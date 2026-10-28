@@ -21,6 +21,9 @@ enum DebugHooks {
     /// With the agent pane open: scroll so the block with this id is in view (`permissions`,
     /// `profile`) — the Details blocks below the fold on the rig (#1544's Shell approvals).
     static var paneScroll: String? { value("ARBOS_PANE_SCROLL") }
+    /// Screenshot rig ([feedback iphone-list-top-fade-2026-10-26]): scroll a list (Home, search
+    /// results, server channels) so its row with this index sits at the top — rows under the bar.
+    static var listScroll: Int? { value("ARBOS_LIST_SCROLL").flatMap { Int($0) } }
     static var autoSend: String? { value("ARBOS_AUTO_SEND") }
     /// Rig (#1596): text put in the composer of the opened chat at appear, caret at the end —
     /// `@s` leaves the mention picker open, `@sam deck ready?` shows the resolved chip.
@@ -28,20 +31,32 @@ enum DebugHooks {
     /// Rig (#1596): print each people-chat send's text and `mentions` ids to the console.
     static var traceSends: Bool { value("ARBOS_TRACE_SENDS") == "1" }
     static var pairCode: String? { value("ARBOS_PAIR_CODE") }
+    /// Rig: a test-token sign-in skips the first-login stages (the account exists already).
+    static var skipFirstLogin: Bool { value("ARBOS_SKIP_FIRST_LOGIN") == "1" }
     static var fixture: Bool { value("ARBOS_FIXTURE") == "1" }
     /// D89 waitlist card and Machine rows: the fixture account's place in line.
     static var fixtureWaitlist: Int? { value("ARBOS_FIXTURE_WAITLIST").flatMap { Int($0) } }
     /// `ARBOS_FIXTURE_SERVERS=1`: the fixture lists three servers (the home list's Servers segment).
     static var fixtureServers: Bool { value("ARBOS_FIXTURE_SERVERS") == "1" }
+    /// `member` | `admin`: my role in the fixture group "Launch week" (owner by default).
+    static var fixtureGroupRole: String? {
+        value("ARBOS_FIXTURE_GROUP_ROLE").flatMap { ["member", "admin"].contains($0) ? $0 : nil }
+    }
     /// Seed the connected 1Password vault and the connect flow (`features.vault_connect` on).
     /// Default off, like the shipped relay flag.
     static var fixtureVault: Bool { value("ARBOS_FIXTURE_VAULT") == "1" }
     /// #1544 rig: the Comms chat ends with a destructive-shell card (four standing rows).
     static var fixtureShellCard: Bool { value("ARBOS_FIXTURE_SHELL_CARD") == "1" }
+    /// Secret hand-off rig: the Comms chat ends with the request card (`offer` / `saved`), the
+    /// "save this" ghost row (`ghost`) or the offer card for a pasted key (`detect`).
+    static var fixtureSecretHandoff: String? { value("ARBOS_FIXTURE_SECRET_HANDOFF") }
     /// With `ARBOS_OPEN_CHAT`: that chat ends with a several-block agent reply (#1389 rigs).
     static var fixtureLongReply: Bool { value("ARBOS_FIXTURE_LONG_REPLY") == "1" }
     /// Presence-row rig (typing-indicator-left-2026-10-23): n agents working in the fixture group.
     static var fixtureWorking: Int { value("ARBOS_FIXTURE_WORKING").flatMap { Int($0) } ?? 0 }
+    /// `ARBOS_FIXTURE_MACHINE=near-limit`: the box report says disk 92 % and memory 88 % used
+    /// (Settings › Machine's warning state on the rig).
+    static var fixtureMachineNearLimit: Bool { value("ARBOS_FIXTURE_MACHINE") == "near-limit" }
     /// Tasks-chip rig (duplex §2.4): the first n of three background jobs open in the opened
     /// agent chat — 1 running with a step, 2 running with no step yet, 3 queued behind a lock.
     static var fixtureJobs: Int { min(3, value("ARBOS_FIXTURE_JOBS").flatMap { Int($0) } ?? 0) }
@@ -54,9 +69,18 @@ enum DebugHooks {
     /// #1592 rig: the fixture group holds someone else's agent ("TestAgent", run by @sami —
     /// in the roster, not in my projects) with one bubble; with `ARBOS_FIXTURE_WORKING` it works.
     static var fixtureForeignAgent: Bool { value("ARBOS_FIXTURE_FOREIGN_AGENT") == "1" }
+    /// `ARBOS_FIXTURE_BLOCKED=<handle,…>`: these fixture people are on my block list, as
+    /// `GET /blocks` would hand it over (the Mac fixture's hook of the same name; blocked-state
+    /// rig: the DM's bar and tag, the group's folded rows, the member list's tags).
+    static var fixtureBlocked: Set<String> {
+        Set((value("ARBOS_FIXTURE_BLOCKED") ?? "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
+    }
     /// `ARBOS_FIXTURE_REPLY_DM=1`: rows in the fixture DM that answer messages in other chats
     /// (Reply in DM rig, #1836).
     static var fixtureReplyDM: Bool { value("ARBOS_FIXTURE_REPLY_DM") == "1" }
+    /// `ARBOS_FIXTURE_LINKS=1`: four links from unconst in the fixture DM, for the Links tab's
+    /// tiles ([feedback link-icons-ios-tile-2026-10-27]).
+    static var fixtureLinks: Bool { value("ARBOS_FIXTURE_LINKS") == "1" }
     /// Presence-row rig: `1` (the chat's other person) or comma-separated handles typing.
     static var fixtureTyping: String? { value("ARBOS_FIXTURE_TYPING").flatMap { $0.isEmpty || $0 == "0" ? nil : $0 } }
     /// Join a call seen via presence automatically (two-simulator relay tests).
@@ -84,6 +108,9 @@ enum DebugHooks {
     /// keyboard up first).
     /// `onboarding` shows the D82 first-login screen frozen on `ARBOS_ONBOARDING_STAGE` (1|2|3|fail).
     static var show: String? { value("ARBOS_SHOW") }
+    /// With the long-press overlay open: stroke every menu row's and capsule cell's hit rect
+    /// (iphone-bubble-menu-hit-area rig — the shot shows what a tap reaches).
+    static var hitRects: Bool { value("ARBOS_HIT_RECTS") == "1" }
     /// How long after the chat appears `ARBOS_SHOW` fires (ms, default 600): a loaded rig Mac
     /// needs more before a sheet can be presented.
     static var showDelayMs: Int { value("ARBOS_SHOW_DELAY_MS").flatMap(Int.init) ?? 600 }
@@ -148,6 +175,9 @@ enum DebugHooks {
     /// Log frame pacing (dropped frames, worst frame, time over budget) and memory every
     /// 2 s to `com.unarbos.arbos.ios` / `perf` for the duration of the launch.
     static let perfLog: Bool = value("ARBOS_PERF_LOG") == "1"
+    /// Rig (chart bubbles): print every chart-plot gesture event (`[arbos chart] …`) so a
+    /// simulator run can tell a touch that never reached the plot from a readout that did not draw.
+    static let traceChart: Bool = value("ARBOS_TRACE_CHART") == "1"
     /// Seed the fixture group from a Loro snapshot file (a relay export of a real chat).
     static var fixtureDoc: String? { value("ARBOS_FIXTURE_DOC") }
     /// Live-path replay (iphone-open-scroll-block): `<checkpoint path>|<rows.hex path>`. The
@@ -174,6 +204,18 @@ enum DebugHooks {
     /// transcript to its top and back, `type` appends 40 keystrokes to the composer,
     /// `typing` fakes a member's typing presence every second. Comma-separated.
     static var perfDrive: Set<String> { Set((value("ARBOS_PERF_DRIVE") ?? "").split(separator: ",").map(String.init)) }
+    /// Scroll rig (iphone-scroll-perf, 2026-10-27): log every touch sequence on the chat
+    /// screen — touch-down → scroll pan began / first content-offset change (latency), and
+    /// pans that moved the finger but never moved the transcript ("dropped") — to the `perf`
+    /// log, plus a one-time dump of the gesture-recognizer graph under the first touch.
+    static let perfTouch: Bool = value("ARBOS_PERF_TOUCH") == "1"
+    /// Scroll rig A/B: comma-separated gestures left out of the chat screen for this launch —
+    /// `reply` (per-bubble swipe-right), `time` (transcript swipe-left time peek), `back`
+    /// (screen-root edge / full-screen back swipe), `longpress` (bubble long-press menu).
+    static let gesturesOff: Set<String> = Set((value("ARBOS_PERF_GESTURES_OFF") ?? "").split(separator: ",").map(String.init))
+    /// With `ARBOS_FIXTURE_LONG_ROWS`: an Arbonites-shaped history — code cards, chart bubbles,
+    /// @mentions, reactions and real (generated) pictures on top of the prose / markdown rows.
+    static var fixtureLongRich: Bool { value("ARBOS_FIXTURE_LONG_RICH") == "1" }
     /// Scripted tour for the screen recording (fixture only).
     static var demo: Bool { value("ARBOS_DEMO") == "1" }
     /// Scripted tour against the live relay: sends ARBOS_AUTO_SEND, waits for the reply, tours the sheets.

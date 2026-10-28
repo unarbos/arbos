@@ -270,6 +270,9 @@ struct PeopleChat: Identifiable, Equatable {
     var archivedAt: Int64? = nil
     /// Banned people (owner/admin with mute-ban rights); Unban from the member list.
     var banned: [ChatMember] = []
+    /// Members I blocked, as `user:<id>` — the relay's `blockedSenders` hint ([feedback
+    /// blocked-state-ios-2026-10-26]): their rows are hidden for me alone (groups).
+    var blockedSenders: [String] = []
 
     /// True while I am muted from posting (honours timed mute).
     var isSilencedNow: Bool {
@@ -323,6 +326,7 @@ extension PeopleChat {
         self.silencedUntil = dto.me.silenced_until
         self.archivedAt = dto.archived_at.flatMap { $0 > 0 ? $0 : nil }
         self.banned = (dto.banned ?? []).map { ChatMember(dto: $0) }
+        self.blockedSenders = dto.blocked_senders ?? []
     }
 
     /// Is this person already in the chat? Me (`meId`) counts as in. A handle
@@ -346,6 +350,32 @@ extension PeopleChat {
             NSLog("PeopleChatDto: \(error)")
             return nil
         }
+    }
+}
+
+/// The Add members picker's one agent section ([feedback add-your-agent-row-removal-ios-2026-10-27];
+/// the Mac's `people::AGENTS_SECTION_LABEL` / `others_agents_in` are the twin): titled "Agents",
+/// my agents first (pickable), then the other members' agents already in the chat — greyed,
+/// already in; only their owner adds or removes them — so the section is the chat's whole agent
+/// roster. The separate "Add agent" / "Add your agent" rows are gone on both platforms.
+enum AddMembersAgents {
+    static let sectionTitle = "Agents"
+    static let peopleTitle = "People"
+
+    /// The other members' agents already in `chat` (not mine — mine are the pickable rows),
+    /// by name, narrowed by what was typed (name or @handle). Nothing outside Add members.
+    static func others(in chat: PeopleChat?, meId: String?, query: String) -> [ChatMember] {
+        guard let chat else { return [] }
+        let needle = query.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "@")).lowercased()
+        return chat.agents
+            .filter { $0.ownerId == nil || $0.ownerId != meId }
+            .filter { needle.isEmpty || $0.displayName.lowercased().contains(needle) || $0.handle.lowercased().contains(needle) }
+            .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+    }
+
+    /// The row's second line for another member's agent: `@handle · run by @owner`.
+    static func note(for agent: ChatMember) -> String? {
+        agent.ownerHandle.map { "run by @\($0)" }
     }
 }
 
@@ -385,11 +415,16 @@ struct OptimisticNotice: Equatable {
     var id: Id
     var text: String
     var createdAt: Int64
+    /// The same facts the relay's row will carry (actor = me, subjects by id), so this copy
+    /// is worded from the live roster like that row and is matched to it by facts, not by
+    /// words a stale local `/me` name could get wrong ("Const added Aureum", 2026-10-26).
+    var notice: MembershipNotice? = nil
 
-    init(text: String, now: Int64) {
+    init(text: String, now: Int64, notice: MembershipNotice? = nil) {
         id = Self.idPrefix + newId()
         self.text = text
         createdAt = now
+        self.notice = notice
     }
 
     /// "A", "A and B", "A, B and C" — the relay's `notices::join_names`, so the local line
@@ -415,17 +450,20 @@ struct OptimisticNotice: Equatable {
             status: .done, turn: nil, decision: nil, subagentId: nil, subagentName: nil,
             inReplyTo: nil, usage: [:], model: nil,
             createdAt: createdAt, completedAt: createdAt, pending: false,
-            parts: [.text(id: "\(id)-t", text: text)], hiddenCount: 0
+            parts: [.text(id: "\(id)-t", text: text)], hiddenCount: 0,
+            notice: notice
         )
     }
 
-    /// The relay's row for this notice: a system line with the same words, written no earlier
-    /// than the local one (minus clock skew).
+    /// The relay's row for this notice: a system line with the same facts (or, for a relay
+    /// that writes none, the same words), written no earlier than the local one (minus
+    /// clock skew).
     func isConfirmed(by m: Message) -> Bool {
-        m.role == .system
-            && !m.id.hasPrefix(Self.idPrefix)
-            && m.createdAt + Self.skewMs >= createdAt
-            && m.plainText.trimmingCharacters(in: .whitespacesAndNewlines) == text
+        guard m.role == .system, !m.id.hasPrefix(Self.idPrefix), m.createdAt + Self.skewMs >= createdAt else {
+            return false
+        }
+        if let mine = notice, let theirs = m.notice { return mine == theirs }
+        return m.plainText.trimmingCharacters(in: .whitespacesAndNewlines) == text
     }
 
     /// Fold a chat's local notices into a fresh snapshot from the relay: a notice the snapshot

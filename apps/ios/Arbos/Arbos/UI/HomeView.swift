@@ -96,6 +96,9 @@ struct HomeView: View {
                 } else {
                     homeList
                 }
+                // One fade for the list and the search results, from the physical top edge
+                // through the bar and the tabs ([feedback iphone-list-top-fade-2026-10-26]).
+                ListTopFade(screen: searching ? .homeSearch : .home)
                 topBar
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { bottomBar }
@@ -143,8 +146,13 @@ struct HomeView: View {
             .sheet(isPresented: $showNewChat) {
                 NewChatSheet().environmentObject(model).environment(\.theme, theme)
             }
-            .sheet(isPresented: $showSettings) {
-                SettingsView().environmentObject(model).environment(\.theme, theme)
+            .sheet(isPresented: $showSettings, onDismiss: { model.pendingSettingsLanding = nil }) {
+                SettingsView(landing: model.pendingSettingsLanding ?? DebugHooks.settingsPage)
+                    .environmentObject(model).environment(\.theme, theme)
+            }
+            // A Settings row picked in search: the sheet opens straight on that page.
+            .onChange(of: model.pendingSettingsLanding) { _, landing in
+                if landing != nil, !showSettings { showSettings = true }
             }
         }
         .task {
@@ -167,7 +175,7 @@ struct HomeView: View {
         .onAppear {
             // Rig: the New Message sheet, which hosts the Create screens (`newagent`,
             // `newgroup`, `newserver`) and the group member picker (`newgroup2`).
-            if ["newchat", "newagent", "newgroup", "newgroup2", "newserver"].contains(DebugHooks.show ?? ""),
+            if ["newchat", "newagent", "newgroup", "newgroup2", "newserver", "newconnect"].contains(DebugHooks.show ?? ""),
                DebugHooks.openProject == nil {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showNewChat = true }
             }
@@ -246,8 +254,9 @@ struct HomeView: View {
     }
 
     private var homeList: some View {
+            ScrollViewReader { proxy in
                 List {
-                    Color.clear.frame(height: 66)
+                    Color.clear.frame(height: showsFilterBar ? HomeChrome.listTop : HomeChrome.barOnlyListTop)
                         .listRowInsets(EdgeInsets())
                         .listRowSeparator(.hidden)
                         .listRowBackground(Color.clear)
@@ -258,10 +267,6 @@ struct HomeView: View {
                             .listRowSeparator(.hidden)
                             .listRowBackground(Color.clear)
                     } else if homeRows.isEmpty {
-                        listFilterBar
-                            .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 8, trailing: 20))
-                            .listRowSeparator(.hidden)
-                            .listRowBackground(theme.bg)
                         Text(listFilter.emptyCopy)
                             .font(theme.font(Theme.small))
                             .foregroundStyle(theme.muted)
@@ -272,10 +277,6 @@ struct HomeView: View {
                             .listRowBackground(Color.clear)
                             .accessibilityIdentifier("home-filter-empty")
                     } else {
-                        listFilterBar
-                            .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 8, trailing: 20))
-                            .listRowSeparator(.hidden)
-                            .listRowBackground(theme.bg)
                         if let update = model.availableUpdate {
                             UpdateCard(update: update)
                                 .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
@@ -384,6 +385,7 @@ struct HomeView: View {
                                 Button { model.open(peopleChat: chat) } label: {
                                     PeopleRow(chat: chat, preview: entry.hit.reason ?? peoplePreview(chat), time: timeLabel(ms: peopleActivity(chat)),
                                               unread: model.peopleUnread.contains(chat.id) || model.unreadCount(for: chat) > 0,
+                                              streaming: model.isStreaming(chat.id),
                                               count: model.unreadCount(for: chat), me: model.user?.id,
                                               pinned: pinned)
                                 }
@@ -518,17 +520,13 @@ struct HomeView: View {
                 .listStyle(.plain)
                 .scrollContentBackground(.hidden)
                 .background(theme.bg)
-                // Fade under the top bar as an overlay — a List `.mask` clips the
-                // system scroll indicator on the right edge (feedback
-                // app-01M5MY2Y9HTFR019WAEPPDCNYS). Same treatment as ChatView's
-                // headerBlur: keep the soft edge, leave the scroller free.
+                // The top fade is `ListTopFade` in the body's ZStack (an overlay, never a
+                // List `.mask`, which clips the scroll indicator — feedback
+                // app-01M5MY2Y9HTFR019WAEPPDCNYS).
                 .scrollIndicators(.visible)
-                .overlay(alignment: .top) {
-                    LinearGradient(colors: [theme.bg, theme.bg.opacity(0)], startPoint: .top, endPoint: .bottom)
-                        .frame(height: 100)
-                        .allowsHitTesting(false)
-                }
                 .refreshable { await model.refreshRegistry() }
+                .rigListScroll(proxy, ids: homeRows.map(\.id))
+            }
     }
 
     // MARK: Top bar
@@ -647,9 +645,29 @@ struct HomeView: View {
         .accessibilityLabel("Hidden chats, \(hiddenCount)")
     }
 
-    /// Account circle (→ Settings) left, the + circle right. Search lives in the
-    /// bottom bar, so the header carries no search disc.
+    /// The filter tabs are fixed chrome under the bar (not a list row) whenever there is
+    /// anything to filter; the search results replace them.
+    private var showsFilterBar: Bool {
+        !searching && !(model.projects.isEmpty && model.peopleChats.isEmpty && model.servers.isEmpty)
+    }
+
+    /// Account circle (→ Settings) left, the + circle right, the All · Agents · People ·
+    /// Servers tabs under them. Search lives in the bottom bar, so the header carries no
+    /// search disc.
     private var topBar: some View {
+        VStack(spacing: 0) {
+            topBarRow
+            if showsFilterBar {
+                listFilterBar
+                    .padding(.horizontal, 20)
+                    .padding(.top, 8)
+                    .padding(.bottom, 4)
+            }
+        }
+        .zIndex(1)
+    }
+
+    private var topBarRow: some View {
         HStack(spacing: 10) {
             Button { showSettings = true } label: {
                 ZStack(alignment: .bottomTrailing) {
@@ -692,7 +710,6 @@ struct HomeView: View {
         // One top bar for every screen: `Controls.inset` / `Controls.top` (was Grok's 20 here
         // and 16 in chats; [feedback iphone-header-composer-sizing-2026-10-26]).
         .controlBar()
-        .zIndex(1)
     }
 
     // MARK: Empty / error
@@ -700,16 +717,10 @@ struct HomeView: View {
     private var emptyState: some View {
         VStack(spacing: 10) {
             if let err = model.registryError {
-                Text("Could not reach the relay")
-                    .font(theme.font(Theme.body, weight: .semibold))
-                    .foregroundStyle(theme.text)
-                Text(err)
-                    .font(theme.font(Theme.small))
-                    .foregroundStyle(theme.muted)
-                    .multilineTextAlignment(.center)
-                Button("Try again") { Task { await model.refreshRegistry() } }
-                    .font(theme.font(Theme.small, weight: .semibold))
-                    .foregroundStyle(theme.text)
+                // Home's note where the list would be: the shared element with Try again.
+                ErrorNote(id: "home-registry-error", error: err, detailsOpen: $model.registryErrorDetailsOpen,
+                          onTryAgain: { Task { await model.refreshRegistry() } })
+                    .padding(.horizontal, 16)
             } else if model.link == .connecting && !model.isFixture {
                 ProgressView().tint(theme.muted)
                 Text(slowConnect ? "Still connecting…" : "Loading your agents…")
@@ -845,7 +856,11 @@ struct HomeView: View {
     }
 
     private func peoplePreview(_ c: PeopleChat) -> String {
-        guard let m = model.messages(of: c.id).last(where: { !$0.voice && !$0.plainText.isEmpty }) else {
+        // Skip group deletion audits (hidden in the chat; Activity only) so the
+        // home row matches what you see when you open the conversation.
+        guard let m = model.messages(of: c.id).last(where: {
+            !$0.voice && !$0.plainText.isEmpty && !GroupActivity.isAuditLine($0.plainText)
+        }) else {
             return c.pending ? "Invited · opens when they sign in" : "Say hi"
         }
         let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
@@ -1018,7 +1033,7 @@ struct HiddenChatsView: View {
         ZStack(alignment: .top) {
             theme.bg.ignoresSafeArea()
             List {
-                Color.clear.frame(height: 66)
+                Color.clear.frame(height: HomeChrome.barOnlyListTop)
                     .listRowInsets(EdgeInsets())
                     .listRowSeparator(.hidden)
                     .listRowBackground(Color.clear)
@@ -1119,6 +1134,7 @@ struct HiddenChatsView: View {
             .scrollContentBackground(.hidden)
             .background(theme.bg)
             .scrollIndicators(.visible)
+            ListTopFade(screen: .hiddenChats)
             // Grok page header: back circle left, title centred in a pill.
             HStack {
                 Button { dismiss() } label: {
@@ -1165,7 +1181,13 @@ struct HiddenChatsView: View {
     }
 
     static func peoplePreview(_ c: PeopleChat, in model: AppModel) -> String {
-        guard let m = model.messages(of: c.id).last(where: { !$0.voice && !$0.plainText.isEmpty }) else {
+        // A row hidden for me (someone I blocked) never previews. Deletion
+        // audits stay out too — same filter as the open chat (Transcript).
+        guard let m = model.messages(of: c.id).last(where: {
+            !$0.voice && !$0.plainText.isEmpty
+                && !model.hidesMessage($0, chatId: c.id)
+                && !GroupActivity.isAuditLine($0.plainText)
+        }) else {
             return c.pending ? "Invited · opens when they sign in" : "Say hi"
         }
         let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
@@ -1190,9 +1212,9 @@ struct AgentRow: View {
         // semibold over a 15 pt grey preview, time right, 10 pt unread dot at the far
         // right of the preview line, 80 pt row pitch.
         HStack(spacing: 15) {
-            // No "agent is working" indicator on rows (Jacob, 2026-10-22): the working
-            // state lives in the chat header / activity line. The right edge keeps the
-            // unread dot.
+            // The status slot at the right end of the preview line, under the time
+            // (Jacob, 2026-10-27): the braille spinner while the agent works (one
+            // shared ticker, `WorkingSpinner`), else the unread dot, else nothing.
             AgentAvatar(project: project, theme: theme, size: Theme.rowAvatar)
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
@@ -1225,14 +1247,35 @@ struct AgentRow: View {
                         .foregroundStyle(theme.muted)
                         .lineLimit(1)
                     Spacer(minLength: 0)
-                    if unread {
+                    switch RowStatus.of(streaming: streaming, unread: unread) {
+                    case .working:
+                        WorkingSpinner()
+                    case .unread:
                         Circle().fill(theme.unread).frame(width: Theme.unreadDot, height: Theme.unreadDot)
+                    case .quiet:
+                        EmptyView()
                     }
                 }
             }
         }
         .padding(.vertical, Theme.rowVPad)
         .contentShape(Rectangle())
+    }
+}
+
+/// What the status slot under a row's time shows ([feedback
+/// working-braille-spinner-ios-2026-10-27]; the Mac's `sidebar::RowStatus`): one
+/// thing — the spinner while the chat's agent works, else the unread mark,
+/// else nothing.
+enum RowStatus: Equatable {
+    case working
+    case unread
+    case quiet
+
+    static func of(streaming: Bool, unread: Bool) -> RowStatus {
+        if streaming { return .working }
+        if unread { return .unread }
+        return .quiet
     }
 }
 
@@ -1245,6 +1288,9 @@ struct PeopleRow: View {
     let preview: String
     let time: String
     let unread: Bool
+    /// An agent in this chat is working: the spinner takes the slot unless a
+    /// count pill is showing.
+    var streaming: Bool = false
     /// Unread messages (Grok/Telegram-style count pill); 0 → the dot only.
     var count: Int = 0
     let me: String?
@@ -1267,31 +1313,13 @@ struct PeopleRow: View {
         return other?.handle ?? chat.title
     }
 
-    /// Tokenised blob URL for the group's custom picture, when one is set.
-    private var groupImageURL: String? {
-        guard chat.isGroup, let key = chat.imageKey, !key.isEmpty else { return nil }
-        return model.blobURL(projectId: "\(peopleSlot):\(chat.id)", key: key)?.absoluteString
-    }
-
     var body: some View {
         HStack(spacing: 15) {
             ZStack(alignment: .bottomTrailing) {
                 if chat.isGroup {
-                    if let groupImageURL {
-                        AvatarCluster(members: [], size: Theme.rowAvatar, imageUrl: groupImageURL)
-                    } else if chat.isNeutralAvatar {
-                        NeutralAvatar(name: chat.title, size: Theme.rowAvatar)
-                    } else if let leaf = chat.leafPick, LeafAvatarsFlag.shared.on {
-                        // D92 amendment: the leaf picked on the Create screen.
-                        LeafAvatar(pick: leaf, size: Theme.rowAvatar)
-                    } else {
-                        ZStack {
-                            Circle().fill(theme.card).frame(width: Theme.rowAvatar, height: Theme.rowAvatar)
-                            Image(systemName: "person.2.fill")
-                                .font(theme.font(17, weight: .medium))
-                                .foregroundStyle(theme.accent)
-                        }
-                    }
+                    // The group's picture through the resolver (its upload, else the leaf or
+                    // neutral initial from the Create screen, else the two-person disc).
+                    GroupAvatar(chat: chat, model: model, size: Theme.rowAvatar)
                 } else {
                     PersonAvatar(url: other?.avatarUrl, handle: other?.handle ?? "?", size: Theme.rowAvatar, name: other?.name, id: other?.id, colorIndex: other?.avatarColorIndex)
                 }
@@ -1328,8 +1356,12 @@ struct PeopleRow: View {
                         .foregroundStyle(theme.muted)
                         .lineLimit(1)
                     Spacer(minLength: 0)
+                    // Information over animation (coordinator, 2026-10-27): an unread
+                    // count pill wins the slot; the spinner replaces only the plain dot.
                     if count > 0 {
                         UnreadBadge(count: count)
+                    } else if streaming {
+                        WorkingSpinner()
                     } else if unread {
                         Circle().fill(theme.unread).frame(width: Theme.unreadDot, height: Theme.unreadDot)
                     }

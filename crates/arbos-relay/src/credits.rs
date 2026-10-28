@@ -15,7 +15,7 @@
 use std::time::Duration;
 
 use axum::http::StatusCode;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
 use arbos_core::ids::now_ms;
@@ -170,6 +170,55 @@ pub fn check(state: &AppState, user_id: &str) -> Result<(), DebitRefused> {
             Ok(())
         }
     }
+}
+
+/// A project's daily cap below zero means "no project cap" (the column is `REAL NOT NULL`, so
+/// the sentinel is a negative value; `PUT /admin/projects/{id}/spend-cap {"daily_cap_usd": null}`
+/// and the owner's `PATCH /projects/{id} {"spend_cap_daily": null}` store it).
+pub const PROJECT_CAP_UNLIMITED: f64 = -1.0;
+
+/// Pure rule for the per-project daily cap (Jacob, 2026-10-26: "Doug agent" hit its $25 project
+/// cap at 22:07 UTC while his *user* cap was unlimited). An owner without a user cap has no
+/// project caps either; a project stored with the unlimited sentinel has none; otherwise the
+/// usual `today >= cap`.
+pub fn project_cap_allows(cap: f64, owner_unlimited: bool, today_usd: f64) -> bool {
+    if owner_unlimited || cap < 0.0 {
+        return true;
+    }
+    today_usd < cap
+}
+
+/// The owner of `project_id` has no daily cap (`users.cap_unlimited`).
+pub fn owner_unlimited(state: &AppState, project_id: &str) -> bool {
+    state
+        .user_of(project_id)
+        .and_then(|u| state.db.user(&u).ok().flatten())
+        .is_some_and(|u| u.daily_cap_usd.is_none())
+}
+
+/// `Some(402 spend_cap)` when the project's own daily cap is spent; `None` when the call may go.
+pub fn project_cap_refusal(state: &AppState, project_id: &str) -> Option<Response> {
+    let p = state.db.project(project_id).ok().flatten()?;
+    let today = state
+        .db
+        .usage_since(project_id, start_of_utc_day_ms())
+        .map(|u| u.usd)
+        .unwrap_or(0.0);
+    if project_cap_allows(p.spend_cap_daily, owner_unlimited(state, project_id), today) {
+        return None;
+    }
+    let _ = state.db.enqueue_push(
+        project_id,
+        "spend_cap",
+        &json!({ "spend_today": today, "cap": p.spend_cap_daily }),
+    );
+    Some(
+        (
+            StatusCode::PAYMENT_REQUIRED,
+            json!({ "error": { "type": "spend_cap", "message": format!("daily spend cap ${:.2} reached", p.spend_cap_daily) } }).to_string(),
+        )
+            .into_response(),
+    )
 }
 
 /// Who pays for a call: the device's or box's user when the bearer has one, else the owner of
@@ -360,6 +409,27 @@ mod tests {
     use arbos_core::ids::ulid;
 
     use super::*;
+
+    /// Jacob, 2026-10-26 22:07 UTC: an unlimited owner's agent was refused by its $25 project cap.
+    #[test]
+    fn project_cap_follows_the_owner_and_the_sentinel() {
+        assert!(project_cap_allows(25.0, false, 24.99));
+        assert!(!project_cap_allows(25.0, false, 25.0));
+        assert!(!project_cap_allows(25.0, false, 25.24));
+        assert!(
+            project_cap_allows(25.0, true, 25.24),
+            "an unlimited owner has no project cap"
+        );
+        assert!(
+            project_cap_allows(PROJECT_CAP_UNLIMITED, false, 1.0e6),
+            "sentinel = no cap"
+        );
+        assert!(project_cap_allows(-5.0, false, 1.0e6));
+        assert!(
+            !project_cap_allows(0.0, false, 0.0),
+            "a zero cap still blocks (not the sentinel)"
+        );
+    }
     use crate::auth::{resolve_checked, Refused};
     use crate::connectors::crypto::RelayKey;
     use crate::db::Sandbox;

@@ -41,7 +41,7 @@ final class DeliveryStateTests: XCTestCase {
         let rows = Transcript.rows([mine, other, pending], projectId: "people:\(chat)", me: "user:fx-me", people: true, multiParty: true)
         let states: [Delivery?] = rows.compactMap { row in
             switch row.kind {
-            case .user(_, let delivery, _): return delivery
+            case .user(_, let delivery, _, _): return delivery
             case .other: return .some(nil)
             default: return nil
             }

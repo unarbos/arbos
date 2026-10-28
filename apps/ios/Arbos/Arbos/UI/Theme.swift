@@ -109,8 +109,24 @@ struct Theme: Equatable {
     /// Screen width minus 76 pt: 16 pt own margin (the composer's `+` column
     /// starts 15 pt further in) + 60 pt on the other side. Grok dark, 420 pt
     /// screen, refs 01–03 at 3 px/pt: the assistant block runs x 16 → 360 in
-    /// every shot ([feedback agent-bubble-inset-2026-10-22]; was 71).
+    /// every shot ([feedback agent-bubble-inset-2026-10-22]; was 71). Agent
+    /// 1:1 chats only; people chats use `peopleBubbleInset`.
     static let bubbleInset: CGFloat = 76
+    /// People chats — DM, group, channel — use more of the screen on both
+    /// sides (Jacob, 2026-10-26, [feedback chat-density-ios-2026-10-26]: "use
+    /// more of the screen both ways, left and right per chat bubble"): the
+    /// 16 pt own margin stays, the far side keeps `bubbleOppositeMargin`
+    /// instead of 60, so on a 402 pt screen my bubble may reach 354 pt
+    /// (left edge ≥ 32) and an incoming one 300 pt after the lane (right
+    /// edge ≤ 370; was 253 → 342). The far-side margin is what keeps a bubble
+    /// reading as mine / theirs. Grok's 76 stays the agent-chat number — Grok
+    /// has no group chats to measure.
+    static let bubbleOppositeMargin: CGFloat = 32
+    static let peopleBubbleInset: CGFloat = 16 + bubbleOppositeMargin
+    /// The inset a transcript row subtracts from the screen for its bubble cap.
+    static func bubbleInset(people: Bool) -> CGFloat {
+        people ? peopleBubbleInset : bubbleInset
+    }
     static let body: CGFloat = 17
     /// Inline code sits a point under body so SF Mono matches the prose cap height.
     static let code: CGFloat = 16
@@ -150,6 +166,13 @@ struct Theme: Equatable {
     /// 22 + `micPillGap`).
     static let micHitWidth: CGFloat = 44
     static let micPillGap: CGFloat = 2
+    /// Pending-attachment chip: the remove ✕'s hit frame (the glyph is 10 pt; the
+    /// target is ≥ 20 pt, [feedback composer-attachment-removal-ios-2026-10-27]).
+    /// The chip's trailing inset shrinks by the frame's overhang so the glyph
+    /// keeps its 10 pt from the capsule's edge.
+    static let pendingRemoveHit: CGFloat = 24
+    static let pendingRemoveGlyph: CGFloat = 10
+    static let pendingChipTrailing: CGFloat = 10 - (pendingRemoveHit - pendingRemoveGlyph) / 2
     /// Mic glyph box (Grok's filled mic has no base bar; drawn by `MicGlyph`): 36 × 49 px.
     static let micGlyphWidth: CGFloat = 12
     static let micGlyphHeight: CGFloat = 49 / 3
@@ -168,15 +191,24 @@ struct Theme: Equatable {
     static let avatar: CGFloat = 28
     /// The avatar column (Mac `SENDER_DISC = PLUS_BUTTON`, Jacob [feedback
     /// AAvkkHYz3TOlou0Hu7u71Sc]): every round picture beside a people-chat bubble is
-    /// centred on the composer's `+`. The disc stayed 42 pt when the `+` grew to Grok's
-    /// 48 ([feedback iphone-composer-grok-parity-2026-10-25]: the ask covered the composer
-    /// and the status row, not the bubbles). The `+` moves with the keyboard (31 → 18 pt
-    /// inset), so the column follows it via `avatarColumnInset(composerInset:)` (keyboard
-    /// up: avatar 21–63, centre 42 = 18 + 48 / 2; down: 34–76, centre 55). The bubble
-    /// body follows after `memberAvatarGap`. Shared with
+    /// centred on the composer's `+`. The `+` moves with the keyboard (31 → 18 pt
+    /// inset), so the column follows it via `avatarColumnInset(composerInset:)`. The
+    /// bubble body follows after `memberAvatarGap`. Shared with
     /// feedback/sender-name-in-bubble-2026-10-23. Agent chats keep #1374's no-avatar rule.
-    static let memberAvatar: CGFloat = 42
-    static let memberAvatarGap: CGFloat = 13
+    ///
+    /// Size: Discord standard (Jacob, 2026-10-26, [feedback chat-density-ios-2026-10-26]:
+    /// "the pfp chat bubble takes up too much space — go for Discord standard size").
+    /// Discord draws its message avatar 40 pt in a 72 pt gutter on desktop (cozy) and
+    /// 32 pt on mobile; **36** is the pick between the two — it reads as Discord's size
+    /// beside our 17 pt text, keeps a face readable at 3x, and, centred on the 48 pt `+`,
+    /// its left edge lands 6 pt inside the `+` — the same edge as the status row's
+    /// picture (`presenceAvatarOffset`), so every picture in the chat shares one left
+    /// edge (keyboard up 24–60, down 37–73). Was 42 (the `+` before Grok's 48).
+    /// The gap to the bubble is the control family's `Controls.gap` (was 13), so the
+    /// body starts 54 pt after the transcript edge with the keyboard up (was 60; 70 from
+    /// the screen, was 76) and 67 with it down (was 73; 83 from the screen, was 89).
+    static let memberAvatar: CGFloat = 36
+    static let memberAvatarGap: CGFloat = Controls.gap
     /// Transcript edge → the avatar's left edge, for the composer's current side inset.
     static func avatarColumnInset(composerInset: CGFloat) -> CGFloat {
         composerInset + plusButton / 2 - memberAvatar / 2 - 16
@@ -784,4 +816,139 @@ extension View {
     func controlBar() -> some View {
         self.padding(.horizontal, Controls.inset).padding(.top, Controls.top)
     }
+}
+
+// MARK: - List top fade ([feedback iphone-list-top-fade-2026-10-26], Jacob 2026-10-26 16:05 CR)
+
+/// The fade every floating top bar sits on. Jacob's TestFlight shot: scrolled chat rows read at
+/// full strength behind the status bar and around the All · Agents · People · Servers tabs —
+/// Home's fade was a 100 pt gradient that began at the safe-area top, under the status bar, and
+/// the tabs scrolled with the list. Now one layer for every list: it starts at the **physical top
+/// edge** (`ignoresSafeArea(.container, edges: .top)` on the fade, never on the list), is opaque
+/// through the status bar and the whole chrome (bar, and the tab bar where there is one), then
+/// fades out over `band` — the Mac's list / transcript top fade (`header::metrics::FADE_BAND`:
+/// text gone at the edge, full ≈ 50 pt down). On Glass the band is `.ultraThinMaterial` under the
+/// wash (the iOS 26 glass discs blur only their own capsule); on Matte it is the page colour.
+/// `ListTopFadeTests` asserts the layer's top inset is 0 and its height covers status bar + chrome
+/// on every screen in `Screen`.
+struct ListTopFade: View {
+    @Environment(\.theme) private var theme
+    let screen: Screen
+    /// Chrome below the bar that is not part of the screen's fixed declaration (the chat's
+    /// Search-in-chat bar, call strips, member chips).
+    var extra: CGFloat = 0
+
+    /// The wash over the material on Glass. The chat header used 0.78 (#1336), which still let a
+    /// row read at about half strength through the material under the tabs (first after-shot of
+    /// this fix); 0.94 keeps the frosted edge and hides the text.
+    static let glassWash: Double = 0.94
+
+    /// Every iPhone list with a floating top bar. `solid` is how far past the status bar the layer
+    /// stays opaque; `band` is the Mac-family gradient after it (the Mac's `FADE_BAND` = bar + 6:
+    /// rows gone at the edge, full where the content starts at rest).
+    enum Screen: String, CaseIterable {
+        case home, homeSearch, hiddenChats, serverChannels, chat, agentPage, personPage, groupPage, serverPage, channelPage, ownProfile, library
+        /// The bar's top gap: pane pages keep `ProfileTopBar`'s 16, the rest `Controls.top`.
+        var barTop: CGFloat {
+            switch self {
+            case .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library: return 16
+            case .home, .homeSearch, .hiddenChats, .serverChannels, .chat: return Controls.top
+            }
+        }
+        /// Fixed chrome under the bar: Home's filter tabs. The pane pages pin hero + tabs themselves.
+        var chrome: CGFloat {
+            switch self {
+            case .home: return HomeChrome.filterBand
+            case .homeSearch, .hiddenChats, .serverChannels, .chat, .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library: return 0
+            }
+        }
+        /// Opaque past the status bar. Home: through the disc row and the whole tab bar, so nothing
+        /// reads through behind the discs or around the tabs (Jacob's shot). Chat: 20 pt into the
+        /// header (its `headerBlur` since #1336). Bar-only lists and pane pages: the status bar alone.
+        var solid: CGFloat {
+            switch self {
+            case .home: return Controls.top + Controls.diameter + HomeChrome.filterBand
+            case .chat: return 20
+            case .homeSearch, .hiddenChats, .serverChannels, .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library: return 0
+            }
+        }
+        /// The gradient after `solid`, ending where the content starts at rest.
+        var band: CGFloat {
+            switch self {
+            case .home: return HomeChrome.listTop - solid
+            case .chat: return Controls.top + Controls.diameter + 6 - solid
+            case .homeSearch, .hiddenChats, .serverChannels: return HomeChrome.barOnlyListTop
+            case .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library: return PaneKit.pageTop
+            }
+        }
+    }
+
+    /// The layer's geometry for a status-bar height: where it starts, how far it is opaque, how tall it is.
+    struct Spec: Equatable {
+        let topInset: CGFloat
+        let solid: CGFloat
+        let height: CGFloat
+    }
+
+    static func spec(_ screen: Screen, statusBar: CGFloat, extra: CGFloat = 0) -> Spec {
+        let solid = statusBar + screen.solid + extra
+        return Spec(topInset: 0, solid: solid, height: solid + screen.band)
+    }
+
+    var body: some View {
+        // The reader keeps the safe area, so its top inset is the status bar; the layer inside
+        // it ignores the top edge and so starts at the physical top (a reader that ignored the
+        // safe area itself would report an inset of 0 — the first after-shot's gap).
+        GeometryReader { geo in
+            let spec = Self.spec(screen, statusBar: geo.safeAreaInsets.top, extra: extra)
+            ZStack {
+                if theme.isGlass {
+                    Rectangle().fill(.ultraThinMaterial)
+                }
+                theme.bg.opacity(theme.isGlass ? Self.glassWash : 1)
+            }
+            .frame(height: spec.height)
+            .mask(
+                LinearGradient(
+                    stops: [
+                        .init(color: .black, location: 0),
+                        .init(color: .black, location: spec.solid / spec.height),
+                        .init(color: .clear, location: 1),
+                    ],
+                    startPoint: .top, endPoint: .bottom)
+            )
+            .frame(maxWidth: .infinity, alignment: .top)
+            .ignoresSafeArea(.container, edges: .top)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+extension View {
+    /// Rig: `ARBOS_LIST_SCROLL=<n>` scrolls the enclosing `ScrollViewReader`'s list so `ids[n]`
+    /// sits at the top, once the rows are on screen.
+    func rigListScroll<ID: Hashable>(_ proxy: ScrollViewProxy, ids: [ID]) -> some View {
+        onAppear {
+            guard let n = DebugHooks.listScroll, ids.indices.contains(n) else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                withAnimation(nil) { proxy.scrollTo(ids[n], anchor: .top) }
+            }
+        }
+    }
+}
+
+/// Home's fixed chrome under the account / `+` discs: the filter tabs
+/// ([feedback iphone-list-top-fade-2026-10-26]: the tabs no longer scroll with the list, so the
+/// fade can be opaque through them).
+extension HomeChrome {
+    /// Tab pill (32) with `filterTop` above and 4 below.
+    static let filterTop: CGFloat = 8
+    static let filterBand: CGFloat = filterTop + 32 + 4
+    /// Rows scrolling under the tabs vanish over this band; the first row sits at its end at rest.
+    static let fadeBand: CGFloat = 20
+    /// The list's first row starts this far under the safe-area top: bar + tabs + the fade band.
+    static let listTop: CGFloat = Controls.top + Controls.diameter + filterBand + fadeBand
+    /// Lists with a bar and nothing under it (hidden chats, server channels, search results).
+    static let barOnlyListTop: CGFloat = Controls.top + Controls.diameter + 12
 }

@@ -5,15 +5,15 @@
 use gpui::{div, prelude::*, px, App, Div, FontWeight, SharedString, Stateful};
 
 use crate::model::StatusKind;
+use crate::sync::user_error::{ErrorClass, UserError};
+use crate::ui::error_note;
 use crate::ui::motion::PulseClock;
 use crate::ui::theme::{Theme, PANEL_RADIUS};
 
-pub fn spinner(theme: &Theme, cx: &App) -> Div {
-    let phase = PulseClock::phase(cx, 900);
-    div()
-        .size(px(8.0))
-        .rounded_full()
-        .bg(Theme::with_alpha(theme.accent, 0.35 + 0.65 * phase))
+/// The small working mark in banners: the braille spinner (never a pulsing
+/// dot — Jacob, 2026-10-27).
+pub fn spinner(theme: &Theme, cx: &mut App) -> Div {
+    crate::ui::working::glyph(theme, cx)
 }
 
 /// Grok Bot's activity spinner — the blue eight-spoke dial that steps round
@@ -26,34 +26,21 @@ pub fn activity_spinner(size: f32, theme: &Theme, cx: &App) -> gpui::Svg {
     )
 }
 
-/// The chat's single working indicator: a pulsing dot that breathes a short
-/// shimmer line beside it. Amber while the message is queued for a sleeping
-/// box. No words.
-pub fn indicator(queued: bool, theme: &Theme, cx: &App) -> Div {
-    let phase = PulseClock::phase(cx, 1100);
-    let base = if queued { theme.warn } else { theme.accent };
+/// The chat's single working indicator: the braille spinner on its own row
+/// (Jacob, 2026-10-27 — no pulsing dot, no shimmer line). While the message
+/// is queued for a sleeping box the spinner is followed by nothing either;
+/// the status row's words say "waiting for the machine".
+pub fn indicator(queued: bool, theme: &Theme, cx: &mut App) -> Div {
+    let _ = queued;
     div()
         .w_full()
         .py(px(6.0))
         .flex()
         .items_center()
-        .gap(px(8.0))
-        .child(
-            div()
-                .size(px(8.0))
-                .rounded_full()
-                .bg(Theme::with_alpha(base, 0.35 + 0.65 * phase)),
-        )
-        .child(
-            div()
-                .h(px(2.0))
-                .w(px(28.0 + 36.0 * phase))
-                .rounded_full()
-                .bg(Theme::with_alpha(base, 0.25 + 0.35 * (1.0 - phase))),
-        )
+        .child(crate::ui::working::glyph(theme, cx))
 }
 
-pub fn status_row(code: StatusKind, text: &str, live: bool, theme: &Theme, cx: &App) -> Div {
+pub fn status_row(code: StatusKind, text: &str, live: bool, theme: &Theme, cx: &mut App) -> Div {
     match code {
         StatusKind::AskUser => div()
             .w_full()
@@ -114,7 +101,8 @@ pub fn status_row(code: StatusKind, text: &str, live: bool, theme: &Theme, cx: &
     }
 }
 
-/// S10: red-tinted chip with the short message and Retry.
+/// S10: an agent turn that failed — the shared error element in the transcript's flow (the
+/// agent's own sentence, the error code behind Details, Try again re-runs the turn).
 pub fn error_chip(
     row_id: &str,
     code: &str,
@@ -122,44 +110,41 @@ pub fn error_chip(
     theme: &Theme,
     on_retry: impl Fn(&mut App) + 'static,
 ) -> Stateful<Div> {
+    let error = UserError::of(
+        "",
+        ErrorClass::Refused {
+            message: Some(if message.trim().is_empty() {
+                "The agent's turn failed.".to_owned()
+            } else {
+                message.to_owned()
+            }),
+        },
+        code.to_owned(),
+    );
+    let error = UserError {
+        class: ErrorClass::Unknown,
+        ..error
+    };
+    let error = if message.trim().is_empty() {
+        error
+    } else {
+        UserError {
+            class: ErrorClass::Refused {
+                message: Some(message.to_owned()),
+            },
+            ..error
+        }
+    };
     div()
         .id(SharedString::from(row_id.to_string()))
         .my(px(4.0))
-        .flex()
-        .items_center()
-        .gap(px(10.0))
-        .px(px(12.0))
-        .py(px(8.0))
-        .rounded(px(PANEL_RADIUS))
-        .bg(theme.danger_soft)
-        .border_1()
-        .border_color(Theme::with_alpha(theme.danger, 0.4))
-        .child(
-            div()
-                .text_color(theme.danger)
-                .text_size(px(12.0))
-                .child("✗"),
-        )
-        .child(
-            div()
-                .flex_1()
-                .text_size(px(12.5))
-                .text_color(theme.text)
-                .child(message.to_string()),
-        )
-        .child(
-            div()
-                .text_size(px(11.0))
-                .text_color(theme.text_faint)
-                .child(code.to_string()),
-        )
-        .child(
-            div()
-                .id(SharedString::from(format!("{row_id}-retry")))
-                .text_size(px(12.0))
-                .text_color(theme.accent)
-                .cursor_pointer()
-                .child("Retry")
-                .on_click(move |_, _, cx| on_retry(cx)),
-        )
+        .w_full()
+        .child(error_note::render(
+            &format!("{row_id}-error"),
+            &error,
+            false,
+            error_note::Style::Inline,
+            theme,
+            error_note::Handlers::new().try_again(move |_, _, cx| on_retry(cx)),
+        ))
 }

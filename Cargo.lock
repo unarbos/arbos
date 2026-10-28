@@ -330,8 +330,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "arbos-acp"
+version = "0.6.317"
+dependencies = [
+ "anyhow",
+ "clap",
+ "futures",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.26.2",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "arbos-agentd"
-version = "0.6.276"
+version = "0.6.317"
 dependencies = [
  "anyhow",
  "arbos-core",
@@ -365,7 +381,7 @@ dependencies = [
 
 [[package]]
 name = "arbos-client"
-version = "0.6.276"
+version = "0.6.317"
 dependencies = [
  "arbos-core",
  "serde",
@@ -374,7 +390,7 @@ dependencies = [
 
 [[package]]
 name = "arbos-core"
-version = "0.6.276"
+version = "0.6.317"
 dependencies = [
  "anyhow",
  "bytes",
@@ -384,10 +400,13 @@ dependencies = [
  "loro",
  "rand 0.8.8",
  "regex-lite",
+ "resvg",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "syntect",
  "thiserror 2.0.21",
+ "ttf-parser",
  "typeshare",
  "ulid",
  "unicode-normalization",
@@ -395,7 +414,7 @@ dependencies = [
 
 [[package]]
 name = "arbos-ffi"
-version = "0.6.276"
+version = "0.6.317"
 dependencies = [
  "arbos-client",
  "arbos-core",
@@ -409,7 +428,7 @@ dependencies = [
 
 [[package]]
 name = "arbos-local"
-version = "0.6.276"
+version = "0.6.317"
 dependencies = [
  "anyhow",
  "arbos-core",
@@ -428,7 +447,7 @@ dependencies = [
 
 [[package]]
 name = "arbos-mac"
-version = "0.6.276"
+version = "0.6.317"
 dependencies = [
  "anyhow",
  "arbos-client",
@@ -477,7 +496,7 @@ dependencies = [
 
 [[package]]
 name = "arbos-matrix"
-version = "0.6.276"
+version = "0.6.317"
 dependencies = [
  "anyhow",
  "futures",
@@ -492,7 +511,7 @@ dependencies = [
 
 [[package]]
 name = "arbos-relay"
-version = "0.6.276"
+version = "0.6.317"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -527,7 +546,7 @@ dependencies = [
 
 [[package]]
 name = "arbos-update"
-version = "0.6.276"
+version = "0.6.317"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -549,7 +568,7 @@ dependencies = [
 
 [[package]]
 name = "arbosctl"
-version = "0.6.276"
+version = "0.6.317"
 dependencies = [
  "anyhow",
  "arbos-core",
@@ -1173,6 +1192,15 @@ name = "basic-toml"
 version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba62675e8242a4c4e806d12f11d136e626e6c8361d6b829310732241652a178a"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "bincode"
+version = "1.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
 dependencies = [
  "serde",
 ]
@@ -3202,6 +3230,17 @@ name = "fallible-streaming-iterator"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
+
+[[package]]
+name = "fancy-regex"
+version = "0.16.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "998b056554fbe42e03ae0e152895cd1a7e1002aec800fdc6635d20270260c46f"
+dependencies = [
+ "bit-set 0.8.0",
+ "regex-automata",
+ "regex-syntax",
+]
 
 [[package]]
 name = "fastrand"
@@ -9757,6 +9796,24 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
+]
+
+[[package]]
+name = "syntect"
+version = "5.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "656b45c05d95a5704399aeef6bd0ddec7b2b3531b7c9e900abbf7c4d2190c925"
+dependencies = [
+ "bincode",
+ "fancy-regex",
+ "flate2",
+ "fnv",
+ "once_cell",
+ "regex-syntax",
+ "serde",
+ "serde_derive",
+ "thiserror 2.0.21",
+ "walkdir",
 ]
 
 [[package]]

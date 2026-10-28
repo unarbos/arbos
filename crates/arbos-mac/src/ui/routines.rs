@@ -12,7 +12,9 @@ use gpui::{
 use crate::app::AppState;
 use crate::model::{now_ms, Id, Routine, RoutineRun, RoutineRunStatus, RoutineTrigger};
 use crate::ui::composer::ComposerInput;
+use crate::ui::error_note;
 use crate::ui::frost::{frosted, MENU_BLUR};
+use crate::ui::highlight;
 use crate::ui::theme::{Theme, PANEL_RADIUS, RAIL_WIDTH};
 
 pub const PANEL_WIDTH: f32 = 560.0;
@@ -232,10 +234,12 @@ impl RoutinesPanel {
             .cursor_pointer()
             .when(primary, |el| el.bg(theme.text).text_color(theme.bg))
             .when(!primary, |el| {
-                el.text_color(theme.text_muted)
-                    .border_1()
-                    .border_color(theme.border)
-                    .hover(|s| s.bg(theme.surface_2))
+                highlight::button(
+                    el.text_color(theme.text_muted)
+                        .border_1()
+                        .border_color(theme.border),
+                    theme,
+                )
             })
             .child(label.into())
     }
@@ -418,7 +422,8 @@ impl RoutinesPanel {
                         .text_size(px(11.5))
                         .text_color(theme.text_faint)
                         .cursor_pointer()
-                        .hover(|s| s.text_color(theme.danger).bg(theme.danger_soft))
+                        // error-ui: exception destructive-action (Delete on hover)
+                        .hover(|s| s.text_color(theme.danger).bg(theme.danger_soft)) // hover-fill: exception danger
                         .child("Delete")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.state
@@ -518,6 +523,7 @@ impl RoutinesPanel {
                     .rounded_full()
                     .text_size(px(11.5))
                     .cursor_pointer()
+                    // hover-fill: exception choice
                     .bg(if selected {
                         theme.accent_soft
                     } else {
@@ -555,6 +561,7 @@ impl RoutinesPanel {
                     .rounded_full()
                     .text_size(px(11.5))
                     .cursor_pointer()
+                    // hover-fill: exception choice
                     .bg(if selected {
                         theme.accent_soft
                     } else {
@@ -587,11 +594,24 @@ impl RoutinesPanel {
                 .into_any_element()],
             &theme,
         );
+        // The form's note (validation, as a refusal) under the header, before the first field.
+        let note = self.error.as_ref().map(|words| {
+            let slot = crate::app::refused("create the routine", words);
+            error_note::render(
+                "routine-error",
+                &slot.error,
+                false,
+                error_note::Style::Inline,
+                &theme,
+                error_note::Handlers::new(),
+            )
+        });
         let mut body = div()
             .flex()
             .flex_col()
             .gap(px(10.0))
             .child(header)
+            .children(note)
             .child(field("NAME", self.name_input.clone(), &theme))
             .child(field(
                 "PROMPT · Enter creates",
@@ -639,14 +659,6 @@ impl RoutinesPanel {
                 )
                 .child(chats),
         );
-        if let Some(err) = &self.error {
-            body = body.child(
-                div()
-                    .text_size(px(11.5))
-                    .text_color(theme.danger)
-                    .child(err.clone()),
-            );
-        }
         body.child(
             div()
                 .flex()

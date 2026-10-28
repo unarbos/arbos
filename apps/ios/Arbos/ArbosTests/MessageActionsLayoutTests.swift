@@ -171,7 +171,7 @@ final class MessageActionsKeyboardTests: XCTestCase {
     }
 
     func testActionsThatKeepTheChatRestoreTheKeyboard() {
-        for item in [MessageMenuItem.copy, .delete, .reply, .edit] {
+        for item in [MessageMenuItem.copy, .delete, .reply, .edit, .removePreview] {
             XCTAssertTrue(MessageActionsKeyboard.restoresFocus(wasFocused: true, after: item), "\(item)")
         }
     }

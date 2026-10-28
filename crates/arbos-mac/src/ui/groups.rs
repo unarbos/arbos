@@ -3,7 +3,7 @@
 //! header with its picker. Everything here is pure rendering over `AppState`; the shell owns
 //! the open/closed state of the picker.
 
-use gpui::{div, prelude::*, px, Div, Hsla};
+use gpui::{div, prelude::*, px, Div};
 
 use crate::app::AppState;
 use crate::model::{Chat, ChatKind, Project};
@@ -29,37 +29,17 @@ pub fn picture(space: &Project, state: &AppState, size: f32, theme: &Theme) -> D
                     .rounded_full()
                     .object_fit(gpui::ObjectFit::Cover),
             ),
-        None => crate::ui::avatars::project(space, size, theme),
+        None => crate::ui::avatars::project(space, size, theme), // avatar-lint: allow (group picture)
     }
-}
-
-/// `#rrggbb` → colour; anything else falls back.
-pub fn project_color(hex: &str, fallback: Hsla) -> Hsla {
-    let h = hex.trim().trim_start_matches('#');
-    if h.len() != 6 {
-        return fallback;
-    }
-    match u32::from_str_radix(h, 16) {
-        Ok(v) => gpui::rgb(v).into(),
-        Err(_) => fallback,
-    }
-}
-
-/// A stable accent for a sender id when its Project is not in the registry (e.g. in a
-/// participant's "Projects ⇄" tab): a hue from the id, the theme's saturation.
-pub fn sender_color(seed: &str, theme: &Theme) -> Hsla {
-    let mut h: u32 = 2166136261;
-    for b in seed.bytes() {
-        h = (h ^ b as u32).wrapping_mul(16777619);
-    }
-    let mut c = theme.accent;
-    c.h = (h % 360) as f32 / 360.0;
-    c.s = c.s.max(0.45);
-    c
 }
 
 /// Group tab: the participants' glyphs stacked, host first. The "Projects ⇄" tab shows `⇄`.
-pub fn tab_glyphs(chat: &Chat, projects: &[Project], theme: &Theme) -> Option<Div> {
+pub fn tab_glyphs(
+    chat: &Chat,
+    projects: &[Project],
+    images: &std::collections::HashMap<String, std::sync::Arc<gpui::RenderImage>>,
+    theme: &Theme,
+) -> Option<Div> {
     match chat.kind {
         ChatKind::Group => {
             // Overlapping heads: laid out absolutely inside a row of a known
@@ -81,7 +61,12 @@ pub fn tab_glyphs(chat: &Chat, projects: &[Project], theme: &Theme) -> Option<Di
                 .h(px(GLYPH));
             for (i, id) in chat.participants.iter().take(MAX_GLYPHS).enumerate() {
                 let head = match projects.iter().find(|p| &p.id == id) {
-                    Some(p) => crate::ui::avatars::project(p, GLYPH, theme),
+                    Some(p) => crate::ui::avatars::project_with(
+                        images.get(&p.id).cloned(),
+                        p,
+                        GLYPH,
+                        theme,
+                    ),
                     None => crate::ui::avatars::element(id, id, None, GLYPH, theme),
                 };
                 row = row.child(head.absolute().left(px(step * i as f32)).top(px(0.0)));

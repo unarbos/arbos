@@ -934,7 +934,13 @@ pub(crate) mod tests {
     }
 
     pub(crate) async fn test_agent() -> (Arc<Agent>, std::path::PathBuf) {
+        test_agent_with(axum::Router::new()).await
+    }
+
+    /// Same, with extra mock-relay routes merged in (`/box/secrets/…` for the hand-off tests).
+    pub(crate) async fn test_agent_with(extra: axum::Router) -> (Arc<Agent>, std::path::PathBuf) {
         let app = axum::Router::new()
+            .merge(extra)
             .route(
                 "/proxy/v1/chat/completions",
                 axum::routing::post(mock_quick),
@@ -1116,23 +1122,10 @@ pub(crate) mod tests {
             .expect("member");
         assert_eq!(mine["handle"].as_str(), Some("feedbackguy"));
         assert_eq!(mine["project"]["name"].as_str(), Some("FeedbackGuy"));
-        assert!(crate::people::addressed(
-            &arbos_core::doc::MessageView {
-                id: "m1".into(),
-                role: "user".into(),
-                status: "done".into(),
-                parts: vec![serde_json::json!({
-                    "kind": "text",
-                    "text": "@feedbackguy you alive?"
-                })],
-                rest: serde_json::json!({ "sender": "user:u1" }),
-            },
-            &agent.cfg.project_id,
-            &info.slug,
-            false,
-            false,
-            false,
-        ));
+        assert_eq!(
+            crate::people::mention_role("@feedbackguy you alive?", &info.slug),
+            crate::people::MentionRole::Addressed
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

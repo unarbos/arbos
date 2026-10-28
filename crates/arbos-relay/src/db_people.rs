@@ -26,6 +26,13 @@ CREATE TABLE IF NOT EXISTS people_members (
   PRIMARY KEY (chat_id, member)
 );
 CREATE INDEX IF NOT EXISTS people_members_member ON people_members(member);
+CREATE TABLE IF NOT EXISTS gate_decisions (
+  chat_id TEXT NOT NULL, message_id TEXT NOT NULL, agent_id TEXT NOT NULL, handle TEXT NOT NULL,
+  decision TEXT NOT NULL, reason TEXT NOT NULL, chosen TEXT NOT NULL DEFAULT '[]',
+  confidence REAL, addressee TEXT, model TEXT, latency_ms INTEGER, cost_usd REAL, at INTEGER NOT NULL,
+  PRIMARY KEY (chat_id, message_id, agent_id)
+);
+CREATE INDEX IF NOT EXISTS gate_decisions_chat_at ON gate_decisions(chat_id, at);
 CREATE TABLE IF NOT EXISTS people_reads (
   chat_id TEXT NOT NULL, device_id TEXT NOT NULL, seq INTEGER NOT NULL DEFAULT 0,
   at INTEGER NOT NULL, hidden INTEGER NOT NULL DEFAULT 0,
@@ -594,6 +601,18 @@ impl Db {
         })
     }
 
+    /// Does `blocker` block `blocked`?
+    pub fn blocks(&self, blocker: &str, blocked: &str) -> Result<bool> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM blocks WHERE blocker = ?1 AND blocked = ?2",
+                params![blocker, blocked],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n > 0)
+        })
+    }
+
     /// Is either of the two blocking the other?
     pub fn blocked_either_way(&self, a: &str, b: &str) -> Result<bool> {
         self.with(|c| {
@@ -698,6 +717,37 @@ impl Db {
         })
     }
 
+    /// Queue a notification for ONE device (the push gateway names devices one by one).
+    /// `coalesce_key` keeps at most one undelivered push of this kind per key per device.
+    pub fn push_device(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        kind: &str,
+        payload: &Value,
+        coalesce_key: Option<&str>,
+    ) -> Result<()> {
+        let now = now_ms();
+        let body = payload.to_string();
+        self.with(|c| {
+            if let Some(key) = coalesce_key {
+                let pending: i64 = c.query_row(
+                    "SELECT COUNT(*) FROM user_pushes WHERE device_id = ?1 AND kind = ?2 AND chat_id = ?3 AND delivered_at IS NULL",
+                    params![device_id, kind, key],
+                    |r| r.get(0),
+                )?;
+                if pending > 0 {
+                    return Ok(());
+                }
+            }
+            c.execute(
+                "INSERT INTO user_pushes(user_id, device_id, kind, payload, chat_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![user_id, device_id, kind, body, coalesce_key, now],
+            )?;
+            Ok(())
+        })
+    }
+
     /// Queue a notification for every live device of a user except `except_device` (the one
     /// that caused it already knows).
     pub fn push_user_except(
@@ -716,6 +766,43 @@ impl Db {
                 params![user_id, kind, body, now, except_device],
             )
             .map(|_| ())
+        })
+    }
+
+    /// Clear-on-read fan-out, queue form: for every live device of the user except
+    /// `except_device` (the one that read), drop the undelivered `people_message` rows for
+    /// `chat_id` — a device that has not drained yet must not post a banner for something
+    /// already read — and any pending clear for the chat, then queue one `kind` row carrying
+    /// `payload`. At most one clear per chat per device is pending, always with the newest
+    /// badge. Returns the ids of the devices told.
+    pub fn queue_chat_clear(
+        &self,
+        user_id: &str,
+        except_device: &str,
+        chat_id: &str,
+        kind: &str,
+        payload: &Value,
+    ) -> Result<Vec<String>> {
+        let now = now_ms();
+        let body = payload.to_string();
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT id FROM devices WHERE user_id = ?1 AND revoked_at IS NULL AND id != ?2",
+            )?;
+            let devices: Vec<String> = st
+                .query_map(params![user_id, except_device], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            for d in &devices {
+                c.execute(
+                    "DELETE FROM user_pushes WHERE device_id = ?1 AND chat_id = ?2 AND delivered_at IS NULL AND kind IN ('people_message', ?3)",
+                    params![d, chat_id, kind],
+                )?;
+                c.execute(
+                    "INSERT INTO user_pushes(user_id, device_id, kind, payload, chat_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![user_id, d, kind, body, chat_id, now],
+                )?;
+            }
+            Ok(devices)
         })
     }
 
@@ -1317,5 +1404,88 @@ mod tests {
         assert_eq!(card.name.as_deref(), Some("Jacob's Mac"));
         let sender = crate::notify::Sender::user(&state, "u_mac");
         assert_eq!(sender.title(), "@jacobs-mac");
+    }
+}
+
+/// One agent's respond-gate verdict on one message, as its box reported it
+/// (`POST /box/people/{chat}/gate`; `agentd::people::report_gate_decision`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GateDecision {
+    pub chat_id: String,
+    pub message_id: String,
+    pub agent_id: String,
+    pub handle: String,
+    /// `reply` | `silent`.
+    pub decision: String,
+    pub reason: String,
+    /// Every agent the judge picked for the message.
+    pub chosen: Vec<String>,
+    pub confidence: Option<f64>,
+    pub addressee: Option<String>,
+    pub model: Option<String>,
+    pub latency_ms: Option<i64>,
+    pub cost_usd: Option<f64>,
+    pub at: i64,
+}
+
+/// How many decisions a chat keeps (the newest); older ones are pruned on insert.
+pub const GATE_DECISIONS_PER_CHAT: i64 = 500;
+
+impl Db {
+    /// Store (or replace) a gate verdict and keep the chat's history bounded.
+    pub fn put_gate_decision(&self, d: &GateDecision) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT OR REPLACE INTO gate_decisions(chat_id, message_id, agent_id, handle, decision, reason, chosen, confidence, addressee, model, latency_ms, cost_usd, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    d.chat_id,
+                    d.message_id,
+                    d.agent_id,
+                    d.handle,
+                    d.decision,
+                    d.reason,
+                    serde_json::to_string(&d.chosen).unwrap_or_else(|_| "[]".into()),
+                    d.confidence,
+                    d.addressee,
+                    d.model,
+                    d.latency_ms,
+                    d.cost_usd,
+                    d.at
+                ],
+            )?;
+            c.execute(
+                "DELETE FROM gate_decisions WHERE chat_id = ?1 AND rowid NOT IN (SELECT rowid FROM gate_decisions WHERE chat_id = ?1 ORDER BY at DESC, rowid DESC LIMIT ?2)",
+                params![d.chat_id, GATE_DECISIONS_PER_CHAT],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// The newest `limit` verdicts of a chat, newest first.
+    pub fn gate_decisions(&self, chat_id: &str, limit: i64) -> Result<Vec<GateDecision>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT chat_id, message_id, agent_id, handle, decision, reason, chosen, confidence, addressee, model, latency_ms, cost_usd, at FROM gate_decisions WHERE chat_id = ?1 ORDER BY at DESC, rowid DESC LIMIT ?2",
+            )?;
+            let rows = st.query_map(params![chat_id, limit.max(1)], |r| {
+                let chosen: String = r.get(6)?;
+                Ok(GateDecision {
+                    chat_id: r.get(0)?,
+                    message_id: r.get(1)?,
+                    agent_id: r.get(2)?,
+                    handle: r.get(3)?,
+                    decision: r.get(4)?,
+                    reason: r.get(5)?,
+                    chosen: serde_json::from_str(&chosen).unwrap_or_default(),
+                    confidence: r.get(7)?,
+                    addressee: r.get(8)?,
+                    model: r.get(9)?,
+                    latency_ms: r.get(10)?,
+                    cost_usd: r.get(11)?,
+                    at: r.get(12)?,
+                })
+            })?;
+            rows.collect()
+        })
     }
 }

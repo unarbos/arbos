@@ -323,6 +323,11 @@ pub struct PeopleChatDto {
     #[typeshare(serialized_as = "I54")]
     pub read_seq: i64,
     pub unread: bool,
+    /// Members this viewer has blocked, as `user:<id>` ([feedback
+    /// blocked-state-relay-2026-10-26]): the clients hide their rows for the viewer alone;
+    /// the relay's pushes, alerts and unread counts for the viewer skip them too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_senders: Vec<String>,
     pub lock_state: String,
     pub me: ChatMeDto,
 }
@@ -1114,6 +1119,19 @@ pub struct SecretDirectorDto {
     pub created_from: Option<String>,
 }
 
+/// Where a secret came from: `settings` (the New secret form) or `chat` (handed to an agent in
+/// a chat — the request card or "save this"). Names and ids only.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SecretSourceDto {
+    /// `settings | chat`.
+    pub kind: String,
+    /// The agent it was given to, when `chat`.
+    pub project_id: Option<String>,
+    pub project_name: Option<String>,
+    pub chat_id: Option<String>,
+}
+
 /// Secret as clients see it (`secret_json`). Never carries a secret value.
 #[typeshare]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1150,6 +1168,9 @@ pub struct SecretDto {
     /// `refuse | card`: what a non-listed person's ask does (absent = refuse).
     #[serde(default)]
     pub others_ask: Option<String>,
+    /// Where it came from (absent on an older relay = settings).
+    #[serde(default)]
+    pub source: Option<SecretSourceDto>,
 }
 
 /// Target block on a secret request.
@@ -1550,6 +1571,44 @@ pub struct PeopleMessagePayloadDto {
     #[typeshare(serialized_as = "I54")]
     pub seq: i64,
     pub sender: SenderDto,
+    /// The project id for an agent's reply in a project chat; absent (`people`) for DMs and
+    /// people groups. Agents' announcements queue this push since 2026-10-26 (before, only a
+    /// device's own row did, so an agent reply never showed an in-app banner).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    /// The announced message's first line, when the sender announced one (agents do; a
+    /// device's row-level push has none and the banner says "New message").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// `dm` | `group` | `project` (shared project chat). Absent on an older relay → `dm`.
+    /// Since 2026-10-27: a group banner is titled with the chat, the sender goes in the body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_kind: Option<String>,
+    /// The chat's name as this recipient sees it (groups and shared project chats; a DM has none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_title: Option<String>,
+    /// Blob key of the group picture under `people:{chat_id}` (people groups with a picture).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_image_key: Option<String>,
+}
+
+/// `channel_message` payload: a message in a server channel (Matrix room), fanned out by the
+/// relay's push gateway (`POST /_matrix/push/v1/notify`) to every member device the homeserver's
+/// push rules name — never the sender's own, never a server the recipient archived. Clients post
+/// a local banner "<sender> in #channel" unless that channel is on screen; a tap opens it.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChannelMessagePayloadDto {
+    pub server_id: String,
+    pub server_name: String,
+    pub channel_id: String,
+    pub channel_name: String,
+    pub room_id: String,
+    pub event_id: String,
+    pub sender: SenderDto,
+    /// First line of the message, when it has text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
 
 /// `people_chat_updated` payload.
@@ -1757,6 +1816,20 @@ pub struct SecretRequestPushPayloadDto {
     pub vault_id: Option<String>,
 }
 
+/// `message_redacted` payload: a message's value moved into the vault and the row became the
+/// "Secret saved as NAME" ghost. Devices drop the old text from search and notifications and
+/// persist a shallow snapshot of the room. Names only.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessageRedactedPayloadDto {
+    pub chat_id: String,
+    /// Absent for a people chat.
+    pub project_id: Option<String>,
+    pub message_id: String,
+    pub secret_id: String,
+    pub name: String,
+}
+
 /// `secrets_paused` payload.
 #[typeshare]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1801,6 +1874,20 @@ pub struct AgentProfileUpdatedPayloadDto {
     pub image_key: Option<String>,
 }
 
+/// `notifications_cleared` payload: the user read `chat_id` on one of their devices
+/// (`PUT /chats/{id}/read`), so every other device drops the banners it still shows for that
+/// chat and sets its app badge to `badge` — the user's unread total across chats after the
+/// read (Fluxer-style clear-on-read, carried on `/me/pushes` today and as a silent push when
+/// APNs is live). `project_id` is `people` for DMs and groups, else the agent's project.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NotificationsClearedPayloadDto {
+    pub chat_id: String,
+    pub project_id: String,
+    #[typeshare(serialized_as = "I54")]
+    pub badge: i64,
+}
+
 /// One kind the relay queues on `/me/pushes` via `push_user` / `push_user_except` /
 /// `push_everyone`. Adjacent tagging matches the stored `{ kind, payload }` row.
 ///
@@ -1813,6 +1900,8 @@ pub struct AgentProfileUpdatedPayloadDto {
 pub enum PushEventDto {
     #[serde(rename = "people_message")]
     PeopleMessage(PeopleMessagePayloadDto),
+    #[serde(rename = "channel_message")]
+    ChannelMessage(ChannelMessagePayloadDto),
     #[serde(rename = "people_chat_updated")]
     PeopleChatUpdated(PeopleChatUpdatedPayloadDto),
     #[serde(rename = "people_member_added")]
@@ -1839,6 +1928,8 @@ pub enum PushEventDto {
     PeopleInviteAccepted(PeopleInviteAcceptedPayloadDto),
     #[serde(rename = "feedback_capture")]
     FeedbackCapture(FeedbackCapturePayloadDto),
+    #[serde(rename = "message_redacted")]
+    MessageRedacted(MessageRedactedPayloadDto),
     #[serde(rename = "server_member_removed")]
     ServerMemberRemoved(ServerMemberRemovedPayloadDto),
     #[serde(rename = "server_member_joined")]
@@ -1867,6 +1958,8 @@ pub enum PushEventDto {
     ProfileUpdated(ProfileUpdatedPayloadDto),
     #[serde(rename = "agent_profile_updated")]
     AgentProfileUpdated(AgentProfileUpdatedPayloadDto),
+    #[serde(rename = "notifications_cleared")]
+    NotificationsCleared(NotificationsClearedPayloadDto),
 }
 
 impl PushEventDto {

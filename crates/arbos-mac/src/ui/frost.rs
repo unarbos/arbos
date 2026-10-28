@@ -115,6 +115,8 @@ pub struct EdgeFaded {
     band: f32,
     top: bool,
     bottom: bool,
+    left: bool,
+    right: bool,
     child: AnyElement,
 }
 
@@ -124,6 +126,21 @@ pub fn edge_faded(band: f32, top: bool, bottom: bool, child: impl IntoElement) -
         band,
         top,
         bottom,
+        left: false,
+        right: false,
+        child: child.into_any_element(),
+    }
+}
+
+/// Fade the child's primitives near its left/right edges over `band` px (a
+/// horizontally scrolling row).
+pub fn edge_faded_sides(band: f32, child: impl IntoElement) -> EdgeFaded {
+    EdgeFaded {
+        band,
+        top: false,
+        bottom: false,
+        left: true,
+        right: true,
         child: child.into_any_element(),
     }
 }
@@ -188,8 +205,8 @@ impl Element for EdgeFaded {
             band_right: None,
             top: self.top,
             bottom: self.bottom,
-            left: false,
-            right: false,
+            left: self.left,
+            right: self.right,
         };
         window.with_edge_fade(Some(fade), |window| self.child.paint(window, cx));
     }

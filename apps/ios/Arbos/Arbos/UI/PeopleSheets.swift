@@ -40,13 +40,14 @@ struct NewChatSheet: View {
     @State private var searching = false
     @State private var opening = false
     @State private var loadingDirectory = false
-    /// `ARBOS_SHOW=newagent|newgroup|newserver` lands on that Create screen, `newgroup2` on the
-    /// member picker (screenshot rig).
+    /// `ARBOS_SHOW=newagent|newgroup|newserver|newconnect` lands on that Create screen, `newgroup2`
+    /// on the member picker (screenshot rig).
     @State private var showCreate: CreateKind? = {
         switch DebugHooks.show {
         case "newagent": return .agent
         case "newgroup": return .group
         case "newserver": return .server
+        case "newconnect": return .connect
         default: return nil
         }
     }()
@@ -101,6 +102,12 @@ struct NewChatSheet: View {
                         card {
                             NavigationLink { CreateEntityView(kind: .agent, onDone: { dismiss() }) } label: {
                                 actionRow(icon: "sparkles", title: "New agent", subtitle: "Its own workspace on your machine")
+                            }
+                            .buttonStyle(.plain)
+                            rowDivider
+                            // Connect an agent (#2142): an agent that runs elsewhere joins as a member.
+                            NavigationLink { CreateEntityView(kind: .connect, onDone: { dismiss() }) } label: {
+                                actionRow(icon: "link", title: "Connect an agent", subtitle: "Claude Code, Grok or your own bot, with a key")
                             }
                             .buttonStyle(.plain)
                             rowDivider
@@ -385,13 +392,16 @@ struct AgentPickRow: View {
     @Environment(\.theme) private var theme
     let project: Project
     var trailing: AnyView? = nil
+    /// Appended to the @handle line (another member's agent: "run by @owner").
+    var note: String? = nil
 
     var body: some View {
         HStack(spacing: SheetRow.gap) {
             AgentAvatar(project: project, theme: theme, size: SheetRow.avatar, still: true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(project.name).font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
-                Text("@\(mentionSlug(project.name))").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(1)
+                Text(note.map { "@\(mentionSlug(project.name)) · \($0)" } ?? "@\(mentionSlug(project.name))")
+                    .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(1)
             }
             Spacer()
             if let trailing { trailing }
@@ -446,18 +456,21 @@ struct PersonRow: View {
 /// What the Create screen creates (D93: one style, parameterised by entity).
 enum CreateKind {
     case agent, group, server
+    /// Connect an outside agent (#2142): the same screen, then the key reveal instead of a box.
+    case connect
 
     var title: String {
         switch self {
         case .agent: return "Create New Agent"
         case .group: return "Create New Group"
         case .server: return "Create New Server"
+        case .connect: return "Connect an Agent"
         }
     }
 
     var placeholder: String {
         switch self {
-        case .agent: return "Name your agent"
+        case .agent, .connect: return "Name your agent"
         case .group: return "Name your group"
         case .server: return "Name your server"
         }
@@ -466,7 +479,7 @@ enum CreateKind {
     /// The footer action: groups continue to the member picker.
     var action: String {
         switch self {
-        case .agent, .server: return "Create"
+        case .agent, .server, .connect: return "Create"
         case .group: return "Next"
         }
     }
@@ -474,7 +487,40 @@ enum CreateKind {
     var explainer: String? {
         switch self {
         case .server: return "A server has channels and an invite link. You start as its owner, in #general."
+        case .connect: return "An agent you already run joins your chats as a member. You get a key to give it."
         case .agent, .group: return nil
+        }
+    }
+}
+
+/// Where a connected agent runs — the approved type picker's rows, as capsules under the
+/// explainer. The local Claude Code / Codex bridge is set up from a Mac (`arbos-acp`).
+enum ConnectTransport: String, CaseIterable, Identifiable {
+    case acp, grok, custom
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .acp: return "Claude Code / Codex on a Mac"
+        case .grok: return "Grok"
+        case .custom: return "Custom bot"
+        }
+    }
+
+    /// The one line under the key that says what to do with it.
+    var howTo: String {
+        switch self {
+        case .acp: return "On your Mac, in Terminal: cargo install --git https://github.com/unarbos/arbos arbos-acp, then run arbos-acp with the key — it starts Claude Code or Codex for you."
+        case .grok: return "In Grok, add a routine that calls the link every few minutes with the key. Arbos handles the rest."
+        case .custom: return "Your bot calls the link with the key: read its inbox, post replies. The link opens the short how-to."
+        }
+    }
+
+    var short: String {
+        switch self {
+        case .acp: return "ACP"
+        case .grok: return "Grok"
+        case .custom: return "custom"
         }
     }
 }
@@ -505,8 +551,11 @@ struct CreateEntityView: View {
     @State private var option: AvatarPickerTab = CreateEntityView.initialOption
     @StateObject private var source = AvatarSourceState()
     @State private var creating = false
-    @State private var errorText: String?
+    @State private var localError: UserError?
     @State private var next = false
+    /// Connect an agent (#2142): the transport picked under the explainer, then the reveal.
+    @State private var transport: ConnectTransport = .acp
+    @State private var reveal: ConnectReveal?
     @FocusState private var focused: Bool
 
     private var clean: String { name.trimmingCharacters(in: .whitespaces) }
@@ -533,6 +582,19 @@ struct CreateEntityView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+            // The sheet's note (Jacob 2026-10-26): under the header, before the hero — a refused
+            // create, or a failed generation (`source.error`); the body below moves down.
+            if let error = source.error ?? localError {
+                ErrorNote(id: "create-entity-error", error: error,
+                          detailsOpen: Binding(get: { source.detailsOpen }, set: { source.detailsOpen = $0 }),
+                          onTryAgain: source.error != nil ? generate : nil)
+                    .padding(.horizontal, 16.5)
+                    .padding(.top, 12)
+            } else {
+                SheetErrorNote(id: "create-entity-error", onTryAgain: go)
+                    .padding(.horizontal, 16.5)
+                    .padding(.top, 12)
+            }
             // The middle scrolls when the keyboard is up (the footer stays above the keyboard,
             // so the action is always reachable); at rest it is Grok's fixed layout.
             ScrollView(showsIndicators: false) {
@@ -558,12 +620,12 @@ struct CreateEntityView: View {
                                 .padding(.top, 8)
                                 .frame(height: 40, alignment: .top)
                         }
-                        if let errorText {
-                            Text(errorText)
-                                .font(.system(size: 13)).foregroundStyle(theme.danger)
-                                .multilineTextAlignment(.center).padding(.horizontal, 24).padding(.top, 8)
+                        if kind == .connect {
+                            transportRow
+                                .frame(height: 40, alignment: .top)
+                                .accessibilityIdentifier("connect-transports")
                         }
-                        AvatarTabPill(tabs: Self.options, tab: $option) { source.errorText = nil }
+                        AvatarTabPill(tabs: Self.options, tab: $option) { source.error = nil }
                             .padding(.top, 246 - 218)
                             .accessibilityIdentifier("create-entity-options")
                         AvatarSourceBody(state: source, tab: option, keepsLine: "Create keeps this one.", uploadsLine: "Create uploads it.", generate: generate) {
@@ -577,10 +639,16 @@ struct CreateEntityView: View {
             .scrollDismissesKeyboard(.interactively)
             footer
         }
+        .claimFailures("create-entity", ["create the server", "create the agent", "create the group", "connect the agent"])
         .background(sheetBg.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
         .navigationDestination(isPresented: $next) {
             NewGroupView(onDone: onDone, draft: GroupDraft(title: clean, leaf: Self.storedLeaf, picture: source.draftPicture(for: option)))
+        }
+        .navigationDestination(isPresented: Binding(get: { reveal != nil }, set: { if !$0 { reveal = nil } })) {
+            if let reveal {
+                ConnectRevealView(reveal: reveal, onDone: onDone)
+            }
         }
         // The rig shoots the sheet without the keyboard (`ARBOS_SHOW=new…`); users get the caret.
         .onAppear {
@@ -636,6 +704,25 @@ struct CreateEntityView: View {
         } else {
             NeutralAvatar(name: clean, size: 114)
         }
+    }
+
+    /// Connect an agent: the three transports as capsules (the Create sheet's option style).
+    private var transportRow: some View {
+        HStack(spacing: 2) {
+            ForEach(ConnectTransport.allCases) { t in
+                Button { transport = t } label: {
+                    Text(t.label)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(transport == t ? Color(white: 0xF5 / 255) : AvatarSheetPalette.labelMuted)
+                        .padding(.horizontal, 11)
+                        .frame(height: 28)
+                        .background(Capsule().fill(transport == t ? cancelBg : .clear))
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("connect-transport-\(t.rawValue)")
+            }
+        }
+        .padding(.top, 6)
     }
 
     private var field: some View {
@@ -694,18 +781,228 @@ struct CreateEntityView: View {
             next = true
         case .server:
             creating = true
-            errorText = nil
+            localError = nil
             Task {
                 if await model.createServer(name: clean, leaf: Self.storedLeaf, picture: picture) {
                     onDone()
-                } else {
-                    errorText = model.notice?.text ?? "Could not create the server."
-                    model.notice = nil
+                }
+                // A refusal is the claimed failure drawn by the note above the hero.
+                creating = false
+            }
+        case .connect:
+            creating = true
+            localError = nil
+            let transport = transport
+            Task {
+                if let r = await model.connectAgent(name: clean, transport: transport.rawValue) {
+                    reveal = r
                 }
                 creating = false
             }
         }
     }
+}
+
+// MARK: - Connect an agent: the key reveal (#2142)
+
+/// After Connect: the link and the key with Copy (the key is shown once), the one how-to line
+/// for the picked transport, and the live status — the system spinner while waiting, "Connected"
+/// once the agent first checks in (polled every 3 s). Done closes the sheet; the new agent is
+/// in the list like any other. Also the screen Rotate key… pushes from the agent pane.
+struct ConnectRevealView: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    let reveal: ConnectReveal
+    /// Closes the whole sheet (a pushed view's own dismiss only pops).
+    let onDone: () -> Void
+    @State private var info: OutsideAgentInfo?
+    @State private var copied: String?
+
+    private var transport: ConnectTransport { ConnectTransport(rawValue: reveal.transport) ?? .custom }
+    private var connected: Bool { (info ?? reveal.info)?.connected == true }
+
+    private let sheetBg = AvatarSheetPalette.sheetBg
+    private let line = AvatarSheetPalette.line
+    private let placeholder = AvatarSheetPalette.placeholder
+    private let cardBg = AvatarSheetPalette.pillBg
+    private let tileBg = AvatarSheetPalette.ring
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 0) {
+                    NeutralAvatar(name: reveal.name, size: 92)
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 18)
+                    Text(reveal.name)
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(Color(white: 0xF5 / 255))
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 12)
+                    sectionTitle("Give this to your agent")
+                    card {
+                        copyRow(id: "connect-link", glyph: "link", label: "Link", shown: shortLink(reveal.link), full: reveal.link)
+                        Rectangle().fill(line).frame(height: 0.5).padding(.leading, 16)
+                        copyRow(id: "connect-key", glyph: "key", label: "Key", shown: shortKey(reveal.key), full: reveal.key)
+                    }
+                    footnote(reveal.rotated
+                        ? "The old key stopped working. This one is shown once."
+                        : "The key is shown once. If you lose it, rotate it from the agent's profile.")
+                    footnote(transport.howTo)
+                    sectionTitle("Status")
+                    card { statusRow }
+                }
+                .padding(.bottom, 24)
+            }
+            footer
+        }
+        .background(sheetBg.ignoresSafeArea())
+        .toolbar(.hidden, for: .navigationBar)
+        .task(id: reveal.projectId) {
+            // Poll the relay while the screen is up; stop once connected.
+            while !Task.isCancelled {
+                if let fresh = await model.refreshOutsideInfo(reveal.projectId) { info = fresh }
+                if connected { return }
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+            }
+        }
+    }
+
+    private var header: some View {
+        HStack {
+            Text(reveal.rotated ? "New key for \(reveal.name)" : "Connect \(reveal.name)")
+                .font(.system(size: 14.2, weight: .semibold))
+                .foregroundStyle(Color(white: 0xF5 / 255))
+                .lineLimit(1)
+                .padding(.leading, 17.5)
+            Spacer()
+            Button(action: onDone) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Color(white: 0xD2 / 255))
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.trailing, 5.5)
+            .accessibilityLabel("Close")
+        }
+        .frame(height: 54.5)
+        .overlay(alignment: .bottom) { Rectangle().fill(line).frame(height: 1) }
+    }
+
+    private func sectionTitle(_ text: String) -> some View {
+        Text(text.uppercased())
+            .font(.system(size: 13))
+            .foregroundStyle(placeholder)
+            .padding(.horizontal, 32)
+            .padding(.top, 22)
+            .padding(.bottom, 8)
+    }
+
+    private func footnote(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 13))
+            .foregroundStyle(placeholder)
+            .lineSpacing(3)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 32)
+            .padding(.top, 8)
+    }
+
+    private func card<Rows: View>(@ViewBuilder _ rows: () -> Rows) -> some View {
+        VStack(spacing: 0) { rows() }
+            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(cardBg))
+            .padding(.horizontal, 16)
+    }
+
+    private func copyRow(id: String, glyph: String, label: String, shown: String, full: String) -> some View {
+        HStack(spacing: 14) {
+            Image(systemName: glyph)
+                .font(.system(size: 17, weight: .medium))
+                .foregroundStyle(Color(white: 0xF5 / 255))
+                .frame(width: 36, height: 36)
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(tileBg))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label).font(.system(size: 13)).foregroundStyle(placeholder)
+                Text(shown)
+                    .font(.system(size: 15, design: .monospaced))
+                    .foregroundStyle(Color(white: 0xF5 / 255))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer(minLength: 8)
+            Button {
+                UIPasteboard.general.string = full
+                copied = id
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: copied == id ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 13, weight: .medium))
+                    Text(copied == id ? "Copied" : "Copy")
+                        .font(.system(size: 14, weight: .medium))
+                }
+                .foregroundStyle(copied == id ? theme.online : Color(white: 0xF5 / 255))
+                .padding(.horizontal, 12)
+                .frame(height: 32)
+                .background(Capsule().fill(copied == id ? theme.online.opacity(0.18) : tileBg))
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("\(id)-copy")
+        }
+        .padding(.horizontal, 16)
+        .frame(minHeight: 60)
+    }
+
+    @ViewBuilder
+    private var statusRow: some View {
+        HStack(spacing: 10) {
+            if connected {
+                Image(systemName: "checkmark").font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.online)
+                Text("Connected · \(transport.short) · asp/1").font(.system(size: 16)).foregroundStyle(Color(white: 0xF5 / 255))
+            } else {
+                ProgressView().controlSize(.small).tint(theme.accent)
+                Text("Waiting for the first heartbeat…").font(.system(size: 16)).foregroundStyle(placeholder)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .frame(minHeight: 56)
+        .accessibilityIdentifier(connected ? "connect-status-connected" : "connect-status-waiting")
+    }
+
+    private var footer: some View {
+        HStack(spacing: 10) {
+            Spacer()
+            Button(action: onDone) {
+                Text("Done").font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(theme.onPrimary)
+                    .frame(width: 92, height: 44).background(Capsule().fill(theme.primary))
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("connect-reveal-done")
+        }
+        .padding(.trailing, 16)
+        .padding(.top, 25)
+        .padding(.bottom, 35)
+        .overlay(alignment: .top) { Rectangle().fill(line).frame(height: 1) }
+    }
+
+    /// `arbk_14788fc5760db12964ebf67724279435f6054bcd` → `arbk_14788fc5…54bcd`.
+    static func shortKey(_ key: String) -> String {
+        guard key.count > 22 else { return key }
+        return "\(key.prefix(13))…\(key.suffix(5))"
+    }
+
+    static func shortLink(_ link: String) -> String {
+        var s = link
+        for p in ["https://", "http://"] where s.hasPrefix(p) { s.removeFirst(p.count) }
+        return s
+    }
+
+    private func shortKey(_ k: String) -> String { Self.shortKey(k) }
+    private func shortLink(_ l: String) -> String { Self.shortLink(l) }
 }
 
 /// What the Create group screen hands to the member picker (step 2).
@@ -738,18 +1035,67 @@ struct NewGroupView: View {
     @State private var pickedAgents: [Project] = []
     @State private var creating = false
     /// Shown on this screen — the root notice alert sits under the sheet and looks like a silent fail.
-    @State private var errorText: String?
+    @State private var localError: UserError?
+    /// The old string form of that state, kept so a sibling branch written against it
+    /// (`iphone-add-members-2026-10-26`) still compiles in the same integration tree; drawn as a refusal.
+    private var errorText: String? {
+        get { localError?.sentence }
+        nonmutating set { localError = newValue.map { UserError.refused("add members", $0) } }
+    }
 
     private var trimmed: String { query.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "@")) }
 
-    /// Own agents only (same as Members → Add agent); shared ones cannot be re-shared here.
-    /// Empty query hides archived agents; a search finds them again — archived agents still
-    /// exist and can join groups unless deleted (home archive is hide-only).
+    /// Own agents only — the pickable rows of the Agents section; shared ones cannot be
+    /// re-shared here. Empty query hides archived agents; a search finds them again — archived
+    /// agents still exist and can join groups unless deleted (home archive is hide-only).
     private var agentCandidates: [Project] {
         if addToServer != nil || addToSecret != nil { return [] }
         let base = model.projects.filter { !$0.shared && (trimmed.isEmpty ? !model.isArchived($0.id) : true) }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         return PeoplePicker.agents(base, query: trimmed)
+    }
+
+    /// Add members on a group: the other members' agents already in it, after mine, greyed
+    /// ([feedback add-your-agent-row-removal-ios-2026-10-27]).
+    private var othersAgents: [ChatMember] {
+        AddMembersAgents.others(in: addToChat, meId: model.user?.id, query: trimmed)
+    }
+
+    private var showsAgents: Bool { !agentCandidates.isEmpty || !othersAgents.isEmpty }
+
+    /// The Agents card: my agents (pickable), then the other members' agents already in
+    /// (greyed). Its own property so `body` stays small for the type checker.
+    @ViewBuilder private var agentsSection: some View {
+        if showsAgents {
+            Text(AddMembersAgents.sectionTitle.uppercased())
+                .font(theme.font(12, weight: .medium))
+                .kerning(0.4)
+                .foregroundStyle(theme.muted)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
+                .accessibilityIdentifier("add-members-agents-section")
+            VStack(spacing: 0) {
+                ForEach(Array(agentCandidates.enumerated()), id: \.element.id) { i, p in
+                    let already = isIn(p)
+                    Button { toggleAgent(p) } label: {
+                        AgentPickRow(project: p, trailing: pickMark(selected: pickedAgents.contains(where: { $0.id == p.id }), already: already))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(already)
+                    .opacity(already ? 0.5 : 1)
+                    if i < agentCandidates.count - 1 || !othersAgents.isEmpty { Rectangle().fill(theme.separator).frame(height: 0.5).padding(.leading, SheetRow.textInset) }
+                }
+                // The other members' agents, already in: greyed, not pickable.
+                ForEach(Array(othersAgents.enumerated()), id: \.element.id) { i, m in
+                    AgentPickRow(project: model.agent(member: m, chatId: addTo), trailing: pickMark(selected: false, already: true), note: AddMembersAgents.note(for: m))
+                        .opacity(0.5)
+                    if i < othersAgents.count - 1 { Rectangle().fill(theme.separator).frame(height: 0.5).padding(.leading, SheetRow.textInset) }
+                }
+            }
+            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(theme.card))
+            .padding(.horizontal, 16)
+            .padding(.bottom, 18)
+        }
     }
 
     /// Directory + remote hits through the shared matcher (display name and @handle):
@@ -822,44 +1168,19 @@ struct NewGroupView: View {
             .padding(.horizontal, SheetSearchField.inset).padding(.vertical, 10)
             .onChange(of: query) { _, _ in search() }
 
-            if let errorText {
-                Text(errorText)
-                    .font(theme.font(Theme.small))
-                    .foregroundStyle(theme.danger)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 20)
-                    .padding(.bottom, 8)
-            }
+            // The sheet's note: under the search field, before the list (a refused add, nobody
+            // picked, the relay's reason) — the shared element.
+            SheetErrorNote(id: "people-sheet-error", local: localError)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    if !agentCandidates.isEmpty {
-                        Text("YOUR AGENTS")
-                            .font(theme.font(12, weight: .medium))
-                            .kerning(0.4)
-                            .foregroundStyle(theme.muted)
-                            .padding(.horizontal, 16)
-                            .padding(.bottom, 8)
-                        VStack(spacing: 0) {
-                            ForEach(Array(agentCandidates.enumerated()), id: \.element.id) { i, p in
-                                let already = isIn(p)
-                                Button { toggleAgent(p) } label: {
-                                    AgentPickRow(project: p, trailing: pickMark(selected: pickedAgents.contains(where: { $0.id == p.id }), already: already))
-                                }
-                                .buttonStyle(.plain)
-                                .disabled(already)
-                                .opacity(already ? 0.5 : 1)
-                                if i < agentCandidates.count - 1 { Rectangle().fill(theme.separator).frame(height: 0.5).padding(.leading, SheetRow.textInset) }
-                            }
-                        }
-                        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(theme.card))
-                        .padding(.horizontal, 16)
-                        .padding(.bottom, 18)
-                    }
+                    agentsSection
 
-                    if !candidates.isEmpty || agentCandidates.isEmpty {
-                        if !agentCandidates.isEmpty {
-                            Text("PEOPLE")
+                    if !candidates.isEmpty || !showsAgents {
+                        if showsAgents {
+                            Text(AddMembersAgents.peopleTitle.uppercased())
                                 .font(theme.font(12, weight: .medium))
                                 .kerning(0.4)
                                 .foregroundStyle(theme.muted)
@@ -919,28 +1240,25 @@ struct NewGroupView: View {
     private func toggle(_ p: Person) {
         guard !isIn(p) else { return }
         if let i = picked.firstIndex(of: p) { picked.remove(at: i) } else { picked.append(p) }
-        errorText = nil
+        localError = nil
     }
 
     private func toggleAgent(_ p: Project) {
         guard !isIn(p) else { return }
         if let i = pickedAgents.firstIndex(where: { $0.id == p.id }) { pickedAgents.remove(at: i) } else { pickedAgents.append(p) }
-        errorText = nil
+        localError = nil
     }
 
     /// Add members: every pick goes to the group — or server, or secret — this picker was opened for.
     private func add() {
         if let secret {
             let new = picked.filter { !isIn($0) }
-            guard !new.isEmpty else { errorText = "Pick someone who is not on the list yet"; return }
+            guard !new.isEmpty else { localError = UserError.refused("add them", "Pick someone who is not on the list yet."); return }
             creating = true
-            errorText = nil
+            localError = nil
             Task {
                 if await model.addSecretPeople(secretId: secret.id, handles: new.map(\.handle)) {
                     onDone()
-                } else {
-                    errorText = model.notice?.text ?? "Could not add them."
-                    model.notice = nil
                 }
                 creating = false
             }
@@ -948,15 +1266,12 @@ struct NewGroupView: View {
         }
         if let s = server {
             let new = picked.filter { !isIn($0) }
-            guard !new.isEmpty else { errorText = "Pick someone who is not in the server yet"; return }
+            guard !new.isEmpty else { localError = UserError.refused("add members", "Pick someone who is not in the server yet."); return }
             creating = true
-            errorText = nil
+            localError = nil
             Task {
                 if await model.addServerMembers(serverId: s.id, userIds: new.map(\.id)) {
                     onDone()
-                } else {
-                    errorText = model.notice?.text ?? "Could not add them."
-                    model.notice = nil
                 }
                 creating = false
             }
@@ -964,15 +1279,12 @@ struct NewGroupView: View {
         }
         guard let chat = addToChat, canSubmit, !creating else { return }
         let plan = AddMembersPlan.make(chat: chat, meId: model.user?.id, picked: picked, pickedAgents: pickedAgents)
-        guard !plan.isEmpty else { errorText = "Pick someone who is not in the group yet"; return }
+        guard !plan.isEmpty else { localError = UserError.refused("add members", "Pick someone who is not in the group yet."); return }
         creating = true
-        errorText = nil
+        localError = nil
         Task {
             if await model.addMembers(chatId: plan.chatId, handles: plan.handles, agentIds: plan.agentIds) {
                 onDone()
-            } else {
-                errorText = model.notice?.text ?? "Could not add them."
-                model.notice = nil
             }
             creating = false
         }
@@ -991,15 +1303,11 @@ struct NewGroupView: View {
     private func create() {
         guard canSubmit, !creating else { return }
         creating = true
-        errorText = nil
+        localError = nil
         let agentIds = pickedAgents.map(\.id)
         Task {
             if await model.createGroup(handles: picked.map(\.handle), agentIds: agentIds, title: draft?.title, leaf: draft?.leaf, picture: draft?.picture) {
                 onDone()
-            } else {
-                // Copy onto this screen: RootView's alert is behind the sheet.
-                errorText = model.notice?.text ?? "Could not create the group."
-                model.notice = nil
             }
             creating = false
         }
