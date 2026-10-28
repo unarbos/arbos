@@ -825,6 +825,10 @@ pub struct Transcript {
     /// list holds while it lays its items out — v0.6.224 crashed on launch,
     /// [feedback bubble-rail-crash-hotfix-2026-10-25]).
     measured: Rc<std::cell::RefCell<Measured>>,
+    /// Reaction chip whose senders are listed under the chips (iPhone
+    /// `reactionSenders`): `(message_id, emoji)`. Set while the pointer is
+    /// over that chip; click still toggles my reaction (capsule also toggles).
+    reaction_senders: Option<(String, String)>,
 }
 
 /// Last-frame geometry, by row id, plus the transcript's viewport.
@@ -896,6 +900,7 @@ impl Transcript {
             }),
             drag_scroll: None,
             measured: Rc::default(),
+            reaction_senders: None,
         }
     }
 
@@ -1391,6 +1396,7 @@ impl Transcript {
         self.pane_open = pane_open;
         if chat_changed {
             self.drag_scroll = None;
+            self.reaction_senders = None;
         }
         let messages: Vec<Message> = chat_id
             .as_deref()
@@ -2246,6 +2252,49 @@ impl Transcript {
             })
     }
 
+    /// Display name for a reaction sender id (`user:…` / `agent:…`), matching
+    /// the iPhone's `reactionSenderLabel` ("You" for self).
+    fn reaction_sender_label(&self, sender: &str, me: &str, cx: &App) -> String {
+        if sender == me {
+            return "You".into();
+        }
+        if let Some(m) = self.mentions.by_id(sender) {
+            return m.name.clone();
+        }
+        let state = self.state.read(cx);
+        if let Some(id) = sender.strip_prefix("agent:") {
+            if let Some(p) = state.project(id) {
+                return p.name.clone();
+            }
+            for space in state.projects.iter().filter(|p| p.is_people()) {
+                if let Some(a) = space.agents.iter().find(|a| a.project_id == id) {
+                    return a.name.clone();
+                }
+            }
+        }
+        if let Some(id) = sender.strip_prefix("user:") {
+            if id == state.me_id() {
+                return "You".into();
+            }
+            if let Some(p) = state
+                .projects
+                .iter()
+                .flat_map(|p| p.people.iter())
+                .chain(state.people_results.iter())
+                .chain(state.people_directory.iter())
+                .find(|p| p.id == id)
+            {
+                return p.display_name();
+            }
+        }
+        sender
+            .split_once(':')
+            .map(|(_, bare)| bare)
+            .filter(|b| !b.is_empty())
+            .unwrap_or(sender)
+            .to_string()
+    }
+
     /// One assistant bubble block (the Markdown row and the no-answer line share it).
     #[allow(clippy::too_many_arguments)]
     fn markdown_bubble(
@@ -2848,18 +2897,27 @@ impl Transcript {
                 indent,
             } => {
                 // iPhone parity: small capsules under the bubble, mine tinted;
-                // click toggles my reaction on that emoji.
+                // click toggles my reaction. Hover lists who used that emoji
+                // under the chips — iPhone `reactionSenders`.
                 let me = format!("user:{}", self.state.read(cx).me_id());
                 let chat_id = self.chat_id.clone().unwrap_or_default();
+                let showing = self
+                    .reaction_senders
+                    .as_ref()
+                    .filter(|(mid, _)| mid == &row.message_id)
+                    .map(|(_, e)| e.clone());
                 let mut chips = div().flex().flex_wrap().gap(px(4.0));
-                for (emoji, senders) in reactions {
+                for (emoji, senders) in &reactions {
                     let on = senders.contains(&me);
+                    let selected = showing.as_ref() == Some(emoji);
                     let (state, chat, message_id, e) = (
                         self.state.clone(),
                         chat_id.clone(),
                         row.message_id.clone(),
                         emoji.clone(),
                     );
+                    let hover_mid = row.message_id.clone();
+                    let hover_emoji = emoji.clone();
                     chips = chips.child(
                         div()
                             .id(SharedString::from(format!("{}#{}", row.id, emoji)))
@@ -2869,13 +2927,13 @@ impl Transcript {
                             .px(px(8.0))
                             .py(px(4.0))
                             .rounded_full()
-                            .bg(if on {
+                            .bg(if on || selected {
                                 Theme::with_alpha(theme.accent, 0.22)
                             } else {
                                 theme.bubble_assistant
                             })
                             .border_1()
-                            .border_color(if on {
+                            .border_color(if on || selected {
                                 Theme::with_alpha(theme.accent, 0.55)
                             } else {
                                 theme.border
@@ -2891,6 +2949,18 @@ impl Transcript {
                                         .child(senders.len().to_string()),
                                 )
                             })
+                            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                                let key = (hover_mid.clone(), hover_emoji.clone());
+                                if *hovered {
+                                    if this.reaction_senders.as_ref() != Some(&key) {
+                                        this.reaction_senders = Some(key);
+                                        cx.notify();
+                                    }
+                                } else if this.reaction_senders.as_ref() == Some(&key) {
+                                    this.reaction_senders = None;
+                                    cx.notify();
+                                }
+                            }))
                             .on_click(move |_, _, cx| {
                                 let (chat, message_id, e) =
                                     (chat.clone(), message_id.clone(), e.clone());
@@ -2899,15 +2969,37 @@ impl Transcript {
                             }),
                     );
                 }
+                let names = showing.as_ref().and_then(|emoji| {
+                    reactions
+                        .iter()
+                        .find(|(e, _)| e == emoji)
+                        .map(|(_, senders)| {
+                            senders
+                                .iter()
+                                .map(|s| self.reaction_sender_label(s, &me, cx))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        })
+                });
                 div()
                     .w_full()
                     .flex()
-                    .when(mine, |el| el.justify_end())
-                    .when(!mine, |el| el.justify_start())
+                    .flex_col()
+                    .gap(px(4.0))
+                    .when(mine, |el| el.items_end())
+                    .when(!mine, |el| el.items_start())
                     .when(indent, |el| el.pl(px(2.0)))
                     .mt(px(-2.0))
                     .pb(px(ROW_GAP_HALF))
                     .child(chips)
+                    .when_some(names, |el, names| {
+                        el.child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(theme.text_muted)
+                                .child(names),
+                        )
+                    })
                     .into_any_element()
             }
             RowKind::Handoff { names, total } => {
