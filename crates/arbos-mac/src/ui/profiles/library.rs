@@ -887,6 +887,9 @@ fn preview(entry: &Entry, state: &AppState, theme: &Theme) -> AnyElement {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MenuItem {
     Open,
+    /// The picture (or file) itself on the pasteboard, original bytes under their
+    /// own type ([feedback copy-image-messages-mac-2026-10-27]).
+    Copy,
     Forward,
     Download,
     OpenLink,
@@ -897,6 +900,7 @@ impl MenuItem {
     pub fn label(self) -> &'static str {
         match self {
             MenuItem::Open => "Open",
+            MenuItem::Copy => "Copy",
             MenuItem::Forward => "Forward",
             MenuItem::Download => "Download",
             MenuItem::OpenLink => "Open link",
@@ -907,6 +911,7 @@ impl MenuItem {
     pub fn glyph(self) -> &'static str {
         match self {
             MenuItem::Open => "photo",
+            MenuItem::Copy => "copy",
             MenuItem::Forward => "forward",
             MenuItem::Download => "arrow-down",
             MenuItem::OpenLink => "globe",
@@ -915,11 +920,16 @@ impl MenuItem {
     }
 }
 
-/// What a row's ⋯ offers: attachments open, forward, download; links open
+/// What a row's ⋯ offers: attachments open, copy, forward, download; links open
 /// and copy. Pure, for the test.
 pub(crate) fn menu_items(target: &Target) -> Vec<MenuItem> {
     match target {
-        Target::Attachment { .. } => vec![MenuItem::Open, MenuItem::Forward, MenuItem::Download],
+        Target::Attachment { .. } => vec![
+            MenuItem::Open,
+            MenuItem::Copy,
+            MenuItem::Forward,
+            MenuItem::Download,
+        ],
         Target::Link { .. } => vec![MenuItem::OpenLink, MenuItem::CopyLink],
     }
 }
@@ -962,6 +972,11 @@ pub(crate) fn menu(shell: &Shell, window: &Window, cx: &mut Context<Shell>) -> O
                 this.library.menu = None;
                 match (item, &target) {
                     (MenuItem::Open, _) => open(this, &target, cx),
+                    (MenuItem::Copy, Target::Attachment { album, index }) => {
+                        if let Some(item) = album.get(*index).cloned() {
+                            this.state.update(cx, |s, cx| s.copy_viewer_item(&item, cx));
+                        }
+                    }
                     (MenuItem::Forward, Target::Attachment { .. }) => {
                         open(this, &target, cx);
                         this.state
@@ -980,7 +995,10 @@ pub(crate) fn menu(shell: &Shell, window: &Window, cx: &mut Context<Shell>) -> O
                     (MenuItem::CopyLink, Target::Link { url }) => {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(url.clone()));
                     }
-                    (MenuItem::Forward | MenuItem::Download, Target::Link { .. })
+                    (
+                        MenuItem::Copy | MenuItem::Forward | MenuItem::Download,
+                        Target::Link { .. },
+                    )
                     | (MenuItem::CopyLink, Target::Attachment { .. }) => {}
                 }
                 cx.notify();
@@ -1101,7 +1119,12 @@ mod tests {
         };
         assert_eq!(
             menu_items(&file),
-            [MenuItem::Open, MenuItem::Forward, MenuItem::Download]
+            [
+                MenuItem::Open,
+                MenuItem::Copy,
+                MenuItem::Forward,
+                MenuItem::Download
+            ]
         );
     }
 
@@ -1432,7 +1455,7 @@ mod render_tests {
         settle(&shell, vcx);
         assert!(vcx.debug_bounds("library-menu-open-link").is_none());
 
-        // A file row: Open · Forward · Download.
+        // A file row: Open · Copy · Forward · Download.
         let row = vcx.debug_bounds("library-row-2").expect("row");
         vcx.simulate_mouse_move(centre(row), None, Modifiers::default());
         settle(&shell, vcx);
