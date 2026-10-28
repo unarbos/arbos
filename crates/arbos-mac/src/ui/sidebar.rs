@@ -32,7 +32,6 @@ use crate::app::AppState;
 use crate::model::{Id, MachineState, Message, Project, Role, ServerInfo};
 use crate::search;
 use crate::ui::avatars;
-use crate::ui::badge;
 use crate::ui::composer::Composer;
 use crate::ui::frost::{edge_faded, edge_faded_sides};
 use crate::ui::glass::{self, WindowDrag};
@@ -177,13 +176,9 @@ pub(crate) const FOOTER_ROW_HEIGHT: f32 = 44.0;
 pub(crate) const FOOTER_ROW_PAD_Y: f32 = FOOTER_BOTTOM - (FOOTER_ROW_HEIGHT - FOOTER_AVATAR) / 2.0;
 /// The machine dot scales with the avatar (28 → 36 carried 7 / 11 to 9 / 13):
 /// a 9 pt dot in a 13 pt ring of the sidebar colour, 2 pt past the avatar's
-/// bottom-right edge — drawn by `ui::badge` from the avatar's size; the
-/// numbers stay here as the measured pins.
-#[cfg(test)]
+/// bottom-right edge.
 pub(crate) const FOOTER_DOT: f32 = 9.0;
-#[cfg(test)]
 pub(crate) const FOOTER_DOT_RING: f32 = 13.0;
-#[cfg(test)]
 pub(crate) const FOOTER_DOT_OVERHANG: f32 = 2.0;
 
 /// Grok Bot's update button at the footer's right end
@@ -238,7 +233,6 @@ pub(crate) fn footer_frame(row: impl IntoElement, disc: Option<impl IntoElement>
 pub(crate) fn footer_row_frame() -> gpui::Stateful<Div> {
     div()
         .id("sidebar-account")
-        .group(FOOTER_GROUP)
         .flex_1()
         .min_w_0()
         .h(px(FOOTER_ROW_HEIGHT))
@@ -579,26 +573,38 @@ pub(crate) fn account_avatar(
             .justify_center()
             .child(icon("person", FOOTER_AVATAR / 2.0, theme.text)),
     };
-    // The dot in front of the picture, ringed in the footer's colour — the
-    // sidebar at rest, the card fill while the footer row is under the
-    // pointer (`ui::badge`; the footer row is the hover group).
-    let dot = Theme::with_alpha(
-        machine_dot(machine, theme),
-        if machine == MachineState::Waking {
-            0.4 + 0.6 * PulseClock::phase(cx, 1100)
-        } else {
-            1.0
-        },
-    );
-    let badge = badge::Badge::new(dot, badge::ring::sidebar(theme))
-        .hover(FOOTER_GROUP, badge::ring::hovered(theme));
-    badge::badged(FOOTER_AVATAR, picture, Some(badge))
+    div()
+        .relative()
+        .size(px(FOOTER_AVATAR))
+        .flex_shrink_0()
         .debug_selector(|| "sidebar-account-avatar".into())
+        .child(picture)
+        .child(
+            div()
+                .absolute()
+                .right(px(-FOOTER_DOT_OVERHANG))
+                .bottom(px(-FOOTER_DOT_OVERHANG))
+                .size(px(FOOTER_DOT_RING))
+                .rounded_full()
+                .bg(theme.sidebar)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .size(px(FOOTER_DOT))
+                        .rounded_full()
+                        .bg(Theme::with_alpha(
+                            machine_dot(machine, theme),
+                            if machine == MachineState::Waking {
+                                0.4 + 0.6 * PulseClock::phase(cx, 1100)
+                            } else {
+                                1.0
+                            },
+                        )),
+                ),
+        )
 }
-
-/// The footer row's hover group: the ring under my machine dot follows the
-/// row's hover fill.
-pub(crate) const FOOTER_GROUP: &str = "sidebar-footer";
 
 pub(crate) struct RowView {
     pub(crate) space: Project,
@@ -793,52 +799,54 @@ fn chat_picture(
     cx: &Context<Shell>,
 ) -> Div {
     let space = &row.space;
-    // Corner badges go through `ui::badge` so they paint in front of the
-    // picture inside the frosted sidebar, ringed in the row's own colour (the
-    // selected card, else the sidebar; the row's hover tint while hovered).
-    let ring = if row.selected {
-        badge::ring::selected(theme)
-    } else {
-        badge::ring::sidebar(theme)
-    };
-    let group = SharedString::from(format!("row-{}", space.id));
-    let hover_ring = if row.selected {
-        badge::ring::selected(theme)
-    } else {
-        badge::ring::hovered(theme)
-    };
     if let Some(person) = space
         .person()
         .filter(|_| space.is_people() && !space.is_people_group())
     {
-        let picture = people::avatar(row.person_image.clone(), person, size, theme);
-        let Some(agent) = space.agents.first() else {
-            return badge::badged(size, picture, None);
-        };
-        // The agent's picture through the shared identity (#1592): the one its bubbles,
-        // the presence row and the member list show — uploaded picture included.
-        let state = shell.state.read(cx);
-        let a = avatars::member_identity(Some(space), &state.projects, agent);
-        let image = a.image_key.as_deref().and_then(|url| state.avatar(url));
-        let mini = div()
-            .p(px(badge::RING_WIDTH))
-            .rounded_full()
-            .bg(ring)
-            // hover-fill: exception badge-ring
-            .group_hover(group, move |s| s.bg(hover_ring))
-            .child(avatars::agent_picture(&a, image, size / 2.0, theme));
-        return badge::corner(size, picture, mini, 3.0);
+        let mut pic = div()
+            .relative()
+            .size(px(size))
+            .flex_shrink_0()
+            .child(people::avatar(
+                row.person_image.clone(),
+                person,
+                size,
+                theme,
+            ));
+        if let Some(agent) = space.agents.first() {
+            // The agent's picture through the shared identity (#1592): the one its bubbles,
+            // the presence row and the member list show — uploaded picture included.
+            let state = shell.state.read(cx);
+            let a = avatars::member_identity(Some(space), &state.projects, agent);
+            let image = a.image_key.as_deref().and_then(|url| state.avatar(url));
+            pic = pic.child(
+                div()
+                    .absolute()
+                    .right(px(-3.0))
+                    .bottom(px(-3.0))
+                    .p(px(2.0))
+                    .rounded_full()
+                    .bg(theme.bg)
+                    .child(avatars::agent_picture(&a, image, size / 2.0, theme)),
+            );
+        }
+        return pic;
     }
-    let picture = groups::picture(space, shell.state.read(cx), size, theme);
-    if row.guests.is_empty() {
-        return badge::badged(size, picture, None);
+    let mut pic = div()
+        .relative()
+        .size(px(size))
+        .flex_shrink_0()
+        .child(groups::picture(space, shell.state.read(cx), size, theme));
+    if !row.guests.is_empty() {
+        pic = pic.child(
+            div()
+                .absolute()
+                .right(px(-4.0))
+                .bottom(px(-2.0))
+                .child(people::avatar_stack(&row.guests, 16.0, 2, theme)),
+        );
     }
-    badge::corner(
-        size,
-        picture,
-        people::avatar_stack(&row.guests, 16.0, 2, ring, Some((group, hover_ring)), theme),
-        3.0,
-    )
+    pic
 }
 
 /// "#general · Sam: hi" for a server row: its newest channel's last line.
@@ -2014,8 +2022,6 @@ fn render_row(
             "row-{}",
             space.id
         ))))
-        // The row is a hover group: its corner badge's ring follows the fill.
-        .group(SharedString::from(format!("row-{}", space.id)))
         .flex()
         .items_center()
         .gap(px(identity::ROW_GAP))
@@ -3020,7 +3026,6 @@ mod footer_tests {
         FOOTER_DOT_RING, FOOTER_HEIGHT, FOOTER_INSET, FOOTER_ROW_HEIGHT, FOOTER_ROW_INSET,
         FOOTER_ROW_PAD_X, FOOTER_ROW_PAD_Y, STRIP_BUTTON, STRIP_GAP, STRIP_INSET,
     };
-    use crate::ui::badge;
     use crate::ui::theme::{Theme, CONTROL, CONTROL_LINE, HEADER_HEIGHT};
 
     /// Grok Bot's footer, measured on Jacob's Oct-2026 refs
@@ -3074,12 +3079,6 @@ mod footer_tests {
         );
         assert_eq!(FOOTER_DOT_RING - FOOTER_DOT, 4.0, "2 pt ring");
         assert_eq!(FOOTER_DOT_OVERHANG, 2.0);
-        // The shared badge draws them at exactly these sizes.
-        let m = badge::metrics(FOOTER_AVATAR);
-        assert_eq!(
-            (m.dot, m.ring, m.overhang),
-            (FOOTER_DOT, FOOTER_DOT_RING, FOOTER_DOT_OVERHANG)
-        );
         // 28 → 36 scaled the 7 / 11 dot to 9 / 14; the ring stays 2 pt.
         assert_eq!(FOOTER_DOT, (7.0f32 * 36.0 / 28.0).round());
     }
@@ -3097,13 +3096,19 @@ mod footer_tests {
             _: &mut gpui::Window,
             _: &mut gpui::Context<Self>,
         ) -> impl IntoElement {
-            // The real badge (`ui::badge`), as `account_avatar` draws it.
-            let avatar = badge::badged(
-                FOOTER_AVATAR,
-                div().size(px(FOOTER_AVATAR)).rounded_full(),
-                Some(badge::Badge::new(gpui::green(), gpui::black())),
-            )
-            .debug_selector(|| "avatar".into());
+            let avatar = div()
+                .relative()
+                .size(px(FOOTER_AVATAR))
+                .flex_shrink_0()
+                .debug_selector(|| "avatar".into())
+                .child(
+                    div()
+                        .absolute()
+                        .right(px(-FOOTER_DOT_OVERHANG))
+                        .bottom(px(-FOOTER_DOT_OVERHANG))
+                        .size(px(FOOTER_DOT_RING))
+                        .debug_selector(|| "dot-ring".into()),
+                );
             let row = footer_row_frame()
                 .child(avatar)
                 .child(div().flex_1().min_w_0().child("Jacob Steeves"));
@@ -3143,9 +3148,7 @@ mod footer_tests {
             grok::AVATAR_LINE,
             "avatar centre line"
         );
-        let ring = vcx
-            .debug_bounds(badge::RING_SELECTOR)
-            .expect("dot ring drawn");
+        let ring = vcx.debug_bounds("dot-ring").expect("dot ring drawn");
         let ring_right: f32 = ring.right().into();
         let ring_bottom: f32 = ring.bottom().into();
         assert_eq!(
