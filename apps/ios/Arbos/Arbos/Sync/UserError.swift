@@ -211,6 +211,12 @@ struct UserError: Equatable, Hashable {
         if kind == "too_large" || kind == "payload_too_large" { return .upload(.tooLarge) }
         if kind == "unsupported_media" || kind == "unsupported_type" { return .upload(.unsupported) }
         if kind == "rate_limited" { return .rateLimited }
+        // A 403 that is a permission answer, not a dead session: the relay names the rule
+        // (`admin_only`, `owner_only`, `not_member`, …) and says it in one sentence. The bare
+        // `forbidden` / `token_expired` kinds are the session.
+        if status == 403, !kind.isEmpty, !["forbidden", "token_expired", "unauthorized"].contains(kind) {
+            return .refused(message: sentence)
+        }
         switch status {
         case 401, 403: return .authExpired
         case 404, 410: return .notFound

@@ -166,6 +166,13 @@ struct Theme: Equatable {
     /// 22 + `micPillGap`).
     static let micHitWidth: CGFloat = 44
     static let micPillGap: CGFloat = 2
+    /// Pending-attachment chip: the remove ✕'s hit frame (the glyph is 10 pt; the
+    /// target is ≥ 20 pt, [feedback composer-attachment-removal-ios-2026-10-27]).
+    /// The chip's trailing inset shrinks by the frame's overhang so the glyph
+    /// keeps its 10 pt from the capsule's edge.
+    static let pendingRemoveHit: CGFloat = 24
+    static let pendingRemoveGlyph: CGFloat = 10
+    static let pendingChipTrailing: CGFloat = 10 - (pendingRemoveHit - pendingRemoveGlyph) / 2
     /// Mic glyph box (Grok's filled mic has no base bar; drawn by `MicGlyph`): 36 × 49 px.
     static let micGlyphWidth: CGFloat = 12
     static let micGlyphHeight: CGFloat = 49 / 3
