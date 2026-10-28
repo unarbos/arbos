@@ -2024,6 +2024,34 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 key,
             });
         }
+        ClientCommand::FetchCopyBlobs { request, keys, .. } => {
+            // The fixture's pictures are PNGs; a key that reads as a file gets a small text body.
+            let blobs = keys
+                .into_iter()
+                .map(|key| {
+                    let is_picture = key.ends_with(".png")
+                        || key.ends_with(".jpg")
+                        || key.ends_with(".jpeg")
+                        || key.contains("Screenshot")
+                        || key.starts_with("fixture-g")
+                        || key.starts_with("img-");
+                    let (mime, bytes) = if is_picture {
+                        ("image/png".to_owned(), fixture_png(&key))
+                    } else {
+                        (
+                            "text/plain".to_owned(),
+                            format!("Fixture attachment {key}.\n").into_bytes(),
+                        )
+                    };
+                    Some(super::CopyBlob {
+                        key,
+                        mime,
+                        bytes: Arc::new(bytes),
+                    })
+                })
+                .collect();
+            let _ = shared.events.send(SyncEvent::CopyBlobs { request, blobs });
+        }
         ClientCommand::FetchLinkIcon { host } => {
             // The real icons of the fixture replies' sites (`assets/link-icons`), so the
             // shots show the feature; any other host has none → the placeholder.
