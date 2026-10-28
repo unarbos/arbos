@@ -288,6 +288,7 @@ pub(super) fn page(
         _ if outside.is_some() => crate::ui::connect_agent::details_sections(
             &pid,
             outside.as_ref().expect("outside"),
+            shell,
             &theme,
             cx,
         ),

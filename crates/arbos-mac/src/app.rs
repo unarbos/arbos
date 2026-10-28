@@ -593,6 +593,17 @@ pub struct ChatUi {
 /// Rows per history page the shared Matrix client fetches (`arbos_matrix::client::HISTORY_PAGE`).
 const CHANNEL_PAGE: usize = 50;
 
+/// The Wake URL form on a connected agent's Connection card ([feedback
+/// outside-agents-wake-mac-2026-10-28]): what is in flight and the last outcome line.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WakeForm {
+    pub project_id: Id,
+    pub saving: bool,
+    pub sending: bool,
+    /// `(ok, text)` of the last Save or Send test wake, shown under the buttons.
+    pub note: Option<(bool, String)>,
+}
+
 /// The reveal sheet after Connect an agent (#2141): the key, shown once, and the live
 /// connection while the sheet is up.
 #[derive(Clone, Debug, PartialEq)]
@@ -818,6 +829,8 @@ pub struct AppState {
     pub connect_open: bool,
     /// Connect an agent: the key reveal sheet, after the relay answered.
     pub connect_reveal: Option<ConnectReveal>,
+    /// The Wake URL form of the connected agent whose pane is open.
+    pub wake_form: Option<WakeForm>,
     /// Debug: per-message "Show details" disclosures in the transcript.
     pub show_details: bool,
     /// The user's one machine (projects are workspaces on it).
@@ -1285,6 +1298,7 @@ impl AppState {
             new_project_open: false,
             connect_open: false,
             connect_reveal: None,
+            wake_form: None,
             show_details: false,
             machine: Machine::default(),
             connectors: ConnectorsView::default(),
@@ -1751,6 +1765,25 @@ impl AppState {
                 if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
                     p.outside = Some(info);
                 }
+                cx.notify();
+            }
+            SyncEvent::OutsideAgentWakeSaved { project_id, error } => {
+                let form = self.wake_form_mut(&project_id);
+                form.saving = false;
+                form.note = Some(match error {
+                    None => (true, "Saved".to_owned()),
+                    Some(e) => (false, e),
+                });
+                cx.notify();
+            }
+            SyncEvent::OutsideAgentWakeTested {
+                project_id,
+                ok,
+                text,
+            } => {
+                let form = self.wake_form_mut(&project_id);
+                form.sending = false;
+                form.note = Some((ok, text));
                 cx.notify();
             }
             SyncEvent::NeedsPairing { relay_url } => {
@@ -9940,6 +9973,61 @@ impl AppState {
     /// Details pane: refresh the connection line when the pane opens on an outside agent.
     pub fn refresh_outside_status(&mut self, project_id: Id) {
         self.command(ClientCommand::OutsideAgentStatus { project_id });
+    }
+
+    /// The Wake URL form for this agent; a form left over from another agent is replaced.
+    fn wake_form_mut(&mut self, project_id: &Id) -> &mut WakeForm {
+        if self
+            .wake_form
+            .as_ref()
+            .is_none_or(|f| &f.project_id != project_id)
+        {
+            self.wake_form = Some(WakeForm {
+                project_id: project_id.clone(),
+                ..Default::default()
+            });
+        }
+        self.wake_form.as_mut().expect("just set")
+    }
+
+    /// Connection card → Wake URL → Save: an empty URL clears the URL and the header value
+    /// together; an empty header value with a URL keeps the stored value (it is never shown
+    /// back, so leaving the field blank means "unchanged").
+    pub fn save_wake_url(
+        &mut self,
+        project_id: Id,
+        url: String,
+        auth: String,
+        cx: &mut Context<Self>,
+    ) {
+        let url = url.trim().to_owned();
+        let auth = auth.trim().to_owned();
+        let (url, auth) = if url.is_empty() {
+            (Some(String::new()), Some(String::new()))
+        } else {
+            (Some(url), (!auth.is_empty()).then_some(auth))
+        };
+        let form = self.wake_form_mut(&project_id);
+        form.saving = true;
+        form.note = None;
+        self.command(ClientCommand::OutsideAgentWakeSet {
+            project_id,
+            url,
+            auth,
+        });
+        cx.notify();
+    }
+
+    /// Connection card → Wake URL → Send test wake.
+    pub fn send_test_wake(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        let form = self.wake_form_mut(&project_id);
+        if form.sending {
+            return;
+        }
+        form.sending = true;
+        form.note = None;
+        self.command(ClientCommand::OutsideAgentWakeTest { project_id });
+        cx.notify();
     }
 
     /// Grok / iPhone "Fork": a new agent with the same look and workspace
