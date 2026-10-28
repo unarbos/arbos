@@ -292,6 +292,10 @@ struct MentionTextView: UIViewRepresentable {
     /// matches the bubbles.
     var agentProject: (ChatMember) -> Project? = { $0.project }
     var maxLines: Int = 8
+    /// ⌫ with nothing to delete (an empty draft): the owner acts on it — the
+    /// chat composer removes its last pending attachment
+    /// ([feedback composer-attachment-removal-ios-2026-10-27]).
+    var onDeleteBackwardEmpty: (() -> Void)? = nil
 
     /// Grok: the caret 17 pt in from the field's edge, one 22 pt line centred in 48.
     static let insets = UIEdgeInsets(top: Theme.composerTextPadY, left: Theme.composerTextInset, bottom: Theme.composerTextPadY, right: 0)
@@ -317,6 +321,7 @@ struct MentionTextView: UIViewRepresentable {
         }
         coordinator.apply(theme: theme, to: view)
         coordinator.rebuild(view, text: text, mentions: mentions, caret: caret)
+        view.onDeleteBackwardEmpty = onDeleteBackwardEmpty
         return view
     }
 
@@ -324,6 +329,7 @@ struct MentionTextView: UIViewRepresentable {
         let c = context.coordinator
         c.parent = self
         c.apply(theme: theme, to: view)
+        view.onDeleteBackwardEmpty = onDeleteBackwardEmpty
         view.placeholderLabel.text = placeholder
         view.placeholderLabel.isHidden = !text.isEmpty
         view.placeholderLabel.font = c.font
@@ -605,6 +611,16 @@ struct MentionTextView: UIViewRepresentable {
 final class MentionUITextView: UITextView {
     let placeholderLabel = UILabel()
     var onMoveToWindow: (() -> Void)?
+    /// ⌫ on an empty field (software or hardware keyboard): the owner's call.
+    var onDeleteBackwardEmpty: (() -> Void)?
+
+    override func deleteBackward() {
+        if text.isEmpty, let onDeleteBackwardEmpty {
+            onDeleteBackwardEmpty()
+            return
+        }
+        super.deleteBackward()
+    }
 
     override init(frame: CGRect, textContainer: NSTextContainer?) {
         super.init(frame: frame, textContainer: textContainer)
