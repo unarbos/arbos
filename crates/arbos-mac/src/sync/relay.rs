@@ -7439,6 +7439,31 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
+        ClientCommand::OutsideAgentScope {
+            project_id,
+            scope,
+            on,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let body = json!({ "scopes": { scope: on } });
+                match shared
+                    .patch_json(&format!("/outside-agents/{project_id}"), body)
+                    .await
+                {
+                    Ok(v) => {
+                        if let Ok(info) =
+                            serde_json::from_value::<crate::model::OutsideInfo>(v["agent"].clone())
+                        {
+                            let _ = shared
+                                .events
+                                .send(SyncEvent::OutsideAgentStatus { project_id, info });
+                        }
+                    }
+                    Err(err) => shared.fail("change what the agent may do", &err),
+                }
+            });
+        }
         ClientCommand::OutsideAgentRevoke { project_id } => {
             let shared = shared.clone();
             tokio::spawn(async move {
