@@ -40,13 +40,14 @@ struct NewChatSheet: View {
     @State private var searching = false
     @State private var opening = false
     @State private var loadingDirectory = false
-    /// `ARBOS_SHOW=newagent|newgroup|newserver` lands on that Create screen, `newgroup2` on the
-    /// member picker (screenshot rig).
+    /// `ARBOS_SHOW=newagent|newgroup|newserver|newconnect` lands on that Create screen, `newgroup2`
+    /// on the member picker (screenshot rig).
     @State private var showCreate: CreateKind? = {
         switch DebugHooks.show {
         case "newagent": return .agent
         case "newgroup": return .group
         case "newserver": return .server
+        case "newconnect": return .connect
         default: return nil
         }
     }()
@@ -101,6 +102,12 @@ struct NewChatSheet: View {
                         card {
                             NavigationLink { CreateEntityView(kind: .agent, onDone: { dismiss() }) } label: {
                                 actionRow(icon: "sparkles", title: "New agent", subtitle: "Its own workspace on your machine")
+                            }
+                            .buttonStyle(.plain)
+                            rowDivider
+                            // Connect an agent (#2142): an agent that runs elsewhere joins as a member.
+                            NavigationLink { CreateEntityView(kind: .connect, onDone: { dismiss() }) } label: {
+                                actionRow(icon: "link", title: "Connect an agent", subtitle: "Claude Code, Grok or your own bot, with a key")
                             }
                             .buttonStyle(.plain)
                             rowDivider
@@ -446,18 +453,21 @@ struct PersonRow: View {
 /// What the Create screen creates (D93: one style, parameterised by entity).
 enum CreateKind {
     case agent, group, server
+    /// Connect an outside agent (#2142): the same screen, then the key reveal instead of a box.
+    case connect
 
     var title: String {
         switch self {
         case .agent: return "Create New Agent"
         case .group: return "Create New Group"
         case .server: return "Create New Server"
+        case .connect: return "Connect an Agent"
         }
     }
 
     var placeholder: String {
         switch self {
-        case .agent: return "Name your agent"
+        case .agent, .connect: return "Name your agent"
         case .group: return "Name your group"
         case .server: return "Name your server"
         }
@@ -466,7 +476,7 @@ enum CreateKind {
     /// The footer action: groups continue to the member picker.
     var action: String {
         switch self {
-        case .agent, .server: return "Create"
+        case .agent, .server, .connect: return "Create"
         case .group: return "Next"
         }
     }
@@ -474,7 +484,40 @@ enum CreateKind {
     var explainer: String? {
         switch self {
         case .server: return "A server has channels and an invite link. You start as its owner, in #general."
+        case .connect: return "An agent you already run joins your chats as a member. You get a key to give it."
         case .agent, .group: return nil
+        }
+    }
+}
+
+/// Where a connected agent runs — the approved type picker's rows, as capsules under the
+/// explainer. The local Claude Code / Codex bridge is set up from a Mac (`arbos-acp`).
+enum ConnectTransport: String, CaseIterable, Identifiable {
+    case acp, grok, custom
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .acp: return "Claude Code / Codex on a Mac"
+        case .grok: return "Grok"
+        case .custom: return "Custom bot"
+        }
+    }
+
+    /// The one line under the key that says what to do with it.
+    var howTo: String {
+        switch self {
+        case .acp: return "On your Mac, in Terminal: cargo install --git https://github.com/unarbos/arbos arbos-acp, then run arbos-acp with the key — it starts Claude Code or Codex for you."
+        case .grok: return "In Grok, add a routine that calls the link every few minutes with the key. Arbos handles the rest."
+        case .custom: return "Your bot calls the link with the key: read its inbox, post replies. The link opens the short how-to."
+        }
+    }
+
+    var short: String {
+        switch self {
+        case .acp: return "ACP"
+        case .grok: return "Grok"
+        case .custom: return "custom"
         }
     }
 }
@@ -507,6 +550,9 @@ struct CreateEntityView: View {
     @State private var creating = false
     @State private var localError: UserError?
     @State private var next = false
+    /// Connect an agent (#2142): the transport picked under the explainer, then the reveal.
+    @State private var transport: ConnectTransport = .acp
+    @State private var reveal: ConnectReveal?
     @FocusState private var focused: Bool
 
     private var clean: String { name.trimmingCharacters(in: .whitespaces) }
@@ -571,6 +617,11 @@ struct CreateEntityView: View {
                                 .padding(.top, 8)
                                 .frame(height: 40, alignment: .top)
                         }
+                        if kind == .connect {
+                            transportRow
+                                .frame(height: 40, alignment: .top)
+                                .accessibilityIdentifier("connect-transports")
+                        }
                         AvatarTabPill(tabs: Self.options, tab: $option) { source.error = nil }
                             .padding(.top, 246 - 218)
                             .accessibilityIdentifier("create-entity-options")
@@ -585,11 +636,16 @@ struct CreateEntityView: View {
             .scrollDismissesKeyboard(.interactively)
             footer
         }
-        .claimFailures("create-entity", ["create the server", "create the agent", "create the group"])
+        .claimFailures("create-entity", ["create the server", "create the agent", "create the group", "connect the agent"])
         .background(sheetBg.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
         .navigationDestination(isPresented: $next) {
             NewGroupView(onDone: onDone, draft: GroupDraft(title: clean, leaf: Self.storedLeaf, picture: source.draftPicture(for: option)))
+        }
+        .navigationDestination(isPresented: Binding(get: { reveal != nil }, set: { if !$0 { reveal = nil } })) {
+            if let reveal {
+                ConnectRevealView(reveal: reveal, onDone: onDone)
+            }
         }
         // The rig shoots the sheet without the keyboard (`ARBOS_SHOW=new…`); users get the caret.
         .onAppear {
@@ -645,6 +701,25 @@ struct CreateEntityView: View {
         } else {
             NeutralAvatar(name: clean, size: 114)
         }
+    }
+
+    /// Connect an agent: the three transports as capsules (the Create sheet's option style).
+    private var transportRow: some View {
+        HStack(spacing: 2) {
+            ForEach(ConnectTransport.allCases) { t in
+                Button { transport = t } label: {
+                    Text(t.label)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(transport == t ? Color(white: 0xF5 / 255) : AvatarSheetPalette.labelMuted)
+                        .padding(.horizontal, 11)
+                        .frame(height: 28)
+                        .background(Capsule().fill(transport == t ? cancelBg : .clear))
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("connect-transport-\(t.rawValue)")
+            }
+        }
+        .padding(.top, 6)
     }
 
     private var field: some View {
@@ -711,8 +786,220 @@ struct CreateEntityView: View {
                 // A refusal is the claimed failure drawn by the note above the hero.
                 creating = false
             }
+        case .connect:
+            creating = true
+            localError = nil
+            let transport = transport
+            Task {
+                if let r = await model.connectAgent(name: clean, transport: transport.rawValue) {
+                    reveal = r
+                }
+                creating = false
+            }
         }
     }
+}
+
+// MARK: - Connect an agent: the key reveal (#2142)
+
+/// After Connect: the link and the key with Copy (the key is shown once), the one how-to line
+/// for the picked transport, and the live status — the system spinner while waiting, "Connected"
+/// once the agent first checks in (polled every 3 s). Done closes the sheet; the new agent is
+/// in the list like any other. Also the screen Rotate key… pushes from the agent pane.
+struct ConnectRevealView: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    let reveal: ConnectReveal
+    /// Closes the whole sheet (a pushed view's own dismiss only pops).
+    let onDone: () -> Void
+    @State private var info: OutsideAgentInfo?
+    @State private var copied: String?
+
+    private var transport: ConnectTransport { ConnectTransport(rawValue: reveal.transport) ?? .custom }
+    private var connected: Bool { (info ?? reveal.info)?.connected == true }
+
+    private let sheetBg = AvatarSheetPalette.sheetBg
+    private let line = AvatarSheetPalette.line
+    private let placeholder = AvatarSheetPalette.placeholder
+    private let cardBg = AvatarSheetPalette.pillBg
+    private let tileBg = AvatarSheetPalette.ring
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 0) {
+                    NeutralAvatar(name: reveal.name, size: 92)
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 18)
+                    Text(reveal.name)
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(Color(white: 0xF5 / 255))
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 12)
+                    sectionTitle("Give this to your agent")
+                    card {
+                        copyRow(id: "connect-link", glyph: "link", label: "Link", shown: shortLink(reveal.link), full: reveal.link)
+                        Rectangle().fill(line).frame(height: 0.5).padding(.leading, 16)
+                        copyRow(id: "connect-key", glyph: "key", label: "Key", shown: shortKey(reveal.key), full: reveal.key)
+                    }
+                    footnote(reveal.rotated
+                        ? "The old key stopped working. This one is shown once."
+                        : "The key is shown once. If you lose it, rotate it from the agent's profile.")
+                    footnote(transport.howTo)
+                    sectionTitle("Status")
+                    card { statusRow }
+                }
+                .padding(.bottom, 24)
+            }
+            footer
+        }
+        .background(sheetBg.ignoresSafeArea())
+        .toolbar(.hidden, for: .navigationBar)
+        .task(id: reveal.projectId) {
+            // Poll the relay while the screen is up; stop once connected.
+            while !Task.isCancelled {
+                if let fresh = await model.refreshOutsideInfo(reveal.projectId) { info = fresh }
+                if connected { return }
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+            }
+        }
+    }
+
+    private var header: some View {
+        HStack {
+            Text(reveal.rotated ? "New key for \(reveal.name)" : "Connect \(reveal.name)")
+                .font(.system(size: 14.2, weight: .semibold))
+                .foregroundStyle(Color(white: 0xF5 / 255))
+                .lineLimit(1)
+                .padding(.leading, 17.5)
+            Spacer()
+            Button(action: onDone) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Color(white: 0xD2 / 255))
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.trailing, 5.5)
+            .accessibilityLabel("Close")
+        }
+        .frame(height: 54.5)
+        .overlay(alignment: .bottom) { Rectangle().fill(line).frame(height: 1) }
+    }
+
+    private func sectionTitle(_ text: String) -> some View {
+        Text(text.uppercased())
+            .font(.system(size: 13))
+            .foregroundStyle(placeholder)
+            .padding(.horizontal, 32)
+            .padding(.top, 22)
+            .padding(.bottom, 8)
+    }
+
+    private func footnote(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 13))
+            .foregroundStyle(placeholder)
+            .lineSpacing(3)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 32)
+            .padding(.top, 8)
+    }
+
+    private func card<Rows: View>(@ViewBuilder _ rows: () -> Rows) -> some View {
+        VStack(spacing: 0) { rows() }
+            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(cardBg))
+            .padding(.horizontal, 16)
+    }
+
+    private func copyRow(id: String, glyph: String, label: String, shown: String, full: String) -> some View {
+        HStack(spacing: 14) {
+            Image(systemName: glyph)
+                .font(.system(size: 17, weight: .medium))
+                .foregroundStyle(Color(white: 0xF5 / 255))
+                .frame(width: 36, height: 36)
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(tileBg))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label).font(.system(size: 13)).foregroundStyle(placeholder)
+                Text(shown)
+                    .font(.system(size: 15, design: .monospaced))
+                    .foregroundStyle(Color(white: 0xF5 / 255))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer(minLength: 8)
+            Button {
+                UIPasteboard.general.string = full
+                copied = id
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: copied == id ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 13, weight: .medium))
+                    Text(copied == id ? "Copied" : "Copy")
+                        .font(.system(size: 14, weight: .medium))
+                }
+                .foregroundStyle(copied == id ? theme.online : Color(white: 0xF5 / 255))
+                .padding(.horizontal, 12)
+                .frame(height: 32)
+                .background(Capsule().fill(copied == id ? theme.online.opacity(0.18) : tileBg))
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("\(id)-copy")
+        }
+        .padding(.horizontal, 16)
+        .frame(minHeight: 60)
+    }
+
+    @ViewBuilder
+    private var statusRow: some View {
+        HStack(spacing: 10) {
+            if connected {
+                Image(systemName: "checkmark").font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.online)
+                Text("Connected · \(transport.short) · asp/1").font(.system(size: 16)).foregroundStyle(Color(white: 0xF5 / 255))
+            } else {
+                ProgressView().controlSize(.small).tint(theme.accent)
+                Text("Waiting for the first heartbeat…").font(.system(size: 16)).foregroundStyle(placeholder)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .frame(minHeight: 56)
+        .accessibilityIdentifier(connected ? "connect-status-connected" : "connect-status-waiting")
+    }
+
+    private var footer: some View {
+        HStack(spacing: 10) {
+            Spacer()
+            Button(action: onDone) {
+                Text("Done").font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(theme.onPrimary)
+                    .frame(width: 92, height: 44).background(Capsule().fill(theme.primary))
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("connect-reveal-done")
+        }
+        .padding(.trailing, 16)
+        .padding(.top, 25)
+        .padding(.bottom, 35)
+        .overlay(alignment: .top) { Rectangle().fill(line).frame(height: 1) }
+    }
+
+    /// `arbk_14788fc5760db12964ebf67724279435f6054bcd` → `arbk_14788fc5…54bcd`.
+    static func shortKey(_ key: String) -> String {
+        guard key.count > 22 else { return key }
+        return "\(key.prefix(13))…\(key.suffix(5))"
+    }
+
+    static func shortLink(_ link: String) -> String {
+        var s = link
+        for p in ["https://", "http://"] where s.hasPrefix(p) { s.removeFirst(p.count) }
+        return s
+    }
+
+    private func shortKey(_ k: String) -> String { Self.shortKey(k) }
+    private func shortLink(_ l: String) -> String { Self.shortLink(l) }
 }
 
 /// What the Create group screen hands to the member picker (step 2).
