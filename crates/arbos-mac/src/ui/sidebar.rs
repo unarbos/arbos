@@ -24,8 +24,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    div, prelude::*, px, AnyElement, App, Context, CursorStyle, Div, DragMoveEvent, ElementId,
-    Focusable as _, FontWeight, MouseButton, Render, RenderImage, SharedString, Window,
+    div, prelude::*, px, AnyElement, App, Context, Div, DragMoveEvent, ElementId, Focusable as _,
+    FontWeight, MouseButton, Render, RenderImage, SharedString, Window,
 };
 
 use crate::app::AppState;
@@ -43,16 +43,21 @@ use crate::ui::people;
 use crate::ui::sf_symbols;
 use crate::ui::shell::{Shell, TRAFFIC_LIGHTS_INSET};
 use crate::ui::sidebar_fit;
+use crate::ui::split_handle;
 use crate::ui::theme::{
     Theme, AVATAR_ROW, CONTROL, CONTROL_GAP, CONTROL_GLYPH, CONTROL_GLYPH_WIDE, HEADER_HEIGHT,
-    PANEL_RADIUS, SIDEBAR_RESIZE_HANDLE, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
+    PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
 };
 
 /// Drag payload for the chat-list column's right-edge resize handle.
 #[derive(Clone)]
 pub(crate) struct SidebarResizeDrag;
 
-struct SidebarResizeDragGhost;
+/// The drag's (empty) ghost; it holds the guard that keeps the handle's
+/// hairline in its drag state until GPUI drops the ghost at mouse up.
+struct SidebarResizeDragGhost {
+    _drag: split_handle::DragGuard,
+}
 
 impl Render for SidebarResizeDragGhost {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -62,35 +67,31 @@ impl Render for SidebarResizeDragGhost {
 
 /// The column's right-edge resize handle — the expanded sidebar's and the
 /// rail's are the same element (`id`s differ), so one drag runs across the
-/// snap between them: a slim hit target (col-resize cursor), the drag's
-/// start resets the gesture, every move goes to
-/// `AppState::drag_sidebar_edge` with the pointer's x
-/// ([feedback app-01M5MJ9Y91W9ZET71KTCE7PS65], [feedback sidebar-narrow-wrap-2026-10-27]).
+/// snap between them: `split_handle::right_edge`'s invisible band and
+/// hairline (col-resize cursor), the drag's start resets the gesture, every
+/// move goes to `AppState::drag_sidebar_edge` with the pointer's x
+/// ([feedback app-01M5MJ9Y91W9ZET71KTCE7PS65], [feedback sidebar-narrow-wrap-2026-10-27],
+/// minimal look [feedback sidebar-slide-handle-minimal-2026-10-28]).
 pub(crate) fn resize_handle(
     id: &'static str,
     theme: &Theme,
+    drag: &split_handle::DragState,
     cx: &mut Context<Shell>,
 ) -> gpui::Stateful<Div> {
-    div()
-        .id(id)
-        .absolute()
-        .top_0()
-        .right_0()
-        .h_full()
-        .w(px(SIDEBAR_RESIZE_HANDLE))
-        .cursor(CursorStyle::ResizeColumn)
-        // hover-fill: exception handle
-        .hover(|s| s.bg(Theme::with_alpha(theme.primary, 0.45)))
+    // Both panes draw `border_r_1`: the hairline lands on that pixel.
+    split_handle::right_edge(id, theme, drag.active(), 1.0)
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_drag(SidebarResizeDrag, {
             let shell = cx.entity().downgrade();
+            let drag = drag.clone();
             move |_, _, _, cx| {
                 if let Some(shell) = shell.upgrade() {
                     shell.update(cx, |this, cx| {
                         this.state.update(cx, |s, _| s.begin_sidebar_edge_drag());
                     });
                 }
-                cx.new(|_| SidebarResizeDragGhost)
+                let guard = drag.begin();
+                cx.new(|_| SidebarResizeDragGhost { _drag: guard })
             }
         })
         .on_drag_move(
@@ -1367,7 +1368,7 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
 
     // Drag handle on the right edge: slimmer or wider, and past the snap
     // point the column collapses to the rail (`ui::sidebar_fit`).
-    let resize = resize_handle("sidebar-resize", &theme, cx);
+    let resize = resize_handle("sidebar-resize", &theme, &shell.split_drag, cx);
 
     let column = div()
         .relative()
