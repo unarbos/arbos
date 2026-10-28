@@ -126,9 +126,32 @@ pub struct WakerConfig {
     /// Webhook: inline URL for non-secret endpoints (tests, local catchers).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    /// Command: argv with `{prompt}`, `{json}`, `{chat}` placeholders.
+    /// Command: argv with `{prompt}`, `{json}`, `{chat}` placeholders (stateless agents).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<Vec<String>>,
+    /// Command: a session preset — claude | codex | cursor | hermes (spec §13.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// Command: custom session templates with `{session}` (used when `agent` is unset).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_new: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_resume: Option<Vec<String>>,
+    /// Rotate the session after this many turns (the handoff carries the chats' briefs).
+    #[serde(default = "default_max_turns")]
+    pub max_turns_per_session: u32,
+    /// `|`-separated substrings that mean "this session cannot be resumed".
+    #[serde(default = "default_resume_failure_regex")]
+    pub resume_failure_regex: String,
+    /// `|`-separated substrings in the agent's output that mean "my context is full".
+    #[serde(default = "default_context_full_regex")]
+    pub context_full_regex: String,
+    /// Close an ACK bubble that got no answer after this long.
+    #[serde(default = "default_ack_timeout_s")]
+    pub ack_timeout_s: u64,
+    /// Keep "… is typing" on after a nudge for at most this long.
+    #[serde(default = "default_typing_timeout_s")]
+    pub typing_timeout_s: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(default = "default_timeout_s")]
@@ -151,6 +174,21 @@ pub struct WakerConfig {
     pub stale_wake_s: u64,
 }
 
+fn default_max_turns() -> u32 {
+    50
+}
+fn default_resume_failure_regex() -> String {
+    "No conversation|not found|unknown session|invalid session|does not exist".into()
+}
+fn default_context_full_regex() -> String {
+    "context window|too long|token limit|context length".into()
+}
+fn default_ack_timeout_s() -> u64 {
+    180
+}
+fn default_typing_timeout_s() -> u64 {
+    60
+}
 fn default_timeout_s() -> u64 {
     // A whole agent turn can run this long (Buzz raised its idle cap 300 → 1 500 s, L6).
     1800
@@ -184,6 +222,14 @@ impl Default for WakerConfig {
             auth_file: None,
             url: None,
             command: None,
+            agent: None,
+            command_new: None,
+            command_resume: None,
+            max_turns_per_session: default_max_turns(),
+            resume_failure_regex: default_resume_failure_regex(),
+            context_full_regex: default_context_full_regex(),
+            ack_timeout_s: default_ack_timeout_s(),
+            typing_timeout_s: default_typing_timeout_s(),
             cwd: None,
             timeout_s: default_timeout_s(),
             env_allow: default_env_allow(),

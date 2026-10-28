@@ -13,8 +13,10 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 use crate::config::{Config, Paths, EXIT_ALREADY_RUNNING, EXIT_KEY_REJECTED};
+use crate::log::SessionLog;
 use crate::mirror::{history_row, now_ms, Mirror, State};
 use crate::relay::{Relay, RelayError};
+use crate::turns::{latencies, Turns};
 use crate::waker::{Engine, Plugin, Signal};
 
 /// Backoff ladder after a failed relay call (Buzz L3: short ladder, reset after a stable minute).
@@ -198,27 +200,105 @@ async fn backfill(relay: &Relay, mirror: &Mirror, cfg: &Config, me: &Value) {
 // ---- control socket -------------------------------------------------------------------------------
 
 /// Answer one control request. Actions carry no key; this process holds it.
-pub async fn handle_control(
-    relay: &Relay,
-    mirror: &Mirror,
-    cfg: &Config,
-    signal: Option<&mpsc::UnboundedSender<Signal>>,
-    req: &Value,
-) -> Value {
+/// Everything the control handler needs besides the relay.
+pub struct Ctx<'a> {
+    pub relay: &'a Relay,
+    pub mirror: &'a Mirror,
+    pub cfg: &'a Config,
+    pub signal: Option<&'a mpsc::UnboundedSender<Signal>>,
+    pub turns: &'a Turns,
+    pub log: &'a SessionLog,
+    pub sessions: Option<&'a crate::session::Store>,
+}
+
+pub async fn handle_control(ctx: &Ctx<'_>, req: &Value) -> Value {
+    let (relay, mirror, cfg, signal, turns, log) = (
+        ctx.relay, ctx.mirror, ctx.cfg, ctx.signal, ctx.turns, ctx.log,
+    );
     let op = req["op"].as_str().unwrap_or("");
     let s = |k: &str| req[k].as_str().unwrap_or("").to_owned();
     let result: crate::relay::RelayResult<Value> = match op {
         "ping" => Ok(json!({ "ok": true, "pid": std::process::id() })),
         "me" => relay.me().await,
+        "ack" => {
+            // Opens the reply bubble at once: `message.start{reply_to}` + the one-line ack as the
+            // first delta (spec §13.1). The answer is appended to the same bubble by `reply`.
+            let chat = s("chat");
+            let text: String = s("text").chars().take(140).collect();
+            if text.trim().is_empty() {
+                Err(RelayError::Other(anyhow::anyhow!("ack text is required")))
+            } else if turns.get(&chat).ack_message.is_some() {
+                Err(RelayError::Other(anyhow::anyhow!(
+                    "an ack is already open in this chat — answer it with arbos_reply"
+                )))
+            } else {
+                let mut start = json!({ "type": "message.start", "chat": chat });
+                if !s("message").is_empty() {
+                    start["reply_to"] = json!(s("message"));
+                }
+                match relay.event(start).await {
+                    Ok(v) => {
+                        let msg = v["message"].as_str().unwrap_or("").to_owned();
+                        let r = relay
+                            .event(json!({ "type": "message.delta", "chat": chat, "message": msg, "text": text }))
+                            .await;
+                        let now = now_ms();
+                        let t = turns.update(&chat, |t| {
+                            t.ack_message = Some(msg.clone());
+                            t.ack_at = Some(now);
+                            // The streaming bubble carries the caret; typing can stop.
+                            t.typing_until = 0;
+                        });
+                        let _ = log.append(json!({
+                            "kind": "ack", "chat": chat, "message": msg, "chars": text.chars().count(),
+                            "session": t.session, "ms": latencies(&t, now, true),
+                        }));
+                        r.map(|_| json!({ "ok": true, "message": msg, "chat": chat }))
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+        }
         "post" | "reply" => {
             let chat = s("chat");
             let text = s("text");
-            let mut ev = json!({ "type": "message.post", "chat": chat, "text": text });
-            if op == "reply" {
-                ev["reply_to"] = json!(s("message"));
-            }
-            match relay.event(ev).await {
+            let open = turns.get(&chat).ack_message.clone();
+            let r = if let Some(msg) = open {
+                // Append under the ack in the same bubble and close it.
+                let d = relay
+                    .event(json!({ "type": "message.delta", "chat": chat, "message": msg, "text": format!("\n\n{text}") }))
+                    .await;
+                match d {
+                    Ok(_) => relay
+                        .event(json!({ "type": "message.end", "chat": chat, "message": msg }))
+                        .await
+                        .map(|mut v| {
+                            v["message"] = json!(msg);
+                            v["appended_to_ack"] = json!(true);
+                            v
+                        }),
+                    Err(e) => Err(e),
+                }
+            } else {
+                let mut ev = json!({ "type": "message.post", "chat": chat, "text": text });
+                if op == "reply" {
+                    ev["reply_to"] = json!(s("message"));
+                }
+                relay.event(ev).await
+            };
+            match r {
                 Ok(v) => {
+                    let now = now_ms();
+                    let t = turns.get(&chat);
+                    let _ = log.append(json!({
+                        "kind": if op == "reply" { "reply" } else { "post" }, "chat": chat,
+                        "message": v["message"], "chars": text.chars().count(),
+                        "session": t.session, "ms": latencies(&t, now, false),
+                    }));
+                    turns.finish(&chat);
+                    let _ = relay
+                        .event(json!({ "type": "typing", "chat": chat, "on": false }))
+                        .await;
                     // A reply answers the rows up to the one it answers; rows that arrived
                     // after it stay pending for the trailing nudge. A plain post answers
                     // everything mirrored so far.
@@ -239,9 +319,26 @@ pub async fn handle_control(
                     }
                     Ok(v)
                 }
-                Err(e) => Err(e),
+                Err(e) => {
+                    let _ = log.append(json!({ "kind": "error", "chat": chat, "step": op, "error": e.to_string() }));
+                    Err(e)
+                }
             }
         }
+        "session" => Ok(ctx
+            .sessions
+            .map(|st| st.json())
+            .unwrap_or(json!({ "ok": true, "session": null }))),
+        "session_rotate" => match ctx.sessions {
+            Some(st) => match st.request_rotation() {
+                Ok(s) => {
+                    let _ = log.append(json!({ "kind": "session.rotate", "session": s.id, "reason": "requested" }));
+                    Ok(json!({ "ok": true, "rotate_pending": true }))
+                }
+                Err(e) => Err(RelayError::Other(e)),
+            },
+            None => Ok(json!({ "ok": true, "session": null })),
+        },
         "react" => {
             let r = relay
                 .event(json!({
@@ -332,19 +429,30 @@ pub async fn handle_control(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn serve_control(
     listener: UnixListener,
     relay: Relay,
     mirror: Mirror,
     cfg: Config,
     signal: mpsc::UnboundedSender<Signal>,
+    turns: Turns,
+    log: SessionLog,
+    sessions: Option<crate::session::Store>,
 ) {
     loop {
         let Ok((stream, _)) = listener.accept().await else {
             continue;
         };
-        let (relay, mirror, cfg, signal) =
-            (relay.clone(), mirror.clone(), cfg.clone(), signal.clone());
+        let (relay, mirror, cfg, signal, turns, log, sessions) = (
+            relay.clone(),
+            mirror.clone(),
+            cfg.clone(),
+            signal.clone(),
+            turns.clone(),
+            log.clone(),
+            sessions.clone(),
+        );
         tokio::spawn(async move {
             let (r, mut w) = stream.into_split();
             let mut lines = BufReader::new(r).lines();
@@ -356,7 +464,19 @@ async fn serve_control(
                 let resp = if req["op"] == "bad" {
                     json!({ "ok": false, "error": "bad_json", "message": req["error"] })
                 } else {
-                    handle_control(&relay, &mirror, &cfg, Some(&signal), &req).await
+                    handle_control(
+                        &Ctx {
+                            relay: &relay,
+                            mirror: &mirror,
+                            cfg: &cfg,
+                            signal: Some(&signal),
+                            turns: &turns,
+                            log: &log,
+                            sessions: sessions.as_ref(),
+                        },
+                        &req,
+                    )
+                    .await
                 };
                 let mut out = resp.to_string();
                 out.push('\n');
@@ -433,15 +553,48 @@ pub async fn run(paths: Paths, cfg: Config) -> Result<i32> {
             "command waker: ARBOS_* is never forwarded; the nudge arrives on stdin and in {{prompt}}/{{json}}"
         );
     }
-    let engine = Engine::new(cfg.waker.clone(), plugin, mirror.clone(), agent.clone());
+    let turns = Turns::default();
+    let log = SessionLog::new(&paths);
+    let sessions = if matches!(
+        plugin,
+        Plugin::Command {
+            templates: Some(_),
+            ..
+        }
+    ) {
+        Some(crate::session::Store::new(
+            mirror.clone(),
+            cfg.waker.max_turns_per_session,
+        ))
+    } else {
+        None
+    };
+    let (side_tx, side_rx) = mpsc::unbounded_channel();
+    let mut engine =
+        Engine::new(cfg.waker.clone(), plugin, mirror.clone(), agent.clone()).with_side(side_tx);
+    if let Some(st) = &sessions {
+        engine = engine.with_sessions(st.clone());
+        let s = st.load();
+        tracing::info!(session = %s.id, generation = s.generation, turns = s.turns, "agent session record loaded (verified on first use)");
+    }
     let (wake_tx, wake_rx) = mpsc::unbounded_channel();
     tokio::spawn(engine.run(wake_rx));
+    tokio::spawn(crate::turns::side_task(
+        relay.clone(),
+        cfg.clone(),
+        turns.clone(),
+        log.clone(),
+        side_rx,
+    ));
     tokio::spawn(serve_control(
         listener,
         relay.clone(),
         mirror.clone(),
         cfg.clone(),
         wake_tx.clone(),
+        turns,
+        log,
+        sessions,
     ));
     let hb_relay = relay.clone();
     tokio::spawn(async move {

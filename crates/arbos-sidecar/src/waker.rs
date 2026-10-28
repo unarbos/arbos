@@ -59,10 +59,15 @@ pub enum Plugin {
         url: Option<String>,
     },
     Command {
+        /// Plain argv (stateless agents, tests). Ignored when `templates` is set.
         argv: Vec<String>,
         cwd: Option<PathBuf>,
         timeout: Duration,
         env_allow: Vec<String>,
+        /// Session-aware launch (spec §13.2): `new` / `resume` argv with `{session}`.
+        templates: Option<crate::session::Templates>,
+        resume_failure_regex: String,
+        context_full_regex: String,
     },
     File {
         path: PathBuf,
@@ -85,9 +90,14 @@ impl Plugin {
                 }
             }
             WakerKind::Command => {
-                let argv = cfg.command.clone().unwrap_or_default();
+                let templates = crate::session::templates(cfg);
+                let argv = cfg
+                    .command
+                    .clone()
+                    .or_else(|| templates.as_ref().map(|t| t.new.clone()))
+                    .unwrap_or_default();
                 if argv.is_empty() {
-                    bail!("command waker needs a command");
+                    bail!("command waker needs a command (or --agent claude|codex|cursor|hermes)");
                 }
                 Self::Command {
                     argv,
@@ -99,6 +109,13 @@ impl Plugin {
                         .filter(|k| !k.starts_with("ARBOS"))
                         .cloned()
                         .collect(),
+                    templates: if cfg.agent.is_some() || cfg.command_new.is_some() {
+                        templates
+                    } else {
+                        None
+                    },
+                    resume_failure_regex: cfg.resume_failure_regex.clone(),
+                    context_full_regex: cfg.context_full_regex.clone(),
                 }
             }
             WakerKind::File => Self::File {
@@ -188,81 +205,14 @@ impl Plugin {
                 cwd,
                 timeout,
                 env_allow,
+                ..
             } => {
-                let json = serde_json::to_string(nudge)?;
-                let prompt = prompt_text(nudge);
-                let chat = nudge["chats"][0]["id"].as_str().unwrap_or("").to_owned();
-                let fill = |s: &str| {
-                    s.replace("{json}", &json)
-                        .replace("{prompt}", &prompt)
-                        .replace("{chat}", &chat)
-                };
-                let mut cmd = tokio::process::Command::new(fill(&argv[0]));
-                for a in &argv[1..] {
-                    cmd.arg(fill(a));
-                }
-                cmd.env_clear();
-                for k in env_allow {
-                    if k.starts_with("ARBOS") {
-                        continue;
-                    }
-                    if let Ok(v) = std::env::var(k) {
-                        cmd.env(k, v);
-                    }
-                }
-                cmd.env("ARBOS_SIDECAR_WAKE", "1");
-                if let Some(d) = cwd {
-                    cmd.current_dir(d);
-                }
-                cmd.stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .process_group(0)
-                    .kill_on_drop(true);
-                let mut child = cmd.spawn().context("starting the waker command")?;
-                let pid = child.id().map(|p| p as i32);
-                if let Some(mut stdin) = child.stdin.take() {
-                    let _ = stdin.write_all(json.as_bytes()).await;
-                    let _ = stdin.shutdown().await;
-                }
-                match tokio::time::timeout(*timeout, child.wait_with_output()).await {
-                    Ok(Ok(out)) => {
-                        let tail = |b: &[u8]| {
-                            let s = String::from_utf8_lossy(b);
-                            let s = s.trim();
-                            s.chars()
-                                .rev()
-                                .take(4096)
-                                .collect::<Vec<_>>()
-                                .into_iter()
-                                .rev()
-                                .collect::<String>()
-                        };
-                        if !out.stdout.is_empty() {
-                            tracing::info!(waker = "command", stdout = %tail(&out.stdout));
-                        }
-                        if !out.stderr.is_empty() {
-                            tracing::info!(waker = "command", stderr = %tail(&out.stderr));
-                        }
-                        if out.status.success() {
-                            Ok("exit 0".into())
-                        } else {
-                            Err(anyhow!("command exited with {}", out.status))
-                        }
-                    }
-                    Ok(Err(e)) => Err(anyhow!("command failed: {e}")),
-                    Err(_) => {
-                        if let Some(pid) = pid {
-                            let _ = nix::sys::signal::killpg(
-                                nix::unistd::Pid::from_raw(pid),
-                                nix::sys::signal::Signal::SIGKILL,
-                            );
-                        }
-                        Err(no_retry(format!(
-                            "command timed out after {} s (killed with its process group; not retried — the agent may have answered already)",
-                            timeout.as_secs()
-                        )))
-                    }
+                let out =
+                    run_command(argv, cwd.as_deref(), *timeout, env_allow, nudge, None).await?;
+                if out.status_ok {
+                    Ok("exit 0".into())
+                } else {
+                    Err(anyhow!("command exited with {}", out.status))
                 }
             }
             Self::File { path } => {
@@ -287,6 +237,236 @@ impl Plugin {
             }
         }
     }
+}
+
+/// What a command waker run produced.
+pub struct CommandOutput {
+    pub status_ok: bool,
+    pub status: String,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Run one agent command: `{prompt}`/`{json}`/`{chat}`/`{session}` filled in, the nudge JSON on
+/// stdin, an allow-listed env (never `ARBOS_*`), its own process group, killed at `timeout`
+/// (not retried — Buzz L20).
+pub async fn run_command(
+    argv: &[String],
+    cwd: Option<&std::path::Path>,
+    timeout: Duration,
+    env_allow: &[String],
+    nudge: &Value,
+    session: Option<&str>,
+) -> std::result::Result<CommandOutput, anyhow::Error> {
+    let json = serde_json::to_string(nudge)?;
+    let prompt = nudge["prompt_override"]
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| prompt_text(nudge));
+    let chat = nudge["chats"][0]["id"].as_str().unwrap_or("").to_owned();
+    let session = session.unwrap_or("");
+    let fill = |s: &str| {
+        s.replace("{json}", &json)
+            .replace("{prompt}", &prompt)
+            .replace("{chat}", &chat)
+            .replace("{session}", session)
+    };
+    let mut cmd = tokio::process::Command::new(fill(&argv[0]));
+    for a in &argv[1..] {
+        cmd.arg(fill(a));
+    }
+    cmd.env_clear();
+    for k in env_allow {
+        if k.starts_with("ARBOS") {
+            continue;
+        }
+        if let Ok(v) = std::env::var(k) {
+            cmd.env(k, v);
+        }
+    }
+    cmd.env("ARBOS_SIDECAR_WAKE", "1");
+    if let Some(d) = cwd {
+        cmd.current_dir(d);
+    }
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .kill_on_drop(true);
+    let mut child = cmd.spawn().context("starting the waker command")?;
+    let pid = child.id().map(|p| p as i32);
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(json.as_bytes()).await;
+        let _ = stdin.shutdown().await;
+    }
+    // Head and tail of each stream: the head carries `thread.started` (codex's session id), the
+    // tail the agent's last words; the middle is the agent's business.
+    let tail = |b: &[u8]| {
+        let s = String::from_utf8_lossy(b);
+        let s = s.trim();
+        let chars: Vec<char> = s.chars().collect();
+        if chars.len() <= 8192 {
+            return s.to_owned();
+        }
+        let head: String = chars[..4096].iter().collect();
+        let end: String = chars[chars.len() - 4096..].iter().collect();
+        format!("{head}\n…\n{end}")
+    };
+    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(out)) => {
+            let stdout = tail(&out.stdout);
+            let stderr = tail(&out.stderr);
+            if !stdout.is_empty() {
+                tracing::info!(waker = "command", stdout = %redact::redact(&stdout));
+            }
+            if !stderr.is_empty() {
+                tracing::info!(waker = "command", stderr = %redact::redact(&stderr));
+            }
+            Ok(CommandOutput {
+                status_ok: out.status.success(),
+                status: out.status.to_string(),
+                stdout,
+                stderr,
+            })
+        }
+        Ok(Err(e)) => Err(anyhow!("command failed: {e}")),
+        Err(_) => {
+            if let Some(pid) = pid {
+                let _ = nix::sys::signal::killpg(
+                    nix::unistd::Pid::from_raw(pid),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
+            }
+            Err(no_retry(format!(
+                "command timed out after {} s (killed with its process group; not retried — the agent may have answered already)",
+                timeout.as_secs()
+            )))
+        }
+    }
+}
+
+/// One wake through the agent's persistent session: resume first; a resume that cannot find
+/// the session falls back to a new one (once) with the status line "starting a fresh session";
+/// a session at its turn cap or asked to rotate starts new with the chats' briefs as handoff.
+#[allow(clippy::too_many_arguments)]
+async fn run_with_session(
+    store: &crate::session::Store,
+    t: &crate::session::Templates,
+    cwd: Option<&std::path::Path>,
+    timeout: Duration,
+    env_allow: &[String],
+    resume_failure_regex: &str,
+    context_full_regex: &str,
+    nudge: &Value,
+    chats: &[String],
+    side: Option<&mpsc::UnboundedSender<Side>>,
+) -> std::result::Result<String, DeliverError> {
+    use crate::session::{
+        codex_thread_id, looks_like_context_full, looks_like_resume_failure, Attempt,
+    };
+    let log = |v: Value| {
+        if let Some(tx) = side {
+            let _ = tx.send(Side::Log(v));
+        }
+    };
+    let agent_kind = t.new.first().cloned().unwrap_or_default();
+    let cfg_like = WakerConfig {
+        max_turns_per_session: store_cap(store),
+        ..Default::default()
+    };
+    let (mut s, mut attempt) = store.plan(&cfg_like, &agent_kind);
+    let mut fell_back = false;
+    loop {
+        let (argv, handoff) = match &attempt {
+            Attempt::Resume => (t.resume.clone(), false),
+            Attempt::New { handoff } => (t.new.clone(), *handoff),
+        };
+        if matches!(attempt, Attempt::New { .. }) {
+            // Codex names its own thread; everyone else gets a sidecar-minted id.
+            let id = if t.capture_codex_thread {
+                String::new()
+            } else {
+                crate::session::new_id()
+            };
+            s = store.begin_new(&s, id).map_err(|e| DeliverError {
+                message: format!("{e:#}"),
+                retry: false,
+            })?;
+            log(
+                json!({ "kind": "session.new", "session": s.id, "generation": s.generation,
+                "handoff": handoff, "handoff_from": s.handoff_from }),
+            );
+        } else {
+            log(
+                json!({ "kind": "session.resume", "session": s.id, "generation": s.generation, "turns": s.turns }),
+            );
+        }
+        let mut n = nudge.clone();
+        if handoff {
+            let prefix = store.handoff_prompt(chats);
+            n["prompt_override"] = json!(format!("{prefix}{}", prompt_text(nudge)));
+        }
+        let started = std::time::Instant::now();
+        let out = run_command(&argv, cwd, timeout, env_allow, &n, Some(&s.id)).await;
+        match out {
+            Ok(o) => {
+                if t.capture_codex_thread && s.id.is_empty() {
+                    if let Some(id) = codex_thread_id(&o.stdout) {
+                        s.id = id;
+                    }
+                }
+                let text = format!("{}\n{}", o.stdout, o.stderr);
+                let resume_failed = attempt == Attempt::Resume
+                    && (!o.status_ok || started.elapsed() < Duration::from_secs(15))
+                    && looks_like_resume_failure(&text, resume_failure_regex);
+                if resume_failed && !fell_back {
+                    fell_back = true;
+                    log(
+                        json!({ "kind": "session.resume_failed", "session": s.id, "status": o.status }),
+                    );
+                    if let Some(tx) = side {
+                        let _ = tx.send(Side::Status {
+                            chats: chats.to_vec(),
+                            text: "starting a fresh session".into(),
+                        });
+                    }
+                    attempt = Attempt::New { handoff: true };
+                    continue;
+                }
+                let context_full = looks_like_context_full(&text, context_full_regex);
+                let _ = store.after_turn(&mut s, context_full);
+                if context_full {
+                    log(
+                        json!({ "kind": "session.rotate", "session": s.id, "reason": "context_full" }),
+                    );
+                }
+                if o.status_ok {
+                    return Ok("exit 0".into());
+                }
+                return Err(DeliverError {
+                    message: format!("command exited with {}", o.status),
+                    retry: true,
+                });
+            }
+            Err(e) => {
+                return Err(match e.downcast_ref::<NoRetry>() {
+                    Some(n) => DeliverError {
+                        message: n.0.clone(),
+                        retry: false,
+                    },
+                    None => DeliverError {
+                        message: format!("{e:#}"),
+                        retry: true,
+                    },
+                });
+            }
+        }
+    }
+}
+
+/// The turn cap the store was built with (kept beside the record so `plan` sees one value).
+fn store_cap(store: &crate::session::Store) -> u32 {
+    store.max_turns()
 }
 
 /// `X-Arbos-Signature` value: hex HMAC-SHA256 of the body keyed with the Authorization value —
@@ -326,7 +506,7 @@ pub fn prompt_text(nudge: &Value) -> String {
         parts.push(format!("{what} [chat {}]", c["id"].as_str().unwrap_or("")));
     }
     format!(
-        "Arbos: {}. Read with the arbos_read_chat MCP tool or 'arbos-sidecar read <chat>'; reply with arbos_reply. Reply only where you are addressed; post nothing if you decide not to answer.",
+        "Arbos: {}. First, within seconds, call arbos_ack (or `arbos-sidecar ack <chat> <message> <one line>`) naming your first step. Then read with arbos_pending / arbos_read_chat (or `arbos-sidecar pending`), do the work, and answer once with arbos_reply (or `arbos-sidecar reply <chat> <message> <text>`) — it appears under your ack in the same bubble. Never a second ack. Reply only where you are addressed; post nothing if you decide not to answer.",
         parts.join("; ")
     )
 }
@@ -348,6 +528,23 @@ pub enum Skip {
     Stale,
     AgentLoop,
     AgentCooldown,
+}
+
+/// What the engine tells the daemon (typing, status line, log lines) — the engine holds no key.
+#[derive(Debug, Clone)]
+pub enum Side {
+    /// A nudge just went out for these chats (`(chat id, newest event ts)`): typing on, log the
+    /// wake, remember the timing for the ack/reply latencies.
+    Nudged {
+        chats: Vec<(String, i64)>,
+        events: Vec<i64>,
+        session: String,
+        at: i64,
+    },
+    /// Put a working line under the composer of these chats ("starting a fresh session").
+    Status { chats: Vec<String>, text: String },
+    /// One `session.jsonl` entry.
+    Log(Value),
 }
 
 /// What the daemon tells the engine.
@@ -398,9 +595,27 @@ pub struct Engine {
     open_until: Option<Instant>,
     half_open: bool,
     agent_sender_last: HashMap<String, Instant>,
+    side: Option<mpsc::UnboundedSender<Side>>,
+    sessions: Option<crate::session::Store>,
 }
 
 impl Engine {
+    pub fn with_side(mut self, side: mpsc::UnboundedSender<Side>) -> Self {
+        self.side = Some(side);
+        self
+    }
+
+    pub fn with_sessions(mut self, store: crate::session::Store) -> Self {
+        self.sessions = Some(store);
+        self
+    }
+
+    fn side(&self, s: Side) {
+        if let Some(tx) = &self.side {
+            let _ = tx.send(s);
+        }
+    }
+
     pub fn new(cfg: WakerConfig, plugin: Plugin, mirror: Mirror, agent: Value) -> Self {
         Self {
             cfg,
@@ -418,6 +633,8 @@ impl Engine {
             open_until: None,
             half_open: false,
             agent_sender_last: HashMap::new(),
+            side: None,
+            sessions: None,
         }
     }
 
@@ -590,12 +807,63 @@ impl Engine {
             return;
         }
         let batch = std::mem::take(&mut self.pending);
-        let nudge = Self::build_nudge(&batch, &self.agent);
+        let mut nudge = Self::build_nudge(&batch, &self.agent);
         self.dirty = false;
         self.done = false;
         self.last_sent = Some(now);
+        // The stable session field for receivers that keep their own thread (webhook / file).
+        let generation = self
+            .sessions
+            .as_ref()
+            .map(|s| s.load().generation)
+            .unwrap_or(0);
+        let agent_id = self.agent["id"].as_str().unwrap_or("").to_owned();
+        let session_label = crate::session::external_session(&agent_id, generation);
+        nudge["session"] = json!(session_label);
+        // Typing on, log the wake, start the latency clock — before the agent is even started.
+        self.side(Side::Nudged {
+            chats: batch
+                .iter()
+                .map(|(id, p)| (id.clone(), p.last_at))
+                .collect(),
+            events: batch.values().flat_map(|p| p.events.clone()).collect(),
+            session: session_label.clone(),
+            at: now_ms(),
+        });
         let plugin = self.plugin.clone();
+        let sessions = self.sessions.clone();
+        let side = self.side.clone();
+        let chats: Vec<String> = batch.keys().cloned().collect();
         self.delivery = Some(tokio::spawn(async move {
+            // Session-aware command wakers resume the agent's own session (spec §13.2).
+            if let (
+                Plugin::Command {
+                    templates: Some(t),
+                    cwd,
+                    timeout,
+                    env_allow,
+                    resume_failure_regex,
+                    context_full_regex,
+                    ..
+                },
+                Some(store),
+            ) = (&plugin, &sessions)
+            {
+                let r = run_with_session(
+                    store,
+                    t,
+                    cwd.as_deref(),
+                    *timeout,
+                    env_allow,
+                    resume_failure_regex,
+                    context_full_regex,
+                    &nudge,
+                    &chats,
+                    side.as_ref(),
+                )
+                .await;
+                return (nudge, r, 1);
+            }
             let mut attempt = 0u32;
             loop {
                 attempt += 1;
@@ -636,6 +904,10 @@ impl Engine {
             }
             Err(e) => {
                 self.record(&nudge, false, "failed", Some(&e.message), attempt);
+                self.side(Side::Log(json!({
+                    "kind": "error", "step": "waker", "error": e.message,
+                    "chat": nudge["chats"][0]["id"],
+                })));
                 self.record_failure(Instant::now());
                 // Put the batch back so the next event (or the next look) carries it.
                 for c in nudge["chats"].as_array().into_iter().flatten() {
@@ -1060,6 +1332,9 @@ mod tests {
             cwd: None,
             timeout: Duration::from_secs(1),
             env_allow: vec!["PATH".into()],
+            templates: None,
+            resume_failure_regex: String::new(),
+            context_full_regex: String::new(),
         };
         let t = std::time::Instant::now();
         let r = p.deliver(&json!({ "chats": [], "agent": {} })).await;
@@ -1128,6 +1403,9 @@ mod tests {
             cwd: None,
             timeout: Duration::from_secs(10),
             env_allow: vec!["PATH".into(), "ARBOS_AGENT_KEY".into()],
+            templates: None,
+            resume_failure_regex: String::new(),
+            context_full_regex: String::new(),
         };
         p.deliver(&json!({ "chats": [{ "id": "c1", "title": "T", "kind": "group", "pending": 1 }], "agent": { "id": "a1" } }))
             .await
@@ -1140,6 +1418,110 @@ mod tests {
         assert!(text.contains("Arbos: 1 new message"));
         std::env::remove_var("ARBOS_AGENT_KEY");
         std::env::remove_var("ARBOS_SIDECAR_HOME");
+    }
+
+    /// Spec §13.2: the first wake creates a session, the next resumes it with the same id; a
+    /// resume the agent cannot find falls back to a new session once (status line "starting a
+    /// fresh session", handoff prompt), generation climbs, and every step is in the log.
+    #[tokio::test]
+    async fn sessions_resume_and_fall_back_once() {
+        let (dir, m) = temp_mirror();
+        let script = dir.path().join("agent.sh");
+        let marks = dir.path().join("marks");
+        std::fs::create_dir_all(&marks).unwrap();
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nmode=$1; sid=$2\n\
+                 echo \"$mode $sid\" >> {marks}/calls\n\
+                 if [ \"$mode\" = resume ] && [ ! -f {marks}/ok-$sid ]; then echo 'No conversation found' >&2; exit 1; fi\n\
+                 touch {marks}/ok-$sid\n\
+                 cat > {marks}/stdin-$mode\n\
+                 echo fine\n",
+                marks = marks.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let t = crate::session::Templates {
+            new: vec![
+                script.display().to_string(),
+                "new".into(),
+                "{session}".into(),
+                "{prompt}".into(),
+            ],
+            resume: vec![
+                script.display().to_string(),
+                "resume".into(),
+                "{session}".into(),
+                "{prompt}".into(),
+            ],
+            capture_codex_thread: false,
+        };
+        let store = crate::session::Store::new(m.clone(), 50);
+        let (side_tx, mut side_rx) = mpsc::unbounded_channel();
+        let run = |n: Value| {
+            let (store, t, side_tx) = (store.clone(), t.clone(), side_tx.clone());
+            async move {
+                run_with_session(
+                    &store,
+                    &t,
+                    None,
+                    Duration::from_secs(10),
+                    &["PATH".to_string()],
+                    "No conversation|not found",
+                    "context window",
+                    &n,
+                    &["c1".to_string()],
+                    Some(&side_tx),
+                )
+                .await
+            }
+        };
+        let nudge = json!({ "chats": [{ "id": "c1", "title": "T", "kind": "group", "pending": 1 }], "agent": { "id": "a1" } });
+        // 1. first wake → new session.
+        run(nudge.clone()).await.unwrap();
+        let s1 = store.load();
+        assert_eq!(s1.generation, 1);
+        assert_eq!(s1.turns, 1);
+        assert!(!s1.id.is_empty());
+        // 2. second wake → resume with the same id (the script has seen it, so it succeeds).
+        run(nudge.clone()).await.unwrap();
+        let s2 = store.load();
+        assert_eq!(s2.id, s1.id);
+        assert_eq!(s2.turns, 2);
+        // 3. simulate a lost session: forget the agent-side mark → resume fails → new once.
+        std::fs::remove_file(marks.join(format!("ok-{}", s2.id))).unwrap();
+        run(nudge.clone()).await.unwrap();
+        let s3 = store.load();
+        assert_ne!(s3.id, s2.id);
+        assert_eq!(s3.generation, 2);
+        assert_eq!(s3.handoff_from.as_deref(), Some(s2.id.as_str()));
+        let calls = std::fs::read_to_string(marks.join("calls")).unwrap();
+        assert_eq!(calls.lines().count(), 4, "{calls}");
+        let handoff = std::fs::read_to_string(marks.join("stdin-new")).unwrap();
+        assert!(handoff.contains("\"chats\""));
+        let mut kinds = Vec::new();
+        let mut statuses = Vec::new();
+        while let Ok(s) = side_rx.try_recv() {
+            match s {
+                Side::Log(v) => kinds.push(v["kind"].as_str().unwrap().to_owned()),
+                Side::Status { text, .. } => statuses.push(text),
+                Side::Nudged { .. } => {}
+            }
+        }
+        assert_eq!(
+            kinds,
+            vec![
+                "session.new",
+                "session.resume",
+                "session.resume",
+                "session.resume_failed",
+                "session.new"
+            ]
+        );
+        assert_eq!(statuses, vec!["starting a fresh session"]);
     }
 
     /// The webhook signature matches the relay's Wake URL contract (#2185).
