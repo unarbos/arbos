@@ -176,11 +176,20 @@ extension AppModel {
                                  joinedAt: now - 40 * 60_000, project: nil, ownerId: nil, ownerHandle: nil, replyPolicy: nil,
                                  lastSeenAt: now - 7 * 60_000, online: false)
         // A small group too, for the group page.
-        let mira = ChatMember(id: "fx-u3", kind: .user, member: "user:fx-u3", role: "member", handle: "mira-k", avatarUrl: nil, name: "Mira Kaplan", status: "member",
+        var mira = ChatMember(id: "fx-u3", kind: .user, member: "user:fx-u3", role: "member", handle: "mira-k", avatarUrl: nil, name: "Mira Kaplan", status: "member",
                               joinedAt: now - 3 * 86_400_000, project: nil, ownerId: nil, ownerHandle: nil, replyPolicy: nil, lastSeenAt: now - 30_000, online: true)
         let sam = ChatMember(id: "fx-u4", kind: .user, member: "user:fx-u4", role: "member", handle: "sam", avatarUrl: nil, name: "Sam Okafor", status: "member",
                              joinedAt: now - 3 * 86_400_000, project: nil, ownerId: nil, ownerHandle: nil, replyPolicy: nil, lastSeenAt: now - 2 * 86_400_000, online: false)
         var meOwner = meMember; meOwner.role = "owner"
+        // `ARBOS_FIXTURE_GROUP_ROLE=member|admin` (screenshot rig, [feedback
+        // group-settings-ios-2026-10-27]): I am that in "Launch week" and Mira owns it, so the
+        // pane can be shot as a plain member (no Edit group) without a second account.
+        var groupMyRole = "owner"
+        if let role = DebugHooks.fixtureGroupRole {
+            meOwner.role = role
+            mira.role = "owner"
+            groupMyRole = role
+        }
         let commsAgent = ChatMember(id: "fx-comms", kind: .agent, member: "agent:fx-comms", role: "agent", handle: "comms", avatarUrl: nil, name: "Comms", status: "member",
                                     joinedAt: now - 86_400_000, project: list.first { $0.id == "fx-comms" }, ownerId: "fx-me", ownerHandle: "jacob", replyPolicy: "mention")
         // `ARBOS_FIXTURE_WORKING=<n>` (presence-row rig): the group holds n agents so the
@@ -204,7 +213,7 @@ extension AppModel {
         }
         let group = PeopleChat(id: "fx-group-launch", kind: "group", createdBy: "fx-me", createdAt: now - 3 * 86_400_000, title: "Launch week",
                                pending: false, members: [meOwner, unconst, mira, sam] + groupAgents, headSeq: 40, readSeq: 40, unread: false,
-                               lockState: "visible_to_agents", lastActivityAt: now - 50 * 60_000, myRole: "owner", muted: false, silenced: false)
+                               lockState: "visible_to_agents", lastActivityAt: now - 50 * 60_000, myRole: groupMyRole, muted: false, silenced: false)
         peopleChats = [group, PeopleChat(id: "fx-dm-unconst", kind: "dm", createdBy: "gh_32490803", createdAt: now - 40 * 60_000, title: "@unconst",
                                   pending: false, members: [unconst, meMember], headSeq: 12, readSeq: 9, unread: true,
                                   lockState: "people_only", lastActivityAt: now - 7 * 60_000, myRole: "member", muted: false, silenced: false)]

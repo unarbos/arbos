@@ -77,7 +77,7 @@ final class MathTextTests: XCTestCase {
         XCTAssertEqual(Markdown.blocks("$$ E = mc^2 $$"), [.math(source: "E = mc^2")])
         XCTAssertEqual(Markdown.blocks("\\[\nx^2\n\\]"), [.math(source: "x^2")])
         // Never closed: prose as typed.
-        XCTAssertEqual(Markdown.blocks("$$\nx^2\n"), [.paragraph("$$ x^2")])
+        XCTAssertEqual(Markdown.blocks("$$\nx^2\n"), [.paragraph("$$\nx^2")])
         XCTAssertEqual(Quote.oneLine("$$ E = mc^2 $$"), "E = mc²")
         XCTAssertEqual(MathText.plain("\\sum_{i=1}^{n} i = \\frac{n(n+1)}{2}"), "∑ᵢ₌₁ⁿ\u{2009}i = (n(n + 1))/2")
     }
