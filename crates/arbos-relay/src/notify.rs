@@ -337,6 +337,8 @@ pub async fn announce_with(
     if let Some(u) = sender.user_id.as_deref() {
         let _ = state.db.mark_chat_read(u, &chat.chat_id);
     }
+    // Outside agents in this chat get the message as an ASP event (#2140).
+    crate::outside::on_announce(state, chat, sender, message_id, text, None, mentions);
     let member = match sender.kind {
         "agent" => format!("agent:{}", sender.id),
         _ => format!("user:{}", sender.id),
