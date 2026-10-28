@@ -278,11 +278,19 @@ impl MatrixClient {
         out
     }
 
-    fn last_of(&self, room_id: &RoomId) -> (String, String, i64) {
+    /// The newest row's (text, sender, sender name, time) for the list's preview.
+    fn last_of(&self, room_id: &RoomId) -> (String, String, String, i64) {
         let tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
         tl.get(room_id)
             .and_then(|t| t.rows.last())
-            .map(|r| (r.text.clone(), r.sender_name.clone(), r.created_at))
+            .map(|r| {
+                (
+                    r.text.clone(),
+                    r.sender.clone(),
+                    r.sender_name.clone(),
+                    r.created_at,
+                )
+            })
             .unwrap_or_default()
     }
 
@@ -294,7 +302,7 @@ impl MatrixClient {
             let Some(state) = Self::arbos_state(&room).await else {
                 continue;
             };
-            let (last_text, last_sender_name, last_ts) = self.last_of(room.room_id());
+            let (last_text, last_sender, last_sender_name, last_ts) = self.last_of(room.room_id());
             match state["kind"].as_str() {
                 Some("space") => {
                     let order = Self::child_order(&room).await;
@@ -306,6 +314,7 @@ impl MatrixClient {
                             member_count: room.joined_members_count(),
                             unread: 0,
                             last_text: String::new(),
+                            last_sender: String::new(),
                             last_sender_name: String::new(),
                             last_ts: 0,
                             channel_ids: Vec::new(),
@@ -327,6 +336,7 @@ impl MatrixClient {
                         can_post,
                         unread: room.unread_notification_counts().notification_count,
                         last_text,
+                        last_sender,
                         last_sender_name,
                         last_ts,
                         order: String::new(),
@@ -351,6 +361,7 @@ impl MatrixClient {
                 if ch.last_ts > space.last_ts {
                     space.last_ts = ch.last_ts;
                     space.last_text = format!("{} · {}", ch.name, ch.last_text);
+                    space.last_sender = ch.last_sender.clone();
                     space.last_sender_name = ch.last_sender_name.clone();
                 }
             }

@@ -1368,10 +1368,13 @@ struct PeopleRow: View {
             }
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
+                    // An emoji-only name is raised onto the baseline the label sits on
+                    // ([feedback emoji-name-handle-offset-ios-2026-10-28]).
                     Text(title)
                         .font(theme.font(Theme.body, weight: .semibold))
                         .foregroundStyle(theme.text)
                         .lineLimit(1)
+                        .emojiNameLift(title, size: theme.pt(Theme.body))
                     Text(label)
                         .font(theme.font(Theme.tiny))
                         .foregroundStyle(theme.muted)

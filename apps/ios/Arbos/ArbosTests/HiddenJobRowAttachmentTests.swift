@@ -54,7 +54,7 @@ final class HiddenJobRowAttachmentTests: XCTestCase {
         // Labelled pattern: a new associated value on `.image` then fails here by name,
         // not as "missing pattern #n".
         guard case .image(item: let item, fromUser: let fromUser, caption: _, lane: let lane, source: _,
-                          forwardedFrom: _, sender: let sender, named: let named) = mine[0].kind else {
+                          forwardedFrom: _, sender: let sender, named: let named, quote: _) = mine[0].kind else {
             return XCTFail("an image card: \(mine[0].kind)")
         }
         XCTAssertEqual(item.name, "sn120_price.png")

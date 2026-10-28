@@ -327,6 +327,8 @@ fn emit_servers_hook(shared: &Arc<Shared>) {
             member_count: 4 + i as u64,
             unread: u64::from(i == 0),
             last_text: text.to_string(),
+            // The fixture names its senders outright (no roster to resolve against).
+            last_sender: String::new(),
             last_sender_name: who.to_string(),
             last_ts,
             channel_ids: vec![format!("{id}-{channel}")],
@@ -340,6 +342,7 @@ fn emit_servers_hook(shared: &Arc<Shared>) {
             can_post: true,
             unread: u64::from(i == 0),
             last_text: text.to_string(),
+            last_sender: String::new(),
             last_sender_name: who.to_string(),
             last_ts,
             order: format!("{i}"),
@@ -6534,6 +6537,43 @@ fn sam() -> Person {
     person(SAM_ID, "sam", Some("Sam Rivera"), "member")
 }
 
+/// `ARBOS_FIXTURE_EMOJI_NAMES=1` ([feedback emoji-name-handle-offset-mac-2026-10-28]):
+/// a DM with someone whose display name is one emoji and a group that also has a
+/// mixed name, so every name + handle stack can be shot beside text names.
+fn emoji_names_seeded() -> bool {
+    std::env::var("ARBOS_FIXTURE_EMOJI_NAMES").is_ok_and(|v| v == "1")
+}
+
+/// The emoji-only name (a mage with a skin tone and a ZWJ: one grapheme, four scalars).
+pub const MAGE_NAME: &str = "🧙🏽\u{200d}♂\u{fe0f}";
+pub const MAGE_HANDLE: &str = "dawizzaa";
+pub const DM_MAGE: &str = "01J9DMMAGE0000000000000000";
+pub const GROUP_EMOJI: &str = "01J9GROUPEMOJI000000000000";
+
+fn mage() -> Person {
+    person("gh_461", MAGE_HANDLE, Some(MAGE_NAME), "member")
+}
+
+fn cato() -> Person {
+    person("gh_462", "cato", Some("Cato 🌳"), "member")
+}
+
+fn emoji_names_group() -> Project {
+    let members = vec![
+        mage(),
+        cato(),
+        person("gh_458", "sara", Some("Sara Lind"), "member"),
+    ];
+    let mut space = people_space(GROUP_EMOJI, members[0].clone(), Vec::new());
+    space.kind = SpaceKind::Group;
+    space.name = "Emoji names".into();
+    space.icon = "E".into();
+    space.people = members;
+    space.owner_handle = Some(ME_HANDLE.into());
+    space.my_role = Some("owner".into());
+    space
+}
+
 /// The directory the new-chat sheet searches.
 fn directory() -> Vec<Person> {
     vec![
@@ -6669,7 +6709,7 @@ fn launch_week() -> Project {
 fn seed_people_projects() -> Vec<Project> {
     let mut owner = sam();
     owner.role = "owner".into();
-    vec![
+    let mut out = vec![
         people_space(DM_SAM, sam(), Vec::new()),
         launch_week(),
         Project {
@@ -6711,10 +6751,40 @@ fn seed_people_projects() -> Vec<Project> {
             blocked_senders: Vec::new(),
             my_role: None,
         },
-    ]
+    ];
+    if emoji_names_seeded() {
+        out.push(people_space(DM_MAGE, mage(), Vec::new()));
+        out.push(emoji_names_group());
+    }
+    out
+}
+
+fn people_chat(id: &str, title: &str, minutes_ago: u64) -> Chat {
+    Chat {
+        id: id.into(),
+        project_id: id.into(),
+        title: title.into(),
+        is_pinned: true,
+        is_system: false,
+        kind: ChatKind::Chat,
+        participants: Vec::new(),
+        unread: false,
+        unread_count: 0,
+        last_message_at: now_ms().saturating_sub(minutes_ago * 60_000),
+        archived_at: None,
+    }
 }
 
 fn seed_people_chats() -> Vec<Chat> {
+    let mut out = seed_people_chats_base();
+    if emoji_names_seeded() {
+        out.push(people_chat(DM_MAGE, MAGE_HANDLE, 8));
+        out.push(people_chat(GROUP_EMOJI, "Emoji names", 30));
+    }
+    out
+}
+
+fn seed_people_chats_base() -> Vec<Chat> {
     vec![
         Chat {
             id: DM_SAM.into(),
@@ -7310,6 +7380,34 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
         ),
     );
     out.push(group);
+    if emoji_names_seeded() {
+        let dm = ChatDoc::new(DM_MAGE, "people");
+        insert_message_via_core(
+            &dm,
+            &human_message(
+                DM_MAGE,
+                &mage(),
+                "Or even better, a wizard hat for everyone at launch.",
+                base + 500_000,
+            ),
+        );
+        out.push(dm);
+        let group = ChatDoc::new(GROUP_EMOJI, GROUP_EMOJI);
+        insert_message_via_core(
+            &group,
+            &human_message(GROUP_EMOJI, &mage(), "hello from the mage", base + 510_000),
+        );
+        insert_message_via_core(
+            &group,
+            &human_message(
+                GROUP_EMOJI,
+                &cato(),
+                "Trees for everyone, then.",
+                base + 520_000,
+            ),
+        );
+        out.push(group);
+    }
     out
 }
 
