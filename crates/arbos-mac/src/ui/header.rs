@@ -136,7 +136,6 @@ pub fn render(
         );
         part.on_click(cx.listener(move |this, _, _, cx| {
             this.members_open = false;
-            this.add_agent_open = false;
             let page = page.clone();
             this.state.update(cx, |s, cx| s.toggle_profile(page, cx));
         }))
@@ -149,7 +148,6 @@ pub fn render(
         )
         .on_click(cx.listener(move |this, _, _, cx| {
             this.members_open = false;
-            this.add_agent_open = false;
             let sid = sid.clone();
             this.state.update(cx, |s, cx| {
                 s.toggle_profile(ProfilePage::Group { space_id: sid }, cx)
@@ -234,7 +232,6 @@ pub fn render(
         part.on_click(
             cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                 this.members_open = false;
-                this.add_agent_open = false;
                 let p = pid.clone();
                 if !can_rename {
                     this.open_from_name(p, groupish, cx);
@@ -524,6 +521,10 @@ pub mod metrics {
             b
         }
     }
+    /// The toast slot (`shell::render_notices`): just below the pill — under the connection
+    /// pill when it hangs there — centred on the chat column (Jacob 2026-10-27, [feedback
+    /// toast-stack-mac-2026-10-27]).
+    pub const TOAST_SLOT_TOP: f32 = LINK_PILL_TOP + LINK_PILL_HEIGHT + 8.0;
 }
 
 /// The frame of every chat header — agent, DM, group, server channel: the top
@@ -628,7 +629,6 @@ pub fn render_channel(
     )
     .on_click(cx.listener(move |this, _, _, cx| {
         this.members_open = false;
-        this.add_agent_open = false;
         let page = page.clone();
         this.state.update(cx, |s, cx| s.toggle_profile(page, cx));
     }));

@@ -7,10 +7,17 @@
 //! head/floor, the checkpoint, stored vs pending rows, projected vs announced vs mirrored message
 //! counts, what each replica last told the relay (HELLO cursor, catch-up, history heals), and a
 //! `divergent` flag with short reasons. The rebuilt doc is cached per room head.
+//!
+//! Respond-gate decisions (2026-10-27): every agent's box posts its verdict on every human
+//! message of a people chat (`POST /box/people/{chat}/gate`: reply or silent, the judge's
+//! one-line reason, confidence, who it was for, model, latency, cost). `GET /chats/{id}/health`
+//! carries the newest ones in a `gate` block; `GET /admin/room-health/{chat}?n=` is the
+//! operator's view of the same with a longer window — "why did Affine answer that" is read
+//! here, not from four boxes' logs.
 
 use std::collections::HashMap;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -20,9 +27,14 @@ use arbos_core::doc::ChatDoc;
 use arbos_core::ids::now_ms;
 
 use crate::auth::Principal;
+use crate::db_people::GateDecision;
 use crate::people;
 use crate::signin::api_error;
 use crate::state::AppState;
+
+/// Gate decisions shown in `/chats/{id}/health` (members) and by default in the admin view.
+const GATE_DEFAULT: i64 = 40;
+const GATE_MAX: i64 = 500;
 
 /// What one replica (device or box) last told the relay about a room.
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -210,6 +222,7 @@ pub async fn health_of(state: &AppState, chat_id: &str, room_name: &str) -> Valu
     json!({
         "chat_id": chat_id,
         "room": room_name,
+        "gate": gate_block(state, chat_id, GATE_DEFAULT),
         "head_seq": doc.head,
         "floor": doc.floor,
         "checkpoint": if doc.checkpoint_seq > 0 {
@@ -225,6 +238,169 @@ pub async fn health_of(state: &AppState, chat_id: &str, room_name: &str) -> Valu
         "checked_at": now_ms(),
         "rule": "divergent = stored rows that do not apply, or fewer projected messages than announced/mirrored (beyond the system-line margin). `export` is the projected doc; pending rows exist on the relay but no fresh device can show them until a replica that holds their dependencies reconnects (history heal, #1540).",
     })
+}
+
+/// The newest gate decisions of a chat, grouped per message (newest message first): one
+/// entry per message with every agent's verdict and reason.
+pub fn gate_block(state: &AppState, chat_id: &str, limit: i64) -> Value {
+    let rows = state
+        .db
+        .gate_decisions(chat_id, limit.clamp(1, GATE_MAX))
+        .unwrap_or_default();
+    let mut order: Vec<String> = Vec::new();
+    let mut by_msg: HashMap<String, Vec<&GateDecision>> = HashMap::new();
+    for d in &rows {
+        if !by_msg.contains_key(&d.message_id) {
+            order.push(d.message_id.clone());
+        }
+        by_msg.entry(d.message_id.clone()).or_default().push(d);
+    }
+    let messages: Vec<Value> = order
+        .iter()
+        .map(|mid| {
+            let ds = &by_msg[mid];
+            let at = ds.iter().map(|d| d.at).max().unwrap_or(0);
+            let repliers: Vec<&str> = ds
+                .iter()
+                .filter(|d| d.decision == "reply")
+                .map(|d| d.handle.as_str())
+                .collect();
+            json!({
+                "message_id": mid,
+                "at": at,
+                "repliers": repliers,
+                "agents": ds.iter().map(|d| json!({
+                    "agent_id": d.agent_id,
+                    "handle": d.handle,
+                    "decision": d.decision,
+                    "reason": d.reason,
+                    "confidence": d.confidence,
+                    "addressee": d.addressee,
+                    "chosen": d.chosen,
+                    "model": d.model,
+                    "latency_ms": d.latency_ms,
+                    "cost_usd": d.cost_usd,
+                    "at": d.at,
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    json!({
+        "decisions": rows.len(),
+        "messages": messages,
+        "rule": "one judge call per human message per agent box (agentd responders.rs); `decision` is that agent's verdict, `reason` the judge's line, `chosen` every agent the judge picked; `repliers` are the agents that answered the message.",
+    })
+}
+
+/// The body a box posts for one verdict.
+#[derive(Debug, serde::Deserialize)]
+pub struct GateReport {
+    pub message_id: String,
+    pub agent_id: String,
+    #[serde(default)]
+    pub handle: String,
+    pub decision: String,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub chosen: Vec<String>,
+    pub confidence: Option<f64>,
+    pub addressee: Option<String>,
+    pub model: Option<String>,
+    pub latency_ms: Option<i64>,
+    pub cost_usd: Option<f64>,
+    pub at: Option<i64>,
+}
+
+/// `POST /box/people/{chat}/gate` — a box records its agent's verdict on one message. The
+/// agent must be one of the box owner's projects and a member of the chat.
+pub async fn post_gate_decision(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(chat_id): Path<String>,
+    Json(body): Json<GateReport>,
+) -> Response {
+    let Principal::Box { user_id } = &principal else {
+        return api_error(StatusCode::FORBIDDEN, "forbidden", "box only");
+    };
+    if !people::room_access(&state, &principal, &chat_id) {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "not_member",
+            "no agent of yours is in this chat",
+        );
+    }
+    let owns = state
+        .db
+        .project(&body.agent_id)
+        .ok()
+        .flatten()
+        .is_some_and(|p| p.user_id == *user_id);
+    let member = state
+        .db
+        .membership(&chat_id, &format!("agent:{}", body.agent_id))
+        .ok()
+        .flatten()
+        .is_some();
+    if !owns || !member {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "not_your_agent",
+            "that agent is not yours or not in this chat",
+        );
+    }
+    if !matches!(body.decision.as_str(), "reply" | "silent") {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "bad_decision",
+            "decision must be reply or silent",
+        );
+    }
+    let clip = |s: &str, n: usize| -> String { s.chars().take(n).collect() };
+    let d = GateDecision {
+        chat_id: chat_id.clone(),
+        message_id: clip(&body.message_id, 64),
+        agent_id: body.agent_id.clone(),
+        handle: clip(&body.handle, 64),
+        decision: body.decision.clone(),
+        reason: clip(&body.reason, 600),
+        chosen: body.chosen.iter().take(32).map(|c| clip(c, 64)).collect(),
+        confidence: body.confidence,
+        addressee: body.addressee.as_deref().map(|a| clip(a, 80)),
+        model: body.model.as_deref().map(|m| clip(m, 80)),
+        latency_ms: body.latency_ms,
+        cost_usd: body.cost_usd,
+        at: body.at.unwrap_or_else(now_ms),
+    };
+    match state.db.put_gate_decision(&d) {
+        Ok(()) => (StatusCode::NO_CONTENT, ()).into_response(),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "store", e.to_string()),
+    }
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct RoomHealthQuery {
+    /// How many gate decisions to include (default 40, max 500).
+    pub n: Option<i64>,
+}
+
+/// `GET /admin/room-health/{chat}` — the health block plus up to `n` gate decisions.
+pub async fn admin_room_health(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(chat_id): Path<String>,
+    Query(q): Query<RoomHealthQuery>,
+) -> Response {
+    if !matches!(principal, Principal::Admin) {
+        return api_error(StatusCode::FORBIDDEN, "forbidden", "admin token required");
+    }
+    if state.db.people_chat(&chat_id).ok().flatten().is_none() {
+        return api_error(StatusCode::NOT_FOUND, "not_found", "no such people chat");
+    }
+    let room = people::room_of(&chat_id);
+    let mut v = health_of(&state, &chat_id, &room).await;
+    v["gate"] = gate_block(&state, &chat_id, q.n.unwrap_or(GATE_DEFAULT));
+    Json(v).into_response()
 }
 
 /// `GET /chats/{id}/health` — people chats by membership, project chats by project access.
@@ -265,6 +441,123 @@ mod tests {
     use crate::people::tests_support::{person, project_of};
     use crate::state::test_support::test_state;
     use crate::state::AuthMode;
+
+    /// A box posts its agent's verdict; the admin view and the members' health both show it,
+    /// grouped per message with the reason; a box that does not own the agent is refused.
+    #[tokio::test]
+    async fn gate_decisions_are_stored_and_shown_per_message() {
+        use crate::people::tests_support::group;
+        use axum::extract::{Path, Query, State};
+        let state = test_state(AuthMode::Github);
+        let (jacob, _) = person(&state, 1);
+        let (ken, _) = person(&state, 2);
+        let chat = group(&state, &[&jacob, &ken]);
+        let affine = project_of(&state, &jacob, "Affine");
+        let jo = project_of(&state, &ken, "Jo");
+        for (p, owner) in [(&affine, &jacob), (&jo, &ken)] {
+            state
+                .db
+                .add_member(
+                    &chat,
+                    &format!("agent:{p}"),
+                    "agent",
+                    owner,
+                    &serde_json::json!({}),
+                )
+                .unwrap();
+        }
+        let report = |agent: &str, handle: &str, decision: &str, reason: &str, msg: &str| {
+            super::GateReport {
+                message_id: msg.into(),
+                agent_id: agent.into(),
+                handle: handle.into(),
+                decision: decision.into(),
+                reason: reason.into(),
+                chosen: vec![jo.clone()],
+                confidence: Some(0.93),
+                addressee: Some("@jo".into()),
+                model: Some("typesafe/jev-1.14-test".into()),
+                latency_ms: Some(120),
+                cost_usd: Some(0.00014),
+                at: None,
+            }
+        };
+        let jacobs_box = crate::auth::Principal::Box {
+            user_id: jacob.clone(),
+        };
+        let kens_box = crate::auth::Principal::Box {
+            user_id: ken.clone(),
+        };
+        let r = super::post_gate_decision(
+            State(state.clone()),
+            jacobs_box.clone(),
+            Path(chat.clone()),
+            axum::Json(report(
+                &affine,
+                "affine",
+                "silent",
+                "judge: for=@jo (0.93); not me → silent",
+                "m1",
+            )),
+        )
+        .await;
+        assert_eq!(r.status(), axum::http::StatusCode::NO_CONTENT);
+        let r = super::post_gate_decision(
+            State(state.clone()),
+            kens_box,
+            Path(chat.clone()),
+            axum::Json(report(
+                &jo,
+                "jo",
+                "reply",
+                "judge: for=@jo (0.93) ≥ 0.60 → reply",
+                "m1",
+            )),
+        )
+        .await;
+        assert_eq!(r.status(), axum::http::StatusCode::NO_CONTENT);
+        // Jacob's box may not speak for Ken's agent.
+        let r = super::post_gate_decision(
+            State(state.clone()),
+            jacobs_box,
+            Path(chat.clone()),
+            axum::Json(report(&jo, "jo", "reply", "forged", "m2")),
+        )
+        .await;
+        assert_eq!(r.status(), axum::http::StatusCode::FORBIDDEN);
+
+        let v = super::admin_room_health(
+            State(state.clone()),
+            crate::auth::Principal::Admin,
+            Path(chat.clone()),
+            Query(super::RoomHealthQuery { n: Some(10) }),
+        )
+        .await;
+        assert_eq!(v.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(v.into_body(), 1 << 20).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["gate"]["decisions"], 2, "{v}");
+        let m1 = &v["gate"]["messages"][0];
+        assert_eq!(m1["message_id"], "m1");
+        assert_eq!(m1["repliers"], serde_json::json!(["jo"]));
+        let agents = m1["agents"].as_array().unwrap();
+        assert_eq!(agents.len(), 2);
+        assert!(agents.iter().any(|a| a["handle"] == "affine"
+            && a["decision"] == "silent"
+            && a["reason"].as_str().unwrap().starts_with("judge: for=@jo")));
+        // Members see the same block through /chats/{id}/health.
+        let h = super::health_of(&state, &chat, &crate::people::room_of(&chat)).await;
+        assert_eq!(h["gate"]["decisions"], 2);
+        // Not admin → refused.
+        let r = super::admin_room_health(
+            State(state),
+            crate::auth::Principal::Box { user_id: jacob },
+            Path(chat),
+            Query(super::RoomHealthQuery::default()),
+        )
+        .await;
+        assert_eq!(r.status(), axum::http::StatusCode::FORBIDDEN);
+    }
 
     #[tokio::test]
     async fn health_flags_pending_rows_and_clears_when_whole() {

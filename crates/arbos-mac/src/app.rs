@@ -24,9 +24,9 @@ use crate::model::{
 use crate::model::{
     new_id, now_ms, Attachment, AttachmentKind, BoxReport, BoxState, ChannelSel, ChannelsView,
     Chat, ChatKind, ConnectorsView, DevicesView, Effort, Id, Job, JobRollout, Link, LinkState,
-    LocalView, Machine, Message, MessageStatus, NewSecret, Part, Project, ProjectDocView,
-    ProjectSecrets, QuestionState, ReplyRef, Role, Routine, RoutineRun, RoutineTrigger,
-    SecretDirector, SecretScope, SecretsView, ServerInfo, Skill, StatusKind,
+    LocalView, Machine, Message, MessageBody, MessageStatus, NewSecret, Part, Project,
+    ProjectDocView, ProjectSecrets, QuestionState, ReplyRef, Role, Routine, RoutineRun,
+    RoutineTrigger, SecretDirector, SecretScope, SecretsView, ServerInfo, Skill, StatusKind,
 };
 use crate::palette;
 use crate::search;
@@ -208,6 +208,25 @@ fn save_read_receipts(enabled: bool) {
     let _ = std::fs::write(read_receipts_path(), if enabled { "true" } else { "false" });
 }
 
+fn link_previews_path() -> std::path::PathBuf {
+    crate::sync::credentials::config_dir().join("link-previews")
+}
+
+/// Settings → Chat → Link previews, saved on this Mac; on unless switched off
+/// ([feedback link-embeds-mac-2026-10-27]).
+fn load_link_previews() -> bool {
+    std::fs::read_to_string(link_previews_path())
+        .ok()
+        .map(|s| s.trim() != "false")
+        .unwrap_or(true)
+}
+
+fn save_link_previews(enabled: bool) {
+    let dir = crate::sync::credentials::config_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(link_previews_path(), if enabled { "true" } else { "false" });
+}
+
 /// "3 min ago", "2 h ago", "yesterday", "5 days ago".
 pub fn ago_text(ms: u64) -> String {
     let s = ms / 1000;
@@ -277,18 +296,27 @@ pub struct FailureClaim {
     pub verbs: &'static [&'static str],
 }
 
-/// A toast in the top-right stack: an info notice (`error` none: "Forwarded to Studio") or a
-/// failure drawn by `ui::error_note` (Jacob, 2026-10-26). Info notices live 6 s, errors 10 s;
-/// the pointer on a toast holds it (`held`), a click on × or an info toast dismisses it.
+/// A toast in the one slot under the header pill: an info notice (`error` none: "Forwarded to
+/// Studio") or a failure drawn by `ui::error_note` (Jacob, 2026-10-26 / 2026-10-27). Info
+/// notices live 6 s, errors 10 s; the pointer on a toast holds it (`held`, at most
+/// [`NOTICE_HOLD_MAX_MS`] unless Details is open), × or a click on an info toast dismisses it.
+/// The same failure again while its toast stands does not add a toast: `count` goes up and the
+/// clock restarts (eight "Couldn't load your secrets" in a row were eight toasts on
+/// 2026-10-27 — never again). `id` is stable for the toast's life; `at` is its clock.
 #[derive(Clone, Debug)]
 pub struct Notice {
+    pub id: u64,
     pub text: String,
     pub at: u64,
     pub error: Option<UserError>,
     pub details_open: bool,
     pub held: bool,
+    /// Since when the pointer holds it (the hold has a cap).
+    pub held_since: u64,
     /// Try again re-issues this command.
     pub retry: Option<Box<ClientCommand>>,
+    /// How many times this same failure arrived while the toast stood (1 = once).
+    pub count: u32,
 }
 
 impl Notice {
@@ -299,10 +327,42 @@ impl Notice {
             NOTICE_TTL_MS
         }
     }
+
+    /// Still on screen at `now`: within its TTL, or held — a hold without Details open
+    /// lasts at most [`NOTICE_HOLD_MAX_MS`], so a pointer parked over the slot (or a hover
+    /// whose leave never arrived) cannot pin a toast forever.
+    pub fn live_at(&self, now: u64) -> bool {
+        if self.held
+            && (self.details_open || now.saturating_sub(self.held_since) < NOTICE_HOLD_MAX_MS)
+        {
+            return true;
+        }
+        now.saturating_sub(self.at) < self.ttl_ms()
+    }
+
+    /// Two toasts are the same failure when they would read the same sentence.
+    fn same_failure(&self, error: &UserError) -> bool {
+        self.error
+            .as_ref()
+            .is_some_and(|e| e.sentence() == error.sentence())
+    }
 }
 
 pub const NOTICE_TTL_MS: u64 = 6_000;
 pub const ERROR_NOTICE_TTL_MS: u64 = 10_000;
+/// A held toast (pointer on it, Details closed) is let go after this long.
+pub const NOTICE_HOLD_MAX_MS: u64 = 60_000;
+/// How many toasts the slot shows at once; older ones fold into one "N more" line
+/// (Jacob 2026-10-27: "max 2–3 visible, oldest collapses into a count").
+pub const NOTICE_VISIBLE_MAX: usize = 3;
+
+/// What the slot draws: the newest toasts, oldest first, and how many older ones are folded
+/// away behind them.
+#[derive(Clone, Debug, Default)]
+pub struct NoticeStack {
+    pub visible: Vec<Notice>,
+    pub folded: usize,
+}
 
 #[derive(Clone, Debug)]
 pub enum AppEvent {
@@ -397,7 +457,7 @@ pub struct ForwardTarget {
     pub last_activity: u64,
 }
 
-/// Bubble menu → Forward (feedback app-01M5MXRZ7609S70P9S9P2RZDDF): the text
+/// Bubble menu → Forward (feedback app-01M5MXRZ7609S70P9S9P2RZDDF): the
 /// message the open picker will send on, and who wrote it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ForwardMessage {
@@ -405,6 +465,57 @@ pub struct ForwardMessage {
     pub message_id: Id,
     /// The original sender's display name ("Forwarded from <by>").
     pub by: String,
+}
+
+/// The parts the optimistic row in the destination draws before the relay
+/// echoes the real one: the same blob keys (their thumbnails are cached), the
+/// chart parts with their fallback pictures, then the text
+/// ([feedback forward-attachments-mac-2026-10-27]).
+pub fn forward_optimistic_parts(body: &MessageBody) -> Vec<Part> {
+    let mut parts: Vec<Part> = body
+        .attachments
+        .iter()
+        .map(|a| Part::Attachment {
+            id: new_id(),
+            attachment: a.clone(),
+        })
+        .collect();
+    for c in &body.charts {
+        let Part::Chart {
+            spec_version,
+            chart,
+            table,
+            ..
+        } = &c.chart
+        else {
+            continue;
+        };
+        let chart_id = new_id();
+        let fallback_id = c.fallback.as_ref().map(|a| {
+            let id = new_id();
+            let mut attachment = a.clone();
+            attachment.chart_part = Some(chart_id.clone());
+            parts.push(Part::Attachment {
+                id: id.clone(),
+                attachment,
+            });
+            id
+        });
+        parts.push(Part::Chart {
+            id: chart_id,
+            spec_version: *spec_version,
+            chart: chart.clone(),
+            table: table.clone(),
+            fallback: fallback_id,
+        });
+    }
+    if !body.text.is_empty() {
+        parts.push(Part::Text {
+            id: new_id(),
+            text: body.text.clone(),
+        });
+    }
+    parts
 }
 
 /// The text line a forwarded attachment travels with (every client renders
@@ -598,6 +709,9 @@ pub struct AppState {
     /// Site icons for the bubbles' named links, by host: `Some` once the relay answered
     /// with a picture, `None` when the site has none; a host still loading is absent.
     pub link_icons: HashMap<String, Option<Arc<RenderImage>>>,
+    /// Each fetched link icon's tone (a dark transparent mark, a light one, or neither), so
+    /// the link tiles can flip their fill under it ([`crate::ui::link_tile`]).
+    pub link_icon_tones: HashMap<String, crate::ui::link_tile::Tone>,
     /// Link-icon fetches in flight or answered (never asked twice per session).
     link_icons_requested: HashSet<String>,
     /// Blob keys whose thumbnail fetch failed: the card says "No preview" instead of loading.
@@ -747,6 +861,8 @@ pub struct AppState {
     /// Settings → Notifications: send and show Presence `{seen}` read receipts
     /// (`<config>/read_receipts.json`, default on).
     pub read_receipts: bool,
+    /// Settings → Chat → Link previews (this Mac).
+    pub link_previews: bool,
     /// People-chat read receipts: chat id → (peer handle → last seen message id).
     pub message_receipts: HashMap<Id, HashMap<String, Id>>,
     /// Last presence frame seen per handle (ms): "online" while fresh.
@@ -1088,6 +1204,7 @@ impl AppState {
             thumbnails_trimmed: HashMap::new(),
             thumbnails_requested: HashSet::new(),
             link_icons: HashMap::new(),
+            link_icon_tones: HashMap::new(),
             link_icons_requested: HashSet::new(),
             thumbnails_failed: HashSet::new(),
             notices: Vec::new(),
@@ -1151,6 +1268,11 @@ impl AppState {
             renaming_project: None,
             muted: load_muted(),
             read_receipts: load_read_receipts(),
+            link_previews: {
+                let on = load_link_previews();
+                crate::ui::link_card::set_enabled(on);
+                on
+            },
             message_receipts: HashMap::new(),
             presence_seen: HashMap::new(),
             notify_prompt_answered: false,
@@ -1623,6 +1745,23 @@ impl AppState {
                 reachable,
             } => self.on_call_ready(call, created, reachable, cx),
             SyncEvent::CallStarted { call, sender } => self.on_call_started(call, sender, cx),
+            SyncEvent::ChannelMessage {
+                server_id,
+                server_name,
+                channel_id,
+                channel_name,
+                room_id,
+                sender,
+                text,
+            } => self.notify_channel_message(
+                &server_id,
+                &server_name,
+                &channel_id,
+                &channel_name,
+                &room_id,
+                &sender,
+                text.as_deref(),
+            ),
             SyncEvent::FeedbackCapture {
                 request_id,
                 expires_at,
@@ -1824,7 +1963,13 @@ impl AppState {
                 cx.notify();
             }
             SyncEvent::LinkIcon { host, png } => {
-                let image = png.and_then(|b| decode_image(&b)).map(Arc::new);
+                let rgba = png.and_then(|b| decode_rgba(&b));
+                let tone = rgba
+                    .as_ref()
+                    .map(crate::ui::link_tile::tone_of)
+                    .unwrap_or_default();
+                let image = rgba.and_then(bgra_frame).map(Arc::new);
+                self.link_icon_tones.insert(host.clone(), tone);
                 self.link_icons.insert(host, image);
                 cx.notify();
             }
@@ -4421,6 +4566,7 @@ impl AppState {
                 parts,
                 hidden_parts: Vec::new(),
                 greeting: false,
+                preview: None,
             });
         if answer {
             let question_id = self.open_plain_question_id(&chat_id);
@@ -5187,6 +5333,7 @@ impl AppState {
                 }],
                 hidden_parts: Vec::new(),
                 greeting: false,
+                preview: None,
             });
         self.command(ClientCommand::ChannelSend {
             room_id: room_id.clone(),
@@ -5593,6 +5740,7 @@ impl AppState {
                 }],
                 hidden_parts: Vec::new(),
                 greeting: false,
+                preview: None,
             });
         self.command(ClientCommand::Answer {
             chat_id: chat_id.clone(),
@@ -6079,6 +6227,46 @@ impl AppState {
             chat_id,
             message_id,
         });
+        cx.notify();
+    }
+
+    /// Bubble ⋯ / the card's × → Remove preview: the relay drops the message's link preview
+    /// for everyone (`preview: "off"`); the card goes at once here, the row follows.
+    pub fn remove_link_preview(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
+        if message_id.is_empty() {
+            return;
+        }
+        if let Some(m) = self
+            .messages
+            .get_mut(&chat_id)
+            .and_then(|list| list.iter_mut().find(|m| m.id == message_id))
+        {
+            m.preview = Some("off".into());
+        }
+        self.command(ClientCommand::RemoveLinkPreview {
+            chat_id,
+            message_id,
+        });
+        cx.notify();
+    }
+
+    /// A link in a bubble or a preview card was clicked: one seam for every chat link, so a
+    /// confirm step (#1522) slots in here for all of them at once. Today: the default opener.
+    pub fn open_link(&mut self, url: &str, cx: &mut Context<Self>) {
+        if url.trim().is_empty() {
+            return;
+        }
+        cx.open_url(url);
+    }
+
+    /// Settings → Chat → Link previews: cards on or off on this Mac.
+    pub fn set_link_previews(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.link_previews == enabled {
+            return;
+        }
+        self.link_previews = enabled;
+        crate::ui::link_card::set_enabled(enabled);
+        save_link_previews(enabled);
         cx.notify();
     }
 
@@ -7428,6 +7616,7 @@ impl AppState {
                 parts,
                 hidden_parts: Vec::new(),
                 greeting: false,
+                preview: None,
             });
         self.command(ClientCommand::Forward {
             chat_id: target.chat_id.clone(),
@@ -7474,12 +7663,26 @@ impl AppState {
         else {
             return;
         };
-        if message.plain_text().trim().is_empty() {
-            self.push_notice("Nothing to forward");
+        // Words, pictures, files, charts — any of them is enough; a picture still
+        // uploading is not on the relay yet, so there is nothing to copy.
+        if message.body().is_none() {
+            self.push_notice(if message.has_uploading_attachment() {
+                "Still uploading — try again in a moment"
+            } else {
+                "Nothing to forward"
+            });
             cx.notify();
             return;
         }
-        let by = self.forward_sender_name(message);
+        // Forwarding a forwarded message keeps the original author (Telegram), not
+        // whoever forwarded it last.
+        let by = message
+            .forwarded_from
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.forward_sender_name(message));
         self.forward_message = Some(ForwardMessage {
             chat_id,
             message_id,
@@ -7494,28 +7697,29 @@ impl AppState {
         }
     }
 
-    /// Forward the picked message's text to `target` as a new message of mine
-    /// there (no reply quote), carrying `forwardedFrom: <name>` so every client
-    /// draws the "Forwarded from <name>" header on the bubble.
+    /// Forward the picked message to `target` as a new message of mine there
+    /// (no reply quote): its text, its pictures / files / videos (each blob
+    /// copied into the destination's slot by the source) and its charts, all
+    /// carrying `forwardedFrom: <name>` so every client draws the "Forwarded
+    /// from <name>" header on the bubble
+    /// ([feedback forward-attachments-mac-2026-10-27]: the image and its
+    /// caption used to arrive as the caption alone).
     pub fn forward_message_to(&mut self, target: ForwardTarget, cx: &mut Context<Self>) {
         let Some(source) = self.forward_message.take() else {
             return;
         };
-        let Some(text) = self
+        let Some(payload) = self
             .messages
             .get(&source.chat_id)
             .and_then(|ms| ms.iter().find(|m| m.id == source.message_id))
-            .map(|m| m.plain_text().trim().to_owned())
-            .filter(|t| !t.is_empty())
+            .and_then(Message::body)
         else {
             cx.notify();
             return;
         };
+        let from_slot = self.space_of_chat(&source.chat_id);
         let message_id = new_id();
-        let parts = vec![Part::Text {
-            id: new_id(),
-            text: text.clone(),
-        }];
+        let parts = forward_optimistic_parts(&payload);
         self.messages
             .entry(target.chat_id.clone())
             .or_default()
@@ -7563,11 +7767,15 @@ impl AppState {
                 parts,
                 hidden_parts: Vec::new(),
                 greeting: false,
+                preview: None,
             });
-        self.command(ClientCommand::ForwardText {
+        self.command(ClientCommand::ForwardMessage {
             chat_id: target.chat_id.clone(),
             message_id,
-            text,
+            from_slot,
+            text: payload.text,
+            attachments: payload.attachments,
+            charts: payload.charts,
             forwarded_from: source.by,
         });
         self.push_notice(format!("Forwarded to {}", target.name));
@@ -7945,8 +8153,75 @@ impl AppState {
         self.sync_focus();
     }
 
-    /// A click on a notification: bring the window up and show that chat.
+    /// A server channel message (relay `channel_message` push, from the homeserver's push
+    /// rules — every member but the sender): a banner "<sender> in #channel" unless that
+    /// channel is on screen in a focused window or the server is muted. The coalescer keys
+    /// it under `server:<id>` so a busy server folds into "N updates in <server>".
+    #[allow(clippy::too_many_arguments)]
+    fn notify_channel_message(
+        &mut self,
+        server_id: &str,
+        server_name: &str,
+        channel_id: &str,
+        channel_name: &str,
+        room_id: &str,
+        sender: &crate::model::Sender,
+        text: Option<&str>,
+    ) {
+        let key = format!("server:{server_id}");
+        let visible = self.window_active
+            && self
+                .selected_channel
+                .as_ref()
+                .is_some_and(|c| c.server_id == server_id && c.channel_id == channel_id);
+        let gate = Gate {
+            streaming: false,
+            visible: visible || self.is_muted(&key),
+        };
+        let title = if sender.kind == "agent" || sender.handle.is_empty() {
+            sender.name.clone()
+        } else {
+            format!("@{}", sender.handle)
+        };
+        let mut event = NotifyEvent::new(
+            key,
+            server_name.to_string(),
+            NotifyKind::DirectMessage,
+            text.filter(|t| !t.is_empty())
+                .map(|t| format!("#{channel_name}: {t}"))
+                .unwrap_or_else(|| format!("#{channel_name}: new message")),
+        );
+        event.chat_id = Some(room_id.to_string());
+        event.sender = Some(title);
+        event.image = if sender.kind == "agent" {
+            crate::ui::avatars::notification_png(
+                &sender.id,
+                &sender.name,
+                sender.avatar_color_index,
+                crate::ui::theme::system_is_dark(),
+            )
+        } else if sender.avatar_url.is_empty() {
+            None
+        } else {
+            self.person_notification_png(&sender.avatar_url)
+        };
+        self.notifier.offer(event, now_ms(), gate);
+    }
+
+    /// A click on a notification: bring the window up and show that chat — or, for a
+    /// server channel banner (its id is the room id), that channel.
     pub fn open_chat_from_notification(&mut self, chat_id: Id, cx: &mut Context<Self>) {
+        let channel = self.servers.iter().find_map(|s| {
+            s.channels
+                .iter()
+                .find(|c| c.room_id.as_deref() == Some(chat_id.as_str()))
+                .map(|c| (s.id.clone(), c.id.clone()))
+        });
+        if let Some((server_id, channel_id)) = channel {
+            self.select_channel(server_id, channel_id, cx);
+            cx.activate(true);
+            return;
+        }
         let project_id = self
             .chats
             .values()
@@ -8078,55 +8353,98 @@ impl AppState {
     }
 
     /// An info toast: something that worked or a plain status. Never a failure — that is
-    /// [`Self::push_failure`] (`error_ui_lint` keeps raw error strings out of here).
+    /// [`Self::push_failure`] (`error_ui_lint` keeps raw error strings out of here). The same
+    /// text again while its toast stands restarts that toast instead of adding one.
     pub fn push_notice(&mut self, text: impl Into<String>) {
-        let now = self.next_notice_at();
+        let text = text.into();
+        let now = self.prune_notices();
+        if let Some(n) = self
+            .notices
+            .iter_mut()
+            .find(|n| n.error.is_none() && n.text == text)
+        {
+            n.at = now;
+            n.count += 1;
+            return;
+        }
+        let id = self.next_notice_id(now);
         self.notices.push(Notice {
-            text: text.into(),
+            id,
+            text,
             at: now,
             error: None,
             details_open: false,
             held: false,
+            held_since: 0,
             retry: None,
+            count: 1,
         });
     }
 
     /// An error toast (the shared error element, 10 s, hover holds, Details + Copy, Try again
     /// re-issues `retry`). The surface that owns the action catches most failures first
-    /// (sheets, pane pages, the composer); this is for the rest.
+    /// (sheets, pane pages, the composer); this is for the rest. The same failure again while
+    /// its toast stands (same sentence) bumps the toast's count and restarts its clock — one
+    /// note per failure, however often it repeats.
     pub fn push_failure(&mut self, error: UserError, retry: Option<Box<ClientCommand>>) {
-        let now = self.next_notice_at();
+        let now = self.prune_notices();
+        if let Some(n) = self.notices.iter_mut().find(|n| n.same_failure(&error)) {
+            n.at = now;
+            n.count = n.count.saturating_add(1);
+            n.error = Some(error);
+            if retry.is_some() {
+                n.retry = retry;
+            }
+            return;
+        }
+        let id = self.next_notice_id(now);
         self.notices.push(Notice {
+            id,
             text: error.sentence(),
             at: now,
             error: Some(error),
             details_open: false,
             held: false,
+            held_since: 0,
             retry,
+            count: 1,
         });
     }
 
-    /// Drops the expired toasts and returns a unique `at` for the next one (`at` is its id:
-    /// two toasts pushed in the same millisecond must not share it).
-    fn next_notice_at(&mut self) -> u64 {
+    /// Drops the expired toasts; returns `now`.
+    fn prune_notices(&mut self) -> u64 {
         let now = now_ms();
-        self.notices
-            .retain(|n| n.held || now.saturating_sub(n.at) < n.ttl_ms());
-        let last = self.notices.iter().map(|n| n.at).max().unwrap_or(0);
+        self.notices.retain(|n| n.live_at(now));
+        now
+    }
+
+    /// A unique id for the next toast (`now`, or one past the newest id when two arrive in
+    /// the same millisecond).
+    fn next_notice_id(&self, now: u64) -> u64 {
+        let last = self.notices.iter().map(|n| n.id).max().unwrap_or(0);
         now.max(last + 1)
     }
 
     /// Click on × (or an info toast) removes it (download status / errors must not sit forever).
-    pub fn dismiss_notice(&mut self, at: u64) {
-        self.notices.retain(|n| n.at != at);
+    pub fn dismiss_notice(&mut self, id: u64) {
+        self.notices.retain(|n| n.id != id);
+    }
+
+    /// Clears the whole slot (the "N more" line's ×).
+    pub fn dismiss_all_notices(&mut self) {
+        self.notices.clear();
     }
 
     /// The pointer on a toast holds it; leaving restarts its clock.
-    pub fn hold_notice(&mut self, at: u64, held: bool) {
-        if let Some(n) = self.notices.iter_mut().find(|n| n.at == at) {
+    pub fn hold_notice(&mut self, id: u64, held: bool) {
+        let now = now_ms();
+        if let Some(n) = self.notices.iter_mut().find(|n| n.id == id) {
+            if held && !n.held {
+                n.held_since = now;
+            }
             n.held = held;
             if !held {
-                n.at = now_ms();
+                n.at = now;
             }
         }
     }
@@ -8156,33 +8474,49 @@ impl AppState {
         }
     }
 
-    pub fn toggle_notice_details(&mut self, at: u64) {
-        if let Some(n) = self.notices.iter_mut().find(|n| n.at == at) {
+    pub fn toggle_notice_details(&mut self, id: u64) {
+        let now = now_ms();
+        if let Some(n) = self.notices.iter_mut().find(|n| n.id == id) {
             n.details_open = !n.details_open;
+            if !n.held {
+                n.held_since = now;
+            }
             n.held = true;
         }
     }
 
     /// Try again on an error toast: re-issue its command and drop the toast.
-    pub fn retry_notice(&mut self, at: u64) {
+    pub fn retry_notice(&mut self, id: u64) {
         let retry = self
             .notices
             .iter()
-            .find(|n| n.at == at)
+            .find(|n| n.id == id)
             .and_then(|n| n.retry.clone());
-        self.dismiss_notice(at);
+        self.dismiss_notice(id);
         if let Some(cmd) = retry {
             self.command(*cmd);
         }
     }
 
+    /// Every toast still on screen, oldest first.
     pub fn live_notices(&self) -> Vec<Notice> {
         let now = now_ms();
         self.notices
             .iter()
-            .filter(|n| n.held || now.saturating_sub(n.at) < n.ttl_ms())
+            .filter(|n| n.live_at(now))
             .cloned()
             .collect()
+    }
+
+    /// What the slot draws: the newest [`NOTICE_VISIBLE_MAX`] toasts (oldest first) and the
+    /// number folded away above them.
+    pub fn notice_stack(&self) -> NoticeStack {
+        let live = self.live_notices();
+        let folded = live.len().saturating_sub(NOTICE_VISIBLE_MAX);
+        NoticeStack {
+            visible: live[folded..].to_vec(),
+            folded,
+        }
     }
 
     /// The composer's note for `chat`, if a send / attachment / recording failed there.
@@ -8987,6 +9321,12 @@ impl AppState {
         self.projects.iter().find(|p| p.id == pid)
     }
 
+    /// One of my agents into a people chat, the way the Add members picker
+    /// does it (optimistic "<me> added <agent>" line, then the batch
+    /// `AddMembers` call). Only the `ARBOS_RIG_ADD_AGENT` recording hook
+    /// calls it since the "Add agent" rows went ([feedback
+    /// add-your-agent-row-removal-mac-2026-10-27]); the picker goes through
+    /// [`Self::add_members_to_group`].
     pub fn add_agent(&mut self, chat_id: Id, project_id: Id, cx: &mut Context<Self>) {
         let names: Vec<String> = self
             .projects
@@ -8999,9 +9339,10 @@ impl AppState {
             id: project_id.clone(),
         }];
         self.show_membership_notice(&chat_id, &names, subjects, cx);
-        self.command(ClientCommand::AddAgent {
+        self.command(ClientCommand::AddMembers {
             chat_id,
-            project_id,
+            handles: Vec::new(),
+            agent_ids: vec![project_id],
         });
         cx.notify();
     }
@@ -9486,12 +9827,28 @@ impl AppState {
                     continue;
                 };
                 for host in crate::ui::markdown::link_hosts(text) {
-                    if self.link_icons_requested.insert(host.clone()) {
-                        self.command(ClientCommand::FetchLinkIcon { host });
-                    }
+                    self.want_link_icon(host);
                 }
             }
         }
+    }
+
+    /// Ask the source for one host's site icon, once per session (the bubbles' named links,
+    /// the link tiles of the Links tab, the Library and search).
+    pub(crate) fn want_link_icon(&mut self, host: String) {
+        if host.is_empty() {
+            return;
+        }
+        if self.link_icons_requested.insert(host.clone()) {
+            self.command(ClientCommand::FetchLinkIcon { host });
+        }
+    }
+
+    /// The fetched icon for a host and its tone, once the relay answered with a picture.
+    pub fn link_icon(&self, host: &str) -> Option<(&Arc<RenderImage>, crate::ui::link_tile::Tone)> {
+        let image = self.link_icons.get(host)?.as_ref()?;
+        let tone = self.link_icon_tones.get(host).copied().unwrap_or_default();
+        Some((image, tone))
     }
 
     /// Ask the source for the bytes of every image attachment in a chat that has no thumbnail yet.
@@ -9560,13 +9917,41 @@ impl AppState {
         };
         for message in messages {
             for part in &message.parts {
-                let Part::Attachment { attachment, .. } = part else {
-                    continue;
+                // A link preview's picture lives in the chat's slot like an attachment's; its
+                // site icon too, and a host without one is asked of the relay (the shared tile).
+                let key = match part {
+                    Part::LinkPreview { preview, .. } => {
+                        if let Some(icon) = preview
+                            .site_icon
+                            .as_ref()
+                            .filter(|i| !i.blob_ref.is_empty())
+                        {
+                            if self.thumbnails_requested.insert(icon.blob_ref.clone()) {
+                                self.command(ClientCommand::FetchThumbnail {
+                                    project_id: project_id.clone(),
+                                    key: icon.blob_ref.clone(),
+                                });
+                            }
+                        } else if let Some(host) =
+                            preview.site_host.clone().filter(|h| !h.is_empty())
+                        {
+                            if crate::ui::link_tile::Brand::for_host(&host).is_none() {
+                                self.want_link_icon(host);
+                            }
+                        }
+                        match preview.image.as_ref().map(|i| i.blob_ref.clone()) {
+                            Some(k) if !k.is_empty() => Some(k),
+                            _ => None,
+                        }
+                    }
+                    Part::Attachment { attachment, .. }
+                        if attachment.kind() == AttachmentKind::Image =>
+                    {
+                        attachment.blob_ref.clone()
+                    }
+                    _ => None,
                 };
-                if attachment.kind() != AttachmentKind::Image {
-                    continue;
-                }
-                let Some(key) = attachment.blob_ref.clone() else {
+                let Some(key) = key else {
                     continue;
                 };
                 // Optimistic send stores a decoded preview under `local:…`.

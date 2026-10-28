@@ -61,6 +61,7 @@ mod sites;
 mod skills;
 mod smoke;
 mod state;
+mod unfurl;
 mod upgrade;
 mod upgrade_carry;
 mod vault;
@@ -332,6 +333,7 @@ async fn main() -> anyhow::Result<()> {
         box_conns: Arc::new(Mutex::new(HashMap::new())),
         wake_started: Arc::new(Mutex::new(HashMap::new())),
         last_client_push: Arc::new(Mutex::new(HashMap::new())),
+        decisions_cache: Arc::new(std::sync::Mutex::new(Default::default())),
         stale_bounces: Arc::new(Mutex::new(HashMap::new())),
         conn_seq: Arc::new(AtomicU64::new(0)),
         relay_key,
@@ -639,6 +641,14 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/box/people/{id}", get(people::box_people_chat))
         .route(
+            "/box/people/{id}/gate",
+            post(room_health::post_gate_decision),
+        )
+        .route(
+            "/admin/room-health/{id}",
+            get(room_health::admin_room_health),
+        )
+        .route(
             "/projects/{id}/members",
             get(people::project_members_list).post(people::project_member_add),
         )
@@ -828,6 +838,10 @@ async fn main() -> anyhow::Result<()> {
             "/room/{project}/{chat}/messages/{message_id}",
             delete(moderation::delete_message),
         )
+        .route(
+            "/room/{project}/{chat}/messages/{message_id}/preview",
+            delete(moderation::remove_preview),
+        )
         .route("/blob/{project}/{key}", get(blobs::get).put(blobs::put))
         .route("/link-icon", get(link_icons::get))
         .route("/feedback", post(feedback::submit))
@@ -1002,7 +1016,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/secrets/pause", post(secrets::admin_pause))
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
         .layer(tower_http::trace::TraceLayer::new_for_http())
-        .layer(axum::middleware::from_fn(
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
             api_error_layer::rewrite_plain_api_errors,
         ))
         .with_state(state.clone());

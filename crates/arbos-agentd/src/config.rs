@@ -10,11 +10,14 @@ use serde_json::Value;
 use crate::isolation::RunAs;
 use crate::settings::{DecisionConfig, DecisionProvider};
 
-/// Decision model the group-chat responder decision uses unless the project says otherwise
+/// Decision model the group-chat respond judge uses unless the project says otherwise
 /// (`ARBOS_DECISION_SCORER`); TypeSafe Jev on OpenRouter's Decisions API.
 pub const DEFAULT_DECISION_SCORER: &str = "typesafe/jev-1.14";
-/// Yes-probability at or above which an agent replies (`ARBOS_DECISION_THRESHOLD`).
-pub const DEFAULT_DECISION_THRESHOLD: f64 = 0.5;
+/// Addressee probability at or above which an agent replies (`ARBOS_DECISION_THRESHOLD`).
+/// 0.60 from the Arbonites replay of 2026-10-27 (72 real rows, two passes): precision 0.99,
+/// recall 0.87, 77/78 silence cases silent; 0.65 trades three real follow-ups for the last
+/// borderline praise reply, 0.50 lets four "lean yes" remarks through.
+pub const DEFAULT_DECISION_THRESHOLD: f64 = 0.6;
 
 fn env_or(k: &str, d: &str) -> String {
     std::env::var(k)

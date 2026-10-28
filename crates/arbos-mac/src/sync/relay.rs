@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
@@ -57,9 +57,9 @@ use super::{
 use crate::model::{
     new_id, now_ms, trace_rows, AccountView, Attachment, AttachmentKind, BoxReport, BoxState, Call,
     CallEnded, CallLeft, CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView,
-    Chat, Effort, Id, Link, LinkState, Machine, MachineState, Message, Part, Person, Project,
-    ProjectDocView, ProjectSecrets, Reachable, ReplyRef, Role, Routine, RoutineRun, Sender,
-    ServerInfo, ThreadInfo,
+    ChartBody, Chat, Effort, Id, Link, LinkState, Machine, MachineState, Message, Part, Person,
+    Project, ProjectDocView, ProjectSecrets, Reachable, ReplyRef, Role, Routine, RoutineRun,
+    Sender, ServerInfo, ThreadInfo,
 };
 use crate::update;
 
@@ -185,9 +185,20 @@ struct QueuedSend {
     command: &'static str,
     answer: Option<(String, serde_json::Value)>,
     reply_to: Option<String>,
-    forwarded_from: Option<String>,
+    forwarded: Option<Forwarded>,
     reply_ref: Option<ReplyRef>,
     mentions: Vec<String>,
+}
+
+/// A bubble-menu Forward's extra freight on a send: who wrote the original
+/// (`forwardedFrom` on the row) and the chart bubbles to write again after the
+/// text and attachment parts — each chart's fallback picture is copied from
+/// `from_slot` like any attachment and linked to the new chart part
+/// ([feedback forward-attachments-mac-2026-10-27]).
+struct Forwarded {
+    from: String,
+    from_slot: String,
+    charts: Vec<ChartBody>,
 }
 
 struct Shared {
@@ -241,6 +252,17 @@ struct Shared {
     in_call: Mutex<Option<String>>,
     /// On-device store (#929); `None` without credentials or with `ARBOS_NO_STORE=1`.
     store: Mutex<Option<Store>>,
+    /// The 15 s secrets poll: one fetch in flight at a time, and a failure streak backs the
+    /// poll off (`secrets_poll_skip`) instead of asking — and failing — every tick
+    /// ([feedback toast-stack-mac-2026-10-27]).
+    secrets_inflight: AtomicBool,
+    secrets_poll_failures: AtomicU32,
+    secrets_poll_skip: AtomicU32,
+    /// When the relay last answered any request over HTTP (ms; any status — an answer is an
+    /// answer). The registry poll reads it so an odd failure (bad JSON, one project's 404) does
+    /// not leave a stale Offline / RelayDown on the connection pill ([feedback
+    /// stale-offline-pill-mac-2026-10-27]).
+    relay_answered_ms: AtomicU64,
     /// Room keys whose doc or cursor changed since the last save.
     dirty: Mutex<HashSet<Id>>,
     /// Silent error reports: one per signature per week (see `diagnostics.rs`).
@@ -437,6 +459,18 @@ impl Shared {
         }
     }
 
+    /// The relay answered a request (any status): the link is up, whatever else went wrong.
+    fn relay_answered(&self) {
+        self.relay_answered_ms
+            .store(crate::model::now_ms(), Ordering::SeqCst);
+    }
+
+    /// Did the relay answer anything within the last `within`?
+    fn relay_answered_within(&self, within: Duration) -> bool {
+        let last = self.relay_answered_ms.load(Ordering::SeqCst);
+        last > 0 && crate::model::now_ms().saturating_sub(last) < within.as_millis() as u64
+    }
+
     async fn delete(self: &Arc<Self>, path: &str) -> Result<()> {
         let resp = self
             .http
@@ -445,6 +479,7 @@ impl Shared {
             .send()
             .await
             .with_context(|| format!("DELETE {path}"))?;
+        self.relay_answered();
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
@@ -462,6 +497,7 @@ impl Shared {
             .send()
             .await
             .with_context(|| format!("PUT {path}"))?;
+        self.relay_answered();
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
@@ -617,6 +653,7 @@ impl Shared {
                 .send()
                 .await
                 .with_context(|| format!("GET {path}"))?;
+            self.relay_answered();
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             if !status.is_success() {
@@ -657,6 +694,7 @@ impl Shared {
                 req = req.header(*name, value);
             }
             let resp = req.send().await.with_context(|| format!("POST {path}"))?;
+            self.relay_answered();
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             if !status.is_success() {
@@ -701,6 +739,7 @@ impl Shared {
                 req = req.timeout(t);
             }
             let resp = req.send().await.with_context(|| format!("POST {path}"))?;
+            self.relay_answered();
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             if !status.is_success() {
@@ -731,6 +770,7 @@ impl Shared {
                 .send()
                 .await
                 .with_context(|| format!("PATCH {path}"))?;
+            self.relay_answered();
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             if !status.is_success() {
@@ -798,6 +838,10 @@ impl SyncSource for RelaySource {
                 avatars_done: Mutex::new(HashSet::new()),
                 me: Mutex::new(None),
                 store: Mutex::new(None),
+                secrets_inflight: AtomicBool::new(false),
+                secrets_poll_failures: AtomicU32::new(0),
+                secrets_poll_skip: AtomicU32::new(0),
+                relay_answered_ms: AtomicU64::new(0),
                 dirty: Mutex::new(HashSet::new()),
                 diagnostics: diagnostics::Diagnostics::load(),
                 matrix: Mutex::new(None),
@@ -991,7 +1035,7 @@ fn start_after_pairing(shared: &Arc<Shared>) {
         let shared = shared.clone();
         tokio::spawn(async move {
             refresh_connectors(&shared).await;
-            refresh_secrets(&shared).await;
+            refresh_secrets(&shared, SecretsWhy::Asked).await;
         });
     }
     {
@@ -1014,8 +1058,9 @@ fn start_after_pairing(shared: &Arc<Shared>) {
         let mut poll = interval(REGISTRY_POLL);
         loop {
             poll.tick().await;
-            // Pending secret requests show up without a manual refresh.
-            refresh_secrets(&shared).await;
+            // Pending secret requests show up without a manual refresh; a failing poll
+            // backs off and stays quiet (the pane's own note / the connection pill speak).
+            poll_secrets(&shared).await;
             match refresh_registry(&shared).await {
                 Ok(()) => {
                     let _ = shared.events.send(SyncEvent::RelayLink(LinkState::Live));
@@ -1038,9 +1083,14 @@ fn start_after_pairing(shared: &Arc<Shared>) {
                     // says nothing about the link.
                     eprintln!("relay registry: {text}");
                     let _ = shared.events.send(SyncEvent::Link(Link::Reconnecting));
-                    let fault = link_fault(&err);
-                    if matches!(fault, LinkState::Offline | LinkState::RelayDown) {
-                        let _ = shared.events.send(SyncEvent::RelayLink(fault));
+                    // A fresh socket / resolver fault is a verdict. An odd error after the
+                    // relay answered this tick (one project's 404, bad JSON, an empty body)
+                    // is not — and it must not leave an earlier Offline / RelayDown standing
+                    // on the pill ([feedback stale-offline-pill-mac-2026-10-27]: Jacob's Mac
+                    // read "Offline" under the header pill while it was talking to the relay).
+                    let answered = shared.relay_answered_within(2 * REGISTRY_POLL);
+                    if let Some(verdict) = registry_link_verdict(link_fault(&err), answered) {
+                        let _ = shared.events.send(SyncEvent::RelayLink(verdict));
                     }
                 }
             }
@@ -1542,9 +1592,18 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
                 let _ = shared.events.send(SyncEvent::Projects(snapshot));
                 refresh = true;
             }
-            // Channel banners: own item (the Mac also sees the room through its Matrix sync).
-            PushEventDto::ChannelMessage(_)
-            | PushEventDto::PeopleMessage(_)
+            PushEventDto::ChannelMessage(payload) => {
+                let _ = shared.events.send(SyncEvent::ChannelMessage {
+                    server_id: payload.server_id.clone(),
+                    server_name: payload.server_name.clone(),
+                    channel_id: payload.channel_id.clone(),
+                    channel_name: payload.channel_name.clone(),
+                    room_id: payload.room_id.clone(),
+                    sender: Sender::from(&payload.sender),
+                    text: payload.text.clone(),
+                });
+            }
+            PushEventDto::PeopleMessage(_)
             | PushEventDto::PeopleChatDeleted(_)
             | PushEventDto::ProjectMemberRemoved(_)
             | PushEventDto::PeopleInviteAccepted(_)
@@ -4318,6 +4377,125 @@ fn outgoing_paths(paths: Vec<PathBuf>) -> Vec<Outgoing> {
     paths.into_iter().map(Outgoing::Path).collect()
 }
 
+/// Put one outgoing attachment under `blob_slot` (a file read from disk, or a
+/// relay blob copied from its source slot) and describe it for the row. A failed
+/// read or upload is reported and leaves the part without a `ref`.
+async fn upload_outgoing(
+    shared: &Arc<Shared>,
+    blob_slot: &str,
+    outgoing: Outgoing,
+) -> UserAttachment {
+    let (name, mime, kind, bytes) = match outgoing {
+        Outgoing::Path(path) => {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("attachment")
+                .to_string();
+            let mime = mime_for(&path).to_string();
+            let bytes = tokio::fs::read(&path)
+                .await
+                .map_err(|err| format!("Could not read {}: {err}", path.display()));
+            (name, mime, None, bytes)
+        }
+        Outgoing::Copy {
+            from_slot,
+            attachment,
+        } => {
+            let bytes = match attachment.blob_ref.as_deref() {
+                Some(key) => fetch_blob_bytes(shared, &from_slot, key)
+                    .await
+                    .map(|(_, b)| b)
+                    .map_err(|err| format!("Could not read {}: {err}", attachment.name)),
+                None => Err(format!("{} has no file on the relay", attachment.name)),
+            };
+            (
+                attachment.name,
+                attachment.mime,
+                attachment.kind.map(attachment_kind_str),
+                bytes,
+            )
+        }
+    };
+    let key = format!("att-{}-{}", new_id().to_lowercase(), safe_name(&name));
+    let blob_ref = match bytes {
+        Ok(bytes) => {
+            let put = shared
+                .http
+                .put(format!("{}/blob/{}/{}", shared.http_url, blob_slot, key))
+                .bearer_auth(shared.token())
+                .header("content-type", mime.clone())
+                .body(bytes)
+                .send()
+                .await;
+            match put {
+                Ok(r) if r.status().is_success() => Some(key),
+                Ok(r) => {
+                    shared.fail("upload the attachment", r.status());
+                    None
+                }
+                Err(err) => {
+                    shared.fail("upload the attachment", &err);
+                    None
+                }
+            }
+        }
+        Err(err) => {
+            shared.fail(&format!("attach {name}"), &err);
+            None
+        }
+    };
+    UserAttachment {
+        name,
+        mime,
+        kind,
+        blob_ref,
+    }
+}
+
+/// The doc parts a forwarded chart becomes on the new row: its copied fallback
+/// picture (when it has one) naming the chart as `chartPart`, then the `chart`
+/// part itself with fresh ids and `fallback` pointing at that picture — the same
+/// shape `post_chart` writes, so a client that draws charts hides the picture
+/// and an older one shows it ([feedback forward-attachments-mac-2026-10-27]).
+fn forwarded_chart_parts(chart: &Part, fallback: Option<UserAttachment>) -> Vec<serde_json::Value> {
+    let Part::Chart {
+        spec_version,
+        chart,
+        table,
+        ..
+    } = chart
+    else {
+        return Vec::new();
+    };
+    let chart_id = new_id();
+    let mut out = Vec::new();
+    let fallback_id = fallback.map(|a| {
+        let id = new_id();
+        let mut attachment = json!({ "name": a.name, "mime": a.mime, "chartPart": chart_id });
+        if let Some(k) = a.kind {
+            attachment["kind"] = json!(k);
+        }
+        if let Some(r) = a.blob_ref {
+            attachment["ref"] = json!(r);
+        }
+        out.push(json!({ "id": id, "kind": "attachment", "attachment": attachment }));
+        id
+    });
+    let mut part = json!({
+        "id": chart_id,
+        "kind": "chart",
+        "specVersion": spec_version,
+        "chart": chart,
+        "table": table,
+    });
+    if let Some(f) = fallback_id {
+        part["fallback"] = json!(f);
+    }
+    out.push(part);
+    out
+}
+
 /// NewChat POST failed (or the body did not decode): drop the mint, notify, mark queued sends failed.
 fn fail_pending_new_chat(shared: &Shared, local_id: &str, error: UserError) {
     shared.chats.lock().unwrap().retain(|c| c.id != local_id);
@@ -4350,7 +4528,7 @@ async fn send_message(
     command: &'static str,
     answer: Option<(String, serde_json::Value)>,
     reply_to: Option<String>,
-    forwarded_from: Option<String>,
+    forwarded: Option<Forwarded>,
     reply_ref: Option<ReplyRef>,
     mentions: Vec<String>,
 ) {
@@ -4367,7 +4545,7 @@ async fn send_message(
                     command,
                     answer,
                     reply_to,
-                    forwarded_from,
+                    forwarded,
                     reply_ref,
                     mentions,
                 });
@@ -4395,78 +4573,35 @@ async fn send_message(
     });
     let mut user_attachments: Vec<UserAttachment> = Vec::new();
     for outgoing in attachments {
-        let (name, mime, kind, bytes) = match outgoing {
-            Outgoing::Path(path) => {
-                let name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("attachment")
-                    .to_string();
-                let mime = mime_for(&path).to_string();
-                let bytes = tokio::fs::read(&path)
-                    .await
-                    .map_err(|err| format!("Could not read {}: {err}", path.display()));
-                (name, mime, None, bytes)
-            }
-            Outgoing::Copy {
-                from_slot,
-                attachment,
-            } => {
-                let bytes = match attachment.blob_ref.as_deref() {
-                    Some(key) => fetch_blob_bytes(&shared, &from_slot, key)
-                        .await
-                        .map(|(_, b)| b)
-                        .map_err(|err| format!("Could not read {}: {err}", attachment.name)),
-                    None => Err(format!("{} has no file on the relay", attachment.name)),
-                };
-                (
-                    attachment.name,
-                    attachment.mime,
-                    attachment.kind.map(attachment_kind_str),
-                    bytes,
-                )
-            }
-        };
-        let key = format!("att-{}-{}", new_id().to_lowercase(), safe_name(&name));
-        let blob_ref = match bytes {
-            Ok(bytes) => {
-                let put = shared
-                    .http
-                    .put(format!("{}/blob/{}/{}", shared.http_url, blob_slot, key))
-                    .bearer_auth(shared.token())
-                    .header("content-type", mime.clone())
-                    .body(bytes)
-                    .send()
-                    .await;
-                match put {
-                    Ok(r) if r.status().is_success() => Some(key),
-                    Ok(r) => {
-                        shared.fail("upload the attachment", r.status());
-                        None
-                    }
-                    Err(err) => {
-                        shared.fail("upload the attachment", &err);
-                        None
-                    }
-                }
-            }
-            Err(err) => {
-                shared.fail(&format!("attach {name}"), &err);
-                None
-            }
-        };
-        user_attachments.push(UserAttachment {
-            name,
-            mime,
-            kind,
-            blob_ref,
-        });
+        user_attachments.push(upload_outgoing(&shared, &blob_slot, outgoing).await);
     }
     if let Some(wav) = voice_wav {
         if let Part::Attachment { attachment, .. } =
             upload_voice_memo(&shared, &blob_slot, wav).await
         {
             user_attachments.push(user_attachment_from_part(attachment));
+        }
+    }
+    // A forwarded chart's fallback picture travels like any attachment but is
+    // written as its own part (linked to the chart), so copy it now.
+    let mut chart_parts: Vec<serde_json::Value> = Vec::new();
+    if let Some(f) = forwarded.as_ref() {
+        for c in &f.charts {
+            let fallback = match c.fallback.clone() {
+                Some(attachment) => Some(
+                    upload_outgoing(
+                        &shared,
+                        &blob_slot,
+                        Outgoing::Copy {
+                            from_slot: f.from_slot.clone(),
+                            attachment,
+                        },
+                    )
+                    .await,
+                ),
+                None => None,
+            };
+            chart_parts.extend(forwarded_chart_parts(&c.chart, fallback));
         }
     }
     shared.unacked.lock().unwrap().insert(message_id.clone());
@@ -4543,8 +4678,11 @@ async fn send_message(
         let device = shared.device_id();
         doc.core.transact(|d| {
             let _ = d.append_user_message(&message_id, &text, &device, &opts);
-            if let Some(by) = forwarded_from.as_deref() {
-                d.set_message_fields(&message_id, &[("forwardedFrom", json!(by))]);
+            if let Some(f) = forwarded.as_ref() {
+                d.set_message_fields(&message_id, &[("forwardedFrom", json!(f.from))]);
+                for part in &chart_parts {
+                    let _ = d.add_part_from_json(&message_id, part);
+                }
             }
             if let Some(r) = reply_ref.as_ref() {
                 d.set_reply_ref(&message_id, r);
@@ -5154,35 +5292,6 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 let _ = room.cmds.send(RoomCmd::Typing(active));
             }
         }
-        ClientCommand::AddAgent {
-            chat_id,
-            project_id,
-        } => {
-            let shared = shared.clone();
-            tokio::spawn(async move {
-                match shared
-                    .post_json(
-                        &format!("/chats/{chat_id}/agents"),
-                        json!({ "project_id": project_id }),
-                    )
-                    .await
-                {
-                    Ok(_) => {
-                        if let Err(err) = refresh_registry(&shared).await {
-                            shared.diagnostic("refresh", format!("{err:#}"));
-                        }
-                    }
-                    Err(err) => {
-                        let _ = shared
-                            .events
-                            .send(SyncEvent::PeopleError(UserError::classify(
-                                "add the agent",
-                                &err,
-                            )));
-                    }
-                }
-            });
-        }
         ClientCommand::RemoveAgent {
             chat_id,
             project_id,
@@ -5667,23 +5776,37 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 Vec::new(),
             ));
         }
-        ClientCommand::ForwardText {
+        ClientCommand::ForwardMessage {
             chat_id,
             message_id,
+            from_slot,
             text,
+            attachments,
+            charts,
             forwarded_from,
         } => {
+            let outgoing = attachments
+                .into_iter()
+                .map(|attachment| Outgoing::Copy {
+                    from_slot: from_slot.clone(),
+                    attachment,
+                })
+                .collect();
             tokio::spawn(send_message(
                 shared.clone(),
                 chat_id,
                 message_id,
                 text,
-                Vec::new(),
+                outgoing,
                 None,
                 "send",
                 None,
                 None,
-                Some(forwarded_from),
+                Some(Forwarded {
+                    from: forwarded_from,
+                    from_slot,
+                    charts,
+                }),
                 None,
                 Vec::new(),
             ));
@@ -5832,6 +5955,44 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             format!("{err:#}"),
                         ),
                         _ => UserError::classify("delete the message", &err),
+                    };
+                    shared.fail_with(error);
+                }
+            });
+        }
+        ClientCommand::RemoveLinkPreview {
+            chat_id,
+            message_id,
+        } => {
+            // Same shape as a delete: the relay decides (`DELETE …/messages/{id}/preview`)
+            // and the change comes back as a relay-signed row.
+            let project_id = shared
+                .chats
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|c| c.id == chat_id)
+                .map(|c| c.project_id.clone())
+                .unwrap_or_else(|| chat_id.clone());
+            let is_people = shared.is_people(&chat_id);
+            let room = room::room_path(&project_id, &chat_id, is_people);
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .delete(&format!("/room/{room}/messages/{message_id}/preview"))
+                    .await
+                {
+                    let error = match err.downcast_ref::<RelayError>() {
+                        Some(e) if e.status == 403 => UserError::of(
+                            "remove the preview",
+                            ErrorClass::Refused {
+                                message: Some(
+                                    "You can only remove previews on your own messages.".into(),
+                                ),
+                            },
+                            format!("{err:#}"),
+                        ),
+                        _ => UserError::classify("remove the preview", &err),
                     };
                     shared.fail_with(error);
                 }
@@ -6131,7 +6292,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                                 q.command,
                                 q.answer,
                                 q.reply_to,
-                                q.forwarded_from,
+                                q.forwarded,
                                 q.reply_ref,
                                 q.mentions,
                             ));
@@ -7343,7 +7504,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         ClientCommand::SecretsRefresh => {
             let shared = shared.clone();
             tokio::spawn(async move {
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
             });
         }
         ClientCommand::DevicesRefresh => {
@@ -7431,7 +7592,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     approval_id,
                     result,
                 });
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
             });
         }
         ClientCommand::SecretAdd { item } => {
@@ -7460,7 +7621,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     }
                     Err(err) => shared.fail("save the secret", &err),
                 }
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
             });
         }
         ClientCommand::SecretPatch { id, body } => {
@@ -7469,7 +7630,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 if let Err(err) = shared.patch_json(&format!("/secrets/{id}"), body).await {
                     shared.fail("save the secret", &err);
                 }
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
             });
         }
         ClientCommand::SecretReplaceValue { id, body } => {
@@ -7481,7 +7642,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     ),
                     Err(err) => shared.fail("replace the value", &err),
                 }
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
             });
         }
         ClientCommand::SecretDelete { id } => {
@@ -7490,7 +7651,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 if let Err(err) = shared.delete(&format!("/secrets/{id}")).await {
                     shared.fail("delete the secret", &err);
                 }
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
             });
         }
         ClientCommand::SecretAccess {
@@ -7511,7 +7672,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 {
                     shared.fail("change who may use it", &err);
                 }
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
                 refresh_project_secrets(&shared, &project_id).await;
             });
         }
@@ -7524,7 +7685,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 {
                     shared.fail("revoke the access", &err);
                 }
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
             });
         }
         ClientCommand::SecretPerson {
@@ -7545,7 +7706,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 {
                     shared.fail("change that person's access", &err);
                 }
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
             });
         }
         ClientCommand::SecretPeopleAdd { id, handles } => {
@@ -7562,7 +7723,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         shared.fail(&format!("add @{handle}"), &err);
                     }
                 }
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
             });
         }
         ClientCommand::SecretPersonRemove { id, user_id } => {
@@ -7574,7 +7735,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 {
                     shared.fail("remove that person", &err);
                 }
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
             });
         }
         ClientCommand::SecretsPause { paused } => {
@@ -7586,7 +7747,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 {
                     shared.fail("change the pause", &err);
                 }
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
             });
         }
         ClientCommand::SecretDecide {
@@ -7621,7 +7782,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     }
                     Err(err) => shared.fail("answer the request", &err),
                 }
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
             });
         }
         ClientCommand::VaultConnect {
@@ -7665,7 +7826,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         });
                     }
                 }
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
             });
         }
         ClientCommand::VaultAccess {
@@ -7684,7 +7845,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 {
                     shared.fail("change the vault access", &err);
                 }
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
                 refresh_project_secrets(&shared, &project_id).await;
             });
         }
@@ -7700,7 +7861,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 {
                     shared.fail("save the item name", &err);
                 }
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
             });
         }
         ClientCommand::VaultReplaceToken { id, token } => {
@@ -7728,7 +7889,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         });
                     }
                 }
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
             });
         }
         ClientCommand::VaultDisconnect { id } => {
@@ -7737,7 +7898,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 if let Err(err) = shared.delete(&format!("/vaults/{id}")).await {
                     shared.fail("disconnect the vault", &err);
                 }
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
             });
         }
         ClientCommand::RoutinesRefresh { project_id } => {
@@ -8261,17 +8422,74 @@ async fn refresh_connectors(shared: &Arc<Shared>) {
     }
 }
 
+/// Why a secrets refresh runs: a person asked (the pane opened, Refresh, after a save — the
+/// pane's note shows a failure) or the 15 s poll, which is quiet about failures (the
+/// connection pill is the one place a link fault shows) and backs off while they continue.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SecretsWhy {
+    Asked,
+    Poll,
+}
+
+/// How many poll ticks to skip after `failures` failures in a row: 1, 2, 4, 8, 16, 20 (15 s
+/// ticks → the poll asks every 30 s, 1 min, 2 min, 4 min, 5 min, 5 min…). Zero while healthy.
+pub(crate) fn secrets_poll_skip_after(failures: u32) -> u32 {
+    match failures {
+        0 => 0,
+        1 => 1,
+        2 => 2,
+        3 => 4,
+        4 => 8,
+        5 => 16,
+        _ => 20,
+    }
+}
+
+/// The poll's turn: runs the refresh unless the streak says to skip this tick.
+async fn poll_secrets(shared: &Arc<Shared>) {
+    let skip = shared.secrets_poll_skip.load(Ordering::SeqCst);
+    if skip > 0 {
+        shared.secrets_poll_skip.store(skip - 1, Ordering::SeqCst);
+        return;
+    }
+    refresh_secrets(shared, SecretsWhy::Poll).await;
+}
+
 /// Settings → Secrets: `GET /secrets` + `GET /secrets/requests` → one view (D83). Never values.
-async fn refresh_secrets(shared: &Arc<Shared>) {
-    let (overview, requests) = tokio::join!(
+/// One fetch at a time: a second call while one is in flight does nothing (the running one
+/// delivers the view).
+async fn refresh_secrets(shared: &Arc<Shared>, why: SecretsWhy) {
+    if shared
+        .secrets_inflight
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    let outcome = tokio::join!(
         shared.get_json("/secrets"),
         shared.get_json("/secrets/requests")
     );
-    let (overview, requests) = match (overview, requests) {
-        (Ok(o), Ok(r)) => (o, r),
+    shared.secrets_inflight.store(false, Ordering::SeqCst);
+    let (overview, requests) = match outcome {
+        (Ok(o), Ok(r)) => {
+            shared.secrets_poll_failures.store(0, Ordering::SeqCst);
+            shared.secrets_poll_skip.store(0, Ordering::SeqCst);
+            (o, r)
+        }
         (Err(err), _) | (_, Err(err)) => {
-            if !format!("{err:#}").contains("HTTP 404") {
-                shared.fail("load your secrets", &err);
+            if format!("{err:#}").contains("HTTP 404") {
+                return;
+            }
+            match why {
+                SecretsWhy::Asked => shared.fail("load your secrets", &err),
+                SecretsWhy::Poll => {
+                    let failures = shared.secrets_poll_failures.fetch_add(1, Ordering::SeqCst) + 1;
+                    shared
+                        .secrets_poll_skip
+                        .store(secrets_poll_skip_after(failures), Ordering::SeqCst);
+                    shared.diagnostic("secrets-poll", format!("{err:#}"));
+                }
             }
             return;
         }
@@ -8406,6 +8624,19 @@ fn link_fault(err: &anyhow::Error) -> LinkState {
         }
     }
     LinkState::Reconnecting
+}
+
+/// What the registry poll tells the connection pill after a failed refresh: a fresh socket /
+/// resolver fault (`Offline` / `RelayDown`) goes up as it is; anything else is a verdict of
+/// `Live` when the relay answered something within the last two polls (the link is fine, the
+/// refresh tripped on content), and no verdict at all when it did not (nothing new to say —
+/// the earlier state stands until a fault or an answer).
+fn registry_link_verdict(fault: LinkState, answered_recently: bool) -> Option<LinkState> {
+    match fault {
+        LinkState::Offline | LinkState::RelayDown => Some(fault),
+        _ if answered_recently => Some(LinkState::Live),
+        _ => None,
+    }
 }
 
 /// Socket-level verdict: no route / no DNS is this Mac being offline; a refusal
@@ -8703,5 +8934,49 @@ mod refused_retry_tests {
             json!({ "chat_id": "dm-1", "by_handle": "sam" }),
         );
         assert_eq!(refusal_nudge_chat(&deleted), None);
+    }
+}
+
+/// [feedback toast-stack-mac-2026-10-27]: a failing 15 s poll asks less and less often
+/// instead of failing — and toasting — every tick.
+#[cfg(test)]
+mod secrets_poll_tests {
+    use super::secrets_poll_skip_after;
+
+    #[test]
+    fn a_failing_poll_backs_off_to_five_minutes_and_a_success_resets_it() {
+        // Ticks skipped after n failures in a row: 15 s ticks → asks at 30 s, 1, 2, 4, 5 min…
+        assert_eq!(
+            (0..8).map(secrets_poll_skip_after).collect::<Vec<_>>(),
+            vec![0, 1, 2, 4, 8, 16, 20, 20]
+        );
+        // Longest gap between two asks: (20 + 1) × 15 s ≈ 5 min.
+        assert!((secrets_poll_skip_after(99) + 1) * 15 <= 5 * 60 + 15);
+    }
+}
+
+/// [feedback stale-offline-pill-mac-2026-10-27]: the pill's Offline never outlives the relay's
+/// next answer.
+#[cfg(test)]
+mod registry_link_tests {
+    use super::{registry_link_verdict, LinkState};
+
+    #[test]
+    fn a_fresh_fault_goes_up_and_an_odd_error_after_an_answer_clears_a_stale_one() {
+        assert_eq!(
+            registry_link_verdict(LinkState::Offline, true),
+            Some(LinkState::Offline)
+        );
+        assert_eq!(
+            registry_link_verdict(LinkState::RelayDown, false),
+            Some(LinkState::RelayDown)
+        );
+        // One project's 404 / bad JSON after the relay answered: the link is Live.
+        assert_eq!(
+            registry_link_verdict(LinkState::Reconnecting, true),
+            Some(LinkState::Live)
+        );
+        // The same with no answer at all this tick says nothing new.
+        assert_eq!(registry_link_verdict(LinkState::Reconnecting, false), None);
     }
 }

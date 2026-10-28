@@ -113,6 +113,8 @@ const ICONS: &[(&str, &str)] = &[
     icon!("check", "<path d=\"M5 12.5l4.5 4.5L19 7\" stroke-width=\"2.6\"/>"),
     icon!("globe", "<circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18\"/>"),
     icon!("doc", "<path d=\"M7 3h7l5 5v13H7z\"/><path d=\"M14 3v5h5\"/>"),
+    // Group pane's Description row (SF `text.alignleft`): three left-aligned lines.
+    icon!("text-align-left", "<path d=\"M4 7h16M4 12h11M4 17h14\"/>"),
     // Settings → Secrets (D83): key tile, pause switch, vault.
     icon!("key", "<circle cx=\"8\" cy=\"15\" r=\"4\"/><path d=\"M11 12l9-9M16 6l2 2M13 9l2 2\"/>"),
     icon!("pause", "<rect x=\"6\" y=\"5\" width=\"4\" height=\"14\" rx=\"1\" fill=\"#000\"/><rect x=\"14\" y=\"5\" width=\"4\" height=\"14\" rx=\"1\" fill=\"#000\"/>"),
@@ -246,6 +248,10 @@ impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         // D92 leaf avatars: `leaves/<slug>.svg` from the shared art in arbos-core.
         if let Some(bytes) = crate::ui::avatars::leaf_asset_bytes(path) {
+            return Ok(Some(Cow::Borrowed(bytes)));
+        }
+        // The link tiles' bundled brand marks (`brands/<slug>.svg`).
+        if let Some(bytes) = crate::ui::link_tile::brand_asset_bytes(path) {
             return Ok(Some(Cow::Borrowed(bytes)));
         }
         Ok(ICONS
@@ -502,14 +508,17 @@ mod tests {
     /// The message menu's glyphs are one set: outline strokes of the pack's
     /// weight (no `fill`, no `stroke-width` of their own) and one optical size
     /// (anchors inside the 24 grid's 3…21 band, 13…18 pt across) — Copy,
-    /// Reply, Forward, Reply in DM and Delete read as siblings.
+    /// Reply, Forward, Reply in DM, Remove preview and Delete read as siblings.
     #[test]
     fn message_menu_glyphs_share_one_set_weight_and_size() {
         let names: Vec<&str> = crate::ui::message_menu::ITEMS
             .iter()
             .map(|i| i.glyph())
             .collect();
-        assert_eq!(names, ["copy", "reply", "forward", "bubble", "trash"]);
+        assert_eq!(
+            names,
+            ["copy", "reply", "forward", "bubble", "link", "trash"]
+        );
         for name in names {
             let b = glyph(name);
             assert!(

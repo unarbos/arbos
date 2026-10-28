@@ -2,6 +2,8 @@
 //! `crdt-sync.md` §6). No GPUI, no Loro: the sync layer fills these in, the
 //! views only read them.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
 pub use arbos_core::doc::ReplyRef;
@@ -128,6 +130,10 @@ pub struct Project {
     /// chat ([feedback blocked-state-mac-2026-10-26]): their rows are hidden for me alone.
     #[serde(default)]
     pub blocked_senders: Vec<String>,
+    /// People chat: my membership role on the relay (`me.role`: `owner`, `admin` or
+    /// `member`); `None` when the relay did not say (fixture, older cache).
+    #[serde(default)]
+    pub my_role: Option<String>,
 }
 
 /// One row of an agent's "Who may message X" card (`message_grants` on the project).
@@ -210,6 +216,20 @@ impl Project {
     /// A people group chat (several humans, no project).
     pub fn is_people_group(&self) -> bool {
         self.kind == SpaceKind::Group
+    }
+
+    /// May I change this group's name, picture and description? The owner and admins
+    /// only — the relay refuses everyone else (`PATCH /chats/{id}` 403 since
+    /// 2026-10-27, after members renamed Arbonites), so the controls hide for them.
+    /// Without a role from the relay only the owner (by handle) counts.
+    pub fn may_edit_group_settings(&self, me_handle: &str) -> bool {
+        if !self.is_people_group() {
+            return false;
+        }
+        match self.my_role.as_deref() {
+            Some(role) => role == "owner" || role == "admin",
+            None => self.owner_handle.as_deref() == Some(me_handle),
+        }
     }
 
     /// Shown as a group page: a people group or a project with other humans in it.
@@ -1504,8 +1524,105 @@ pub enum Part {
         #[serde(default)]
         fallback: Option<String>,
     },
+    /// Link preview ([feedback link-embeds-mac-2026-10-27], #2065): the card the relay
+    /// unfurled for the message's first bare URL. Read-only here; `preview: "off"` on the
+    /// message hides it.
+    LinkPreview {
+        id: Id,
+        #[serde(flatten)]
+        preview: Box<LinkPreview>,
+    },
     #[serde(other)]
     Unknown,
+}
+
+/// What a `link_preview` part carries (relay `unfurl.rs`, spec 1). Everything but `title` is
+/// optional; `facts` are pre-formatted footer strings in order.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkPreview {
+    #[serde(default)]
+    pub spec_version: u32,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub canonical_url: String,
+    /// `spotify` `youtube` `x` `github` `bluesky` `vimeo` `loom` `soundcloud` `apple_music`
+    /// `google_maps` `wikipedia` `arbos` `file` `web`.
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub provider_name: String,
+    /// `song` `album` … `pull_request` `issue` `repo` `article` `image` `file` `place` `page`.
+    #[serde(default, rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub subtitle: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub facts: Vec<String>,
+    /// `open` `merged` `closed` `draft`.
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub diff: Option<PreviewDiff>,
+    /// "18:24" on a video thumbnail.
+    #[serde(default)]
+    pub duration: Option<String>,
+    #[serde(default)]
+    pub image: Option<PreviewImage>,
+    /// The final host ("github.com"): the shared link-icon tile picks its mark by it.
+    #[serde(default)]
+    pub site_host: Option<String>,
+    /// Reserved for the shared link-icon tile (a blob in the chat's slot); unused here.
+    #[serde(default)]
+    pub site_icon: Option<PreviewImage>,
+    /// `compact` (art row) or `expanded` (media on top).
+    #[serde(default)]
+    pub layout: String,
+}
+
+impl LinkPreview {
+    pub fn expanded(&self) -> bool {
+        self.layout == "expanded" && self.image.is_some()
+    }
+
+    /// "<title> — <provider>" for quote headers and one-line previews.
+    pub fn one_line(&self) -> String {
+        if self.provider_name.is_empty() {
+            self.title.clone()
+        } else {
+            format!("{} — {}", self.title, self.provider_name)
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewImage {
+    #[serde(rename = "ref", default)]
+    pub blob_ref: String,
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+    #[serde(default)]
+    pub mime: String,
+    #[serde(default)]
+    pub art: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PreviewDiff {
+    #[serde(default)]
+    pub additions: u64,
+    #[serde(default)]
+    pub deletions: u64,
+    #[serde(default)]
+    pub files: u64,
 }
 
 fn open_state() -> QuestionState {
@@ -2085,11 +2202,112 @@ pub struct Message {
     /// the project; never read as the user's words.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub greeting: bool,
+    /// `"off"` once the sender removed the link preview for everyone (#2065); the
+    /// `link_preview` part, if any is still there, is not drawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
 }
 
 /// The reaction capsule's set, in Grok Bot's order (the iPhone's
 /// `MessageReaction.palette`); any other emoji comes from the system picker.
 pub const REACTION_PALETTE: [&str; 5] = ["😂", "👍", "👎", "❤️", "🎉"];
+
+/// What a message says and shows, as one thing — the accessor Forward, Copy and any
+/// other "take this message" action read, so they all see the same parts
+/// ([feedback forward-attachments-mac-2026-10-27]): the prose, every attachment that is
+/// on the relay (a chart's fallback picture excluded), and every chart with its fallback.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MessageBody {
+    pub text: String,
+    pub attachments: Vec<Attachment>,
+    pub charts: Vec<ChartBody>,
+}
+
+/// A chart bubble as a message carries it: the `chart` part plus its fallback picture
+/// when the message has one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChartBody {
+    /// Always a `Part::Chart`.
+    pub chart: Part,
+    pub fallback: Option<Attachment>,
+}
+
+/// An attachment the relay holds (not a `local:` key still uploading).
+fn on_relay(a: &Attachment) -> bool {
+    a.blob_ref
+        .as_deref()
+        .is_some_and(|k| !k.is_empty() && !k.starts_with("local:"))
+}
+
+impl Message {
+    /// The message's body, in part order; `None` when there is nothing to take —
+    /// no words, no attachment on the relay, no chart. A picture-only message has a
+    /// body like any other.
+    pub fn body(&self) -> Option<MessageBody> {
+        let text = self.plain_text().trim().to_owned();
+        let chart_fallbacks: HashSet<&str> = self
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                Part::Chart {
+                    fallback: Some(f), ..
+                } => Some(f.as_str()),
+                _ => None,
+            })
+            .collect();
+        let attachments: Vec<Attachment> = self
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                Part::Attachment { id, attachment }
+                    if !chart_fallbacks.contains(id.as_str()) && on_relay(attachment) =>
+                {
+                    Some(attachment.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        let charts: Vec<ChartBody> = self
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                Part::Chart { fallback, .. } => {
+                    let fallback = fallback.as_deref().and_then(|f| {
+                        self.parts.iter().find_map(|q| match q {
+                            Part::Attachment { id, attachment }
+                                if id == f && on_relay(attachment) =>
+                            {
+                                Some(attachment.clone())
+                            }
+                            _ => None,
+                        })
+                    });
+                    Some(ChartBody {
+                        chart: p.clone(),
+                        fallback,
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+        (!text.is_empty() || !attachments.is_empty() || !charts.is_empty()).then_some(MessageBody {
+            text,
+            attachments,
+            charts,
+        })
+    }
+
+    /// Does the message hold an attachment whose upload has not finished (a `local:` key)?
+    pub fn has_uploading_attachment(&self) -> bool {
+        self.parts.iter().any(|p| match p {
+            Part::Attachment { attachment, .. } => attachment
+                .blob_ref
+                .as_deref()
+                .is_some_and(|k| k.starts_with("local:")),
+            _ => false,
+        })
+    }
+}
 
 impl Message {
     /// Reactions as `(emoji, senders)`, palette order first, then the rest
@@ -2261,6 +2479,19 @@ impl Message {
         self.parts
             .iter()
             .any(|p| matches!(p, Part::Chart { id, .. } if id == part_id))
+    }
+
+    /// The link preview the relay attached, unless the sender switched it off.
+    pub fn link_preview(&self) -> Option<(&Id, &LinkPreview)> {
+        if self.preview.as_deref() == Some("off") {
+            return None;
+        }
+        self.parts.iter().find_map(|p| match p {
+            Part::LinkPreview { id, preview } if !preview.title.trim().is_empty() => {
+                Some((id, &**preview))
+            }
+            _ => None,
+        })
     }
 
     /// Open `question` parts of this message, newest last.
@@ -3885,6 +4116,7 @@ impl OptimisticNotice {
             }],
             hidden_parts: Vec::new(),
             greeting: false,
+            preview: None,
         }
     }
 
@@ -4160,6 +4392,52 @@ mod add_members_tests {
         let plan = add_members_plan(&g, "unarbos", &[person("gh_1", "allan")], &[]);
         assert_eq!(plan.chat_id, "chat_testing");
         assert!(plan.handles.is_empty() && plan.agent_ids.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod group_settings_permission_tests {
+    //! The group pane's edit controls (picture crayon, inline name) follow the relay's
+    //! rule: owner and admins only ([feedback group-settings-permissions-2026-10-27]).
+
+    use super::*;
+
+    fn group(my_role: Option<&str>, owner: &str) -> Project {
+        Project {
+            id: "g".into(),
+            kind: SpaceKind::Group,
+            owner_handle: Some(owner.into()),
+            my_role: my_role.map(str::to_owned),
+            ..Project::default()
+        }
+    }
+
+    #[test]
+    fn owner_and_admin_edit_members_do_not() {
+        assert!(group(Some("owner"), "me").may_edit_group_settings("me"));
+        assert!(group(Some("admin"), "alice").may_edit_group_settings("me"));
+        assert!(!group(Some("member"), "alice").may_edit_group_settings("me"));
+        // The relay's role wins over the handle match.
+        assert!(!group(Some("member"), "me").may_edit_group_settings("me"));
+    }
+
+    #[test]
+    fn without_a_role_only_the_owner_by_handle_edits() {
+        assert!(group(None, "me").may_edit_group_settings("me"));
+        assert!(!group(None, "alice").may_edit_group_settings("me"));
+        let mut unknown_owner = group(None, "alice");
+        unknown_owner.owner_handle = None;
+        assert!(!unknown_owner.may_edit_group_settings("me"));
+    }
+
+    #[test]
+    fn dms_and_projects_have_no_group_settings() {
+        let mut dm = group(Some("owner"), "me");
+        dm.kind = SpaceKind::Dm;
+        assert!(!dm.may_edit_group_settings("me"));
+        let mut project = group(Some("owner"), "me");
+        project.kind = SpaceKind::Project;
+        assert!(!project.may_edit_group_settings("me"));
     }
 }
 
