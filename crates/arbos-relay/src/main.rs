@@ -46,6 +46,7 @@ mod moderation;
 mod notices;
 mod notify;
 mod outside;
+mod outside_log;
 mod outside_sidecar;
 mod outside_wake;
 mod people;
@@ -612,6 +613,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/llms.txt", get(outside_sidecar::llms_txt))
         .route("/agents/llms.txt", get(outside_sidecar::llms_txt))
         .route("/sidecar/install.sh", get(outside_sidecar::install_sh))
+        // Session log (spec §13.3): the sidecar uploads, the owner reads.
+        .route("/asp/log", post(outside_log::upload))
+        .route("/outside-agents/{id}/log", get(outside_log::read))
         .route(
             "/projects/{project_id}/chats/{chat_id}/notify",
             post(notify::notify_project_chat),
