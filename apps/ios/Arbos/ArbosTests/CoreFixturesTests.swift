@@ -879,4 +879,20 @@ final class CoreFixturesTests: XCTestCase {
             spendCapUsd: 0
         )
     }
+
+    // MARK: Animated image frames (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG)
+
+    /// GIF and animated WebP fixtures decode to 3 frames; a PNG stays still (`nil`).
+    func testAnimatedImageFramesFixtures() throws {
+        let gif = try fixtureData("anim_three.gif")
+        let gifFrames = try XCTUnwrap(AnimatedImageFrames.frames(from: gif))
+        XCTAssertEqual(gifFrames.images.count, 3)
+
+        let webp = try fixtureData("anim_three.webp")
+        let webpFrames = try XCTUnwrap(AnimatedImageFrames.frames(from: webp))
+        XCTAssertEqual(webpFrames.images.count, 3)
+
+        let png = try fixtureData("anim_still.png")
+        XCTAssertNil(AnimatedImageFrames.frames(from: png), "PNG is still")
+    }
 }

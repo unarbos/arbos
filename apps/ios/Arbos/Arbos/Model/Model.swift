@@ -486,6 +486,14 @@ struct ToolCall: Codable, Equatable {
     var name: String
 }
 
+/// Where a GIF / sticker came from (`source` on the attachment map). Old
+/// messages and pastes have none (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG).
+struct AttachmentSource: Equatable {
+    var provider: String
+    var id: String
+    var pageUrl: String
+}
+
 struct Attachment: Codable, Equatable {
     var name: String
     var mime: String
@@ -497,10 +505,56 @@ struct Attachment: Codable, Equatable {
     /// The fallback picture of a chart bubble: names the `chart` part of the same message.
     /// A client that draws the chart hides this attachment ([feedback chart-bubble-ios-2026-10-26]).
     var chartPart: String? = nil
+    /// GIF-picker attribution; when set the bubble shows "via \<provider\>".
+    var source: AttachmentSource? = nil
 
     enum CodingKeys: String, CodingKey {
-        case name, mime, kind, bytes, chartPart
+        case name, mime, kind, bytes, chartPart, source
         case blobRef = "ref"
+    }
+
+    init(name: String, mime: String, blobRef: String?, kind: String? = nil, bytes: Int64? = nil,
+         chartPart: String? = nil, source: AttachmentSource? = nil) {
+        self.name = name
+        self.mime = mime
+        self.blobRef = blobRef
+        self.kind = kind
+        self.bytes = bytes
+        self.chartPart = chartPart
+        self.source = source
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        mime = try c.decode(String.self, forKey: .mime)
+        blobRef = try c.decodeIfPresent(String.self, forKey: .blobRef)
+        kind = try c.decodeIfPresent(String.self, forKey: .kind)
+        bytes = try c.decodeIfPresent(Int64.self, forKey: .bytes)
+        chartPart = try c.decodeIfPresent(String.self, forKey: .chartPart)
+        if let map = try c.decodeIfPresent([String: String].self, forKey: .source),
+           let provider = map["provider"], let id = map["id"],
+           let pageUrl = map["pageUrl"] ?? map["page_url"] {
+            source = AttachmentSource(provider: provider, id: id, pageUrl: pageUrl)
+        } else {
+            source = nil
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(name, forKey: .name)
+        try c.encode(mime, forKey: .mime)
+        try c.encodeIfPresent(blobRef, forKey: .blobRef)
+        try c.encodeIfPresent(kind, forKey: .kind)
+        try c.encodeIfPresent(bytes, forKey: .bytes)
+        try c.encodeIfPresent(chartPart, forKey: .chartPart)
+        if let source {
+            try c.encode(
+                ["provider": source.provider, "id": source.id, "pageUrl": source.pageUrl],
+                forKey: .source
+            )
+        }
     }
 
     /// "1.8 MB" style size, empty when unknown (Mac `size_label`).
@@ -1365,6 +1419,14 @@ enum DocJSON {
             // Nested `{ attachment: { name, mime, ref } }` is the schema; tolerate a
             // flat part map if a writer omitted the wrapper.
             let a = (pm["attachment"] as? [String: Any]) ?? pm
+            let source: AttachmentSource? = {
+                guard let map = a["source"] as? [String: Any],
+                      let provider = str(map["provider"]), !provider.isEmpty,
+                      let sid = str(map["id"]),
+                      let pageUrl = str(map["pageUrl"]) ?? str(map["page_url"]), !pageUrl.isEmpty
+                else { return nil }
+                return AttachmentSource(provider: provider, id: sid, pageUrl: pageUrl)
+            }()
             return .attachment(
                 id: id,
                 attachment: Attachment(
@@ -1373,7 +1435,8 @@ enum DocJSON {
                     blobRef: str(a["ref"]),
                     kind: str(a["kind"]).flatMap { $0 == "attachment" ? nil : $0 },
                     bytes: (a["bytes"] as? NSNumber)?.int64Value,
-                    chartPart: str(a["chartPart"])
+                    chartPart: str(a["chartPart"]),
+                    source: source
                 )
             )
         case "chart":
