@@ -28,9 +28,9 @@ use crate::model::{
 use crate::ui::avatars::{self, AvatarState};
 use crate::ui::glass;
 use crate::ui::hoverpick;
-use crate::ui::icons::icon;
 use crate::ui::motion::PulseClock;
 use crate::ui::routines::rel_time;
+use crate::ui::sf_symbols;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, TEXT_SMALL};
 
@@ -606,7 +606,11 @@ fn details_sections(
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(icon("code", 18.0, theme.text_muted))
+                        .child(sf_symbols::glyph(
+                            "chevron.left.forwardslash.chevron.right",
+                            18.0,
+                            theme.text_muted,
+                        ))
                         .into_any_element()
                 };
                 let status = coding_status(
