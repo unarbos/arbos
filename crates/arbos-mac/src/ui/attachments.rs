@@ -242,7 +242,28 @@ fn picture_bubble(
             crate::ui::transcript::forwarded_header(by.to_owned(), theme.text),
         ));
     }
-    out.child(bubble).into_any_element()
+    out = out.child(bubble);
+    // GIF-picker attribution (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG): a small
+    // "via <provider>" under the picture opens the source page. Nothing sets
+    // `source` yet; when a later picker does, this is where it shows.
+    if let Some(src) = attachment.source.clone() {
+        let label = format!("via {}", src.provider);
+        let url = src.page_url.clone();
+        out = out.child(
+            div()
+                .id(SharedString::from(format!("{row_id}-via")))
+                .pl(px(6.0))
+                .max_w(px(w))
+                .text_size(px(11.0))
+                .text_color(theme.text_faint)
+                .cursor_pointer()
+                .on_click(move |_, _, cx| {
+                    cx.open_url(&url);
+                })
+                .child(label),
+        );
+    }
+    out.into_any_element()
 }
 
 /// Grok's doc card (web-08): kind-coloured doc glyph, name, "PDF · 1.8 MB";
