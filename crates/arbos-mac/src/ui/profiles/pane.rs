@@ -13,7 +13,7 @@ use gpui::{
 };
 
 use crate::app::{AppState, ProfilePage};
-use crate::ui::icons::icon;
+use crate::ui::sf_symbols;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, TEXT_TINY};
 
@@ -160,7 +160,7 @@ fn glyph_tile(glyph: &'static str, theme: &Theme) -> AnyElement {
         .flex()
         .items_center()
         .justify_center()
-        .child(icon(glyph, HERO_AVATAR * 0.45, theme.text))
+        .child(sf_symbols::glyph(glyph, HERO_AVATAR * 0.45, theme.text))
         .into_any_element()
 }
 
@@ -262,7 +262,7 @@ pub fn render(pane: ProfilePane, shell: &Shell, cx: &mut Context<Shell>) -> Stat
             .items_center()
             .gap(px(6.0))
             .child(pane.hero.name)
-            .child(icon(glyph, 14.0, theme.text_muted))
+            .child(sf_symbols::glyph(glyph, 14.0, theme.text_muted))
             .into_any_element(),
         None => pane.hero.name,
     };

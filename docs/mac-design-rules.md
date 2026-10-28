@@ -664,17 +664,29 @@ media) centre the rail on their own row as before.
 Code: `transcript.rs` `HoverFade::set(key, row, …)`, `rail_centre()`,
 `hover_rail_frame()`; pinned by `rail_tests`.
 
-## Menus
+## Menus and every other glyph: standard SF Symbols
 
-### Standard SF Symbols, same names as iPhone (Jacob 2026-10-27, [feedback menu-sf-symbols-2026-10-27]; supersedes [feedback reply-in-dm-icon-2026-10-27])
+### Standard SF Symbols, same names as iPhone (Jacob 2026-10-27, [feedback menu-sf-symbols-2026-10-27]; every surface [feedback sf-symbols-everywhere-mac-2026-10-28]; supersedes [feedback reply-in-dm-icon-2026-10-27])
 
-**Every glyph in a menu is Apple's system symbol, by its SF Symbols name —
-the same name the iPhone passes to `Image(systemName:)` — never a glyph of
-our own.** Jacob, on the redrawn speech bubble of v0.6.302: "use standard
-versions instead of making them." The hand-drawn pack (`ui/icons.rs`) is
-frozen; it stays only as the fallback for a symbol the running macOS lacks and
-for the surfaces the follow-up release converts (toolbar discs, status row,
-composer, settings rows, sidebar glyphs — listed in that issue).
+**Every glyph the Mac app draws — menus, toolbar and strip discs, the rail,
+chat header, composer, transcript marks, hover rail and reactions, footer,
+settings rows and Devices tiles, people and profile panes, connectors,
+library and media viewer, call view, search surfaces — is Apple's system
+symbol, by its SF Symbols name, the same name the iPhone passes to
+`Image(systemName:)`; never a glyph of our own.** Jacob, on the redrawn
+speech bubble of v0.6.302: "use standard versions instead of making them."
+The hand-drawn pack (`ui/icons.rs`) is frozen and now serves only as the
+fallback for a symbol the running macOS lacks (and the Linux dev build);
+its one living custom path is the activity spinner (marked
+`// icon: custom` — SF has no fading-spoke dial). Brand art (the leaf
+avatars, the black-and-white tree) is not an icon and is not in this rule.
+
+| Surface rule | Detail | Where |
+|---|---|---|
+| Drop-in | `sf_symbols::glyph(name, size, color)` replaces `icons::icon(name, size, color)` one for one: same `size` box in the layout, the symbol at **`size × 0.85` points** (`GLYPH_POINT_RATIO`, the menu precedent 13-in-15), **medium** weight (the pack's 2 pt stroke on the 24 grid ≈ SF Medium), semibold for the marks the pack drew heavier (`checkmark`, `arrow.up`, `arrow.down`, `waveform`, `number`, `chevron.left.forwardslash.chevron.right`, `exclamationmark.circle`) | `sf_symbols::glyph`, `HEAVIER` |
+| Discs | strip / rail / header discs keep `CONTROL_GLYPH` 19 and `CONTROL_GLYPH_WIDE` 17 boxes; `magnifyingglass` inks ≈ 14.5 of Grok's 14, `plus` ≈ 12.9 of 13, `sidebar.left` ≈ 14 — pinned by `sidebar::strip_tests::the_three_discs_are_groks_size` | `StripControl::glyph`, `rail::disc`, `glass::control_disc` |
+| Names | the full pack → symbol map is `sf_symbols::FALLBACKS` (79 names, every one present on macOS 26.6 — probed): `search` → `magnifyingglass`, `person` → `person.fill`, `people` → `person.2.fill`, `gear` → `gearshape`, `check` → `checkmark`, `hash` → `number`, `code` → `chevron.left.forwardslash.chevron.right`, `camera` / `camera-off` → `video.fill` / `video.slash.fill`, `mic-off` → `mic.slash`, `phone-down` → `phone.down.fill`, `share` → `square.and.arrow.up`, `leave` → `rectangle.portrait.and.arrow.right`, `cloud-download` → `icloud.and.arrow.down`, `window` → `macwindow`, `desktop` / `laptop` / `smartphone` / `bot` → `desktopcomputer` / `laptopcomputer` / `iphone` / `server.rack`, `circle-half` → `circle.lefthalf.filled`, `info` → `info.circle`, `exclamation` → `exclamationmark.circle`, `face-smile` → `face.smiling`, `puzzle` → `puzzlepiece`, `antenna` → `antenna.radiowaves.left.and.right`, `expand` → `arrow.up.left.and.arrow.down.right`, `download` → `arrow.down.to.line`, `text-align-left` → `text.alignleft`; identical names (`plus`, `xmark`, `trash`, `link`, `globe`, `photo`, `doc`, `key`, `lock`, `video`, `eye`, `mic`, `bell`, …) stay | `sf_symbols::FALLBACKS` |
+| Lint | `icons::tests::every_surface_draws_system_symbols` walks the crate's sources: no `icons::icon(` call outside `icons.rs` / `sf_symbols.rs` without a `// icon: custom <why>` line above it, and every literal handed to `sf_symbols::glyph(` / `symbol(` is a registered symbol; `no_new_hand_drawn_glyph_without_a_custom_marker` freezes the pack's names | `icons.rs` |
 
 | Item | Rule | Where |
 |---|---|---|

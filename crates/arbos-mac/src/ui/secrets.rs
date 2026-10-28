@@ -22,8 +22,8 @@ use crate::ui::error_note;
 use crate::ui::frost::{frosted, MENU_BLUR};
 use crate::ui::glass;
 use crate::ui::highlight::{self, Shape};
-use crate::ui::icons::icon;
 use crate::ui::profiles::kit;
+use crate::ui::sf_symbols;
 use crate::ui::theme::{Theme, PANEL_RADIUS, RAIL_WIDTH, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
 pub enum SecretsEvent {
@@ -639,7 +639,7 @@ impl SecretsPanel {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(icon("plus", 15.0, theme.text)),
+                    .child(sf_symbols::glyph("plus", 15.0, theme.text)),
             )
             .child(label)
     }
@@ -852,7 +852,7 @@ impl SecretsPanel {
         let paused = view.paused;
         let pause_row = Self::row(
             "secrets-pause",
-            "pause",
+            "pause.fill",
             "Pause all secrets",
             None,
             false,
@@ -924,7 +924,7 @@ impl SecretsPanel {
                     )
                     .cursor_pointer()
                     .group(kit::HOT)
-                    .child(icon("chevron-right", 13.0, theme.text_faint))
+                    .child(sf_symbols::glyph("chevron.right", 13.0, theme.text_faint))
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.go(Page::Vault(vid.clone()), cx)),
                     ),
@@ -976,7 +976,7 @@ impl SecretsPanel {
                 )
                 .cursor_pointer()
                 .group(kit::HOT)
-                .child(icon("chevron-right", 13.0, theme.text_faint))
+                .child(sf_symbols::glyph("chevron.right", 13.0, theme.text_faint))
                 .on_click(
                     cx.listener(move |this, _, _, cx| this.go(Page::Secret(sid.clone()), cx)),
                 ),
@@ -2013,7 +2013,9 @@ impl SecretsPanel {
                         .text_color(if on { theme.on_primary } else { theme.text })
                         .cursor_pointer()
                         .child(s.env.clone())
-                        .when(on, |el| el.child(icon("check", 11.0, theme.on_primary)))
+                        .when(on, |el| {
+                            el.child(sf_symbols::glyph("checkmark", 11.0, theme.on_primary))
+                        })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let picked = &mut this.agent_picker.picked;
                             if let Some(i) = picked.iter().position(|x| *x == sid) {
