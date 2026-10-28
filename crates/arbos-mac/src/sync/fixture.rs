@@ -392,7 +392,7 @@ fn emit_link_hook(shared: &Arc<Shared>) {
 }
 
 /// Screenshot rig for the shared error element ([feedback error-messages-mac-2026-10-26]):
-/// `ARBOS_RIG_FAILURE=toast|composer|delivery|machine|secrets|people` raises that surface's
+/// `ARBOS_RIG_FAILURE=toast|toast-repeat|toast-many|composer|delivery|machine|secrets|people` raises that surface's
 /// note 1.5 s after start (so the opened chat / pane is up): `toast` = an error toast (a
 /// download that timed out, with Try again); `composer` = the opened chat's last own message
 /// refused, offline; `delivery` = that chat's pushes refused; `machine` = the machine in error;
@@ -430,6 +430,40 @@ fn emit_failure_hook(shared: &Arc<Shared>) {
                 .collect()
         };
         match spec.as_str() {
+            // [feedback toast-stack-mac-2026-10-27]: Jacob's shape — the secrets poll failing
+            // with the resolver's words eight times in a row — and five distinct failures for
+            // the "N more" fold.
+            "toast-repeat" | "toast-many" => {
+                let offline = |path: &str| {
+                    anyhow::anyhow!(
+                        "error sending request for url (https://relay.arbos.life{path}): client error (Connect): dns error: failed to lookup address information: nodename nor servname provided, or not known"
+                    )
+                    .context(format!("GET {path}"))
+                };
+                if spec == "toast-repeat" {
+                    for _ in 0..8 {
+                        let _ = shared.events.send(SyncEvent::Failure {
+                            error: UserError::classify("load your secrets", &offline("/secrets")),
+                            retry: None,
+                        });
+                        sleep(Duration::from_millis(250)).await;
+                    }
+                } else {
+                    for (verb, path) in [
+                        ("load your secrets", "/secrets"),
+                        ("load the voices", "/voices"),
+                        ("download report-q3.pdf", "/blobs/x/report-q3.pdf"),
+                        ("save the secret", "/secrets"),
+                        ("load the devices", "/devices"),
+                    ] {
+                        let _ = shared.events.send(SyncEvent::Failure {
+                            error: UserError::classify(verb, &offline(path)),
+                            retry: None,
+                        });
+                        sleep(Duration::from_millis(250)).await;
+                    }
+                }
+            }
             "toast" => {
                 let raw = anyhow::anyhow!(
                     "error sending request for url (https://relay.arbos.life/blobs/x/report-q3.pdf): operation timed out"
@@ -3752,6 +3786,16 @@ const LINK_REPLY: &str = "https://treatment-perfume-marble-tournaments.trycloudf
 
 const NYPOST_REPLY: &str = "- [Syringe attack: lawyer claims mistaken identity](https://nypost.com/2026/10/25/us-news/syringe-attack-lawyer-claims-mistaken-identity/)\n- [Arrest story: a second Jewish victim minutes earlier](https://nypost.com/2026/10/25/us-news/arrest-story-second-jewish-victim-minutes-earlier/)\n- [Ex-NYPD cop charged in a George Washington Bridge killing, free on $1M bail](https://nypost.com/2026/10/25/us-news/ex-nypd-cop-charged-in-gw-bridge-killing-free-on-1m-bail/)\n- [Thomas Markle home search, child pornography, Philippine official’s comment](https://nypost.com/2026/10/25/world-news/thomas-markle-home-search-philippine-official-comment/)\n- [Musk says SpaceX cut Ukraine’s Starlink access](https://nypost.com/2026/10/25/business/musk-says-spacex-cut-ukraines-starlink-access/)\n- [Giants beat the Texans in overtime in J. J. McCarthy’s first start](https://nypost.com/2026/10/25/sports/giants-beat-texans-in-overtime-mccarthy-first-start/)\n- [McCarthy’s wife after that win](https://nypost.com/2026/10/25/sports/mccarthys-wife-after-that-win/)\n\nNo times or bylines were on the page text I read. Want one of these opened?";
 
+/// The chat-formatting sample sheet, my own bubble: one line per format, labelled
+/// ([feedback chat-markdown-mac-2026-10-27]). `ARBOS_FIXTURE_REPLY=markdown`.
+pub const MARKDOWN_SAMPLE_USER: &str = "> quote: a line that starts with \"> \"\n> second quoted line\n>> nested quote inside it\n\nbold: **bold text** · italic: *italic* and _italic_ · strike: ~~gone~~\ninline code: `cargo test -p arbos-core` · spoiler (click): ||the butler did it||\nlink: [Arbos docs](https://docs.arbos.life/formatting) · bare: https://arbos.life/x_y · mention: @sam · emoji: 🎉 👍🏽\n\n# Heading 1\n## Heading 2\n### Heading 3\n\n- bullet one\n- bullet **two**\n* star bullet\n\n1. first\n2. second\n\n```python\ndef hello(name):\n    return f\"hi {name}\"  # fenced, copyable\n```\n\nescapes: \\*not italic\\* \\> not a quote \\`not code\\`";
+
+/// The agent's answer on the sample sheet: the same grammar in a grey bubble.
+pub const MARKDOWN_SAMPLE_REPLY: &str = "> quote: what you sent, quoted back\n> with a second line\n\nEvery format renders the same on both sides: **bold**, *italic*, ~~strike~~, `code`, ||spoiler||, [a named link](https://docs.arbos.life/formatting) and https://arbos.life/x_y.\n\n## Heading 2 in a reply\n\n- list item with `code`\n- and a [link](https://arbos.life)\n\n1. numbered\n2. list\n\n```rust\nlet quoted = parse_blocks(\"> hello\");\n```\n\nMath stays math: $O(n^2)$, and prices stay prices: $5 and $10.";
+
+/// The must-not-mangle lines: plain text the grammar must leave exactly as typed.
+pub const MARKDOWN_SAMPLE_PLAIN: &str = "plain, must not change:\nsnake_case_word __init__ some_var_name\n2*3*4 = 24 and 5 * 3 = 15\nhttps://example.com/some_path_with_underscores\njacob_s@example.com\n>5 means more than five · a > b · lone > here\n<b>html</b> stays <i>text</i>\n#hashtag #1 fan C++ C# 100%\n** not bold ** · a*b · trailing* · *leading";
+
 /// The reply to "write bubble sort in python" from Jacob's 2026-10-26 10:50 Mac screenshot,
 /// byte for byte: a Python code card, then prose whose `$O(n^2)$` showed its dollars and
 /// caret verbatim ([feedback math-render-mac-2026-10-26]). `ARBOS_FIXTURE_REPLY=math`.
@@ -5761,6 +5805,30 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
             Ok("link") => {
                 s.user("Where is the competitors page?");
                 s.assistant(TurnKind::Reply, MessageStatus::Done, vec![text(LINK_REPLY)]);
+            }
+            // `ARBOS_FIXTURE_REPLY=markdown`: the chat-formatting sample sheet — every
+            // format in my own bubble, the agent's answer with the same, then the
+            // must-not-mangle lines ([feedback chat-markdown-mac-2026-10-27]).
+            Ok("markdown") => {
+                s.user(MARKDOWN_SAMPLE_USER);
+                s.assistant(
+                    TurnKind::Reply,
+                    MessageStatus::Done,
+                    vec![text(MARKDOWN_SAMPLE_REPLY)],
+                );
+                s.user(MARKDOWN_SAMPLE_PLAIN);
+            }
+            // `ARBOS_FIXTURE_REPLY=quote`: Jacob's report — "> hello" typed in the
+            // composer, and the agent quoting it back ([feedback chat-markdown-mac-2026-10-27]).
+            Ok("quote") => {
+                s.user("> hello\nthat is what the quote looks like now");
+                s.assistant(
+                    TurnKind::Reply,
+                    MessageStatus::Done,
+                    vec![text(
+                        "> hello\n\nYes — a `> ` line is a quote: inset, muted, with the bar. **Bold**, *italic*, ~~strike~~ and ||spoilers|| work too.",
+                    )],
+                );
             }
             // `ARBOS_FIXTURE_REPLY=math`: Jacob's bubble-sort turn — a Python code card,
             // then prose with inline `$O(n^2)$` math ([feedback math-render-mac-2026-10-26]).
