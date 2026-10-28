@@ -95,6 +95,8 @@
 		A1DE700000000000000000A2 /* DevicesStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DE700000000000000000A1 /* DevicesStore.swift */; };
 		A1DE700000000000000000B2 /* MentionChips.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DE700000000000000000B1 /* MentionChips.swift */; };
 		A1F7B0000000000000000002 /* BlockedState.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F7B0000000000000000001 /* BlockedState.swift */; };
+		A1C0B10000000000000000A2 /* MessagePasteboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C0B10000000000000000A1 /* MessagePasteboard.swift */; };
+		A1C0B10000000000000000B2 /* MessagePasteboardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C0B10000000000000000B1 /* MessagePasteboardTests.swift */; };
 		A1C0F1000000000000000002 /* Confirm.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C0F1000000000000000001 /* Confirm.swift */; };
 		A1F100000000000000000006 /* LinkIcons.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F100000000000000000005 /* LinkIcons.swift */; };
 		A1F100000000000000000101 /* LinkTile.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F100000000000000000100 /* LinkTile.swift */; };
@@ -171,6 +173,7 @@
 		A1B5EA00000000000000A00A /* BottomSearchBarTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B5EA00000000000000A009 /* BottomSearchBarTests.swift */; };
 		A1B5EA00000000000000A00C /* SearchIndexTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B5EA00000000000000A00B /* SearchIndexTests.swift */; };
 		A1B5EA00000000000000A0F2 /* SearchSettingsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B5EA00000000000000A0F1 /* SearchSettingsTests.swift */; };
+		A1B5EA00000000000000C7A2 /* GroupTitlePushTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B5EA00000000000000C7A1 /* GroupTitlePushTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -313,6 +316,8 @@
 		A1DE700000000000000000A1 /* DevicesStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevicesStore.swift; sourceTree = "<group>"; };
 		A1DE700000000000000000B1 /* MentionChips.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MentionChips.swift; sourceTree = "<group>"; };
 		A1F7B0000000000000000001 /* BlockedState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlockedState.swift; sourceTree = "<group>"; };
+		A1C0B10000000000000000A1 /* MessagePasteboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessagePasteboard.swift; sourceTree = "<group>"; };
+		A1C0B10000000000000000B1 /* MessagePasteboardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessagePasteboardTests.swift; sourceTree = "<group>"; };
 		A1C0F1000000000000000001 /* Confirm.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Confirm.swift; sourceTree = "<group>"; };
 		A1F100000000000000000005 /* LinkIcons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkIcons.swift; sourceTree = "<group>"; };
 		A1F100000000000000000100 /* LinkTile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkTile.swift; sourceTree = "<group>"; };
@@ -388,6 +393,7 @@
 		A1B5EA00000000000000A009 /* BottomSearchBarTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BottomSearchBarTests.swift; sourceTree = "<group>"; };
 		A1B5EA00000000000000A00B /* SearchIndexTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchIndexTests.swift; sourceTree = "<group>"; };
 		A1B5EA00000000000000A0F1 /* SearchSettingsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchSettingsTests.swift; sourceTree = "<group>"; };
+		A1B5EA00000000000000C7A1 /* GroupTitlePushTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GroupTitlePushTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -587,6 +593,7 @@
 				A1B7A11E00000000000000C1 /* StatusMarks.swift */,
 				A1DE700000000000000000B1 /* MentionChips.swift */,
 				A1F7B0000000000000000001 /* BlockedState.swift */,
+				A1C0B10000000000000000A1 /* MessagePasteboard.swift */,
 				A1C0F1000000000000000001 /* Confirm.swift */,
 				A1F100000000000000000005 /* LinkIcons.swift */,
 				A1F100000000000000000100 /* LinkTile.swift */,
@@ -634,6 +641,7 @@
 				A1680000000000000000A060 /* ListTopFadeTests.swift */,
 				A1670000000000000000A040 /* ControlMetricsTests.swift */,
 				A1CD0000000000000000D040 /* ChatDensityMetricsTests.swift */,
+				A1C0B10000000000000000B1 /* MessagePasteboardTests.swift */,
 				A11B0000000000000000A003 /* LibraryListTests.swift */,
 				A1AC0E00000000000000A003 /* MachineMetricsTests.swift */,
 				A15A00000000000000000012 /* ReactionToggleTests.swift */,
@@ -654,6 +662,7 @@
 				A15E00000000000000000003 /* HomeSearchTests.swift */,
 				A1B5EA00000000000000A00B /* SearchIndexTests.swift */,
 				A1B5EA00000000000000A0F1 /* SearchSettingsTests.swift */,
+				A1B5EA00000000000000C7A1 /* GroupTitlePushTests.swift */,
 				A1B5EA00000000000000A009 /* BottomSearchBarTests.swift */,
 				A1C100000000000000000001 /* SenderNameRowTests.swift */,
 				A1D100000000000000000071 /* ReplyInDMTests.swift */,
@@ -897,6 +906,7 @@
 				A1DE700000000000000000A2 /* DevicesStore.swift in Sources */,
 				A1DE700000000000000000B2 /* MentionChips.swift in Sources */,
 				A1F7B0000000000000000002 /* BlockedState.swift in Sources */,
+				A1C0B10000000000000000A2 /* MessagePasteboard.swift in Sources */,
 				A1C0F1000000000000000002 /* Confirm.swift in Sources */,
 				A1F100000000000000000006 /* LinkIcons.swift in Sources */,
 				A1F100000000000000000101 /* LinkTile.swift in Sources */,
@@ -992,6 +1002,7 @@
 				A1680000000000000000A061 /* ListTopFadeTests.swift in Sources */,
 				A1670000000000000000A041 /* ControlMetricsTests.swift in Sources */,
 				A1CD0000000000000000D041 /* ChatDensityMetricsTests.swift in Sources */,
+				A1C0B10000000000000000B2 /* MessagePasteboardTests.swift in Sources */,
 				A11B0000000000000000A004 /* LibraryListTests.swift in Sources */,
 				A1AC0E00000000000000A004 /* MachineMetricsTests.swift in Sources */,
 				A15C0000000000000000000B /* SessionRoomTests.swift in Sources */,
@@ -1011,6 +1022,7 @@
 				A15E00000000000000000004 /* HomeSearchTests.swift in Sources */,
 				A1B5EA00000000000000A00C /* SearchIndexTests.swift in Sources */,
 				A1B5EA00000000000000A0F2 /* SearchSettingsTests.swift in Sources */,
+				A1B5EA00000000000000C7A2 /* GroupTitlePushTests.swift in Sources */,
 				A1B5EA00000000000000A00A /* BottomSearchBarTests.swift in Sources */,
 				A1C100000000000000000002 /* SenderNameRowTests.swift in Sources */,
 				A1D100000000000000000072 /* ReplyInDMTests.swift in Sources */,

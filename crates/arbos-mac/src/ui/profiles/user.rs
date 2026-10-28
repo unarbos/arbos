@@ -150,7 +150,7 @@ pub(super) fn page(
     } else {
         shows_message(me, blocked).then(|| {
             let handle = person.handle.clone();
-            kit::pill_button(MESSAGE_ID, "bubble", MESSAGE_LABEL, &theme)
+            kit::pill_button(MESSAGE_ID, "bubble.left", MESSAGE_LABEL, &theme)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let handle = handle.clone();
                     this.state.update(cx, |s, cx| s.start_dm(handle, cx));
