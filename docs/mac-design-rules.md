@@ -411,6 +411,37 @@ Pinned by `ui::composer::caret_tests` (every move and extend on a wrapped
 two-paragraph draft in a 360 pt field, ⌘⌫, ⌥ arrows, focused vs blurred
 routing — all through the real keymap) and `keymap_tests::caret_chords_route_to_the_focused_composer_only`.
 
+### Composer — keyboard layouts (Scout 2026-10-28, [feedback mention-hotkey-layout-2026-10-28])
+
+There is no `@` hotkey: the mention picker opens when an `@` is **typed** at a
+word start, and every layout types it differently (US ⇧2, German ⌥L **and**
+⌃⌥L, Spanish ⌥G, Swiss ⌥G, French/Italian/Norwegian a plain key, Finnish /
+Portuguese ⌥2 — read off the real layouts with `UCKeyTranslate`). GPUI's macOS
+layer drops the character of any chord with Control held and AppKit never
+hands such a chord to `insertText:`, so German ⌃⌥L reached the composer as a
+bare `ctrl-alt-l` and typed nothing (on German the whole ⌃⌥ column repeats
+the ⌥ column — Q `«`, F `ƒ`, Y `¥` — AltGr by another name). Rule: **a
+Control+Option chord no binding took types what the layout says it types**,
+when that is printable — the composer's `on_key_down` asks
+`ui::key_layout::typed_text` (Carbon TIS + `UCKeyTranslate`, the table
+`NSTextView` uses) and inserts the result. Nothing is special-cased to `@` or
+to German; US ⌃⌥L is still a control character and types nothing, as in
+TextEdit; plain Control chords are left alone (US ⌃2 reports "2" but is not
+typed). Bindings run first, so ⌃⌥F stays Send Feedback on German rather than
+typing `ƒ`. Chords that arrive with their character (⌥L = `alt-l` + `@`) are
+the platform's to type and are not typed twice.
+
+Shortcut audit: GPUI reports every letter chord under ⌘ by the character the
+layout gives that key with ⌘ held (non-ASCII layouts fall back to the ⌘ table),
+so ⌘B / ⌘I / ⌘⇧X / ⌘F / ⌘⇧F / ⌘K / ⌘G and the caret chords (named keys) work
+on QWERTZ, AZERTY and friends. Only `cmd-{` / `cmd-}` (tabs) are unreachable
+where braces need ⌥; **⌃⇥ / ⌃⇧⇥** are bound as the layout-independent tab
+chords. Pinned by `ui::key_layout::tests` (layout tables read off the real
+German / US / French / Spanish layouts), `ui::composer::layout_chord_tests`
+(the chords dispatched exactly as the platform builds them, through the real
+keymap, into a focused composer) and
+`keymap_tests::non_us_at_sign_chords_are_nobodys_and_tabs_have_layout_free_chords`.
+
 ### Composer — formatting chords and live styling (Jacob 2026-10-27, [feedback chat-markdown-composer-2026-10-27])
 
 The draft shows the chat Markdown of § Message formatting **as it is typed**,
