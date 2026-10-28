@@ -2922,7 +2922,7 @@ struct ImageBubble: View {
 
     var body: some View {
         // Only the picture opens the viewer. The description bar sits outside
-        // that button so a long-press on the text still shows Edit / Reply
+        // that tap so a long-press on the text still shows Edit / Reply
         // ([feedback app-01M5TK984G6NY5A66K75RR5PWJ]).
         PhotoBubbleLayout(maxWidth: maxWidth, pictureInset: Self.pictureInset, hasHeader: forwardedFrom != nil) {
             if let forwardedFrom {
@@ -2931,11 +2931,16 @@ struct ImageBubble: View {
                     .padding(.top, Theme.bubbleVPad)
                     .padding(.bottom, 6)
             }
-            Button { viewer = MediaOpen.state(for: item, chatId: chatId, model: model) } label: {
-                pictureTile
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Image, tap to view")
+            // Tap opens the viewer. Not a Button: the transcript's reply swipe
+            // owns the row pan, and a SwiftUI Button still counts a right pan
+            // that starts here as a tap on lift ([feedback
+            // app-01M5Z71ZQQ9G8EG5WF8SVNGM85]). onTapGesture yields once the
+            // pan moves; the flag covers the case where the swipe already claimed.
+            pictureTile
+                .contentShape(Rectangle())
+                .onTapGesture(perform: openViewer)
+                .accessibilityAddTraits(.isButton)
+                .accessibilityLabel("Image, tap to view")
             if captionText != nil || source != nil {
                 VStack(alignment: .leading, spacing: 2) {
                     if let captionText {
@@ -3005,6 +3010,13 @@ struct ImageBubble: View {
         // layout hands it.
         .frame(minWidth: picture.width, idealWidth: picture.width, maxWidth: .infinity,
                minHeight: picture.height, idealHeight: picture.height, maxHeight: .infinity)
+    }
+
+    /// Open the full-screen viewer for this picture. Skipped while a reply
+    /// swipe owns the drag so a right pan on the image only replies.
+    private func openViewer() {
+        guard !BackSwipe.bubbleSwipeActive else { return }
+        viewer = MediaOpen.state(for: item, chatId: chatId, model: model)
     }
 
     private func load() async {
