@@ -502,6 +502,77 @@ pub fn plate<E: Styled>(el: E, theme: &Theme) -> E {
     ])
 }
 
+/// The blur under a search popup ([feedback search-popup-single-layer-2026-10-28]):
+/// the sheet's 24 pt. A line of transcript under the ⌘K panel must not read
+/// through it — the header pill's 5 pt ([`HEADER_BLUR`]) is made to keep text
+/// legible, this is made to erase it: 24 pt smears a 15 pt line (≈ 18 pt
+/// pitch) into a flat band before the tint even lands.
+pub const POPUP_BLUR: f32 = PANEL_BLUR;
+
+/// What a search popup is made of — the pure part, for the tests and the
+/// rule in `docs/mac-design-rules.md`. One material: a blur (Glass only), one
+/// fill, one hairline, one lift shadow. No dim behind it, no second plate.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PopupMaterial {
+    /// Backdrop blur radius under the plate (0 on Matte).
+    pub blur: f32,
+    /// The plate's fill: the popup wash on Glass, the flat card on Matte.
+    pub fill: gpui::Hsla,
+    /// The one hairline: the glass rim on Glass, the card border on Matte.
+    pub hairline: gpui::Hsla,
+    /// Whether the window behind is dimmed by the popup (never).
+    pub dims_window: bool,
+}
+
+impl PopupMaterial {
+    /// Residual Weber-style contrast of a white-on-page (or black-on-page)
+    /// line of transcript seen through the plate's *tint alone*: how much of
+    /// the backdrop's luminance difference survives the fill. The blur is not
+    /// credited here (it is what makes the line unreadable); this is the floor
+    /// the tint provides even where the blur has nothing to smear.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn backdrop_bleed(&self) -> f32 {
+        1.0 - self.fill.a.clamp(0.0, 1.0)
+    }
+}
+
+pub fn popup_material(theme: &Theme) -> PopupMaterial {
+    PopupMaterial {
+        blur: if theme.is_frost() { POPUP_BLUR } else { 0.0 },
+        fill: theme.popup(),
+        hairline: if theme.is_frost() {
+            theme.plate_rim()
+        } else {
+            theme.border_strong
+        },
+        dims_window: false,
+    }
+}
+
+/// Dress a search popup's panel in its one material ([`popup_material`]) and
+/// frost the window under it on Glass. The panel keeps its own rounding
+/// (`radius`, the same the blur is clipped to). The lift shadow is the
+/// sheet's; the top highlight is the glass family's.
+pub fn popup_plate(radius: f32, theme: &Theme, panel: Stateful<Div>) -> AnyElement {
+    let material = popup_material(theme);
+    let panel = panel.bg(material.fill);
+    if !theme.is_frost() {
+        return panel
+            .border_1()
+            .border_color(material.hairline)
+            .shadow_lg()
+            .into_any_element();
+    }
+    let panel = panel.shadow(vec![
+        BoxShadow::new(px(0.0), px(0.0), material.hairline)
+            .spread_radius(px(1.0))
+            .inset(),
+        BoxShadow::new(px(0.0), px(1.0), theme.plate_highlight()).inset(),
+        BoxShadow::new(px(0.0), px(8.0), gpui::hsla(0.0, 0.0, 0.0, 0.28)).blur_radius(px(24.0)),
+    ]);
+    frosted(radius, material.blur, panel).into_any_element()
+}
+
 /// A dropdown card under a header control: frosted, rounded, shadowed.
 pub fn menu_card(width: f32, theme: &Theme) -> Div {
     let card = div()
@@ -688,6 +759,114 @@ mod tests {
     fn wheel_over_menu_does_not_chain_into_underlying_scroll() {
         let hit = scroll_hit_layers([(true, "frosted_menu"), (false, "sidebar_list")]);
         assert_eq!(hit, vec!["frosted_menu"]);
+    }
+}
+
+#[cfg(test)]
+mod popup_tests {
+    //! The search popups' one material ([feedback
+    //! search-popup-single-layer-2026-10-28]; Jacob 2026-10-28: "double
+    //! transparency on search pop up is annoying", Scout's "double
+    //! transparency overlap"): on Glass one frosted plate whose blur and tint
+    //! together leave no transcript line legible under it, on Matte one opaque
+    //! card; one hairline either way; nothing dimmed behind it.
+    use super::*;
+    use crate::ui::modal::PASSTHROUGH_BACKDROP_ALPHA;
+    use crate::ui::theme::{Appearance, Backdrop, Surface, POPUP_WASH_FLOOR, TEXT_BODY};
+
+    /// A 15 pt line's glyphs stand ≈ 11 pt tall (cap height) on ≈ 1.5 pt
+    /// strokes. A blur radius wider than the whole glyph box — 1.5 × the
+    /// font size, 22.5 pt — leaves no stroke and no letter shape to read;
+    /// it smears each line into the next (GPUI's default pitch is φ × 15 ≈
+    /// 24 pt) and what remains is a band of the line's mean tone.
+    const GLYPH_BOX: f32 = TEXT_BODY * 1.5;
+
+    fn themes() -> Vec<(String, Theme)> {
+        let mut out = Vec::new();
+        for appearance in [Appearance::Dark, Appearance::Light] {
+            for surface in [Surface::Glass, Surface::Matte] {
+                out.push((
+                    format!("{appearance:?} {surface:?}"),
+                    Theme::with(appearance, surface),
+                ));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_popup_is_one_frosted_plate_on_glass_and_one_opaque_card_on_matte() {
+        for (name, theme) in themes() {
+            let m = popup_material(&theme);
+            assert!(
+                !m.dims_window,
+                "{name}: a dim behind the plate is a second layer"
+            );
+            assert!(m.hairline.a > 0.0, "{name}: the one hairline is drawn");
+            if theme.is_frost() {
+                assert_eq!(m.blur, POPUP_BLUR, "{name}: the sheet's blur");
+                assert!(
+                    m.blur >= GLYPH_BOX,
+                    "{name}: blur {} narrower than a {GLYPH_BOX} pt glyph box leaves strokes",
+                    m.blur
+                );
+                assert!(
+                    m.fill.a >= POPUP_WASH_FLOOR,
+                    "{name}: thinner than the popup floor: fill alpha {}",
+                    m.fill.a
+                );
+                assert_eq!(
+                    m.hairline,
+                    theme.plate_rim(),
+                    "{name}: the glass family's rim"
+                );
+                // Over a friendly desktop (dark under dark, light under light)
+                // the plate sits at its floor: glass, not a solid card.
+                let mut friendly = theme.clone();
+                friendly.backdrop =
+                    Some(Backdrop::uniform(if theme.is_light() { 1.0 } else { 0.0 }));
+                let at_floor = popup_material(&friendly).fill.a;
+                assert!(
+                    (at_floor - POPUP_WASH_FLOOR).abs() < 1e-3,
+                    "{name}: over a friendly desktop the plate is at its floor, got {at_floor}"
+                );
+            } else {
+                assert_eq!(m.blur, 0.0, "{name}: Matte does not blur");
+                assert_eq!(m.fill.a, 1.0, "{name}: Matte is one opaque card");
+                assert_eq!(m.fill, theme.surface_1);
+                assert_eq!(m.hairline, theme.border_strong, "{name}: the card border");
+            }
+        }
+    }
+
+    /// Readability: a line of transcript under the panel must not read
+    /// through. The tint alone lets at most a fifth of the backdrop's
+    /// luminance difference survive (`backdrop_bleed`), and the blur is
+    /// wider than the glyph box — together there is nothing left to read.
+    /// The popup floor sits above the menus' card floor on purpose.
+    #[test]
+    fn a_transcript_line_under_the_glass_popup_is_not_legible() {
+        for (name, theme) in themes().into_iter().filter(|(_, t)| t.is_frost()) {
+            let m = popup_material(&theme);
+            assert!(
+                m.backdrop_bleed() <= 0.2,
+                "{name}: {:.0} % of the chat bleeds through the tint",
+                m.backdrop_bleed() * 100.0
+            );
+            assert!(m.blur >= GLYPH_BOX, "{name}");
+        }
+        let (popup, card) = (POPUP_WASH_FLOOR, crate::ui::theme::CARD_WASH_FLOOR);
+        assert!(
+            popup > card,
+            "the popup ({popup}) is thicker than a menu ({card})"
+        );
+    }
+
+    /// The see-through backdrop under the palette does not dim: the plate is
+    /// the one layer between the chat and the rows.
+    #[test]
+    fn the_palette_backdrop_does_not_dim() {
+        assert_eq!(PASSTHROUGH_BACKDROP_ALPHA, 0.0);
     }
 }
 
