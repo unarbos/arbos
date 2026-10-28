@@ -47,7 +47,7 @@ pub struct ImageData {
 
 impl ImageData {
     /// The UTI the original bytes are declared under.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(any(not(target_os = "macos"), test), allow(dead_code))]
     pub fn uti(&self) -> &'static str {
         uti_of(self.format)
     }
@@ -64,7 +64,7 @@ pub struct PasteItem {
 impl PasteItem {
     /// The pasteboard types this item declares, most descriptive first — the order a
     /// reader that walks `types` sees (the native picture type before its fallbacks).
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(any(not(target_os = "macos"), test), allow(dead_code))]
     pub fn types(&self) -> Vec<&'static str> {
         let mut out = Vec::new();
         if let Some(image) = &self.image {
@@ -84,31 +84,31 @@ impl PasteItem {
     }
 }
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(any(not(target_os = "macos"), test), allow(dead_code))]
 pub const UTI_PNG: &str = "public.png";
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(any(not(target_os = "macos"), test), allow(dead_code))]
 pub const UTI_JPEG: &str = "public.jpeg";
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(any(not(target_os = "macos"), test), allow(dead_code))]
 pub const UTI_GIF: &str = "com.compuserve.gif";
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(any(not(target_os = "macos"), test), allow(dead_code))]
 pub const UTI_WEBP: &str = "org.webmproject.webp";
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(any(not(target_os = "macos"), test), allow(dead_code))]
 pub const UTI_TIFF: &str = "public.tiff";
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(any(not(target_os = "macos"), test), allow(dead_code))]
 pub const UTI_BMP: &str = "com.microsoft.bmp";
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(any(not(target_os = "macos"), test), allow(dead_code))]
 pub const UTI_SVG: &str = "public.svg-image";
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(any(not(target_os = "macos"), test), allow(dead_code))]
 pub const UTI_ICO: &str = "com.microsoft.ico";
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(any(not(target_os = "macos"), test), allow(dead_code))]
 pub const UTI_PNM: &str = "public.pbm";
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(any(not(target_os = "macos"), test), allow(dead_code))]
 pub const UTI_UTF8_TEXT: &str = "public.utf8-plain-text";
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(any(not(target_os = "macos"), test), allow(dead_code))]
 pub const UTI_FILE_URL: &str = "public.file-url";
 
 /// The UTI gpui's own reader expects for `format` (its `UTType` table).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(any(not(target_os = "macos"), test), allow(dead_code))]
 pub fn uti_of(format: ImageFormat) -> &'static str {
     match format {
         ImageFormat::Png => UTI_PNG,
@@ -124,7 +124,7 @@ pub fn uti_of(format: ImageFormat) -> &'static str {
 }
 
 /// The image format for a declared pasteboard type, `None` for anything else.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(any(not(target_os = "macos"), test), allow(dead_code))]
 pub fn format_of_uti(uti: &str) -> Option<ImageFormat> {
     Some(match uti {
         UTI_PNG => ImageFormat::Png,
@@ -304,12 +304,16 @@ pub fn write(items: &[PasteItem], cx: &mut App) -> bool {
     if items.is_empty() {
         return false;
     }
-    #[cfg(target_os = "macos")]
+    // Under `cargo test` the app runs on gpui's test platform, whose clipboard is a
+    // field of the test context: the real NSPasteboard is neither what the tests write
+    // to nor something a test may clobber (the release lane's `enter_tests` run on the
+    // Mac runner and failed on this once, 2026-10-28 05:50–07:50).
+    #[cfg(all(target_os = "macos", not(test)))]
     {
         let _ = cx;
         macos::write(items)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", not(test))))]
     {
         cx.write_to_clipboard(fallback_item(items));
         true
@@ -322,12 +326,12 @@ pub fn write(items: &[PasteItem], cx: &mut App) -> bool {
 /// at the first item's text, which is why a copied picture-with-caption pasted into the
 /// composer as words only.
 pub fn read(cx: &App) -> Option<ClipboardItem> {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", not(test)))]
     {
         let _ = cx;
         macos::read()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", not(test))))]
     {
         cx.read_from_clipboard()
     }
@@ -366,7 +370,7 @@ pub fn fallback_item(items: &[PasteItem]) -> ClipboardItem {
     ClipboardItem { entries }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 mod macos {
     use std::path::PathBuf;
 
@@ -709,10 +713,9 @@ mod tests {
         assert_eq!(format_of_uti("public.utf8-plain-text"), None);
     }
 
-    /// The platform-neutral path end to end: what `write` puts on gpui's clipboard,
-    /// `read` hands the composer back — text, both pictures (formats kept). Not on a
-    /// Mac: there `write` goes to the real general pasteboard.
-    #[cfg(not(target_os = "macos"))]
+    /// The test-platform path end to end: what `write` puts on gpui's clipboard,
+    /// `read` hands the composer back — text, both pictures (formats kept). Under
+    /// `cargo test` this is the path on the Mac too (the real pasteboard is never touched).
     #[gpui::test]
     fn write_then_read_round_trips_text_and_pictures(cx: &mut gpui::TestAppContext) {
         let items = plan(
