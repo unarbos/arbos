@@ -330,6 +330,8 @@ enum GlobalSearch {
         case thumbnail(MediaItem)
         /// The Settings list's grey tile with this SF Symbol.
         case settingsTile(String)
+        /// A link's tile (`LinkTile`: brand mark, the relay's icon, or the host's letter).
+        case link(URL)
     }
 
     /// Rows per section with a query (the list scrolls, but a long tail of

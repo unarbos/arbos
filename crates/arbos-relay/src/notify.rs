@@ -263,19 +263,100 @@ pub async fn clear_focus(state: &AppState, device_id: &str, chat_id: &str) {
     }
 }
 
-/// Group-style chats carry the room's name so the banner reads "sender in <chat>": a shared
-/// project (owner plus guests) uses the project name; DMs carry none.
-fn chat_title(state: &AppState, chat: &ChatRef) -> Option<String> {
-    let pid = chat.project_id.as_deref()?;
-    let shared = state
-        .db
-        .project_members(pid)
-        .map(|m| !m.is_empty())
-        .unwrap_or(false);
-    if !shared {
-        return None;
+/// What a notification needs to know about the chat it is for, beyond its id: the kind and —
+/// for anything but a DM — the name the recipient sees in their list, plus the group picture.
+/// A DM is titled with the sender; a group, shared project chat or channel is titled with the
+/// chat (Messages / Slack shape) and the sender moves into the body ("Sender: text"), so the
+/// banner's first line says *where* the message is from. Decided 2026-10-27 (Jacob: "cannot
+/// tell which group a message came from"); the alternative "Sender in Group" title was
+/// rejected because the iOS communication intent and Notification Center group by title.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatMeta {
+    /// `dm` | `group` | `project` | `channel`.
+    pub kind: &'static str,
+    /// The list name for this recipient; `None` for a DM.
+    pub title: Option<String>,
+    /// Blob key of the group picture under `people:{chat_id}` (people groups only).
+    pub image_key: Option<String>,
+}
+
+impl ChatMeta {
+    pub fn dm() -> Self {
+        Self {
+            kind: "dm",
+            title: None,
+            image_key: None,
+        }
     }
-    state.db.project(pid).ok().flatten().map(|p| p.name)
+
+    /// Is the chat titled by itself (group/project/channel) rather than by the sender?
+    pub fn titled(&self) -> bool {
+        self.title.as_deref().is_some_and(|t| !t.is_empty())
+    }
+}
+
+/// The chat meta as `recipient` sees it. An untitled people group is named after the *other*
+/// members' handles (the same rule as `GET /chats`), so it is per recipient. A project chat
+/// counts as a group only when it is shared (owner plus guests); the owner's own 1:1 agent
+/// chat is a DM with the agent.
+pub fn chat_meta(state: &AppState, chat: &ChatRef, recipient: &str) -> ChatMeta {
+    match &chat.project_id {
+        Some(pid) => {
+            let shared = state
+                .db
+                .project_members(pid)
+                .map(|m| !m.is_empty())
+                .unwrap_or(false);
+            if !shared {
+                return ChatMeta::dm();
+            }
+            ChatMeta {
+                kind: "project",
+                title: state.db.project(pid).ok().flatten().map(|p| p.name),
+                image_key: None,
+            }
+        }
+        None => {
+            let Some(c) = state.db.people_chat(&chat.chat_id).ok().flatten() else {
+                return ChatMeta::dm();
+            };
+            if c.kind == "dm" {
+                return ChatMeta::dm();
+            }
+            let title = c
+                .title
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| {
+                    let members = state.db.members_of(&chat.chat_id).unwrap_or_default();
+                    let others: Vec<String> = members
+                        .iter()
+                        .filter_map(|m| m.user_id())
+                        .filter(|u| *u != recipient)
+                        .map(|u| people::handle_of(state, u))
+                        .filter(|h| !h.is_empty())
+                        .collect();
+                    let named = if others.is_empty() {
+                        members
+                            .iter()
+                            .filter_map(|m| m.project_id())
+                            .filter_map(|p| state.db.project(p).ok().flatten())
+                            .map(|p| p.name)
+                            .collect()
+                    } else {
+                        others
+                    };
+                    named.join(", ")
+                });
+            ChatMeta {
+                kind: "group",
+                title: Some(title),
+                image_key: c.image_key.filter(|k| !k.is_empty()),
+            }
+        }
+    }
 }
 
 /// One outbox entry for a message alert to one device.
@@ -337,6 +418,8 @@ pub async fn announce_with(
     if let Some(u) = sender.user_id.as_deref() {
         let _ = state.db.mark_chat_read(u, &chat.chat_id);
     }
+    // Outside agents in this chat get the message as an ASP event (#2140).
+    crate::outside::on_announce(state, chat, sender, message_id, text, None, mentions);
     let member = match sender.kind {
         "agent" => format!("agent:{}", sender.id),
         _ => format!("user:{}", sender.id),
@@ -360,24 +443,16 @@ pub async fn announce_with(
         }
         _ => brief(text),
     };
-    let title = chat_title(state, chat);
     // An agent's reply reaches the apps' in-app banner path (`/me/pushes` → local
     // notification; what a phone gets while push is off or while it is open on another chat)
     // only from here: a device's own row queues it in `people::on_room_push`, a box's row does
-    // not, and until 2026-10-26 nothing queued it for agents at all — an @doug-agent answer in
-    // a group never showed on the iPhone while a like on a bubble did.
-    let inapp = (sender.kind == "agent").then(|| {
+    // not, and until 2026-10-26 nothing queued it for agents at all — an agent's answer in a
+    // group never showed on the iPhone while a like on a bubble did. Per recipient, because an
+    // untitled group is named after the *other* members.
+    let inapp_seq = (sender.kind == "agent").then(|| {
         let room = arbos_core::wire::room_name(chat.project_label(), &chat.chat_id);
         let (head, _) = state.db.room_activity(&room).unwrap_or((0, 0));
-        arbos_core::api::PushEventDto::PeopleMessage(arbos_core::api::PeopleMessagePayloadDto {
-            chat_id: chat.chat_id.clone(),
-            from: format!("agent:{}", sender.id),
-            from_handle: sender.handle.clone(),
-            seq: head + 1,
-            sender: sender.dto(),
-            project_id: chat.project_id.clone(),
-            text: Some(body.clone()),
-        })
+        head + 1
     });
     let shape = eligibility::chat_shape(state, chat);
     let large_group_min = eligibility::large_group_min();
@@ -404,8 +479,23 @@ pub async fn announce_with(
             );
             continue;
         }
-        if let Some(event) = &inapp {
-            let _ = state.db.push_user_event(&user, event, Some(&chat.chat_id));
+        let meta = chat_meta(state, chat, &user);
+        if let Some(seq) = inapp_seq {
+            let event = arbos_core::api::PushEventDto::PeopleMessage(
+                arbos_core::api::PeopleMessagePayloadDto {
+                    chat_id: chat.chat_id.clone(),
+                    from: format!("agent:{}", sender.id),
+                    from_handle: sender.handle.clone(),
+                    seq,
+                    sender: sender.dto(),
+                    project_id: chat.project_id.clone(),
+                    text: Some(body.clone()),
+                    chat_kind: Some(meta.kind.to_owned()),
+                    chat_title: meta.title.clone(),
+                    chat_image_key: meta.image_key.clone(),
+                },
+            );
+            let _ = state.db.push_user_event(&user, &event, Some(&chat.chat_id));
         }
         if !state.push.is_on() {
             continue;
@@ -424,8 +514,7 @@ pub async fn announce_with(
             if device_focused(state, &t.device_id, &chat.chat_id).await {
                 continue;
             }
-            let mut p =
-                payload::message_alert(chat, sender, message_id, &body, badge, title.as_deref());
+            let mut p = payload::message_alert(chat, sender, message_id, &body, badge, &meta);
             if let Some(r) = &reply_ref_json {
                 p["reply_ref"] = r.clone();
             }
@@ -477,7 +566,7 @@ pub async fn alert_device(
         message_id,
         &brief(text),
         badge,
-        chat_title(state, chat).as_deref(),
+        &chat_meta(state, chat, &user_id),
     );
     state
         .push
@@ -499,8 +588,10 @@ pub async fn clear_on_read(
     user_id: &str,
     except_device: &str,
     chat: &ChatRef,
+    read_upto: &str,
 ) -> Vec<String> {
     let badge = crate::matrix::reads::unread_total(state, user_id).await;
+    silent_clear(state, user_id, except_device, chat, read_upto, badge);
     let event = arbos_core::api::PushEventDto::NotificationsCleared(
         arbos_core::api::NotificationsClearedPayloadDto {
             chat_id: chat.chat_id.clone(),
@@ -531,6 +622,48 @@ pub async fn clear_on_read(
             Vec::new()
         }
     }
+}
+
+/// A clear-on-read push stays worth sending about as long as a badge count.
+pub const CLEAR_TTL_MS: i64 = BADGE_TTL_MS;
+
+/// The APNs form of [`clear_on_read`]: one background push (`PushKind::Clear`, `type: clear`,
+/// `chat_id`, `badge`) per other device with a token, so a phone that is not running the app
+/// drops the chat's banners too. `read_upto` (the row the reader got to) is the kind's
+/// `upto_message_id`: it makes a later read of the same chat a new push instead of a dedupe
+/// hit, while the same cursor re-sent (the apps re-PUT on foreground) pushes once. Nothing
+/// is queued while no provider can reach a device.
+fn silent_clear(
+    state: &AppState,
+    user_id: &str,
+    except_device: &str,
+    chat: &ChatRef,
+    read_upto: &str,
+    badge: i64,
+) {
+    if !state.push.is_on() {
+        return;
+    }
+    let kind = PushKind::Clear {
+        chat_id: chat.chat_id.clone(),
+        upto_message_id: Some(read_upto.to_owned()),
+    };
+    let pushes: Vec<NewPush> = state
+        .db
+        .push_tokens_of_user(user_id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|t| t.device_id != except_device)
+        .map(|t| NewPush {
+            user_id: t.user_id.clone(),
+            device_id: t.device_id.clone(),
+            collapse_id: Some(kind.collapse_id(user_id)),
+            kind: kind.clone(),
+            payload: payload::clear(&chat.chat_id, Some(read_upto), badge),
+            ttl_ms: CLEAR_TTL_MS,
+        })
+        .collect();
+    state.push.enqueue(pushes);
 }
 
 /// The user read something somewhere: every other device gets the new badge count.
@@ -1426,6 +1559,73 @@ mod tests {
         );
     }
 
+    /// The APNs form of the clear: a background `type: clear` push per other device with a
+    /// token (never the reader's), collapse id `clear:<chat>`, carrying the chat and the badge;
+    /// the same read cursor re-sent is one push, a later read of the same chat is a new one.
+    #[tokio::test]
+    async fn a_read_queues_one_silent_clear_push_per_other_device() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _alice_dev) = person(&state, 1);
+        let (bob, bob_phone) = person(&state, 2);
+        let bob_pad = second_device(&state, &bob);
+        let dm_chat = dm(&state, &alice, &bob);
+        let other = dm(&state, &alice, &bob);
+        let phone_tok = register(&state, &bob_phone, &bob);
+        let pad_tok = register(&state, &bob_pad, &bob);
+        let alice_s = Sender::user(&state, &alice);
+        announce(&state, &ChatRef::people(&dm_chat), &alice_s, "d1", "one").await;
+        announce(&state, &ChatRef::people(&other), &alice_s, "o1", "two").await;
+        let before = pushed(&state).await.len();
+
+        let read = |dev: Principal, seq: i64| {
+            let state = state.clone();
+            let chat = dm_chat.clone();
+            async move {
+                let r = crate::people::chat_read(
+                    State(state),
+                    dev,
+                    Path(chat),
+                    Json(crate::people::ReadBody { seq }),
+                )
+                .await;
+                assert_eq!(r.status(), StatusCode::NO_CONTENT);
+            }
+        };
+        read(bob_phone.clone(), 1).await;
+        read(bob_phone.clone(), 1).await; // the app re-PUTs the same cursor on foreground
+        let sent = pushed(&state).await;
+        let clears: Vec<_> = sent[before..]
+            .iter()
+            .filter(|o| o.payload["type"] == "clear")
+            .collect();
+        assert_eq!(clears.len(), 1, "one silent clear, to the pad: {clears:?}");
+        let c = clears[0];
+        assert_eq!(c.device_token, pad_tok);
+        assert_ne!(c.device_token, phone_tok);
+        assert_eq!(c.push_type, "background");
+        assert_eq!(
+            c.collapse_id.as_deref(),
+            Some(format!("clear:{dm_chat}").as_str())
+        );
+        assert_eq!(c.payload["aps"]["content-available"], 1);
+        assert_eq!(c.payload["chat_id"], dm_chat);
+        assert_eq!(c.payload["badge"], 1, "the other chat is still unread");
+        assert_eq!(c.payload["upto_message_id"], "seq:1");
+
+        // Further along in the same chat: a new push, not a dedupe hit.
+        announce(&state, &ChatRef::people(&dm_chat), &alice_s, "d2", "three").await;
+        read(bob_phone.clone(), 2).await;
+        let sent = pushed(&state).await;
+        let clears: Vec<_> = sent[before..]
+            .iter()
+            .filter(|o| o.payload["type"] == "clear")
+            .collect();
+        assert_eq!(clears.len(), 2, "{clears:?}");
+        assert_eq!(clears[1].payload["upto_message_id"], "seq:2");
+        assert_eq!(clears[1].payload["badge"], 1);
+        assert_eq!(clears[1].device_token, pad_tok);
+    }
+
     #[test]
     fn brief_caps_at_140_chars_on_one_line() {
         assert_eq!(brief("  two\nlines  here "), "two lines here");
@@ -2154,5 +2354,114 @@ mod eligibility_tests {
         want.sort();
         assert_eq!(got, want);
         let _ = alice;
+    }
+}
+
+#[cfg(test)]
+mod chat_meta_tests {
+    //! Group banners are titled with the chat as each recipient sees it; DMs with the sender.
+
+    use arbos_core::ids::{now_ms, ulid};
+    use serde_json::json;
+
+    use super::*;
+    use crate::db_people::PeopleChat;
+    use crate::people::tests_support::{dm, person, project_of};
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    fn dev_id(p: &Principal) -> String {
+        match p {
+            Principal::Device { id, .. } => id.clone(),
+            Principal::Box { .. } | Principal::Admin => unreachable!("device principal"),
+        }
+    }
+
+    fn group(state: &AppState, members: &[&str], title: Option<&str>) -> String {
+        let chat = PeopleChat {
+            id: ulid(),
+            kind: "group".into(),
+            created_by: members[0].to_owned(),
+            created_at: now_ms(),
+            title: title.map(str::to_owned),
+            image_key: Some("pic.png".into()),
+            avatar_leaf: None,
+            avatar_leaf_color: None,
+            description: None,
+        };
+        state.db.insert_people_chat(&chat).expect("chat");
+        state
+            .db
+            .update_people_chat_profile(&chat.id, None, Some(Some("pic.png")), None, None)
+            .expect("picture");
+        for u in members {
+            state
+                .db
+                .add_member(
+                    &chat.id,
+                    &format!("user:{u}"),
+                    "member",
+                    members[0],
+                    &json!({}),
+                )
+                .expect("member");
+        }
+        chat.id
+    }
+
+    #[test]
+    fn meta_per_kind_and_per_recipient() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 41);
+        let (bob, _) = person(&state, 42);
+        let (carol, _) = person(&state, 43);
+        // DM: no title.
+        let d = dm(&state, &alice, &bob);
+        assert_eq!(
+            chat_meta(&state, &ChatRef::people(&d), &bob),
+            ChatMeta::dm()
+        );
+        // Named group: the name for everyone, with its picture.
+        let g = group(&state, &[&alice, &bob, &carol], Some("Arbonites"));
+        let m = chat_meta(&state, &ChatRef::people(&g), &bob);
+        assert_eq!(m.kind, "group");
+        assert_eq!(m.title.as_deref(), Some("Arbonites"));
+        assert_eq!(m.image_key.as_deref(), Some("pic.png"));
+        // Untitled group: the *other* members' handles, so it differs per recipient.
+        let u = group(&state, &[&alice, &bob, &carol], None);
+        let for_bob = chat_meta(&state, &ChatRef::people(&u), &bob);
+        let for_carol = chat_meta(&state, &ChatRef::people(&u), &carol);
+        assert_eq!(for_bob.title.as_deref(), Some("user41, user43"));
+        assert_eq!(for_carol.title.as_deref(), Some("user41, user42"));
+        // Own 1:1 agent chat: a DM with the agent; shared project chat: a group named after it.
+        let pid = project_of(&state, &alice, "Research");
+        assert_eq!(
+            chat_meta(&state, &ChatRef::project(&pid, "c"), &alice),
+            ChatMeta::dm()
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_reply_in_a_group_queues_a_titled_in_app_push() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _alice_dev) = person(&state, 51);
+        let (bob, bob_dev) = person(&state, 52);
+        let g = group(&state, &[&alice, &bob], Some("Arbonites"));
+        let pid = project_of(&state, &alice, "Doug");
+        let project = state.db.project(&pid).unwrap().unwrap();
+        let agent = Sender::agent(&state, &project);
+        announce(&state, &ChatRef::people(&g), &agent, "m1", "Five.").await;
+        let pushes = state.db.take_user_pushes(&dev_id(&bob_dev)).unwrap();
+        let pm: Vec<_> = pushes
+            .iter()
+            .filter(|(_, k, _, _)| k == "people_message")
+            .collect();
+        assert_eq!(pm.len(), 1, "{pushes:?}");
+        let p = &pm[0].2;
+        assert_eq!(p["chat_kind"], "group");
+        assert_eq!(p["chat_title"], "Arbonites");
+        assert_eq!(p["chat_image_key"], "pic.png");
+        assert_eq!(p["text"], "Five.");
+        assert_eq!(p["sender"]["kind"], "agent");
     }
 }

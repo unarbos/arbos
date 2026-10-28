@@ -352,6 +352,7 @@ async fn run(
     let box_user = principal.user_id().map(str::to_owned).unwrap_or_default();
     if is_box {
         boxes::box_connected(&state, &box_user).await;
+        room.box_joined(&box_user);
     }
     tracing::debug!(%room_name, %device, conn_id, "room join");
 
@@ -450,6 +451,7 @@ async fn run(
         }
     }
     if is_box {
+        room.box_left(&box_user);
         boxes::box_disconnected(&state, &box_user).await;
     }
     // `_clear_doc` (declared before `rx`) drops after `rx`, clearing the doc cache when this
@@ -627,6 +629,7 @@ async fn handle_frame(
                     // History, not a new message: no read-cursor move, no notification, no
                     // wake. The Matrix mirror resync picks the rows up on its own.
                 } else if !is_box {
+                    let mut chat_ref = None;
                     // A person wrote without announcing a message (older apps): the fallback
                     // notifies the other members by name only.
                     if let Principal::Device { user_id, .. } = principal {
@@ -650,26 +653,50 @@ async fn handle_frame(
                             // A person's own row is read by definition: their per-user cursor
                             // moves to it, so no device of theirs sees it as unread.
                             let _ = state.db.advance_user_cursor(user_id, &chat.chat_id, seq);
-                            crate::notify::on_row_from_device(state, chat, user_id, seq);
+                            crate::notify::on_row_from_device(state, chat.clone(), user_id, seq);
+                            // Outside agents in this chat (#2140): announced by the app in a
+                            // moment, else read from the doc.
+                            crate::outside::on_row(
+                                state,
+                                chat.clone(),
+                                user_id,
+                                arbos_core::ids::now_ms(),
+                            );
+                            chat_ref = Some(chat);
                         }
                     }
-                    // Wake obligation: a client row for a sleeping box (crdt-sync §8.4 step 1–2).
-                    if let Some(u) = state.user_of(project_id) {
-                        state
-                            .last_client_push
-                            .lock()
-                            .await
-                            .insert(u, arbos_core::ids::now_ms());
-                    }
-                    boxes::ensure_awake_project(state, project_id, "send").await;
-                    // A people chat with shared agents wakes every agent owner's box.
-                    for owner in wake_owners {
-                        state
-                            .last_client_push
-                            .lock()
-                            .await
-                            .insert(owner.clone(), arbos_core::ids::now_ms());
-                        boxes::ensure_awake(state, &owner, "send").await;
+                    // Wake obligation: a client row for a sleeping box (crdt-sync §8.4 step 1–2),
+                    // and a box with no socket on this room is told to open it (#2120). A
+                    // people chat with shared agents reaches every agent's box.
+                    match &chat_ref {
+                        Some(chat) => {
+                            let agents = match &chat.project_id {
+                                None => wake_owners,
+                                // An outside agent's chat (#2140): the relay hosts it, no box.
+                                Some(pid) if crate::outside::is_outside(state, pid) => Vec::new(),
+                                Some(pid) => state
+                                    .user_of(pid)
+                                    .map(|owner| {
+                                        vec![boxes::ServingAgent {
+                                            project_id: pid.clone(),
+                                            owner,
+                                        }]
+                                    })
+                                    .unwrap_or_default(),
+                            };
+                            boxes::after_person_row(state, room, chat, &agents).await;
+                        }
+                        None if crate::outside::is_outside(state, project_id) => {}
+                        None => {
+                            if let Some(u) = state.user_of(project_id) {
+                                state
+                                    .last_client_push
+                                    .lock()
+                                    .await
+                                    .insert(u, arbos_core::ids::now_ms());
+                            }
+                            boxes::ensure_awake_project(state, project_id, "send").await;
+                        }
                     }
                 }
             }
@@ -709,7 +736,10 @@ async fn handle_frame(
                 serde_json::from_value(f.header).unwrap_or(wire::WakeHeader {
                     reason: "open".into(),
                 });
-            boxes::ensure_awake_project(state, project_id, &w.reason).await;
+            // An outside agent's room never wakes the owner's box (#2140).
+            if !crate::outside::is_outside(state, project_id) {
+                boxes::ensure_awake_project(state, project_id, &w.reason).await;
+            }
             let (st, since) = state.project_box_state(project_id).await;
             sink.send(frame(
                 FrameType::Status,

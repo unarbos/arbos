@@ -410,6 +410,23 @@ extension AppModel {
                     subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 6 * 60_000, completedAt: nil, pending: false,
                     parts: [.text(id: "d4t", text: "Sure — add it, and send the copy whenever you're ready.")], hiddenCount: 0, senderHandle: "jacob", senderName: "Jacob Steeves"),
         ]
+        // `ARBOS_FIXTURE_LINKS=1` (rig, [feedback link-icons-ios-tile-2026-10-27]): unconst's
+        // Links tab — a brand with a mono mark, one with a colour, X, and a site with no
+        // bundled mark (nypost.com, whose icon the fixture ships).
+        if DebugHooks.fixtureLinks {
+            let links = [
+                "The repo: https://github.com/unarbos/arbos",
+                "Launch playlist https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M?si=abc",
+                "Their post https://x.com/arbos/status/1982341234567890123",
+                "Background reading https://nypost.com/2026/10/25/business/musk-says-spacex-cut-ukraines-starlink-access/",
+            ]
+            for (i, text) in links.enumerated() {
+                messages["fx-dm-unconst", default: []].append(
+                    Message(id: "dl\(i)", chatId: "fx-dm-unconst", role: .user, sender: "user:gh_32490803", status: .done, turn: nil, decision: nil, subagentId: nil,
+                            subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 5 * 60_000 + Int64(i) * 5_000, completedAt: nil, pending: false,
+                            parts: [.text(id: "dl\(i)t", text: text)], hiddenCount: 0, senderHandle: "unconst", senderName: "Unconst"))
+            }
+        }
         // `ARBOS_FIXTURE_REPLY_DM=1` (rig, #1836): rows that answer messages in other chats —
         // unconst replies here to Mira's Launch week line (a group I am in: linked); I reply
         // to Sam's; and one from a chat I am not in (quote only, no link).
@@ -434,6 +451,18 @@ extension AppModel {
             messages["fx-dm-unconst"]?.append(contentsOf: [theirs, mine, outside])
         }
         caughtUp.insert("fx-dm-unconst")
+        // `ARBOS_FIXTURE_BLOCKED=<handle,…>`: my block list, as the relay's `GET /blocks` lists
+        // it — the blocked-state rig (the Mac fixture has the same hook).
+        let blockedHandles = DebugHooks.fixtureBlocked
+        if !blockedHandles.isEmpty {
+            var seen = Set<String>()
+            var list: [Person] = []
+            for m in peopleChats.flatMap(\.members) where !m.isAgent && blockedHandles.contains(m.handle) && !seen.contains(m.id) {
+                seen.insert(m.id)
+                list.append(Person(id: m.id, handle: m.handle, avatarUrl: m.avatarUrl, name: m.name, status: "member"))
+            }
+            setBlockedForTests(list)
+        }
         directory = [
             Person(id: "fx-u1", handle: "alex-rivera", avatarUrl: nil, name: "Alex Rivera", status: "member"),
             Person(id: "fx-u2", handle: "jen", avatarUrl: nil, name: "Jen Park", status: "member"),

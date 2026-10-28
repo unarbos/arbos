@@ -1132,6 +1132,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::RemoveMessageGrant { .. }
         | ClientCommand::FetchAvatar { .. }
         | ClientCommand::DeleteProject { .. }
+        | ClientCommand::ConnectAgent { .. }
+        | ClientCommand::OutsideAgentStatus { .. }
+        | ClientCommand::OutsideAgentRotate { .. }
+        | ClientCommand::OutsideAgentRevoke { .. }
         | ClientCommand::DeletePeopleChat { .. }
         | ClientCommand::RenameGroup { .. }
         | ClientCommand::SetGroupImage { .. }
@@ -1332,18 +1336,26 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             }
             let _ = shared.events.send(SyncEvent::AttachmentOpened { key });
         }
-        ClientCommand::ForwardText {
+        ClientCommand::ForwardMessage {
             chat_id,
             message_id,
             text,
+            attachments,
+            charts,
             forwarded_from,
+            ..
         } => {
+            // No blob store to copy between: the row lands with the same keys,
+            // so its pictures are already cached. A chart travels as its
+            // fallback picture here (the fixture doc writer has no chart parts).
+            let mut attachments = attachments;
+            attachments.extend(charts.into_iter().filter_map(|c| c.fallback));
             send_user(
                 shared,
                 chat_id,
                 message_id,
                 text,
-                Vec::new(),
+                attachments,
                 None,
                 Some(forwarded_from),
                 None,
@@ -1530,6 +1542,18 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let docs = shared.docs.lock().unwrap();
             if let Some(doc) = docs.get(&chat_id) {
                 let _ = doc.core.transact(|d| d.delete_message(&message_id));
+            }
+        }
+        ClientCommand::RemoveLinkPreview {
+            chat_id,
+            message_id,
+        } => {
+            let docs = shared.docs.lock().unwrap();
+            if let Some(doc) = docs.get(&chat_id) {
+                doc.core.transact(|d| {
+                    d.set_message_fields(&message_id, &[("preview", serde_json::json!("off"))]);
+                    d.remove_parts_of_kind(&message_id, "link_preview");
+                });
             }
         }
         ClientCommand::Approve {
@@ -1915,6 +1939,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 description,
                 owner_person: None,
                 machine_info: None,
+                outside: None,
                 muted: false,
                 archived_at: None,
                 primary_chat: None,
@@ -1998,6 +2023,34 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 bytes: Arc::new(fixture_png(&key)),
                 key,
             });
+        }
+        ClientCommand::FetchCopyBlobs { request, keys, .. } => {
+            // The fixture's pictures are PNGs; a key that reads as a file gets a small text body.
+            let blobs = keys
+                .into_iter()
+                .map(|key| {
+                    let is_picture = key.ends_with(".png")
+                        || key.ends_with(".jpg")
+                        || key.ends_with(".jpeg")
+                        || key.contains("Screenshot")
+                        || key.starts_with("fixture-g")
+                        || key.starts_with("img-");
+                    let (mime, bytes) = if is_picture {
+                        ("image/png".to_owned(), fixture_png(&key))
+                    } else {
+                        (
+                            "text/plain".to_owned(),
+                            format!("Fixture attachment {key}.\n").into_bytes(),
+                        )
+                    };
+                    Some(super::CopyBlob {
+                        key,
+                        mime,
+                        bytes: Arc::new(bytes),
+                    })
+                })
+                .collect();
+            let _ = shared.events.send(SyncEvent::CopyBlobs { request, blobs });
         }
         ClientCommand::FetchLinkIcon { host } => {
             // The real icons of the fixture replies' sites (`assets/link-icons`), so the
@@ -5076,6 +5129,7 @@ fn seed_projects() -> Vec<Project> {
             description: None,
             owner_person: None,
             machine_info: None,
+            outside: None,
             muted: false,
             archived_at: None,
             primary_chat: None,
@@ -5114,6 +5168,7 @@ fn seed_projects() -> Vec<Project> {
             description: None,
             owner_person: None,
             machine_info: None,
+            outside: None,
             muted: false,
             archived_at: None,
             primary_chat: None,
@@ -5152,6 +5207,7 @@ fn seed_projects() -> Vec<Project> {
             description: None,
             owner_person: None,
             machine_info: None,
+            outside: None,
             muted: false,
             archived_at: None,
             primary_chat: None,
@@ -6476,6 +6532,7 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
         description: None,
         owner_person: None,
         machine_info: None,
+        outside: None,
         muted: false,
         archived_at: None,
         primary_chat: None,
@@ -6601,6 +6658,7 @@ fn seed_people_projects() -> Vec<Project> {
             description: None,
             owner_person: None,
             machine_info: None,
+            outside: None,
             muted: false,
             archived_at: None,
             primary_chat: None,
@@ -6708,6 +6766,7 @@ fn human_message(chat_id: &str, who: &Person, text: &str, at: u64) -> Message {
         parts: vec![text_part(text)],
         hidden_parts: Vec::new(),
         greeting: false,
+        preview: None,
     }
 }
 
@@ -6849,6 +6908,24 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
         "Sending in a sec. Also: can we add your Arbos agent here so it can pull the numbers while we talk?",
         base + 150_000,
     ));
+    if std::env::var("ARBOS_FIXTURE_LINKS").is_ok_and(|v| v == "1") {
+        // Sam's Links tab ([feedback link-icons-mac-tile-2026-10-27] shots): a brand with a
+        // mono mark, one with a colour, X, and a site with no bundled mark.
+        for (i, text) in [
+            "The repo: https://github.com/unarbos/arbos",
+            "Launch playlist https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M?si=abc",
+            "Their post https://x.com/arbos/status/1982341234567890123",
+            "Background reading https://nypost.com/2026/10/25/business/musk-says-spacex-cut-ukraines-starlink-access/",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            insert_message_via_core(
+                &doc,
+                &human_message(DM_SAM, &sam(), text, base + 160_000 + i as u64 * 5_000),
+            );
+        }
+    }
     // The Launch week group's rows are built here so the DM can quote them
     // (`ARBOS_FIXTURE_REPLY_DM=1`, #1835: Reply in DM carries the original).
     let samir = person("gh_457", "samir", Some("Samir Haddad"), "member");
@@ -6955,6 +7032,25 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
     }
     insert_message_via_core(&group, &deck);
     insert_message_via_core(&group, &ask);
+    // Scout's photo (Jacob, 2026-10-27, [feedback forward-attachments-mac-2026-10-27]): an
+    // agent's picture-only message in a group right before its words — it must carry the
+    // same disc and name as the bubble under it.
+    let mut agent_picture = human_message(GROUP_LAUNCH, &sam(), "", base + 358_000);
+    agent_picture.role = Role::Assistant;
+    agent_picture.sender = format!("agent:{PROJECT_ARBOS}");
+    agent_picture.sender_name = Some("Arbos".into());
+    agent_picture.sender_handle = Some("arbos".into());
+    agent_picture.sender_avatar = None;
+    agent_picture.asked_by_handle = Some("sam".into());
+    agent_picture.owner_handle = Some(ME_HANDLE.into());
+    agent_picture.parts = vec![attachment(
+        "slide-04-signups.png",
+        "image/png",
+        AttachmentKind::Image,
+        "Slide 4 · signups",
+        212_000,
+    )];
+    insert_message_via_core(&group, &agent_picture);
     let mut agent = human_message(GROUP_LAUNCH, &sam(), "", base + 360_000);
     agent.role = Role::Assistant;
     agent.sender = format!("agent:{PROJECT_ARBOS}");
@@ -8327,6 +8423,7 @@ mod seed_parity_tests {
         ("01J9GROUPLAUNCH00000000000", &[
             "User Done user:gh_457 name=Some(\"Samir Haddad\") h=Some(\"samir\") asked=None turn=None wa=false [text] hidden=[] text=93 r=0 dt=0 ct=Some(0)",
             "User Done user:gh_456 name=Some(\"Sam Rivera\") h=Some(\"sam\") asked=None turn=None wa=false [text] hidden=[] text=71 r=0 dt=30000 ct=Some(0)",
+            "Assistant Done agent:01J9ARBOS00000000000000000 name=Some(\"Arbos\") h=Some(\"arbos\") asked=Some(\"sam\") turn=None wa=false [attachment:Slide 4 · signups:Some(212000):Image] hidden=[] text=0 r=0 dt=58000 ct=Some(0)",
             "Assistant Done agent:01J9ARBOS00000000000000000 name=Some(\"Arbos\") h=Some(\"arbos\") asked=Some(\"sam\") turn=None wa=false [text] hidden=[] text=96 r=0 dt=60000 ct=Some(0)",
             "User Done user:gh_457 name=Some(\"Samir Haddad\") h=Some(\"samir\") asked=None turn=None wa=false [attachment:Slide 4 · signups:Some(212000):Image,attachment:Launch dashboard:Some(348000):Image,attachment:Launch day, the team:Some(1204000):Image,attachment:Signup funnel:Some(156000):Image,attachment:Press kit v3:Some(1840000):Pdf,attachment:Launch teaser:Some(6420000):Video,text] hidden=[] text=54 r=0 dt=80000 ct=Some(0)",
             "User Done user:gh_457 name=Some(\"Samir Haddad\") h=Some(\"samir\") asked=None turn=None wa=false [text] hidden=[] text=112 r=0 dt=90000 ct=Some(0)",

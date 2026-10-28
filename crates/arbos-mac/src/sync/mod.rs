@@ -33,8 +33,8 @@ use crate::model::{
     Voice,
 };
 use crate::model::{
-    Attachment, BoxReport, BoxState, ChannelsView, Chat, ConnectorsView, DeviceView, Effort, Id,
-    Link, LinkState, LocalView, Machine, Message, NewSecret, Project, ProjectDocView,
+    Attachment, BoxReport, BoxState, ChannelsView, ChartBody, Chat, ConnectorsView, DeviceView,
+    Effort, Id, Link, LinkState, LocalView, Machine, Message, NewSecret, Project, ProjectDocView,
     ProjectSecrets, Routine, RoutineRun, RoutineTrigger, SecretsView, Skill,
 };
 
@@ -111,6 +111,25 @@ pub enum SyncEvent {
     NeedsPairing {
         relay_url: String,
     },
+    /// An outside agent's key (#2141), shown once on the reveal sheet: after a connect or a
+    /// rotate.
+    OutsideAgentKey {
+        project_id: Id,
+        name: String,
+        transport: String,
+        key: String,
+        link: String,
+        relay_url: String,
+        /// The agent's 1:1 chat (connect only).
+        chat_id: Option<Id>,
+        rotated: bool,
+    },
+    /// The connection of an outside agent, polled while the reveal sheet is up and on the
+    /// Details pane.
+    OutsideAgentStatus {
+        project_id: Id,
+        info: crate::model::OutsideInfo,
+    },
     /// Who is signed in (`/auth/token` or `/me`); `None` after sign-out.
     Account(Option<AccountView>),
     /// Remote feature flags from `GET /me` → `features` (one object, one place on the relay).
@@ -181,6 +200,17 @@ pub enum SyncEvent {
     CallStarted {
         call: Call,
         sender: Sender,
+    },
+    /// A message in a server channel (`channel_message` push from the relay's Matrix push
+    /// gateway): the banner source for servers, which never pass through the chat docs.
+    ChannelMessage {
+        server_id: String,
+        server_name: String,
+        channel_id: String,
+        channel_name: String,
+        room_id: String,
+        sender: Sender,
+        text: Option<String>,
     },
     /// A call ended (push, or my `leave` answered `ended: true`).
     CallEnded(CallEnded),
@@ -337,6 +367,14 @@ pub enum SyncEvent {
     /// loading forever. The failure itself went to the log and the silent diagnostics path.
     ThumbnailFailed {
         key: String,
+    },
+    /// Copy of a message ([feedback copy-image-messages-mac-2026-10-27]): the original
+    /// bytes of every attachment `ClientCommand::FetchCopyBlobs` asked for, in the asked
+    /// order; a blob that could not be fetched is `None` in its slot. `request` is the
+    /// command's.
+    CopyBlobs {
+        request: u64,
+        blobs: Vec<Option<CopyBlob>>,
     },
     /// An attachment landed in ~/Downloads (F10); the app reveals it.
     AttachmentSaved {
@@ -533,6 +571,15 @@ pub enum PictureSource {
     Key(String),
 }
 
+/// One fetched attachment of a Copy (`SyncEvent::CopyBlobs`): the relay's `content-type`
+/// and the bytes as uploaded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CopyBlob {
+    pub key: String,
+    pub mime: String,
+    pub bytes: Arc<Vec<u8>>,
+}
+
 /// Something the user did; the source writes it into the doc / outbox.
 #[derive(Clone, Debug)]
 pub enum ClientCommand {
@@ -726,6 +773,12 @@ pub enum ClientCommand {
         chat_id: Id,
         message_id: Id,
     },
+    /// Remove a message's link preview for everyone (`preview: "off"` on the row, the part
+    /// dropped; the relay decides with the delete rule) ([feedback link-embeds-mac-2026-10-27]).
+    RemoveLinkPreview {
+        chat_id: Id,
+        message_id: Id,
+    },
     /// S18: decide an approval card (`approve` / `reject` commands, `arbos_core::approval`).
     Approve {
         chat_id: Id,
@@ -874,6 +927,26 @@ pub enum ClientCommand {
     DeleteProject {
         project_id: Id,
     },
+    /// Connect an outside agent (#2141): `POST /outside-agents {name, transport}` →
+    /// [`SyncEvent::OutsideAgentKey`] (the key, shown once) and a registry refresh.
+    ConnectAgent {
+        name: String,
+        /// `acp` | `grok` | `custom`.
+        transport: String,
+        avatar_color_index: Option<u8>,
+    },
+    /// `GET /outside-agents/{id}` → [`SyncEvent::OutsideAgentStatus`].
+    OutsideAgentStatus {
+        project_id: Id,
+    },
+    /// `POST /outside-agents/{id}/rotate` → [`SyncEvent::OutsideAgentKey`] (fresh key).
+    OutsideAgentRotate {
+        project_id: Id,
+    },
+    /// `DELETE /outside-agents/{id}` (revoke the key; the agent stays) → status refresh.
+    OutsideAgentRevoke {
+        project_id: Id,
+    },
     /// Delete a people chat I own (`DELETE /chats/{id}`).
     DeletePeopleChat {
         chat_id: Id,
@@ -947,6 +1020,15 @@ pub enum ClientCommand {
         project_id: Id,
         key: String,
     },
+    /// Copy of a message: the full original bytes of every attachment in `keys` (blob
+    /// slot `project_id`), answered together as `SyncEvent::CopyBlobs { request, .. }`
+    /// ([feedback copy-image-messages-mac-2026-10-27]). Never a thumbnail: the
+    /// pasteboard gets what the sender uploaded.
+    FetchCopyBlobs {
+        project_id: Id,
+        request: u64,
+        keys: Vec<String>,
+    },
     /// Fetch the site icon the bubbles draw before named links to `host`.
     FetchLinkIcon {
         host: String,
@@ -975,13 +1057,20 @@ pub enum ClientCommand {
         attachment: Attachment,
         text: String,
     },
-    /// Bubble menu → Forward: write `text` as a new user row in `chat_id`
-    /// carrying `forwardedFrom: <name>` (the bubble's "Forwarded from" header).
-    /// `message_id` is the optimistic row's id.
-    ForwardText {
+    /// Bubble menu → Forward: write the picked message again as a new user row
+    /// in `chat_id` — its text, every attachment (each blob copied from
+    /// `from_slot` into the destination's slot, so the target chat's members can
+    /// read it) and every chart part with its fallback picture — carrying
+    /// `forwardedFrom: <name>` (the bubble's "Forwarded from" header).
+    /// `message_id` is the optimistic row's id
+    /// ([feedback forward-attachments-mac-2026-10-27]).
+    ForwardMessage {
         chat_id: Id,
         message_id: Id,
+        from_slot: Id,
         text: String,
+        attachments: Vec<Attachment>,
+        charts: Vec<ChartBody>,
         forwarded_from: String,
     },
     /// Settings → Connectors opened or asked for a refresh.

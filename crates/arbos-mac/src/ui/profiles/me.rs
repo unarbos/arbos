@@ -22,7 +22,6 @@ use crate::ui::people;
 use crate::ui::profiles::pane::{self, Hero, Picture, ProfilePane, Section};
 use crate::ui::profiles::{self, kit, machine};
 use crate::ui::shell::{fmt_uptime, human_bytes, SettingsPage, Shell};
-use crate::ui::sidebar;
 use crate::ui::theme::{
     AppearancePref, Surface, Theme, GLASS_OPACITY_MAX, GLASS_OPACITY_MIN, TEXT_BODY, TEXT_SMALL,
     TEXT_TINY,
@@ -67,6 +66,7 @@ impl Shell {
         let notify_on = state.notifier.enabled;
         let permission = state.notification_permission();
         let read_receipts = state.read_receipts;
+        let link_previews = state.link_previews;
         let secrets_value = if state.secrets.loaded {
             state.secrets.row_value()
         } else {
@@ -243,7 +243,6 @@ impl Shell {
             let breakdown_open = self.machine_breakdown_open;
             let plan = machine::plan(&machine, report.as_ref(), breakdown_open);
             let live = report.as_ref().filter(|r| r.reachable);
-            let dot = sidebar::machine_dot(shown, &theme);
             let uptime = machine
                 .since
                 .filter(|_| shown == MachineState::Awake)
@@ -359,14 +358,11 @@ impl Shell {
                                 .flex()
                                 .items_center()
                                 .gap(px(7.0))
-                                .child(div().size(px(8.0)).rounded_full().bg(Theme::with_alpha(
-                                    dot,
-                                    if shown == MachineState::Waking {
-                                        0.4 + 0.6 * PulseClock::phase(cx, 1100)
-                                    } else {
-                                        1.0
-                                    },
-                                )))
+                                // The spinner while it wakes, the red `!` on a fault, nothing
+                                // at rest (Jacob, 2026-10-27: never a coloured dot).
+                                .children(crate::ui::marks::machine_mark_element(
+                                    shown, 9.0, &theme, cx,
+                                ))
                                 .child(value(
                                     match &uptime {
                                         Some(up) => format!("{} · {up}", shown.label()),
@@ -537,7 +533,7 @@ impl Shell {
                                     crate::ui::avatars::neutral_element(&ws.name, 28.0, &theme)
                                         .into_any_element()
                                 });
-                            card.child(machine::agent_row(picture, ws, &theme))
+                            card.child(machine::agent_row(picture, ws, &theme, cx))
                         }
                         _ => card,
                     };
@@ -741,6 +737,29 @@ impl Shell {
                     ),
                 );
             }
+            // Link previews ([feedback link-embeds-mac-2026-10-27]): the cards under links in
+            // chat, on or off on this Mac; off leaves every link plain.
+            let group = group.child(seg_row(
+                "Link previews",
+                div()
+                    .flex()
+                    .gap(px(2.0))
+                    .child(
+                        glass::segment("link-previews-on", "On", link_previews, &theme).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.state.update(cx, |s, cx| s.set_link_previews(true, cx));
+                            }),
+                        ),
+                    )
+                    .child(
+                        glass::segment("link-previews-off", "Off", !link_previews, &theme)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.state
+                                    .update(cx, |s, cx| s.set_link_previews(false, cx));
+                            })),
+                    ),
+                &theme,
+            ));
             div()
                 .flex()
                 .flex_col()

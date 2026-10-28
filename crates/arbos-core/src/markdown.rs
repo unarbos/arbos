@@ -401,18 +401,30 @@ pub struct InlineStyle {
 }
 
 /// One inline run: its text (markers removed, escapes resolved), its style,
-/// and the link target when `style.link`.
+/// the link target when `style.link`, and `source` — the byte range of the
+/// text it came from (escapes included, markers excluded). The bytes of the
+/// source no span covers are markers: a composer paints those faint and the
+/// spans in their styles while the message is typed.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Span {
     pub text: String,
     pub style: InlineStyle,
     pub href: Option<String>,
+    pub source: std::ops::Range<usize>,
 }
 
 /// Split inline markdown into styled runs. Unterminated markers are shown
 /// literally, so a half-streamed `**bold` does not flicker.
 pub fn inline_spans(text: &str) -> Vec<Span> {
     let chars: Vec<char> = text.chars().collect();
+    // Byte offset of every char index, plus the end.
+    let mut bytes = Vec::with_capacity(chars.len() + 1);
+    let mut at = 0usize;
+    for c in &chars {
+        bytes.push(at);
+        at += c.len_utf8();
+    }
+    bytes.push(at);
     let mut spoilers = 0u16;
     let mut out = Vec::new();
     inline_into(
@@ -424,7 +436,38 @@ pub fn inline_spans(text: &str) -> Vec<Span> {
         &mut spoilers,
         &mut out,
     );
+    for span in &mut out {
+        span.source = bytes[span.source.start]..bytes[span.source.end];
+    }
     out
+}
+
+/// The byte ranges of `text` that are inline markers (`**`, `` ` ``, `[`,
+/// `](…)`, `||`, …): everything no span of [`inline_spans`] covers.
+pub fn inline_markers(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    for span in inline_spans(text) {
+        if span.source.start > at {
+            out.push(at..span.source.start);
+        }
+        at = span.source.end.max(at);
+    }
+    if at < text.len() {
+        out.push(at..text.len());
+    }
+    out
+}
+
+/// The byte length of the quote markers a line starts with (`> `, `>> `,
+/// `> > `), or `None` when the line is not a quote line by the block rule
+/// (text after the markers required). For a composer's live quote bar.
+pub fn quote_marker_len(line: &str) -> Option<usize> {
+    let content = quote_content(line)?;
+    if content.trim().is_empty() {
+        return None;
+    }
+    Some(line.len() - content.len())
 }
 
 /// The text [`inline_spans`] renders: markers removed, math as its source.
@@ -503,14 +546,17 @@ fn inline_into(
     out: &mut Vec<Span>,
 ) {
     let mut current = String::new();
+    // Where the text in `current` started (char index).
+    let mut current_from = from;
     let mut i = from;
 
-    let flush = |current: &mut String, out: &mut Vec<Span>| {
+    let flush = |current: &mut String, current_from: usize, upto: usize, out: &mut Vec<Span>| {
         if !current.is_empty() {
             out.push(Span {
                 text: std::mem::take(current),
                 style: base,
                 href: inside_link.map(str::to_owned),
+                source: current_from..upto,
             });
         }
     };
@@ -521,17 +567,23 @@ fn inline_into(
         // math are handled by `math_at` first.
         if c == '\\' {
             if let Some((source, end)) = math_at(chars, i, to) {
-                flush(&mut current, out);
-                push_math(&source, base, inside_link, out);
+                flush(&mut current, current_from, i, out);
+                push_math(&source, base, inside_link, i..end, out);
                 i = end;
                 continue;
             }
             if let Some(&next) = chars.get(i + 1).filter(|_| i + 1 < to) {
                 if next.is_ascii_punctuation() {
+                    if current.is_empty() {
+                        current_from = i;
+                    }
                     current.push(next);
                     i += 2;
                     continue;
                 }
+            }
+            if current.is_empty() {
+                current_from = i;
             }
             current.push(c);
             i += 1;
@@ -539,19 +591,21 @@ fn inline_into(
         }
         if c == '$' {
             if let Some((source, end)) = math_at(chars, i, to) {
-                flush(&mut current, out);
-                push_math(&source, base, inside_link, out);
+                flush(&mut current, current_from, i, out);
+                push_math(&source, base, inside_link, i..end, out);
                 i = end;
                 continue;
             }
         }
         if c == '`' {
             if let Some((code, end)) = code_span_at(chars, i, to) {
-                flush(&mut current, out);
+                flush(&mut current, current_from, i, out);
+                let ticks = (i..end).take_while(|&k| chars[k] == '`').count();
                 out.push(Span {
                     text: code,
                     style: InlineStyle { code: true, ..base },
                     href: inside_link.map(str::to_owned),
+                    source: i + ticks..end - ticks,
                 });
                 i = end;
                 continue;
@@ -559,7 +613,7 @@ fn inline_into(
         }
         if c == '[' && inside_link.is_none() {
             if let Some((label_end, typed, href, end)) = link_at(chars, i, to) {
-                flush(&mut current, out);
+                flush(&mut current, current_from, i, out);
                 let style = InlineStyle { link: true, ..base };
                 let before = out.len();
                 inline_into(chars, i + 1, label_end, style, Some(&href), spoilers, out);
@@ -569,6 +623,7 @@ fn inline_into(
                         text: typed,
                         style,
                         href: Some(href),
+                        source: i..end,
                     });
                 }
                 i = end;
@@ -576,7 +631,7 @@ fn inline_into(
             }
         }
         if let Some((url, end)) = autolink_at(chars, i, to) {
-            flush(&mut current, out);
+            flush(&mut current, current_from, i, out);
             let href = if url.starts_with("www.") {
                 format!("https://{url}")
             } else {
@@ -586,12 +641,13 @@ fn inline_into(
                 text: url,
                 style: InlineStyle { link: true, ..base },
                 href: Some(inside_link.map(str::to_owned).unwrap_or(href)),
+                source: i..end,
             });
             i = end;
             continue;
         }
         if let Some((delim, len, close)) = delimiter_at(chars, i, to) {
-            flush(&mut current, out);
+            flush(&mut current, current_from, i, out);
             let mut style = base;
             match delim {
                 Delim::Bold => style.bold = true,
@@ -610,17 +666,27 @@ fn inline_into(
             i = close + len;
             continue;
         }
+        if current.is_empty() {
+            current_from = i;
+        }
         current.push(c);
         i += 1;
     }
-    flush(&mut current, out);
+    flush(&mut current, current_from, i, out);
 }
 
-fn push_math(source: &str, base: InlineStyle, inside_link: Option<&str>, out: &mut Vec<Span>) {
+fn push_math(
+    tex: &str,
+    base: InlineStyle,
+    inside_link: Option<&str>,
+    source: std::ops::Range<usize>,
+    out: &mut Vec<Span>,
+) {
     out.push(Span {
-        text: source.to_string(),
+        text: tex.to_string(),
         style: InlineStyle { math: true, ..base },
         href: inside_link.map(str::to_owned),
+        source,
     });
 }
 
@@ -1417,6 +1483,43 @@ mod tests {
         assert_eq!(styles("`$x$`"), vec![("$x$".into(), code())]);
         // Underscores and stars inside math never become emphasis.
         assert_eq!(inline_spans("$a_1 * b_2$")[0].text, "a_1 * b_2");
+    }
+
+    /// Every span names the bytes it came from; what no span covers is a marker —
+    /// the composer's live styling paints by these.
+    #[test]
+    fn spans_carry_their_source_bytes_and_the_gaps_are_markers() {
+        let text = "a **b** `c` [d](https://e.f) ~~g~~ \\*h é";
+        let spans = inline_spans(text);
+        for s in &spans {
+            let src = &text[s.source.clone()];
+            if s.text.contains('*') {
+                continue;
+            }
+            assert!(
+                src == s.text || (s.style.code && src.contains(&s.text)) || s.style.link,
+                "{s:?} from {src:?}"
+            );
+        }
+        assert_eq!(
+            inline_markers(text)
+                .into_iter()
+                .map(|r| text[r].to_string())
+                .collect::<Vec<_>>(),
+            vec!["**", "**", "`", "`", "[", "](https://e.f)", "~~", "~~"]
+        );
+        let escaped = spans
+            .iter()
+            .find(|s| s.text == " *h é")
+            .expect("escaped run");
+        assert_eq!(&text[escaped.source.clone()], " \\*h é");
+        assert!(inline_markers("plain snake_case 2*3").is_empty());
+        assert_eq!(quote_marker_len("> hi"), Some(2));
+        assert_eq!(quote_marker_len(">> hi"), Some(3));
+        assert_eq!(quote_marker_len("> > hi"), Some(4));
+        assert_eq!(quote_marker_len(">"), None);
+        assert_eq!(quote_marker_len(">5"), None);
+        assert_eq!(quote_marker_len("hi"), None);
     }
 
     #[test]

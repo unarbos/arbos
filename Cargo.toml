@@ -14,13 +14,15 @@ members = [
     "crates/arbos-relay",
     "crates/arbos-agentd",
     "crates/arbosctl",
+    # Outside agents (#2143): ACP agent ⇄ relay bridge. Depends on nothing in the workspace.
+    "crates/arbos-acp",
     "crates/arbos-local",
     "crates/arbos-mac",
     "crates/arbos-update",
 ]
 
 [workspace.package]
-version = "0.6.307"
+version = "0.6.317"
 edition = "2021"
 license = "UNLICENSED"
 publish = false

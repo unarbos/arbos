@@ -69,7 +69,7 @@ pub fn no_such_image() -> Response {
     )
 }
 
-fn safe_key(k: &str) -> bool {
+pub(crate) fn safe_key(k: &str) -> bool {
     // `:` is required for people-chat blob slots (`people:{chat_id}`); still no `/` or `..` path bits.
     !k.is_empty()
         && k.len() <= 128

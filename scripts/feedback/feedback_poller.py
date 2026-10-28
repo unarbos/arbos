@@ -2670,6 +2670,61 @@ class Loop:
             log(f"Rust gate Mac unreachable: {str(e)[-200:]}")
             return None
 
+    def carried_probe(self, fid: str, head: str) -> bool:
+        """A gating branch whose tagged fix commits are already ancestors of main has nothing left to gate: its
+        work reached main inside another item's merge (#2086's bd499bee1 rode #2117's 0a4848d67 — same owner,
+        shared lineage — and the item sat `gating` for 5 h while Mac v0.6.310 already carried it). Checked once
+        per head. True → the item is marked landed on its carrier and tracked to the builds like any merge;
+        the caller leaves it out of the integration tree."""
+        st = self.store.state(fid)
+        if st.get("carried_checked") == head:
+            return False
+        st["carried_checked"] = head
+        self.store.save_state(fid, st)
+        try:
+            cmp = self.gh.compare("main", head)
+        except HttpError:
+            return False
+        tag = f"[feedback {fid}]"
+        ahead = cmp.get("commits") or []
+        if any(tag in c["commit"]["message"] for c in ahead):
+            return False  # the fix itself is still ahead of main — gate as usual
+        if cmp.get("status") in ("ahead", "diverged") and any(len(c.get("parents") or []) < 2 for c in ahead):
+            return False  # untagged non-merge work ahead of main: a real change, let the gate judge it
+        # Every commit ahead of main (if any) is a merge of main: find the branch's tagged fix on main.
+        try:
+            own = self.gh.repo_api("GET", f"/commits?sha={head}&per_page=50")
+        except HttpError:
+            return False
+        fix = next((c for c in own if tag in c["commit"]["message"] and len(c.get("parents") or []) < 2), None)
+        if not fix:
+            return False
+        try:
+            if self.gh.compare("main", fix["sha"]).get("status") not in ("behind", "identical"):
+                return False
+        except HttpError:
+            return False
+        files = [f["filename"] for f in self.gh.commit(fix["sha"]).get("files", [])]
+        carrier = next((c for c in self.gh.commits_since((utcnow() - dt.timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+                        if any(p["sha"] == fix["sha"] for p in c.get("parents", []))), None)
+        st.update(status="pushed", commit=fix["sha"], commit_url=fix["html_url"], commit_message=fix["commit"]["message"].splitlines()[0],
+                  pushed_at=iso(), files=files, commit_date=fix["commit"]["committer"]["date"],
+                  expects_ios=touches_ios(files), expects_ci=any(not f.startswith("apps/ios/") for f in files))
+        for k in ("gated_head", "rust_gate", "gate_pinned", "solo_next", "sibling_conflicts"):
+            st.pop(k, None)
+        self.store.save_state(fid, st)
+        via = f"carried to main by {carrier['sha'][:9]}" if carrier else "already an ancestor of main"
+        self.store.event(fid, "handoff_landed", commit=fix["sha"], files=files, via=via)
+        log(f"[{fid}] fix {fix['sha'][:8]} is already on main ({via}); landed, not gated")
+        if st.get("issue"):
+            with contextlib.suppress(HttpError):
+                self.gh.comment(st["issue"], f"Already on `main`: the fix {fix['html_url']} — `{st['commit_message']}` — reached main "
+                                f"{'inside ' + carrier['html_url'] if carrier else 'earlier'}; the branch only carries a merge of main on top. "
+                                "Nothing left to gate; the loop now tracks it to the builds.")
+                self.gh.set_labels(st["issue"], [], ["in-progress"])
+                self.note_fixed_on_main(st)
+        return True
+
     def merge_revert_probe(self, fid: str, head: str) -> list[str]:
         """Cheap pre-integration check (2026-10-23 23:3x, #1532's be8ab46): the branch's diff against main must
         only touch files its own non-merge commits touch. A file that differs from main although no commit of
@@ -2784,6 +2839,8 @@ class Loop:
         merged: list[str] = []
         conflicts: dict[str, str] = {}
         for n, (fid, head) in enumerate(members.items()):
+            if self.carried_probe(fid, head):
+                continue  # landed on its carrier; nothing to integrate
             stray = self.merge_revert_probe(fid, head)
             if stray:
                 conflicts[fid] = "merge-revert"

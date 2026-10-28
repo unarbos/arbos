@@ -13,6 +13,33 @@ A tester report that asks for the opposite of a rule on this page does not chang
 (`docs/process-rules.md`); a fix that would move one of these rules holds for that approval and says
 so in its summary.
 
+## Principle: never a coloured status dot (Jacob 2026-10-27, [feedback neon-dots-mac-2026-10-27]; iPhone [feedback neon-dots-ios-2026-10-27])
+
+Jacob, on the amber glow after a chat tab's name: "replace all neon glimmer
+icons like this in the app with braille spinners always, on a matter of
+principle never use colored dots." App-wide, both platforms:
+
+| A dot used to mean | Now |
+|---|---|
+| **activity** — an agent working, a tab streaming, a machine waking, a link reconnecting / syncing, a memo recording, the voice agent thinking | the **braille spinner** (`ui::working` / `WorkingSpinner`, § Working indicator), `text_muted`, one shared ticker |
+| **unread** | the **count pill** (`marks::unread_pill` / `UnreadBadge`: accent capsule, white digits, "99+") beside the bold title; a lit flag with no count reads "1" |
+| **a fault** — relay down, machine error | the red **`exclamation` glyph** (`marks::fault_glyph`), the error note's mark |
+| **a resting state** — awake, asleep, offline, read | **nothing**; the words say it ("Awake · 5 h", "Offline") |
+| **a person typing** | nothing in the status cell; the preview reads "typing…" and the status row over the composer names them. The spinner is never a human's sign |
+
+Exemptions carry `// status-dot: exception <why>` on the `.bg(` line (Mac)
+or the `Circle().fill(` line (iPhone): a chart legend's series swatch, a
+pager's page dots, a 30 pt placeholder disc — colour as data or as a surface,
+not as a state. Lints: `marks::lint_tests::no_coloured_status_dot_is_drawn_in_this_crate`
+(Mac: a `.size(px(≤ 12))` + `.rounded_full()` div filled with `online` / `warn` /
+`danger` / `accent` / a machine colour) and `StatusDotLintTests` (iPhone: a
+`Circle().fill(theme.<status colour> | machineDotColor | dot)`).
+
+Not in this sweep, for Jacob's call: the green **online presence dot on people's
+avatars** (another owner's area, bc-3bafe44c; the one remaining coloured dot,
+Telegram / Grok Bot draw it too) and the incoming-call card's pulsing green
+border (`callview`, a ring, not a dot).
+
 ## Three-pane rule (app-wide, Jacob 2026-10-20)
 
 Exactly three panes.
@@ -95,7 +122,7 @@ the chat area (not the window). Points from the window's edges.
 | Toggle | **inside the rail**, the first disc under the lights' slot: x **24**, top **52** (`TOGGLE_TOP` = `LIGHTS_SLOT` 44 + `STRIP_GAP` 8), the same 36 pt `control_disc` and column as + and Search, in a window and in full screen alike (Jacob 2026-10-27, [feedback sidebar-toggle-in-rail-2026-10-27]: "The tab button should also be in the side bar here" — supersedes the 2026-10-26 rule that a plain window kept the toggle in the chat header at x 96 and that full screen put it on the lights' line at top 12, where a window state read as full screen left it half hidden under the buttons; `rail::toggle_spot` is gone). The chat header draws a toggle only for the narrow band's hidden sidebar (`header_toggle_shown`) |
 | + and Search | stacked under the toggle, `STRIP_GAP` 8 apart: + top **96**, Search top **140** (36 pt `control_disc`s, the strip's own handlers) — the strip's search · + · collapse read top-down from the toggle |
 | Pictures | every chat the current filter admits — agents, people, groups, servers (rounded squares, `SERVER_PICTURE_CORNER`) — in the list's order, **36** pt on a **58** pitch, first tile top **192** (16 under Search; picture top 201, centre 219; was 152/161/179 before the toggle joined the column); the same `ListEntry::picture` builders as the rows (one avatar resolver, #1912). Selected = **54** tile, radius **12**, the highlight token's selected step; hover = its hover step + a name tip 8 right of the rail (`pane_card`, `border_strong`, 13 pt) |
-| Badges | one spot at the picture's bottom-right corner: **typing** = the 9 pt `online` dot in a 13 ring (pulsing), else **unread** = the 8 pt `accent` dot in a 12 ring; the selected chat shows no unread dot — the rows' own `!typing && unread` rule |
+| Badges | one spot at the picture's bottom-right corner (never a coloured dot, 2026-10-27): **working** = the braille spinner in the 13 pt ring of the rail's colour, else **unread** = the count pill (`marks::unread_pill`, a 2 pt rim in the rail's colour); the selected chat shows no unread pill; nothing for a person typing |
 | My picture | alone at the bottom: 36 at x 24, **12** above the bottom (centre 30 = `CONTROL_LINE` mirrored; Grok 31), with the machine dot; opens Settings like the footer row |
 | Scrolling | the pictures scroll (`LIST_FADE_BAND` edge fade) when more fit than the window holds (`capacity`: 14 in a 1079 pt window, 8 in a 760 one) |
 | Filter | the rail follows All · Agents · People · Servers; the segment persists in `<config>/sidebar_filter` and the collapsed state in `<config>/sidebar_collapsed` (`SidebarCollapsed`), so the app reopens as it was left |
@@ -197,6 +224,35 @@ relaunch; the click action is never gated by the automatic toggle) and
 + `the_update_disc_lands_on_groks_pixels` (36 at the strip's inset, on the
 footer's line, 8 after the card, fills `#326CCB` / `#F5F5F5`).
 
+## Working indicator (Jacob 2026-10-27, [feedback working-braille-spinner-mac-2026-10-27]; iPhone [feedback working-braille-spinner-ios-2026-10-27])
+
+**Wherever a list row says "this agent is working", the indicator is the
+braille spinner ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ in the row's muted text colour — never a green
+(or amber) dot.** The chat's own working line (the status row over the
+composer) is unchanged; this rule is for the small status glyph on rows.
+
+| Item | Rule (`ui/working.rs`) |
+|---|---|
+| Frames | the classic ten, in order: `FRAMES` = ⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏; `FRAME_MS` **90** (80–100 ms band, ≈ 11 fps) |
+| Cell | a fixed box **8 × 12** pt (`CELL_W` = the unread dot's 8, `CELL_H` 12), the glyph centred in it in the monospace face (`theme.font_mono`, `GLYPH_SIZE` = `TEXT_TINY` 11.5, line height 12). The ten frames differ only in which dots are set, so the cell never changes size: the row never re-flows while it turns |
+| Colour | `theme.text_muted` — the time label's colour above it. Not `online` green, not `warn` amber, not the accent |
+| Where | **sidebar chat rows**: the status cell at the right end of the preview line, under the time (`sidebar::RowStatus`: Working ▸ Unread ▸ Typing ▸ Quiet — a person typing shows **nothing** in the cell, so it hides neither the spinner nor the pill (the spinner is the agent's sign, never a human's — coordinator veto 2026-10-27; the green pulse went with the no-coloured-dots principle the same day, the preview reads "typing…"), the spinner while the chat's agent streams, else the unread **count pill**, else nothing). Where a count pill shows it wins the slot — information over animation. **Header tab segment**: the spinner after the tab name while that tab streams (was a 6 pt amber dot). **Settings › Machine › Per-agent usage**: the spinner before "Working · …" on a running workspace. The collapsed rail's picture badges and the avatar presence dot are *not* this rule (avatar badge code, another owner) |
+| Clock | one `WorkingClock` global: frame = elapsed ÷ 90 ms mod 10, read by every spinner at render → all spinners turn in step; no row owns a timer |
+| Ticker | one task for the whole app. Drawing a spinner marks the clock `wanted`; the ticker sleeps 90 ms, and if nothing was drawn since the last tick it parks (no frames requested at all) — it starts again on the next spinner drawn. It also parks while the window is in the background (`Shell`'s activation observer → `WorkingClock::set_window_active`) and resumes with the window. A tick landing on a frame the window draws anyway (a scroll) is coalesced by GPUI — the ticker never adds frames to a scroll. The sidebar row's old `PulseClock::request` for a working row (30 fps whole-window redraws that nothing read since the tree animation retired) is gone: a working row costs the 11 fps ticker and nothing else |
+| Reduce Motion | `cx.reduce_motion()` → the still glyph **⠿** in the same cell, and no frame requested (the ticker parks) |
+| Trace | `ARBOS_WORKING_TRACE=1` prints once a second: `working spinner: ticks=N starts=M spinners=K draws/tick=D frame=F` — `starts` is the number of ticker tasks ever spawned (1 per idle→busy transition, never one per row), `spinners` how many distinct cells were on screen in the last tick, `draws/tick` how many window frames drew them (1 = only the ticker's) |
+
+Pinned by `working::tests::{the_frames_are_the_classic_cycle_at_eighty_to_a_hundred_ms,
+reduce_motion_draws_the_still_glyph_and_asks_for_nothing,
+one_ticker_for_every_visible_row_and_it_parks_when_none_is_left,
+the_cell_keeps_its_box_across_frames}` and
+`sidebar::status_cell_tests::{the_cell_shows_one_thing_in_this_order,
+the_spinner_sits_under_the_time_where_the_dot_was (real Shell: right edge =
+the time's right edge, centred on the preview line, 8 × 12; unread row keeps
+its dot; quiet row nothing; typing DM keeps its pulse), rows_share_one_ticker_and_the_cell_never_moves}`.
+iPhone twin: `WorkingSpinner` in `UI/WorkingSpinner.swift` (same frames, 90 ms,
+one `WorkingSpinnerClock`, Reduce Motion ⠿), pinned by `WorkingSpinnerTests`.
+
 ## Command palette ([feedback search-palette-2026-10-24], Grok Bot's)
 
 Search never opens inline. The Search disc, **⌘⇧F** and **⌘K** open one
@@ -291,6 +347,73 @@ Contacts → `+` (New message: people + directory) and the bar's People & agents
 Calls → a chat's header call buttons (no call-history list existed; the tab was
 empty); the unread count → the app icon badge and each row's dot / count pill;
 new chat → `+`.
+
+## Composer — caret shortcuts (Jacob 2026-10-27, [feedback composer-caret-shortcuts-2026-10-27])
+
+The chat composer answers the standard macOS caret chords exactly as an
+`NSTextView` does. "Line" for ⌘← / ⌘→ / ⌘⌫ is the **visual (wrapped) row**,
+never the paragraph; "document" is the whole draft, every paragraph. Code:
+`ui::composer` (`Home` / `End` / `DocumentStart` / `DocumentEnd` and their
+`Select…` twins, `DeleteToLineStart`, `visual_line_range`, `caret_position`),
+bound in `main.rs` `bind_keys` in the `"ComposerInput"` context only.
+
+| Keys | Does | NSTextView selector |
+|---|---|---|
+| ⌘↑ / ⌘↓ | caret to the start / end of the whole draft | `moveToBeginningOfDocument:` / `moveToEndOfDocument:` |
+| ⌘← / ⌘→ (also Home / End) | caret to the start / end of the caret's **visual** row; the end is after the space the row wraps on and paints at the row's end | `moveToLeftEndOfLine:` / `moveToRightEndOfLine:` |
+| ⇧⌘↑ / ⇧⌘↓ / ⇧⌘← / ⇧⌘→ (also ⇧Home / ⇧End) | the same moves extend the selection from the anchor; the caret is the moving end, a selection flips around the anchor | `…AndModifySelection:` |
+| ⌘⌫ | deletes the selection, else the row back to its start; at a row's start one step back like ⌫ | `deleteToBeginningOfLine:` |
+| ⌥← / ⌥→ (⇧ selects), ⌥⌫ / ⌥⌦ | word moves / word deletes — unchanged | `moveWordLeft:` … |
+| ↑ / ↓ (⇧ selects) | one visual row, column kept; past the ends → draft start / end — unchanged | `moveUp:` / `moveDown:` |
+
+Rules: (1) **routing** — all of these live in the `"ComposerInput"` key
+context, so they reach the focused composer first and fall through to any
+app-level binding only when no text field has focus (today nothing else binds
+⌘↑ / ⌘↓ / ⌘← / ⌘→; the chat list and the transcript must never take them
+ahead of a focused field). (2) **Affinity** — a caret that ⌘← / ⇧⌘← put on a
+soft-wrap boundary paints at the start of *its* row (downstream), every other
+way of reaching that byte paints at the end of the row above (upstream, the
+AppKit default); a selection that starts on a boundary is drawn from the row
+below's start, so no empty sliver is highlighted at the end of the row above.
+(3) Before the first paint (no layout yet) the row is the paragraph.
+
+Pinned by `ui::composer::caret_tests` (every move and extend on a wrapped
+two-paragraph draft in a 360 pt field, ⌘⌫, ⌥ arrows, focused vs blurred
+routing — all through the real keymap) and `keymap_tests::caret_chords_route_to_the_focused_composer_only`.
+
+### Composer — formatting chords and live styling (Jacob 2026-10-27, [feedback chat-markdown-composer-2026-10-27])
+
+The draft shows the chat Markdown of § Message formatting **as it is typed**,
+and three chords write the markers for you. Code: `ui::composer` (`Bold` /
+`Italic` / `Strike` → `toggle_marker`, `live_styles`, the quote bars in
+`InputElement::prepaint`), `main.rs` `bind_keys`.
+
+| Keys | Does |
+|---|---|
+| ⌘B | wraps the selection in `**…**`; on an already wrapped selection (markers just outside it, or selected with it) removes them; with no selection inserts `****` with the caret in the middle, and removes an empty pair on the next press |
+| ⌘I | the same with `*…*` |
+| ⌘⇧X | the same with `~~…~~` |
+
+Rules: (1) **Routing (Jacob's default, vetoable)** — the three chords live in
+the `"ComposerInput"` context: with the composer focused ⌘B is bold; with it
+blurred ⌘B keeps toggling the sidebar (`shell::ToggleRail`, bound at the
+root), and ⌘I / ⌘⇧X are nobody's. (2) The markers hug the words: spaces at the
+ends of the selection stay outside, so the grammar's close-against-a-non-space
+rule always holds. (3) After a wrap the words stay selected (inside the
+markers), so ⌘I after ⌘B nests (`***both***`) and a second ⌘B undoes the wrap;
+every toggle is one ⌘Z step. (4) **Live styling** never changes the layout: the
+typed bytes stay where they are, only their paint changes — marker bytes
+(`**`, `*`, `~~`, `||`, `` ` ``, `[`, `](…)`) in the faint ink, the words
+between them bold / italic / struck / mono on the code wash / on the open
+spoiler wash; a `> ` line's markers faint, its words muted, and a 3 pt bar
+(`transcript::QUOTE_BAR`, the muted ink at 55 %) in the field's left padding
+5 pt from the text, the height of that paragraph's rows (`>>` nests the same
+way: one bar, deeper text). Plain text (`snake_case`, `2*3*4`, `>5`) is one
+plain run — the same never-mangled rule as the bubble.
+
+Pinned by `ui::composer::format_tests` (wrap / unwrap / hug / strip / empty pair
+/ nesting / ⌘Z / blurred, all through the real keymap; `live_styles` run by
+run) and `keymap_tests::format_chords_are_the_focused_composers_and_cmd_b_toggles_the_rail_outside`.
 
 ## Chat-list filter (the iPhone home's `PaneTabs`)
 
@@ -1017,7 +1140,7 @@ the agent pane (Details · Library · Computer); `profiles/library.rs`.
 |---|---|---|
 | Grouping | one list, `when` descending, split by local day: **Today · Yesterday · weekday (last 7 days) · "Oct 18"** (the sidebar's words; "Oct 18, 2025" in another year); each day = `kit::section_title` + one `kit::card` | `group_days`, `day_label` |
 | Row | the kit's one-line row: **41** tall, inset 16, 10 right; **32** pt thumbnail (aspect-fill, radius 7) — a play glyph over a video, the extension ("PDF") on a `surface_2` tile for files, the link glyph for links; name 13 pt one line, tail-truncated; time 11.5 pt muted, compact ("now", "42m", "13h", "2d", "3w", "4mo"); the kit's divider (16 / 16, below) | `ROW_H`, `THUMB`, `rel_time` |
-| Hover | the shared inset pill (§ Rows: hover / selected / pressed; the armed row draws it lit from state); the time gives way to a **24 pt ⋯ disc** (no layout shift) that opens the row's menu at the click: Open · Forward · Download for attachments, Open link · Copy link for links | `MORE_DISC`, `menu_items` |
+| Hover | the shared inset pill (§ Rows: hover / selected / pressed; the armed row draws it lit from state); the time gives way to a **24 pt ⋯ disc** (no layout shift) that opens the row's menu at the click: Open · Copy · Forward · Download for attachments (Copy puts the picture or file itself on the pasteboard, [feedback copy-image-messages-mac-2026-10-27]), Open link · Copy link for links | `MORE_DISC`, `menu_items` |
 | Show more | after **5** rows a 36 pt "Show more ⌄" row unfolds the rest of that day in place ("Show less ⌃" folds it); per opened pane | `SHOW_MORE_AFTER`, `library_toggle_day` |
 | Preview card | after **300 ms** on a row: **300** wide, left **20** from the pane's edge, **8** above the row (under it when it would reach the window's top 8 pt band); padding 10, radius 12, a step over the card's fill (white in light) with the strong border and shadow; picture **278 × 156** radius 8 aspect-fill (files: the extension at 22 pt on the tile; links: a globe); type line 11.5 muted ("Image" / "Video" / "PDF" / "Link"); the full name 13 semibold on 17, up to 3 lines; the sender's 18 pt picture, name, "· Yesterday 10:06 PM" (`sidebar::stamp_label`) | `HOVER_DELAY_MS`, `CARD_*`, `card_above` |
 | Click | a row opens the viewer at its place in the chat-order album (files included: the viewer's Open / Download); a link opens in the browser — as before | `open` |
@@ -1058,6 +1181,30 @@ centred; click opens the DM we have / starts one; none on my own pane or a
 blocked person's, back once unblocked). Rig: `ARBOS_OPEN_PROFILE=user`
 (the DM peer's pane), `user:message` (the pill pressed), `group:member`
 (a member with no DM yet).
+
+### Link icons: one tile, bundled brand marks, no stretched favicons (Jacob 2026-10-27, [feedback link-icons-mac-tile-2026-10-27])
+
+**Every site icon on a tile — the person pane's Links tab, the Library's
+Links rows, the search palette's links, the link-embed cards — is
+`ui::link_tile::tile`.** Jacob: the Spotify row had a crisp green mark, the
+github.com row "a blurry, low-res, dark-on-dark favicon on a muddy grey
+square". The iPhone's `LinkTile` follows the same table.
+
+| Item | Rule | Where |
+|---|---|---|
+| Tile | a rounded square of the row's size (pane rows 36, Library 32, inline 14); corner 28 % of the side (36 → 10 = the kit's corner, 14 → 4); fill `surface_2` in both themes | `link_tile::tile`, `radius` |
+| Known host | a bundled **vector** mark, 56 % of the side (36 → 20; 22 % clear space all round), never a fetched picture: GitHub, X, YouTube, Spotify, Apple Music, SoundCloud, Vimeo, Loom, Bluesky, Reddit, Google Docs / Sheets / Slides / Maps, Figma, Notion, Linear, Wikipedia, Arbos | `link_tile::Brand`, `assets/brands/*.svg` |
+| Mark colour | a brand with its own colour keeps it on both tiles (Spotify `#1ED760`, YouTube `#FF0000`…); a black-and-white brand (GitHub, X, Notion, Wikipedia, Arbos) is `text` — white on the dark tile, near-black on the light | `Brand::ink`, `Brand::color` |
+| Unknown host | the relay's icon (`GET /link-icon?domain=`: apple-touch-icon or the largest declared icon, resampled to the tile's device pixels) edge to edge; a transparent **dark** mark gets a light fill in the dark theme, a light mark a dark fill in the light theme (`Tone`, measured at decode) | `link_tile::Icon::Picture`, `app::link_icon` |
+| No icon | the host's first letter, semibold, `text_muted`, on the plain tile — never a coloured disc, never `https://<host>/favicon.ico` | `link_tile::Icon::Initial` |
+| Brand sources | each mark's press page is in `Brand::source`; shapes unaltered, used mono or in the published brand colour with clear space, per the owners' guidelines | `link_tile.rs` |
+
+Pinned by `link_tile::tests` (host → brand incl. the three Google editors by
+path and `google.com/maps`; every brand has one filled SVG path and a source;
+tones; fills flip only across the mark's own tone; the headless render: 36 →
+mark 20 at 8/8, 32 → 18 at 7/7). Rig: `ARBOS_FIXTURE_LINKS=1
+ARBOS_FIXTURE_OPEN=01J9DMSAM00000000000000000 ARBOS_OPEN_PROFILE=user` —
+Sam's Links tab with github.com, open.spotify.com, x.com and nypost.com.
 
 ### Profile targets toggle the pane (Jacob 2026-10-26, [feedback profile-pane-toggle-mac-2026-10-26])
 
@@ -1312,6 +1459,27 @@ iPhone: the chip's ✕ has a 24 pt hit frame and the same label; ⌫ on an empty
 field removes the last pending attachment (`MentionUITextView.deleteBackward`);
 pinned by `ComposerMetricsTests` (pending attachments).
 
+### iPhone: a confirm is a centred alert (Jacob 2026-10-27, [feedback confirm-alerts-ios-2026-10-27])
+
+**Where the iPhone does ask first — Block / Unblock, Leave / Delete a group, server
+or channel, Remove / Ban a member, Delete / Revoke / Scrub a secret, Disconnect a
+vault, Sign out, Reset an invite link — the question is a centred alert: title, a
+one-line note, Cancel · action (red when it removes something), the Mac's two-button
+confirm. Never a sheet or dialog anchored at the screen.** On iOS 26 a
+`.confirmationDialog` presents anchored to the view it is attached to; every one of
+ours hung off a screen's root, so the Unblock question floated in the middle of the
+transcript over someone's messages with no Cancel (`media/feedback/blocked-state/
+after-iphone17-sim-6231fdd8c-2-composer-unblock-confirm-floats-3x.png`). A
+`.confirmationDialog` stays only where it is a *menu on its own control* — the
+mute-duration list on its row, a tapped member's actions on their row, a connector's
+Disconnect on its row — and says so with `// confirm: anchored`.
+
+Code: `UI/Confirm.swift` — `ConfirmSpec` (title · message · action · destructive ·
+cancel) and `View.confirm(_:isPresented:perform:)` / `confirm(item:spec:perform:)`
+over `.alert`; `BlockedState.unblockConfirm`, `BlockRow.blockConfirm`. Pinned by
+`ConfirmFormTests`: the spec's shape, no `.confirmationDialog(` outside the helper
+without the marker (count held at 3), no hand-built destructive-plus-Cancel `.alert(`.
+
 ## Secrets agent picker: chips + "Add agent" (Jacob 2026-10-26, [feedback secrets-agent-picker-mac-2026-10-26], iPhone [feedback secrets-agent-picker-ios-2026-10-26])
 
 **Wherever Secrets picks agents, the agents already granted are chips (picture ·
@@ -1436,6 +1604,41 @@ title / legend / plot height / the three 24 pt squares at the top-right, Copy da
 → TSV + check, Save / Expand wired) and `chart_card::tests` (palette per theme,
 file names, the 2x themed PNG); the numbers by `arbos_core::chart::tests`.
 
+## Link previews: one card under a link, the code card's frame (Jacob 2026-10-27, approved mock; relay [feedback link-embeds-relay-2026-10-27], Mac [feedback link-embeds-mac-2026-10-27], iPhone [feedback link-embeds-ios-2026-10-27])
+
+**The relay unfurls, the apps draw.** A finished message with a bare `http(s)://` URL (not a
+markdown-labelled link, not inside code) gets one `link_preview` part from the relay — fetched
+once with the relay's address, never a viewer's — and the apps draw it as the code / chart card's
+sibling inside the bubble: `code_bg`, hairline, radius 10, 10 pt padding, at most 400 pt wide.
+Two densities, chosen by the relay (`layout`): **compact** = 56 pt art left, title (13 semibold,
+one line) · subtitle (12 muted) · footer (11 faint: tile slot · provider · facts); **expanded** =
+the picture on top (225 pt tall at full width, cover-cropped), ▶ and the duration chip on a
+video, title (two lines) · description (two lines) · footer under it. X / Bluesky posts: a
+32 pt initials disc, name · @handle, the post text (eight lines), the date. GitHub: repo · #n
+over the title, a state pill (Open green · Merged purple · Draft muted · Closed red), the diff
+(`+612` in `online`, `−38` in `danger`) in the footer.
+
+**One card per message; the card is never the only copy of the link.** Text + URL keeps the
+text exactly as typed and puts the card under it; a message that was only the URL shows the card
+alone with a 6 pt inset (iMessage's rule) — the full URL stays one hover away on the card and
+`Copy` copies the text. No part → today's plain link, silently: no "preview unavailable", no
+error text, nothing fetched by the app.
+
+**Every card opens out.** A click anywhere on the card is the link's click
+(`AppState::open_link`, the one seam every chat link goes through, where #1522's confirm slots
+in): own bubbles open directly, others' ask. Nothing plays inside a bubble in v1.
+
+**Remove preview, for everyone.** On a message the user may delete (#1526's rule, shared with
+the bubble menu), the card shows an × top-right on hover and the ⋯ menu gains **Remove
+preview** above Delete; both write `preview: "off"` on the row through the relay
+(`DELETE …/messages/{id}/preview`) and the card goes for every member. Viewers have one global
+switch — Settings → Appearance → **Link previews** On · Off (this Mac) — and no per-message
+collapse.
+
+**The site-icon tile.** The footer's small square is the shared link-icon tile
+(`ui::link_tile`, 14 pt): the host's bundled brand mark, else the relay's `siteIcon` picture on
+the part, else the relay's host icon, else the host's initial. The card itself fetches nothing
+from the site.
 ## One add row per info pane: "Add members" (Jacob 2026-10-27, [feedback add-your-agent-row-removal-mac-2026-10-27], iPhone [feedback add-your-agent-row-removal-ios-2026-10-27])
 
 **Every info pane that adds members has exactly ONE add row — "Add members" —
@@ -1465,3 +1668,32 @@ the Description row sits under Add members in the same card and vanishes when
 blank; Add members opens the picker aimed at the group with the Agents section
 above my agents, the others' agents after mine, people below) and
 `profiles::group::tests` (which description makes a row).
+
+## Copy copies the message, pictures included (Jacob 2026-10-27, [feedback copy-image-messages-mac-2026-10-27], iPhone [feedback copy-image-messages-ios-2026-10-27])
+
+Copy — the bubble menu's Copy, control-click, ⌘C with a whole bubble selected, the media
+viewer's Copy pill / ⌘C, the Library row's Copy — puts **the message** on the pasteboard,
+read through the one accessor Forward uses too (`Message::body()` / `Message.body`):
+
+- every picture is one pasteboard item carrying its **original bytes under its own
+  type** (PNG `public.png`, JPEG `public.jpeg`, GIF `com.compuserve.gif`, WebP, HEIC),
+  fetched from the relay as uploaded — never the thumbnail — plus a `public.png`
+  re-encode when the native type is not PNG and (Mac) a `public.tiff` representation, all
+  on the same item, so Preview, Notes, Messages, Slack and Finder each take the one they
+  read and a GIF stays a GIF;
+- the message's words ride on the **first** item as `public.utf8-plain-text`: a text
+  field receives the text, an image well the picture — one rich item, never two;
+- several pictures → several items in message order; a file that is not a picture → a
+  `public.file-url` item (Mac, staged under the temp dir) / its own data type (iPhone);
+- the Arbos composer reads every item back (⌘V / Paste): the pictures become attachment
+  chips, the words land at the caret;
+- a message whose picture is still uploading says "Still uploading — try again in a
+  moment"; a picture the relay would not give back says so in the notice and the rest
+  still copies.
+
+Mac: `pasteboard.rs` (`plan` → `write`/`read`, NSPasteboard on macOS, gpui's clipboard
+elsewhere), `AppState::copy_message` / `copy_attachment`, `ClientCommand::FetchCopyBlobs`.
+iPhone: `MessagePasteboard` (`items` → `UIPasteboard.setItems`), `AppModel.copyMessage` /
+`copyAttachment`, the composer's `paste` override. Pinned by `pasteboard::tests` and
+`MessagePasteboardTests` (text · picture only · mixed · several · GIF kept · file ·
+round trip).

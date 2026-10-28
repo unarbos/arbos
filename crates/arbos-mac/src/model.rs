@@ -2,6 +2,8 @@
 //! `crdt-sync.md` §6). No GPUI, no Loro: the sync layer fills these in, the
 //! views only read them.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
 pub use arbos_core::doc::ReplyRef;
@@ -80,6 +82,10 @@ pub struct Project {
     /// API §9: `machine {state, class, snapshot, always_on, …}` of the agent's box.
     #[serde(default)]
     pub machine_info: Option<ProjectMachine>,
+    /// A connected (outside) agent (#2141): its brain runs elsewhere, the relay hosts the
+    /// member. `GET /projects/{id}` carries this beside the DTO; `None` = a native agent.
+    #[serde(default)]
+    pub outside: Option<OutsideInfo>,
     /// People chats: my `me.muted` on the relay (synced across devices).
     #[serde(default)]
     pub muted: bool,
@@ -172,6 +178,63 @@ pub struct Voice {
     pub description: Option<String>,
     #[serde(default, deserialize_with = "null_to_empty")]
     pub sample_url: String,
+}
+
+/// The connection of an outside agent, as `GET /outside-agents/{id}` / the project detail
+/// report it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct OutsideInfo {
+    /// `connected` | `away` | `never` | `revoked`.
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub connected: bool,
+    /// `acp` | `grok` | `custom`.
+    #[serde(default)]
+    pub transport: String,
+    /// `asp/1`.
+    #[serde(default)]
+    pub protocol: String,
+    #[serde(default)]
+    pub last_seen_at: Option<i64>,
+    #[serde(default)]
+    pub connected_at: Option<i64>,
+}
+
+impl OutsideInfo {
+    /// The transport as the Details pane names it.
+    pub fn transport_label(&self) -> &'static str {
+        match self.transport.as_str() {
+            "acp" => "ACP · on your Mac",
+            "grok" => "Grok · HTTPS",
+            _ => "Custom · HTTPS / WebSocket",
+        }
+    }
+
+    /// "Connected · 12 s ago", "Away · 40 min ago", "Waiting for the first heartbeat",
+    /// "Disconnected".
+    pub fn status_line(&self, now: i64) -> String {
+        let ago = |t: i64| {
+            let s = ((now - t).max(0) / 1000).max(0);
+            if s < 60 {
+                format!("{s} s ago")
+            } else if s < 3600 {
+                format!("{} min ago", s / 60)
+            } else if s < 86_400 {
+                format!("{} h ago", s / 3600)
+            } else {
+                format!("{} d ago", s / 86_400)
+            }
+        };
+        match (self.status.as_str(), self.last_seen_at) {
+            ("revoked", _) => "Disconnected".to_owned(),
+            ("connected", Some(t)) => format!("Connected · {}", ago(t)),
+            ("connected", None) => "Connected".to_owned(),
+            ("away", Some(t)) => format!("Away · {}", ago(t)),
+            ("away", None) => "Away".to_owned(),
+            _ => "Waiting for the first heartbeat".to_owned(),
+        }
+    }
 }
 
 /// API §9 `project.machine`.
@@ -1348,6 +1411,21 @@ impl Attachment {
     pub fn is_image(&self) -> bool {
         self.kind() == AttachmentKind::Image || self.mime.starts_with("image/")
     }
+
+    /// The blob is still on its way up from this device (`local:` key): nothing
+    /// anyone can fetch from the relay yet.
+    pub fn is_uploading(&self) -> bool {
+        self.blob_ref
+            .as_deref()
+            .is_some_and(|k| k.starts_with("local:"))
+    }
+
+    /// The bytes can be fetched from the relay (`GET /blob/{slot}/{key}`).
+    pub fn is_on_relay(&self) -> bool {
+        self.blob_ref
+            .as_deref()
+            .is_some_and(|k| !k.is_empty() && !k.starts_with("local:"))
+    }
 }
 
 /// One row of `messages[].parts` (`crdt-sync.md` §6.2). Unknown kinds decode
@@ -1522,8 +1600,105 @@ pub enum Part {
         #[serde(default)]
         fallback: Option<String>,
     },
+    /// Link preview ([feedback link-embeds-mac-2026-10-27], #2065): the card the relay
+    /// unfurled for the message's first bare URL. Read-only here; `preview: "off"` on the
+    /// message hides it.
+    LinkPreview {
+        id: Id,
+        #[serde(flatten)]
+        preview: Box<LinkPreview>,
+    },
     #[serde(other)]
     Unknown,
+}
+
+/// What a `link_preview` part carries (relay `unfurl.rs`, spec 1). Everything but `title` is
+/// optional; `facts` are pre-formatted footer strings in order.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkPreview {
+    #[serde(default)]
+    pub spec_version: u32,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub canonical_url: String,
+    /// `spotify` `youtube` `x` `github` `bluesky` `vimeo` `loom` `soundcloud` `apple_music`
+    /// `google_maps` `wikipedia` `arbos` `file` `web`.
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub provider_name: String,
+    /// `song` `album` … `pull_request` `issue` `repo` `article` `image` `file` `place` `page`.
+    #[serde(default, rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub subtitle: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub facts: Vec<String>,
+    /// `open` `merged` `closed` `draft`.
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub diff: Option<PreviewDiff>,
+    /// "18:24" on a video thumbnail.
+    #[serde(default)]
+    pub duration: Option<String>,
+    #[serde(default)]
+    pub image: Option<PreviewImage>,
+    /// The final host ("github.com"): the shared link-icon tile picks its mark by it.
+    #[serde(default)]
+    pub site_host: Option<String>,
+    /// Reserved for the shared link-icon tile (a blob in the chat's slot); unused here.
+    #[serde(default)]
+    pub site_icon: Option<PreviewImage>,
+    /// `compact` (art row) or `expanded` (media on top).
+    #[serde(default)]
+    pub layout: String,
+}
+
+impl LinkPreview {
+    pub fn expanded(&self) -> bool {
+        self.layout == "expanded" && self.image.is_some()
+    }
+
+    /// "<title> — <provider>" for quote headers and one-line previews.
+    pub fn one_line(&self) -> String {
+        if self.provider_name.is_empty() {
+            self.title.clone()
+        } else {
+            format!("{} — {}", self.title, self.provider_name)
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewImage {
+    #[serde(rename = "ref", default)]
+    pub blob_ref: String,
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+    #[serde(default)]
+    pub mime: String,
+    #[serde(default)]
+    pub art: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PreviewDiff {
+    #[serde(default)]
+    pub additions: u64,
+    #[serde(default)]
+    pub deletions: u64,
+    #[serde(default)]
+    pub files: u64,
 }
 
 fn open_state() -> QuestionState {
@@ -2103,11 +2278,112 @@ pub struct Message {
     /// the project; never read as the user's words.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub greeting: bool,
+    /// `"off"` once the sender removed the link preview for everyone (#2065); the
+    /// `link_preview` part, if any is still there, is not drawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
 }
 
 /// The reaction capsule's set, in Grok Bot's order (the iPhone's
 /// `MessageReaction.palette`); any other emoji comes from the system picker.
 pub const REACTION_PALETTE: [&str; 5] = ["😂", "👍", "👎", "❤️", "🎉"];
+
+/// What a message says and shows, as one thing — the accessor Forward, Copy and any
+/// other "take this message" action read, so they all see the same parts
+/// ([feedback forward-attachments-mac-2026-10-27]): the prose, every attachment that is
+/// on the relay (a chart's fallback picture excluded), and every chart with its fallback.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MessageBody {
+    pub text: String,
+    pub attachments: Vec<Attachment>,
+    pub charts: Vec<ChartBody>,
+}
+
+/// A chart bubble as a message carries it: the `chart` part plus its fallback picture
+/// when the message has one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChartBody {
+    /// Always a `Part::Chart`.
+    pub chart: Part,
+    pub fallback: Option<Attachment>,
+}
+
+/// An attachment the relay holds (not a `local:` key still uploading).
+fn on_relay(a: &Attachment) -> bool {
+    a.blob_ref
+        .as_deref()
+        .is_some_and(|k| !k.is_empty() && !k.starts_with("local:"))
+}
+
+impl Message {
+    /// The message's body, in part order; `None` when there is nothing to take —
+    /// no words, no attachment on the relay, no chart. A picture-only message has a
+    /// body like any other.
+    pub fn body(&self) -> Option<MessageBody> {
+        let text = self.plain_text().trim().to_owned();
+        let chart_fallbacks: HashSet<&str> = self
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                Part::Chart {
+                    fallback: Some(f), ..
+                } => Some(f.as_str()),
+                _ => None,
+            })
+            .collect();
+        let attachments: Vec<Attachment> = self
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                Part::Attachment { id, attachment }
+                    if !chart_fallbacks.contains(id.as_str()) && on_relay(attachment) =>
+                {
+                    Some(attachment.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        let charts: Vec<ChartBody> = self
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                Part::Chart { fallback, .. } => {
+                    let fallback = fallback.as_deref().and_then(|f| {
+                        self.parts.iter().find_map(|q| match q {
+                            Part::Attachment { id, attachment }
+                                if id == f && on_relay(attachment) =>
+                            {
+                                Some(attachment.clone())
+                            }
+                            _ => None,
+                        })
+                    });
+                    Some(ChartBody {
+                        chart: p.clone(),
+                        fallback,
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+        (!text.is_empty() || !attachments.is_empty() || !charts.is_empty()).then_some(MessageBody {
+            text,
+            attachments,
+            charts,
+        })
+    }
+
+    /// Does the message hold an attachment whose upload has not finished (a `local:` key)?
+    pub fn has_uploading_attachment(&self) -> bool {
+        self.parts.iter().any(|p| match p {
+            Part::Attachment { attachment, .. } => attachment
+                .blob_ref
+                .as_deref()
+                .is_some_and(|k| k.starts_with("local:")),
+            _ => false,
+        })
+    }
+}
 
 impl Message {
     /// Reactions as `(emoji, senders)`, palette order first, then the rest
@@ -2279,6 +2555,19 @@ impl Message {
         self.parts
             .iter()
             .any(|p| matches!(p, Part::Chart { id, .. } if id == part_id))
+    }
+
+    /// The link preview the relay attached, unless the sender switched it off.
+    pub fn link_preview(&self) -> Option<(&Id, &LinkPreview)> {
+        if self.preview.as_deref() == Some("off") {
+            return None;
+        }
+        self.parts.iter().find_map(|p| match p {
+            Part::LinkPreview { id, preview } if !preview.title.trim().is_empty() => {
+                Some((id, &**preview))
+            }
+            _ => None,
+        })
     }
 
     /// Open `question` parts of this message, newest last.
@@ -3903,6 +4192,7 @@ impl OptimisticNotice {
             }],
             hidden_parts: Vec::new(),
             greeting: false,
+            preview: None,
         }
     }
 

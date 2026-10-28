@@ -52,14 +52,15 @@ use super::dto::{
 use super::store::{self, Store};
 use super::user_error::{ErrorClass, Fault, UserError};
 use super::{
-    ClientCommand, DraftPicture, PictureSource, PictureTarget, PushRefusal, SyncEvent, SyncSource,
+    ClientCommand, CopyBlob, DraftPicture, PictureSource, PictureTarget, PushRefusal, SyncEvent,
+    SyncSource,
 };
 use crate::model::{
     new_id, now_ms, trace_rows, AccountView, Attachment, AttachmentKind, BoxReport, BoxState, Call,
     CallEnded, CallLeft, CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView,
-    Chat, Effort, Id, Link, LinkState, Machine, MachineState, Message, Part, Person, Project,
-    ProjectDocView, ProjectSecrets, Reachable, ReplyRef, Role, Routine, RoutineRun, Sender,
-    ServerInfo, ThreadInfo,
+    ChartBody, Chat, Effort, Id, Link, LinkState, Machine, MachineState, Message, Part, Person,
+    Project, ProjectDocView, ProjectSecrets, Reachable, ReplyRef, Role, Routine, RoutineRun,
+    Sender, ServerInfo, ThreadInfo,
 };
 use crate::update;
 
@@ -185,9 +186,20 @@ struct QueuedSend {
     command: &'static str,
     answer: Option<(String, serde_json::Value)>,
     reply_to: Option<String>,
-    forwarded_from: Option<String>,
+    forwarded: Option<Forwarded>,
     reply_ref: Option<ReplyRef>,
     mentions: Vec<String>,
+}
+
+/// A bubble-menu Forward's extra freight on a send: who wrote the original
+/// (`forwardedFrom` on the row) and the chart bubbles to write again after the
+/// text and attachment parts — each chart's fallback picture is copied from
+/// `from_slot` like any attachment and linked to the new chart part
+/// ([feedback forward-attachments-mac-2026-10-27]).
+struct Forwarded {
+    from: String,
+    from_slot: String,
+    charts: Vec<ChartBody>,
 }
 
 struct Shared {
@@ -1581,9 +1593,18 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
                 let _ = shared.events.send(SyncEvent::Projects(snapshot));
                 refresh = true;
             }
-            // Channel banners: own item (the Mac also sees the room through its Matrix sync).
-            PushEventDto::ChannelMessage(_)
-            | PushEventDto::PeopleMessage(_)
+            PushEventDto::ChannelMessage(payload) => {
+                let _ = shared.events.send(SyncEvent::ChannelMessage {
+                    server_id: payload.server_id.clone(),
+                    server_name: payload.server_name.clone(),
+                    channel_id: payload.channel_id.clone(),
+                    channel_name: payload.channel_name.clone(),
+                    room_id: payload.room_id.clone(),
+                    sender: Sender::from(&payload.sender),
+                    text: payload.text.clone(),
+                });
+            }
+            PushEventDto::PeopleMessage(_)
             | PushEventDto::PeopleChatDeleted(_)
             | PushEventDto::ProjectMemberRemoved(_)
             | PushEventDto::PeopleInviteAccepted(_)
@@ -2509,6 +2530,11 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
                 continue;
             }
         };
+        // Outside agents (#2141): an extra key beside the DTO.
+        let outside: Option<crate::model::OutsideInfo> = detail_val
+            .get("outside")
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok());
         let detail: GetProjectResponseDto = match serde_json::from_value(detail_val) {
             Ok(d) => d,
             Err(err) => {
@@ -2535,6 +2561,7 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
             .find(|x| x.id == id)
             .cloned();
         let mut project = project_from_dto(&detail, members.as_ref());
+        project.outside = outside;
         // D92 amendment: the agent's uploaded / generated picture — the public versioned route.
         project.image_url = project_image_url(
             &shared.http_url,
@@ -4357,6 +4384,125 @@ fn outgoing_paths(paths: Vec<PathBuf>) -> Vec<Outgoing> {
     paths.into_iter().map(Outgoing::Path).collect()
 }
 
+/// Put one outgoing attachment under `blob_slot` (a file read from disk, or a
+/// relay blob copied from its source slot) and describe it for the row. A failed
+/// read or upload is reported and leaves the part without a `ref`.
+async fn upload_outgoing(
+    shared: &Arc<Shared>,
+    blob_slot: &str,
+    outgoing: Outgoing,
+) -> UserAttachment {
+    let (name, mime, kind, bytes) = match outgoing {
+        Outgoing::Path(path) => {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("attachment")
+                .to_string();
+            let mime = mime_for(&path).to_string();
+            let bytes = tokio::fs::read(&path)
+                .await
+                .map_err(|err| format!("Could not read {}: {err}", path.display()));
+            (name, mime, None, bytes)
+        }
+        Outgoing::Copy {
+            from_slot,
+            attachment,
+        } => {
+            let bytes = match attachment.blob_ref.as_deref() {
+                Some(key) => fetch_blob_bytes(shared, &from_slot, key)
+                    .await
+                    .map(|(_, b)| b)
+                    .map_err(|err| format!("Could not read {}: {err}", attachment.name)),
+                None => Err(format!("{} has no file on the relay", attachment.name)),
+            };
+            (
+                attachment.name,
+                attachment.mime,
+                attachment.kind.map(attachment_kind_str),
+                bytes,
+            )
+        }
+    };
+    let key = format!("att-{}-{}", new_id().to_lowercase(), safe_name(&name));
+    let blob_ref = match bytes {
+        Ok(bytes) => {
+            let put = shared
+                .http
+                .put(format!("{}/blob/{}/{}", shared.http_url, blob_slot, key))
+                .bearer_auth(shared.token())
+                .header("content-type", mime.clone())
+                .body(bytes)
+                .send()
+                .await;
+            match put {
+                Ok(r) if r.status().is_success() => Some(key),
+                Ok(r) => {
+                    shared.fail("upload the attachment", r.status());
+                    None
+                }
+                Err(err) => {
+                    shared.fail("upload the attachment", &err);
+                    None
+                }
+            }
+        }
+        Err(err) => {
+            shared.fail(&format!("attach {name}"), &err);
+            None
+        }
+    };
+    UserAttachment {
+        name,
+        mime,
+        kind,
+        blob_ref,
+    }
+}
+
+/// The doc parts a forwarded chart becomes on the new row: its copied fallback
+/// picture (when it has one) naming the chart as `chartPart`, then the `chart`
+/// part itself with fresh ids and `fallback` pointing at that picture — the same
+/// shape `post_chart` writes, so a client that draws charts hides the picture
+/// and an older one shows it ([feedback forward-attachments-mac-2026-10-27]).
+fn forwarded_chart_parts(chart: &Part, fallback: Option<UserAttachment>) -> Vec<serde_json::Value> {
+    let Part::Chart {
+        spec_version,
+        chart,
+        table,
+        ..
+    } = chart
+    else {
+        return Vec::new();
+    };
+    let chart_id = new_id();
+    let mut out = Vec::new();
+    let fallback_id = fallback.map(|a| {
+        let id = new_id();
+        let mut attachment = json!({ "name": a.name, "mime": a.mime, "chartPart": chart_id });
+        if let Some(k) = a.kind {
+            attachment["kind"] = json!(k);
+        }
+        if let Some(r) = a.blob_ref {
+            attachment["ref"] = json!(r);
+        }
+        out.push(json!({ "id": id, "kind": "attachment", "attachment": attachment }));
+        id
+    });
+    let mut part = json!({
+        "id": chart_id,
+        "kind": "chart",
+        "specVersion": spec_version,
+        "chart": chart,
+        "table": table,
+    });
+    if let Some(f) = fallback_id {
+        part["fallback"] = json!(f);
+    }
+    out.push(part);
+    out
+}
+
 /// NewChat POST failed (or the body did not decode): drop the mint, notify, mark queued sends failed.
 fn fail_pending_new_chat(shared: &Shared, local_id: &str, error: UserError) {
     shared.chats.lock().unwrap().retain(|c| c.id != local_id);
@@ -4389,7 +4535,7 @@ async fn send_message(
     command: &'static str,
     answer: Option<(String, serde_json::Value)>,
     reply_to: Option<String>,
-    forwarded_from: Option<String>,
+    forwarded: Option<Forwarded>,
     reply_ref: Option<ReplyRef>,
     mentions: Vec<String>,
 ) {
@@ -4406,7 +4552,7 @@ async fn send_message(
                     command,
                     answer,
                     reply_to,
-                    forwarded_from,
+                    forwarded,
                     reply_ref,
                     mentions,
                 });
@@ -4434,78 +4580,35 @@ async fn send_message(
     });
     let mut user_attachments: Vec<UserAttachment> = Vec::new();
     for outgoing in attachments {
-        let (name, mime, kind, bytes) = match outgoing {
-            Outgoing::Path(path) => {
-                let name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("attachment")
-                    .to_string();
-                let mime = mime_for(&path).to_string();
-                let bytes = tokio::fs::read(&path)
-                    .await
-                    .map_err(|err| format!("Could not read {}: {err}", path.display()));
-                (name, mime, None, bytes)
-            }
-            Outgoing::Copy {
-                from_slot,
-                attachment,
-            } => {
-                let bytes = match attachment.blob_ref.as_deref() {
-                    Some(key) => fetch_blob_bytes(&shared, &from_slot, key)
-                        .await
-                        .map(|(_, b)| b)
-                        .map_err(|err| format!("Could not read {}: {err}", attachment.name)),
-                    None => Err(format!("{} has no file on the relay", attachment.name)),
-                };
-                (
-                    attachment.name,
-                    attachment.mime,
-                    attachment.kind.map(attachment_kind_str),
-                    bytes,
-                )
-            }
-        };
-        let key = format!("att-{}-{}", new_id().to_lowercase(), safe_name(&name));
-        let blob_ref = match bytes {
-            Ok(bytes) => {
-                let put = shared
-                    .http
-                    .put(format!("{}/blob/{}/{}", shared.http_url, blob_slot, key))
-                    .bearer_auth(shared.token())
-                    .header("content-type", mime.clone())
-                    .body(bytes)
-                    .send()
-                    .await;
-                match put {
-                    Ok(r) if r.status().is_success() => Some(key),
-                    Ok(r) => {
-                        shared.fail("upload the attachment", r.status());
-                        None
-                    }
-                    Err(err) => {
-                        shared.fail("upload the attachment", &err);
-                        None
-                    }
-                }
-            }
-            Err(err) => {
-                shared.fail(&format!("attach {name}"), &err);
-                None
-            }
-        };
-        user_attachments.push(UserAttachment {
-            name,
-            mime,
-            kind,
-            blob_ref,
-        });
+        user_attachments.push(upload_outgoing(&shared, &blob_slot, outgoing).await);
     }
     if let Some(wav) = voice_wav {
         if let Part::Attachment { attachment, .. } =
             upload_voice_memo(&shared, &blob_slot, wav).await
         {
             user_attachments.push(user_attachment_from_part(attachment));
+        }
+    }
+    // A forwarded chart's fallback picture travels like any attachment but is
+    // written as its own part (linked to the chart), so copy it now.
+    let mut chart_parts: Vec<serde_json::Value> = Vec::new();
+    if let Some(f) = forwarded.as_ref() {
+        for c in &f.charts {
+            let fallback = match c.fallback.clone() {
+                Some(attachment) => Some(
+                    upload_outgoing(
+                        &shared,
+                        &blob_slot,
+                        Outgoing::Copy {
+                            from_slot: f.from_slot.clone(),
+                            attachment,
+                        },
+                    )
+                    .await,
+                ),
+                None => None,
+            };
+            chart_parts.extend(forwarded_chart_parts(&c.chart, fallback));
         }
     }
     shared.unacked.lock().unwrap().insert(message_id.clone());
@@ -4582,8 +4685,11 @@ async fn send_message(
         let device = shared.device_id();
         doc.core.transact(|d| {
             let _ = d.append_user_message(&message_id, &text, &device, &opts);
-            if let Some(by) = forwarded_from.as_deref() {
-                d.set_message_fields(&message_id, &[("forwardedFrom", json!(by))]);
+            if let Some(f) = forwarded.as_ref() {
+                d.set_message_fields(&message_id, &[("forwardedFrom", json!(f.from))]);
+                for part in &chart_parts {
+                    let _ = d.add_part_from_json(&message_id, part);
+                }
             }
             if let Some(r) = reply_ref.as_ref() {
                 d.set_reply_ref(&message_id, r);
@@ -5677,23 +5783,37 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 Vec::new(),
             ));
         }
-        ClientCommand::ForwardText {
+        ClientCommand::ForwardMessage {
             chat_id,
             message_id,
+            from_slot,
             text,
+            attachments,
+            charts,
             forwarded_from,
         } => {
+            let outgoing = attachments
+                .into_iter()
+                .map(|attachment| Outgoing::Copy {
+                    from_slot: from_slot.clone(),
+                    attachment,
+                })
+                .collect();
             tokio::spawn(send_message(
                 shared.clone(),
                 chat_id,
                 message_id,
                 text,
-                Vec::new(),
+                outgoing,
                 None,
                 "send",
                 None,
                 None,
-                Some(forwarded_from),
+                Some(Forwarded {
+                    from: forwarded_from,
+                    from_slot,
+                    charts,
+                }),
                 None,
                 Vec::new(),
             ));
@@ -5842,6 +5962,44 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             format!("{err:#}"),
                         ),
                         _ => UserError::classify("delete the message", &err),
+                    };
+                    shared.fail_with(error);
+                }
+            });
+        }
+        ClientCommand::RemoveLinkPreview {
+            chat_id,
+            message_id,
+        } => {
+            // Same shape as a delete: the relay decides (`DELETE …/messages/{id}/preview`)
+            // and the change comes back as a relay-signed row.
+            let project_id = shared
+                .chats
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|c| c.id == chat_id)
+                .map(|c| c.project_id.clone())
+                .unwrap_or_else(|| chat_id.clone());
+            let is_people = shared.is_people(&chat_id);
+            let room = room::room_path(&project_id, &chat_id, is_people);
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .delete(&format!("/room/{room}/messages/{message_id}/preview"))
+                    .await
+                {
+                    let error = match err.downcast_ref::<RelayError>() {
+                        Some(e) if e.status == 403 => UserError::of(
+                            "remove the preview",
+                            ErrorClass::Refused {
+                                message: Some(
+                                    "You can only remove previews on your own messages.".into(),
+                                ),
+                            },
+                            format!("{err:#}"),
+                        ),
+                        _ => UserError::classify("remove the preview", &err),
                     };
                     shared.fail_with(error);
                 }
@@ -6141,7 +6299,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                                 q.command,
                                 q.answer,
                                 q.reply_to,
-                                q.forwarded_from,
+                                q.forwarded,
                                 q.reply_ref,
                                 q.mentions,
                             ));
@@ -7002,6 +7160,117 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
+        ClientCommand::ConnectAgent {
+            name,
+            transport,
+            avatar_color_index,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let mut body = json!({ "name": name, "transport": transport });
+                if let Some(i) = avatar_color_index {
+                    body["avatar_color_index"] = json!(i);
+                }
+                match shared.post_json("/outside-agents", body).await {
+                    Ok(v) => {
+                        let _ = shared.events.send(SyncEvent::OutsideAgentKey {
+                            project_id: v["agent"]["project_id"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_owned(),
+                            name: v["agent"]["name"].as_str().unwrap_or(&name).to_owned(),
+                            transport: v["agent"]["transport"]
+                                .as_str()
+                                .unwrap_or(&transport)
+                                .to_owned(),
+                            key: v["key"].as_str().unwrap_or_default().to_owned(),
+                            link: v["link"].as_str().unwrap_or_default().to_owned(),
+                            relay_url: v["relay_url"].as_str().unwrap_or_default().to_owned(),
+                            chat_id: v["chat_id"].as_str().map(str::to_owned),
+                            rotated: false,
+                        });
+                        if let Err(err) = refresh_registry(&shared).await {
+                            shared.diagnostic("refresh", format!("{err:#}"));
+                        }
+                    }
+                    Err(err) => shared.fail("connect the agent", &err),
+                }
+            });
+        }
+        ClientCommand::OutsideAgentStatus { project_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Ok(v) = shared
+                    .get_json(&format!("/outside-agents/{project_id}"))
+                    .await
+                {
+                    if let Ok(info) =
+                        serde_json::from_value::<crate::model::OutsideInfo>(v["agent"].clone())
+                    {
+                        let _ = shared
+                            .events
+                            .send(SyncEvent::OutsideAgentStatus { project_id, info });
+                    }
+                }
+            });
+        }
+        ClientCommand::OutsideAgentRotate { project_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                match shared
+                    .post_json(&format!("/outside-agents/{project_id}/rotate"), json!({}))
+                    .await
+                {
+                    Ok(v) => {
+                        let _ = shared.events.send(SyncEvent::OutsideAgentKey {
+                            project_id: project_id.clone(),
+                            name: v["agent"]["name"].as_str().unwrap_or_default().to_owned(),
+                            transport: v["agent"]["transport"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_owned(),
+                            key: v["key"].as_str().unwrap_or_default().to_owned(),
+                            link: v["link"].as_str().unwrap_or_default().to_owned(),
+                            relay_url: v["relay_url"].as_str().unwrap_or_default().to_owned(),
+                            chat_id: None,
+                            rotated: true,
+                        });
+                        if let Ok(info) =
+                            serde_json::from_value::<crate::model::OutsideInfo>(v["agent"].clone())
+                        {
+                            let _ = shared
+                                .events
+                                .send(SyncEvent::OutsideAgentStatus { project_id, info });
+                        }
+                    }
+                    Err(err) => shared.fail("rotate the key", &err),
+                }
+            });
+        }
+        ClientCommand::OutsideAgentRevoke { project_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .delete(&format!("/outside-agents/{project_id}"))
+                    .await
+                {
+                    shared.fail("revoke the agent's access", &err);
+                    return;
+                }
+                if let Ok(v) = shared
+                    .get_json(&format!("/outside-agents/{project_id}"))
+                    .await
+                {
+                    if let Ok(info) =
+                        serde_json::from_value::<crate::model::OutsideInfo>(v["agent"].clone())
+                    {
+                        let _ = shared
+                            .events
+                            .send(SyncEvent::OutsideAgentStatus { project_id, info });
+                    }
+                }
+            });
+        }
         ClientCommand::DeleteProject { project_id } => {
             let shared = shared.clone();
             tokio::spawn(async move {
@@ -7222,6 +7491,48 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         let _ = shared.events.send(SyncEvent::ThumbnailFailed { key });
                     }
                 }
+            });
+        }
+        ClientCommand::FetchCopyBlobs {
+            project_id,
+            request,
+            keys,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                // Every blob at once; one that fails leaves a hole, the rest still copy.
+                let fetches = keys.iter().map(|key| {
+                    let shared = shared.clone();
+                    let project_id = project_id.clone();
+                    let key = key.clone();
+                    async move {
+                        let mut attempt = 0u32;
+                        loop {
+                            match fetch_blob_bytes(&shared, &project_id, &key).await {
+                                Ok((mime, bytes)) => {
+                                    break Some(CopyBlob {
+                                        key,
+                                        mime,
+                                        bytes: Arc::new(bytes),
+                                    })
+                                }
+                                Err(err) => {
+                                    let text = format!("{err:#}");
+                                    if diagnostics::is_transient(&text) && attempt < 2 {
+                                        attempt += 1;
+                                        sleep(Duration::from_millis(400 * u64::from(attempt)))
+                                            .await;
+                                        continue;
+                                    }
+                                    shared.diagnostic("copy", format!("{key}: {text}"));
+                                    break None;
+                                }
+                            }
+                        }
+                    }
+                });
+                let blobs = futures::future::join_all(fetches).await;
+                let _ = shared.events.send(SyncEvent::CopyBlobs { request, blobs });
             });
         }
         ClientCommand::DownloadAttachment {

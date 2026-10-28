@@ -250,6 +250,10 @@ impl AssetSource for Assets {
         if let Some(bytes) = crate::ui::avatars::leaf_asset_bytes(path) {
             return Ok(Some(Cow::Borrowed(bytes)));
         }
+        // The link tiles' bundled brand marks (`brands/<slug>.svg`).
+        if let Some(bytes) = crate::ui::link_tile::brand_asset_bytes(path) {
+            return Ok(Some(Cow::Borrowed(bytes)));
+        }
         Ok(ICONS
             .iter()
             .find(|(p, _)| *p == path)
@@ -504,14 +508,17 @@ mod tests {
     /// The message menu's glyphs are one set: outline strokes of the pack's
     /// weight (no `fill`, no `stroke-width` of their own) and one optical size
     /// (anchors inside the 24 grid's 3…21 band, 13…18 pt across) — Copy,
-    /// Reply, Forward, Reply in DM and Delete read as siblings.
+    /// Reply, Forward, Reply in DM, Remove preview and Delete read as siblings.
     #[test]
     fn message_menu_glyphs_share_one_set_weight_and_size() {
         let names: Vec<&str> = crate::ui::message_menu::ITEMS
             .iter()
             .map(|i| i.glyph())
             .collect();
-        assert_eq!(names, ["copy", "reply", "forward", "bubble", "trash"]);
+        assert_eq!(
+            names,
+            ["copy", "reply", "forward", "bubble", "link", "trash"]
+        );
         for name in names {
             let b = glyph(name);
             assert!(
