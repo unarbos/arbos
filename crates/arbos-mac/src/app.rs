@@ -467,6 +467,14 @@ pub struct ForwardMessage {
     pub by: String,
 }
 
+/// A Copy whose attachment bytes are being fetched
+/// ([feedback copy-image-messages-mac-2026-10-27]): the body to lay out once they land.
+#[derive(Clone, Debug, PartialEq)]
+struct CopyRequest {
+    id: u64,
+    body: MessageBody,
+}
+
 /// The parts the optimistic row in the destination draws before the relay
 /// echoes the real one: the same blob keys (their thumbnails are cached), the
 /// chart parts with their fallback pictures, then the text
@@ -735,6 +743,11 @@ pub struct AppState {
     link_icons_requested: HashSet<String>,
     /// Blob keys whose thumbnail fetch failed: the card says "No preview" instead of loading.
     pub thumbnails_failed: HashSet<String>,
+    /// The Copy whose attachment bytes are on their way
+    /// ([feedback copy-image-messages-mac-2026-10-27]); a newer Copy replaces it and the
+    /// older answer is dropped by its `request` number.
+    copy_request: Option<CopyRequest>,
+    copy_request_seq: u64,
     pub notices: Vec<Notice>,
     /// Rooms whose pushes were refused (`not_available` / `blocked`) and why; the chat-level
     /// note draws the sentence. Cleared when that room's next ACK arrives.
@@ -1230,6 +1243,8 @@ impl AppState {
             link_icon_tones: HashMap::new(),
             link_icons_requested: HashSet::new(),
             thumbnails_failed: HashSet::new(),
+            copy_request: None,
+            copy_request_seq: 0,
             notices: Vec::new(),
             push_refused: HashMap::new(),
             selected_project: None,
@@ -2069,6 +2084,9 @@ impl AppState {
                     cx.emit(AppEvent::TranscriptChanged { chat_id });
                 }
                 cx.notify();
+            }
+            SyncEvent::CopyBlobs { request, blobs } => {
+                self.finish_copy(request, blobs, cx);
             }
             SyncEvent::AttachmentSaved { path } => {
                 self.push_notice(format!("Saved to {}", path.display()));
@@ -7528,6 +7546,43 @@ impl AppState {
         cx.notify();
     }
 
+    /// A Library row's Copy ([feedback copy-image-messages-mac-2026-10-27]): the
+    /// picture or file of that row, from the slot its chat's blobs live in (its
+    /// project, or the people chat itself; a channel row falls back to the selected space).
+    pub fn copy_viewer_item(&mut self, item: &ViewerItem, cx: &mut Context<Self>) {
+        let known = self
+            .chats
+            .values()
+            .any(|tabs| tabs.iter().any(|c| c.id == item.chat_id));
+        let slot = if known {
+            self.space_of_chat(&item.chat_id)
+        } else {
+            match self.selected_project.clone() {
+                Some(p) => p,
+                None => return,
+            }
+        };
+        let attachment = item.attachment.clone();
+        self.copy_attachment(slot, &attachment, cx);
+    }
+
+    /// Viewer → Copy (the pill, or ⌘C while the viewer is up): the open picture or
+    /// file on the pasteboard, original bytes under their own type
+    /// ([feedback copy-image-messages-mac-2026-10-27]).
+    pub fn media_viewer_copy(&mut self, cx: &mut Context<Self>) {
+        let Some(viewer) = self.media_viewer.as_ref() else {
+            return;
+        };
+        let Some(item) = viewer.items.get(viewer.index) else {
+            return;
+        };
+        if item.picture_url.is_some() || viewer.forward_open {
+            return;
+        }
+        let (slot, attachment) = (viewer.slot.clone(), item.attachment.clone());
+        self.copy_attachment(slot, &attachment, cx);
+    }
+
     /// Viewer → Play / Quick Look: fetch the bytes to a temp file and hand them
     /// to macOS (`qlmanage -p` for files, `open` for video → QuickTime Player).
     pub fn media_viewer_open_external(&mut self, cx: &mut Context<Self>) {
@@ -9996,6 +10051,135 @@ impl AppState {
             key,
             save,
         });
+        cx.notify();
+    }
+
+    /// Copy of a whole message — the bubble menu, control-click, ⌘C on a whole
+    /// bubble ([feedback copy-image-messages-mac-2026-10-27]): its body
+    /// (`Message::body`, the accessor Forward reads too) as [`crate::pasteboard`] lays
+    /// it out. Words alone land at once; a message with pictures or files first fetches
+    /// their original bytes from the relay (never the thumbnail) and writes the
+    /// pasteboard when they are in. Says what happened when nothing could be copied.
+    pub fn copy_message(&mut self, chat_id: &Id, message_id: &Id, cx: &mut Context<Self>) {
+        let Some(message) = self
+            .messages
+            .get(chat_id)
+            .and_then(|ms| ms.iter().find(|m| m.id == *message_id))
+        else {
+            return;
+        };
+        let Some(body) = message.body() else {
+            self.push_notice(if message.has_uploading_attachment() {
+                "Still uploading — try again in a moment"
+            } else {
+                "Nothing to copy"
+            });
+            cx.notify();
+            return;
+        };
+        let slot = self.space_of_chat(chat_id);
+        self.copy_body(slot, body, cx);
+    }
+
+    /// Copy of one attachment on its own — the media viewer's Copy, the Library's
+    /// row menu: the picture (or file) without the message's words.
+    pub fn copy_attachment(&mut self, slot: Id, attachment: &Attachment, cx: &mut Context<Self>) {
+        if !attachment.is_on_relay() {
+            self.push_notice(if attachment.is_uploading() {
+                "Still uploading — try again in a moment"
+            } else {
+                "Nothing to copy"
+            });
+            cx.notify();
+            return;
+        }
+        let body = MessageBody {
+            text: String::new(),
+            attachments: vec![attachment.clone()],
+            charts: Vec::new(),
+        };
+        self.copy_body(slot, body, cx);
+    }
+
+    fn copy_body(&mut self, slot: Id, body: MessageBody, cx: &mut Context<Self>) {
+        if body.attachments.is_empty() {
+            let items =
+                crate::pasteboard::plan(&body.text, &[], &crate::pasteboard::copied_files_dir());
+            crate::pasteboard::write(&items, cx);
+            self.copy_request = None;
+            return;
+        }
+        self.copy_request_seq += 1;
+        let request = self.copy_request_seq;
+        let keys: Vec<String> = body
+            .attachments
+            .iter()
+            .filter_map(|a| a.blob_ref.clone())
+            .collect();
+        self.copy_request = Some(CopyRequest { id: request, body });
+        self.command(ClientCommand::FetchCopyBlobs {
+            project_id: slot,
+            request,
+            keys,
+        });
+        cx.notify();
+    }
+
+    /// The blobs of a Copy came back: lay the items out and write the pasteboard.
+    fn finish_copy(
+        &mut self,
+        request: u64,
+        blobs: Vec<Option<crate::sync::CopyBlob>>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pending) = self.copy_request.take_if(|p| p.id == request) else {
+            return;
+        };
+        let fetched: Vec<crate::pasteboard::Fetched> = pending
+            .body
+            .attachments
+            .iter()
+            .zip(blobs)
+            .filter_map(|(attachment, blob)| {
+                let blob = blob?;
+                // The relay's content-type unless it is the generic one; then the row's.
+                let generic =
+                    blob.mime.is_empty() || blob.mime.starts_with("application/octet-stream");
+                Some(crate::pasteboard::Fetched {
+                    name: attachment.name.clone(),
+                    mime: if generic {
+                        attachment.mime.clone()
+                    } else {
+                        blob.mime.clone()
+                    },
+                    bytes: blob.bytes.as_ref().clone(),
+                })
+            })
+            .collect();
+        let missing = pending.body.attachments.len() - fetched.len();
+        let items = crate::pasteboard::plan(
+            &pending.body.text,
+            &fetched,
+            &crate::pasteboard::copied_files_dir(),
+        );
+        let written = crate::pasteboard::write(&items, cx);
+        if !written {
+            self.push_notice("Couldn't copy — the picture didn't download. Try again.");
+        } else if missing > 0 {
+            self.push_notice(if missing == 1 {
+                "Copied — one picture didn't download".to_owned()
+            } else {
+                format!("Copied — {missing} pictures didn't download")
+            });
+        } else {
+            let pictures = fetched.len();
+            self.push_notice(match (pictures, pending.body.text.is_empty()) {
+                (1, true) => "Copied the picture".to_owned(),
+                (1, false) => "Copied the picture and its text".to_owned(),
+                (n, true) => format!("Copied {n} pictures"),
+                (n, false) => format!("Copied {n} pictures and the text"),
+            });
+        }
         cx.notify();
     }
 
