@@ -163,6 +163,7 @@
 		A1C0F1000000000000000004 /* ConfirmFormTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C0F1000000000000000003 /* ConfirmFormTests.swift */; };
 		A1F7A0000000000000000004 /* ProfileToggleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F7A0000000000000000003 /* ProfileToggleTests.swift */; };
 		A1660000000000000000A031 /* HeaderGlassStructureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1660000000000000000A030 /* HeaderGlassStructureTests.swift */; };
+		A1680000000000000000A031 /* PaneCardGlassTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1680000000000000000A030 /* PaneCardGlassTests.swift */; };
 		A1F6000000000000000000C2 /* ChatSearchShortcut.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F6000000000000000000C1 /* ChatSearchShortcut.swift */; };
 		A1F6000000000000000000C4 /* ChatSearchShortcutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F6000000000000000000C3 /* ChatSearchShortcutTests.swift */; };
 		A1F6000000000000000000C6 /* ChatSearchCloseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F6000000000000000000C5 /* ChatSearchCloseTests.swift */; };
@@ -399,6 +400,7 @@
 		A1C0F1000000000000000003 /* ConfirmFormTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfirmFormTests.swift; sourceTree = "<group>"; };
 		A1F7A0000000000000000003 /* ProfileToggleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileToggleTests.swift; sourceTree = "<group>"; };
 		A1660000000000000000A030 /* HeaderGlassStructureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeaderGlassStructureTests.swift; sourceTree = "<group>"; };
+		A1680000000000000000A030 /* PaneCardGlassTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneCardGlassTests.swift; sourceTree = "<group>"; };
 		A1F6000000000000000000C1 /* ChatSearchShortcut.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSearchShortcut.swift; sourceTree = "<group>"; };
 		A1F6000000000000000000C3 /* ChatSearchShortcutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSearchShortcutTests.swift; sourceTree = "<group>"; };
 		A1F6000000000000000000C5 /* ChatSearchCloseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSearchCloseTests.swift; sourceTree = "<group>"; };
@@ -665,6 +667,7 @@
 				A1C0F1000000000000000003 /* ConfirmFormTests.swift */,
 				A1F7A0000000000000000003 /* ProfileToggleTests.swift */,
 				A1660000000000000000A030 /* HeaderGlassStructureTests.swift */,
+				A1680000000000000000A030 /* PaneCardGlassTests.swift */,
 				A1F6000000000000000000C3 /* ChatSearchShortcutTests.swift */,
 				A1F6000000000000000000C5 /* ChatSearchCloseTests.swift */,
 				A1AD0000000000000000B003 /* SheetHeaderLayoutTests.swift */,
@@ -1041,6 +1044,7 @@
 				A1C0F1000000000000000004 /* ConfirmFormTests.swift in Sources */,
 				A1F7A0000000000000000004 /* ProfileToggleTests.swift in Sources */,
 				A1660000000000000000A031 /* HeaderGlassStructureTests.swift in Sources */,
+				A1680000000000000000A031 /* PaneCardGlassTests.swift in Sources */,
 				A1F6000000000000000000C4 /* ChatSearchShortcutTests.swift in Sources */,
 				A1F6000000000000000000C6 /* ChatSearchCloseTests.swift in Sources */,
 				A1AD0000000000000000B004 /* SheetHeaderLayoutTests.swift in Sources */,

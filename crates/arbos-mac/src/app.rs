@@ -44,6 +44,9 @@ const NOTIFY_TICK_MS: u64 = 5_000;
 /// → `activity.jobs[]`) while a job row is live or the drawer lists one —
 /// the design's "chip updates on the next poll" (duplex §2.4, stop ≤ 3 s).
 pub const JOBS_POLL_MS: u64 = 1_000;
+/// Sidebar pins the relay allows until `GET /me/pins` says otherwise (Jacob 2026-10-28:
+/// 5, no tiers; [feedback sidebar-pinning-mac-2026-10-28]).
+pub const PIN_CAP_DEFAULT: usize = 5;
 /// A link state must hold this long before the header pill shows it.
 pub const LINK_PILL_GRACE_MS: u64 = 1_200;
 /// The ring card and its sound give up after this long.
@@ -785,6 +788,12 @@ pub struct AppState {
     /// offline copy): off the tab strip, listed in the "+" dropdown, still open on
     /// the relay (history in context, memory and search), never badge or notify.
     pub archived_chats: HashSet<Id>,
+    /// My sidebar pins, top first — row keys `agent:<project>` / `chat:<people chat>` /
+    /// `server:<server>`, one list for every device through the relay (`/me/pins`;
+    /// [feedback sidebar-pinning-mac-2026-10-28]). The Pinned section draws them in this
+    /// order; `pin_cap` is the relay's limit (Jacob 2026-10-28: 5, no tiers).
+    pub pins: Vec<String>,
+    pub pin_cap: usize,
     /// Chat a home-search hit opened; kept visible while single-chat would hide it.
     search_chat: Option<Id>,
     /// Scroll the transcript to this `(chat_id, message_id)` once its rows exist.
@@ -1279,6 +1288,8 @@ impl AppState {
             multi_chat: multi_chat_enabled(),
             last_chats: HashMap::new(),
             archived_chats: HashSet::new(),
+            pins: Vec::new(),
+            pin_cap: PIN_CAP_DEFAULT,
             search_chat: None,
             reveal_message: None,
             reveal_nonce: 0,
@@ -2673,6 +2684,11 @@ impl AppState {
                 for p in projects {
                     self.enforce_tab(&p);
                 }
+                cx.notify();
+            }
+            SyncEvent::Pins { pins, cap } => {
+                self.pins = pins;
+                self.pin_cap = cap.max(1);
                 cx.notify();
             }
             SyncEvent::StoreUsage { bytes, chats } => {
@@ -7400,11 +7416,129 @@ impl AppState {
                 .count()
     }
 
+    // ---- Sidebar pins ([feedback sidebar-pinning-mac-2026-10-28]) ------------------------
+
+    /// The relay's row key for a sidebar space, or `None` for something the list does not
+    /// show: `agent:` for an agent (own or shared), `chat:` for a DM or a people group
+    /// (their space id is the chat id), `server:` for a server.
+    pub fn pin_key(&self, space_id: &str) -> Option<String> {
+        if let Some(p) = self.projects.iter().find(|p| p.id == space_id) {
+            return Some(if p.is_people() {
+                format!("chat:{space_id}")
+            } else {
+                format!("agent:{space_id}")
+            });
+        }
+        self.servers
+            .iter()
+            .any(|s| s.id == space_id)
+            .then(|| format!("server:{space_id}"))
+    }
+
+    /// The space a pin names, if it is in my list today.
+    pub fn pinned_space_id(key: &str) -> Option<&str> {
+        key.split_once(':')
+            .filter(|(kind, id)| matches!(*kind, "agent" | "chat" | "server") && !id.is_empty())
+            .map(|(_, id)| id)
+    }
+
+    pub fn is_pinned(&self, space_id: &str) -> bool {
+        self.pin_index(space_id).is_some()
+    }
+
+    /// Position in the Pinned section (0 = top), or `None` when not pinned.
+    pub fn pin_index(&self, space_id: &str) -> Option<usize> {
+        let key = self.pin_key(space_id)?;
+        self.pins.iter().position(|k| *k == key)
+    }
+
+    /// Pin (a new pin lands at the top, the iPhone's rule) or unpin a sidebar row, on
+    /// every device. At the cap the pin is refused with one sentence; archived rows come
+    /// back first (a pin is a row you see).
+    pub fn set_pinned(&mut self, space_id: Id, pinned: bool, cx: &mut Context<Self>) {
+        let Some(key) = self.pin_key(&space_id) else {
+            return;
+        };
+        let mut pins = self.pins.clone();
+        pins.retain(|k| *k != key);
+        if pinned {
+            if pins.len() >= self.pin_cap {
+                self.push_failure(
+                    UserError::of(
+                        "pin the chat",
+                        ErrorClass::Refused {
+                            message: Some(format!("You can pin up to {} chats.", self.pin_cap)),
+                        },
+                        "",
+                    ),
+                    None,
+                );
+                cx.notify();
+                return;
+            }
+            if self.is_space_archived(&space_id) {
+                self.set_space_archived(space_id.clone(), false, cx);
+            }
+            pins.insert(0, key);
+        }
+        self.store_pins(pins, cx);
+    }
+
+    /// Drop of a pin drag: `shown` is the Pinned section as the list drew it (the pinned
+    /// rows the filter admits, in their new order). Those pins take that order among
+    /// themselves; pins the filter hid keep their places.
+    pub fn reorder_pins(&mut self, shown: &[Id], cx: &mut Context<Self>) {
+        let shown_keys: Vec<String> = shown
+            .iter()
+            .filter_map(|id| self.pin_key(id))
+            .filter(|k| self.pins.contains(k))
+            .collect();
+        let mut next = shown_keys.iter().cloned();
+        let pins: Vec<String> = self
+            .pins
+            .iter()
+            .map(|k| {
+                if shown_keys.contains(k) {
+                    next.next().unwrap_or_else(|| k.clone())
+                } else {
+                    k.clone()
+                }
+            })
+            .collect();
+        self.store_pins(pins, cx);
+    }
+
+    fn unpin_if_pinned(&mut self, space_id: &str) {
+        let Some(key) = self.pin_key(space_id) else {
+            return;
+        };
+        if self.pins.contains(&key) {
+            self.pins.retain(|k| *k != key);
+            self.command(ClientCommand::SetPins {
+                pins: self.pins.clone(),
+            });
+        }
+    }
+
+    /// The new list, shown at once and sent to the relay (its answer is the truth).
+    fn store_pins(&mut self, pins: Vec<String>, cx: &mut Context<Self>) {
+        if pins == self.pins {
+            return;
+        }
+        self.pins = pins.clone();
+        self.command(ClientCommand::SetPins { pins });
+        cx.notify();
+    }
+
     /// Archive (hide) or unarchive a sidebar space for me, on every device.
     /// Nothing is deleted; an archived agent keeps running its routines. A
     /// people chat goes through the chat archive the relay already has.
     pub fn set_space_archived(&mut self, space_id: Id, archived: bool, cx: &mut Context<Self>) {
         let at = archived.then(now_ms);
+        if archived {
+            // A hidden row is not a pinned row (the iPhone's rule).
+            self.unpin_if_pinned(&space_id);
+        }
         if let Some(p) = self.projects.iter_mut().find(|p| p.id == space_id) {
             p.archived_at = at;
             let people = p.is_people();
@@ -9865,6 +9999,7 @@ impl AppState {
         self.chat_ui.remove(&chat_id);
         self.chats.remove(&chat_id);
         self.archived_chats.remove(&chat_id);
+        self.unpin_if_pinned(&chat_id);
         self.projects.retain(|p| p.id != chat_id);
         self.muted.remove(&chat_id);
         self.command(ClientCommand::LeaveChat { chat_id });
@@ -10278,6 +10413,7 @@ impl AppState {
         }
         self.active_tab.remove(&project_id);
         self.last_chats.remove(&project_id);
+        self.unpin_if_pinned(&project_id);
         self.projects.retain(|p| p.id != project_id);
         self.muted.remove(&project_id);
         self.command(ClientCommand::DeleteProject { project_id });
@@ -10297,6 +10433,7 @@ impl AppState {
         self.chat_ui.remove(&chat_id);
         self.chats.remove(&chat_id);
         self.archived_chats.remove(&chat_id);
+        self.unpin_if_pinned(&chat_id);
         self.projects.retain(|p| p.id != chat_id);
         self.muted.remove(&chat_id);
         self.command(ClientCommand::DeletePeopleChat { chat_id });

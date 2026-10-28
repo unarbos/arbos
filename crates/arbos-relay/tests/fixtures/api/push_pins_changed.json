@@ -1,0 +1,12 @@
+{
+  "created_at": 1700000000000,
+  "id": "push_pins_changed",
+  "kind": "pins_changed",
+  "payload": {
+    "pins": [
+      "agent:01FIXTUREAGENT",
+      "chat:people_dm",
+      "server:01FIXTURESERVER"
+    ]
+  }
+}

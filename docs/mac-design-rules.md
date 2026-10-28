@@ -99,6 +99,32 @@ discs 20 px apart; v0.6.212–0.6.214 had the right discs centred at 21 pt
 (top 3) in a 44 pt band with the filter capsules at 50 — 9 pt too high
 against Grok, Jacob's "the top bar on mac is now too high".
 
+## Sidebar pinning (Jacob 2026-10-28, [feedback sidebar-pinning-mac-2026-10-28]; relay [feedback sidebar-pinning-relay-2026-10-28]; iPhone [feedback sidebar-pinning-ios-2026-10-28])
+
+Jacob (Arbonites, 16:44 UTC): "the ability to pin chats/servers/agents on the side bar
+with the control click." Mockup approved 17:10 UTC (project store
+`media/feedback/sidebar-pinning/sheet-sidebar-pinning-mock.png`, design
+`docs/sidebar-pinning-design.md`) with two decisions: **cap 5, no tiers**; iPhone gets the
+same header, pins servers too and migrates its device-local pins into the synced list.
+
+| Item | Rule | Code |
+|---|---|---|
+| Pin / Unpin | the **first item** of every row menu (agent, person, group, server), above today's items, which do not move; SF `pin` / `pin.slash`, the iPhone's names. A new pin lands at the **top**; Unpin returns the row to its place by activity. At the cap the click answers with the shared error element ("You can pin up to 5 chats.") | `sidebar::row_menu` (`row-menu-pin`), `AppState::set_pinned` |
+| Pinned section | "Pinned" `TEXT_SMALL` 13 medium `text_muted` at the rows' text inset (list 8 + row 12 = **20**) in a **26** pt band (`PINNED_HEADER_H`) under the filter row; the pinned rows **in the user's order only** — never re-sorted by unread or activity, unread stays the count pill / bold name; then a 1 pt `border` hairline inset 12 in a 9 pt band (`PINNED_DIVIDER_H` = `glass::MENU_DIVIDER_HEIGHT`); then the rest in today's order, no second header | `sidebar::list_sections`, `pinned_header`, `pinned_divider` |
+| Pinned row | a normal row plus **`pin.fill` 11 pt semibold** in `text_muted` before the time (`row-pin-<id>`). No colour, no dot | `pin_mark` |
+| Zero pins | **nothing is drawn** — no header, hairline or marks; the list is exactly as before | pinned by `pin_tests::zero_pins_draws_no_section` |
+| Filter | All · Agents · People · Servers: the section shows only the pins the segment admits; header and hairline hide when none passes | `list_sections` over the filtered rows; `pin_tests::the_filter_shows_only_the_pins_it_admits` |
+| Reorder | **drag** a pinned row within the section: the row lifts (the highlight token's pressed step, `highlight::lifted`), the others slide to open the slot under the pointer, the drop — or a mouse-up anywhere — saves the shown order; pins the filter hid keep their places (`AppState::reorder_pins`). No drag across the hairline; pin / unpin is the menu | `PinDrag` / `pin_draggable` / `pin_drop_target`, `Shell::{begin_pin_drag, pin_slot_at, finish_pin_drag}` |
+| Rail | the collapsed rail draws the same order (pins first); its metrics are unchanged — no hairline tile | `rail` reads `sidebar::list_entries` |
+| Archive / delete | unpin (a pin is a row you see); pinning an archived row unarchives it first | `set_space_archived`, `delete_project`, `delete_people_chat`, `leave_group` |
+| Data | one relay list per user, top first: row keys `agent:<project id>` / `chat:<people chat id>` / `server:<server id>` (`AppState::pins`, `pin_key`); `GET /me/pins` at launch after the cached copy (`store::KEY_PINS`), `PUT /me/pins {pins}` replaces the whole list (`ClientCommand::SetPins`; the relay's answer is the truth, a refusal re-reads), `pins_changed` from another device replaces it (`SyncEvent::Pins`). Cap from the relay (`pin_cap`, default 5) | `sync/relay.rs` `refresh_pins` / `apply_pins`, `fixture.rs` `ARBOS_RIG_PINS=<name>[,…]` |
+
+Pinned by `sidebar::pin_tests::{zero_pins_draws_no_section,
+pinned_rows_lead_in_the_users_order_under_a_header, the_filter_shows_only_the_pins_it_admits,
+the_row_menu_leads_with_pin_then_unpin, pins_land_on_top_stop_at_the_cap_and_go_to_the_relay,
+reordering_keeps_hidden_pins_in_place, a_pin_drag_previews_the_order_and_commits_on_drop}`;
+relay `pins::tests`.
+
 ## Collapsed sidebar = icon rail (Jacob 2026-10-26, [feedback mac-sidebar-rail-2026-10-26])
 
 **The sidebar toggle collapses the chat list to Grok Bot's 84 pt icon rail; it

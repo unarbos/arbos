@@ -376,6 +376,7 @@ impl Db {
                 "secret_requests",
                 "user_keys",
                 "user_secrets_settings",
+                "user_pins",
             ] {
                 c.execute(
                     &format!("DELETE FROM {table} WHERE user_id = ?1"),

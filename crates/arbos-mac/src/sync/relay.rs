@@ -18,7 +18,7 @@ use arbos_core::api::{
     ChannelPlatformDto, ChatDto, ConnectConnectorReplyDto, ConnectorsCatalogDto, ConnectorsListDto,
     CreateChatResponseDto, DecideSecretResponseDto, GetProjectResponseDto, LeaveCallResponseDto,
     LocalDevicesDto, MachineStateDto, MachineStatusDto, MeResponseDto, MeUserResponseDto,
-    ModelListDto, PairResponseDto, PeopleChatDto, ProjectMembersDto, ProjectSecretsDto,
+    ModelListDto, PairResponseDto, PeopleChatDto, PinsDto, ProjectMembersDto, ProjectSecretsDto,
     PushEventDto, PushItemDto, RoutineDto, RoutineRunDto, SecretEnvelopeDto, SecretRequestsDto,
     SecretsOverviewDto, SkillDto, StartCallResponseDto, TokenResponseDto, TranscriptionDto,
     UnreadDto, UserCardDto, UsersPageDto, VaultEnvelopeDto, VoiceCatalogDto,
@@ -1050,6 +1050,10 @@ fn start_after_pairing(shared: &Arc<Shared>) {
         let shared = shared.clone();
         tokio::spawn(async move { refresh_me(&shared).await });
     }
+    {
+        let shared = shared.clone();
+        tokio::spawn(async move { refresh_pins(&shared).await });
+    }
     let skills_shared = shared.clone();
     tokio::spawn(async move { refresh_skills(&skills_shared).await });
     let models_shared = shared.clone();
@@ -1195,6 +1199,13 @@ fn load_store(shared: &Arc<Shared>) {
         let _ = shared.events.send(SyncEvent::ChatPrefs {
             last_chats,
             archived,
+        });
+    }
+    // The pins as the relay last confirmed them, so the Pinned section is there at launch.
+    if let Some(Some(pins)) = shared.with_store(|s| s.get_json::<Vec<String>>(store::KEY_PINS)) {
+        let _ = shared.events.send(SyncEvent::Pins {
+            pins,
+            cap: PIN_CAP_DEFAULT,
         });
     }
     if let Some(u) = account {
@@ -1645,6 +1656,10 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
             | PushEventDto::SecretExpiring(_)
             | PushEventDto::MessageRedacted(_)
             | PushEventDto::CallMissed(_) => {}
+            PushEventDto::PinsChanged(payload) => {
+                // Another device of mine replaced the list: the push carries the whole list.
+                apply_pins(shared, payload.pins.clone(), None);
+            }
         }
     }
     if refresh {
@@ -2846,6 +2861,35 @@ async fn migrate_local_archive(shared: &Arc<Shared>, all_chats: &mut [Chat]) {
     if all_ok {
         shared.with_store(|s| s.put_json(store::KEY_ARCHIVE_MIGRATED, &true));
     }
+}
+
+/// The relay's pin cap until `GET /me/pins` says otherwise (Jacob 2026-10-28: 5, no tiers).
+const PIN_CAP_DEFAULT: usize = 5;
+
+/// `GET /me/pins` → the cache and `SyncEvent::Pins` ([feedback sidebar-pinning-mac-2026-10-28]).
+async fn refresh_pins(shared: &Arc<Shared>) {
+    match shared.get_json("/me/pins").await {
+        Ok(v) => match serde_json::from_value::<PinsDto>(v) {
+            Ok(dto) => apply_pins(shared, dto.pins, Some(dto.cap as usize)),
+            Err(err) => shared.diagnostic("pins", format!("{err:#}")),
+        },
+        Err(err) => {
+            let text = format!("{err:#}");
+            // An older relay without the endpoint: the cached list stands, quietly.
+            if !text.contains("HTTP 404") {
+                shared.diagnostic("pins", text);
+            }
+        }
+    }
+}
+
+/// A confirmed pin list: cached for the next launch and handed to the app.
+fn apply_pins(shared: &Arc<Shared>, pins: Vec<String>, cap: Option<usize>) {
+    shared.with_store(|s| s.put_json(store::KEY_PINS, &pins));
+    let _ = shared.events.send(SyncEvent::Pins {
+        pins,
+        cap: cap.unwrap_or(PIN_CAP_DEFAULT),
+    });
 }
 
 /// `PUT /chats/{id}/settings {archived}` (§9c). The relay echoes a project chat as `ChatDto`
@@ -6442,6 +6486,24 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         });
                     }
                     Err(err) => shared.fail("fork the chat", &err),
+                }
+            });
+        }
+        ClientCommand::SetPins { pins } => {
+            // Optimistic: the list is cached and shown now; the relay's answer (cleaned,
+            // capped) replaces it, and a refusal re-reads the stored list.
+            shared.with_store(|s| s.put_json(store::KEY_PINS, &pins));
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                match shared.put_json("/me/pins", json!({ "pins": pins })).await {
+                    Ok(v) => match serde_json::from_value::<PinsDto>(v) {
+                        Ok(dto) => apply_pins(&shared, dto.pins, Some(dto.cap as usize)),
+                        Err(err) => shared.diagnostic("pins", format!("{err:#}")),
+                    },
+                    Err(err) => {
+                        shared.diagnostic("pins", format!("{err:#}"));
+                        refresh_pins(&shared).await;
+                    }
                 }
             });
         }
