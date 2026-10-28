@@ -1444,6 +1444,36 @@ impl Agent {
         Some(prelude)
     }
 
+    /// The recent lines of people chat `chat_id`, rendered for a prompt, when this agent is a
+    /// member of it: what another agent's `send_message` from that chat was about (Arbonites
+    /// 2026-10-28: Bubble's "Jacob asked me to talk to you" reached Bob with nothing of the group,
+    /// so Bob asked "What's on Jacob's mind?"). `None` for chats this agent is not in — a
+    /// sender's room is never shown to a non-member.
+    pub(crate) async fn people_chat_window(&self, chat_id: &str) -> Option<String> {
+        let info = self.people.info(chat_id)?;
+        let host = self.sync.host(chat_id).await?;
+        let handles = agent_handles(&info, &self.cfg.project_id, &self.identity.handle());
+        let recent = {
+            let h = host.lock().await;
+            recent_people_context_for(
+                &h.doc.messages(),
+                "",
+                RESPOND_RECENT_MAX,
+                &info,
+                chat_id,
+                &handles,
+            )
+        };
+        if recent.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "{}{}",
+            crate::truncate::render_window(&recent),
+            crate::truncate::window_note(chat_id)
+        ))
+    }
+
     /// Projects together (D72 step 3): in this Project's own chats, a message written by a guest
     /// the owner invited is labelled so the agent knows who is talking. `None` for the owner's
     /// own messages and for people chats (which have their own prelude).
