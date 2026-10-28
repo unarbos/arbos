@@ -1467,6 +1467,11 @@ class Loop:
         new commits touch the branch's files, re-gate (status gating; the pool batches it and a green run holds it
         again). A conflict goes to the agent / owner as a merge-main follow-up."""
         aw = st.get("awaiting") or {}
+        if st.get("do_not_merge"):
+            # An operator hold above approval (#2098/#2100, presence dot): the decision is Jacob's, the branch may be
+            # gone (the revert flow deleted it) and there is nothing to keep current — 504 billed 404s on POST /merges
+            # between 04:41 and 13:22 Oct 28. The branch is recreated by hand when the hold is lifted.
+            return
         if aw.get("conflict"):
             # "conflict — owner merging main": the owner's resolving push is the way out. Pick it up without waiting
             # for main to move again, and re-gate it (the resolved tree is new) — still held for Jacob.
@@ -1485,6 +1490,12 @@ class Loop:
             return
         cmp = self.gh.compare(aw.get("main_head") or main_head, main_head)
         moved_files = {f["filename"] for f in cmp.get("files", [])}
+        if not self.gh.branch_head(st["branch"]):
+            # No live branch (deleted after a merge or by hand): nothing to merge main into; note it once.
+            if aw.get("branch_missing_noted") != main_head:
+                aw["branch_missing_noted"] = main_head; st["awaiting"] = aw; self.store.save_state(fid, st)
+                log(f"[{fid}] held item has no live branch {st['branch']}; keep-current skipped")
+            return
         res = self.gh.merge_into(st["branch"], main_head, f"merge main into {st['branch']} (kept current while awaiting approval) [feedback {fid}]")
         if res is None:
             aw.update(ready=False, conflict=True, main_head=main_head)
