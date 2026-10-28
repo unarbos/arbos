@@ -23,14 +23,15 @@ final class ListTopFadeTests: XCTestCase {
         }
     }
 
-    func testHomeIsOpaqueThroughTheDiscsAndFadesOutWhereTheFirstRowStarts() {
+    func testHomeFloatsItsBarsOverTheRowsAndFadesOutWhereTheFirstRowStarts() {
+        // Jacob 2026-10-28 ([feedback iphone-home-bar-fades-2026-10-28]) reversed the opaque block
+        // through the discs and the tabs: the bars float, the rows fade out under them. Opaque
+        // through the status bar and a hair past it only; clear exactly where the list's first
+        // row sits at rest (the band's end never moved). `HomeBarFadeTests` pins the curve.
         let status: CGFloat = 59
         let spec = ListTopFade.spec(.home, statusBar: status)
-        // Opaque through the status bar, the account / + row and the whole tab bar: nothing
-        // reads through behind the status bar or around the tabs (Jacob's shot).
-        XCTAssertEqual(spec.solid, status + Controls.top + Controls.diameter + HomeChrome.filterBand)
-        // Clear exactly where the list's first row sits at rest (the Mac's rule: the band ends
-        // where the content starts).
+        XCTAssertEqual(spec.solid, status + HomeChrome.topSolid)
+        XCTAssertLessThan(spec.solid, status + Controls.top, "the discs are not under the opaque part")
         XCTAssertEqual(spec.height, status + HomeChrome.listTop)
         XCTAssertEqual(HomeChrome.listTop, Controls.top + Controls.diameter + HomeChrome.filterBand + HomeChrome.fadeBand)
         XCTAssertEqual(HomeChrome.filterBand, 44)
