@@ -5982,6 +5982,44 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
+        ClientCommand::RemoveLinkPreview {
+            chat_id,
+            message_id,
+        } => {
+            // Same shape as a delete: the relay decides (`DELETE …/messages/{id}/preview`)
+            // and the change comes back as a relay-signed row.
+            let project_id = shared
+                .chats
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|c| c.id == chat_id)
+                .map(|c| c.project_id.clone())
+                .unwrap_or_else(|| chat_id.clone());
+            let is_people = shared.is_people(&chat_id);
+            let room = room::room_path(&project_id, &chat_id, is_people);
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .delete(&format!("/room/{room}/messages/{message_id}/preview"))
+                    .await
+                {
+                    let error = match err.downcast_ref::<RelayError>() {
+                        Some(e) if e.status == 403 => UserError::of(
+                            "remove the preview",
+                            ErrorClass::Refused {
+                                message: Some(
+                                    "You can only remove previews on your own messages.".into(),
+                                ),
+                            },
+                            format!("{err:#}"),
+                        ),
+                        _ => UserError::classify("remove the preview", &err),
+                    };
+                    shared.fail_with(error);
+                }
+            });
+        }
         ClientCommand::Approve {
             chat_id,
             approval_id,
