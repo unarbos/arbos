@@ -6270,6 +6270,22 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Details → Can → a switch. The row flips at once; the relay's answer confirms it.
+    func setOutsideScope(_ projectId: Id, _ scope: String, on: Bool) {
+        outsideInfo[projectId]?.scopes[scope] = on
+        guard !isFixture else { return }
+        Task {
+            do {
+                if let info = try await api.setOutsideScope(projectId, scope, on: on) {
+                    outsideInfo[projectId] = info
+                }
+            } catch {
+                outsideInfo[projectId]?.scopes[scope] = !on
+                fail("change what the agent may do", error)
+            }
+        }
+    }
+
     func revokeOutsideAgent(_ projectId: Id) async {
         do {
             try await api.revokeOutsideAgent(projectId)
