@@ -34,9 +34,9 @@ use crate::model::{Id, Job, JobState};
 use crate::ui::cards;
 use crate::ui::glass;
 use crate::ui::highlight;
-use crate::ui::icons::icon;
 use crate::ui::mention::{self, ChipPointer};
 use crate::ui::presence::{self, Presence};
+use crate::ui::sf_symbols;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, TEXT_SMALL, TEXT_TINY};
 
@@ -242,7 +242,7 @@ pub fn chip(
         None => pointer.alpha(&CHIP_KEY, Instant::now(), cx.reduce_motion()),
     };
     let label = Job::count_label(count);
-    let chevron = if open { "chevron-down" } else { "chevron-up" };
+    let chevron = if open { "chevron.down" } else { "chevron.up" };
     div()
         .id("tasks-chip")
         .h(px(CHIP_HEIGHT))
@@ -260,7 +260,7 @@ pub fn chip(
         .cursor_pointer()
         .debug_selector(|| "tasks-chip".into())
         .child(label)
-        .child(icon(chevron, CHIP_CHEVRON, theme.accent))
+        .child(sf_symbols::glyph(chevron, CHIP_CHEVRON, theme.accent))
         .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
             let key = hovered.then_some(CHIP_KEY);
             if this.tasks_chip.hover(key, Instant::now()) {
@@ -346,7 +346,9 @@ fn job_row(
 ) -> Stateful<Div> {
     let leading: AnyElement = match job.state {
         JobState::Running => cards::activity_spinner(ROW_SPINNER, theme, cx).into_any_element(),
-        JobState::Queued => icon("pause", ROW_SPINNER, theme.text_faint).into_any_element(),
+        JobState::Queued => {
+            sf_symbols::glyph("pause.fill", ROW_SPINNER, theme.text_faint).into_any_element()
+        }
     };
     let subtitle_color = match job.state {
         JobState::Running => theme.text_muted,
@@ -443,7 +445,7 @@ fn job_row(
                                 .debug_selector(move || format!("tasks-row-title-{ix}"))
                                 .child(job.title.clone()),
                         )
-                        .child(icon("chevron-right", 12.0, theme.text_faint)),
+                        .child(sf_symbols::glyph("chevron.right", 12.0, theme.text_faint)),
                 )
                 .child(
                     div()

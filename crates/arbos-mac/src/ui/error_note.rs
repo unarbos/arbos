@@ -26,7 +26,7 @@ use gpui::{
 };
 
 use crate::sync::user_error::{Action, UserError};
-use crate::ui::icons::icon;
+use crate::ui::sf_symbols;
 use crate::ui::theme::{Theme, TEXT_SMALL};
 
 pub const RADIUS: f32 = 10.0;
@@ -231,11 +231,11 @@ pub fn render(
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.8))
                 .child("Details")
-                .child(icon(
+                .child(sf_symbols::glyph(
                     if details_open {
-                        "chevron-up"
+                        "chevron.up"
                     } else {
-                        "chevron-down"
+                        "chevron.down"
                     },
                     11.0,
                     theme.text_muted,
@@ -320,7 +320,7 @@ pub fn render(
                     .justify_center()
                     .cursor_pointer()
                     .hover(|s| s.opacity(0.7))
-                    .child(icon("xmark", 12.0, theme.text_muted))
+                    .child(sf_symbols::glyph("xmark", 12.0, theme.text_muted))
                     .on_click(move |e, w, cx| f(e, w, cx)),
             );
         }

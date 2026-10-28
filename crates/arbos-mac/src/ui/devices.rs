@@ -65,13 +65,13 @@ fn row(d: &DeviceView, now_ms: i64) -> DeviceRow {
 pub fn glyph_for(name: &str, kind: &str) -> &'static str {
     let n = name.to_lowercase();
     if kind == "reader" || n.contains("bot") {
-        "bot"
+        "server.rack"
     } else if n.contains("iphone") || n.contains("ipad") || n.contains("phone") {
-        "smartphone"
+        "iphone"
     } else if n.contains("imac") || n.contains("mac mini") || n.contains("studio") {
-        "desktop"
+        "desktopcomputer"
     } else {
-        "laptop"
+        "laptopcomputer"
     }
 }
 
@@ -175,12 +175,12 @@ mod tests {
         );
         assert_eq!(rows.len(), 3);
         assert!(rows[0].current && rows[0].id == "a", "this Mac first");
-        assert_eq!(rows[0].glyph, "laptop");
+        assert_eq!(rows[0].glyph, "laptopcomputer");
         assert_eq!(rows[0].tag, None);
         assert!(rows[0].subtitle.starts_with("Active now · added "));
-        assert_eq!(rows[1].glyph, "smartphone");
+        assert_eq!(rows[1].glyph, "iphone");
         assert!(rows[1].subtitle.starts_with("2 h ago · added "));
-        assert_eq!(rows[2].glyph, "bot");
+        assert_eq!(rows[2].glyph, "server.rack");
         assert_eq!(rows[2].tag, Some("read-only"));
         assert!(rows[2].subtitle.starts_with("3 d ago · added "));
     }
@@ -231,12 +231,12 @@ mod tests {
 
     #[test]
     fn kinds_and_names_pick_glyphs_and_tags() {
-        assert_eq!(glyph_for("Jacob's iPhone", "github"), "smartphone");
-        assert_eq!(glyph_for("iPad", "github"), "smartphone");
-        assert_eq!(glyph_for("Jacob's iMac", "github"), "desktop");
-        assert_eq!(glyph_for("GrokBot-Arbos", "reader"), "bot");
-        assert_eq!(glyph_for("anything", "reader"), "bot");
-        assert_eq!(glyph_for("MacBook Air", "paircode"), "laptop");
+        assert_eq!(glyph_for("Jacob's iPhone", "github"), "iphone");
+        assert_eq!(glyph_for("iPad", "github"), "iphone");
+        assert_eq!(glyph_for("Jacob's iMac", "github"), "desktopcomputer");
+        assert_eq!(glyph_for("GrokBot-Arbos", "reader"), "server.rack");
+        assert_eq!(glyph_for("anything", "reader"), "server.rack");
+        assert_eq!(glyph_for("MacBook Air", "paircode"), "laptopcomputer");
         assert_eq!(kind_tag("github"), None);
         assert_eq!(kind_tag("reader"), Some("read-only"));
         assert_eq!(kind_tag("paircode"), Some("pair code"));

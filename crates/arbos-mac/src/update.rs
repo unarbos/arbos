@@ -11,10 +11,11 @@
 //! Automatic updates (D85, opt-in): a newer build is downloaded, verified and
 //! installed in the background as soon as the poll (every 5 min) or the
 //! relay's `release_published` push sees it; the app then relaunches at a safe
-//! moment — while Arbos is focused and idle, never while another app has
-//! focus, never during a call or mid-typing — and until then the disc offers
-//! "restart now" (a one-minute countdown runs behind it). The open chat comes
-//! back after the relaunch (on-device store, `RestoreSelection`).
+//! moment — while Arbos has been focused continuously (countdown or idle
+//! pause), never on the swipe-back that regains focus, never while another app
+//! has focus, never during a call or mid-typing — and until then the disc
+//! offers "restart now" (a one-minute countdown runs behind it). The open chat
+//! comes back after the relaunch (on-device store, `RestoreSelection`).
 //!
 //! Where the bytes come from: the stable channel reads the manifest the site serves
 //! (`https://arbos.life/updates/mac/appcast.xml`, a mirror of the GitHub release's appcast) and

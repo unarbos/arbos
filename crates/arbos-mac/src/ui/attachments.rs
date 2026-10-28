@@ -18,7 +18,7 @@ use gpui::{
 use crate::app::{AppState, FORWARDED_FROM_PREFIX};
 use crate::model::{Attachment, AttachmentKind};
 use crate::ui::highlight;
-use crate::ui::icons::icon;
+use crate::ui::sf_symbols;
 use crate::ui::theme::{Theme, BUBBLE_RADIUS};
 
 /// What a card click does: open the media viewer on this attachment.
@@ -109,7 +109,7 @@ fn download_disc(id: SharedString, muted: bool, theme: &Theme) -> gpui::Stateful
         .cursor_pointer()
         // hover-fill: exception overlay
         .hover(|s| s.bg(Theme::with_alpha(gpui::black(), 0.75)))
-        .child(icon("arrow-down", 12.0, fg))
+        .child(sf_symbols::glyph("arrow.down", 12.0, fg))
 }
 
 /// The card element for one attachment row. `forwarded_from` is the message's
@@ -196,7 +196,7 @@ fn picture_bubble(
                 .flex_col()
                 .items_center()
                 .gap(px(6.0))
-                .child(icon("photo", 22.0, theme.text_faint))
+                .child(sf_symbols::glyph("photo", 22.0, theme.text_faint))
                 .child(
                     div()
                         .text_size(px(11.0))
@@ -298,9 +298,9 @@ fn file_card(
         .flex()
         .items_center()
         .justify_center()
-        .child(icon(
+        .child(sf_symbols::glyph(
             match kind {
-                AttachmentKind::Video => "play",
+                AttachmentKind::Video => "play.fill",
                 AttachmentKind::Audio => "waveform",
                 _ => "doc",
             },

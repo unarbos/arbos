@@ -13,7 +13,7 @@ use gpui::{
 use crate::model::{Id, REACTION_PALETTE};
 use crate::ui::composer::ComposerInput;
 use crate::ui::highlight;
-use crate::ui::icons::icon;
+use crate::ui::sf_symbols;
 use crate::ui::shell::Shell;
 use crate::ui::theme::Theme;
 
@@ -138,7 +138,7 @@ pub fn render(shell: &Shell, window: &Window, cx: &mut Context<Shell>) -> Option
             )
             .child(cell(
                 "react-pick-close",
-                icon("xmark", 14.0, theme.text_muted),
+                sf_symbols::glyph("xmark", 14.0, theme.text_muted),
                 false,
                 &theme,
                 cx.listener(|this, _, _, cx| {
@@ -167,7 +167,7 @@ pub fn render(shell: &Shell, window: &Window, cx: &mut Context<Shell>) -> Option
             div()
                 .relative()
                 .size(px(20.0))
-                .child(icon("face-smile", 20.0, theme.text_muted))
+                .child(sf_symbols::glyph("face.smiling", 20.0, theme.text_muted))
                 .child(
                     div()
                         .absolute()
@@ -179,7 +179,7 @@ pub fn render(shell: &Shell, window: &Window, cx: &mut Context<Shell>) -> Option
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(icon("plus", 10.0, theme.text_muted)),
+                        .child(sf_symbols::glyph("plus", 10.0, theme.text_muted)),
                 ),
             false,
             &theme,

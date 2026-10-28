@@ -70,8 +70,9 @@ const ICONS: &[(&str, &str)] = &[
         "<path d=\"M7 3h10M7 21h10M8 3c0 5 4 6 4 9s-4 4-4 9M16 3c0 5-4 6-4 9s4 4 4 9\"/>"
     ),
     icon!("xmark", "<path d=\"M6 6l12 12M18 6L6 18\"/>"),
-    // Grok Bot's activity spinner (the Coding row while the bot works): eight
-    // spokes fading round the dial; `cards::activity_spinner` steps it.
+    // icon: custom — Grok Bot's activity spinner (the Coding row while the bot
+    // works): eight spokes fading round the dial, stepped by
+    // `cards::activity_spinner`; SF Symbols has no fading-spoke dial.
     icon!(
         "spinner",
         "<path d=\"M12.00 5.50L12.00 1.50\" stroke-width=\"2.4\" stroke-opacity=\"1.0\"/><path d=\"M16.60 7.40L19.42 4.58\" stroke-width=\"2.4\" stroke-opacity=\"0.85\"/><path d=\"M18.50 12.00L22.50 12.00\" stroke-width=\"2.4\" stroke-opacity=\"0.7\"/><path d=\"M16.60 16.60L19.42 19.42\" stroke-width=\"2.4\" stroke-opacity=\"0.55\"/><path d=\"M12.00 18.50L12.00 22.50\" stroke-width=\"2.4\" stroke-opacity=\"0.42\"/><path d=\"M7.40 16.60L4.58 19.42\" stroke-width=\"2.4\" stroke-opacity=\"0.3\"/><path d=\"M5.50 12.00L1.50 12.00\" stroke-width=\"2.4\" stroke-opacity=\"0.2\"/><path d=\"M7.40 7.40L4.58 4.58\" stroke-width=\"2.4\" stroke-opacity=\"0.12\"/>"
@@ -629,6 +630,86 @@ mod tests {
             }
         }
         out
+    }
+
+    /// Every surface draws system symbols ([feedback
+    /// sf-symbols-everywhere-mac-2026-10-28]): no `icons::icon(` call survives
+    /// outside this module and `sf_symbols` unless a `// icon: custom <why>`
+    /// line sits right above it (the activity spinner), and every string
+    /// literal handed to `sf_symbols::glyph(` / `symbol(` is a registered
+    /// symbol. Read from the source tree, so a new site fails here.
+    #[test]
+    fn every_surface_draws_system_symbols() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("src dir") {
+                let path = entry.expect("entry").path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        walk(&root, &mut files);
+        assert!(files.len() > 50, "the walk found {} files", files.len());
+        let mut pack_calls = Vec::new();
+        let mut unregistered = Vec::new();
+        let mut literals = 0;
+        for path in files {
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if name == "icons.rs" || name == "sf_symbols.rs" {
+                continue;
+            }
+            let src = std::fs::read_to_string(&path).expect("read");
+            let lines: Vec<&str> = src.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                let code = line.split("//").next().unwrap_or("");
+                let mut from = 0;
+                while let Some(ix) = code[from..].find("icon(") {
+                    let at = from + ix;
+                    let before = code[..at].chars().last();
+                    let is_call = !matches!(before, Some(c) if c.is_alphanumeric() || c == '_')
+                        && !code[..at].ends_with("fn ")
+                        && !code[..at].ends_with("link_");
+                    if is_call {
+                        let marked = lines[i.saturating_sub(3)..i]
+                            .iter()
+                            .any(|l| l.contains("// icon: custom "));
+                        if !marked {
+                            pack_calls.push(format!("{name}:{}", i + 1));
+                        }
+                    }
+                    from = at + 5;
+                }
+                for call in ["sf_symbols::glyph(\"", "sf_symbols::symbol(\""] {
+                    let mut from = 0;
+                    while let Some(ix) = code[from..].find(call) {
+                        let start = from + ix + call.len();
+                        let literal: String =
+                            code[start..].chars().take_while(|c| *c != '"').collect();
+                        literals += 1;
+                        if !crate::ui::sf_symbols::is_registered(&literal) {
+                            unregistered.push(format!("{name}:{} {literal:?}", i + 1));
+                        }
+                        from = start;
+                    }
+                }
+            }
+        }
+        assert!(
+            pack_calls.is_empty(),
+            "pack glyphs drawn outside sf_symbols without `// icon: custom <why>`: {pack_calls:?}"
+        );
+        assert!(
+            literals >= 80,
+            "the scan found only {literals} symbol literals"
+        );
+        assert!(
+            unregistered.is_empty(),
+            "symbol names not registered in sf_symbols::FALLBACKS: {unregistered:?}"
+        );
     }
 
     /// The pack is frozen ([feedback menu-sf-symbols-2026-10-27]): a glyph is

@@ -28,10 +28,10 @@ use crate::search;
 use crate::ui::glass;
 use crate::ui::groups;
 use crate::ui::highlight;
-use crate::ui::icons::icon;
 use crate::ui::link_tile;
 use crate::ui::modal;
 use crate::ui::people;
+use crate::ui::sf_symbols;
 use crate::ui::shell::Shell;
 use crate::ui::sidebar;
 use crate::ui::theme::Theme;
@@ -196,7 +196,11 @@ pub fn overlay(
         .gap(px(FIELD_GAP))
         .cursor_text()
         .debug_selector(|| "palette-field".into())
-        .child(icon("search", FIELD_GLYPH, theme.text_muted))
+        .child(sf_symbols::glyph(
+            "magnifyingglass",
+            FIELD_GLYPH,
+            theme.text_muted,
+        ))
         .child(
             div()
                 .flex_1()
@@ -439,7 +443,7 @@ fn picture(shell: &Shell, entry: &Entry, theme: &Theme, cx: &Context<Shell>) -> 
             .flex()
             .items_center()
             .justify_center()
-            .child(icon(glyph, AVATAR * 0.58, theme.text_muted))
+            .child(sf_symbols::glyph(glyph, AVATAR * 0.58, theme.text_muted))
     };
     match &entry.target {
         Target::Setting(setting) => {
@@ -454,7 +458,7 @@ fn picture(shell: &Shell, entry: &Entry, theme: &Theme, cx: &Context<Shell>) -> 
         }
         Target::Space(id) | Target::Message { space_id: id, .. } => {
             let Some(space) = state.project(id) else {
-                return tile("person").into_any_element();
+                return tile("person.fill").into_any_element();
             };
             if let Some(person) = space
                 .person()
@@ -468,10 +472,10 @@ fn picture(shell: &Shell, entry: &Entry, theme: &Theme, cx: &Context<Shell>) -> 
         }
         Target::Server(id) | Target::Channel { server_id: id, .. } => {
             let Some(server) = state.server(id) else {
-                return tile("hash").into_any_element();
+                return tile("number").into_any_element();
             };
             if entry.kind == Kind::Channel {
-                tile("hash").into_any_element()
+                tile("number").into_any_element()
             } else {
                 sidebar::server_picture(server, state, AVATAR, theme).into_any_element()
             }
@@ -516,7 +520,7 @@ fn picture(shell: &Shell, entry: &Entry, theme: &Theme, cx: &Context<Shell>) -> 
                 .into_any_element(),
             }
         }
-        Target::ChannelMessage { .. } => tile("hash").into_any_element(),
+        Target::ChannelMessage { .. } => tile("number").into_any_element(),
         Target::Person(handle) => {
             // A person met in a group or the directory: their photo / initials
             // disc, as the member list draws it.
@@ -532,7 +536,7 @@ fn picture(shell: &Shell, entry: &Entry, theme: &Theme, cx: &Context<Shell>) -> 
                     let image = state.avatar(&p.avatar_url);
                     people::avatar(image, &p, AVATAR, theme).into_any_element()
                 }
-                None => tile("person").into_any_element(),
+                None => tile("person.fill").into_any_element(),
             }
         }
         Target::Link(url) => {
@@ -636,7 +640,11 @@ mod tests {
                     .items_center()
                     .gap(px(FIELD_GAP))
                     .debug_selector(|| "palette-field".into())
-                    .child(icon("search", FIELD_GLYPH, theme.text_muted))
+                    .child(sf_symbols::glyph(
+                        "magnifyingglass",
+                        FIELD_GLYPH,
+                        theme.text_muted,
+                    ))
                     .child(
                         div()
                             .flex_1()

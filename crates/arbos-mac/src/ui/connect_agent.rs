@@ -12,10 +12,10 @@ use crate::model::{now_ms, Id, OutsideInfo};
 use crate::ui::create_entity::{self, hex, palette, Transport};
 use crate::ui::frost::{frosted, PANEL_BLUR};
 use crate::ui::highlight;
-use crate::ui::icons::icon;
 use crate::ui::motion::PulseClock;
 use crate::ui::profiles::kit::{self, Leading};
 use crate::ui::profiles::pane::Section;
+use crate::ui::sf_symbols;
 use crate::ui::shell::Shell;
 use crate::ui::theme::Theme;
 
@@ -83,7 +83,7 @@ pub fn reveal_sheet(_shell: &Shell, reveal: &ConnectReveal, cx: &mut Context<She
                 .rounded_full()
                 .cursor_pointer()
                 .map(|el| highlight::button(el, &theme))
-                .child(icon("xmark", 10.0, hex(0xD2D2D2)))
+                .child(sf_symbols::glyph("xmark", 10.0, hex(0xD2D2D2)))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.state.update(cx, |s, cx| s.close_connect_reveal(cx));
                 })),
@@ -133,7 +133,7 @@ pub fn reveal_sheet(_shell: &Shell, reveal: &ConnectReveal, cx: &mut Context<She
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(icon(glyph, 15.0, p.title)),
+                    .child(sf_symbols::glyph(glyph, 15.0, p.title)),
             )
             .child(
                 div()
@@ -179,8 +179,8 @@ pub fn reveal_sheet(_shell: &Shell, reveal: &ConnectReveal, cx: &mut Context<She
                     .text_color(if copied { theme.online } else { p.title })
                     .cursor_pointer()
                     .hover(|s| s.opacity(0.85))
-                    .child(icon(
-                        if copied { "check" } else { "copy" },
+                    .child(sf_symbols::glyph(
+                        if copied { "checkmark" } else { "doc.on.doc" },
                         13.0,
                         if copied { theme.online } else { p.title },
                     ))
@@ -235,7 +235,7 @@ pub fn reveal_sheet(_shell: &Shell, reveal: &ConnectReveal, cx: &mut Context<She
             .py(px(12.0))
             .text_size(px(13.0))
             .text_color(p.title)
-            .child(icon("check", 14.0, theme.online))
+            .child(sf_symbols::glyph("checkmark", 14.0, theme.online))
             .child(format!(
                 "Connected · {} · asp/1",
                 match transport {

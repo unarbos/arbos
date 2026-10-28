@@ -22,8 +22,8 @@ use crate::ui::avatars;
 use crate::ui::blocked;
 use crate::ui::groups;
 use crate::ui::highlight;
-use crate::ui::icons::icon;
 use crate::ui::people;
+use crate::ui::sf_symbols;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, TEXT_SMALL};
 
@@ -212,7 +212,7 @@ pub(super) fn page(
                 add_rows.push(
                     kit::row(
                         ADD_MEMBERS_ID,
-                        kit::Leading::Glyph("person-plus"),
+                        kit::Leading::Glyph("person.badge.plus"),
                         "Add members",
                         None,
                         None,
@@ -257,7 +257,7 @@ pub(super) fn page(
                 add_rows.push(
                     kit::row(
                         DESCRIPTION_ID,
-                        kit::Leading::Glyph("text-align-left"),
+                        kit::Leading::Glyph("text.alignleft"),
                         "Description",
                         None,
                         None,
@@ -514,7 +514,7 @@ fn remove_x(key: String, theme: &Theme, cx: &mut Context<Shell>) -> Stateful<Div
         .opacity(0.0)
         .group_hover(kit::HOT, |s| s.opacity(1.0));
     highlight::button(x, theme)
-        .child(icon("xmark", 11.0, theme.text_muted))
+        .child(sf_symbols::glyph("xmark", 11.0, theme.text_muted))
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(cx.listener(move |this, _, _, cx| {
             cx.stop_propagation();
