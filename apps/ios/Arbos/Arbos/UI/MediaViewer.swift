@@ -791,7 +791,7 @@ struct ForwardSheet: View {
         if attachmentNote {
             return "Sends it as a new message, “\(MediaAlbum.forwardedPrefix)\(fromName)”."
         }
-        return "Sends the text as a new message."
+        return "Opens the chat with the text ready to send."
     }
 
     var body: some View {
@@ -1127,13 +1127,12 @@ extension AppModel {
         }
     }
 
-    /// Bubble long-press → Forward: send the message again to `target` as a new
-    /// message of mine (no reply quote — it is a fresh send in that chat): its
-    /// text, its pictures / files / videos (each blob fetched from `slot` and
-    /// uploaded into the destination's slot, so that chat's members can read it)
-    /// and its charts, all carrying `forwardedFrom: by` so every client draws
-    /// "Forwarded from <by>" on it ([feedback forward-attachments-ios-2026-10-27];
-    /// app-01M5MXRZ7609S70P9S9P2RZDDF sent the words alone).
+    /// Bubble long-press → Forward. Text-only messages open `target` with the
+    /// words drafted so the user taps Send (feedback
+    /// app-01M5YF7JWEZXPD1JSKBH9TMCES). Messages with pictures / files / videos /
+    /// charts still send at once into `target` ([feedback
+    /// forward-attachments-ios-2026-10-27]). Both paths carry `forwardedFrom: by`
+    /// (app-01M5MXRZ7609S70P9S9P2RZDDF).
     func forwardMessage(_ message: Message, from by: String, slot: String, to target: ForwardTarget) {
         guard let payload = message.body else { return }
         let name = by.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1148,6 +1147,21 @@ extension AppModel {
             guard let chat = primaryChat(of: p.id) else { return }
             chatId = chat.id
             targetSlot = chat.projectId
+        }
+        // Text alone: open the chat with the draft ready (user taps Send).
+        if !payload.hasMedia {
+            let body = payload.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !body.isEmpty else { return }
+            switch target.kind {
+            case .people(let c):
+                open(peopleChat: c)
+            case .agent(let p):
+                guard let chat = primaryChat(of: p.id) else { return }
+                open(chat: chat)
+            }
+            setComposerDraft(body, for: chatId)
+            pendingForwardDraft = (chatId, body, forwardedFrom)
+            return
         }
         #if DEBUG
         if isFixture {
