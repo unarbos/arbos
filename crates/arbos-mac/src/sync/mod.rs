@@ -368,6 +368,14 @@ pub enum SyncEvent {
     ThumbnailFailed {
         key: String,
     },
+    /// Copy of a message ([feedback copy-image-messages-mac-2026-10-27]): the original
+    /// bytes of every attachment `ClientCommand::FetchCopyBlobs` asked for, in the asked
+    /// order; a blob that could not be fetched is `None` in its slot. `request` is the
+    /// command's.
+    CopyBlobs {
+        request: u64,
+        blobs: Vec<Option<CopyBlob>>,
+    },
     /// An attachment landed in ~/Downloads (F10); the app reveals it.
     AttachmentSaved {
         path: PathBuf,
@@ -561,6 +569,15 @@ pub enum PictureSource {
     File(std::path::PathBuf),
     /// A blob the relay already stores under the project (a generated picture).
     Key(String),
+}
+
+/// One fetched attachment of a Copy (`SyncEvent::CopyBlobs`): the relay's `content-type`
+/// and the bytes as uploaded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CopyBlob {
+    pub key: String,
+    pub mime: String,
+    pub bytes: Arc<Vec<u8>>,
 }
 
 /// Something the user did; the source writes it into the doc / outbox.
@@ -1002,6 +1019,15 @@ pub enum ClientCommand {
     FetchThumbnail {
         project_id: Id,
         key: String,
+    },
+    /// Copy of a message: the full original bytes of every attachment in `keys` (blob
+    /// slot `project_id`), answered together as `SyncEvent::CopyBlobs { request, .. }`
+    /// ([feedback copy-image-messages-mac-2026-10-27]). Never a thumbnail: the
+    /// pasteboard gets what the sender uploaded.
+    FetchCopyBlobs {
+        project_id: Id,
+        request: u64,
+        keys: Vec<String>,
     },
     /// Fetch the site icon the bubbles draw before named links to `host`.
     FetchLinkIcon {

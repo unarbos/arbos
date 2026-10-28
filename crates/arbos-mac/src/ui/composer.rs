@@ -1096,7 +1096,10 @@ impl ComposerInput {
     /// drop ([feedback desktop-paste-2026-10-23]). Fields without an owner
     /// hook (search, names, secrets) keep text only.
     pub(crate) fn paste_clipboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(item) = cx.read_from_clipboard() else {
+        // Every pasteboard item, pictures and text alike — gpui's reader stops at the
+        // first item's text, so a copied picture-with-caption pasted as words only
+        // ([feedback copy-image-messages-mac-2026-10-27]).
+        let Some(item) = crate::pasteboard::read(cx) else {
             return;
         };
         let pasted = Pasted::from_clipboard(&item);
