@@ -67,6 +67,14 @@ actions!(
         End,
         SelectHome,
         SelectEnd,
+        DocumentStart,
+        DocumentEnd,
+        SelectDocumentStart,
+        SelectDocumentEnd,
+        DeleteToLineStart,
+        Bold,
+        Italic,
+        Strike,
         DeleteWordBackward,
         DeleteWordForward,
         Paste,
@@ -212,6 +220,11 @@ pub struct ComposerInput {
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
+    /// The caret sits on a soft-wrap boundary and belongs to the row *below*
+    /// it (⌘← / ⇧⌘← put it there — [feedback composer-caret-shortcuts-2026-10-27]).
+    /// Every other move paints a boundary caret at the end of the row above,
+    /// as NSTextView's upstream affinity does.
+    caret_downstream: bool,
     layout: Option<Layout>,
     is_selecting: bool,
     /// The pointer over the committed chips (hover / pressed), by chip range.
@@ -275,6 +288,7 @@ impl ComposerInput {
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
+            caret_downstream: false,
             layout: None,
             is_selecting: false,
             chips: mention::ChipPointer::default(),
@@ -753,6 +767,7 @@ impl ComposerInput {
         self.selection_reversed = snap.selection_reversed;
         self.tokens = snap.tokens;
         self.marked_range = None;
+        self.caret_downstream = false;
     }
 
     /// Push the current text before a user edit so ⌘Z can restore it.
@@ -874,20 +889,141 @@ impl ComposerInput {
         self.select_to(self.content.len(), cx)
     }
 
+    /// ⌘← / Home — NSTextView's `moveToLeftEndOfLine:`: the start of the
+    /// *visual* (wrapped) line, not the paragraph.
     fn home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(self.line_start(self.cursor_offset()), cx);
+        self.move_to(self.visual_line_start(self.cursor_offset()), cx);
+        self.caret_downstream = true;
     }
 
+    /// ⌘→ / End — `moveToRightEndOfLine:`: the end of the visual line (after
+    /// the space the row wraps on, where the caret paints at the row's end).
     fn end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(self.line_end(self.cursor_offset()), cx);
+        self.move_to(self.visual_line_end(self.cursor_offset()), cx);
     }
 
     fn select_home(&mut self, _: &SelectHome, _: &mut Window, cx: &mut Context<Self>) {
-        self.select_to(self.line_start(self.cursor_offset()), cx);
+        self.select_to(self.visual_line_start(self.cursor_offset()), cx);
+        self.caret_downstream = true;
     }
 
     fn select_end(&mut self, _: &SelectEnd, _: &mut Window, cx: &mut Context<Self>) {
-        self.select_to(self.line_end(self.cursor_offset()), cx);
+        self.select_to(self.visual_line_end(self.cursor_offset()), cx);
+    }
+
+    /// ⌘↑ — `moveToBeginningOfDocument:`.
+    fn document_start(&mut self, _: &DocumentStart, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(0, cx);
+    }
+
+    /// ⌘↓ — `moveToEndOfDocument:`.
+    fn document_end(&mut self, _: &DocumentEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(self.content.len(), cx);
+    }
+
+    fn select_document_start(
+        &mut self,
+        _: &SelectDocumentStart,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_to(0, cx);
+    }
+
+    fn select_document_end(
+        &mut self,
+        _: &SelectDocumentEnd,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_to(self.content.len(), cx);
+    }
+
+    /// ⌘⌫ — `deleteToBeginningOfLine:`: the selection if there is one, else
+    /// the caret's visual line back to its start; at a row's start it takes
+    /// one step back like ⌫, so the key is never dead.
+    fn delete_to_line_start(
+        &mut self,
+        _: &DeleteToLineStart,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            let caret = self.cursor_offset();
+            let mut start = self.visual_line_start(caret);
+            if start == caret {
+                start = self.previous_boundary(caret);
+            }
+            if start == caret {
+                return;
+            }
+            self.select_to(start, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx)
+    }
+
+    /// ⌘B / ⌘I / ⌘⇧X ([feedback chat-markdown-composer-2026-10-27]): wrap the
+    /// selection in the chat-Markdown marker, or unwrap it when it is already
+    /// wrapped; with no selection, put an empty pair around the caret so the
+    /// next words are styled (a second press on the empty pair removes it).
+    fn bold(&mut self, _: &Bold, _: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_marker("**", cx);
+    }
+
+    fn italic(&mut self, _: &Italic, _: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_marker("*", cx);
+    }
+
+    fn strike(&mut self, _: &Strike, _: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_marker("~~", cx);
+    }
+
+    pub(crate) fn toggle_marker(&mut self, marker: &str, cx: &mut Context<Self>) {
+        let m = marker.len();
+        let sel = self.selected_range.clone();
+        if self.masked || self.content.get(sel.clone()).is_none() {
+            return;
+        }
+        self.record_undo();
+        self.marked_range = None;
+        self.caret_downstream = false;
+        self.selection_reversed = false;
+        // The markers sit just outside the selection (or around the caret):
+        // remove them.
+        let before = sel
+            .start
+            .checked_sub(m)
+            .and_then(|s| self.content.get(s..sel.start));
+        let after = self.content.get(sel.end..sel.end + m);
+        if before == Some(marker) && after == Some(marker) {
+            self.splice(sel.end..sel.end + m, "");
+            self.splice(sel.start - m..sel.start, "");
+            self.selected_range = sel.start - m..sel.end - m;
+            cx.notify();
+            return;
+        }
+        // The selection holds the markers at both ends: strip them.
+        let selected = &self.content[sel.clone()];
+        if selected.len() >= 2 * m && selected.starts_with(marker) && selected.ends_with(marker) {
+            let inner = selected[m..selected.len() - m].to_owned();
+            self.splice(sel.clone(), &inner);
+            self.selected_range = sel.start..sel.start + inner.len();
+            cx.notify();
+            return;
+        }
+        // Wrap: the markers hug the words, never the surrounding spaces (the
+        // grammar closes a marker only against a non-space).
+        let lead = selected.len() - selected.trim_start().len();
+        let trail = selected.len() - selected.trim_end().len();
+        let (start, end) = if lead + trail >= selected.len() {
+            (sel.start, sel.end)
+        } else {
+            (sel.start + lead, sel.end - trail)
+        };
+        self.splice(end..end, marker);
+        self.splice(start..start, marker);
+        self.selected_range = start + m..end + m;
+        cx.notify();
     }
 
     /// ⌫ with nothing to delete (caret at the start, no selection) is not
@@ -1046,6 +1182,7 @@ impl ComposerInput {
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
+        self.caret_downstream = false;
         cx.notify()
     }
 
@@ -1075,6 +1212,7 @@ impl ComposerInput {
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.caret_downstream = false;
         if self.selection_reversed {
             self.selected_range.start = offset
         } else {
@@ -1170,6 +1308,32 @@ impl ComposerInput {
         line_end(&self.content, offset)
     }
 
+    /// Whether `offset` paints on the row below its soft-wrap boundary: only
+    /// the caret carries that affinity, and only right after ⌘← / ⇧⌘←.
+    fn downstream_at(&self, offset: usize) -> bool {
+        self.caret_downstream && offset == self.cursor_offset()
+    }
+
+    /// Byte range of the visual (wrapped) line holding `offset`; the hard
+    /// line before the first paint.
+    fn visual_line(&self, offset: usize) -> Range<usize> {
+        let fallback = self.line_start(offset)..self.line_end(offset);
+        let Some(layout) = self.layout.as_ref() else {
+            return fallback;
+        };
+        visual_line_range(&layout.lines, offset, self.downstream_at(offset)).unwrap_or(fallback)
+    }
+
+    /// Start of the visual line (⌘← / Home), never inside a chip.
+    fn visual_line_start(&self, offset: usize) -> usize {
+        self.snap(self.visual_line(offset).start, false)
+    }
+
+    /// End of the visual line (⌘→ / End), never inside a chip.
+    fn visual_line_end(&self, offset: usize) -> usize {
+        self.snap(self.visual_line(offset).end, true)
+    }
+
     /// Byte offset one wrapped line above/below the caret, keeping column when
     /// the layout is known; falls back to hard newlines before the first paint.
     ///
@@ -1185,11 +1349,12 @@ impl ComposerInput {
         if layout.lines.is_empty() {
             return cursor;
         }
-        let Some(pos) = position_for_index(
+        let Some(pos) = caret_position(
             &layout.lines,
             cursor,
             layout.bounds.size.width,
             self.text_center,
+            self.caret_downstream,
         ) else {
             return self.offset_for_hard_line_move(up);
         };
@@ -1308,17 +1473,74 @@ fn next_word_boundary(text: &str, offset: usize) -> usize {
     end
 }
 
-/// Start of the hard line holding `offset` (Cmd+Left / Home).
+/// Start of the hard line (paragraph) holding `offset` — the ⌘← fallback
+/// before the first paint and the ↑/↓ column keeper.
 fn line_start(text: &str, offset: usize) -> usize {
     text[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0)
 }
 
-/// End of the hard line holding `offset` (Cmd+Right / End).
+/// End of the hard line (paragraph) holding `offset`.
 fn line_end(text: &str, offset: usize) -> usize {
     text[offset..]
         .find('\n')
         .map(|i| offset + i)
         .unwrap_or(text.len())
+}
+
+/// Byte indices where `line` soft-wraps: each is the first byte of a new row
+/// (the row above keeps the space it wrapped on).
+fn wrap_indices(line: &WrappedLine) -> impl Iterator<Item = usize> + '_ {
+    let runs = line.runs();
+    line.wrap_boundaries()
+        .iter()
+        .map(move |b| runs[b.run_ix].glyphs[b.glyph_ix].index)
+}
+
+/// Byte range of the visual (wrapped) row holding `index`. An index that
+/// sits on a wrap boundary belongs to the row above it (upstream, where a
+/// caret paints by default) unless `downstream`.
+fn visual_line_range(
+    lines: &[(usize, WrappedLine)],
+    index: usize,
+    downstream: bool,
+) -> Option<Range<usize>> {
+    let (start, line) = lines
+        .iter()
+        .find(|(start, line)| index >= *start && index <= start + line.len())?;
+    let rel = index - start;
+    let mut row_start = 0;
+    for wrap in wrap_indices(line) {
+        let below = if downstream { rel >= wrap } else { rel > wrap };
+        if below {
+            row_start = wrap;
+        } else {
+            return Some(start + row_start..start + wrap);
+        }
+    }
+    Some(start + row_start..start + line.len())
+}
+
+/// Where the caret paints: `position_for_index`, except that a caret with
+/// downstream affinity on a wrap boundary paints at the start of the row below.
+fn caret_position(
+    lines: &[(usize, WrappedLine)],
+    index: usize,
+    bounds_width: Pixels,
+    text_center: bool,
+    downstream: bool,
+) -> Option<Point<Pixels>> {
+    let upstream = position_for_index(lines, index, bounds_width, text_center)?;
+    if !downstream {
+        return Some(upstream);
+    }
+    let (start, line) = lines
+        .iter()
+        .find(|(start, line)| index >= *start && index <= start + line.len())?;
+    if !wrap_indices(line).any(|wrap| start + wrap == index) {
+        return Some(upstream);
+    }
+    let ox = line_center_offset(line, bounds_width, text_center);
+    Some(point(ox, upstream.y + px(INPUT_LINE_HEIGHT)))
 }
 
 /// Pixel position (relative to the text origin) of a byte index.
@@ -1435,6 +1657,7 @@ impl EntityInputHandler for ComposerInput {
         let range = self.splice(range, new_text);
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.selection_reversed = false;
+        self.caret_downstream = false;
         // `@handle` + a separator typed right after it: the handle becomes a chip
         // without the picker (behaviour 5).
         let mut chars = new_text.chars();
@@ -1524,6 +1747,9 @@ struct Prepaint {
     chip_hits: Vec<ChipHit>,
     /// Whether a pill is mid-fade (paint again next frame).
     fading: bool,
+    /// Live quote bars: one per `> ` paragraph, in the field's left padding
+    /// (painted outside the text's clip).
+    bars: Vec<PaintQuad>,
     hitbox: Hitbox,
     scroll_y: f32,
 }
@@ -1652,6 +1878,7 @@ impl Element for InputElement {
 
         // One WrappedLine per '\n'-separated paragraph.
         let mut lines = Vec::new();
+        let mut quote_paragraphs: Vec<usize> = Vec::new();
         let mut start = 0usize;
         for para in display_text.split('\n') {
             let mut runs = runs_for(para, start, marked.as_ref(), &base_run);
@@ -1672,6 +1899,15 @@ impl Element for InputElement {
                 }
                 let local = t.range.start - start..t.range.end.min(para_end) - start;
                 runs = select::chip_runs(runs, local, mention::CELL.len(), mention_accent);
+            }
+            // Live chat-Markdown styling ([feedback chat-markdown-composer-2026-10-27]):
+            // markers faint, the words between them in their style, a `> ` line
+            // muted with a bar beside it — what the bubble will show.
+            if !content.is_empty() && !input.masked {
+                let quoted = live_styles(para, &mut runs, &theme);
+                if quoted {
+                    quote_paragraphs.push(lines.len());
+                }
             }
             let shaped = window
                 .text_system()
@@ -1711,7 +1947,13 @@ impl Element for InputElement {
                 });
             Some(point(ox, px(0.0)))
         } else {
-            position_for_index(&lines, cursor, bounds.size.width, text_center)
+            caret_position(
+                &lines,
+                cursor,
+                bounds.size.width,
+                text_center,
+                input.caret_downstream,
+            )
         };
         if let Some(p) = cursor_pos {
             let cy = f32::from(p.y);
@@ -1723,6 +1965,29 @@ impl Element for InputElement {
         }
         scroll_y = scroll_y.clamp(0.0, (total_h - visible_h).max(0.0));
         let dy = px(scroll_y);
+
+        // The quote bars: beside each `> ` paragraph, the height of its rows.
+        let mut bars = Vec::new();
+        let mut top = px(0.0);
+        for (ix, (_, line)) in lines.iter().enumerate() {
+            let h = line.size(lh).height;
+            if quote_paragraphs.contains(&ix) {
+                bars.push(
+                    fill(
+                        Bounds::new(
+                            point(
+                                bounds.left() - px(QUOTE_BAR_GAP + transcript::QUOTE_BAR),
+                                bounds.top() + top - dy + px(QUOTE_BAR_INSET),
+                            ),
+                            size(px(transcript::QUOTE_BAR), h - px(QUOTE_BAR_INSET * 2.0)),
+                        ),
+                        Theme::with_alpha(theme.text_muted, 0.55),
+                    )
+                    .corner_radii(Corners::all(px(transcript::QUOTE_BAR / 2.0))),
+                );
+            }
+            top += h;
+        }
 
         // Chip pills (one per wrapped-line fragment) and pictures, in element
         // coordinates shifted by the scroll.
@@ -1811,8 +2076,15 @@ impl Element for InputElement {
                 ));
             }
         } else {
-            let a =
-                position_for_index(&lines, selected_range.start, bounds.size.width, text_center);
+            // A selection that starts on a wrap boundary begins where the
+            // row below starts (no empty sliver at the end of the row above).
+            let a = caret_position(
+                &lines,
+                selected_range.start,
+                bounds.size.width,
+                text_center,
+                true,
+            );
             let b = position_for_index(&lines, selected_range.end, bounds.size.width, text_center);
             if let (Some(a), Some(b)) = (a, b) {
                 if a.y == b.y {
@@ -1859,6 +2131,7 @@ impl Element for InputElement {
             pictures,
             chip_hits,
             fading,
+            bars,
             hitbox: window.insert_hitbox(bounds, HitboxBehavior::Normal),
             scroll_y,
         }
@@ -1883,6 +2156,22 @@ impl Element for InputElement {
         let lh = px(INPUT_LINE_HEIGHT);
         let scroll_y = prepaint.scroll_y;
         let focused = focus_handle.is_focused(window);
+        // The bars sit in the left padding, so they get a mask one gutter wider.
+        let gutter = Bounds::new(
+            point(
+                bounds.left() - px(QUOTE_BAR_GAP + transcript::QUOTE_BAR),
+                bounds.top(),
+            ),
+            size(
+                bounds.size.width + px(QUOTE_BAR_GAP + transcript::QUOTE_BAR),
+                bounds.size.height,
+            ),
+        );
+        window.with_content_mask(Some(gpui::ContentMask { bounds: gutter }), |window| {
+            for bar in prepaint.bars.drain(..) {
+                window.paint_quad(bar);
+            }
+        });
         window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
             for pill in prepaint.pills.drain(..) {
                 window.paint_quad(pill);
@@ -2061,6 +2350,97 @@ impl InputElement {
     }
 }
 
+/// The live quote bar's distance from the text and its vertical inset in the row.
+const QUOTE_BAR_GAP: f32 = 5.0;
+const QUOTE_BAR_INSET: f32 = 2.0;
+
+/// Restyle one paragraph's runs by the chat-Markdown grammar as it is typed:
+/// marker bytes (`**`, `` ` ``, `~~`, `||`, `[`, `](…)`) in the faint ink, the
+/// words between them bold / italic / struck / mono on the code wash / on the
+/// spoiler wash, a `> ` line's markers faint and its words muted. Returns
+/// whether the paragraph is a quote line (the caller draws its bar). The runs'
+/// total length never changes, so the layout is the typed text's.
+fn live_styles(para: &str, runs: &mut Vec<TextRun>, theme: &Theme) -> bool {
+    let quote = arbos_core::markdown::quote_marker_len(para);
+    let body_from = quote.unwrap_or(0);
+    if let Some(n) = quote {
+        *runs = recolor(std::mem::take(runs), 0..n, theme.text_faint);
+        *runs = recolor(std::mem::take(runs), n..para.len(), theme.text_muted);
+    }
+    let body = &para[body_from..];
+    if !body.contains(['*', '_', '~', '|', '`', '[']) {
+        return quote.is_some();
+    }
+    for range in arbos_core::markdown::inline_markers(body) {
+        let range = range.start + body_from..range.end + body_from;
+        *runs = recolor(std::mem::take(runs), range, theme.text_faint);
+    }
+    for span in arbos_core::markdown::inline_spans(body) {
+        let st = span.style;
+        if st == arbos_core::markdown::InlineStyle::default() || span.source.is_empty() {
+            continue;
+        }
+        let range = span.source.start + body_from..span.source.end + body_from;
+        *runs = restyle(std::mem::take(runs), range, |run| {
+            if st.code {
+                run.font.family = theme.font_mono.into();
+                run.background_color = Some(theme.code_bg);
+            }
+            if st.bold {
+                run.font.weight = FontWeight::BOLD;
+            }
+            if st.italic {
+                run.font.style = gpui::FontStyle::Italic;
+            }
+            if st.strike {
+                run.strikethrough = Some(gpui::StrikethroughStyle {
+                    thickness: px(1.0),
+                    color: Some(run.color),
+                });
+            }
+            if st.spoiler != 0 {
+                run.background_color = Some(transcript::spoiler_fill(theme.text, theme, true));
+            }
+        });
+    }
+    quote.is_some()
+}
+
+/// Recolour the bytes in `range`, splitting runs at its edges.
+fn recolor(runs: Vec<TextRun>, range: Range<usize>, color: gpui::Hsla) -> Vec<TextRun> {
+    restyle(runs, range, |run| run.color = color)
+}
+
+/// Apply `f` to the runs covering `range` (split at its edges); the total
+/// length is unchanged.
+fn restyle(runs: Vec<TextRun>, range: Range<usize>, f: impl Fn(&mut TextRun)) -> Vec<TextRun> {
+    if range.is_empty() {
+        return runs;
+    }
+    let mut out = Vec::with_capacity(runs.len() + 2);
+    let mut pos = 0usize;
+    for run in runs {
+        let run_end = pos + run.len;
+        let mut cursor = pos;
+        for cut in [range.start, range.end, run_end] {
+            if cut <= cursor || cut > run_end {
+                continue;
+            }
+            let mut piece = TextRun {
+                len: cut - cursor,
+                ..run.clone()
+            };
+            if cursor >= range.start && cursor < range.end {
+                f(&mut piece);
+            }
+            out.push(piece);
+            cursor = cut;
+        }
+        pos = run_end;
+    }
+    out
+}
+
 fn runs_for(
     para: &str,
     para_start: usize,
@@ -2164,6 +2544,14 @@ impl Render for ComposerInput {
             .on_action(cx.listener(Self::end))
             .on_action(cx.listener(Self::select_home))
             .on_action(cx.listener(Self::select_end))
+            .on_action(cx.listener(Self::document_start))
+            .on_action(cx.listener(Self::document_end))
+            .on_action(cx.listener(Self::select_document_start))
+            .on_action(cx.listener(Self::select_document_end))
+            .on_action(cx.listener(Self::delete_to_line_start))
+            .on_action(cx.listener(Self::bold))
+            .on_action(cx.listener(Self::italic))
+            .on_action(cx.listener(Self::strike))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
@@ -4833,6 +5221,545 @@ mod mention_token_tests {
         assert_eq!(mention_match("x", "sam", "Sam Rivera"), None);
         assert_eq!(mention_match("ivera", "sam", "Sam Rivera"), None);
         assert_eq!(mention_match("am", "sam", "Sam Rivera"), None);
+    }
+}
+
+#[cfg(test)]
+mod caret_tests {
+    //! The macOS caret chords in the composer ([feedback
+    //! composer-caret-shortcuts-2026-10-27], Jacob): ⌘↑ / ⌘↓ = the draft's
+    //! start / end, ⌘← / ⌘→ = the *visual* (wrapped) line's start / end, ⇧
+    //! extends the selection, ⌘⌫ deletes to the visual line's start — through
+    //! the real keymap (`bind_keys`) on a wrapped two-paragraph draft in a
+    //! narrow headless window, and only while the composer is focused.
+    use super::*;
+    use gpui::{TestAppContext, VisualTestContext};
+
+    /// A 360 pt column: the first paragraph wraps into several rows.
+    const WIDTH: f32 = 360.0;
+    const FIRST: &str = "The quick brown fox jumps over the lazy dog while the composer \
+                         wraps this long first paragraph onto several visual rows so \
+                         that the caret chords have somewhere to go";
+    const SECOND: &str = "second paragraph";
+
+    struct Harness {
+        input: Entity<ComposerInput>,
+    }
+
+    impl Render for Harness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(WIDTH))
+                .h(px(600.0))
+                .flex()
+                .child(self.input.clone())
+        }
+    }
+
+    struct Draft {
+        input: Entity<ComposerInput>,
+        /// Byte index where each soft-wrapped row of the first paragraph
+        /// starts (row 0 starts at 0).
+        rows: Vec<usize>,
+        /// Start of the second paragraph.
+        second: usize,
+        len: usize,
+    }
+
+    fn draft(cx: &mut TestAppContext) -> (Draft, &mut VisualTestContext) {
+        cx.update(|cx| {
+            let theme = crate::ui::theme::Theme::for_pref(
+                crate::ui::theme::AppearancePref::Dark,
+                crate::ui::theme::Surface::Matte,
+                cx,
+            );
+            cx.set_global(theme);
+            crate::ui::motion::PulseClock::init(cx);
+            crate::bind_keys(cx);
+        });
+        let (view, vcx) = cx.add_window_view(|_, cx| Harness {
+            input: cx.new(ComposerInput::new),
+        });
+        let input = vcx.update(|_, cx| view.read(cx).input.clone());
+        let text = format!("{FIRST}\n{SECOND}");
+        vcx.update(|window, cx| {
+            input.update(cx, |i, cx| i.set_text(text.clone(), cx));
+            let handle = input.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        });
+        vcx.run_until_parked();
+        let rows = vcx.update(|_, cx| {
+            let layout = input.read(cx).layout.as_ref().expect("painted once");
+            assert!(
+                layout.bounds.size.width <= px(WIDTH),
+                "the harness narrows the field: {:?}",
+                layout.bounds.size.width
+            );
+            let (start, first) = &layout.lines[0];
+            assert_eq!(*start, 0);
+            let mut rows = vec![0usize];
+            rows.extend(wrap_indices(first));
+            rows
+        });
+        assert!(
+            rows.len() >= 3,
+            "the first paragraph wraps into at least three rows: {rows:?}"
+        );
+        let d = Draft {
+            input,
+            rows,
+            second: FIRST.len() + 1,
+            len: text.len(),
+        };
+        (d, vcx)
+    }
+
+    fn caret(d: &Draft, cx: &mut VisualTestContext) -> usize {
+        cx.update(|_, cx| d.input.read(cx).cursor_offset())
+    }
+
+    fn selection(d: &Draft, cx: &mut VisualTestContext) -> (Range<usize>, bool) {
+        cx.update(|_, cx| {
+            let i = d.input.read(cx);
+            (i.selected_range.clone(), i.selection_reversed)
+        })
+    }
+
+    /// Which visual row (0-based, over the whole draft) the caret paints on.
+    fn caret_row(d: &Draft, cx: &mut VisualTestContext) -> usize {
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let i = d.input.read(cx);
+            let layout = i.layout.as_ref().expect("laid out");
+            let p = caret_position(
+                &layout.lines,
+                i.cursor_offset(),
+                layout.bounds.size.width,
+                i.text_center,
+                i.caret_downstream,
+            )
+            .expect("caret on a row");
+            (f32::from(p.y) / INPUT_LINE_HEIGHT).round() as usize
+        })
+    }
+
+    fn put_caret(d: &Draft, at: usize, cx: &mut VisualTestContext) {
+        cx.update(|_, cx| d.input.update(cx, |i, cx| i.move_to(at, cx)));
+        cx.run_until_parked();
+    }
+
+    fn text(d: &Draft, cx: &mut VisualTestContext) -> String {
+        cx.update(|_, cx| d.input.read(cx).text().to_string())
+    }
+
+    #[gpui::test]
+    fn cmd_up_and_cmd_down_go_to_the_draft_ends(cx: &mut TestAppContext) {
+        let (d, cx) = draft(cx);
+        let mid = d.rows[1] + 4;
+        put_caret(&d, mid, cx);
+        cx.simulate_keystrokes("cmd-up");
+        assert_eq!(caret(&d, cx), 0, "⌘↑: the start of the whole draft");
+        assert_eq!(caret_row(&d, cx), 0);
+        cx.simulate_keystrokes("cmd-down");
+        assert_eq!(caret(&d, cx), d.len, "⌘↓: the end of the whole draft");
+        assert_eq!(
+            caret_row(&d, cx),
+            d.rows.len(),
+            "the second paragraph's row"
+        );
+        // Not the paragraph: from the second paragraph ⌘↑ still goes to 0.
+        put_caret(&d, d.second + 3, cx);
+        cx.simulate_keystrokes("cmd-up");
+        assert_eq!(caret(&d, cx), 0);
+    }
+
+    #[gpui::test]
+    fn cmd_left_and_cmd_right_stop_at_the_visual_line_not_the_paragraph(cx: &mut TestAppContext) {
+        let (d, cx) = draft(cx);
+        // Middle of the second wrapped row of the first paragraph.
+        let mid = d.rows[1] + 4;
+        put_caret(&d, mid, cx);
+        assert_eq!(caret_row(&d, cx), 1);
+
+        cx.simulate_keystrokes("cmd-left");
+        assert_eq!(caret(&d, cx), d.rows[1], "⌘←: this row's first byte, not 0");
+        assert_eq!(
+            caret_row(&d, cx),
+            1,
+            "the caret paints at the start of its own row, not the end of the row above"
+        );
+
+        cx.simulate_keystrokes("cmd-right");
+        assert_eq!(
+            caret(&d, cx),
+            d.rows[2],
+            "⌘→: this row's end (where the next row starts), not the paragraph's"
+        );
+        assert_eq!(caret_row(&d, cx), 1, "painted at the end of its row");
+
+        // A second ⌘→ on the row's end stays on the same byte (already at the end).
+        cx.simulate_keystrokes("cmd-right");
+        assert_eq!(caret(&d, cx), d.rows[2]);
+
+        // From a row start, ⌘← stays; ⌘→ goes to that row's end.
+        put_caret(&d, d.rows[2], cx);
+        cx.simulate_keystrokes("cmd-left");
+        assert_eq!(
+            caret(&d, cx),
+            d.rows[1],
+            "a boundary caret belongs to the row above (upstream) — ⌘← goes to that row's start"
+        );
+
+        // The second paragraph: a hard line that does not wrap.
+        put_caret(&d, d.second + 3, cx);
+        cx.simulate_keystrokes("cmd-left");
+        assert_eq!(caret(&d, cx), d.second);
+        cx.simulate_keystrokes("cmd-right");
+        assert_eq!(caret(&d, cx), d.len);
+    }
+
+    #[gpui::test]
+    fn shift_cmd_arrows_extend_the_selection_the_same_way(cx: &mut TestAppContext) {
+        let (d, cx) = draft(cx);
+        let mid = d.rows[1] + 4;
+
+        put_caret(&d, mid, cx);
+        cx.simulate_keystrokes("cmd-shift-left");
+        assert_eq!(
+            selection(&d, cx),
+            (d.rows[1]..mid, true),
+            "⇧⌘←: back to the visual row's start, caret at the moving end"
+        );
+        assert_eq!(caret(&d, cx), d.rows[1]);
+        assert_eq!(caret_row(&d, cx), 1);
+
+        put_caret(&d, mid, cx);
+        cx.simulate_keystrokes("cmd-shift-right");
+        assert_eq!(
+            selection(&d, cx),
+            (mid..d.rows[2], false),
+            "⇧⌘→: to the row's end"
+        );
+
+        put_caret(&d, mid, cx);
+        cx.simulate_keystrokes("cmd-shift-up");
+        assert_eq!(
+            selection(&d, cx),
+            (0..mid, true),
+            "⇧⌘↑: back to the draft's start"
+        );
+
+        put_caret(&d, mid, cx);
+        cx.simulate_keystrokes("cmd-shift-down");
+        assert_eq!(
+            selection(&d, cx),
+            (mid..d.len, false),
+            "⇧⌘↓: on to the draft's end"
+        );
+
+        // Extending twice keeps growing from the anchor.
+        put_caret(&d, mid, cx);
+        cx.simulate_keystrokes("cmd-shift-right cmd-shift-down");
+        assert_eq!(selection(&d, cx), (mid..d.len, false));
+        cx.simulate_keystrokes("cmd-shift-up");
+        assert_eq!(
+            selection(&d, cx),
+            (0..mid, true),
+            "⇧⌘↑ from a forward selection flips it around the anchor"
+        );
+    }
+
+    #[gpui::test]
+    fn cmd_backspace_deletes_to_the_visual_line_start(cx: &mut TestAppContext) {
+        let (d, cx) = draft(cx);
+        let before = text(&d, cx);
+        let at = d.rows[2] + 5;
+        put_caret(&d, at, cx);
+        cx.simulate_keystrokes("cmd-backspace");
+        let expected = format!("{}{}", &before[..d.rows[2]], &before[at..]);
+        assert_eq!(
+            text(&d, cx),
+            expected,
+            "⌘⌫ removes this row back to its start; the rows above stay"
+        );
+        assert_eq!(caret(&d, cx), d.rows[2]);
+        // At a row's start (⌘← put it there) it steps back one character, like
+        // ⌫, so the key is never dead. Row 1's start is unchanged by the edit
+        // above (greedy wrapping only looks at the text before it).
+        put_caret(&d, d.rows[1] + 4, cx);
+        cx.simulate_keystrokes("cmd-left");
+        assert_eq!(caret(&d, cx), d.rows[1]);
+        cx.simulate_keystrokes("cmd-backspace");
+        assert_eq!(
+            text(&d, cx),
+            format!("{}{}", &expected[..d.rows[1] - 1], &expected[d.rows[1]..]),
+            "one step back: the space the row above wrapped on"
+        );
+    }
+
+    #[gpui::test]
+    fn option_arrows_still_step_words(cx: &mut TestAppContext) {
+        let (d, cx) = draft(cx);
+        put_caret(&d, 0, cx);
+        cx.simulate_keystrokes("alt-right");
+        assert_eq!(caret(&d, cx), "The".len(), "⌥→: the end of the first word");
+        cx.simulate_keystrokes("alt-right alt-left");
+        assert_eq!(
+            caret(&d, cx),
+            "The ".len(),
+            "⌥←: the start of the second word"
+        );
+        cx.simulate_keystrokes("alt-shift-right");
+        assert_eq!(selection(&d, cx), ("The ".len().."The quick".len(), false));
+    }
+
+    /// Routing: the chords are the focused composer's; with focus elsewhere
+    /// they fall through (nothing else binds them) and the draft is untouched.
+    #[gpui::test]
+    fn the_chords_reach_only_the_focused_composer(cx: &mut TestAppContext) {
+        let (d, cx) = draft(cx);
+        let mid = d.rows[1] + 4;
+        put_caret(&d, mid, cx);
+        cx.update(|window, _| window.blur());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-up cmd-down cmd-left cmd-right cmd-shift-up cmd-backspace");
+        assert_eq!(caret(&d, cx), mid, "unfocused: the caret did not move");
+        assert_eq!(selection(&d, cx).0, mid..mid, "unfocused: nothing selected");
+        assert_eq!(
+            text(&d, cx),
+            format!("{FIRST}\n{SECOND}"),
+            "unfocused: nothing deleted"
+        );
+
+        cx.update(|window, cx| {
+            let handle = d.input.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-up");
+        assert_eq!(caret(&d, cx), 0, "focused again: ⌘↑ moves the caret");
+    }
+}
+
+#[cfg(test)]
+mod format_tests {
+    //! Chat-Markdown in the composer ([feedback chat-markdown-composer-2026-10-27],
+    //! Jacob): ⌘B / ⌘I / ⌘⇧X wrap or unwrap the selection through the real
+    //! keymap while the composer is focused, and the draft is styled as it is
+    //! typed — markers faint, the words between them styled, a `> ` line muted
+    //! with its bar.
+    use super::*;
+    use gpui::{TestAppContext, VisualTestContext};
+
+    struct Harness {
+        input: Entity<ComposerInput>,
+    }
+
+    impl Render for Harness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(480.0))
+                .h(px(300.0))
+                .flex()
+                .child(self.input.clone())
+        }
+    }
+
+    fn field<'a>(
+        cx: &'a mut TestAppContext,
+        text: &str,
+    ) -> (Entity<ComposerInput>, &'a mut VisualTestContext) {
+        cx.update(|cx| {
+            let theme = crate::ui::theme::Theme::for_pref(
+                crate::ui::theme::AppearancePref::Dark,
+                crate::ui::theme::Surface::Matte,
+                cx,
+            );
+            cx.set_global(theme);
+            crate::ui::motion::PulseClock::init(cx);
+            crate::bind_keys(cx);
+        });
+        let (view, vcx) = cx.add_window_view(|_, cx| Harness {
+            input: cx.new(ComposerInput::new),
+        });
+        let input = vcx.update(|_, cx| view.read(cx).input.clone());
+        let text = text.to_owned();
+        vcx.update(|window, cx| {
+            input.update(cx, |i, cx| i.set_text(text, cx));
+            let handle = input.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        });
+        vcx.run_until_parked();
+        (input, vcx)
+    }
+
+    fn select(input: &Entity<ComposerInput>, range: Range<usize>, cx: &mut VisualTestContext) {
+        cx.update(|_, cx| {
+            input.update(cx, |i, cx| {
+                i.move_to(range.start, cx);
+                i.select_to(range.end, cx);
+            })
+        });
+        cx.run_until_parked();
+    }
+
+    fn state(input: &Entity<ComposerInput>, cx: &mut VisualTestContext) -> (String, Range<usize>) {
+        cx.update(|_, cx| {
+            let i = input.read(cx);
+            (i.text().to_string(), i.selected_range.clone())
+        })
+    }
+
+    /// ⌘B wraps the selected words in `**` and keeps them selected; ⌘B again
+    /// unwraps; the markers hug the words, never the spaces around them.
+    #[gpui::test]
+    fn cmd_b_wraps_and_unwraps_the_selection(cx: &mut TestAppContext) {
+        let (input, cx) = field(cx, "make this bold please");
+        select(&input, 5..9, cx);
+        cx.simulate_keystrokes("cmd-b");
+        assert_eq!(
+            state(&input, cx),
+            ("make **this** bold please".into(), 7..11)
+        );
+        cx.simulate_keystrokes("cmd-b");
+        assert_eq!(state(&input, cx), ("make this bold please".into(), 5..9));
+        // A selection that drags the spaces in: the markers still hug the word.
+        select(&input, 4..10, cx);
+        cx.simulate_keystrokes("cmd-b");
+        assert_eq!(
+            state(&input, cx),
+            ("make **this** bold please".into(), 7..11)
+        );
+        // Selecting the markers too and pressing again strips them.
+        select(&input, 5..13, cx);
+        cx.simulate_keystrokes("cmd-b");
+        assert_eq!(state(&input, cx), ("make this bold please".into(), 5..9));
+        // ⌘Z brings the last wrap back.
+        cx.simulate_keystrokes("cmd-z");
+        assert_eq!(state(&input, cx).0, "make **this** bold please");
+    }
+
+    /// ⌘I and ⌘⇧X use `*` and `~~`; the three nest.
+    #[gpui::test]
+    fn cmd_i_and_cmd_shift_x_wrap_with_their_markers(cx: &mut TestAppContext) {
+        let (input, cx) = field(cx, "gone and soft");
+        select(&input, 0..4, cx);
+        cx.simulate_keystrokes("cmd-shift-x");
+        assert_eq!(state(&input, cx), ("~~gone~~ and soft".into(), 2..6));
+        select(&input, 13..17, cx);
+        cx.simulate_keystrokes("cmd-i");
+        assert_eq!(state(&input, cx), ("~~gone~~ and *soft*".into(), 14..18));
+        cx.simulate_keystrokes("cmd-b");
+        assert_eq!(
+            state(&input, cx),
+            ("~~gone~~ and ***soft***".into(), 16..20)
+        );
+        cx.simulate_keystrokes("cmd-b");
+        assert_eq!(state(&input, cx), ("~~gone~~ and *soft*".into(), 14..18));
+    }
+
+    /// No selection: ⌘B puts an empty pair around the caret, the next words
+    /// land inside; ⌘B again on the empty pair removes it.
+    #[gpui::test]
+    fn cmd_b_with_no_selection_opens_an_empty_pair(cx: &mut TestAppContext) {
+        let (input, cx) = field(cx, "say ");
+        cx.update(|_, cx| input.update(cx, |i, cx| i.move_to(4, cx)));
+        cx.simulate_keystrokes("cmd-b");
+        assert_eq!(state(&input, cx), ("say ****".into(), 6..6));
+        cx.simulate_keystrokes("cmd-b");
+        assert_eq!(state(&input, cx), ("say ".into(), 4..4));
+        cx.simulate_keystrokes("cmd-b");
+        cx.simulate_keystrokes("h i");
+        assert_eq!(state(&input, cx).0, "say **hi**");
+    }
+
+    /// Blurred, ⌘B is the sidebar's: the draft does not change.
+    #[gpui::test]
+    fn blurred_cmd_b_leaves_the_draft_alone(cx: &mut TestAppContext) {
+        let (input, cx) = field(cx, "plain words");
+        select(&input, 0..5, cx);
+        cx.update(|window, _| window.blur());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-b");
+        assert_eq!(state(&input, cx).0, "plain words");
+    }
+
+    /// Live styling: the runs of a typed line carry the grammar — markers in
+    /// the faint ink, `**bold**` bold, `~~x~~` struck, `` `c` `` mono on the
+    /// code wash, a `> ` line's words muted; plain text is one plain run.
+    #[test]
+    fn live_styles_paint_markers_faint_and_words_styled() {
+        let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+        let base = TextRun {
+            len: 0,
+            font: gpui::Font {
+                family: theme.font_sans.into(),
+                features: Default::default(),
+                fallbacks: None,
+                weight: FontWeight::NORMAL,
+                style: gpui::FontStyle::Normal,
+            },
+            color: theme.text,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let runs_of = |para: &str| {
+            let mut runs = runs_for(para, 0, None, &base);
+            let quoted = live_styles(para, &mut runs, &theme);
+            assert_eq!(
+                runs.iter().map(|r| r.len).sum::<usize>(),
+                para.len(),
+                "{para}"
+            );
+            (quoted, runs)
+        };
+        let (quoted, runs) = runs_of("a **b** `c` ~~d~~");
+        assert!(!quoted);
+        let pieces: Vec<(usize, bool, bool, bool, bool)> = runs
+            .iter()
+            .map(|r| {
+                (
+                    r.len,
+                    r.color == theme.text_faint,
+                    r.font.weight == FontWeight::BOLD,
+                    r.background_color == Some(theme.code_bg),
+                    r.strikethrough.is_some(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            pieces,
+            vec![
+                (2, false, false, false, false), // "a "
+                (2, true, false, false, false),  // "**"
+                (1, false, true, false, false),  // "b"
+                (2, true, false, false, false),  // "**"
+                (1, false, false, false, false), // " "
+                (1, true, false, false, false),  // "`"
+                (1, false, false, true, false),  // "c"
+                (1, true, false, false, false),  // "`"
+                (1, false, false, false, false), // " "
+                (2, true, false, false, false),  // "~~"
+                (1, false, false, false, true),  // "d"
+                (2, true, false, false, false),  // "~~"
+            ]
+        );
+        let (quoted, runs) = runs_of("> hello *there*");
+        assert!(quoted, "a `> ` line draws its bar");
+        assert_eq!(runs[0].len, 2);
+        assert_eq!(runs[0].color, theme.text_faint, "the `> ` marker is faint");
+        assert_eq!(
+            runs[1].color, theme.text_muted,
+            "the quoted words are muted"
+        );
+        assert!(runs.iter().any(|r| r.font.style == gpui::FontStyle::Italic));
+        for plain in ["snake_case 2*3*4 a_b", ">5 not a quote", "plain words"] {
+            let (quoted, runs) = runs_of(plain);
+            assert!(!quoted, "{plain}");
+            assert_eq!(runs.len(), 1, "{plain}: one plain run, {runs:?}");
+            assert_eq!(runs[0].color, theme.text);
+        }
     }
 }
 
