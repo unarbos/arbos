@@ -1430,8 +1430,9 @@ impl AppState {
             UpdateEvent::Available(available) => {
                 let available = *available;
                 self.update.last_checked_at = Some(now_ms());
-                // An installed build waiting for its relaunch outranks whatever the feed says now.
-                if !self.update.busy() && self.pending_relaunch.is_none() {
+                if self.pending_relaunch.is_some() {
+                    self.supersede_pending_install(available, cx);
+                } else if !self.update.busy() {
                     // Never offer a build that is not strictly newer than what is running.
                     if !arbos_update::version::is_newer(
                         &available.item.version,
@@ -1504,7 +1505,9 @@ impl AppState {
                     available,
                     deadline_ms: now_ms() + update::RELAUNCH_COUNTDOWN_MS,
                 };
-                self.pending_relaunch = Some(installed);
+                // A newer build installed over one that was already waiting keeps the watcher
+                // that is running for it.
+                let watching = self.pending_relaunch.replace(installed).is_some();
                 update::log(format!(
                     "auto-update: {version} installed; waiting for a safe moment to relaunch"
                 ));
@@ -1515,23 +1518,25 @@ impl AppState {
                     "Arbos {version} is installed — it restarts in a minute while you are in Arbos, \
                      or when you pause. Press the blue update button at the bottom of the chat list to do it at once."
                 ));
-                cx.spawn(async move |this, cx| loop {
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(1000))
-                        .await;
-                    let done = this.update(cx, |state, cx| {
-                        if state.pending_relaunch.is_none() {
-                            return true;
+                if !watching {
+                    cx.spawn(async move |this, cx| loop {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(1000))
+                            .await;
+                        let done = this.update(cx, |state, cx| {
+                            if state.pending_relaunch.is_none() {
+                                return true;
+                            }
+                            let relaunched = state.try_relaunch(cx);
+                            cx.notify();
+                            relaunched
+                        });
+                        if done.unwrap_or(true) {
+                            break;
                         }
-                        let relaunched = state.try_relaunch(cx);
-                        cx.notify();
-                        relaunched
-                    });
-                    if done.unwrap_or(true) {
-                        break;
-                    }
-                })
-                .detach();
+                    })
+                    .detach();
+                }
             }
             UpdateEvent::Failed(message) => {
                 if let Some(a) = self.update.available() {
@@ -1565,6 +1570,10 @@ impl AppState {
     fn relaunch_is_safe(&self) -> bool {
         let now = now_ms();
         if self.my_call.is_some() || self.incoming_call.is_some() {
+            return false;
+        }
+        // A newer build is being swapped into the bundle the relaunch would open.
+        if self.update.busy() {
             return false;
         }
         if !self.window_active {
@@ -1605,6 +1614,41 @@ impl AppState {
         update::log("auto-update: safe moment — relaunching");
         self.relaunch_into(installed, cx);
         true
+    }
+
+    /// A newer build announced while an older one waits for its relaunch (the app sat
+    /// unfocused while releases landed) is installed over it first, so the user gets one
+    /// restart into the newest build instead of one restart per release they missed.
+    /// Manual mode keeps the waiting build: the user already chose to restart into it.
+    fn supersede_pending_install(
+        &mut self,
+        available: arbos_update::client::Available,
+        cx: &mut Context<Self>,
+    ) {
+        let UpdatePhase::Installed {
+            available: waiting, ..
+        } = &self.update.phase
+        else {
+            return;
+        };
+        let version = available.item.version.clone();
+        if !self.update.auto
+            || self.auto_update_failed.as_deref() == Some(version.as_str())
+            || !arbos_update::version::is_newer(&version, &waiting.item.version)
+        {
+            return;
+        }
+        update::log(format!(
+            "auto-update: {version} supersedes the waiting {}; installing it before the relaunch",
+            waiting.item.version
+        ));
+        self.update.phase = UpdatePhase::Downloading {
+            available,
+            got: 0,
+            total: None,
+        };
+        let _ = self.update_commands.send(UpdateCommand::Install);
+        cx.notify();
     }
 
     /// One frame shows "Restarting", then the relauncher takes over.
@@ -12802,6 +12846,195 @@ mod new_message_first_paint_tests {
         assert!(is_directory_query("@"));
         assert!(!is_directory_query("al"));
         assert!(!is_directory_query("@al"));
+    }
+}
+
+#[cfg(test)]
+mod update_restart_chain_tests {
+    //! Affinity (Arbonites, 2026-10-28 21:47 UTC): "bubble just caused my arbos to restart".
+    //! No chat event did it: her Mac had 0.6.334 installed and waiting since 17:57, relaunched
+    //! into it at 21:38, into 0.6.338 at 21:47 and into 0.6.339 at 22:00 — a build that waits
+    //! for its relaunch ignored every newer one, so each missed release was one more restart
+    //! ([feedback mac-update-restart-chain-2026-10-28]).
+    use futures::future::BoxFuture;
+    use gpui::{AppContext as _, TestAppContext};
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use arbos_update::client::{Available, Install};
+
+    struct Idle;
+
+    impl SyncSource for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            _commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    fn build(version: &str) -> Available {
+        Available {
+            item: arbos_update::appcast::Item {
+                title: format!("Arbos {version}"),
+                version: version.into(),
+                build: "1".into(),
+                ..Default::default()
+            },
+            url: format!("https://arbos.life/updates/mac/Arbos-{version}-macos-universal.tar.gz"),
+            length: 1,
+            ed_signature: String::new(),
+        }
+    }
+
+    fn bundle() -> Install {
+        Install::MacBundle("/Applications/Arbos.app".into())
+    }
+
+    /// Auto-update on, running 0.6.333, the window in the background (no relaunch yet).
+    #[allow(clippy::type_complexity)]
+    fn mount(
+        cx: &mut TestAppContext,
+    ) -> (
+        tokio::runtime::Runtime,
+        gpui::Entity<AppState>,
+        mpsc::UnboundedReceiver<UpdateCommand>,
+    ) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| gpui_tokio::init_from_handle(cx, handle));
+        let state = cx.new(|cx| AppState::new(Box::new(Idle), cx));
+        let (tx, rx) = mpsc::unbounded_channel();
+        state.update(cx, |s, _| {
+            s.update_commands = tx;
+            s.update.auto = true;
+            s.update.needs_relocation = false;
+            s.update.current_version = "0.6.333".into();
+            s.window_active = false;
+        });
+        (rt, state, rx)
+    }
+
+    fn installs(rx: &mut mpsc::UnboundedReceiver<UpdateCommand>) -> usize {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|c| matches!(c, UpdateCommand::Install))
+            .count()
+    }
+
+    fn waiting_version(state: &AppState, _: &App) -> Option<String> {
+        match &state.update.phase {
+            UpdatePhase::Installed { available, .. } => Some(available.item.version.clone()),
+            _ => None,
+        }
+    }
+
+    /// Install `version` through the automatic path the way the worker reports it.
+    fn land(cx: &mut TestAppContext, state: &gpui::Entity<AppState>, version: &str) {
+        state.update(cx, |s, cx| {
+            s.apply_update(UpdateEvent::Installing, cx);
+            s.apply_update(UpdateEvent::Installed(bundle()), cx);
+        });
+        let waiting = state.read_with(cx, waiting_version);
+        assert_eq!(
+            waiting.as_deref(),
+            Some(version),
+            "{version} waits for its relaunch"
+        );
+    }
+
+    #[gpui::test]
+    fn a_newer_release_replaces_the_waiting_build_so_there_is_one_restart(cx: &mut TestAppContext) {
+        let (_rt, state, mut rx) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.apply_update(UpdateEvent::Available(Box::new(build("0.6.334"))), cx)
+        });
+        assert_eq!(installs(&mut rx), 1, "0.6.334 installs in the background");
+        land(cx, &state, "0.6.334");
+
+        // Releases that land while 0.6.334 waits are installed over it.
+        for newer in ["0.6.338", "0.6.339"] {
+            state.update(cx, |s, cx| {
+                s.apply_update(UpdateEvent::Available(Box::new(build(newer))), cx)
+            });
+            assert_eq!(
+                installs(&mut rx),
+                1,
+                "{newer} is installed over the waiting build"
+            );
+            state.read_with(cx, |s, _| {
+                assert!(s.update.busy(), "{newer} is downloading");
+                assert!(s.pending_relaunch.is_some(), "the relaunch still waits");
+            });
+            land(cx, &state, newer);
+        }
+
+        // The same or an older build in the feed changes nothing.
+        for same in ["0.6.339", "0.6.338"] {
+            state.update(cx, |s, cx| {
+                s.apply_update(UpdateEvent::Available(Box::new(build(same))), cx)
+            });
+            assert_eq!(
+                installs(&mut rx),
+                0,
+                "{same} is not newer than the waiting 0.6.339"
+            );
+            assert_eq!(
+                state.read_with(cx, waiting_version).as_deref(),
+                Some("0.6.339")
+            );
+        }
+    }
+
+    /// The relaunch never fires while the newer build is being swapped into the bundle.
+    #[gpui::test]
+    fn no_relaunch_while_the_newer_build_installs(cx: &mut TestAppContext) {
+        let (_rt, state, mut rx) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.apply_update(UpdateEvent::Available(Box::new(build("0.6.334"))), cx)
+        });
+        land(cx, &state, "0.6.334");
+        state.update(cx, |s, cx| {
+            s.apply_update(UpdateEvent::Available(Box::new(build("0.6.338"))), cx);
+            let long_ago = now_ms().saturating_sub(10 * update::IDLE_RELAUNCH_MS);
+            s.window_active = true;
+            s.became_active_at = long_ago;
+            s.last_input_at = long_ago;
+            assert!(!s.relaunch_is_safe(), "downloading 0.6.338");
+            s.apply_update(UpdateEvent::Installing, cx);
+            assert!(!s.relaunch_is_safe(), "installing 0.6.338");
+            assert!(!s.try_relaunch(cx));
+            assert!(s.pending_relaunch.is_some());
+        });
+        assert_eq!(installs(&mut rx), 2);
+    }
+
+    /// Manual mode: the waiting build is what the user clicked for; the feed does not move it.
+    #[gpui::test]
+    fn manual_mode_keeps_the_waiting_build(cx: &mut TestAppContext) {
+        let (_rt, state, mut rx) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.apply_update(UpdateEvent::Available(Box::new(build("0.6.334"))), cx)
+        });
+        land(cx, &state, "0.6.334");
+        let _ = installs(&mut rx);
+        state.update(cx, |s, cx| {
+            s.update.auto = false;
+            s.apply_update(UpdateEvent::Available(Box::new(build("0.6.338"))), cx);
+        });
+        assert_eq!(installs(&mut rx), 0);
+        assert_eq!(
+            state.read_with(cx, waiting_version).as_deref(),
+            Some("0.6.334")
+        );
     }
 }
 
