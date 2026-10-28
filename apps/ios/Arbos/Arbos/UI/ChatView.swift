@@ -899,6 +899,11 @@ struct ChatSession: View {
             .frame(maxWidth: .infinity, alignment: .top)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        // Rows scrolling under the chat bar dissolve into its band over the last
+        // `Theme.composerFade` pt above it ([feedback iphone-composer-bottom-fade-2026-10-28]).
+        // The canvas ends at the bar's top edge (the bar is a safe-area inset), so this sits
+        // right on it, moves with the keyboard, and is under the pill and the chevron below.
+        .overlay(alignment: .bottom) { ComposerBottomFade() }
         .overlay(alignment: .bottom) {
             if newBelowCount > 0 {
                 newMessagesPill
@@ -967,12 +972,10 @@ struct ChatSession: View {
             .padding(.top, Theme.chatBarTopPad)
             // Grok: 18 pt between the field and the keyboard, 2 pt above the home indicator.
             .padding(.bottom, composerFocused ? Theme.composerBottomKeyboard : Theme.composerBottom)
-            .background(alignment: .top) {
-                LinearGradient(colors: [theme.bg.opacity(0), theme.bg], startPoint: .top, endPoint: .bottom)
-                    .frame(height: 24)
-                    .offset(y: -24)
-            }
-            .background(theme.bg)
+            // The band: opaque from the bar's top edge through the home indicator (the
+            // keyboard's edge when it is up) — nothing reads behind or between the controls.
+            // The fade above it is `ComposerBottomFade` in the canvas.
+            .background { ComposerBandMaterial().ignoresSafeArea(.container, edges: .bottom) }
             // A drag that starts here selects text or slides the mic — never "back".
             .backSwipeComposerBar()
         }
@@ -1878,8 +1881,8 @@ struct ChatSession: View {
                     transcriptRows(shown: shown, mentions: mentions, width: width)
                     // Who is working is the presence row over the composer
                     // (`PresenceRow`), not a transcript row.
-                    // Clears the 24 pt fade above the composer, so the last row
-                    // is never under the chat bar; the status row rises into it
+                    // Clears the `Theme.composerFade` above the chat bar, so the last
+                    // row at rest is never under the fade; the status row rises into it
                     // (`Theme.presenceLift`).
                     Color.clear.frame(height: Theme.transcriptTail).id("bottom")
                 }
