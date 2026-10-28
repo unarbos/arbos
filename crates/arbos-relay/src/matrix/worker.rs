@@ -299,9 +299,20 @@ impl Worker {
                 chat_id,
                 project_id,
             } => {
-                let n = super::backfill::resync_chat(&self.state, chat_id, project_id.as_deref());
-                if n > 0 {
-                    tracing::info!(chat = %chat_id, queued = n, "matrix resync: unannounced rows");
+                let r = super::backfill::resync_chat(&self.state, chat_id, project_id.as_deref());
+                // Per-row warnings for the rows nobody announced are written by `resync_chat`;
+                // this is the pass summary. Announced rows with a job still queued are not
+                // "unannounced" (#2120) and do not make a line.
+                if r.queued > 0 {
+                    tracing::info!(
+                        chat = %chat_id,
+                        queued = r.queued,
+                        announced = r.announced,
+                        unannounced = r.unannounced,
+                        solo_project = r.unannounced_expected,
+                        pending_skipped = r.pending_skipped,
+                        "matrix resync: mirrored rows the worker had not applied"
+                    );
                 }
                 Ok(())
             }
