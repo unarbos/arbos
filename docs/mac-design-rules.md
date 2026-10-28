@@ -666,30 +666,31 @@ Code: `transcript.rs` `HoverFade::set(key, row, …)`, `rail_centre()`,
 
 ## Menus
 
-### One icon set per menu (Jacob 2026-10-27, [feedback reply-in-dm-icon-2026-10-27])
+### Standard SF Symbols, same names as iPhone (Jacob 2026-10-27, [feedback menu-sf-symbols-2026-10-27]; supersedes [feedback reply-in-dm-icon-2026-10-27])
 
-**Every glyph in a menu comes from the app's own icon pack (`ui/icons.rs`) at
-the pack's metrics — the 24 grid, 2 pt round strokes, drawn into the 3…21
-band, 13…18 pt across — and a menu's rows share one size (`glass::menu_row`
-paints 15 pt).** No glyph is pasted in from another set, re-weighted or
-re-scaled for one row, and no hand-drawn path ships with a curve that misses
-its start: the message menu's Reply in DM bubble did (its outline ended 1 pt
-under where it began and `z` drew a stub at the top), so it read as broken
-beside Copy · Reply · Forward · Delete.
+**Every glyph in a menu is Apple's system symbol, by its SF Symbols name —
+the same name the iPhone passes to `Image(systemName:)` — never a glyph of
+our own.** Jacob, on the redrawn speech bubble of v0.6.302: "use standard
+versions instead of making them." The hand-drawn pack (`ui/icons.rs`) is
+frozen; it stays only as the fallback for a symbol the running macOS lacks and
+for the surfaces the follow-up release converts (toolbar discs, status row,
+composer, settings rows, sidebar glyphs — listed in that issue).
 
 | Item | Rule | Where |
 |---|---|---|
-| Set | one pack, one header: `fill="none"`, `stroke-width="2"`, round caps and joins; a filled mark or a per-glyph `stroke-width` is another set and does not go in a menu | `icons::ICONS`, the `icon!` header |
-| Size | the menu row paints every glyph at **15**; a glyph is drawn to fill 13…18 of the grid so all read as one optical size (Copy 15 × 16, Reply 15 × 15, Forward 15 × 15, bubble 16.5 × 16, Delete 16 × 17) | `glass::menu_row`, `icons::lint::anchor_box` |
-| Shape | an outline closes on itself: a `z` either lands on its start or draws a real edge (≥ the stroke); a gap in between is a stub and fails the build | `icons::lint::stubs`, `icons::tests::no_glyph_closes_with_a_stub` |
-| Bubble | `bubble` = SF `bubble.left`'s shape in the pack's metrics: one ellipse (centre 12,10.5 · 8.5 × 6.5) with the tail's tip at 4.5,20, both arcs meeting at the top centre; the same glyph draws the reply-quote header (12), the message menu (15) and the person pane's Message pill (17) | `icons.rs` `bubble` |
-| iPhone | the system SF Symbols (`bubble.left`, `arrowshape.turn.up.left`, …) — never a hand-drawn copy | `MessageMenu.swift`, `ProfilePages.swift` |
+| Name | the SF Symbols name, registered in `sf_symbols::FALLBACKS` with the pack glyph that stands in for it; message menu = `doc.on.doc` · `arrowshape.turn.up.left` · `arrowshape.turn.up.right` · `bubble.left` · `trash` (`MessageMenu.swift`'s `systemImage`); chat-list menus `archivebox` / `tray.and.arrow.up`, `bell` / `bell.slash`, `arrow.triangle.branch`, `pencil`, `person.crop.circle`, `trash`; member menu `person.crop.circle`, `xmark`; library menu `photo`, `arrowshape.turn.up.right`, `arrow.down.to.line`, `globe`, `link`; tab menu `plus`; connectors `globe`, `doc.on.clipboard` | `message_menu::MessageMenuItem::glyph`, `sidebar.rs`, `member_menu.rs`, `profiles/library.rs`, `header.rs`, `connectors.rs` |
+| Size and weight | point size = the label's (`TEXT_SMALL` 13, `glass::MENU_SYMBOL_PT`), weight regular, scale medium — what a SwiftUI `Label` does; each symbol keeps Apple's natural canvas (a `trash` at 13 pt is 15 × 17) centred in a fixed **20 pt slot** (`MENU_SYMBOL_SLOT`) so labels align, 8 pt gap to the label | `glass::menu_row` |
+| Rendering | `NSImage(systemSymbolName:)` + `NSImageSymbolConfiguration(pointSize, weight, .medium)`, drawn as the template into an `NSBitmapImageRep` of natural size × the window's backing scale (2× Retina, no resampling), tinted with the row's text colour by a `sourceIn` fill, handed to GPUI as a premultiplied BGRA `RenderImage`; one raster per (name, size, weight, scale, colour), cached. Why not text or paths: the system font does not carry the symbols under their names (`CTFontGetGlyphWithName` knows `plus`, `minus`, `ellipsis` only — probed on 26.6), so AppKit's own raster of the system artwork is the crisp, weight-faithful route, and it is how NSMenu draws symbol images too | `ui/sf_symbols.rs` |
+| Fallback | a name `NSImage` does not know (older macOS) and every non-mac build draw the registered pack glyph at the slot size; nothing else in a menu may draw from the pack | `sf_symbols::symbol`, `FALLBACKS` |
+| Message pill | the person pane's Message pill draws `bubble.left` at 13 pt **semibold** (the label's weight) in an 18 pt slot | `kit::pill_button`, `PILL_GLYPH*` |
+| New glyphs | a new hand-drawn `icon!` entry is refused unless a `// icon: custom <why>` line sits right above it (why no symbol fits); the pack's current names are frozen in the test | `icons::tests::no_new_hand_drawn_glyph_without_a_custom_marker` |
 
-Pinned by `icons::tests::{no_glyph_closes_with_a_stub,
-message_menu_glyphs_share_one_set_weight_and_size,
-the_bubble_outline_closes_on_itself_with_a_lower_left_tail}`. The walker
-(`icons::lint::walk`) reads a path's `d` string, so the lint runs on Linux CI
-with no rasteriser. Rig: `ARBOS_RIG_MESSAGE_MENU=<x>,<y>` +
+Pinned by `icons::tests::menus_draw_system_symbols_only` (every enum-driven
+menu glyph and every literal `menu_row(id, "…", …)` in `sidebar.rs`,
+`header.rs`, `connectors.rs` must be a registered symbol; every fallback is a
+real pack glyph), `no_new_hand_drawn_glyph_without_a_custom_marker`, and
+`no_glyph_closes_with_a_stub` (the pack's own shape check, kept for the
+fallbacks). Rig: `ARBOS_RIG_MESSAGE_MENU=<x>,<y>` +
 `ARBOS_RIG_MESSAGE_MENU_FROM=someone` opens the menu on another person's
 newest row; `/Users/Shared/arbos-tools/bin/cgclick x y right` is a real
 right-click.
@@ -1191,7 +1192,7 @@ button to a user." The iPhone has the same button in the same place
 | Item | Rule | Where |
 |---|---|---|
 | Place | centred in the hero, 12 under the "@handle" line (the hero's 6 pt gap + `HERO_ACTION_GAP` 6), before the tab pill | `Hero.action`, `pane.rs` |
-| Shape | one of the Grok button family: `theme::CONTROL` **36** tall, a capsule, side padding 18; `surface_2` fill (the discs'), the `bubble` glyph at 17 and "Message" 13 pt semibold in `text`, 7 apart | `kit::pill_button`, `PILL_*` |
+| Shape | one of the Grok button family: `theme::CONTROL` **36** tall, a capsule, side padding 18; `surface_2` fill (the discs'), the system `bubble.left` symbol at 13 pt semibold (§ Menus) and "Message" 13 pt semibold in `text`, 7 apart | `kit::pill_button`, `PILL_*` |
 | Pointer | hover and pressed are the highlight token's two steps over the fill (`highlight::washed`), as the footer's update disc | `kit::pill_button` |
 | Click | `AppState::start_dm(handle)`: the existing people space with that person is selected; else `POST /chats/dm` (the New Message sheet's path) and the DM is selected when the registry lists it. A relay refusal ("this person is not available" — they blocked you) shows as a notice | `user.rs`, `app.rs` |
 | Hidden | on your own pane; once *you* blocked them (`GET /blocks`); the reverse direction is not in any payload the client reads, so the relay's answer covers it | `user::shows_message` |

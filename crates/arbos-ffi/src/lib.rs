@@ -874,6 +874,20 @@ impl ChatDoc {
         Ok(self.lock_doc().push_command(&kind, payload, &device_id))
     }
 
+    /// Append one part to a message from its JSON object (`kind` + fields, a string
+    /// `id` kept, else minted) — core's `add_part_from_json`. Forward writes a chart
+    /// part and its fallback picture after the row's text and attachments with it
+    /// ([feedback forward-attachments-ios-2026-10-27]). Returns the part id.
+    pub fn add_part_json(&self, message_id: String, part_json: String) -> Result<String, FfiError> {
+        let part: Value = serde_json::from_str(&part_json).map_err(write_err)?;
+        if !part.is_object() {
+            return Err(FfiError::Write("part_json must be a JSON object".into()));
+        }
+        self.lock_doc()
+            .add_part_from_json(&message_id, &part)
+            .ok_or_else(|| FfiError::Write(format!("no message {message_id} to add a part to")))
+    }
+
     /// Mirror the model picker into project `settings`. Does not commit.
     pub fn set_model_settings(&self, model: String, effort: String) -> Result<(), FfiError> {
         self.lock_doc()

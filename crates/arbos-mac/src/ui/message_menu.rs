@@ -47,12 +47,13 @@ impl MessageMenuItem {
         }
     }
 
+    /// The row's SF Symbol — the iPhone's `MessageMenu.systemImage` names.
     pub fn glyph(self) -> &'static str {
         match self {
-            MessageMenuItem::Copy => "copy",
-            MessageMenuItem::Reply => "reply",
-            MessageMenuItem::Forward => "forward",
-            MessageMenuItem::ReplyInDm => "bubble",
+            MessageMenuItem::Copy => "doc.on.doc",
+            MessageMenuItem::Reply => "arrowshape.turn.up.left",
+            MessageMenuItem::Forward => "arrowshape.turn.up.right",
+            MessageMenuItem::ReplyInDm => "bubble.left",
             MessageMenuItem::RemovePreview => "link",
             MessageMenuItem::Delete => "trash",
         }
