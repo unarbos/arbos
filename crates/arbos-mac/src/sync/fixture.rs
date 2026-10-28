@@ -1540,6 +1540,18 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 let _ = doc.core.transact(|d| d.delete_message(&message_id));
             }
         }
+        ClientCommand::RemoveLinkPreview {
+            chat_id,
+            message_id,
+        } => {
+            let docs = shared.docs.lock().unwrap();
+            if let Some(doc) = docs.get(&chat_id) {
+                doc.core.transact(|d| {
+                    d.set_message_fields(&message_id, &[("preview", serde_json::json!("off"))]);
+                    d.remove_parts_of_kind(&message_id, "link_preview");
+                });
+            }
+        }
         ClientCommand::Approve {
             chat_id,
             approval_id,
@@ -6716,6 +6728,7 @@ fn human_message(chat_id: &str, who: &Person, text: &str, at: u64) -> Message {
         parts: vec![text_part(text)],
         hidden_parts: Vec::new(),
         greeting: false,
+        preview: None,
     }
 }
 
