@@ -7,13 +7,14 @@ import ArbosFFI
 import SwiftUI
 
 /// A server in the home list: the D79 initials disc, the name, the newest line
-/// across its channels, the time, the unread dot (rule 1 — no counts or badges).
+/// across its channels, the time, the unread count pill (never a dot — Jacob 2026-10-27).
 struct ServerRow: View {
     @Environment(\.theme) private var theme
     let server: Server
     let preview: String
     let time: String
     let unread: Bool
+    var unreadCount: Int = 0
 
     var body: some View {
         HStack(spacing: 15) {
@@ -38,7 +39,7 @@ struct ServerRow: View {
                         .lineLimit(1)
                     Spacer(minLength: 0)
                     if unread {
-                        Circle().fill(theme.unread).frame(width: Theme.unreadDot, height: Theme.unreadDot)
+                        UnreadMark(count: unreadCount)
                     }
                 }
             }
@@ -57,6 +58,7 @@ struct ChannelRow: View {
     let preview: String
     let time: String
     let unread: Bool
+    var unreadCount: Int = 0
 
     var body: some View {
         HStack(spacing: 15) {
@@ -92,7 +94,7 @@ struct ChannelRow: View {
                         .lineLimit(1)
                     Spacer(minLength: 0)
                     if unread {
-                        Circle().fill(theme.unread).frame(width: Theme.unreadDot, height: Theme.unreadDot)
+                        UnreadMark(count: unreadCount)
                     }
                 }
             }
@@ -143,7 +145,8 @@ struct ServerChannelsView: View {
                                        restricted: model.channelRestricted(channel),
                                        preview: model.channelPreview(channel),
                                        time: HomeView.timeLabel(ms: model.channelActivity(channel)),
-                                       unread: model.channelUnread(channel))
+                                       unread: model.channelUnread(channel),
+                                       unreadCount: model.channelUnreadCount(channel))
                         }
                         .buttonStyle(.borderless)
                         // Long-press (the Mac's right-click): Archive for everyone; Delete for

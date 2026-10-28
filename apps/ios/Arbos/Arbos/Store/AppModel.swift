@@ -1271,6 +1271,15 @@ final class AppModel: ObservableObject {
         return (unreadCounts[chat.id] ?? 0) > 0
     }
 
+    /// Missed messages across an agent's chats — the home row's count pill; 1 per chat
+    /// whose flag is lit without a relay count.
+    func unreadCount(project projectId: Id) -> Int {
+        chats(of: projectId).reduce(0) { sum, chat in
+            guard chatHasUnread(chat) else { return sum }
+            return sum + max(1, unreadCounts[chat.id] ?? 0)
+        }
+    }
+
     func unreadCount(for chat: PeopleChat) -> Int {
         Self.peopleUnreadCount(
             remote: unreadCounts[chat.id],

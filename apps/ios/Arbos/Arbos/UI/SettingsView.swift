@@ -212,7 +212,7 @@ struct SettingsView: View {
         out.append(.card(account, separatorInset: inset))
         out.append(.card([
             AnyView(NavigationLink { MachinePage(openAgent: openAgentFromSettings) } label: {
-                SettingsRow(icon: "desktopcomputer", title: "Machine", value: machineSummary, dot: machineDotColor(model.machine.state, theme: theme))
+                SettingsRow(icon: "desktopcomputer", title: "Machine", value: machineSummary, mark: machineMark(model.machine.state))
             }),
         ], separatorInset: inset))
         out.append(.footnote(model.machine.alwaysOn
@@ -485,8 +485,8 @@ struct SettingsRow: View {
     let title: String
     var value: String? = nil
     var chevron: Bool = true
-    /// Small status dot drawn on the tile (machine state).
-    var dot: Color? = nil
+    /// The machine mark on the tile (spinner / fault / nothing — never a dot).
+    var mark: StatusMark? = nil
     /// Colour for the trailing value (red `Paused`).
     var valueTint: Color? = nil
 
@@ -495,7 +495,7 @@ struct SettingsRow: View {
     static let separatorInset: CGFloat = PaneKit.separatorInset(.tile(""))
 
     var body: some View {
-        PaneRow(leading: .tile(icon, dot: dot), title: title, value: value, valueTint: valueTint, chevron: chevron)
+        PaneRow(leading: .tile(icon, mark: mark), title: title, value: value, valueTint: valueTint, chevron: chevron)
     }
 }
 
@@ -667,7 +667,8 @@ struct MachinePage: View {
                                     ProgressView().controlSize(.mini).tint(theme.muted)
                                     Text("Restarting…")
                                 } else {
-                                    Circle().fill(machineDotColor(m.state, theme: theme)).frame(width: 8, height: 8)
+                                    // Spinner while it wakes, fault glyph on error, nothing at rest.
+                                    if let mark = machineMark(m.state) { StatusMarkView(mark: mark, size: 9) }
                                     Text(stateText(m))
                                 }
                             }
