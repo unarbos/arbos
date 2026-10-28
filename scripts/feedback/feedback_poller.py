@@ -4728,7 +4728,7 @@ class Loop:
         main_moved = main_head != cur.get("handoff_main_head")
         main_commits: list[dict] | None = None
         pending = [(fid, self.store.state(fid)) for fid in self.store.items()]
-        pending = [(f, st) for f, st in pending if st.get("status") == "handed_off" and not st.get("commit") and st.get("track_commit")]
+        pending = [(f, st) for f, st in pending if st.get("status") == "handed_off" and not st.get("commit") and (st.get("track_commit") or st.get("follow_pushes"))]
         if main_moved and pending:
             oldest = min(max(st.get("created") or "", st.get("handed_off_at") or "") or iso() for _, st in pending)
             since = (parse_iso(oldest) - dt.timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -5601,8 +5601,11 @@ def main(argv: list[str]) -> int:
         # live head: a push recorded between the red and the park stayed invisible when the park copied branch_head
         # (#1995 08:32/08:35, #1962/#1963 09:01/09:55, 2026-10-27). The follower re-registers any other head, so a
         # push already made re-gates on the next tick; a pin is released. The follower only walks items with
-        # `track_commit`: a parked loop-agent item (app-…, owner = `agent_id`, never handed off) has none, so its
-        # owner's push went unseen (#2049: fix pushed 21:27, found by hand 23:36, 2026-10-27). `handed_off_to` stays
+        # `track_commit` or `follow_pushes`: a parked loop-agent item (app-…, owner = `agent_id`, never handed off) has
+        # neither, so its owner's push went unseen (#2049). `follow_pushes` is the right flag: `track_commit` also
+        # means "coordinator-registered" to the approval gate (`freeze_allows`), and setting it on a tester item let
+        # #2049 (class-b, awaiting Jacob) merge from an operator batch at 06:17 Oct 28 without his per-item approve.
+        # The push itself went unseen on 2026-10-27 (#2049: pushed 21:27, found by hand 23:36). `handed_off_to` stays
         # unset on purpose — that is what keeps the Cursor follow-up channel to the agent on a conflict.
         if len(argv) < 4:
             print("park <id> <note…>")
@@ -5614,7 +5617,7 @@ def main(argv: list[str]) -> int:
             return 2
         rg = st.get("rust_gate") or {}
         red = (st.get("last_red") or {}).get("head") or (rg.get("head") if rg.get("verdict") in ("fail", "conflict") else None) or st.get("branch_head")
-        st.update(status="handed_off", gated_head=red, parked_head=red, gate_pinned=False, track_commit=True)
+        st.update(status="handed_off", gated_head=red, parked_head=red, gate_pinned=False, follow_pushes=True)
         loop.store.save_state(fid, st)
         loop.store.event(fid, "parked_by_operator", head=red, live_head=st.get("branch_head"), note=note[:400])
         later = st.get("branch_head") != red
