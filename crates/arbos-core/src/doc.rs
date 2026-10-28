@@ -1437,6 +1437,34 @@ impl ChatDoc {
         true
     }
 
+    /// Remove every part of `kind` from message `msg_id` (the relay dropping a link preview
+    /// the sender removed). Returns how many went. Commits like the other part writers.
+    pub fn remove_parts_of_kind(&self, msg_id: &str, kind: &str) -> usize {
+        let Some(parts) = self.parts_of(msg_id) else {
+            return 0;
+        };
+        let mut removed = 0;
+        let mut i = 0;
+        while i < parts.len() {
+            let is_kind = match parts.get(i) {
+                Some(ValueOrContainer::Container(Container::Map(p))) => matches!(
+                    p.get("kind"),
+                    Some(ValueOrContainer::Value(LoroValue::String(s))) if s.as_str() == kind
+                ),
+                _ => false,
+            };
+            if is_kind && parts.delete(i, 1).is_ok() {
+                removed += 1;
+            } else {
+                i += 1;
+            }
+        }
+        if removed > 0 {
+            self.commit_now();
+        }
+        removed
+    }
+
     /// Id of the part at index `pix` in message `msg_id`.
     pub fn part_id_at(&self, msg_id: &str, pix: usize) -> Option<String> {
         let parts = self.parts_of(msg_id)?;
@@ -2166,6 +2194,32 @@ mod secret_redaction_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn remove_parts_of_kind_drops_only_that_kind_and_leaves_the_rest() {
+        use super::*;
+        let doc = ChatDoc::new(Some(1), false);
+        doc.append_user_message("m", "look https://a.test/x", "dev", &Default::default())
+            .unwrap();
+        doc.add_part_from_json(
+            "m",
+            &serde_json::json!({ "kind": "link_preview", "title": "A", "url": "https://a.test/x" }),
+        )
+        .unwrap();
+        doc.add_part_from_json(
+            "m",
+            &serde_json::json!({ "kind": "link_preview", "title": "B", "url": "https://a.test/y" }),
+        )
+        .unwrap();
+        assert_eq!(doc.message("m").unwrap().parts.len(), 3);
+        assert_eq!(doc.remove_parts_of_kind("m", "link_preview"), 2);
+        let m = doc.message("m").unwrap();
+        assert_eq!(m.parts.len(), 1);
+        assert_eq!(m.parts[0]["kind"], "text");
+        assert_eq!(m.text(), "look https://a.test/x");
+        assert_eq!(doc.remove_parts_of_kind("m", "link_preview"), 0);
+        assert_eq!(doc.remove_parts_of_kind("nope", "link_preview"), 0);
+    }
+
     use super::*;
 
     #[test]
