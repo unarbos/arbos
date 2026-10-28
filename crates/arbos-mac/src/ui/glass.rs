@@ -121,7 +121,7 @@ pub fn control_disc(
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .map(|el| highlight::washed(el, theme.surface_2, theme))
+        .map(|el| highlight::washed(el, theme.control_fill(), theme))
         .child(sf_symbols::glyph(glyph, glyph_size, theme.text))
 }
 
@@ -345,10 +345,7 @@ pub fn icon_tile_sized(glyph: &str, size: f32, theme: &Theme) -> Div {
         .size(px(size))
         .flex_shrink_0()
         .rounded(px(size * 0.25))
-        .bg(match theme.appearance {
-            crate::ui::theme::Appearance::Dark => gpui::Hsla::from(gpui::rgb(0x5c5c60)),
-            crate::ui::theme::Appearance::Light => gpui::Hsla::from(gpui::rgb(0x6e6e73)),
-        })
+        .bg(theme.tile_fill())
         .flex()
         .items_center()
         .justify_center()
@@ -371,7 +368,7 @@ pub fn segment(id: impl Into<ElementId>, label: &str, on: bool, theme: &Theme) -
             FontWeight::NORMAL
         })
         .bg(if on {
-            theme.bubble
+            theme.segment_on_fill()
         } else {
             gpui::transparent_black()
         })
@@ -380,7 +377,7 @@ pub fn segment(id: impl Into<ElementId>, label: &str, on: bool, theme: &Theme) -
         .text_color(if on {
             theme.bubble_text()
         } else {
-            theme.text_muted
+            theme.label_muted()
         })
         .cursor_pointer()
         .when(!on, |el| el.hover(|s| s.text_color(theme.text)))

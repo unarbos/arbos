@@ -43,6 +43,7 @@ use crate::ui::local::{LocalEvent, LocalPanel};
 use crate::ui::media_viewer;
 use crate::ui::member_menu;
 use crate::ui::message_menu;
+use crate::ui::mock_backdrop;
 use crate::ui::modal;
 use crate::ui::motion::{ease_out_cubic, PulseClock, COMPOSER_DROP_MS, SHAKE_MS};
 use crate::ui::onboarding;
@@ -4904,7 +4905,7 @@ impl Render for Shell {
         let project_space = state.selected().filter(|p| !p.is_people()).cloned();
         let selected = state.selected().cloned();
 
-        let mut root = div()
+        let root = div()
             .id("shell-root")
             .key_context("Shell")
             .track_focus(&self.focus_handle)
@@ -4989,10 +4990,17 @@ impl Render for Shell {
             .flex()
             .flex_row()
             .size_full()
-            .bg(theme.shell())
             .text_color(theme.text)
             .font_family(theme.font_sans)
             .text_size(px(TEXT_BODY));
+        // Rig (`ui::mock_backdrop`): the stand-in desktop under the shell
+        // wash, where the window has no material of its own.
+        let mut root = match mock_backdrop::layer(cx).filter(|_| theme.is_frost()) {
+            Some(desktop) => root
+                .child(desktop)
+                .child(div().absolute().inset_0().bg(theme.shell())),
+            None => root.bg(theme.shell()),
+        };
 
         if let Some(pairing) = pairing {
             self.signing_in = true;
