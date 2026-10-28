@@ -208,6 +208,25 @@ fn save_read_receipts(enabled: bool) {
     let _ = std::fs::write(read_receipts_path(), if enabled { "true" } else { "false" });
 }
 
+fn link_previews_path() -> std::path::PathBuf {
+    crate::sync::credentials::config_dir().join("link-previews")
+}
+
+/// Settings → Chat → Link previews, saved on this Mac; on unless switched off
+/// ([feedback link-embeds-mac-2026-10-27]).
+fn load_link_previews() -> bool {
+    std::fs::read_to_string(link_previews_path())
+        .ok()
+        .map(|s| s.trim() != "false")
+        .unwrap_or(true)
+}
+
+fn save_link_previews(enabled: bool) {
+    let dir = crate::sync::credentials::config_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(link_previews_path(), if enabled { "true" } else { "false" });
+}
+
 /// "3 min ago", "2 h ago", "yesterday", "5 days ago".
 pub fn ago_text(ms: u64) -> String {
     let s = ms / 1000;
@@ -842,6 +861,8 @@ pub struct AppState {
     /// Settings → Notifications: send and show Presence `{seen}` read receipts
     /// (`<config>/read_receipts.json`, default on).
     pub read_receipts: bool,
+    /// Settings → Chat → Link previews (this Mac).
+    pub link_previews: bool,
     /// People-chat read receipts: chat id → (peer handle → last seen message id).
     pub message_receipts: HashMap<Id, HashMap<String, Id>>,
     /// Last presence frame seen per handle (ms): "online" while fresh.
@@ -1247,6 +1268,11 @@ impl AppState {
             renaming_project: None,
             muted: load_muted(),
             read_receipts: load_read_receipts(),
+            link_previews: {
+                let on = load_link_previews();
+                crate::ui::link_card::set_enabled(on);
+                on
+            },
             message_receipts: HashMap::new(),
             presence_seen: HashMap::new(),
             notify_prompt_answered: false,
@@ -4548,6 +4574,7 @@ impl AppState {
                 parts,
                 hidden_parts: Vec::new(),
                 greeting: false,
+                preview: None,
             });
         if answer {
             let question_id = self.open_plain_question_id(&chat_id);
@@ -5314,6 +5341,7 @@ impl AppState {
                 }],
                 hidden_parts: Vec::new(),
                 greeting: false,
+                preview: None,
             });
         self.command(ClientCommand::ChannelSend {
             room_id: room_id.clone(),
@@ -5720,6 +5748,7 @@ impl AppState {
                 }],
                 hidden_parts: Vec::new(),
                 greeting: false,
+                preview: None,
             });
         self.command(ClientCommand::Answer {
             chat_id: chat_id.clone(),
@@ -6206,6 +6235,46 @@ impl AppState {
             chat_id,
             message_id,
         });
+        cx.notify();
+    }
+
+    /// Bubble ⋯ / the card's × → Remove preview: the relay drops the message's link preview
+    /// for everyone (`preview: "off"`); the card goes at once here, the row follows.
+    pub fn remove_link_preview(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
+        if message_id.is_empty() {
+            return;
+        }
+        if let Some(m) = self
+            .messages
+            .get_mut(&chat_id)
+            .and_then(|list| list.iter_mut().find(|m| m.id == message_id))
+        {
+            m.preview = Some("off".into());
+        }
+        self.command(ClientCommand::RemoveLinkPreview {
+            chat_id,
+            message_id,
+        });
+        cx.notify();
+    }
+
+    /// A link in a bubble or a preview card was clicked: one seam for every chat link, so a
+    /// confirm step (#1522) slots in here for all of them at once. Today: the default opener.
+    pub fn open_link(&mut self, url: &str, cx: &mut Context<Self>) {
+        if url.trim().is_empty() {
+            return;
+        }
+        cx.open_url(url);
+    }
+
+    /// Settings → Chat → Link previews: cards on or off on this Mac.
+    pub fn set_link_previews(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.link_previews == enabled {
+            return;
+        }
+        self.link_previews = enabled;
+        crate::ui::link_card::set_enabled(enabled);
+        save_link_previews(enabled);
         cx.notify();
     }
 
@@ -7555,6 +7624,7 @@ impl AppState {
                 parts,
                 hidden_parts: Vec::new(),
                 greeting: false,
+                preview: None,
             });
         self.command(ClientCommand::Forward {
             chat_id: target.chat_id.clone(),
@@ -7705,6 +7775,7 @@ impl AppState {
                 parts,
                 hidden_parts: Vec::new(),
                 greeting: false,
+                preview: None,
             });
         self.command(ClientCommand::ForwardMessage {
             chat_id: target.chat_id.clone(),
@@ -9856,13 +9927,41 @@ impl AppState {
         };
         for message in messages {
             for part in &message.parts {
-                let Part::Attachment { attachment, .. } = part else {
-                    continue;
+                // A link preview's picture lives in the chat's slot like an attachment's; its
+                // site icon too, and a host without one is asked of the relay (the shared tile).
+                let key = match part {
+                    Part::LinkPreview { preview, .. } => {
+                        if let Some(icon) = preview
+                            .site_icon
+                            .as_ref()
+                            .filter(|i| !i.blob_ref.is_empty())
+                        {
+                            if self.thumbnails_requested.insert(icon.blob_ref.clone()) {
+                                self.command(ClientCommand::FetchThumbnail {
+                                    project_id: project_id.clone(),
+                                    key: icon.blob_ref.clone(),
+                                });
+                            }
+                        } else if let Some(host) =
+                            preview.site_host.clone().filter(|h| !h.is_empty())
+                        {
+                            if crate::ui::link_tile::Brand::for_host(&host).is_none() {
+                                self.want_link_icon(host);
+                            }
+                        }
+                        match preview.image.as_ref().map(|i| i.blob_ref.clone()) {
+                            Some(k) if !k.is_empty() => Some(k),
+                            _ => None,
+                        }
+                    }
+                    Part::Attachment { attachment, .. }
+                        if attachment.kind() == AttachmentKind::Image =>
+                    {
+                        attachment.blob_ref.clone()
+                    }
+                    _ => None,
                 };
-                if attachment.kind() != AttachmentKind::Image {
-                    continue;
-                }
-                let Some(key) = attachment.blob_ref.clone() else {
+                let Some(key) = key else {
                     continue;
                 };
                 // Optimistic send stores a decoded preview under `local:…`.
