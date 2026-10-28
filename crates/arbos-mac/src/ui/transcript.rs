@@ -612,6 +612,10 @@ pub enum RowKind {
         time: Option<String>,
         /// The message's "Forwarded from …" line, drawn on the card.
         forwarded_from: Option<String>,
+        /// A reply's quote header above the first card of the message — a picture
+        /// reply quotes like a text one ([feedback picture-reply-quote-mac-2026-10-28]);
+        /// the caption bubble under it then carries none.
+        quote: Option<Quote>,
     },
     /// S8: the agent asked a question.
     AskUser {
@@ -731,6 +735,16 @@ const JUMP_ARRIVE_FROM_ALPHA: f32 = 0.35;
 pub const RAIL_BUTTON: f32 = 24.0;
 pub const RAIL_GLYPH: f32 = 16.0;
 pub const RAIL_GAP: f32 = 2.0;
+
+/// A reaction chip under a bubble (iPhone `reactionChips`: 14 pt emoji, 12 pt
+/// medium count, 8 pt side pads, 4 pt vertical pads, 1 pt rim). The height is
+/// fixed rather than derived from the emoji's line box: the glyph comes from
+/// a fallback font whose metrics must never size the chip, and nothing about
+/// the pointer may change the box ([feedback reaction-pill-hover-jitter-2026-10-28]).
+pub const REACTION_CHIP_HEIGHT: f32 = 26.0;
+pub const REACTION_CHIP_PAD_X: f32 = 8.0;
+pub const REACTION_CHIP_EMOJI: f32 = 14.0;
+pub const REACTION_CHIP_COUNT: f32 = 12.0;
 
 /// Right-click or the rail's ⋯: the shell opens the message menu there.
 /// The rail's smiley: the shell opens the reaction capsule there.
@@ -2003,6 +2017,8 @@ impl Transcript {
         let btn = |id: SharedString, glyph: &'static str, opacity: f32, color: gpui::Hsla| {
             div()
                 .id(id)
+                .debug_selector(move || format!("rail-button#{glyph}"))
+                // A fixed box; the hover wash is paint only (`highlight::button`).
                 .size(px(RAIL_BUTTON))
                 .flex_shrink_0()
                 .flex()
@@ -3011,32 +3027,45 @@ impl Transcript {
                         .into();
                     let accent_soft = Theme::with_alpha(theme.accent, 0.22);
                     let accent_edge = Theme::with_alpha(theme.accent, 0.55);
+                    // Hover is paint only (the token's wash over the chip's own
+                    // fill): the border, the pads, the fixed height and the
+                    // count's weight are the same at rest and under the pointer,
+                    // so the chip's box never moves ([feedback
+                    // reaction-pill-hover-jitter-2026-10-28], `reaction_chip_tests`).
+                    let fill = if on {
+                        accent_soft
+                    } else {
+                        theme.bubble_assistant
+                    };
+                    let selector: SharedString = format!("reaction-chip#{emoji}").into();
                     chips = chips.child(
                         div()
                             .id(SharedString::from(format!("{}#{}", row.id, emoji)))
+                            .debug_selector(move || selector.to_string())
                             .flex()
                             .items_center()
                             .gap(px(3.0))
-                            .px(px(8.0))
-                            .py(px(4.0))
+                            .h(px(REACTION_CHIP_HEIGHT))
+                            .px(px(REACTION_CHIP_PAD_X))
                             .rounded_full()
-                            .bg(if on {
-                                accent_soft
-                            } else {
-                                theme.bubble_assistant
-                            })
                             .border_1()
                             .border_color(if on { accent_edge } else { theme.border })
                             .cursor_pointer()
-                            .map(|el| highlight::button(el, &theme))
+                            .map(|el| highlight::washed(el, fill, &theme))
                             .tooltip(move |_, cx| {
                                 cx.new(|_| ReactionSendersTip(names.clone())).into()
                             })
-                            .child(div().text_size(px(14.0)).child(emoji.clone()))
+                            .child(
+                                div()
+                                    .text_size(px(REACTION_CHIP_EMOJI))
+                                    .line_height(px(REACTION_CHIP_EMOJI))
+                                    .child(emoji.clone()),
+                            )
                             .when(senders.len() > 1, |el| {
                                 el.child(
                                     div()
-                                        .text_size(px(12.0))
+                                        .text_size(px(REACTION_CHIP_COUNT))
+                                        .line_height(px(REACTION_CHIP_COUNT))
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(theme.text_muted)
                                         .child(senders.len().to_string()),
@@ -3051,6 +3080,7 @@ impl Transcript {
                     );
                 }
                 div()
+                    .debug_selector(|| "reaction-row".into())
                     .w_full()
                     .flex()
                     .when(mine, |el| el.justify_end())
@@ -3081,6 +3111,7 @@ impl Transcript {
                 disc,
                 time,
                 forwarded_from,
+                quote,
             } => {
                 let preview = match attachment.blob_ref.as_ref() {
                     None => attachments::Preview::Unavailable,
@@ -3105,6 +3136,12 @@ impl Transcript {
                         });
                     }) as attachments::OpenFn
                 });
+                // A reply's quote header above the first card, the same one a text
+                // bubble carries ([feedback picture-reply-quote-mac-2026-10-28]).
+                let quote_header = quote.map(|q| {
+                    self.quote_header(&row.id, q, theme.text, cx)
+                        .into_any_element()
+                });
                 // Same reply · copy rail and right-click menu as text bubbles
                 // (feedback app-01M5N8ZQVWC63V54HM70D9SJ4H): an image / file
                 // row was a bare card with no way to reply.
@@ -3119,6 +3156,7 @@ impl Transcript {
                         &attachment,
                         preview,
                         forwarded_from.as_deref(),
+                        quote_header,
                         open,
                         self.state.clone(),
                         &theme,
@@ -4271,8 +4309,31 @@ pub fn build_rows_with_cache(
                 let show_text = !text.is_empty()
                     && !(has_image && is_generic_media_label(&text))
                     && legacy_hint.is_none();
+                // A cross-chat reply (Reply in DM) quotes its own snapshot; an in-chat
+                // reply quotes the row it points at. A forward never quotes. With
+                // attachments the quote sits once, above the first card, so a picture
+                // reply keeps its reply — with or without a caption ([feedback
+                // picture-reply-quote-mac-2026-10-28]: a wordless picture had no bubble
+                // to carry it and the reply vanished).
+                let quote = if forwarded_by.is_some() || legacy_hint.is_some() {
+                    None
+                } else {
+                    message
+                        .reply_ref
+                        .as_ref()
+                        .filter(|r| !r.chat_id.is_empty() && !r.message_id.is_empty())
+                        .map(Quote::for_reply_ref)
+                        .or_else(|| {
+                            message
+                                .reply_to
+                                .as_deref()
+                                .filter(|id| !id.is_empty())
+                                .map(|id| Quote::for_reply(id, messages))
+                        })
+                };
                 for (ix, (part_id, attachment)) in attachment_parts.iter().enumerate() {
                     let forwarded = forwarded.clone().filter(|_| ix == 0);
+                    let quote = quote.clone().filter(|_| ix == 0);
                     let has_thumb = attachment
                         .blob_ref
                         .as_deref()
@@ -4295,6 +4356,7 @@ pub fn build_rows_with_cache(
                                 from.as_ref().map(|p| &p.handle),
                                 card_named,
                                 disc,
+                                &quote,
                             ),
                             false,
                         ),
@@ -4309,24 +4371,13 @@ pub fn build_rows_with_cache(
                             disc,
                             time: clock_label(message.created_at),
                             forwarded_from: forwarded.clone(),
+                            quote,
                         },
                     });
                 }
                 if show_text || attachment_parts.is_empty() || preview.is_some() {
-                    // A cross-chat reply (Reply in DM) quotes its own snapshot;
-                    // an in-chat reply quotes the row it points at.
-                    let quote = message
-                        .reply_ref
-                        .as_ref()
-                        .filter(|r| !r.chat_id.is_empty() && !r.message_id.is_empty())
-                        .map(Quote::for_reply_ref)
-                        .or_else(|| {
-                            message
-                                .reply_to
-                                .as_deref()
-                                .filter(|id| !id.is_empty())
-                                .map(|id| Quote::for_reply(id, messages))
-                        });
+                    // The quote is on the first card when the message has any.
+                    let quote = quote.filter(|_| attachment_parts.is_empty());
                     let delivery = delivery_state(message, is_mine);
                     // The label is on the first card when the message has any.
                     let forwarded_from = forwarded_by.filter(|_| attachment_parts.is_empty());
@@ -4724,6 +4775,7 @@ pub fn build_rows_with_cache(
                                     disc,
                                     time: clock_label(message.created_at),
                                     forwarded_from: None,
+                                    quote: None,
                                 },
                             })
                         }
@@ -8262,8 +8314,8 @@ mod transcript_smoke_tests {
         }
     }
 
-    struct Host {
-        transcript: Entity<Transcript>,
+    pub(super) struct Host {
+        pub(super) transcript: Entity<Transcript>,
     }
 
     impl Render for Host {
@@ -8277,7 +8329,7 @@ mod transcript_smoke_tests {
 
     const LONG_REPLY: &str = "Arbos, from where I sat:\n\n**What worked**\n- Authority held: three guest agents deferred to the owner's call every time.\n- The handoff lines read cleanly; nobody asked who was speaking.\n\n**What did not**\n- The group lost the thread twice when two agents answered at once.\n- One attachment never rendered on the phone.\n\nTell me which of these you want first.";
 
-    fn message(id: &str, role: &str, text: &str, at: u64) -> Message {
+    pub(super) fn message(id: &str, role: &str, text: &str, at: u64) -> Message {
         serde_json::from_value(serde_json::json!({
             "id": id,
             "chatId": "c1",
@@ -8312,7 +8364,7 @@ mod transcript_smoke_tests {
     }
 
     /// `mount` over any message list (the long-chat tests).
-    fn mount_with(
+    pub(super) fn mount_with(
         cx: &mut TestAppContext,
         messages: Vec<Message>,
     ) -> (
@@ -8727,6 +8779,218 @@ mod transcript_smoke_tests {
             !cue,
             "a nearby jump glides; the landing cue is for the long way"
         );
+    }
+}
+
+#[cfg(test)]
+mod reaction_chip_tests {
+    //! Hover on a reaction chip, on the hover rail's smiley and on a capsule
+    //! cell changes paint, never geometry: the same box at rest, under the
+    //! pointer and after it left ([feedback reaction-pill-hover-jitter-2026-10-28];
+    //! Scout, 2026-10-28: "the emoji reaction pill still twitches on hover").
+    use gpui::{point, Bounds, Modifiers, Pixels, TestAppContext};
+
+    use super::transcript_smoke_tests::{message, mount_with, Host};
+    use super::*;
+
+    fn same_box(rest: Bounds<Pixels>, now: Bounds<Pixels>, what: &str) {
+        let d = |a: Pixels, b: Pixels| (f32::from(a) - f32::from(b)).abs();
+        assert!(
+            d(rest.origin.x, now.origin.x) < 0.01
+                && d(rest.origin.y, now.origin.y) < 0.01
+                && d(rest.size.width, now.size.width) < 0.01
+                && d(rest.size.height, now.size.height) < 0.01,
+            "{what} moved: at rest {rest:?}, now {now:?}"
+        );
+    }
+
+    fn away() -> Point<Pixels> {
+        point(px(2.0), px(2.0))
+    }
+
+    /// A user line with Sam's 👍 and an agent reply with a ❤️ held by two
+    /// people, me among them (the count drawn, the accent fill on).
+    fn seed(cx: &mut TestAppContext) -> (tokio::runtime::Runtime, Entity<Transcript>) {
+        let t = 1_700_000_000_000u64;
+        let mut mine = message(
+            "m1",
+            "user",
+            "Here now. Paste what you have and I'll read it.",
+            t,
+        );
+        mine.reactions
+            .entry("👍".into())
+            .or_default()
+            .insert("user:sam".into(), true);
+        let mut reply = message("m2", "assistant", "Sending in a sec.", t + 2_000);
+        let (rt, state, transcript) = mount_with(cx, vec![mine, reply.clone()]);
+        let me = state.read_with(cx, |s, _| format!("user:{}", s.me_id()));
+        let held = reply.reactions.entry("❤️".into()).or_default();
+        held.insert(me, true);
+        held.insert("user:sam".into(), true);
+        state.update(cx, |s, cx| {
+            let rows = s.messages.get_mut("c1").expect("chat");
+            rows.pop();
+            rows.push(reply);
+            cx.notify();
+        });
+        transcript.update(cx, |t, cx| t.sync(cx));
+        (rt, transcript)
+    }
+
+    #[gpui::test]
+    fn a_reaction_chip_keeps_its_box_under_the_pointer(cx: &mut TestAppContext) {
+        let (_rt, transcript) = seed(cx);
+        let (_view, vcx) = cx.add_window_view(|_, _| Host { transcript });
+        vcx.run_until_parked();
+        for sel in ["reaction-chip#👍", "reaction-chip#❤️"] {
+            vcx.simulate_mouse_move(away(), None, Modifiers::default());
+            vcx.run_until_parked();
+            let rest = vcx
+                .debug_bounds(sel)
+                .unwrap_or_else(|| panic!("{sel} drawn at rest"));
+            let row = vcx
+                .debug_bounds("reaction-row")
+                .expect("the chips row draws");
+            assert!(
+                (f32::from(rest.size.height) - REACTION_CHIP_HEIGHT).abs() < 0.01,
+                "{sel}: the chip is {:?} tall, not the fixed {REACTION_CHIP_HEIGHT}",
+                rest.size.height
+            );
+            vcx.simulate_mouse_move(rest.center(), None, Modifiers::default());
+            vcx.run_until_parked();
+            same_box(
+                rest,
+                vcx.debug_bounds(sel).expect("chip under the pointer"),
+                sel,
+            );
+            same_box(
+                row,
+                vcx.debug_bounds("reaction-row")
+                    .expect("row under the pointer"),
+                "the chips row",
+            );
+            vcx.simulate_mouse_move(away(), None, Modifiers::default());
+            vcx.run_until_parked();
+            same_box(
+                rest,
+                vcx.debug_bounds(sel).expect("chip after the pointer left"),
+                sel,
+            );
+        }
+    }
+
+    /// The count and the emoji come from different fonts; neither sizes the chip.
+    #[gpui::test]
+    fn every_chip_is_the_same_height(cx: &mut TestAppContext) {
+        let (_rt, transcript) = seed(cx);
+        let (_view, vcx) = cx.add_window_view(|_, _| Host { transcript });
+        vcx.run_until_parked();
+        let one = vcx.debug_bounds("reaction-chip#👍").expect("👍 drawn");
+        let two = vcx.debug_bounds("reaction-chip#❤️").expect("❤️ drawn");
+        assert!(
+            (f32::from(one.size.height) - f32::from(two.size.height)).abs() < 0.01,
+            "a chip with a count ({:?}) is not as tall as one without ({:?})",
+            two.size.height,
+            one.size.height
+        );
+        assert!(
+            two.size.width > one.size.width,
+            "the count widens the chip, nothing else changes"
+        );
+    }
+
+    /// The rail's smiley beside the agent reply: a fixed 24 pt box whether the
+    /// pointer is on the bubble or on the button, and the bubble beside it
+    /// does not move either.
+    #[gpui::test]
+    fn the_rail_smiley_keeps_its_box_under_the_pointer(cx: &mut TestAppContext) {
+        let (_rt, transcript) = seed(cx);
+        let (_view, vcx) = cx.add_window_view(|_, _| Host { transcript });
+        vcx.run_until_parked();
+        let bubble = vcx
+            .debug_bounds("chat-bubble-assistant")
+            .expect("the agent bubble draws");
+        vcx.simulate_mouse_move(bubble.center(), None, Modifiers::default());
+        vcx.run_until_parked();
+        let smiley = vcx
+            .debug_bounds("rail-button#face.smiling")
+            .expect("the rail's smiley draws beside the hovered bubble");
+        assert!(
+            (f32::from(smiley.size.width) - RAIL_BUTTON).abs() < 0.01
+                && (f32::from(smiley.size.height) - RAIL_BUTTON).abs() < 0.01,
+            "the smiley is {:?}, not {RAIL_BUTTON} square",
+            smiley.size
+        );
+        vcx.simulate_mouse_move(smiley.center(), None, Modifiers::default());
+        vcx.run_until_parked();
+        same_box(
+            smiley,
+            vcx.debug_bounds("rail-button#face.smiling")
+                .expect("smiley under the pointer"),
+            "the rail's smiley",
+        );
+        same_box(
+            bubble,
+            vcx.debug_bounds("chat-bubble-assistant")
+                .expect("bubble while its rail is hovered"),
+            "the bubble beside the hovered rail",
+        );
+    }
+
+    struct Cells;
+
+    impl Render for Cells {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(px(8.0))
+                .child(crate::ui::reactions::cell(
+                    "react-👍",
+                    div().text_size(px(22.0)).child("👍"),
+                    true,
+                    &theme,
+                    |_, _, _| {},
+                ))
+                .child(crate::ui::reactions::cell(
+                    "react-more",
+                    div().size(px(20.0)),
+                    false,
+                    &theme,
+                    |_, _, _| {},
+                ))
+        }
+    }
+
+    /// The capsule's cells — a held emoji and the add-emoji ☺+ — are fixed boxes too.
+    #[gpui::test]
+    fn capsule_cells_keep_their_box_under_the_pointer(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::dark(crate::ui::theme::Surface::Matte)));
+        let (_view, vcx) = cx.add_window_view(|_, _| Cells);
+        vcx.run_until_parked();
+        for sel in ["reaction-cell#react-👍", "reaction-cell#react-more"] {
+            let rest = vcx
+                .debug_bounds(sel)
+                .unwrap_or_else(|| panic!("{sel} drawn"));
+            vcx.simulate_mouse_move(rest.center(), None, Modifiers::default());
+            vcx.run_until_parked();
+            same_box(
+                rest,
+                vcx.debug_bounds(sel).expect("cell under the pointer"),
+                sel,
+            );
+            vcx.simulate_mouse_move(away(), None, Modifiers::default());
+            vcx.run_until_parked();
+            same_box(
+                rest,
+                vcx.debug_bounds(sel).expect("cell after the pointer left"),
+                sel,
+            );
+        }
     }
 }
 
@@ -9866,6 +10130,107 @@ mod system_line_tests {
             [(None, false), (Some("Sam Rivera".into()), false)],
             "the forward header is trimmed and a forward never quotes"
         );
+    }
+
+    /// A user message whose parts are a picture then `text` (the send shape), replying
+    /// to `reply_to`.
+    fn picture_reply(sender: &str, text: &str, reply_to: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": format!("m-{at}"),
+            "chatId": "chat_testing",
+            "role": "user",
+            "sender": sender,
+            "senderHandle": "bob",
+            "status": "done",
+            "createdAt": at,
+            "replyTo": reply_to,
+            "parts": [
+                { "id": format!("a-{at}"), "kind": "attachment",
+                  "attachment": { "name": "IMG_0042.jpeg", "mime": "image/jpeg", "ref": "blob-42" } },
+                { "id": format!("p-{at}"), "kind": "text", "text": text },
+            ],
+        }))
+        .expect("picture reply")
+    }
+
+    /// Per row: `("attachment" | "user", quote text)`.
+    fn quotes(rows: &[Row]) -> Vec<(&str, Option<String>)> {
+        rows.iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::Attachment { quote, .. } => {
+                    Some(("attachment", quote.as_ref().map(|q| q.text.clone())))
+                }
+                RowKind::User { quote, .. } => {
+                    Some(("user", quote.as_ref().map(|q| q.text.clone())))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Tester bug ([feedback picture-reply-quote-mac-2026-10-28]): a reply that carries a
+    /// picture lost its quote — a wordless picture had no bubble to hold it, and a captioned
+    /// picture drew it under the picture. The quote now sits above the first card, once;
+    /// the caption bubble stays plain; a text reply to a picture quotes the file's name.
+    #[test]
+    fn picture_replies_quote_above_the_first_card() {
+        let t = 1_700_000_000_000u64;
+        let original = message("user", "user:gh_bob", "look at this", t);
+        let wordless = picture_reply("user:gh_me", "", &original.id, t + 1_000);
+        let captioned = picture_reply("user:gh_me", "same here", &original.id, t + 2_000);
+        let mut to_picture = message("user", "user:gh_bob", "nice shot", t + 3_000);
+        to_picture.reply_to = Some(wordless.id.clone());
+        let messages = [original, wordless, captioned, to_picture];
+        let (spoken, failed) = (HashSet::new(), HashMap::new());
+        let rows = build_rows(
+            &messages,
+            false,
+            speech(&spoken, &failed),
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+        );
+        assert_eq!(
+            quotes(&rows),
+            [
+                ("user", None),
+                ("attachment", Some("look at this".into())),
+                ("attachment", Some("look at this".into())),
+                ("user", None),
+                ("user", Some("IMG_0042.jpeg".into())),
+            ],
+            "{rows:?}"
+        );
+    }
+
+    /// A forwarded picture keeps its forward header and never quotes, on the card or
+    /// the caption.
+    #[test]
+    fn forwarded_picture_never_quotes() {
+        let t = 1_700_000_000_000u64;
+        let original = message("user", "user:gh_bob", "look at this", t);
+        let mut forwarded = picture_reply("user:gh_me", "caption", &original.id, t + 1_000);
+        forwarded.forwarded_from = Some("Sam Rivera".into());
+        let messages = [original, forwarded];
+        let (spoken, failed) = (HashSet::new(), HashMap::new());
+        let rows = build_rows(
+            &messages,
+            false,
+            speech(&spoken, &failed),
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+        );
+        assert_eq!(
+            quotes(&rows),
+            [("user", None), ("attachment", None), ("user", None)]
+        );
+        assert!(rows.iter().any(|r| matches!(
+            &r.kind,
+            RowKind::Attachment { forwarded_from: Some(f), .. } if f.ends_with("Sam Rivera")
+        )));
     }
 
     /// … and a 1:1 chat (me ↔ person, me ↔ agent) labels nobody, and carries no
