@@ -538,7 +538,7 @@ impl Shell {
                                     crate::ui::avatars::neutral_element(&ws.name, 28.0, &theme)
                                         .into_any_element()
                                 });
-                            card.child(machine::agent_row(picture, ws, &theme))
+                            card.child(machine::agent_row(picture, ws, &theme, cx))
                         }
                         _ => card,
                     };

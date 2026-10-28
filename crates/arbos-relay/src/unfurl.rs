@@ -478,7 +478,7 @@ impl Fetcher {
 
 /// One bounded, pinned, checked GET for other relay modules (the shared link-icon resolver
 /// fetches a host's icon through this; `accept` and `max` as in [`Fetcher::get`]).
-#[allow(dead_code)] // the shared link-icon resolver (bc-1ceabe13) is its first caller
+#[allow(dead_code)] // kept for other relay modules; the site-icon resolver drives a `Fetcher` of its own
 pub async fn fetch_bounded(url: &str, accept: &str, max: usize) -> Option<Fetched> {
     Fetcher::new().get(url, accept, max).await
 }
@@ -1899,9 +1899,16 @@ pub async fn write_part(
             .map_err(|e| anyhow::anyhow!("blob: {e}"))?;
         image_ref = Some(key);
     }
-    // `siteIcon`: filled by the shared link-icon resolver (`site_icons::resolve(state, host)`,
-    // copied into the chat's slot) once that release lands; absent until then.
-    let part = unfurled.part_json(&c.url, image_ref.as_deref(), None);
+    // `siteIcon`: the shared link-icon resolver's picture for the final host, copied into the
+    // chat's slot ([feedback link-icons-relay-2026-10-27]); absent when the host has none.
+    let site_icon = match Url::parse(&unfurled.canonical_url)
+        .ok()
+        .map(|u| host_of(&u))
+    {
+        Some(host) => crate::site_icons::site_icon_for(state, &slot, &host).await,
+        None => None,
+    };
+    let part = unfurled.part_json(&c.url, image_ref.as_deref(), site_icon);
     let msg_id = c.msg_id.clone();
     crate::notices::write_doc(state, project_id, chat_id, move |doc: &ChatDoc| {
         let m = doc
