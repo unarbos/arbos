@@ -28,7 +28,7 @@ use crate::ui::frost::edge_faded;
 use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::markdown::{
-    self, has_fenced_code, inline_plain, inline_spans, polish_assistant_prose, split_blocks, Block,
+    self, inline_plain, inline_spans, polish_assistant_prose, split_blocks, Block,
 };
 use crate::ui::math;
 use crate::ui::mention::{self, Mentions};
@@ -373,9 +373,18 @@ pub fn reply_ref_label(r: &ReplyRef) -> String {
 /// file when there is no prose.
 pub fn one_line(text: &str) -> String {
     let mut out = String::new();
-    for block in split_blocks(text) {
+    one_line_blocks(split_blocks(text), &mut out);
+    out
+}
+
+fn one_line_blocks(blocks: Vec<Block>, out: &mut String) {
+    for block in blocks {
         let pieces: Vec<String> = match block {
             Block::Paragraph(text) | Block::Heading { text, .. } => vec![text],
+            Block::Quote(inner) => {
+                one_line_blocks(inner, out);
+                continue;
+            }
             Block::Bullets(items) | Block::Numbered(items) => items,
             Block::Code { code, .. } => vec![code],
             Block::Table { header, rows } => header
@@ -397,7 +406,6 @@ pub fn one_line(text: &str) -> String {
             }
         }
     }
-    out
 }
 
 /// `line` cut to `max_chars` on a word boundary with an ellipsis; shorter
@@ -3235,6 +3243,7 @@ pub fn speaker_label(cached: bool, failed: bool) -> &'static str {
 fn block_text_len(block: &Block) -> usize {
     match block {
         Block::Paragraph(t) | Block::Heading { text: t, .. } => t.len(),
+        Block::Quote(inner) => inner.iter().map(|b| block_text_len(b) + 1).sum(),
         Block::Bullets(items) | Block::Numbered(items) => items.iter().map(|s| s.len() + 1).sum(),
         Block::Code { code, .. } => code.len(),
         Block::Table { header, rows } => {
@@ -3440,6 +3449,7 @@ fn is_json_block(block: &Block) -> bool {
         }
         Block::Code { .. }
         | Block::Heading { .. }
+        | Block::Quote(_)
         | Block::Bullets(_)
         | Block::Numbered(_)
         | Block::Table { .. }
@@ -4578,6 +4588,21 @@ fn block_segments(block: &Block, literal: bool) -> Vec<Segment> {
         Block::Paragraph(text) | Block::Heading { text, .. } => {
             vec![seg(String::new(), inline(text))]
         }
+        // A quote's blocks follow one another one newline apart, as the
+        // bubble's blocks do.
+        Block::Quote(inner) => inner
+            .iter()
+            .enumerate()
+            .flat_map(|(i, b)| {
+                let mut segs = block_segments(b, literal);
+                if i > 0 {
+                    if let Some(first) = segs.first_mut() {
+                        first.lead.insert(0, '\n');
+                    }
+                }
+                segs
+            })
+            .collect(),
         Block::Bullets(items) => items
             .iter()
             .enumerate()
@@ -4632,10 +4657,11 @@ fn block_segments(block: &Block, literal: bool) -> Vec<Segment> {
 /// hands its `Selectable::bubble`: the text as typed, or its blocks when it
 /// carries a fenced code block.
 fn user_bubble_plain(text: &str) -> String {
-    if has_fenced_code(text) {
-        bubble_plain(&split_blocks(text), true)
-    } else {
+    let blocks = split_blocks(text);
+    if is_plain_paragraph(&blocks) {
         urlwrap::hint_bare_urls(text)
+    } else {
+        bubble_plain(&blocks, false)
     }
 }
 
@@ -4820,52 +4846,48 @@ fn user_message_body(
     copy: &CodeCopy,
 ) -> AnyElement {
     let key = format!("{row_id}.u");
-    if !has_fenced_code(text) {
-        // The same text in the bubble and on screen: `user_bubble_plain`.
+    let blocks = split_blocks(text);
+    // A typed message with no formatting at all stays one plain element: the
+    // text as typed, bare URLs linked ([`user_bubble_plain`]).
+    if is_plain_paragraph(&blocks) {
         let text = urlwrap::hint_bare_urls(text);
         let bubble = selectable.bubble(key, text.clone());
         return plain_text(&text, color, theme, &bubble, 0);
     }
-    let blocks = split_blocks(text);
-    let bubble = selectable.bubble(key, bubble_plain(&blocks, true));
-    let offsets = block_offsets(&blocks, true);
+    let bubble = selectable.bubble(key, bubble_plain(&blocks, false));
+    let offsets = block_offsets(&blocks, false);
     // Same as `render_block`: no `min_w_0`, so the quote header above never
     // sets this column's width.
     let mut col = div().flex().flex_col().gap(px(6.0)).w_full();
     for (i, block) in blocks.iter().enumerate() {
         let id = format!("{row_id}.u{i}");
-        let at = offsets[i];
-        col = match block {
-            Block::Code { lang, code } => col.child(code_fence_card(
-                &id,
-                lang,
-                code,
-                color,
-                theme,
-                &bubble,
-                at,
-                None,
-                Instant::now(),
-                copy,
-            )),
-            // Prose, lists and tables stay literal in a typed bubble (a
-            // "# heading" is still a "# heading"); one element per block.
-            Block::Paragraph(_)
-            | Block::Heading { .. }
-            | Block::Bullets(_)
-            | Block::Numbered(_)
-            | Block::Table { .. }
-            | Block::Math { .. }
-            | Block::Chart { .. } => col.child(plain_text(
-                &block_plain(block, true),
-                color,
-                theme,
-                &bubble,
-                at,
-            )),
-        };
+        col = col.child(render_block_in(
+            &id,
+            block,
+            color,
+            offsets[i],
+            None,
+            Instant::now(),
+            theme,
+            &bubble,
+            copy,
+        ));
     }
     col.into_any_element()
+}
+
+/// Whether a typed message renders exactly as typed: one paragraph whose
+/// inline runs carry no style (links aside — `plain_text` draws those).
+fn is_plain_paragraph(blocks: &[Block]) -> bool {
+    match blocks {
+        [Block::Paragraph(text)] => inline_spans(text).iter().all(|s| {
+            let mut style = s.style;
+            style.link = false;
+            style == markdown::InlineStyle::default() && s.icon.is_none()
+        }),
+        [] => true,
+        _ => false,
+    }
 }
 
 /// Inline-markdown prose as one selectable element. `veil_offset` is where
@@ -4882,7 +4904,9 @@ fn styled_text(
     bubble: &BubbleSelectable,
     at: usize,
 ) -> AnyElement {
-    let (full, runs, links, icons) = inline_runs(text, base_color, theme);
+    let (full, runs, links, icons, spoilers) = inline_runs(text, base_color, theme, at, &|start| {
+        bubble.spoiler_revealed(start)
+    });
     let runs = match veil {
         Some(veil) => apply_veil(runs, &veil.spans(now), veil_offset),
         None => runs,
@@ -4891,6 +4915,7 @@ fn styled_text(
         .text(at, full, runs)
         .with_links(links)
         .with_icons(icons)
+        .with_spoilers(spoilers)
         .into_any_element()
 }
 
@@ -4909,22 +4934,38 @@ pub fn link_icon_placeholder(theme: &Theme) -> gpui::Hsla {
 type Links = Vec<(std::ops::Range<usize>, String)>;
 /// Icon cells of the named links (element-local bytes of the cell → site host).
 type Icons = Vec<(std::ops::Range<usize>, String)>;
+/// Spoiler ranges (element-local bytes → where the spoiler starts in the bubble).
+type Spoilers = Vec<(std::ops::Range<usize>, usize)>;
 
-/// The rendered text, its styled runs, its link ranges and its icon cells for
-/// inline markdown `text` (`**bold**`, `*italic*`, `` `code` ``, links). A
-/// named link's cell ([`markdown::LINK_ICON_CELL`]) is an unpainted run — the
-/// site's picture goes there at paint time — and the link's click range
-/// covers cell and name.
+/// A hidden spoiler's fill: a solid pill in the muted ink; open, a faint wash.
+pub fn spoiler_fill(color: gpui::Hsla, theme: &Theme, revealed: bool) -> gpui::Hsla {
+    let ink = muted_of(color, theme);
+    Theme::with_alpha(ink, if revealed { 0.16 } else { 0.9 })
+}
+
+/// The rendered text, its styled runs, its link ranges, its icon cells and
+/// its spoiler ranges for inline markdown `text` (`**bold**`, `*italic*`,
+/// `~~strike~~`, `||spoiler||`, `` `code` ``, links). A named link's cell
+/// ([`markdown::LINK_ICON_CELL`]) is an unpainted run — the site's picture
+/// goes there at paint time — and the link's click range covers cell and
+/// name. A spoiler the viewer has not opened (`revealed(start)` is false for
+/// its start byte in the bubble's plain text) paints as a solid pill with its
+/// text invisible; `at` is where `text` starts in the bubble's plain text.
 fn inline_runs(
     text: &str,
     base_color: gpui::Hsla,
     theme: &Theme,
-) -> (String, Vec<TextRun>, Links, Icons) {
+    at: usize,
+    revealed: &dyn Fn(usize) -> bool,
+) -> (String, Vec<TextRun>, Links, Icons, Spoilers) {
     let spans = inline_spans(text);
     let mut full = String::new();
     let mut runs: Vec<TextRun> = Vec::new();
     let mut links: Links = Vec::new();
     let mut icons: Icons = Vec::new();
+    let mut spoilers: Spoilers = Vec::new();
+    // Where each spoiler's first run starts (element-local), by its index.
+    let mut spoiler_starts: HashMap<u16, usize> = HashMap::new();
     let sans = sans_font(theme);
     let mono = gpui::Font {
         family: theme.font_mono.into(),
@@ -4965,29 +5006,37 @@ fn inline_runs(
                 text_len -= cell;
             }
         }
+        let mut color = if style.link { theme.accent } else { base_color };
+        let mut background = style.code.then_some(theme.code_bg);
+        let mut underline = style.link.then(|| gpui::UnderlineStyle {
+            color: Some(Theme::with_alpha(theme.accent, 0.6)),
+            thickness: px(1.0),
+            wavy: false,
+        });
+        if style.spoiler != 0 {
+            let first = *spoiler_starts.entry(style.spoiler).or_insert(start);
+            let open = revealed(at + first);
+            spoilers.push((start..start + span.text.len(), at + first));
+            background = Some(spoiler_fill(base_color, theme, open));
+            if !open {
+                color = gpui::transparent_black();
+                underline = None;
+            }
+        }
         runs.push(TextRun {
             len: text_len,
             font,
-            color: if style.link { theme.accent } else { base_color },
-            background_color: if style.code {
-                Some(theme.code_bg)
-            } else {
-                None
-            },
-            underline: if style.link {
-                Some(gpui::UnderlineStyle {
-                    color: Some(Theme::with_alpha(theme.accent, 0.6)),
-                    thickness: px(1.0),
-                    wavy: false,
-                })
-            } else {
-                None
-            },
-            strikethrough: None,
+            color,
+            background_color: background,
+            underline,
+            strikethrough: style.strike.then(|| gpui::StrikethroughStyle {
+                thickness: px(1.0),
+                color: Some(color),
+            }),
         });
         full.push_str(&span.text);
     }
-    (full, runs, links, icons)
+    (full, runs, links, icons, spoilers)
 }
 
 /// Split runs at chunk boundaries and multiply alpha in (zeron veil.rs).
@@ -5052,6 +5101,40 @@ fn render_block(
     bubble: &BubbleSelectable,
     copy: &CodeCopy,
 ) -> AnyElement {
+    render_block_in(
+        row_id, block, theme.text, at, veil, now, theme, bubble, copy,
+    )
+}
+
+/// The quote bar's width and the gap to the quoted text (Grok Bot: a thin
+/// muted bar, the text inset and muted).
+pub const QUOTE_BAR: f32 = 3.0;
+pub const QUOTE_GAP: f32 = 10.0;
+
+/// A muted version of the bubble's text colour: the theme's muted ink on the
+/// agent's grey bubble, the same ink at lower alpha on my accent bubble.
+fn muted_of(color: gpui::Hsla, theme: &Theme) -> gpui::Hsla {
+    if color == theme.text {
+        theme.text_muted
+    } else {
+        Theme::with_alpha(color, 0.72)
+    }
+}
+
+/// One block in `color` (the bubble's ink: `theme.text` on an agent's bubble,
+/// the white of my own).
+#[allow(clippy::too_many_arguments)]
+fn render_block_in(
+    row_id: &str,
+    block: &Block,
+    color: gpui::Hsla,
+    at: usize,
+    veil: Option<&Veil>,
+    now: Instant,
+    theme: &Theme,
+    bubble: &BubbleSelectable,
+    copy: &CodeCopy,
+) -> AnyElement {
     // No `min_w_0` here. Inside a flex-column bubble (a quote header stacked
     // over the text, #1447) taffy sizes the column from its items, and an
     // item with `min-width: 0` contributes nothing to that width — the bubble
@@ -5062,7 +5145,7 @@ fn render_block(
     // the bubble itself keeps `min_w_0`). `layout_tests::a_quoted_bubble_…`.
     let base = div()
         .w_full()
-        .text_color(theme.text)
+        .text_color(color)
         .text_size(px(CHAT_BODY))
         .line_height(px(CHAT_LINE_HEIGHT));
     // Where each selectable element's text starts in the bubble's plain text.
@@ -5074,10 +5157,11 @@ fn render_block(
         starts.push(pos);
         pos += s.text.len();
     }
+    let muted = muted_of(color, theme);
     match block {
         Block::Paragraph(text) => base
             .child(styled_text(
-                text, theme.text, theme, veil, now, 0, bubble, starts[0],
+                text, color, theme, veil, now, 0, bubble, starts[0],
             ))
             .into_any_element(),
         Block::Heading { level, text } => {
@@ -5089,9 +5173,37 @@ fn render_block(
             base.text_size(px(size))
                 .font_weight(STRONG_WEIGHT)
                 .pt(px(6.0))
+                .debug_selector(move || format!("heading-{level}"))
                 .child(styled_text(
-                    text, theme.text, theme, veil, now, 0, bubble, starts[0],
+                    text, color, theme, veil, now, 0, bubble, starts[0],
                 ))
+                .into_any_element()
+        }
+        // `> quoted`: a thin bar, the blocks inset and muted; a quote inside
+        // a quote draws its own bar inside this one.
+        Block::Quote(inner) => {
+            let mut col = div().flex_1().min_w_0().flex().flex_col().gap(px(6.0));
+            let mut inner_at = at;
+            for (i, b) in inner.iter().enumerate() {
+                let id = format!("{row_id}.q{i}");
+                col = col.child(render_block_in(
+                    &id, b, muted, inner_at, None, now, theme, bubble, copy,
+                ));
+                inner_at += block_plain(b, false).len() + 1;
+            }
+            base.flex()
+                .items_stretch()
+                .gap(px(QUOTE_GAP))
+                .debug_selector(|| "quote-block".into())
+                .child(
+                    div()
+                        .w(px(QUOTE_BAR))
+                        .flex_shrink_0()
+                        .rounded_full()
+                        .bg(Theme::with_alpha(muted, 0.55))
+                        .debug_selector(|| "quote-bar".into()),
+                )
+                .child(col)
                 .into_any_element()
         }
         Block::Bullets(items) | Block::Numbered(items) => {
@@ -5111,7 +5223,7 @@ fn render_block(
                     .flex_shrink_0()
                     .flex()
                     .items_center()
-                    .text_color(theme.text_muted)
+                    .text_color(muted)
                     .debug_selector(move || format!("list-marker-{i}"));
                 let marker = if numbered {
                     marker.child(format!("{}.", i + 1))
@@ -5123,7 +5235,7 @@ fn render_block(
                             .size(px(BULLET_DOT))
                             .flex_shrink_0()
                             .rounded_full()
-                            .bg(theme.text_muted)
+                            .bg(muted)
                             .debug_selector(move || format!("list-bullet-{i}")),
                     )
                 };
@@ -5138,7 +5250,7 @@ fn render_block(
                                 .min_w_0()
                                 .debug_selector(move || format!("list-text-{i}"))
                                 .child(styled_text(
-                                    item, theme.text, theme, veil, now, offset, bubble, starts[i],
+                                    item, color, theme, veil, now, offset, bubble, starts[i],
                                 )),
                         ),
                 );
@@ -5154,8 +5266,9 @@ fn render_block(
             // markdown-tables-mac-2026-10-25]: the Lima table showed raw
             // `[…](https://…)` in every first column).
             let cell = |text: &str, head: bool, ri: usize, i: usize, start: usize| {
-                let color = if head { theme.text } else { theme.text_muted };
-                let (full, mut runs, links, icons) = inline_runs(text, color, theme);
+                let color = if head { color } else { muted };
+                let (full, mut runs, links, icons, spoilers) =
+                    inline_runs(text, color, theme, start, &|s| bubble.spoiler_revealed(s));
                 if head {
                     for run in &mut runs {
                         if run.font.weight < FontWeight::SEMIBOLD {
@@ -5178,7 +5291,8 @@ fn render_block(
                         bubble
                             .text(start, full, runs)
                             .with_links(links)
-                            .with_icons(icons),
+                            .with_icons(icons)
+                            .with_spoilers(spoilers),
                     )
             };
             // Taffy sizes a nested flex column from its cells' text, not their
@@ -5231,7 +5345,7 @@ fn render_block(
             .into_any_element()
         }
         Block::Code { lang, code } => code_fence_card(
-            row_id, lang, code, theme.text, theme, bubble, starts[0], veil, now, copy,
+            row_id, lang, code, color, theme, bubble, starts[0], veil, now, copy,
         ),
         Block::Chart { part_id, spec, .. } => {
             crate::ui::chart_card::card(row_id, part_id, spec, theme, copy)
@@ -5239,7 +5353,7 @@ fn render_block(
         // Display math: typeset, a size up, centred on its own line (KaTeX's
         // display mode in Grok Bot).
         Block::Math { source } => {
-            let (full, runs) = math_runs(source, theme.text, theme);
+            let (full, runs) = math_runs(source, color, theme);
             let runs = match veil {
                 Some(veil) => apply_veil(runs, &veil.spans(now), 0),
                 None => runs,
@@ -5882,7 +5996,8 @@ mod selection_tests {
             markdown::LINK_ICON_CELL
         )));
         let theme = Theme::dark(crate::ui::theme::Surface::Matte);
-        let (text, runs, links, icons) = inline_runs(&rows[0][0], theme.text_muted, &theme);
+        let (text, runs, links, icons, _) =
+            inline_runs(&rows[0][0], theme.text_muted, &theme, 0, &|_| false);
         let cell = markdown::LINK_ICON_CELL;
         assert_eq!(text, format!("{cell}Librería El Virrey"));
         assert_eq!(
@@ -8098,9 +8213,13 @@ mod cross_bubble_copy_tests {
         );
     }
 
+    /// A typed bubble's selectable text is what it renders: a heading reads
+    /// without its `#` ([feedback chat-markdown-mac-2026-10-27]), `#hashtag`
+    /// and plain lines as typed, a fenced block as its code.
     #[test]
-    fn a_user_bubble_is_selectable_as_typed() {
-        assert_eq!(user_bubble_plain("# not a heading"), "# not a heading");
+    fn a_user_bubble_is_selectable_as_rendered() {
+        assert_eq!(user_bubble_plain("# a heading"), "a heading");
+        assert_eq!(user_bubble_plain("#hashtag stays"), "#hashtag stays");
         assert_eq!(
             user_bubble_plain("see\n```rs\nlet x = 1;\n```"),
             "see\nlet x = 1;"
@@ -8215,7 +8334,8 @@ mod link_icon_tests {
         assert_eq!(items.len(), 7);
         let theme = Theme::dark(crate::ui::theme::Surface::Matte);
         for item in items {
-            let (text, runs, links, icons) = inline_runs(item, theme.text, &theme);
+            let (text, runs, links, icons, _) =
+                inline_runs(item, theme.text, &theme, 0, &|_| false);
             assert!(text.starts_with(markdown::LINK_ICON_CELL), "{text}");
             assert_eq!(icons.len(), 1);
             assert_eq!(icons[0].1, "nypost.com");
@@ -8301,7 +8421,8 @@ mod markdown_tests {
     #[test]
     fn strong_runs_are_bold() {
         let theme = Theme::dark(crate::ui::theme::Surface::Matte);
-        let (text, runs, _, _) = inline_runs("Surf **gear** list", theme.text, &theme);
+        let (text, runs, _, _, _) =
+            inline_runs("Surf **gear** list", theme.text, &theme, 0, &|_| false);
         assert_eq!(text, "Surf gear list");
         let weights: Vec<(usize, FontWeight)> =
             runs.iter().map(|r| (r.len, r.font.weight)).collect();
@@ -8401,6 +8522,222 @@ mod markdown_tests {
     fn list_plain_text_keeps_its_markers() {
         let block = Block::Bullets(vec!["a".into(), "b".into()]);
         assert_eq!(block_plain(&block, false), "• a\n• b");
+    }
+}
+
+#[cfg(test)]
+mod chat_markdown_tests {
+    //! Jacob, 2026-10-27 ([feedback chat-markdown-mac-2026-10-27]): "allow these
+    //! common chat highlighting stuff for users to use > etc." Grok Bot renders a
+    //! typed `> hello` as a quote block; the Mac composer sent it as raw text.
+    //! Typed bubbles now go through the shared grammar (quotes, headings, lists,
+    //! code cards, bold / italic / strike / spoiler / code / links), and plain
+    //! text still renders as typed.
+    use gpui::{point, TestAppContext};
+
+    use super::*;
+
+    /// A typed `> hello` is a quote; `>5` and a lone `>` are text.
+    #[test]
+    fn a_typed_quote_is_a_quote_block_and_a_glued_angle_is_text() {
+        assert_eq!(
+            split_blocks("> hello\nthat is what the quote looks like now"),
+            vec![
+                Block::Quote(vec![Block::Paragraph("hello".into())]),
+                Block::Paragraph("that is what the quote looks like now".into()),
+            ]
+        );
+        assert_eq!(
+            split_blocks("> a\n>> b"),
+            vec![Block::Quote(vec![
+                Block::Paragraph("a".into()),
+                Block::Quote(vec![Block::Paragraph("b".into())]),
+            ])]
+        );
+        for text in [">5 means more than five", ">", "a > b"] {
+            assert_eq!(split_blocks(text), vec![Block::Paragraph(text.into())]);
+        }
+    }
+
+    /// The plain text of a typed bubble: as typed when nothing formats, the
+    /// rendered words (markers gone, list markers kept) otherwise.
+    #[test]
+    fn typed_bubble_plain_text() {
+        assert_eq!(
+            user_bubble_plain("snake_case 2*3*4 jacob_s@example.com $5"),
+            "snake_case 2*3*4 jacob_s@example.com $5"
+        );
+        assert!(is_plain_paragraph(&split_blocks("hello https://a.com/x_y")));
+        assert!(!is_plain_paragraph(&split_blocks("> hello")));
+        assert!(!is_plain_paragraph(&split_blocks("**hello**")));
+        assert_eq!(user_bubble_plain("> **hi**\n- a\n- b"), "hi\n• a\n• b");
+        assert_eq!(
+            block_plain(
+                &Block::Quote(vec![
+                    Block::Paragraph("q".into()),
+                    Block::Bullets(vec!["a".into()])
+                ]),
+                false
+            ),
+            "q\n• a"
+        );
+        // Every segment's start is where its text sits in the bubble's text.
+        let blocks = split_blocks("> one\n> two\n\nafter ~~x~~");
+        let plain = bubble_plain(&blocks, false);
+        let offsets = block_offsets(&blocks, false);
+        assert_eq!(plain, "one\ntwo\nafter x");
+        assert_eq!(&plain[offsets[1]..], "after x");
+    }
+
+    /// `~~strike~~` strikes through; a `||spoiler||` paints as a pill with the
+    /// glyphs invisible until the viewer opens it, and its range is clickable.
+    #[test]
+    fn strike_and_spoiler_runs() {
+        let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+        let (text, runs, _, _, spoilers) =
+            inline_runs("a ~~gone~~ ||secret|| b", theme.text, &theme, 10, &|_| {
+                false
+            });
+        assert_eq!(text, "a gone secret b");
+        assert!(runs[1].strikethrough.is_some(), "{runs:?}");
+        assert!(runs[0].strikethrough.is_none());
+        let pill = &runs[3];
+        assert_eq!(pill.len, "secret".len());
+        assert_eq!(pill.color.a, 0.0, "hidden glyphs");
+        assert_eq!(
+            pill.background_color,
+            Some(spoiler_fill(theme.text, &theme, false))
+        );
+        assert_eq!(
+            spoilers,
+            vec![(7..13, 17)],
+            "range in the element, start in the bubble"
+        );
+        let (_, runs, _, _, _) =
+            inline_runs("a ~~gone~~ ||secret|| b", theme.text, &theme, 10, &|at| {
+                at == 17
+            });
+        assert_eq!(runs[3].color, theme.text, "open: readable");
+        assert_eq!(
+            runs[3].background_color,
+            Some(spoiler_fill(theme.text, &theme, true))
+        );
+        // A spoiler with styled parts is one spoiler: every run shares its start.
+        let (_, _, _, _, spoilers) = inline_runs("||**a** b||", theme.text, &theme, 0, &|_| false);
+        assert_eq!(spoilers, vec![(0..1, 0), (1..3, 0)]);
+    }
+
+    struct QuoteBubble {
+        selection: Entity<TextSelection>,
+    }
+
+    const QUOTED: &str = "> hello there\n\nthe ||butler|| did it";
+
+    impl gpui::Render for QuoteBubble {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+            let selectable = Selectable::new(&self.selection, theme.accent_soft, cx);
+            let blocks = split_blocks(QUOTED);
+            let bubble = selectable.bubble("u#text", bubble_plain(&blocks, false));
+            let offsets = block_offsets(&blocks, false);
+            let mut col = div()
+                .w(px(400.0))
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .debug_selector(|| "test-block".into());
+            for (i, block) in blocks.iter().enumerate() {
+                col = col.child(render_block_in(
+                    &format!("u{i}"),
+                    block,
+                    theme.text,
+                    offsets[i],
+                    None,
+                    Instant::now(),
+                    &theme,
+                    &bubble,
+                    &CodeCopy::default(),
+                ));
+            }
+            div().w(px(500.0)).h(px(300.0)).p(px(20.0)).child(col)
+        }
+    }
+
+    /// Rendered: the quote bar is 3 pt wide at the block's left, the quoted
+    /// text starts `QUOTE_GAP` after it; a click on the spoiler opens it for
+    /// this viewer, a second click hides it again.
+    #[gpui::test]
+    fn a_quote_draws_its_bar_and_a_click_opens_a_spoiler(cx: &mut TestAppContext) {
+        let selection = cx.update(|cx| cx.new(TextSelection::new));
+        let (_view, vcx) = cx.add_window_view(|_, _| QuoteBubble {
+            selection: selection.clone(),
+        });
+        vcx.run_until_parked();
+        let block = vcx.debug_bounds("test-block").expect("block drawn");
+        let bar = vcx.debug_bounds("quote-bar").expect("quote bar drawn");
+        assert_eq!(f32::from(bar.size.width), QUOTE_BAR);
+        assert!(
+            (f32::from(bar.left() - block.left())).abs() <= 0.5,
+            "bar at the left"
+        );
+        assert!(
+            f32::from(bar.size.height) >= CHAT_LINE_HEIGHT - 1.0,
+            "the bar spans the quoted line: {bar:?}"
+        );
+        let quote = vcx.debug_bounds("quote-block").expect("quote drawn");
+        assert!(f32::from(quote.size.height) >= CHAT_LINE_HEIGHT - 1.0);
+
+        // The second paragraph: "the ||butler|| did it" — click inside "butler".
+        let plain = bubble_plain(&split_blocks(QUOTED), false);
+        let start = plain.find("butler").expect("spoiler text in the bubble");
+        let revealed = |vcx: &gpui::VisualTestContext| {
+            selection.read_with(vcx, |s, _| s.spoiler_revealed(&("u#text".into(), start)))
+        };
+        assert!(!revealed(vcx), "hidden at first");
+        let para = quote.bottom() + px(6.0);
+        let line_h = vcx.update(|window, _| window.line_height());
+        // "the " is four glyphs in; the pill starts after them.
+        let x = block.left() + px(40.0);
+        vcx.simulate_click(point(x, para + line_h / 2.0), gpui::Modifiers::default());
+        vcx.run_until_parked();
+        assert!(revealed(vcx), "one click opens the spoiler");
+        vcx.simulate_click(point(x, para + line_h / 2.0), gpui::Modifiers::default());
+        vcx.run_until_parked();
+        assert!(!revealed(vcx), "a second click hides it again");
+        assert!(cx.opened_url().is_none(), "nothing opened in the browser");
+    }
+
+    /// Headings, lists, fences and links a user types render as blocks; the
+    /// one-line preview and the link hosts see inside quotes.
+    #[test]
+    fn typed_formats_split_into_blocks() {
+        let blocks = split_blocks(
+            "# Title\n> [Docs](https://docs.arbos.life/x)\n- a\n1. b\n```py\nx = 1\n```\n**done**",
+        );
+        assert_eq!(blocks.len(), 6, "{blocks:?}");
+        assert!(matches!(blocks[0], Block::Heading { level: 1, .. }));
+        assert!(matches!(blocks[1], Block::Quote(_)));
+        assert!(matches!(blocks[2], Block::Bullets(_)));
+        assert!(matches!(blocks[3], Block::Numbered(_)));
+        assert!(matches!(blocks[4], Block::Code { .. }));
+        assert_eq!(
+            one_line("> **hello** there\n\n||secret||"),
+            "hello there secret"
+        );
+        assert_eq!(
+            markdown::link_hosts("> see [Docs](https://docs.arbos.life/x)"),
+            vec!["docs.arbos.life".to_string()]
+        );
+        // A named link's label keeps its styles and its one icon cell.
+        let spans = inline_spans("[**Bold** link](https://arbos.life/a)");
+        assert_eq!(spans.len(), 2);
+        assert!(spans[0].text.starts_with(markdown::LINK_ICON_CELL) && spans[0].style.bold);
+        assert_eq!(spans[0].icon.as_deref(), Some("arbos.life"));
+        assert!(spans[1].icon.is_none() && spans[1].style.link);
     }
 }
 

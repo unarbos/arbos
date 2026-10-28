@@ -4565,47 +4565,91 @@ impl Shell {
         )
     }
 
-    fn render_notices(&self, cx: &mut Context<Self>) -> Option<Div> {
+    /// The one toast slot (Jacob 2026-10-27, [feedback toast-stack-mac-2026-10-27]): just
+    /// below the header's profile-picture pill, centred on the chat column (between the
+    /// sidebar and the pane), the newest `NOTICE_VISIBLE_MAX` toasts stacked compactly, older
+    /// ones folded into one "N more" line with a × that clears the slot. Info notices are the
+    /// plain card (click dismisses); failures are the shared error element as a toast — ×,
+    /// Details, Try again, 10 s, the pointer on it holds it, the same failure again bumps its
+    /// "×N" instead of adding a toast ([feedback error-messages-mac-2026-10-26]).
+    fn render_notices(&self, left: f32, right: f32, cx: &mut Context<Self>) -> Option<Div> {
         let theme = Theme::of(cx).clone();
-        let notices = self.state.read(cx).live_notices();
-        if notices.is_empty() {
+        let stack = self.state.read(cx).notice_stack();
+        if stack.visible.is_empty() {
             return None;
         }
         PulseClock::request(cx);
-        // Top right, under the header: never over the composer's send / mic button or a note
-        // above it (the busy end of the column). Info notices are the plain card (click
-        // dismisses); failures are the shared error element as a toast — ×, Details, Try
-        // again, 10 s, and the pointer on it holds it ([feedback error-messages-mac-2026-10-26]).
-        let mut stack = div()
-            .absolute()
-            .right(px(16.0))
-            .top(px(HEADER_HEIGHT + 12.0))
+        let mut column = div()
+            .id("toast-slot")
+            .debug_selector(|| "toast-slot".into())
             .w(px(error_note::TOAST_WIDTH))
             .flex()
             .flex_col()
             .gap(px(6.0));
-        for n in notices {
-            let at = n.at;
+        if stack.folded > 0 {
+            let folded = stack.folded;
+            column = column.child(
+                div()
+                    .id("toast-folded")
+                    .debug_selector(|| "toast-folded".into())
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px(px(12.0))
+                    .h(px(24.0))
+                    .rounded_full()
+                    .bg(theme.surface_2)
+                    .border_1()
+                    .border_color(theme.border_strong)
+                    .text_size(px(TEXT_SMALL))
+                    .text_color(theme.text_muted)
+                    .child(format!(
+                        "{folded} more {}",
+                        if folded == 1 { "notice" } else { "notices" }
+                    ))
+                    .child(
+                        div()
+                            .id("toast-folded-close")
+                            .debug_selector(|| "toast-folded-close".into())
+                            .size(px(16.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .hover(|s| s.opacity(0.7))
+                            .child(icon("xmark", 12.0, theme.text_muted))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.state.update(cx, |s, cx| {
+                                    s.dismiss_all_notices();
+                                    cx.notify();
+                                });
+                            })),
+                    ),
+            );
+        }
+        for n in stack.visible {
+            let nid = n.id;
+            let id = format!("notice-{nid}");
             let element: gpui::AnyElement = match &n.error {
                 Some(error) => {
-                    let id = format!("notice-{at}");
                     let mut handlers = error_note::Handlers::new()
+                        .count(n.count)
                         .toggle_details(cx.listener(move |this, _, _, cx| {
                             this.state.update(cx, |s, cx| {
-                                s.toggle_notice_details(at);
+                                s.toggle_notice_details(nid);
                                 cx.notify();
                             });
                         }))
                         .dismiss(cx.listener(move |this, _, _, cx| {
                             this.state.update(cx, |s, cx| {
-                                s.dismiss_notice(at);
+                                s.dismiss_notice(nid);
                                 cx.notify();
                             });
                         }));
                     if n.retry.is_some() {
                         handlers = handlers.try_again(cx.listener(move |this, _, _, cx| {
                             this.state.update(cx, |s, cx| {
-                                s.retry_notice(at);
+                                s.retry_notice(nid);
                                 cx.notify();
                             });
                         }));
@@ -4613,7 +4657,7 @@ impl Shell {
                     if error.action() == crate::sync::user_error::Action::SignIn {
                         handlers = handlers.sign_in(cx.listener(move |this, _, _, cx| {
                             this.state.update(cx, |s, cx| {
-                                s.dismiss_notice(at);
+                                s.dismiss_notice(nid);
                                 s.sign_in(cx);
                             });
                         }));
@@ -4628,12 +4672,12 @@ impl Shell {
                     )
                     .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
                         let hovering = *hovering;
-                        this.state.update(cx, |s, _| s.hold_notice(at, hovering));
+                        this.state.update(cx, |s, _| s.hold_notice(nid, hovering));
                     }))
                     .into_any_element()
                 }
                 None => div()
-                    .id(SharedString::from(format!("notice-{at}")))
+                    .id(SharedString::from(id.clone()))
                     .w_full()
                     .px(px(14.0))
                     .py(px(10.0))
@@ -4645,18 +4689,31 @@ impl Shell {
                     .text_size(px(TEXT_SMALL))
                     .text_color(theme.text)
                     .cursor_pointer()
-                    .child(n.text.clone())
+                    .child(if n.count >= 2 {
+                        format!("{} (×{})", n.text, n.count)
+                    } else {
+                        n.text.clone()
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.state.update(cx, |s, cx| {
-                            s.dismiss_notice(at);
+                            s.dismiss_notice(nid);
                             cx.notify();
                         });
                     }))
                     .into_any_element(),
             };
-            stack = stack.child(element);
+            column = column.child(element);
         }
-        Some(stack)
+        Some(
+            div()
+                .absolute()
+                .left(px(left))
+                .right(px(right))
+                .top(px(header::metrics::TOAST_SLOT_TOP))
+                .flex()
+                .justify_center()
+                .child(column),
+        )
     }
 }
 
@@ -5328,7 +5385,7 @@ impl Render for Shell {
         if let Some(prompt) = self.render_notify_prompt(cx) {
             root = root.child(prompt);
         }
-        if let Some(notices) = self.render_notices(cx) {
+        if let Some(notices) = self.render_notices(frame.sidebar_visible, frame.pane_visible, cx) {
             root = root.child(notices);
         }
         // D82: first sign-in — the terminal screen covers the shell until the

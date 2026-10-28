@@ -58,66 +58,91 @@ pub fn may_delete(who: &Deleter<'_>, sender: &str, agent_owner: Option<&str>) ->
     false
 }
 
-/// `DELETE /room/{project}/{chat}/messages/{message_id}` — delete a message for everyone.
-/// 204 when gone (or already gone), 403 `not_yours` when the rule says no, 404 when the chat
-/// or the message is unknown. The deletion lands as a relay-signed row on the room.
-pub async fn delete_message(
-    State(state): State<AppState>,
-    principal: Principal,
-    Path((project, chat_id, message_id)): Path<(String, String, String)>,
-) -> Response {
-    let Principal::Device { user_id: me, .. } = &principal else {
-        return api_error(
+/// What the rule needs to know before a message is edited for everyone: the project the chat
+/// belongs to (`None` for a people chat), the asker and the message's normalised sender.
+struct Authorised {
+    project_id: Option<String>,
+    me: String,
+    sender: String,
+}
+
+/// The shared half of the message-wide edits: membership, the message's sender, the rule.
+/// `Ok(None)` when the message is already gone (editing twice is fine).
+async fn authorise(
+    state: &AppState,
+    principal: &Principal,
+    project: &str,
+    chat_id: &str,
+    message_id: &str,
+    verb: &str,
+) -> Result<Option<Authorised>, Box<Response>> {
+    let Principal::Device { user_id: me, .. } = principal else {
+        return Err(Box::new(api_error(
             StatusCode::FORBIDDEN,
             "forbidden",
             "a signed-in device is required",
-        );
+        )));
     };
     if message_id.trim().is_empty() || chat_id == PROJECT_DOC_CHAT_ID {
-        return api_error(StatusCode::BAD_REQUEST, "bad_request", "not a message");
+        return Err(Box::new(api_error(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "not a message",
+        )));
     }
     let is_people = project == PEOPLE_PROJECT;
     let (role, project_owner, project_id) = if is_people {
-        let cm = match people::load_chat(&state, &chat_id) {
-            Ok(cm) => cm,
-            Err(r) => return *r,
-        };
+        let cm = people::load_chat(state, chat_id)?;
         let Some(mine) = cm.members.iter().find(|m| m.user_id() == Some(me.as_str())) else {
-            return api_error(
+            return Err(Box::new(api_error(
                 StatusCode::FORBIDDEN,
                 "not_member",
                 "you are not in this chat",
-            );
+            )));
         };
         (Some(mine.role.clone()), false, None)
     } else {
-        if !state.allows(&principal, &project) {
-            return api_error(
+        if !state.allows(principal, project) {
+            return Err(Box::new(api_error(
                 StatusCode::FORBIDDEN,
                 "not_member",
                 "you are not in this project",
-            );
+            )));
         }
         (
             None,
-            state.owns(&principal, &project),
-            Some(project.as_str()),
+            state.owns(principal, project),
+            Some(project.to_owned()),
         )
     };
-    let doc = match load_doc(&state, &chat_id, project_id) {
+    let doc = match load_doc(state, chat_id, project_id.as_deref()) {
         Ok(Some(d)) => d,
-        Ok(None) => return api_error(StatusCode::NOT_FOUND, "not_found", "no such chat"),
-        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+        Ok(None) => {
+            return Err(Box::new(api_error(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "no such chat",
+            )))
+        }
+        Err(e) => {
+            return Err(Box::new(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db",
+                e.to_string(),
+            )))
+        }
     };
-    let Some(message) = doc.message(&message_id) else {
-        // Already gone: deleting twice is fine.
-        return StatusCode::NO_CONTENT.into_response();
+    let Some(message) = doc.message(message_id) else {
+        return Ok(None);
     };
     let sender = normalised_sender(
         message.rest["sender"].as_str().unwrap_or_default(),
         &message.role,
-        project_id.and_then(|p| state.user_of(p)).as_deref(),
-        project_id,
+        project_id
+            .as_deref()
+            .and_then(|p| state.user_of(p))
+            .as_deref(),
+        project_id.as_deref(),
     );
     let agent_owner = sender
         .strip_prefix("agent:")
@@ -128,20 +153,84 @@ pub async fn delete_message(
         project_owner,
     };
     if !may_delete(&who, &sender, agent_owner.as_deref()) {
-        return api_error(
+        return Err(Box::new(api_error(
             StatusCode::FORBIDDEN,
             "not_yours",
-            "you can only delete your own messages",
-        );
+            format!("you can only {verb} your own messages"),
+        )));
     }
-    match write_doc(&state, project_id, &chat_id, |doc| {
+    Ok(Some(Authorised {
+        project_id,
+        me: me.clone(),
+        sender,
+    }))
+}
+
+/// `DELETE /room/{project}/{chat}/messages/{message_id}` — delete a message for everyone.
+/// 204 when gone (or already gone), 403 `not_yours` when the rule says no, 404 when the chat
+/// or the message is unknown. The deletion lands as a relay-signed row on the room.
+pub async fn delete_message(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((project, chat_id, message_id)): Path<(String, String, String)>,
+) -> Response {
+    let a = match authorise(
+        &state,
+        &principal,
+        &project,
+        &chat_id,
+        &message_id,
+        "delete",
+    )
+    .await
+    {
+        Ok(Some(a)) => a,
+        Ok(None) => return StatusCode::NO_CONTENT.into_response(),
+        Err(r) => return *r,
+    };
+    match write_doc(&state, a.project_id.as_deref(), &chat_id, |doc| {
         doc.delete_message(&message_id)?;
         Ok(())
     })
     .await
     {
         Ok(seq) => {
-            tracing::info!(chat = %chat_id, message = %message_id, %me, %sender, seq, "message deleted");
+            tracing::info!(chat = %chat_id, message = %message_id, me = %a.me, sender = %a.sender, seq, "message deleted");
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    }
+}
+
+/// `DELETE /room/{project}/{chat}/messages/{message_id}/preview` — the sender's **Remove
+/// preview** (#2064): the same rule as deleting the message (yours, or you moderate), then the
+/// relay writes `preview: "off"` on the row and drops its `link_preview` parts, for everyone.
+/// 204 when done (or nothing to remove), 403 `not_yours` otherwise.
+pub async fn remove_preview(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((project, chat_id, message_id)): Path<(String, String, String)>,
+) -> Response {
+    let a = match authorise(&state, &principal, &project, &chat_id, &message_id, "edit").await {
+        Ok(Some(a)) => a,
+        Ok(None) => return StatusCode::NO_CONTENT.into_response(),
+        Err(r) => return *r,
+    };
+    match write_doc(&state, a.project_id.as_deref(), &chat_id, |doc| {
+        doc.set_message_fields(
+            &message_id,
+            &[(
+                crate::unfurl::PREVIEW_FIELD,
+                serde_json::Value::from(crate::unfurl::PREVIEW_OFF),
+            )],
+        );
+        doc.remove_parts_of_kind(&message_id, crate::unfurl::PART_KIND);
+        Ok(())
+    })
+    .await
+    {
+        Ok(seq) => {
+            tracing::info!(chat = %chat_id, message = %message_id, me = %a.me, seq, "link preview removed");
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
