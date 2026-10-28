@@ -201,8 +201,9 @@ footer's line, 8 after the card, fills `#326CCB` / `#F5F5F5`).
 
 Search never opens inline. The Search disc, **⌘⇧F** and **⌘K** open one
 centred modal over the window (`ui::palette` on the shared `ui::modal`
-backdrop): the chat behind gets no wheel, no click and no key while it is up;
-Esc, a click outside, or opening a row closes it. Send Feedback moved from
+backdrop): the chat behind gets no wheel and no key while it is up; Esc,
+⌘⇧F / ⌘K again, a click outside (which also lands on what is under it —
+"Search in chat" § Click outside), or opening a row closes it. Send Feedback moved from
 ⌘⇧F to **⌘⌥F** (Help menu unchanged).
 
 | Item | Value (measured on `ref-grok-command-palette.png`, 2 px/pt) |
@@ -254,15 +255,18 @@ app-wide, the bar is this chat only. Code: `crate::chat_search` (rules),
 | Matching | keyword = folded substring over the chat's loaded rows (`arbos_core::search::fold`, the palette index's text); sender = the shared matcher of #1918 (`match_entity` on display name / @handle of everyone who posted: exact > prefix > word-start, name before handle); **chip AND keyword**; a pinned chip with no text = all of that sender's rows. A hit is a **message**, not a word occurrence |
 | Count | "n of m" over the loaded rows, 1 = the oldest loaded (Find's order); the cursor starts on the newest hit; "No matches"; nothing while nothing is typed |
 | Marks | every hit's words on the accent at 30 %; the revealed hit's words in Find's yellow `#ffd60a` with dark text; the revealed message's row washed and scrolled to through **the palette's reveal path** (`highlight_message` + `reveal_message` → `Transcript::reveal_hit`) — one reveal mechanism |
-| Keys | ⌘F open / refocus (never closes); Enter / › / ⌘G next (newer); ⇧Enter / ‹ / ⇧⌘G previous (older); both wrap; ⇥ pins the offered sender; Esc / ✕ close — marks go, the composer types again. Inside the field the "ChatSearch" context overrides the composer's Send / Newline / AcceptMention |
+| Keys | **⌘F toggles** (Jacob 2026-10-27, [feedback search-toggle-click-outside-mac-2026-10-27]): closed → opens and focuses the field; open → closes exactly like ✕ / Esc (marks go, the composer types again), also with the field focused — the chord is a root action, the text input never swallows it. Enter / › / ⌘G next (newer); ⇧Enter / ‹ / ⇧⌘G previous (older); both wrap; ⇥ pins the offered sender; Esc / ✕ close. Inside the field the "ChatSearch" context overrides the composer's Send / Newline / AcceptMention. **⌘⇧F / ⌘K toggle the palette** the same way |
+| Click outside | a mouse-down anywhere outside the bar closes it, and anywhere outside the palette's panel dismisses the palette — **without swallowing the click**: the message, sidebar row or button under it answers in the same click (`Shell::click_outside`, capture phase against the bar's / panel's last-painted bounds; the palette's backdrop is see-through for the mouse — `modal::modal_overlay_top_passthrough` — and still dims and still swallows the wheel). A click inside the bar / panel keeps it. The Forward picker and the media viewer stay true modals (#1632) |
 | Beyond the loaded rows | ‹ on the oldest loaded hit of a **server channel** asks the relay for a page (`ChannelLoadOlder`), shows "searching older…", moves on to the page's older hit when it lands, keeps paging while rows come without a hit, and wraps once the room says there is nothing above (`SyncEvent::ChannelHistoryEnd`). A chat doc (agent, DM, group) is whole on this Mac, so ‹ wraps at once |
 | Not | no second field in the header, no dropdown of senders, no match counter in the pill, no sidebar field |
 
 Pinned by `chat_search::tests` (hits, AND, offer, wrap, paging step, count,
 byte ranges), `ui::chat_search::tests` (⌘F opens the bar at 56 / 36 / the
-composer's width and focuses the field, Esc closes; typing counts, steps,
-wraps, pins; a channel pages older rows then wraps) and `keymap_tests`
-(⌘F / ⌘G / ⇧⌘G; Enter / ⇧Enter / ⇥ inside the bar).
+composer's width and focuses the field, Esc closes; ⌘F / ⌘⇧F toggle closed
+again from inside the field; a click outside closes bar / palette and the
+"+" disc under it still opens; typing counts, steps, wraps, pins; a channel
+pages older rows then wraps) and `keymap_tests` (⌘F / ⌘G / ⇧⌘G; Enter /
+⇧Enter / ⇥ inside the bar).
 
 ### iPhone: one bottom search bar, nothing else (Jacob 2026-10-25, [feedback iphone-bottom-search-bar-2026-10-25])
 
@@ -1339,3 +1343,33 @@ transcript's row builder (a chart part is a `Markdown` row; an attachment whose
 title / legend / plot height / the three 24 pt squares at the top-right, Copy data
 → TSV + check, Save / Expand wired) and `chart_card::tests` (palette per theme,
 file names, the 2x themed PNG); the numbers by `arbos_core::chart::tests`.
+
+## One add row per info pane: "Add members" (Jacob 2026-10-27, [feedback add-your-agent-row-removal-mac-2026-10-27], iPhone [feedback add-your-agent-row-removal-ios-2026-10-27])
+
+**Every info pane that adds members has exactly ONE add row — "Add members" —
+and its picker adds people and agents. No "Add agent", no "Add your agent", no
+sparkle promo row anywhere: not in the group pane, not in the server pane, not on
+a person's pane opened from a chat, not in an empty chat.** Jacob's shots
+(Mac, 2026-10-27): the group's Members card drew "Add members" and under it
+"Add agent · One of yours, so everyone here can ask it"; a DM's info pane drew
+"Add your agent · Bring one of yours into this chat". Cut, not relocated
+(product principle 2026-10-20 / 2026-10-22). Candidates for a return, as
+candidates only: adding an agent to a 1:1 DM from the Mac now has no path (the
+person pane never had Add members — the iPhone never had one either).
+
+| Item | Mac | iPhone |
+|---|---|---|
+| Group / shared project, Members tab | the first card is "Add members" (`profile-add-members`, `person-plus` glyph) alone; a people group's description follows it in the same card as a labelled row (`profile-description`, `text-align-left` glyph, "Description", the text right-aligned in `TEXT_SMALL` muted, ≤ 180 wide, truncated) — it used to be a bare text card above the add rows, which with "AR" alone read as a stray block; the Mac has no editor for it (the iPhone's Edit group sheet is the one writer) | "Add members" alone, then the Description row (tap → Edit group), then Share invite link / Activity |
+| Server, Members tab | "Add members" (`server-add-members`) alone, admins only; people only | the same |
+| Person pane (from a DM or a group) | Links \| Groups, the Message pill, Block — no add row | the same |
+| Empty people chat | picture, name, hint, composer — no "Add agent" control | the same |
+| Add members picker | title "Add members to <group>"; chips; search; **Agents** section first — my agents (pickable; a greyed check when already in), then the other members' agents already in the chat (greyed, `@handle · run by @owner`, not pickable: only their owner adds or removes them) — then **People** (`add-members-agents-section`, `group-agent-<id>`, `group-person-<id>`); servers' and secrets' pickers list people only | "AGENTS" then "PEOPLE" in the same order (`NewGroupView`) |
+| Dead code gone | `Shell.add_agent_open`, `people::add_agent_picker`, `ClientCommand::AddAgent` (the picker's batch `AddMembers` carries agents; the `ARBOS_RIG_ADD_AGENT` recording hook goes through it), `groups::project_color` | — |
+
+Pinned by `profiles::group::render_tests` (the real Shell, headless: every kind's
+pane — people group, shared project, server, person from a DM and from a group —
+draws one Add members row and neither `profile-add-agent` nor `empty-add-agent`;
+the Description row sits under Add members in the same card and vanishes when
+blank; Add members opens the picker aimed at the group with the Agents section
+above my agents, the others' agents after mine, people below) and
+`profiles::group::tests` (which description makes a row).

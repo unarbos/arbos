@@ -128,6 +128,10 @@ pub struct Project {
     /// chat ([feedback blocked-state-mac-2026-10-26]): their rows are hidden for me alone.
     #[serde(default)]
     pub blocked_senders: Vec<String>,
+    /// People chat: my membership role on the relay (`me.role`: `owner`, `admin` or
+    /// `member`); `None` when the relay did not say (fixture, older cache).
+    #[serde(default)]
+    pub my_role: Option<String>,
 }
 
 /// One row of an agent's "Who may message X" card (`message_grants` on the project).
@@ -210,6 +214,20 @@ impl Project {
     /// A people group chat (several humans, no project).
     pub fn is_people_group(&self) -> bool {
         self.kind == SpaceKind::Group
+    }
+
+    /// May I change this group's name, picture and description? The owner and admins
+    /// only — the relay refuses everyone else (`PATCH /chats/{id}` 403 since
+    /// 2026-10-27, after members renamed Arbonites), so the controls hide for them.
+    /// Without a role from the relay only the owner (by handle) counts.
+    pub fn may_edit_group_settings(&self, me_handle: &str) -> bool {
+        if !self.is_people_group() {
+            return false;
+        }
+        match self.my_role.as_deref() {
+            Some(role) => role == "owner" || role == "admin",
+            None => self.owner_handle.as_deref() == Some(me_handle),
+        }
     }
 
     /// Shown as a group page: a people group or a project with other humans in it.
@@ -4160,6 +4178,52 @@ mod add_members_tests {
         let plan = add_members_plan(&g, "unarbos", &[person("gh_1", "allan")], &[]);
         assert_eq!(plan.chat_id, "chat_testing");
         assert!(plan.handles.is_empty() && plan.agent_ids.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod group_settings_permission_tests {
+    //! The group pane's edit controls (picture crayon, inline name) follow the relay's
+    //! rule: owner and admins only ([feedback group-settings-permissions-2026-10-27]).
+
+    use super::*;
+
+    fn group(my_role: Option<&str>, owner: &str) -> Project {
+        Project {
+            id: "g".into(),
+            kind: SpaceKind::Group,
+            owner_handle: Some(owner.into()),
+            my_role: my_role.map(str::to_owned),
+            ..Project::default()
+        }
+    }
+
+    #[test]
+    fn owner_and_admin_edit_members_do_not() {
+        assert!(group(Some("owner"), "me").may_edit_group_settings("me"));
+        assert!(group(Some("admin"), "alice").may_edit_group_settings("me"));
+        assert!(!group(Some("member"), "alice").may_edit_group_settings("me"));
+        // The relay's role wins over the handle match.
+        assert!(!group(Some("member"), "me").may_edit_group_settings("me"));
+    }
+
+    #[test]
+    fn without_a_role_only_the_owner_by_handle_edits() {
+        assert!(group(None, "me").may_edit_group_settings("me"));
+        assert!(!group(None, "alice").may_edit_group_settings("me"));
+        let mut unknown_owner = group(None, "alice");
+        unknown_owner.owner_handle = None;
+        assert!(!unknown_owner.may_edit_group_settings("me"));
+    }
+
+    #[test]
+    fn dms_and_projects_have_no_group_settings() {
+        let mut dm = group(Some("owner"), "me");
+        dm.kind = SpaceKind::Dm;
+        assert!(!dm.may_edit_group_settings("me"));
+        let mut project = group(Some("owner"), "me");
+        project.kind = SpaceKind::Project;
+        assert!(!project.may_edit_group_settings("me"));
     }
 }
 

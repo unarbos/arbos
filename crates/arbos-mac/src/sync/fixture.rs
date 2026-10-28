@@ -1086,7 +1086,6 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::StartDm { .. }
         | ClientCommand::CreatePeopleGroup { .. }
         | ClientCommand::SetTyping { .. }
-        | ClientCommand::AddAgent { .. }
         | ClientCommand::RemoveAgent { .. }
         | ClientCommand::AddMembers { .. }
         | ClientCommand::RemoveMember { .. }
@@ -1896,6 +1895,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 avatar_version: 0,
                 message_grants: Vec::new(),
                 blocked_senders: Vec::new(),
+                my_role: None,
             });
             if let Some(url) = &image_url {
                 emit_avatar(shared, url);
@@ -5045,6 +5045,7 @@ fn seed_projects() -> Vec<Project> {
             avatar_version: 0,
             message_grants: Vec::new(),
             blocked_senders: Vec::new(),
+            my_role: None,
         },
         Project {
             id: PROJECT_COMMS.into(),
@@ -5082,6 +5083,7 @@ fn seed_projects() -> Vec<Project> {
             avatar_version: 0,
             message_grants: Vec::new(),
             blocked_senders: Vec::new(),
+            my_role: None,
         },
         Project {
             id: PROJECT_ARBOS.into(),
@@ -5119,6 +5121,7 @@ fn seed_projects() -> Vec<Project> {
             avatar_version: 0,
             message_grants: Vec::new(),
             blocked_senders: Vec::new(),
+            my_role: None,
         },
     ]
 }
@@ -6418,6 +6421,7 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
         avatar_version: 0,
         message_grants: Vec::new(),
         blocked_senders: Vec::new(),
+        my_role: None,
     }
 }
 
@@ -6483,6 +6487,20 @@ fn launch_week() -> Project {
     space.icon = "L".into();
     space.people = members;
     space.owner_handle = Some(ME_HANDLE.into());
+    space.my_role = Some("owner".into());
+    // `ARBOS_FIXTURE_GROUP_ROLE=member|admin` (screenshot rig, [feedback
+    // group-settings-mac-2026-10-27]): I am that in "Launch week" and Sam owns it, so the
+    // pane can be shot as a plain member (no crayon, no name field) without a second account.
+    if let Ok(role) = std::env::var("ARBOS_FIXTURE_GROUP_ROLE") {
+        let role = role.trim().to_lowercase();
+        if role == "member" || role == "admin" {
+            if let Some(sam) = space.people.first_mut() {
+                sam.role = "owner".into();
+                space.owner_handle = Some(sam.handle.clone());
+            }
+            space.my_role = Some(role);
+        }
+    }
     space
 }
 
@@ -6528,6 +6546,7 @@ fn seed_people_projects() -> Vec<Project> {
             avatar_version: 0,
             message_grants: Vec::new(),
             blocked_senders: Vec::new(),
+            my_role: None,
         },
     ]
 }
@@ -7426,6 +7445,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             space.people = members;
             space.pending = space.people.iter().any(|p| p.status == "invited");
             space.owner_handle = Some(ME_HANDLE.into());
+            space.my_role = Some("owner".into());
             shared.projects.lock().unwrap().push(space);
             shared.chats.lock().unwrap().push(Chat {
                 id: id.clone(),
@@ -7450,51 +7470,6 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             true
         }
         ClientCommand::SetTyping { .. } => true,
-        ClientCommand::AddAgent {
-            chat_id,
-            project_id,
-        } => {
-            let agent = {
-                let projects = shared.projects.lock().unwrap();
-                projects
-                    .iter()
-                    .find(|p| p.id == *project_id && !p.is_people())
-                    .map(|p| AgentMember {
-                        project_id: p.id.clone(),
-                        name: p.name.clone(),
-                        icon: p.icon.clone(),
-                        color: p.color.clone(),
-                        handle: Project::mention_slug(&p.name),
-                        owner_id: ME_ID.into(),
-                        owner_handle: ME_HANDLE.into(),
-                        reply_policy: ReplyPolicy::Mention,
-                        avatar: p.avatar.clone(),
-                        avatar_color: p.avatar_color.clone(),
-                        avatar_color_index: p.avatar_color_index,
-                        avatar_leaf: p.avatar_leaf,
-                        avatar_leaf_color: p.avatar_leaf_color,
-                        image_url: None,
-                        avatar_version: 0,
-                        description: None,
-                        model: None,
-                        owner: None,
-                    })
-            };
-            if let Some(agent) = agent {
-                let mut projects = shared.projects.lock().unwrap();
-                if let Some(space) = projects.iter_mut().find(|p| p.id == *chat_id) {
-                    if !space
-                        .agents
-                        .iter()
-                        .any(|a| a.project_id == agent.project_id)
-                    {
-                        space.agents.push(agent);
-                    }
-                }
-            }
-            emit_projects(shared);
-            true
-        }
         ClientCommand::RemoveAgent {
             chat_id,
             project_id,
