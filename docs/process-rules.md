@@ -82,6 +82,23 @@ and a 250 GB volume (five leftover 13 GB test-simulator clones took it from 60 t
   equal stamps the caller's order holds (chat roster, my records, other rosters). While a picture
   loads, the disc is the neutral initial — never an older picture, never the leaf.
 
+## No Simulator.app on the gate Mac (2026-10-28 21:40 UTC)
+
+Xcode 27 on the shared EC2 Mac ships **no Simulator.app** (nothing under `Contents/Developer/Applications`,
+nothing elsewhere on the box). Rig steps that `open -a Simulator` and then tap with `cgclick` can never work
+there — eight such runs from several owners failed with "no Simulator window" after holding a heavy slot. The
+runner's PATH shim (`/Users/Shared/arbos-run/axbin/open`) now fails such a call fast (exit 66) with this note.
+
+Working path for iPhone shots and flows:
+
+- boot the named simulator you own (`xcrun simctl boot <udid>`), install the build (`simctl install`), and
+  drive the UI from an **XCUITest** target (`xcodebuild test-without-building -xctestrun <…> -destination
+  "id=<udid>"`) — taps, swipes and typing go through XCUITest, not the window;
+- capture with `xcrun simctl io <udid> screenshot <file.png>` (or `recordVideo`), which needs no window;
+- shut the simulator down when done (`simctl shutdown <udid>`), as the heavy-slot rules already require.
+
+Do not install Simulator.app or any other system-wide tool on the shared Mac without the coordinator's go-ahead.
+
 ## Rigs take a heavy slot on the shared EC2 Mac (2026-10-26 20:30 UTC)
 
 The Mac's heavy-job cap (`/usr/local/bin/arbos-heavy-slot.sh`, versioned at `scripts/runner/arbos-heavy-slot.sh`;
