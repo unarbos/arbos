@@ -81,6 +81,18 @@ pub async fn write_doc(
     chat_id: &str,
     edit: impl FnOnce(&ChatDoc) -> anyhow::Result<()>,
 ) -> anyhow::Result<i64> {
+    write_doc_as(state, project_id, chat_id, RELAY_DEVICE, edit).await
+}
+
+/// [`write_doc`] signed as `device` — the relay writing **for** a member it hosts (an outside
+/// agent, `outside::<project>`), so the row says whose words these are.
+pub async fn write_doc_as(
+    state: &AppState,
+    project_id: Option<&str>,
+    chat_id: &str,
+    device: &str,
+    edit: impl FnOnce(&ChatDoc) -> anyhow::Result<()>,
+) -> anyhow::Result<i64> {
     let room_name = wire::room_name(project_id.unwrap_or(PEOPLE_PROJECT), chat_id);
     let doc = load_doc(state, chat_id, project_id)?.unwrap_or_else(|| ChatDoc::new(None, false));
     let base = doc.oplog_vv();
@@ -88,13 +100,11 @@ pub async fn write_doc(
     let bytes = doc.export_updates_since(&base);
     anyhow::ensure!(!bytes.is_empty(), "the edit produced no update");
     let batch_id = ulid();
-    let (seq, dup) = state
-        .db
-        .append_row(&room_name, RELAY_DEVICE, &batch_id, &bytes)?;
+    let (seq, dup) = state.db.append_row(&room_name, device, &batch_id, &bytes)?;
     if !dup {
         let frame = Frame::new(
             FrameType::Row,
-            json!({ "seq": seq, "device": RELAY_DEVICE, "batchId": batch_id }),
+            json!({ "seq": seq, "device": device, "batchId": batch_id }),
             Bytes::from(bytes),
         )
         .encode();
