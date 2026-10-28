@@ -865,7 +865,10 @@ enum MediaFetch {
         guard let ref = item.blobRef, !ref.hasPrefix("local:") else { return nil }
         #if DEBUG
         if model.isFixture, ref.hasPrefix("fixture-") {
-            return FixtureMedia.bytes(ref: ref, item: item)
+            // Off the main actor like a network fetch, so the rig's open and scroll numbers
+            // carry the decode path's cost, not the fixture painter's.
+            let fixtureItem = item
+            return await Task.detached(priority: .userInitiated) { FixtureMedia.bytes(ref: ref, item: fixtureItem) }.value
         }
         #endif
         guard let url = model.blobURL(projectId: item.slot, key: ref) else { return nil }

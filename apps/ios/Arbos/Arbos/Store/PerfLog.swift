@@ -113,6 +113,8 @@ final class PerfLog {
 enum PerfDriveProbe {
     /// Main thread only (the reporter writes, the driver reads).
     nonisolated(unsafe) static var lastScrollGeometry = Date.distantPast
+    /// The `switch` driver runs once per process (every chat it opens would start it again).
+    nonisolated(unsafe) static var switchStarted = false
 }
 
 /// Body-evaluation and work counters, drained into each 2 s perf line
