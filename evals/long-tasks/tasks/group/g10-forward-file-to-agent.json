@@ -3,7 +3,7 @@
  "lane": "a",
  "category": "group",
  "title": "Hand a file's content to another agent and relay its check (agent-to-agent with payload)",
- "regression": "agent-to-agent send carrying a payload; the receiving agent's confirmation is relayed with the right number; run 10a: the agent sent and promised to relay later instead of waiting (same shape as g2/g4) — turn 2 added",
+ "regression": "agent-to-agent send carrying a payload; the receiving agent's confirmation is relayed with the right number; run 10a: the agent sent and promised to relay later instead of waiting (same shape as g2/g4) — turn 2 added; run 10: relayed on turn 2 ('lane-b said it received 7 lines, last PN-9999')",
  "turns": [
   {
    "prompt": "{D}/manifest.txt has a list of 7 part numbers. Send its full content to lane-b, ask lane-b how many lines it received and what the last part number is, and relay lane-b's answer to me.",

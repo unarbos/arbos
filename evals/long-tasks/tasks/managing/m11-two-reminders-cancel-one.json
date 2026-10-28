@@ -24,5 +24,6 @@
    "verify": "f={D}/remind.log; p=0; b=0; if [ -f $f ]; then p=$(grep -c 'WATER PLANTS' $f); b=$(grep -c 'CALL BANK' $f); fi; echo \"SHOW plants=$p bank=$b\"; if [ \"$p\" -eq 0 ] && [ \"$b\" -ge 1 ]; then echo PASS; else echo FAIL: plants=$p bank=$b; fi"
   }
  ],
- "cleanup_routines": true
+ "cleanup_routines": true,
+ "regression": "#2146 (reminders written to the previous task's folder; the explicit path must win)"
 }
