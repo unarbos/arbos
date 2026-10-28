@@ -464,22 +464,128 @@ struct ChatSession: View {
         searchFocused = true
     }
 
-    /// Avatar for a sender in the Search-in-chat person Menu.
+    /// Search-in-chat bar with sender Menu / pin chip / offer
+    /// ([feedback app-01M61GXS849K96HRER4YD0ZZ6R]). Own builder so `sessionRoot`
+    /// type-checks in reasonable time.
     @ViewBuilder
-    private func searchSenderAvatar(_ sender: ChatSearchFilter.Sender, size: CGFloat) -> some View {
-        if let people, let m = people.members.first(where: { $0.member == sender.key }) {
-            if m.isAgent {
-                AgentAvatar(project: model.agent(member: m, chatId: chatId), theme: theme, size: size, still: true)
-            } else {
-                PersonAvatar(url: m.avatarUrl, handle: m.handle, size: size, name: m.name, id: m.id, colorIndex: m.avatarColorIndex)
+    private var chatSearchBar: some View {
+        VStack(spacing: 6) {
+            chatSearchBarField
+            if let offered = searchOfferedSender {
+                chatSearchOfferChip(offered)
             }
-        } else if sender.key == model.myUserId, let u = model.user {
-            PersonAvatar(url: u.avatarUrl, handle: u.login, size: size, name: u.name, id: u.id, colorIndex: u.avatarColorIndexEffective)
-        } else if sender.key.hasPrefix("agent:"), let p = model.project(String(sender.key.dropFirst(6))) {
-            AgentAvatar(project: p, theme: theme, size: size, still: true)
-        } else {
-            PersonAvatar(url: nil, handle: sender.handle.isEmpty ? sender.name : sender.handle, size: size, name: sender.name, id: sender.key)
         }
+        .padding(.horizontal, Controls.inset)
+    }
+
+    /// Magnifier-side person Menu, optional pinned chip, keyword field, close.
+    private var chatSearchBarField: some View {
+        HStack(spacing: 8) {
+            chatSearchSenderMenu
+            if let pinned = searchPinnedSender {
+                chatSearchPinnedChip(pinned)
+            }
+            ChatSearchTextField(
+                text: $searchText,
+                isFocused: Binding(
+                    get: { searchFocused },
+                    set: { searchFocused = $0 }),
+                placeholder: "Search in chat",
+                placeholderColor: UIColor(theme.placeholder),
+                textColor: UIColor(theme.text),
+                font: UIFont.systemFont(ofSize: Theme.body * theme.textScale),
+                onDeleteBackwardEmpty: {
+                    if searchText.isEmpty { unpinSearchSender() }
+                })
+            .frame(maxWidth: .infinity, minHeight: 22)
+            Button { closeSearch() } label: {
+                Image(systemName: "xmark.circle.fill").foregroundStyle(theme.muted)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Close search")
+        }
+        .padding(.horizontal, Controls.textInset).frame(height: Controls.height)
+        .background {
+            HeaderGlassBackground(
+                shape: Capsule(),
+                material: ChatHeaderGlass.searchBarMaterial(surface: theme.surface),
+                tinted: true)
+        }
+    }
+
+    /// Person button → Menu of senders (avatar, name, @handle).
+    private var chatSearchSenderMenu: some View {
+        Menu {
+            ForEach(searchSenders) { sender in
+                Button {
+                    pinSearchSender(sender)
+                } label: {
+                    Label(chatSearchSenderTitle(sender), systemImage: sender.key.hasPrefix("agent:") ? "cpu" : "person.crop.circle")
+                }
+            }
+        } label: {
+            Image(systemName: "person.crop.circle")
+                .font(.system(size: Controls.glyph, weight: .medium))
+                .foregroundStyle(searchPinnedSender != nil ? theme.accent : theme.muted)
+        }
+        .accessibilityLabel("Filter by sender")
+    }
+
+    private func chatSearchSenderTitle(_ sender: ChatSearchFilter.Sender) -> String {
+        if sender.handle.isEmpty { return sender.name }
+        return "\(sender.name)  @\(sender.handle)"
+    }
+
+    /// Accent chip at the start of the field with ✕ to unpin.
+    private func chatSearchPinnedChip(_ pinned: ChatSearchFilter.Sender) -> some View {
+        HStack(spacing: 4) {
+            Text("From \(pinned.name)")
+                .font(theme.font(12.5, weight: .medium))
+                .foregroundStyle(theme.accent)
+                .lineLimit(1)
+            Button(action: unpinSearchSender) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(theme.accent)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Clear sender filter")
+        }
+        .padding(.leading, 8).padding(.trailing, 6).padding(.vertical, 4)
+        .background(Capsule().fill(theme.accent.opacity(0.18)))
+    }
+
+    /// Offered sender chip under the field while a typed name / @handle matches.
+    private func chatSearchOfferChip(_ offered: ChatSearchFilter.Sender) -> some View {
+        Button {
+            pinSearchSender(offered)
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "person.crop.circle.fill")
+                    .font(.system(size: 14))
+                    .foregroundStyle(theme.muted)
+                Text("From \(offered.name)")
+                    .font(theme.font(12.5, weight: .medium))
+                    .foregroundStyle(theme.text)
+                    .lineLimit(1)
+                if !offered.handle.isEmpty {
+                    Text("@\(offered.handle)")
+                        .font(theme.font(12.5))
+                        .foregroundStyle(theme.muted)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            .background(
+                Capsule()
+                    .fill(theme.text.opacity(0.08))
+                    .overlay(Capsule().strokeBorder(theme.separator, lineWidth: 1))
+            )
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, Controls.textInset)
+        .accessibilityLabel("Filter from \(offered.name)")
     }
 
     /// Hardware-keyboard keys for the bar ([feedback iphone-chat-search-cmd-f-2026-10-26]).
@@ -951,108 +1057,7 @@ struct ChatSession: View {
                 // the pushes refused for this chat, or the machine in error. One element.
                 chatNote.padding(.horizontal, 16)
                 if let people, showsMemberChips { memberChips(people).padding(.horizontal, 16) }
-                if showSearch {
-                    // Sender chip + keyword ([feedback app-01M61GXS849K96HRER4YD0ZZ6R]):
-                    // person button → Menu of senders; pinned accent chip; field; offer under.
-                    VStack(spacing: 6) {
-                        HStack(spacing: 8) {
-                            Menu {
-                                ForEach(searchSenders) { sender in
-                                    Button {
-                                        pinSearchSender(sender)
-                                    } label: {
-                                        Label {
-                                            if sender.handle.isEmpty {
-                                                Text(sender.name)
-                                            } else {
-                                                Text("\(sender.name)  @\(sender.handle)")
-                                            }
-                                        } icon: {
-                                            searchSenderAvatar(sender, size: 22)
-                                        }
-                                    }
-                                }
-                            } label: {
-                                Image(systemName: "person.crop.circle")
-                                    .font(.system(size: Controls.glyph, weight: .medium))
-                                    .foregroundStyle(searchPinnedSender != nil ? theme.accent : theme.muted)
-                            }
-                            .accessibilityLabel("Filter by sender")
-                            if let pinned = searchPinnedSender {
-                                HStack(spacing: 4) {
-                                    Text("From \(pinned.name)")
-                                        .font(theme.font(12.5, weight: .medium))
-                                        .foregroundStyle(theme.accent)
-                                        .lineLimit(1)
-                                    Button(action: unpinSearchSender) {
-                                        Image(systemName: "xmark")
-                                            .font(.system(size: 9, weight: .bold))
-                                            .foregroundStyle(theme.accent)
-                                    }
-                                    .buttonStyle(.plain)
-                                    .accessibilityLabel("Clear sender filter")
-                                }
-                                .padding(.leading, 8).padding(.trailing, 6).padding(.vertical, 4)
-                                .background(Capsule().fill(theme.accent.opacity(0.18)))
-                            }
-                            ChatSearchTextField(
-                                text: $searchText,
-                                focused: $searchFocused,
-                                placeholder: "Search in chat",
-                                placeholderColor: UIColor(theme.placeholder),
-                                textColor: UIColor(theme.text),
-                                font: UIFont.systemFont(ofSize: Theme.body * theme.textScale),
-                                onDeleteBackwardEmpty: {
-                                    if searchText.isEmpty { unpinSearchSender() }
-                                })
-                            .frame(maxWidth: .infinity, minHeight: 22)
-                            Button { closeSearch() } label: {
-                                Image(systemName: "xmark.circle.fill").foregroundStyle(theme.muted)
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Close search")
-                        }
-                        .padding(.horizontal, Controls.textInset).frame(height: Controls.height)
-                        .background {
-                            HeaderGlassBackground(
-                                shape: Capsule(),
-                                material: ChatHeaderGlass.searchBarMaterial(surface: theme.surface),
-                                tinted: true)
-                        }
-                        if let offered = searchOfferedSender {
-                            Button {
-                                pinSearchSender(offered)
-                            } label: {
-                                HStack(spacing: 6) {
-                                    Image(systemName: "person.crop.circle.fill")
-                                        .font(.system(size: 14))
-                                        .foregroundStyle(theme.muted)
-                                    Text("From \(offered.name)")
-                                        .font(theme.font(12.5, weight: .medium))
-                                        .foregroundStyle(theme.text)
-                                        .lineLimit(1)
-                                    if !offered.handle.isEmpty {
-                                        Text("@\(offered.handle)")
-                                            .font(theme.font(12.5))
-                                            .foregroundStyle(theme.muted)
-                                            .lineLimit(1)
-                                    }
-                                    Spacer(minLength: 0)
-                                }
-                                .padding(.horizontal, 12).padding(.vertical, 6)
-                                .background(
-                                    Capsule()
-                                        .fill(theme.text.opacity(0.08))
-                                        .overlay(Capsule().strokeBorder(theme.separator, lineWidth: 1))
-                                )
-                            }
-                            .buttonStyle(.plain)
-                            .padding(.horizontal, Controls.textInset)
-                            .accessibilityLabel("Filter from \(offered.name)")
-                        }
-                    }
-                    .padding(.horizontal, Controls.inset)
-                }
+                if showSearch { chatSearchBar }
                 if hasInCallBar, let c = calls.call {
                     InCallOverlay(expected: model.expectedCallPeople(c), inline: true)
                         .frame(height: 48)
@@ -4081,7 +4086,7 @@ private struct ComposerField: View {
 /// ([feedback app-01M61GXS849K96HRER4YD0ZZ6R]; Mac `chat_search_unpin_sender`).
 private struct ChatSearchTextField: UIViewRepresentable {
     @Binding var text: String
-    var focused: FocusState<Bool>.Binding
+    @Binding var isFocused: Bool
     var placeholder: String
     var placeholderColor: UIColor
     var textColor: UIColor
@@ -4119,7 +4124,7 @@ private struct ChatSearchTextField: UIViewRepresentable {
             guard let uiView, (uiView.text ?? "").isEmpty else { return }
             context.coordinator.parent.onDeleteBackwardEmpty()
         }
-        if focused.wrappedValue {
+        if isFocused {
             if !uiView.isFirstResponder { uiView.becomeFirstResponder() }
         } else if uiView.isFirstResponder {
             uiView.resignFirstResponder()
@@ -4136,11 +4141,11 @@ private struct ChatSearchTextField: UIViewRepresentable {
         }
 
         func textFieldDidBeginEditing(_ textField: UITextField) {
-            if !parent.focused.wrappedValue { parent.focused.wrappedValue = true }
+            if !parent.isFocused { parent.isFocused = true }
         }
 
         func textFieldDidEndEditing(_ textField: UITextField) {
-            if parent.focused.wrappedValue { parent.focused.wrappedValue = false }
+            if parent.isFocused { parent.isFocused = false }
         }
 
         func textFieldShouldReturn(_ textField: UITextField) -> Bool {
