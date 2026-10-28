@@ -33,8 +33,8 @@ use crate::model::{
     Voice,
 };
 use crate::model::{
-    Attachment, BoxReport, BoxState, ChannelsView, Chat, ConnectorsView, DeviceView, Effort, Id,
-    Link, LinkState, LocalView, Machine, Message, NewSecret, Project, ProjectDocView,
+    Attachment, BoxReport, BoxState, ChannelsView, ChartBody, Chat, ConnectorsView, DeviceView,
+    Effort, Id, Link, LinkState, LocalView, Machine, Message, NewSecret, Project, ProjectDocView,
     ProjectSecrets, Routine, RoutineRun, RoutineTrigger, SecretsView, Skill,
 };
 
@@ -181,6 +181,17 @@ pub enum SyncEvent {
     CallStarted {
         call: Call,
         sender: Sender,
+    },
+    /// A message in a server channel (`channel_message` push from the relay's Matrix push
+    /// gateway): the banner source for servers, which never pass through the chat docs.
+    ChannelMessage {
+        server_id: String,
+        server_name: String,
+        channel_id: String,
+        channel_name: String,
+        room_id: String,
+        sender: Sender,
+        text: Option<String>,
     },
     /// A call ended (push, or my `leave` answered `ended: true`).
     CallEnded(CallEnded),
@@ -975,13 +986,20 @@ pub enum ClientCommand {
         attachment: Attachment,
         text: String,
     },
-    /// Bubble menu → Forward: write `text` as a new user row in `chat_id`
-    /// carrying `forwardedFrom: <name>` (the bubble's "Forwarded from" header).
-    /// `message_id` is the optimistic row's id.
-    ForwardText {
+    /// Bubble menu → Forward: write the picked message again as a new user row
+    /// in `chat_id` — its text, every attachment (each blob copied from
+    /// `from_slot` into the destination's slot, so the target chat's members can
+    /// read it) and every chart part with its fallback picture — carrying
+    /// `forwardedFrom: <name>` (the bubble's "Forwarded from" header).
+    /// `message_id` is the optimistic row's id
+    /// ([feedback forward-attachments-mac-2026-10-27]).
+    ForwardMessage {
         chat_id: Id,
         message_id: Id,
+        from_slot: Id,
         text: String,
+        attachments: Vec<Attachment>,
+        charts: Vec<ChartBody>,
         forwarded_from: String,
     },
     /// Settings → Connectors opened or asked for a refresh.
