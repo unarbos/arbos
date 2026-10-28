@@ -11,11 +11,15 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
-/// Long-press → Forward payload for the chat picker sheet.
+/// Long-press → Forward payload for the chat picker sheet: the message (its text, its
+/// pictures / files / videos and its charts all travel) and who wrote it
+/// ([feedback forward-attachments-ios-2026-10-27]).
 private struct PendingForward: Identifiable, Equatable {
     let id = UUID()
-    let text: String
+    let message: Message
     let from: String
+    /// The blob slot the message's attachments live in (copied from there).
+    let slot: String
 }
 
 /// Long-press → View thread payload for the reply-chain sheet.
@@ -1035,9 +1039,9 @@ struct ChatSession: View {
             AgentEditSheet(projectId: projectId).environmentObject(model).environment(\.theme, theme)
         }
         .sheet(item: $pendingForward) { pending in
-            ForwardSheet(fromName: pending.from) { target in
+            ForwardSheet(fromName: pending.from, attachmentNote: pending.message.body?.hasMedia == true) { target in
                 pendingForward = nil
-                model.forwardText(pending.text, from: pending.from, to: target)
+                model.forwardMessage(pending.message, from: pending.from, slot: pending.slot, to: target)
                 model.notice = Notice(text: "Forwarded to \(target.title)")
             }
             .environmentObject(model)
@@ -1243,6 +1247,25 @@ struct ChatSession: View {
                         startCall(.voice)
                         #endif
                     case "recording": recorder.start()
+                    // `copy[:<n>]` (Debug, [feedback copy-image-messages-ios-2026-10-27] rig): Copy of
+                    // the n-th newest message row (0 = newest) through the menu's own path, the
+                    // pasteboard printed to the console, then the composer's paste 2 s later.
+                    case let s where s.hasPrefix("copy"):
+                        #if DEBUG
+                        let n = Int(s.split(separator: ":").dropFirst().first ?? "0") ?? 0
+                        let candidates = rows.filter { isMessageRow($0) }
+                        if n < candidates.count {
+                            let row = candidates[candidates.count - 1 - n]
+                            runMessageMenu(.copy, row: row)
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                                MessagePasteboard.debugDump()
+                                let media = MessagePasteboard.pendingAttachments()
+                                if !media.isEmpty { pending.append(contentsOf: media); composerFocused = true }
+                                if let words = UIPasteboard.general.string { composerDraft.text = words }
+                                print("rig copy: composer staged \(media.count) attachment(s), draft \"\(composerDraft.text)\"")
+                            }
+                        }
+                        #endif
                     case "scrollup":
                         if let first = windowedRows.first { withAnimation { scroller?.scrollTo(first.id, anchor: .top) } }
                     case "media", "media-forward", "media-file":
@@ -2161,7 +2184,8 @@ struct ChatSession: View {
         return MessageDeleteRule.mayDelete(sender: m.sender, meId: meId, moderates: moderates, agentOwnerIds: agentOwners)
     }
 
-    /// The long-press menu's actions (`MessageMenu`): Copy the text, Reply
+    /// The long-press menu's actions (`MessageMenu`): Copy the message (text and
+    /// pictures), Reply
     /// (in a people chat the agent that wrote it becomes the recipient),
     /// View thread (when the message has replies), Forward to another chat,
     /// Reply in DM (open a private chat with the human who wrote it), Edit
@@ -2169,7 +2193,12 @@ struct ChatSession: View {
     private func runMessageMenu(_ item: MessageMenuItem, row: Row) {
         switch item {
         case .copy:
-            UIPasteboard.general.string = m_text(row)
+            // The whole message — words and pictures / files — through the one copy path
+            // ([feedback copy-image-messages-ios-2026-10-27]: the text alone went out before,
+            // and a picture message copied nothing).
+            guard let m = messageById[row.messageId] else { return }
+            let slot = isPeople ? "\(peopleSlot):\(chatId)" : isChannel ? "\(channelSlot):\(chatId)" : projectId
+            Task { await model.copyMessage(m, slot: slot) }
         case .reply:
             beginReply(to: row)
         case .viewThread:
@@ -2217,16 +2246,26 @@ struct ChatSession: View {
     }
 
 
-    /// Long-press → Forward: open the chat picker with this row's text.
+    /// Long-press → Forward: open the chat picker for this row's message — words,
+    /// pictures, files, charts, any of them is enough
+    /// ([feedback forward-attachments-ios-2026-10-27]: only the words used to travel).
     private func beginForward(_ row: Row) {
         guard let m = messageById[row.messageId] else { return }
-        let text = m.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        // "Forwarded from <name>" names me by my display name, not "You".
-        let from = m.role == .user && m.senderName == nil && (m.sender == "user" || m.sender == model.myUserId)
-            ? (model.user.map { me in me.name.flatMap { $0.isEmpty ? nil : $0 } ?? me.login } ?? "You")
-            : MediaAlbum.senderName(m) { model.project($0)?.name }
-        pendingForward = PendingForward(text: text, from: from)
+        guard m.body != nil else {
+            if m.hasUploadingAttachment {
+                model.notice = Notice(text: "Still uploading — try again in a moment")
+            }
+            return
+        }
+        // "Forwarded from <name>" names me by my display name, not "You"; forwarding a
+        // forwarded message keeps the original author (Telegram), not the last forwarder.
+        let original = (m.forwardedFrom?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
+        let from = original
+            ?? (m.role == .user && m.senderName == nil && (m.sender == "user" || m.sender == model.myUserId)
+                ? (model.user.map { me in me.name.flatMap { $0.isEmpty ? nil : $0 } ?? me.login } ?? "You")
+                : MediaAlbum.senderName(m) { model.project($0)?.name })
+        let slot = isPeople ? "\(peopleSlot):\(chatId)" : isChannel ? "\(channelSlot):\(chatId)" : projectId
+        pendingForward = PendingForward(message: m, from: from, slot: slot)
     }
 
     /// Reply to this row: composer preview + focus (people chats also address the agent).
@@ -2735,12 +2774,8 @@ struct ChatSession: View {
             cancelDistance: Self.memoCancelDistance,
             prompt: { composerPrompt(for: $0) },
             onDeleteBackwardEmpty: removeLastPending,
-            onPasteImage: { data, mime, ext in
-                // Keep GIF/WebP bytes and mime; do not re-encode to PNG/JPEG.
-                let stamp = ChatView.photoStamp.string(from: Date())
-                pending.append(.init(name: "Pasted image \(stamp).\(ext)", mime: mime, data: data))
-                composerFocused = true
-            },
+            // Pasted pictures / files arrive through `onPasteMedia` below (every item,
+            // native type kept — GIF/WebP bytes included); no second handler here.
             onCancelRecording: cancelMemoRecording,
             onMicDrag: { value in
                 if !memoHoldActive {
@@ -2810,6 +2845,12 @@ struct ChatSession: View {
                 } else if !isChannel {
                     requestCall(.voice)
                 }
+            },
+            onPasteMedia: { media in
+                // A copied picture / file pastes back as an attachment chip
+                // ([feedback copy-image-messages-ios-2026-10-27]).
+                pending.append(contentsOf: media)
+                composerFocused = true
             }
         )
         // Hold released before permission returned: finish once recording starts.
@@ -3599,6 +3640,8 @@ private struct ComposerField: View {
     let onMicDrag: (DragGesture.Value) -> Void
     let onMicEnd: (DragGesture.Value) -> Void
     let onPrimary: () -> Void
+    /// Pictures / files pasted into the field ([feedback copy-image-messages-ios-2026-10-27]).
+    var onPasteMedia: (([AppModel.PendingAttachment]) -> Void)? = nil
 
     private var canSend: Bool {
         !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasPending
@@ -3707,6 +3750,7 @@ private struct ComposerField: View {
                 MentionTextView(text: $draft.text, mentions: $draft.mentions, caret: $draft.caret, isFocused: $focus,
                                 placeholder: prompt(draft.text), theme: theme,
                                 agentProject: { model.agent(member: $0, chatId: chatId) },
+                                onPasteMedia: onPasteMedia,
                                 onDeleteBackwardEmpty: onDeleteBackwardEmpty,
                                 onPasteImage: onPasteImage)
                     .fixedSize(horizontal: false, vertical: true)

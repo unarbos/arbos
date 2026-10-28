@@ -9,7 +9,7 @@ import UIKit
 // viewer for every chat kind, opened from an image / file bubble or a Library
 // tile. Black backdrop; the album (the chat's pictures and videos in order)
 // pages with a swipe; swipe down, ×, or the Close pill closes. Caption
-// top-centre (who, when), counter top-right, Close · Download · Forward pills
+// top-centre (who, when), counter top-right, Close · Copy · Download · Forward pills
 // at the bottom ([feedback ABUo19aGqPpSnnw4Ha6F6H0] — the top × was easy to
 // miss / not hittable over the paged image; Close matches Mac). Video plays
 // inline after Play; a file shows its tile with Open (Quick Look). Forward is a
@@ -300,6 +300,11 @@ struct MediaViewer: View {
                 pill("Close", system: "xmark") { close() }
                 // A profile picture is not a chat attachment: Close only.
                 if item?.pictureURL == nil {
+                    // The picture itself, original bytes under its own type
+                    // ([feedback copy-image-messages-ios-2026-10-27]).
+                    pill("Copy", system: "doc.on.doc") { Task { await copy() } }
+                        .disabled(!canAct || busy)
+                        .opacity(canAct ? 1 : 0.5)
                     pill("Download", system: "arrow.down.to.line") { Task { await download() } }
                         .disabled(!canAct || busy)
                         .opacity(canAct ? 1 : 0.5)
@@ -332,6 +337,21 @@ struct MediaViewer: View {
         Task {
             try? await Task.sleep(nanoseconds: 1_800_000_000)
             if toast == text { toast = nil }
+        }
+    }
+
+    // ----- Copy ---------------------------------------------------------------
+
+    /// The open picture or file on the pasteboard (`AppModel.copyAttachment`).
+    @MainActor
+    private func copy() async {
+        guard let item, canAct else { return }
+        busy = true
+        defer { busy = false }
+        let attachment = Attachment(name: item.name, mime: item.mime, blobRef: item.blobRef,
+                                    kind: item.kind == .image ? "image" : item.kind == .video ? "video" : nil)
+        if await model.copyAttachment(attachment, slot: item.slot) {
+            flash(item.kind == .image ? "Copied the picture" : "Copied \(item.name)")
         }
     }
 
@@ -1107,21 +1127,109 @@ extension AppModel {
         }
     }
 
-    /// Bubble long-press → Forward: send the message's text to `target` as a
-    /// new message (no reply quote — it is a fresh send in that chat) carrying
-    /// `forwardedFrom: by`, so every client draws "Forwarded from <by>" on it
-    /// (feedback app-01M5MXRZ7609S70P9S9P2RZDDF).
-    func forwardText(_ text: String, from by: String, to target: ForwardTarget) {
-        let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !body.isEmpty else { return }
+    /// Bubble long-press → Forward: send the message again to `target` as a new
+    /// message of mine (no reply quote — it is a fresh send in that chat): its
+    /// text, its pictures / files / videos (each blob fetched from `slot` and
+    /// uploaded into the destination's slot, so that chat's members can read it)
+    /// and its charts, all carrying `forwardedFrom: by` so every client draws
+    /// "Forwarded from <by>" on it ([feedback forward-attachments-ios-2026-10-27];
+    /// app-01M5MXRZ7609S70P9S9P2RZDDF sent the words alone).
+    func forwardMessage(_ message: Message, from by: String, slot: String, to target: ForwardTarget) {
+        guard let payload = message.body else { return }
         let name = by.trimmingCharacters(in: .whitespacesAndNewlines)
         let forwardedFrom = name.isEmpty ? nil : name
+        let chatId: Id
+        let targetSlot: String
         switch target.kind {
         case .people(let c):
-            sendPeople(chatId: c.id, text: body, replyTo: nil, forwardedFrom: forwardedFrom)
+            chatId = c.id
+            targetSlot = "\(peopleSlot):\(c.id)"
         case .agent(let p):
             guard let chat = primaryChat(of: p.id) else { return }
-            send(chatId: chat.id, text: body, forwardedFrom: forwardedFrom)
+            chatId = chat.id
+            targetSlot = chat.projectId
         }
+        #if DEBUG
+        if isFixture {
+            // No blob store to copy between: the rows land with the same keys. A chart
+            // travels as its fallback picture here.
+            fixtureAppend(chatId: chatId, text: payload.text,
+                          attachments: payload.attachments + payload.charts.compactMap(\.fallback),
+                          forwardedFrom: forwardedFrom)
+            return
+        }
+        #endif
+        Task { @MainActor in
+            var pending: [PendingAttachment] = []
+            for a in payload.attachments {
+                guard let data = await fetchForForward(a, slot: slot) else { continue }
+                pending.append(PendingAttachment(name: a.name, mime: a.mime, data: data))
+            }
+            // A chart's fallback picture is written as its own part, linked to the chart,
+            // so it is uploaded here rather than through the send's attachment list.
+            var extraParts: [[String: Any]] = []
+            for c in payload.charts {
+                var fallbackRef: String?
+                if let a = c.fallback, let data = await fetchForForward(a, slot: slot) {
+                    do {
+                        fallbackRef = try await uploadBlob(slot: targetSlot, name: a.name, mime: a.mime, data: data)
+                    } catch {
+                        fail("forward the chart's picture", error)
+                    }
+                }
+                extraParts.append(contentsOf: c.forwardParts(fallbackRef: fallbackRef))
+            }
+            guard !payload.text.isEmpty || !pending.isEmpty || !extraParts.isEmpty else {
+                notice = Notice(text: "Couldn't forward the message")
+                return
+            }
+            switch target.kind {
+            case .people(let c):
+                sendPeople(chatId: c.id, text: payload.text, replyTo: nil, attachments: pending,
+                           forwardedFrom: forwardedFrom, extraParts: extraParts)
+            case .agent:
+                send(chatId: chatId, text: payload.text, attachments: pending, forwardedFrom: forwardedFrom,
+                     extraParts: extraParts)
+            }
+        }
+    }
+
+    /// The bytes of one attachment being forwarded, from the source chat's slot; a
+    /// miss is reported and the attachment is left out.
+    private func fetchForForward(_ a: Attachment, slot: String) async -> Data? {
+        guard let ref = a.blobRef, let url = blobURL(projectId: slot, key: ref),
+              let (data, _) = await MediaFetch.data(url, headers: authHeaders) else {
+            notice = Notice(text: "Couldn't forward \(a.name)")
+            return nil
+        }
+        return data
+    }
+}
+
+/// Forward writes a chart again as its own parts ([feedback forward-attachments-ios-2026-10-27]).
+extension ChartBody {
+    /// The doc parts a forwarded chart becomes on the new row: its copied fallback picture
+    /// (when it has one, uploaded under `fallbackRef`) naming the chart as `chartPart`, then
+    /// the `chart` part itself with fresh ids and `fallback` pointing at that picture — the
+    /// shape `post_chart` writes, so a client that draws charts hides the picture and an
+    /// older one shows it. The spec travels as the JSON object it is.
+    func forwardParts(fallbackRef: String?) -> [[String: Any]] {
+        let chartId = newId()
+        var out: [[String: Any]] = []
+        var fallbackId: String?
+        if let a = fallback {
+            let id = newId()
+            var attachment: [String: Any] = ["name": a.name, "mime": a.mime, "chartPart": chartId]
+            if let kind = a.kind { attachment["kind"] = kind }
+            if let ref = fallbackRef { attachment["ref"] = ref }
+            out.append(["id": id, "kind": "attachment", "attachment": attachment])
+            fallbackId = id
+        }
+        let specValue: Any = spec.data(using: .utf8).flatMap { try? JSONSerialization.jsonObject(with: $0) } ?? spec
+        var chart: [String: Any] = ["id": chartId, "kind": "chart", "specVersion": specVersion,
+                                    "chart": specValue, "table": table]
+        if let fallbackId { chart["fallback"] = fallbackId }
+        out.append(chart)
+        return out
     }
 }
