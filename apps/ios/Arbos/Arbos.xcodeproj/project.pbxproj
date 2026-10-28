@@ -149,6 +149,7 @@
 		A1670000000000000000A051 /* ControlTokenLintTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1670000000000000000A050 /* ControlTokenLintTests.swift */; };
 		A1680000000000000000A061 /* ListTopFadeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1680000000000000000A060 /* ListTopFadeTests.swift */; };
 		A1670000000000000000A041 /* ControlMetricsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1670000000000000000A040 /* ControlMetricsTests.swift */; };
+		A1BD0000000000000000B071 /* PresenceBadgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BD0000000000000000B070 /* PresenceBadgeTests.swift */; };
 		A1CD0000000000000000D041 /* ChatDensityMetricsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CD0000000000000000D040 /* ChatDensityMetricsTests.swift */; };
 		A15C0000000000000000000B /* SessionRoomTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15C0000000000000000000A /* SessionRoomTests.swift */; };
 		A15C00000000000000000004 /* ArbosFFI in Frameworks */ = {isa = PBXBuildFile; productRef = A15C00000000000000000002 /* ArbosFFI */; };
@@ -358,6 +359,7 @@
 		A1670000000000000000A050 /* ControlTokenLintTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlTokenLintTests.swift; sourceTree = "<group>"; };
 		A1680000000000000000A060 /* ListTopFadeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ListTopFadeTests.swift; sourceTree = "<group>"; };
 		A1670000000000000000A040 /* ControlMetricsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlMetricsTests.swift; sourceTree = "<group>"; };
+		A1BD0000000000000000B070 /* PresenceBadgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PresenceBadgeTests.swift; sourceTree = "<group>"; };
 		A1CD0000000000000000D040 /* ChatDensityMetricsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatDensityMetricsTests.swift; sourceTree = "<group>"; };
 		A15C0000000000000000000A /* SessionRoomTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRoomTests.swift; sourceTree = "<group>"; };
 		A15C00000000000000000001 /* ArbosFFI */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = ArbosFFI; path = ../../../packages/ArbosFFI; sourceTree = SOURCE_ROOT; };
@@ -605,6 +607,7 @@
 				A1670000000000000000A050 /* ControlTokenLintTests.swift */,
 				A1680000000000000000A060 /* ListTopFadeTests.swift */,
 				A1670000000000000000A040 /* ControlMetricsTests.swift */,
+				A1BD0000000000000000B070 /* PresenceBadgeTests.swift */,
 				A1CD0000000000000000D040 /* ChatDensityMetricsTests.swift */,
 				A11B0000000000000000A003 /* LibraryListTests.swift */,
 				A1AC0E00000000000000A003 /* MachineMetricsTests.swift */,
@@ -953,6 +956,7 @@
 				A1670000000000000000A051 /* ControlTokenLintTests.swift in Sources */,
 				A1680000000000000000A061 /* ListTopFadeTests.swift in Sources */,
 				A1670000000000000000A041 /* ControlMetricsTests.swift in Sources */,
+				A1BD0000000000000000B071 /* PresenceBadgeTests.swift in Sources */,
 				A1CD0000000000000000D041 /* ChatDensityMetricsTests.swift in Sources */,
 				A11B0000000000000000A004 /* LibraryListTests.swift in Sources */,
 				A1AC0E00000000000000A004 /* MachineMetricsTests.swift in Sources */,
