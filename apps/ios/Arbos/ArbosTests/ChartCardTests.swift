@@ -156,7 +156,7 @@ final class ChartCardTests: XCTestCase {
         XCTAssertEqual(ChartScrub.claim(CGSize(width: 0, height: 12)), .declined)
         XCTAssertEqual(ChartScrub.claim(CGSize(width: 8, height: -8)), .declined, "a diagonal is the scroll's")
         XCTAssertEqual(ChartScrub.claim(CGSize(width: 10, height: 9)), .declined, "needs a clear horizontal lead")
-        XCTAssertLessThanOrEqual(ChartScrub.minimumDistance, BubbleSwipe.lockDistance, "decides no later than the reply swipe")
+        XCTAssertLessThanOrEqual(ChartScrub.minimumDistance, BackSwipe.lockDistance, "decides no later than the full-screen back swipe")
         XCTAssertLessThan(ChartScrub.holdDuration, 0.35, "the chart hold begins before the row's long press")
     }
 }

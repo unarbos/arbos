@@ -1,102 +1,86 @@
-// Horizontal gestures on every chat screen (agent 1:1, DM, group, server channel,
-// job tab) and on the server channel list — one owner for all of them (Jacob,
-// 2026-10-26, iMessage-style; supersedes #1706's "no swipe-to-reply"):
+// Horizontal gestures on every chat screen (agent 1:1, DM, group, server channel, job tab)
+// and on the server channel list — one owner for all of them (Jacob, 2026-10-28:
+// "remove the swipe to reply and replace it with performant and high fidelity swipe to go
+// back"; supersedes the 2026-10-26 iMessage reply-swipe rule):
 //
-// 1. A swipe that starts in the screen's left edge zone always pops back one level,
-//    keyboard open or closed; the keyboard goes down with the pop. Nothing else
-//    reads a drag from that zone.
-// 2. A horizontal swipe to the right on a message bubble, away from the edge, reveals
-//    the reply arrow behind the bubble, taps at the threshold and ends in the composer
-//    with the quote (`BubbleSwipe`). Vertical scroll is untouched: the swipe decides
-//    once, at 12 pt, whether the pan is horizontal-right or not.
-// 3. A swipe to the right anywhere else on the screen (header, empty transcript, the
-//    channel list) is also "back" (#925) — never from the composer bar, where a drag
-//    selects text or slides the mic, and never while a bubble swipe owns the drag.
+// 1. A swipe from the screen's left edge is the system's interactive pop: the screen
+//    follows the finger, a release short of halfway cancels, UIKit drives the frames. Each
+//    chat screen hides the system navigation bar and back button for its own chevron, and
+//    SwiftUI turns the pop gesture off with them — `NativePopEnabler` turns it back on and
+//    is its delegate (begins whenever the stack has something to pop to; keyboard open or
+//    closed — the keyboard goes down as the pop begins). Nothing else reads a drag that
+//    starts in the edge zone.
+// 2. A swipe to the right anywhere else on the screen (header, transcript, empty space, the
+//    channel list) is also "back" (since 7d2d3797, 2026-10-16) — an animated pop, never from
+//    the composer bar (a drag there selects text or slides the mic) and never from the edge
+//    zone, which is the system's. `FullScreenBackHost`, a `DirectionalSwipeRecognizer` that
+//    fails at once on anything but a clear rightward pan.
+// 3. A swipe to the left on the transcript peeks the message times (iMessage); the same
+//    recognizer class, on the scroll view, declines every rightward or vertical pan.
 //
-// Each screen hides the system navigation bar and back button for its own chevron,
-// which also turns UIKit's edge-swipe pop off. Under SwiftUI's NavigationStack on iOS 27
-// no UIKit recognizer gets the touches back: re-enabling `interactivePopGestureRecognizer`
-// with our own delegate, or adding a `UIScreenEdgePanGestureRecognizer` to the screen's
-// hosting view, left both enabled and never asked to begin (logging delegates, 2026-10-26).
-// So the edge pop here is a SwiftUI drag at the screen's root, decided by where it starts.
-// History:
-// #1554 gated the back gestures on the composer's focus and `send()` keeps the composer
-// focused, so once anything was typed no back swipe worked (#1831).
+// There is no swipe-to-reply. Reply stays on long-press and in the actions menu.
+//
+// History: #1554 gated the back gestures on the composer's focus (#1831). #1985 made the edge
+// pop a SwiftUI drag that called `dismiss()` after 40 pt and added the per-bubble reply drag;
+// #2122 turned both into exclusive UIKit recognizers — the root one claimed an edge drag at
+// 6 pt and, being exclusive with everything, failed the system's edge pan before it could
+// begin: the finger-tracking pop was gone and "back" became a 40 pt threshold with an
+// animation that did not follow the finger (Jacob, 2026-10-28: "very buggy and not working").
+// The system pop had been on since 731cdec9 (2026-10-16) until #1985 removed its enabler.
 
 import SwiftUI
 import UIKit
 import UIKit.UIGestureRecognizerSubclass
+import os
 
 /// The back-gesture rules, as data (unit-tested in `BackSwipeTests`).
 enum BackSwipe {
-    /// The left band the edge pop owns: a drag that starts inside it is "back" and nothing
-    /// else (not a bubble swipe, not text selection), whatever is under the finger.
+    /// The left band that belongs to the system's edge pop: nothing else reads a drag that
+    /// starts inside it. UIKit's own edge recognizer is narrower; the band is wider so a
+    /// finger that lands a little off the edge is not caught by the full-screen rule either.
     static let edgeZoneWidth: CGFloat = 24
-    /// How far right an edge drag must travel to pop (and to drop the keyboard early).
-    static let edgePopDistance: CGFloat = 40
-    /// How far right an edge drag must travel before the keyboard goes down with it.
-    static let edgeKeyboardDistance: CGFloat = 12
 
     static func startsAtEdge(_ start: CGPoint) -> Bool { start.x < edgeZoneWidth }
 
-    /// An edge drag decides early (6 pt): it claims the touch as soon as the finger has moved
-    /// right at least as much as up or down (the same "more sideways than vertical" shape
-    /// `edgePops` asks for at the end), fails at once when the motion is leftward or clearly
-    /// vertical (twice as much up/down as right), and otherwise waits for the next point. The
-    /// scroll view's own pan begins at ~10 pt, so a rightward edge drag is the pop's before the
-    /// transcript can take it (Jacob, 2026-10-26: the edge always pops), while a scroll that
-    /// happens to start in the edge zone is the transcript's as before.
-    static let edgeLockDistance: CGFloat = 6
+    /// Pan length at which a non-edge swipe decides, once, what the drag is.
+    static let lockDistance: CGFloat = 12
 
-    static func edgeLock(translation: CGSize) -> SwipeClaim {
-        let dx = translation.width, dy = abs(translation.height)
-        if dx <= 0 { return .declined }
-        if dx >= dy { return .claimed }
-        if dy > dx * 2 { return .declined }
-        return .undecided
+    /// What a drag that did not start in the edge zone is, at `lockDistance`: a clear pan to
+    /// the right (more than 1.15× as wide as tall) is "back"; anything else is left to the
+    /// scroll view / the time peek / the presses, for the rest of the touch.
+    static func fullScreenLock(translation: CGSize, start: CGPoint, composerTop: CGFloat?) -> SwipeClaim {
+        let dx = translation.width, dy = translation.height
+        guard abs(dx) + abs(dy) >= lockDistance else { return .undecided }
+        if startsAtEdge(start) { return .declined }
+        if let composerTop, start.y >= composerTop { return .declined }
+        return dx > 0 && abs(dx) > abs(dy) * 1.15 ? .claimed : .declined
     }
 
-    /// An edge drag pops when it has moved right by `edgePopDistance` and more sideways
-    /// than up or down. No screen state (keyboard, draft, edit, composer bar) blocks it.
-    static func edgePops(translation: CGSize) -> Bool {
-        translation.width >= edgePopDistance && translation.width > abs(translation.height)
-    }
-
-    /// A finished drag counts as "back" when:
-    /// - it started in the edge zone and `edgePops`; or
-    /// - it is a clear horizontal pan to the right — far enough (> 70 pt), more horizontal
-    ///   than vertical (1.25×), and either faster sideways than up/down or long (> 120 pt)
-    ///   — that did not start inside the composer bar (`start.y >= composerTop`, where a
-    ///   drag selects text or slides the mic) and that no bubble swipe claimed.
-    static func isBackSwipe(translation: CGSize, velocity: CGSize, start: CGPoint, composerTop: CGFloat?,
-                            bubbleSwipeActive: Bool) -> Bool {
-        if startsAtEdge(start) { return edgePops(translation: translation) }
-        if bubbleSwipeActive { return false }
-        if let composerTop, start.y >= composerTop { return false }
+    /// A finished full-screen drag pops when it is far enough (> 70 pt), more horizontal
+    /// than vertical (1.25×), and either faster sideways than up/down or long (> 120 pt).
+    static func fullScreenPops(translation: CGSize, velocity: CGSize) -> Bool {
         let dx = translation.width
         let absX = abs(dx), absY = abs(translation.height)
         guard dx > 0, absX > 70, absX > absY * 1.25 else { return false }
         return abs(velocity.width) >= abs(velocity.height) || absX > 120
     }
 
-    /// True while a bubble's reply swipe owns the current drag (set by `RowView`, read by
-    /// the full-screen back swipe of the same drag). One drag at a time on a phone, so a
-    /// flag, like `NestedHorizontalScroll.claiming`. Cleared a run-loop turn after the
-    /// bubble's drag ends so the screen's `onEnded` of the same drag still sees it.
-    static var bubbleSwipeActive = false
-
-    /// The keyboard goes down with the pop (and with the full-screen back).
+    /// The keyboard goes down with the pop.
     static func dismissKeyboard() {
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     }
+
+    /// Named coordinate space of a screen that uses `backSwipeToPop`; the composer bar
+    /// measures its top edge in it.
+    static let space = "arbosBackSwipeRoot"
 }
 
 /// Which optional chat-screen gestures are installed. All of them in Release; the Debug
 /// scroll rig leaves single ones out (`ARBOS_PERF_GESTURES_OFF`) to measure what each one
 /// costs the scroll view's pan (iphone-scroll-perf, 2026-10-27).
 enum ChatGestures {
-    static let replySwipe = on("reply")
     static let timeReveal = on("time")
+    /// The full-screen swipe-right (the system edge pop is never off).
     static let backSwipe = on("back")
     static let longPress = on("longpress")
 
@@ -123,45 +107,6 @@ extension View {
     }
 }
 
-/// Swipe right on a message bubble → reply (Telegram / iMessage). Rules as data, tested
-/// in `BackSwipeTests`; `RowView` runs them.
-enum BubbleSwipe {
-    /// Pan length at which the swipe decides, once, what the drag is.
-    static let lockDistance: CGFloat = 12
-    /// How far the bubble follows the finger 1:1 before it rubber-bands.
-    static let revealWidth: CGFloat = 56
-    /// Fraction of `revealWidth` at which the reply arms (haptic; release replies).
-    static let triggerFraction: CGFloat = 0.7
-
-    enum Lock: Equatable {
-        /// Under `lockDistance`: nothing decided yet.
-        case undecided
-        /// A horizontal pan to the right, outside the edge zone: this drag replies.
-        case reply
-        /// Anything else (vertical scroll, swipe left, edge zone): this drag is left alone until it ends.
-        case declined
-    }
-
-    /// Decide what a drag on a bubble is. `startX` is the drag's start in the screen's
-    /// coordinate space: inside `BackSwipe.edgeZoneWidth` the edge pop owns the drag.
-    static func lock(translation: CGSize, startX: CGFloat) -> Lock {
-        let dx = translation.width, dy = translation.height
-        guard abs(dx) + abs(dy) >= lockDistance else { return .undecided }
-        if startX < BackSwipe.edgeZoneWidth { return .declined }
-        return dx > 0 && abs(dx) > abs(dy) * 1.15 ? .reply : .declined
-    }
-
-    /// Bubble travel for a rightward pan: 1:1 up to `revealWidth`, then a fifth of the
-    /// excess, at most 24 pt more (the time reveal's curve, mirrored).
-    static func reveal(for dx: CGFloat) -> CGFloat {
-        let raw = max(0, dx)
-        return raw <= revealWidth ? raw : revealWidth + min(24, (raw - revealWidth) * 0.2)
-    }
-
-    /// Armed: releasing here replies.
-    static func triggers(reveal: CGFloat) -> Bool { reveal >= revealWidth * triggerFraction }
-}
-
 /// Top edge of the composer bar in the chat root's coordinate space (`BackSwipe.space`),
 /// reported by the bar so the full-screen swipe can leave text selection alone.
 struct ComposerTopKey: PreferenceKey {
@@ -171,27 +116,14 @@ struct ComposerTopKey: PreferenceKey {
     }
 }
 
-extension BackSwipe {
-    /// Named coordinate space of a screen that uses `backSwipeToPop`; the composer bar
-    /// measures its top edge in it.
-    static let space = "arbosBackSwipeRoot"
-}
-
 // MARK: - UIKit recognizers (iphone-scroll-perf, 2026-10-27)
 //
-// The three horizontal gestures used to be SwiftUI `DragGesture`s — one per bubble (reply), one
-// on the ScrollView (time peek) and one at the screen root (back), all `simultaneousGesture` so
-// the scroll kept working. A SwiftUI drag cannot fail: once it reaches `minimumDistance` it runs
-// for the whole touch whatever the direction, so every vertical pan on a bubble kept three
-// drags alive beside the scroll and each move event ran their closures. They are now two
-// UIKit recognizers that decide direction on the first points and fail at once otherwise:
-// `TranscriptSwipeHost` (reply right on a row, time peek left; attached to the transcript's
-// UIScrollView, the row found by location) and `BackSwipeHost` (edge pop and full-screen back;
-// attached to the screen's root view). Both are exclusive with the scroll view's pan — the
-// first to begin wins and the other fails, nothing waits on anything — and the rules stay
-// the data above (`BubbleSwipe.lock`, `BackSwipe.isBackSwipe`), pinned by `BackSwipeTests`.
+// The horizontal gestures are UIKit recognizers that decide direction on the first points
+// and fail at once otherwise (a SwiftUI `DragGesture` cannot fail: once it reaches its
+// minimum distance it runs for the whole touch whatever the direction). Both are exclusive
+// with the scroll view's pan — the first to begin wins, nothing waits on anything.
 
-/// What a horizontal drag turned out to be, decided once at `BubbleSwipe.lockDistance`.
+/// What a horizontal drag turned out to be, decided once at `BackSwipe.lockDistance`.
 enum SwipeClaim: Equatable {
     case undecided
     case claimed
@@ -207,7 +139,7 @@ final class DirectionalSwipeRecognizer: UIGestureRecognizer {
     /// `.claimed` begins, `.declined` fails, `.undecided` asks again on the next move.
     var decide: (_ start: CGPoint, _ translation: CGSize) -> SwipeClaim = { _, _ in .declined }
     /// Movement (|dx| + |dy|) before `decide` is first asked.
-    var minimumDistance: CGFloat = BubbleSwipe.lockDistance
+    var minimumDistance: CGFloat = BackSwipe.lockDistance
     /// Fail on touch-down when the finger landed somewhere this gesture must leave alone.
     var shouldStart: (_ touch: UITouch, _ start: CGPoint) -> Bool = { _, _ in true }
 
@@ -288,65 +220,25 @@ final class DirectionalSwipeRecognizer: UIGestureRecognizer {
     }
 }
 
-/// The transcript rows' frames in the transcript's coordinate space (`TranscriptSpace.name`),
-/// written by the rows on layout (`onGeometryChange`), read by the swipe recognizer at touch
-/// time to find the row under the finger. A plain class, never `@Published`: a write must not
-/// invalidate any view. Frames do not move with the scroll offset (the space scrolls with the
-/// content), so nothing here runs per frame while scrolling.
-final class RowFrameIndex {
-    private var frames: [String: CGRect] = [:]
-    private var replyable: Set<String> = []
-
-    func set(_ id: String, frame: CGRect, canReply: Bool) {
-        frames[id] = frame
-        if canReply { replyable.insert(id) } else { replyable.remove(id) }
-    }
-
-    func remove(_ id: String) {
-        frames[id] = nil
-        replyable.remove(id)
-    }
-
-    /// The row whose frame holds `point` (transcript space), if it can be replied to.
-    func replyableRow(at point: CGPoint) -> String? {
-        guard let hit = frames.first(where: { $0.value.contains(point) }) else { return nil }
-        return replyable.contains(hit.key) ? hit.key : nil
-    }
-}
-
-enum TranscriptSpace {
-    /// Named coordinate space of the transcript's content (the ScrollView's VStack).
-    static let name = "arbosTranscript"
-}
-
-/// The reply swipe in progress on the chat screen: which row follows the finger, how far
-/// (`BubbleSwipe.reveal`), and whether releasing now replies (`BubbleSwipe.triggers`).
-struct ReplySwipe: Equatable {
-    var rowId: String?
-    var reveal: CGFloat = 0
-    var armed = false
-}
-
 /// What the transcript's swipe recognizer tells the chat screen.
 enum TranscriptSwipeEvent {
-    /// A reply swipe on `row` follows the finger: `dx` is the translation to the right.
-    case replyChanged(row: String, dx: CGFloat)
-    /// The reply swipe ended; `fire` when it was armed (`BubbleSwipe.triggers`).
-    case replyEnded(row: String, fire: Bool)
     /// The time peek follows the finger: `dx` is the translation (negative = left).
     case timeChanged(dx: CGFloat)
     case timeEnded
 }
 
-/// One recognizer on the transcript's `UIScrollView` for the two horizontal swipes inside it —
-/// swipe right on a message row → reply, swipe left anywhere → time peek — instead of one
-/// SwiftUI drag per bubble plus one on the ScrollView. Sits as the `.background` of the
-/// ScrollView's content so its bounds are the transcript space the rows report their frames in.
+/// One recognizer on the transcript's `UIScrollView` for the time peek — swipe left anywhere
+/// on the transcript reveals the message times — instead of a SwiftUI drag on the ScrollView.
+/// Sits as the `.background` of the ScrollView's content. Declines every rightward pan
+/// (the edge pop's and the full-screen back's) and every vertical one (the scroll's).
 struct TranscriptSwipeHost: UIViewRepresentable {
-    let frames: RowFrameIndex
+    /// Install the time peek (the Debug scroll rig can leave it out).
+    var timePeek = true
     let onEvent: (TranscriptSwipeEvent) -> Void
+    /// The scroll view's own pan began (a finger scroll started).
+    let onScrollPanBegan: () -> Void
 
-    func makeCoordinator() -> Coordinator { Coordinator(frames: frames, onEvent: onEvent) }
+    func makeCoordinator() -> Coordinator { Coordinator(timePeek: timePeek, onEvent: onEvent, onScrollPanBegan: onScrollPanBegan) }
 
     func makeUIView(context: Context) -> HostView {
         let v = HostView()
@@ -358,6 +250,7 @@ struct TranscriptSwipeHost: UIViewRepresentable {
 
     func updateUIView(_ uiView: HostView, context: Context) {
         context.coordinator.onEvent = onEvent
+        context.coordinator.onScrollPanBegan = onScrollPanBegan
     }
 
     final class HostView: UIView {
@@ -369,40 +262,34 @@ struct TranscriptSwipeHost: UIViewRepresentable {
             var node: UIView? = superview
             while let current = node {
                 if let scroll = current as? UIScrollView {
-                    coordinator?.attach(to: scroll, host: self)
+                    coordinator?.attach(to: scroll)
                     return
                 }
                 node = current.superview
             }
         }
-
-        /// Is `windowPoint` over a row that can be replied to? Asked by the screen's back
-        /// recognizer so a right swipe on a bubble is the reply's, never "back".
-        func hitsReplyableRow(windowPoint: CGPoint) -> Bool {
-            let p = convert(windowPoint, from: nil)
-            return coordinator?.frames.replyableRow(at: p) != nil
-        }
     }
 
     final class Coordinator: NSObject, UIGestureRecognizerDelegate {
-        let frames: RowFrameIndex
+        let timePeek: Bool
         var onEvent: (TranscriptSwipeEvent) -> Void
+        var onScrollPanBegan: () -> Void
         private weak var scroll: UIScrollView?
-        private weak var host: HostView?
         private var recognizer: DirectionalSwipeRecognizer?
-        private enum Mode { case reply(row: String), time }
-        private var mode: Mode?
 
-        init(frames: RowFrameIndex, onEvent: @escaping (TranscriptSwipeEvent) -> Void) {
-            self.frames = frames
+        init(timePeek: Bool, onEvent: @escaping (TranscriptSwipeEvent) -> Void, onScrollPanBegan: @escaping () -> Void) {
+            self.timePeek = timePeek
             self.onEvent = onEvent
+            self.onScrollPanBegan = onScrollPanBegan
         }
 
-        func attach(to scroll: UIScrollView, host: HostView) {
+        func attach(to scroll: UIScrollView) {
             guard self.scroll !== scroll else { return }
+            self.scroll?.panGestureRecognizer.removeTarget(self, action: #selector(scrollPan(_:)))
             if let old = recognizer { old.view?.removeGestureRecognizer(old) }
             self.scroll = scroll
-            self.host = host
+            scroll.panGestureRecognizer.addTarget(self, action: #selector(scrollPan(_:)))
+            guard timePeek else { return }
             let gr = DirectionalSwipeRecognizer(target: self, action: #selector(handle(_:)))
             gr.delegate = self
             gr.shouldStart = { [weak scroll] touch, _ in
@@ -414,46 +301,25 @@ struct TranscriptSwipeHost: UIViewRepresentable {
                 }
                 return true
             }
-            gr.decide = { [weak self, weak scroll, weak host] start, translation in
-                guard let self, let scroll, let host else { return .declined }
-                let inWindow = scroll.convert(start, to: nil)
-                if BackSwipe.startsAtEdge(inWindow) { return .declined }
+            gr.decide = { _, translation in
                 let dx = translation.width, dy = translation.height
-                if dx > 0 {
-                    // Same rule as `BubbleSwipe.lock`, with the row found by location.
-                    guard ChatGestures.replySwipe, BubbleSwipe.lock(translation: translation, startX: inWindow.x) == .reply,
-                          let row = self.frames.replyableRow(at: host.convert(start, from: scroll)) else { return .declined }
-                    self.mode = .reply(row: row)
-                    return .claimed
-                }
-                guard ChatGestures.timeReveal, dx < 0, abs(dx) > abs(dy) * 1.15 else { return .declined }
-                self.mode = .time
+                guard dx < 0, abs(dx) > abs(dy) * 1.15 else { return .declined }
                 return .claimed
             }
             scroll.addGestureRecognizer(gr)
             recognizer = gr
         }
 
+        @objc private func scrollPan(_ gr: UIPanGestureRecognizer) {
+            if gr.state == .began { onScrollPanBegan() }
+        }
+
         @objc private func handle(_ gr: DirectionalSwipeRecognizer) {
-            guard let mode else { return }
             switch gr.state {
             case .began, .changed:
-                if case .reply = mode { BackSwipe.bubbleSwipeActive = true }
-                switch mode {
-                case .reply(let row): onEvent(.replyChanged(row: row, dx: gr.translation.width))
-                case .time: onEvent(.timeChanged(dx: gr.translation.width))
-                }
+                onEvent(.timeChanged(dx: gr.translation.width))
             case .ended, .cancelled, .failed:
-                switch mode {
-                case .reply(let row):
-                    let fire = gr.state == .ended && BubbleSwipe.triggers(reveal: BubbleSwipe.reveal(for: gr.translation.width))
-                    onEvent(.replyEnded(row: row, fire: fire))
-                    // The screen's back recognizer may read the flag for this same touch.
-                    DispatchQueue.main.async { BackSwipe.bubbleSwipeActive = false }
-                case .time:
-                    onEvent(.timeEnded)
-                }
-                self.mode = nil
+                onEvent(.timeEnded)
             case .possible:
                 break
             @unknown default:
@@ -469,11 +335,9 @@ struct TranscriptSwipeHost: UIViewRepresentable {
     }
 }
 
-/// Hides the system bar and back button and owns the back gestures: the edge pop and the
-/// full-screen swipe-right, both → `dismiss()` (SwiftUI pops, so the stack's path stays
-/// the truth). One UIKit recognizer on the screen's root view that fails at once on anything
-/// but a rightward start (`BackSwipeHost`); which rule applies is decided by where the drag
-/// started (`BackSwipe.isBackSwipe`).
+/// Hides the system bar and back button and owns the back gestures: the system's
+/// interactive edge pop (`NativePopEnabler`) and the full-screen swipe-right
+/// (`FullScreenBackHost` → `dismiss()`; SwiftUI pops, so the stack's path stays the truth).
 private struct BackSwipeModifier: ViewModifier {
     @Environment(\.dismiss) private var dismiss
     /// Where the composer bar starts (nil: the whole screen counts).
@@ -486,17 +350,112 @@ private struct BackSwipeModifier: ViewModifier {
             .toolbar(.hidden, for: .navigationBar)
             .navigationBarBackButtonHidden(true)
             .background {
+                NativePopEnabler()
                 if ChatGestures.backSwipe {
-                    BackSwipeHost(composerTop: composerTop, onBack: { dismiss() })
+                    FullScreenBackHost(composerTop: composerTop, onBack: { dismiss() })
                 }
             }
     }
 }
 
-/// The screen-level back recognizer. The host view is the `.background` of the screen's root
-/// content, so its bounds are `BackSwipe.space`; the recognizer itself goes on the nearest
-/// ancestor that is a view controller's view (touches on the content never reach a sibling).
-private struct BackSwipeHost: UIViewRepresentable {
+/// `.navigationBarBackButtonHidden(true)` / a hidden navigation bar turn the system's
+/// interactive pop gesture off; this turns it back on for the enclosing navigation
+/// controller and is its delegate: it begins whenever the stack has something to pop to,
+/// keyboard open or closed, and the keyboard goes down as it begins. SwiftUI may switch
+/// the recognizer off again on its own appearance passes; the enabler re-applies on every
+/// appearance and update, and the recognizer's `isEnabled` is watched so a late flip is
+/// undone (one write back, never a loop: the flip is SwiftUI's, the re-enable ours).
+private struct NativePopEnabler: UIViewControllerRepresentable {
+    func makeUIViewController(context: Context) -> Controller { Controller() }
+
+    func updateUIViewController(_ uiViewController: Controller, context: Context) {
+        uiViewController.apply()
+    }
+
+    final class Controller: UIViewController, UIGestureRecognizerDelegate {
+        private weak var pop: UIGestureRecognizer?
+        private var enabledWatch: NSKeyValueObservation?
+        private var onScreen = false
+
+        override func viewWillAppear(_ animated: Bool) {
+            super.viewWillAppear(animated)
+            onScreen = true
+            apply()
+        }
+
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            onScreen = true
+            apply()
+        }
+
+        override func viewWillDisappear(_ animated: Bool) {
+            super.viewWillDisappear(animated)
+            onScreen = false
+            // Leave the navigation controller able to pop after this screen is gone.
+            pop?.isEnabled = true
+        }
+
+        func apply() {
+            guard let nav = enclosingNavigationController(), let gr = nav.interactivePopGestureRecognizer else { return }
+            if pop !== gr {
+                pop?.removeTarget(self, action: #selector(popChanged(_:)))
+                pop = gr
+                gr.addTarget(self, action: #selector(popChanged(_:)))
+                enabledWatch = gr.observe(\.isEnabled, options: [.new]) { [weak self] gr, change in
+                    guard let self, self.onScreen, change.newValue == false else { return }
+                    DispatchQueue.main.async { if self.onScreen, !gr.isEnabled { gr.isEnabled = true } }
+                }
+            }
+            gr.isEnabled = true
+            gr.delegate = self
+        }
+
+        @objc private func popChanged(_ gr: UIGestureRecognizer) {
+            if gr.state == .began {
+                BackSwipe.dismissKeyboard()
+            }
+            #if DEBUG
+            SwipeLog.event("system pop state=\(gr.state.rawValue)")
+            #endif
+        }
+
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            let depth = enclosingNavigationController()?.viewControllers.count ?? 0
+            #if DEBUG
+            SwipeLog.event("system pop shouldBegin depth=\(depth)")
+            #endif
+            return depth > 1
+        }
+
+        /// Background representables sometimes have a nil `navigationController`; walk the
+        /// parents and the responder chain to find the stack that pushed this screen.
+        private func enclosingNavigationController() -> UINavigationController? {
+            if let nav = navigationController { return nav }
+            var parent = self.parent
+            while let current = parent {
+                if let nav = current as? UINavigationController { return nav }
+                if let nav = current.navigationController { return nav }
+                parent = current.parent
+            }
+            var responder: UIResponder? = viewIfLoaded
+            while let current = responder {
+                if let nav = current as? UINavigationController { return nav }
+                if let vc = current as? UIViewController, let nav = vc.navigationController { return nav }
+                responder = current.next
+            }
+            return nil
+        }
+    }
+}
+
+/// The full-screen swipe-right → back. The host view is the `.background` of the screen's
+/// root content, so its bounds are `BackSwipe.space`; the recognizer itself goes on the
+/// nearest ancestor that is a view controller's view (touches on the content never reach a
+/// sibling). It fails at once on an edge-zone start (the system pop's), on a composer-bar
+/// start, and on anything but a clear rightward pan, so it never competes with the pop,
+/// the scroll or the time peek.
+private struct FullScreenBackHost: UIViewRepresentable {
     let composerTop: CGFloat?
     let onBack: () -> Void
 
@@ -538,9 +497,7 @@ private struct BackSwipeHost: UIViewRepresentable {
         var onBack: () -> Void
         private weak var root: UIView?
         private weak var host: HostView?
-        private weak var transcript: TranscriptSwipeHost.HostView?
         private var recognizer: DirectionalSwipeRecognizer?
-        private var edgeKeyboardDropped = false
 
         init(onBack: @escaping () -> Void) {
             self.onBack = onBack
@@ -553,68 +510,34 @@ private struct BackSwipeHost: UIViewRepresentable {
             self.host = host
             let gr = DirectionalSwipeRecognizer(target: self, action: #selector(handle(_:)))
             gr.delegate = self
-            gr.minimumDistance = BackSwipe.edgeLockDistance
+            gr.shouldStart = { [weak root, weak host] _, start in
+                guard let root, let host else { return false }
+                // The edge zone is the system pop's from touch-down.
+                return !BackSwipe.startsAtEdge(host.convert(start, from: root))
+            }
             gr.decide = { [weak self, weak root, weak host] start, translation in
                 guard let self, let root, let host else { return .declined }
-                let inSpace = host.convert(start, from: root)
-                let dx = translation.width, dy = translation.height
-                if BackSwipe.startsAtEdge(inSpace) {
-                    return BackSwipe.edgeLock(translation: translation)
-                }
-                // Off the edge the rules are the bubble's 12 pt.
-                guard abs(dx) + abs(dy) >= BubbleSwipe.lockDistance else { return .undecided }
-                if let top = self.composerTop, inSpace.y >= top { return .declined }
-                guard dx > 0, abs(dx) > abs(dy) * 1.15 else { return .declined }
-                // A right swipe on a message bubble is the reply's.
-                if self.transcriptHost(under: root)?.hitsReplyableRow(windowPoint: root.convert(start, to: nil)) == true {
-                    return .declined
-                }
-                return .claimed
+                return BackSwipe.fullScreenLock(translation: translation, start: host.convert(start, from: root),
+                                                composerTop: self.composerTop)
             }
             root.addGestureRecognizer(gr)
             recognizer = gr
         }
 
-        private func transcriptHost(under root: UIView) -> TranscriptSwipeHost.HostView? {
-            if let transcript, transcript.window != nil { return transcript }
-            transcript = Self.find(TranscriptSwipeHost.HostView.self, in: root)
-            return transcript
-        }
-
-        private static func find<T: UIView>(_ type: T.Type, in view: UIView) -> T? {
-            for sub in view.subviews {
-                if let hit = sub as? T { return hit }
-                if let hit = find(type, in: sub) { return hit }
-            }
-            return nil
-        }
-
         @objc private func handle(_ gr: DirectionalSwipeRecognizer) {
-            guard let root, let host else { return }
-            let start = host.convert(gr.start, from: root)
-            switch gr.state {
-            case .began, .changed:
-                // The keyboard leaves with the edge pop, not after it.
-                if !edgeKeyboardDropped, BackSwipe.startsAtEdge(start), gr.translation.width >= BackSwipe.edgeKeyboardDistance {
-                    edgeKeyboardDropped = true
-                    BackSwipe.dismissKeyboard()
-                }
-            case .ended:
-                edgeKeyboardDropped = false
-                if BackSwipe.isBackSwipe(translation: gr.translation, velocity: gr.velocity, start: start,
-                                         composerTop: composerTop, bubbleSwipeActive: BackSwipe.bubbleSwipeActive) {
-                    BackSwipe.dismissKeyboard()
-                    onBack()
-                }
-            case .cancelled, .failed:
-                edgeKeyboardDropped = false
-            case .possible:
-                break
-            @unknown default:
-                break
+            guard gr.state == .ended else { return }
+            if BackSwipe.fullScreenPops(translation: gr.translation, velocity: gr.velocity) {
+                #if DEBUG
+                SwipeLog.event("full-screen back dx=\(Int(gr.translation.width))")
+                #endif
+                BackSwipe.dismissKeyboard()
+                onBack()
             }
         }
 
+        /// Exclusive with every other recognizer: the scroll pan, the time peek and the
+        /// system pop (which never shares a touch with this one anyway — edge starts fail
+        /// here on touch-down).
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
             false
         }
@@ -622,8 +545,8 @@ private struct BackSwipeHost: UIViewRepresentable {
 }
 
 extension View {
-    /// Custom-back screen: swipe right (edge, or anywhere outside the composer bar and
-    /// the bubbles) pops it.
+    /// Custom-back screen: the system's interactive edge pop, and a swipe right anywhere
+    /// outside the composer bar pops it.
     func backSwipeToPop() -> some View { modifier(BackSwipeModifier()) }
 
     /// Mark the composer bar of a `backSwipeToPop` screen so a drag that starts in it
@@ -637,3 +560,17 @@ extension View {
         )
     }
 }
+
+#if DEBUG
+/// Rig log for the back gestures (`ARBOS_SWIPE_LOG=1`, category `swipe`): the system pop's
+/// delegate calls and state changes, and the full-screen back's fires.
+enum SwipeLog {
+    private static let log = Logger(subsystem: "com.unarbos.arbos.ios", category: "swipe")
+    private static let on = ProcessInfo.processInfo.environment["ARBOS_SWIPE_LOG"] == "1"
+
+    static func event(_ what: String) {
+        guard on else { return }
+        log.notice("\(what, privacy: .public)")
+    }
+}
+#endif
