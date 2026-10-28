@@ -8,15 +8,22 @@ import XCTest
 /// only, picture + caption, several pictures, a GIF — what `UIPasteboard` ends up
 /// holding, and what the composer's paste reads back from it.
 final class MessagePasteboardTests: XCTestCase {
+    /// 1× renderer: `w × h` points are `w × h` pixels, whatever the simulator's screen scale.
+    private func renderer(_ w: Int, _ h: Int) -> UIGraphicsImageRenderer {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        return UIGraphicsImageRenderer(size: CGSize(width: w, height: h), format: format)
+    }
+
     private func png(_ w: Int = 2, _ h: Int = 2, color: UIColor = .red) -> Data {
-        UIGraphicsImageRenderer(size: CGSize(width: w, height: h)).image { ctx in
+        renderer(w, h).image { ctx in
             color.setFill()
             ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
         }.pngData()!
     }
 
     private func jpeg(_ w: Int = 4, _ h: Int = 4) -> Data {
-        UIGraphicsImageRenderer(size: CGSize(width: w, height: h)).image { ctx in
+        renderer(w, h).image { ctx in
             UIColor.blue.setFill()
             ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
         }.jpegData(compressionQuality: 0.9)!
@@ -68,7 +75,9 @@ final class MessagePasteboardTests: XCTestCase {
         let items = MessagePasteboard.items(text: "", fetched: [fetched("photo.jpg", "image/jpeg", bytes)])
         XCTAssertEqual(items[0][MessagePasteboard.jpeg] as? Data, bytes)
         let twin = try XCTUnwrap(items[0][MessagePasteboard.png] as? Data, "a public.png twin for PNG-only readers")
-        XCTAssertEqual(UIImage(data: twin)?.size, CGSize(width: 4, height: 4))
+        let decoded = try XCTUnwrap(UIImage(data: twin))
+        XCTAssertEqual(decoded.size.width * decoded.scale, 4)
+        XCTAssertEqual(decoded.size.height * decoded.scale, 4)
     }
 
     func testGifTypeIsPreserved() {
@@ -133,7 +142,7 @@ final class MessagePasteboardTests: XCTestCase {
 
     // MARK: UIPasteboard round trip
 
-    func testWrittenItemsReadBackByTypeAndTheComposerStagesThem() {
+    func testWrittenItemsReadBackByTypeAndTheComposerStagesThem() throws {
         let shot = png(3, 3)
         let items = MessagePasteboard.items(text: "caption", fetched: [
             fetched("shot.png", "image/png", shot),
@@ -146,7 +155,8 @@ final class MessagePasteboardTests: XCTestCase {
         XCTAssertEqual(pb.data(forPasteboardType: MessagePasteboard.png, inItemSet: IndexSet(integer: 0))?.first, shot)
         XCTAssertEqual(pb.data(forPasteboardType: MessagePasteboard.gif, inItemSet: IndexSet(integer: 1))?.first, gif)
         XCTAssertTrue(pb.hasImages)
-        XCTAssertEqual(pb.image?.size, CGSize(width: 3, height: 3), "UIImage readers get the picture")
+        let shown = try XCTUnwrap(pb.image, "UIImage readers get the picture")
+        XCTAssertEqual(shown.size.width * shown.scale, 3)
 
         // The composer's paste: one attachment per picture item, the GIF as a GIF.
         XCTAssertTrue(MessagePasteboard.hasMedia(pb))
@@ -158,6 +168,19 @@ final class MessagePasteboardTests: XCTestCase {
         XCTAssertEqual(staged[1].mime, "image/gif")
         XCTAssertEqual(staged[1].data, gif, "the native GIF, not its PNG twin")
         XCTAssertTrue(staged[1].name.hasSuffix(".gif"))
+    }
+
+    func testTheComposerReadsTheNativeTypeBeforeAPngTwin() {
+        // One item, GIF + its PNG twin (what Copy writes, and what Messages / other apps write too).
+        UIPasteboard.general.setItems([[MessagePasteboard.gif: gif, MessagePasteboard.png: png()]], options: [:])
+        let staged = MessagePasteboard.pendingAttachments()
+        XCTAssertEqual(staged.map(\.mime), ["image/gif"])
+        XCTAssertEqual(staged.first?.data, gif)
+        // JPEG + PNG twin → the JPEG; PNG alone → the PNG.
+        UIPasteboard.general.setItems([[MessagePasteboard.jpeg: jpeg(), MessagePasteboard.png: png()]], options: [:])
+        XCTAssertEqual(MessagePasteboard.pendingAttachments().map(\.mime), ["image/jpeg"])
+        UIPasteboard.general.setItems([[MessagePasteboard.png: png()]], options: [:])
+        XCTAssertEqual(MessagePasteboard.pendingAttachments().map(\.mime), ["image/png"])
     }
 
     func testAWordsOnlyPasteboardStagesNothing() {
