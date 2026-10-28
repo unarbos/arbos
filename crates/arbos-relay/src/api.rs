@@ -24,8 +24,12 @@ use crate::state::{AppState, AuthMode};
 
 pub(crate) type ApiResult = Result<Response, (StatusCode, String)>;
 
+/// A handler's 500. Logged here (the route, user and latency follow in the request layer's
+/// `request failed` line): until #2120 a listing 500 left no trace in the journal at all.
 pub(crate) fn internal(e: impl std::fmt::Display) -> (StatusCode, String) {
-    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    let message = e.to_string();
+    tracing::error!(error = %message, "internal error");
+    (StatusCode::INTERNAL_SERVER_ERROR, message)
 }
 
 /// `GET /healthz` body (also used for fixtures).
@@ -1714,6 +1718,10 @@ pub async fn create_chat(
         forked_from: fork_from.map(|c| c.id),
     };
     state.db.insert_chat(&chat).map_err(internal)?;
+    // The box opens the new room from this push (its 3 s listing is the fallback) and a
+    // sleeping box wakes: the first message is usually seconds away (#2120).
+    boxes::chat_created(&state, &chat);
+    boxes::ensure_awake(&state, &p.user_id, "api").await;
     Ok(Json(
         serde_json::to_value(CreateChatResponseDto {
             chat: chat_dto(&chat),
@@ -2353,6 +2361,101 @@ mod primary_chat_tests {
         )
         .await;
         assert_eq!(missing.err().map(|(s, _)| s), Some(StatusCode::NOT_FOUND));
+    }
+
+    /// #2120: a new chat tab reaches its box inside the create request — a `chat_open` push on
+    /// the project queue (what agentd opens the room from) and a wake of a sleeping box — and a
+    /// person's first row into the room re-arms the push once while no box socket is on it.
+    #[tokio::test]
+    async fn new_chat_tells_the_box_to_open_it_at_once() {
+        let state = test_state(AuthMode::Github);
+        let (alice, dev) = person(&state, 1);
+        let project = project_of(&state, &alice, "Hezbola");
+        let _ = state.db.take_pushes(&project).unwrap();
+        assert_eq!(
+            state.box_state(&alice).await.0,
+            arbos_core::wire::BoxState::Asleep
+        );
+
+        let r = create_chat(
+            State(state.clone()),
+            dev,
+            Path(project.clone()),
+            Json(CreateChatBody {
+                title: None,
+                kind: None,
+                fork_from: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let bytes = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let chat_id = v["chat"]["id"].as_str().unwrap().to_owned();
+
+        let pushes = state.db.take_pushes(&project).unwrap();
+        let opens: Vec<&Value> = pushes
+            .iter()
+            .filter(|(_, k, _)| k == boxes::CHAT_OPEN_PUSH)
+            .map(|(_, _, p)| p)
+            .collect();
+        assert_eq!(opens.len(), 1, "{pushes:?}");
+        assert_eq!(opens[0]["chat_id"], json!(chat_id));
+        assert_eq!(opens[0]["project_id"], json!(project));
+        assert_eq!(opens[0]["reason"], "created");
+        assert_eq!(opens[0]["title"], "New chat");
+        assert_eq!(
+            state.box_state(&alice).await.0,
+            arbos_core::wire::BoxState::Waking,
+            "a sleeping box is woken for the new chat"
+        );
+        assert!(state
+            .db
+            .due_wake_jobs()
+            .unwrap()
+            .iter()
+            .any(|(u, _, _)| u == &alice));
+
+        // The first row lands before the box has a socket on the room: one `rows_pending`
+        // push, not one per row; none once the box is in the room.
+        let room = state
+            .room(&arbos_core::wire::room_name(&project, &chat_id))
+            .await;
+        let chat = crate::notify::ChatRef::project(&project, &chat_id);
+        let agents = [boxes::ServingAgent {
+            project_id: project.clone(),
+            owner: alice.clone(),
+        }];
+        assert_eq!(
+            boxes::after_person_row(&state, &room, &chat, &agents).await,
+            1
+        );
+        assert_eq!(
+            boxes::after_person_row(&state, &room, &chat, &agents).await,
+            0
+        );
+        let pushes = state.db.take_pushes(&project).unwrap();
+        assert_eq!(pushes.len(), 1);
+        assert_eq!(pushes[0].1, boxes::CHAT_OPEN_PUSH);
+        assert_eq!(pushes[0].2["reason"], "rows_pending");
+        assert_eq!(pushes[0].2["chat_id"], json!(chat_id));
+        assert_eq!(
+            pushes[0].2["title"], "New chat",
+            "the chat row rides along so the box does not reset it"
+        );
+        assert!(pushes[0].2["created_at"].as_i64().unwrap() > 0);
+        room.box_joined(&alice);
+        assert_eq!(
+            boxes::after_person_row(&state, &room, &chat, &agents).await,
+            0
+        );
+        assert!(state.db.take_pushes(&project).unwrap().is_empty());
+        room.box_left(&alice);
+        assert!(!room.has_box(&alice));
+        assert_eq!(
+            boxes::after_person_row(&state, &room, &chat, &agents).await,
+            1
+        );
     }
 
     /// Sidebar archive (Jacob 2026-10-23): per user, hides the row, never deletes.
