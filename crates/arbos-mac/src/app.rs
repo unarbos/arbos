@@ -690,6 +690,9 @@ pub struct AppState {
     /// Site icons for the bubbles' named links, by host: `Some` once the relay answered
     /// with a picture, `None` when the site has none; a host still loading is absent.
     pub link_icons: HashMap<String, Option<Arc<RenderImage>>>,
+    /// Each fetched link icon's tone (a dark transparent mark, a light one, or neither), so
+    /// the link tiles can flip their fill under it ([`crate::ui::link_tile`]).
+    pub link_icon_tones: HashMap<String, crate::ui::link_tile::Tone>,
     /// Link-icon fetches in flight or answered (never asked twice per session).
     link_icons_requested: HashSet<String>,
     /// Blob keys whose thumbnail fetch failed: the card says "No preview" instead of loading.
@@ -1180,6 +1183,7 @@ impl AppState {
             thumbnails_trimmed: HashMap::new(),
             thumbnails_requested: HashSet::new(),
             link_icons: HashMap::new(),
+            link_icon_tones: HashMap::new(),
             link_icons_requested: HashSet::new(),
             thumbnails_failed: HashSet::new(),
             notices: Vec::new(),
@@ -1933,7 +1937,13 @@ impl AppState {
                 cx.notify();
             }
             SyncEvent::LinkIcon { host, png } => {
-                let image = png.and_then(|b| decode_image(&b)).map(Arc::new);
+                let rgba = png.and_then(|b| decode_rgba(&b));
+                let tone = rgba
+                    .as_ref()
+                    .map(crate::ui::link_tile::tone_of)
+                    .unwrap_or_default();
+                let image = rgba.and_then(bgra_frame).map(Arc::new);
+                self.link_icon_tones.insert(host.clone(), tone);
                 self.link_icons.insert(host, image);
                 cx.notify();
             }
@@ -9746,12 +9756,28 @@ impl AppState {
                     continue;
                 };
                 for host in crate::ui::markdown::link_hosts(text) {
-                    if self.link_icons_requested.insert(host.clone()) {
-                        self.command(ClientCommand::FetchLinkIcon { host });
-                    }
+                    self.want_link_icon(host);
                 }
             }
         }
+    }
+
+    /// Ask the source for one host's site icon, once per session (the bubbles' named links,
+    /// the link tiles of the Links tab, the Library and search).
+    pub(crate) fn want_link_icon(&mut self, host: String) {
+        if host.is_empty() {
+            return;
+        }
+        if self.link_icons_requested.insert(host.clone()) {
+            self.command(ClientCommand::FetchLinkIcon { host });
+        }
+    }
+
+    /// The fetched icon for a host and its tone, once the relay answered with a picture.
+    pub fn link_icon(&self, host: &str) -> Option<(&Arc<RenderImage>, crate::ui::link_tile::Tone)> {
+        let image = self.link_icons.get(host)?.as_ref()?;
+        let tone = self.link_icon_tones.get(host).copied().unwrap_or_default();
+        Some((image, tone))
     }
 
     /// Ask the source for the bytes of every image attachment in a chat that has no thumbnail yet.
