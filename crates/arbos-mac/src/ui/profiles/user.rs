@@ -4,10 +4,10 @@
 //! opens the 1:1 DM, or starts it through the same `/chats/dm` path the New
 //! Message sheet uses; never on your own pane, never when you blocked them),
 //! one tab pill Links | Groups, the list, and a single red "Block user" row.
-//! When opened from a people chat (`space_id`), an **Add your agent** row
-//! sits above Block so a guest can bring their agent into that shared chat
-//! ([feedback app-01M5WKBR85JVW1KKJH96FWZVK5]). No Add members here —
-//! adding people starts in groups.
+//! No Add members and no "Add your agent" here (Jacob 2026-10-27, [feedback
+//! add-your-agent-row-removal-mac-2026-10-27]): members — people and agents —
+//! are added from a group's Add members; `space_id` only says which chat the
+//! pane was opened from.
 
 use gpui::{div, prelude::*, px, Context, Div, ElementId, SharedString, Stateful};
 
@@ -207,7 +207,7 @@ pub(super) fn page(
                             &theme,
                         )
                         .cursor_pointer()
-                        .hover(|s| s.bg(theme.surface_2))
+                        .group(kit::HOT)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let pid = pid.clone();
                             this.state.update(cx, |s, cx| {
@@ -223,32 +223,10 @@ pub(super) fn page(
         }
     };
 
-    // ----- actions: Add your agent (from a shared chat) · Block / Unblock ----------
-    // Add your agent only when this pane was opened from a people chat — that
-    // is the chat the agent joins ([feedback app-01M5WKBR85JVW1KKJH96FWZVK5]).
+    // ----- actions: Block / Unblock ----------------------------------------------
     // The Block label comes from the relay's block list (#1545), so it is right
     // on re-open and relaunch; the pane stays open so the flip is visible.
     let mut footer: Vec<Section> = Vec::new();
-    if space_id.is_some() {
-        footer.push(Section::Card(vec![kit::row(
-            "profile-add-agent",
-            kit::Leading::Glyph("sparkles"),
-            "Add your agent",
-            Some("Bring one of yours into this chat".into()),
-            None,
-            None,
-            false,
-            &theme,
-        )
-        .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
-        .on_click(cx.listener(|this, _, _, cx| {
-            this.members_open = false;
-            this.add_agent_open = true;
-            cx.notify();
-        }))
-        .into_any_element()]));
-    }
     if !me {
         let target = person.clone();
         let row = if blocked && shell.unblock_armed_for(&person) {

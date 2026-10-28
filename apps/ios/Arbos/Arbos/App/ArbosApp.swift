@@ -50,6 +50,7 @@ struct RootView: View {
             #if DEBUG
             PerfLog.shared.startIfRequested()
             PerfLog.shared.observe(model)
+            TouchPerf.installIfRequested()
             if DebugHooks.perfChanges { setlinebuf(stdout) }
             #endif
             if DebugHooks.show == "onboarding" {
@@ -60,12 +61,15 @@ struct RootView: View {
         .environment(\.theme, theme)
         .preferredColorScheme(preferredScheme)
         .tint(theme.text)
-        // Toasts (Jacob 2026-10-26): the top of the screen under the status bar — an info notice
-        // as the plain card, a failure as the shared `ErrorNote` — instead of the root alert.
+        // Toasts (Jacob 2026-10-26 / 2026-10-27): one slot — under the open chat's header pill
+        // (`ChatView` hosts it there); here at the top under the status bar only while no chat
+        // is up — an info notice as the plain card, a failure as the shared `ErrorNote`.
         .overlay(alignment: .top) {
-            ToastHost()
-                .environmentObject(model)
-                .environment(\.theme, theme)
+            if !model.chatIsUp {
+                ToastHost()
+                    .environmentObject(model)
+                    .environment(\.theme, theme)
+            }
         }
         // Fresh account: the name/handle sheet shows over the first-login terminal
         // screen (D82) while the machine boots (8–11 s), as Telegram and Grok ask for

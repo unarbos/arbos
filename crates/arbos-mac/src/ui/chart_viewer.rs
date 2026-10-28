@@ -13,6 +13,7 @@ use gpui::{
 use arbos_core::chart::LayoutStyle;
 
 use super::chart_card::{self, icon_square, legend, ChartUi};
+use super::highlight;
 use super::icons::icon;
 use super::shell::Shell;
 use super::theme::{Appearance, Theme};
@@ -59,7 +60,6 @@ fn pill(
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
     let color = tint.unwrap_or(theme.text);
-    let hover_bg = theme.surface_2;
     div()
         .id(id)
         .debug_selector(move || id.to_owned())
@@ -68,12 +68,11 @@ fn pill(
         .rounded_full()
         .border_1()
         .border_color(theme.border)
-        .bg(theme.surface_1)
         .flex()
         .items_center()
         .gap(px(6.0))
         .cursor_pointer()
-        .hover(move |s| s.bg(hover_bg))
+        .map(|el| highlight::washed(el, theme.surface_1, theme))
         .text_size(px(12.5))
         .text_color(color)
         .child(icon(glyph, 14.0, tint.unwrap_or(theme.text_muted)))

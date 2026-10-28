@@ -15,10 +15,10 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, Mutex, Semaphore};
 
 use arbos_core::approval::ApprovalOutcome;
-use arbos_core::doc::{CommandStatus, CommandView, MessageStatus};
+use arbos_core::doc::{CommandStatus, CommandView, MessageStatus, MessageView};
 use arbos_core::ids::{now_ms, ulid};
 use arbos_core::route::{pick_harness, validate, Harness, ValidRoute};
-use arbos_core::rpc::{AssistantEvent, Command as RpcCommand, Event};
+use arbos_core::rpc::{AssistantEvent, Command as RpcCommand, Event, StreamingBehavior};
 use arbos_core::widget::Widget;
 use arbos_core::{TOOL_OUTPUT_SUMMARY_MAX, TURN_DEADLINE_SECS};
 
@@ -1256,6 +1256,10 @@ pub struct TurnState {
     /// This turn was started by a voice-call `ask_agent` / `look` (user row `voice: true`).
     /// A later typed `send` preempts it so text chat is not stuck behind a hung call turn.
     pub from_voice: bool,
+    /// What pi does with this turn's prompt if its agent is still running something when the
+    /// prompt arrives (#2073): `FollowUp` queues it behind that run, `Steer` injects it into
+    /// it. Never unset — a prompt without a behaviour is what pi rejects outright.
+    pub streaming_behavior: StreamingBehavior,
     /// This turn was started by a routine fire (user row `sender: routine:<id>`), not by a
     /// person: nobody is waiting, so an `act` route writes no ack bubble (#1391).
     pub routine_turn: bool,
@@ -1499,6 +1503,7 @@ impl TurnState {
             parts_continuation: false,
             attachments_posted: Vec::new(),
             ack_row_id: None,
+            streaming_behavior: StreamingBehavior::FollowUp,
         }
     }
 }
@@ -1568,6 +1573,11 @@ pub struct Agent {
     /// A respawn is replacing the child right now: the supervisor must not spawn a second one
     /// because `pi` is momentarily empty.
     pub(crate) pi_respawning: AtomicBool,
+    /// agentd stopped listening to a pi run before pi settled it (a Prompt call that timed out,
+    /// a relay turn cut short, a turn deadline): pi may still be running it, and would reject
+    /// the next plain prompt with "Agent is already processing" (#2073, Doug 2026-10-27). The
+    /// next turn reclaims pi (abort, wait for idle) before it prompts.
+    pub(crate) pi_run_orphaned: AtomicBool,
     /// D91 soft-compaction hysteresis per chat: `None` right after a compaction (the floor is
     /// not known yet), then the window observed on the first turn after it.
     compaction_floor: std::sync::Mutex<HashMap<String, Option<i64>>>,
@@ -1673,6 +1683,7 @@ impl Agent {
             prompt_refresh_due_ms: std::sync::atomic::AtomicU64::new(0),
             pi_lease: Mutex::new(()),
             pi_respawning: AtomicBool::new(false),
+            pi_run_orphaned: AtomicBool::new(false),
             compaction_floor: std::sync::Mutex::new(HashMap::new()),
             pending_sends: std::sync::atomic::AtomicUsize::new(0),
             side_notes: std::sync::Mutex::new(HashMap::new()),
@@ -2951,18 +2962,28 @@ impl Agent {
         // A structured answer (`answer { questionId, value }`): render the value to text with the
         // widget the question was asked with, and mark the part answered before the turn runs.
         let structured = self.resolve_structured_answer(host, cmd).await;
-        let (mut user_text, channel_note, message_view, reply_note) = {
+        let (mut user_text, channel_note, message_view, reply_note, replies_to_me, mentions_me) = {
             let h = host.lock().await;
             let m = h.doc.message(&user_msg_id);
             let text = m.as_ref().map(|m| m.text()).unwrap_or_default();
             let reply_note = m
                 .as_ref()
                 .and_then(|m| crate::reply::quoted_message_note(&h.doc, m, &self.reply_me()));
+            let replies_to_me = m
+                .as_ref()
+                .and_then(|m| m.rest.get("replyTo").and_then(Value::as_str))
+                .and_then(|id| h.doc.message(id))
+                .is_some_and(|q| crate::reply::quoted_is_mine(&q, &self.reply_me()));
+            let mentions_me = m.as_ref().is_some_and(|m| {
+                message_mentions_agent(m, &self.cfg.project_id, &self.identity.handle())
+            });
             (
                 text,
                 m.as_ref().and_then(crate::channels::prompt_note),
                 m,
                 reply_note,
+                replies_to_me,
+                mentions_me,
             )
         };
         if user_text.trim().is_empty() {
@@ -3038,11 +3059,26 @@ impl Agent {
         }
         // Answering an open question (S8): mark it answered; pi receives the text as the next prompt.
         let mut prompt_text = user_text.clone();
+        let mut answers_my_question = structured.is_some();
         if let Some((question, rendered)) = &structured {
             prompt_text = format!("Answer to your question \"{question}\":\n{rendered}");
         } else if let Ok(Some((ask_id, _, question))) = self.store.open_ask(chat_id) {
             let _ = self.store.answer_ask(&ask_id);
             prompt_text = format!("Answer to your question \"{question}\": {user_text}");
+            answers_my_question = true;
+        }
+        // Should pi still be running something when this prompt lands, it queues or steers —
+        // never refuses (#2073).
+        {
+            let behavior = streaming_behavior_for(
+                answers_my_question,
+                replies_to_me,
+                mentions_me,
+                looks_imperative(&user_text),
+            );
+            if let Some(t) = self.turn.lock().await.as_mut() {
+                t.streaming_behavior = behavior;
+            }
         }
         // Reply-to: the quoted message rides with the user's words (user turn, never the
         // system prompt — D87 keeps the prefix byte-stable).
@@ -3809,6 +3845,9 @@ impl Agent {
     /// `child pi-main timed out on sw-1`, #2007), anything else as is.
     pub(crate) fn user_error_line(&self, e: &anyhow::Error) -> String {
         let text = e.to_string();
+        if is_prompt_rejection(&text) {
+            return PROMPT_REJECTED_LINE.to_owned();
+        }
         if is_child_error(&text) {
             return CHILD_ERROR_LINE.to_owned();
         }
@@ -4114,6 +4153,7 @@ impl Agent {
             parts_continuation: false,
             attachments_posted: Vec::new(),
             ack_row_id: None,
+            streaming_behavior: StreamingBehavior::FollowUp,
         });
         self.turn_running.store(true, Ordering::SeqCst);
         let keepalive = self.spawn_keepalive();
@@ -4365,7 +4405,7 @@ impl Agent {
                 h.doc.add_error_part(
                     &assistant_msg_id,
                     "turn_failed",
-                    &crate::disk::friendly(e, &self.work_root()),
+                    &self.user_error_line(&anyhow!("{e}")),
                 );
             }
             if let Some(m) = &model_failed {
@@ -5007,17 +5047,69 @@ impl Agent {
     ) -> Result<()> {
         let pi = self.pi().await?;
         let mut events = pi.subscribe();
+        // Whatever ends this call, pi is either settled (we saw `agent_settled`) or running a
+        // turn nobody listens to; the next prompt must know which (#2073).
+        let settled = Arc::new(AtomicBool::new(false));
+        let _orphan_note = OrphanNote {
+            settled: settled.clone(),
+            flag: &self.pi_run_orphaned,
+        };
         let images = std::mem::take(&mut *self.turn_images.lock().expect("turn images"));
-        let r = pi
+        let behavior = self
+            .turn
+            .lock()
+            .await
+            .as_ref()
+            .map(|t| t.streaming_behavior)
+            .unwrap_or(StreamingBehavior::FollowUp);
+        self.reclaim_pi_run(chat_id, &pi).await;
+        let mut r = pi
             .call(RpcCommand::Prompt {
                 id: pi.next_id("p"),
                 message: prompt_text.to_owned(),
-                streaming_behavior: None,
-                images,
+                streaming_behavior: Some(behavior),
+                images: images.clone(),
             })
             .await?;
+        if !r.success && is_pi_busy_rejection(r.error.as_deref().unwrap_or_default()) {
+            // pi still had a run we did not know about: take it back and ask once more, queued.
+            tracing::warn!(chat_id, error = ?r.error, "pi rejected the prompt as busy; reclaiming and retrying once");
+            self.pi_run_orphaned.store(true, Ordering::SeqCst);
+            self.reclaim_pi_run(chat_id, &pi).await;
+            r = pi
+                .call(RpcCommand::Prompt {
+                    id: pi.next_id("p"),
+                    message: prompt_text.to_owned(),
+                    streaming_behavior: Some(StreamingBehavior::FollowUp),
+                    images,
+                })
+                .await?;
+        }
         if !r.success {
-            return Err(anyhow!("prompt rejected: {}", r.error.unwrap_or_default()));
+            let detail = r.error.unwrap_or_default();
+            self.append_audit(
+                "prompt_rejected",
+                json!({ "chat_id": chat_id, "behavior": behavior_name(behavior), "error": detail }),
+            );
+            return Err(anyhow!("prompt rejected: {detail}"));
+        }
+        if r.data
+            .as_ref()
+            .and_then(|d| d.get("disposition"))
+            .and_then(Value::as_str)
+            == Some("queued")
+        {
+            // pi was still finishing something: the prompt waits behind it instead of being
+            // refused; the turn runs when pi gets to it.
+            tracing::info!(
+                chat_id,
+                behavior = behavior_name(behavior),
+                "prompt queued behind pi's running turn"
+            );
+            self.append_audit(
+                "prompt_queued",
+                json!({ "chat_id": chat_id, "behavior": behavior_name(behavior) }),
+            );
         }
         let started = Instant::now();
         let mut deadline_announced = false;
@@ -5119,14 +5211,72 @@ impl Agent {
             if self.turn.lock().await.as_ref().is_some_and(|t| t.stopped) {
                 break;
             }
+            if matches!(ev, Event::AgentSettled { .. }) {
+                settled.store(true, Ordering::SeqCst);
+            }
             if self.fold_main_event(chat_id, host, &ev, started).await? {
                 break;
             }
             if matches!(ev, Event::Other) && !pi.is_alive() {
+                settled.store(true, Ordering::SeqCst);
                 return Err(anyhow!("pi main child exited mid-turn"));
             }
         }
         Ok(())
+    }
+
+    /// pi may still be running a turn agentd stopped listening to (`pi_run_orphaned`), or one
+    /// agentd never knew about: ask pi, and when it is busy abort that run and wait for idle,
+    /// so the prompt that follows starts clean instead of being refused (#2073). Bounded: a pi
+    /// that will not settle in 20 s is left to the queued prompt.
+    async fn reclaim_pi_run(self: &Arc<Self>, chat_id: &str, pi: &Arc<RpcChild>) {
+        let flagged = self.pi_run_orphaned.load(Ordering::SeqCst);
+        let busy = match pi
+            .call_timeout(
+                RpcCommand::GetState {
+                    id: pi.next_id("gs"),
+                },
+                Duration::from_secs(5),
+            )
+            .await
+        {
+            Ok(r) => r
+                .data
+                .as_ref()
+                .and_then(|d| d.get("isStreaming"))
+                .and_then(Value::as_bool)
+                .unwrap_or(flagged),
+            Err(_) => flagged,
+        };
+        if !busy && !flagged {
+            return;
+        }
+        if !busy {
+            self.pi_run_orphaned.store(false, Ordering::SeqCst);
+            return;
+        }
+        let t0 = Instant::now();
+        let aborted = pi
+            .call_timeout(
+                RpcCommand::Abort {
+                    id: pi.next_id("ab"),
+                },
+                Duration::from_secs(20),
+            )
+            .await
+            .is_ok();
+        self.pi_run_orphaned.store(!aborted, Ordering::SeqCst);
+        tracing::warn!(
+            chat_id,
+            flagged,
+            aborted,
+            ms = t0.elapsed().as_millis() as i64,
+            "pi was still running a turn nobody listened to; reclaimed before the prompt"
+        );
+        self.append_audit(
+            "pi_run_reclaimed",
+            json!({ "chat_id": chat_id, "flagged": flagged, "aborted": aborted, "ms": t0.elapsed().as_millis() as i64 }),
+        );
     }
 
     /// End a relay turn now: the plain fallback line when the model wrote nothing yet, the turn
@@ -8553,6 +8703,96 @@ const RECAP_ROW_CHARS: usize = 500;
 pub(crate) const CHILD_ERROR_LINE: &str =
     "The agent restarted while it was working on this. Send the message again.";
 
+/// What a person reads when pi refused the prompt because it was still running something
+/// (#2073). Never the RPC's own words.
+pub(crate) const PROMPT_REJECTED_LINE: &str =
+    "I was still busy with the previous message and couldn't take this one. Send it again.";
+
+/// pi's refusal of a prompt (any reason), as run_main_turn words it.
+pub(crate) fn is_prompt_rejection(text: &str) -> bool {
+    text.starts_with("prompt rejected")
+}
+
+/// pi 1.2's refusal of a prompt that carries no streaming behaviour while a run is active.
+pub(crate) fn is_pi_busy_rejection(error: &str) -> bool {
+    error.contains("already processing")
+}
+
+fn behavior_name(b: StreamingBehavior) -> &'static str {
+    match b {
+        StreamingBehavior::Steer => "steer",
+        StreamingBehavior::FollowUp => "followUp",
+    }
+}
+
+/// Clears or sets `pi_run_orphaned` when a main turn ends, from whether pi settled it.
+struct OrphanNote<'a> {
+    settled: Arc<AtomicBool>,
+    flag: &'a AtomicBool,
+}
+
+impl Drop for OrphanNote<'_> {
+    fn drop(&mut self) {
+        let settled = self.settled.load(Ordering::SeqCst);
+        self.flag.store(!settled, Ordering::SeqCst);
+        if !settled {
+            tracing::warn!("main turn ended before pi settled; the next prompt reclaims pi first");
+        }
+    }
+}
+
+/// How pi should take a prompt that reaches it while a run is still active (#2073): a direct
+/// answer to the agent's own open question, a reply quoting one of its messages, or an
+/// @mention that tells it to do something steers the running turn; anything else waits its
+/// turn behind it. Never "reject".
+pub(crate) fn streaming_behavior_for(
+    answers_my_question: bool,
+    replies_to_me: bool,
+    mentions_me: bool,
+    imperative: bool,
+) -> StreamingBehavior {
+    if answers_my_question || replies_to_me || (mentions_me && imperative) {
+        StreamingBehavior::Steer
+    } else {
+        StreamingBehavior::FollowUp
+    }
+}
+
+/// The message names this agent: an `agent:<project>` chip in `mentions`, or `@handle` in the
+/// text (a typed mention the composer did not resolve).
+pub(crate) fn message_mentions_agent(msg: &MessageView, project_id: &str, handle: &str) -> bool {
+    let chip = format!("agent:{project_id}");
+    let by_chip = msg
+        .rest
+        .get("mentions")
+        .and_then(Value::as_array)
+        .is_some_and(|ms| ms.iter().any(|m| m.as_str() == Some(chip.as_str())));
+    by_chip || (!handle.is_empty() && msg.text().contains(&format!("@{handle}")))
+}
+
+/// A message that tells the agent to change what it is doing: it opens with a directive
+/// verb (after any @handles). Deliberately narrow — a steer interrupts a running turn.
+pub(crate) fn looks_imperative(text: &str) -> bool {
+    const VERBS: &[&str] = &[
+        "stop", "wait", "hold", "pause", "cancel", "don't", "dont", "do", "use", "switch",
+        "change", "instead", "no", "skip", "drop", "make", "try", "fix", "add", "remove", "run",
+        "check", "go", "keep", "focus", "ignore", "forget", "actually", "also", "now", "please",
+        "pls", "plz",
+    ];
+    let mut words = text
+        .split_whitespace()
+        .skip_while(|w| w.starts_with('@'))
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\''))
+        .filter(|w| !w.is_empty());
+    match words.next() {
+        Some(first) => {
+            let first = first.to_lowercase();
+            VERBS.contains(&first.as_str())
+        }
+        None => false,
+    }
+}
+
 /// An error from the pi child's plumbing (`RpcChild`): a call that timed out, a child that
 /// exited before answering, closed stdin, or no child at all.
 pub(crate) fn is_child_error(text: &str) -> bool {
@@ -9384,6 +9624,106 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #2073: how a prompt is handed to a pi that may still be running — never "reject".
+    #[test]
+    fn mid_run_prompts_queue_or_steer_never_reject() {
+        use StreamingBehavior::{FollowUp, Steer};
+        // (answers my question, replies to me, mentions me, imperative) → behaviour
+        type Case = ((bool, bool, bool, bool), StreamingBehavior);
+        let matrix: &[Case] = &[
+            ((false, false, false, false), FollowUp), // an ordinary message
+            ((false, false, false, true), FollowUp),  // imperative, but to nobody in particular
+            ((false, false, true, false), FollowUp), // "@doug what do you think?" — a question waits
+            ((false, false, true, true), Steer),     // "@doug stop, use the other file"
+            ((true, false, false, false), Steer),    // "yes" to the agent's own open question
+            ((false, true, false, false), Steer),    // a quoted reply to the agent's message
+            ((true, true, true, true), Steer),
+        ];
+        for ((a, r, m, i), want) in matrix {
+            assert_eq!(
+                streaming_behavior_for(*a, *r, *m, *i),
+                *want,
+                "answers={a} replies={r} mentions={m} imperative={i}"
+            );
+        }
+    }
+
+    #[test]
+    fn imperative_openers_are_narrow() {
+        for t in [
+            "stop",
+            "Stop that and use the CSV",
+            "@doug-agent don't publish yet",
+            "@doug-agent @affine switch to dark mode",
+            "no, the other one",
+            "please add a legend",
+        ] {
+            assert!(looks_imperative(t), "{t:?}");
+        }
+        for t in [
+            "yes",
+            "what do you think about scout?",
+            "@doug-agent how did you make that link?",
+            "https://open.spotify.com/track/x",
+            "",
+            "Lol",
+        ] {
+            assert!(!looks_imperative(t), "{t:?}");
+        }
+    }
+
+    #[test]
+    fn a_message_mentions_the_agent_by_chip_or_handle() {
+        let row = |text: &str, mentions: Vec<&str>| MessageView {
+            id: "m".into(),
+            role: "user".into(),
+            status: "done".into(),
+            parts: vec![json!({ "kind": "text", "text": text })],
+            rest: json!({ "mentions": mentions }),
+        };
+        assert!(message_mentions_agent(
+            &row("plot it", vec!["agent:p1"]),
+            "p1",
+            "doug-agent"
+        ));
+        assert!(!message_mentions_agent(
+            &row("plot it", vec!["agent:p2"]),
+            "p1",
+            "doug-agent"
+        ));
+        assert!(message_mentions_agent(
+            &row("@doug-agent plot it", vec![]),
+            "p1",
+            "doug-agent"
+        ));
+        assert!(!message_mentions_agent(
+            &row("doug, plot it", vec![]),
+            "p1",
+            "doug-agent"
+        ));
+        assert!(!message_mentions_agent(
+            &row("@doug-agent plot it", vec![]),
+            "p1",
+            ""
+        ));
+    }
+
+    /// The RPC's refusal never reaches the room; the person reads one plain line.
+    #[test]
+    fn a_rejected_prompt_reads_as_one_plain_line() {
+        let raw = "prompt rejected: Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.";
+        assert!(is_prompt_rejection(raw));
+        assert!(is_pi_busy_rejection(
+            "Agent is already processing. Specify streamingBehavior"
+        ));
+        assert!(!is_pi_busy_rejection(
+            "Cannot submit a prompt while compaction is in progress"
+        ));
+        assert!(!PROMPT_REJECTED_LINE.contains("streamingBehavior"));
+        assert!(!PROMPT_REJECTED_LINE.contains("prompt rejected"));
+        assert!(!is_prompt_rejection("workspace disk full (2 MB free)"));
+    }
 
     #[test]
     fn child_plumbing_errors_read_as_one_plain_line() {

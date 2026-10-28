@@ -38,6 +38,10 @@ enum DebugHooks {
     static var fixtureWaitlist: Int? { value("ARBOS_FIXTURE_WAITLIST").flatMap { Int($0) } }
     /// `ARBOS_FIXTURE_SERVERS=1`: the fixture lists three servers (the home list's Servers segment).
     static var fixtureServers: Bool { value("ARBOS_FIXTURE_SERVERS") == "1" }
+    /// `member` | `admin`: my role in the fixture group "Launch week" (owner by default).
+    static var fixtureGroupRole: String? {
+        value("ARBOS_FIXTURE_GROUP_ROLE").flatMap { ["member", "admin"].contains($0) ? $0 : nil }
+    }
     /// Seed the connected 1Password vault and the connect flow (`features.vault_connect` on).
     /// Default off, like the shipped relay flag.
     static var fixtureVault: Bool { value("ARBOS_FIXTURE_VAULT") == "1" }
@@ -188,6 +192,18 @@ enum DebugHooks {
     /// transcript to its top and back, `type` appends 40 keystrokes to the composer,
     /// `typing` fakes a member's typing presence every second. Comma-separated.
     static var perfDrive: Set<String> { Set((value("ARBOS_PERF_DRIVE") ?? "").split(separator: ",").map(String.init)) }
+    /// Scroll rig (iphone-scroll-perf, 2026-10-27): log every touch sequence on the chat
+    /// screen — touch-down → scroll pan began / first content-offset change (latency), and
+    /// pans that moved the finger but never moved the transcript ("dropped") — to the `perf`
+    /// log, plus a one-time dump of the gesture-recognizer graph under the first touch.
+    static let perfTouch: Bool = value("ARBOS_PERF_TOUCH") == "1"
+    /// Scroll rig A/B: comma-separated gestures left out of the chat screen for this launch —
+    /// `reply` (per-bubble swipe-right), `time` (transcript swipe-left time peek), `back`
+    /// (screen-root edge / full-screen back swipe), `longpress` (bubble long-press menu).
+    static let gesturesOff: Set<String> = Set((value("ARBOS_PERF_GESTURES_OFF") ?? "").split(separator: ",").map(String.init))
+    /// With `ARBOS_FIXTURE_LONG_ROWS`: an Arbonites-shaped history — code cards, chart bubbles,
+    /// @mentions, reactions and real (generated) pictures on top of the prose / markdown rows.
+    static var fixtureLongRich: Bool { value("ARBOS_FIXTURE_LONG_RICH") == "1" }
     /// Scripted tour for the screen recording (fixture only).
     static var demo: Bool { value("ARBOS_DEMO") == "1" }
     /// Scripted tour against the live relay: sends ARBOS_AUTO_SEND, waits for the reply, tours the sheets.

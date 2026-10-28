@@ -134,6 +134,39 @@ async fn room_oplog_vv(
     Ok(vv)
 }
 
+/// The newest `n` message rows of a room's stored doc (projected JSON, oldest first), from the
+/// same cache the version-vector readers use. The link-preview scan reads the tail this way
+/// so a busy room is not rebuilt from its rows on every message.
+pub async fn room_tail_rows(
+    state: &AppState,
+    room_name: &str,
+    n: usize,
+) -> anyhow::Result<Vec<serde_json::Value>> {
+    let room = state.room(room_name).await;
+    let tail = |doc: &arbos_core::doc::ChatDoc| {
+        let list = doc.messages_list();
+        let len = list.len();
+        (len.saturating_sub(n)..len)
+            .filter_map(|i| doc.projected_row(i))
+            .collect::<Vec<_>>()
+    };
+    {
+        let mut guard = room.doc_cache.lock().unwrap();
+        if let Some(cached) = guard.as_mut() {
+            advance_room_doc(state, room_name, cached)?;
+            return Ok(tail(&cached.doc));
+        }
+    }
+    let state_c = state.clone();
+    let name = room_name.to_owned();
+    let built = tokio::task::spawn_blocking(move || build_room_doc(&state_c, &name))
+        .await
+        .map_err(|e| anyhow::anyhow!("room doc rebuild: {e}"))??;
+    let rows = tail(&built.doc);
+    *room.doc_cache.lock().unwrap() = Some(built);
+    Ok(rows)
+}
+
 /// Per-socket row ordering (see `run`).
 struct Delivery {
     /// True from connect / HELLO until this socket's ROWS_REQ reply ended with ROWS_DONE.
@@ -583,6 +616,13 @@ async fn handle_frame(
                     bytes: row,
                     seq,
                 });
+                if !p.heal {
+                    // A link in a finished message gets its preview card (#2064), off the
+                    // socket task.
+                    if let Some((_, chat_id)) = room_name.rsplit_once('/') {
+                        crate::unfurl::on_row(state, project_id, chat_id, is_box);
+                    }
+                }
                 if p.heal {
                     // History, not a new message: no read-cursor move, no notification, no
                     // wake. The Matrix mirror resync picks the rows up on its own.
@@ -1795,6 +1835,118 @@ mod history_tests {
         assert_eq!(
             live.healed_bytes, healed_before,
             "no second heal once the relay is whole"
+        );
+    }
+
+    /// #2069 (long-task eval run 9): in a people chat the owner's device sent a message and the
+    /// box's reply causally depends on it. Every row was acked and advanced `head_seq`, yet a
+    /// replay that omits the device's own rows (`excludeOwn:true`) parks the box's reply as
+    /// pending and truncates the doc at the last row before the omitted message — the owner's
+    /// question and the agent's answer vanish. A full replay (`excludeOwn:false`, what the apps,
+    /// agentd and arbosctl now all use) returns every acked row. The relay stores everything; the
+    /// truncation was a client-side replay choice.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn replay_after_ack_returns_every_acked_row_across_cross_device_deps() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let project = project_of(&state, &alice, "Repro2069");
+        let chat = new_chat(&state, &project);
+        let room = format!("{project}/{chat}");
+        let token = device_token(&state, &alice);
+
+        // The owner's device writes meta and a user message.
+        let owner = ChatDoc::new(Some(11), false);
+        let base = owner.oplog_vv();
+        owner.init_meta("c", "p", 1);
+        state
+            .db
+            .append_row(
+                &room,
+                "dev:owner",
+                "meta",
+                &owner.export_updates_since(&base),
+            )
+            .unwrap();
+        let before = owner.oplog_vv();
+        owner
+            .append_user_message(
+                "m-owner",
+                "read the summary back",
+                "dev:owner",
+                &UserMessageOpts::default(),
+            )
+            .unwrap();
+        state
+            .db
+            .append_row(
+                &room,
+                "dev:owner",
+                "b-owner",
+                &owner.export_updates_since(&before),
+            )
+            .unwrap();
+
+        // The box imports the owner's message, then replies — its reply's ops depend on the
+        // owner's ops, so the reply cannot apply without them.
+        let mut box_doc = ChatDoc::new(Some(22), false);
+        box_doc.import(&owner.snapshot()).unwrap();
+        let before_reply = box_doc.oplog_vv();
+        box_doc
+            .append_user_message(
+                "m-box",
+                "the summary currently reads ...",
+                "box:x",
+                &UserMessageOpts::default(),
+            )
+            .unwrap();
+        let (reply_seq, _) = state
+            .db
+            .append_row(
+                &room,
+                "box:x",
+                "b-box",
+                &box_doc.export_updates_since(&before_reply),
+            )
+            .unwrap();
+
+        let addr = serve(state.clone()).await;
+
+        // A fresh device replays with `excludeOwn:false`: every acked row arrives and both
+        // messages rebuild, none pending.
+        let mut fresh = Device::fresh("dev:owner");
+        fresh.sync(addr, &room, &token, &state, None).await;
+        assert_eq!(fresh.cursor, reply_seq, "replay reaches the room head");
+        let ids = fresh.message_ids();
+        assert!(
+            ids.contains(&"m-owner".to_string()),
+            "owner message present"
+        );
+        assert!(
+            ids.contains(&"m-box".to_string()),
+            "the box reply is visible after a full replay"
+        );
+
+        // The regression: `excludeOwn:true` omits this device's own rows, so the box reply that
+        // depends on them is parked as pending and never becomes a visible message.
+        let kept = state
+            .db
+            .rows_after(&room, 0, Some("dev:owner"), 1024)
+            .unwrap();
+        assert!(
+            kept.iter().all(|r| r.device != "dev:owner"),
+            "excludeOwn drops the device's own rows"
+        );
+        let mut truncated = ChatDoc::new(None, false);
+        let mut pending_seen = false;
+        for r in &kept {
+            if truncated.import(&r.bytes).unwrap().pending.is_some() {
+                pending_seen = true;
+            }
+        }
+        assert!(pending_seen, "the box reply is parked as pending");
+        assert!(
+            !truncated.messages().iter().any(|m| m.id == "m-box"),
+            "the acked box reply is missing from the excludeOwn replay"
         );
     }
 }

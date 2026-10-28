@@ -1,0 +1,53 @@
+{
+  "id": "g6-respond-gate-about-agents",
+  "lane": "a",
+  "category": "group",
+  "title": "People group with two agents: messages ABOUT agents and human chatter get silence; a direct ask gets one answer",
+  "turns": [
+    {
+      "prompt": "The agents are getting better but still really buggy and hard to use",
+      "chat": "dm",
+      "expect_no_reply_s": 45,
+      "timeout_s": 60
+    },
+    {
+      "prompt": "Can you add members or agents?",
+      "chat": "dm",
+      "expect_no_reply_s": 45,
+      "timeout_s": 60
+    },
+    {
+      "prompt": "I think they get triggered by the word \"agents\"",
+      "chat": "dm",
+      "expect_no_reply_s": 45,
+      "timeout_s": 60
+    },
+    {
+      "prompt": "lane-a, count to 3 — one number per message, nothing else.",
+      "chat": "dm",
+      "reply_regex": "3",
+      "reply_from": "lane-a",
+      "silent_agents": [
+        "lane-b"
+      ],
+      "timeout_s": 180
+    },
+    {
+      "prompt": "lol",
+      "chat": "dm",
+      "expect_no_reply_s": 45,
+      "timeout_s": 60
+    }
+  ],
+  "setup_actions": [
+    {
+      "kind": "people_group",
+      "peer_handle": "lt-peer",
+      "with": [
+        "lane-b"
+      ],
+      "title": "eval respond gate"
+    }
+  ],
+  "regression": "Arbonites 2026-10-25/27: 'The agents are getting better…' woke three agents (collective-address rule), 'lol'/'oh' after an agent's turn woke it again (follow-up rule). The judge (responders.rs) must say nobody."
+}

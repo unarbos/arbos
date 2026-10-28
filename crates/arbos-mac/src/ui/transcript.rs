@@ -25,9 +25,10 @@ use crate::ui::avatars;
 use crate::ui::cards;
 use crate::ui::chat_search;
 use crate::ui::frost::edge_faded;
+use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::markdown::{
-    self, has_fenced_code, inline_plain, inline_spans, polish_assistant_prose, split_blocks, Block,
+    self, inline_plain, inline_spans, polish_assistant_prose, split_blocks, Block,
 };
 use crate::ui::math;
 use crate::ui::mention::{self, Mentions};
@@ -40,6 +41,7 @@ use crate::ui::theme::{
     Theme, BUBBLE_PAD_X, BUBBLE_PAD_Y, BUBBLE_RADIUS, CHAT_BODY, CHAT_LINE_HEIGHT, COLUMN_MARGIN,
     COMPOSER_HEIGHT, COMPOSER_WIDTH, LINE_HEIGHT, PLUS_BUTTON, TEXT_SMALL, TEXT_TINY,
 };
+use crate::ui::urlwrap;
 use crate::ui::veil::Veil;
 use crate::ui::widgets::QuestionCard;
 use serde_json::Value;
@@ -371,9 +373,18 @@ pub fn reply_ref_label(r: &ReplyRef) -> String {
 /// file when there is no prose.
 pub fn one_line(text: &str) -> String {
     let mut out = String::new();
-    for block in split_blocks(text) {
+    one_line_blocks(split_blocks(text), &mut out);
+    out
+}
+
+fn one_line_blocks(blocks: Vec<Block>, out: &mut String) {
+    for block in blocks {
         let pieces: Vec<String> = match block {
             Block::Paragraph(text) | Block::Heading { text, .. } => vec![text],
+            Block::Quote(inner) => {
+                one_line_blocks(inner, out);
+                continue;
+            }
             Block::Bullets(items) | Block::Numbered(items) => items,
             Block::Code { code, .. } => vec![code],
             Block::Table { header, rows } => header
@@ -395,7 +406,6 @@ pub fn one_line(text: &str) -> String {
             }
         }
     }
-    out
 }
 
 /// `line` cut to `max_chars` on a word boundary with an ellipsis; shorter
@@ -724,6 +734,10 @@ pub struct Transcript {
     chat_id: Option<Id>,
     list: ListState,
     pub(crate) rows: Vec<Row>,
+    /// Per-message built rows (#1405 / feedback app-01M5Z3QPDA5BRE84SAPADXX05V):
+    /// a send or streaming upsert rebuilds one message, not the whole
+    /// transcript — keeps scrolling and gestures responsive after send.
+    row_cache: MessageRowCache,
     /// Who `@handle` resolves to in this chat's bubbles (mention chips),
     /// rebuilt with the rows.
     mentions: Rc<Mentions>,
@@ -817,6 +831,7 @@ impl Transcript {
             chat_id: None,
             list,
             rows: Vec::new(),
+            row_cache: MessageRowCache::default(),
             mentions: Mentions::empty(),
             link_icons: LinkIcons::empty(),
             pane_open: false,
@@ -977,7 +992,8 @@ impl Transcript {
             }
         };
         if let Some(text) = text {
-            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+            // The URLs' wrap hints stay in the app.
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(urlwrap::plain(&text)));
         }
     }
 
@@ -1370,7 +1386,12 @@ impl Transcript {
             state.active_chat(),
             state.selected_channel.is_some(),
         );
+        if chat_changed {
+            self.row_cache.clear();
+        }
         self.chat_id = chat_id;
+        // Clone the Rc so the row-cache mut borrow does not conflict.
+        let mentions = Rc::clone(&self.mentions);
         // People I blocked: their rows fold into one hidden line for me (the relay's
         // `blockedSenders` hint, else my block list by id) — groups only; a DM with them has
         // the composer bar instead ([feedback blocked-state-mac-2026-10-26]).
@@ -1379,14 +1400,15 @@ impl Transcript {
             .filter(|p| p.is_people_group())
             .map(|p| state.hidden_senders_in(p))
             .unwrap_or_default();
-        let new_rows = build_rows_hiding(
+        let new_rows = build_rows_with_cache(
             &messages,
             show_details,
             speech,
             &me_id,
             &thumb_keys,
-            &self.mentions,
+            &mentions,
             multi_party,
+            &mut self.row_cache,
             &hidden_senders,
         );
         self.multi_party = multi_party;
@@ -1790,7 +1812,7 @@ impl Transcript {
                 .rounded_full()
                 .cursor_pointer()
                 .opacity(opacity)
-                .hover(|s| s.bg(theme.surface_2))
+                .map(|el| highlight::button(el, theme))
                 .child(icon(glyph, RAIL_GLYPH, color))
         };
         div()
@@ -3167,12 +3189,11 @@ impl Render for Transcript {
                                 .items_center()
                                 .justify_center()
                                 .rounded_full()
-                                .bg(theme.card())
                                 .border_1()
                                 .border_color(theme.border_strong)
                                 .shadow_md()
                                 .cursor_pointer()
-                                .hover(|s| s.bg(theme.surface_2))
+                                .map(|el| highlight::washed(el, theme.card(), &theme))
                                 .child(icon("arrow-down", 15.0, theme.text))
                                 .on_click(cx.listener(|this, _, _, cx| this.jump_to_latest(cx)))
                                 .with_animation(
@@ -3222,6 +3243,7 @@ pub fn speaker_label(cached: bool, failed: bool) -> &'static str {
 fn block_text_len(block: &Block) -> usize {
     match block {
         Block::Paragraph(t) | Block::Heading { text: t, .. } => t.len(),
+        Block::Quote(inner) => inner.iter().map(|b| block_text_len(b) + 1).sum(),
         Block::Bullets(items) | Block::Numbered(items) => items.iter().map(|s| s.len() + 1).sum(),
         Block::Code { code, .. } => code.len(),
         Block::Table { header, rows } => {
@@ -3427,6 +3449,7 @@ fn is_json_block(block: &Block) -> bool {
         }
         Block::Code { .. }
         | Block::Heading { .. }
+        | Block::Quote(_)
         | Block::Bullets(_)
         | Block::Numbered(_)
         | Block::Table { .. }
@@ -3438,6 +3461,112 @@ fn is_json_block(block: &Block) -> bool {
         && serde_json::from_str::<serde_json::Value>(t).is_ok()
 }
 
+/// Built rows for one message, keyed by a render version so a streaming
+/// upsert rebuilds only that message (#1405 /
+/// feedback app-01M5Z3QPDA5BRE84SAPADXX05V).
+#[derive(Default)]
+pub struct MessageRowCache {
+    entries: HashMap<Id, CachedMessageRows>,
+    /// How many messages were built (not served from the cache) on the
+    /// last [`build_rows_with_cache`] call. Tests assert a streaming edit
+    /// rebuilds one message, not the whole transcript.
+    pub built: usize,
+}
+
+struct CachedMessageRows {
+    version: u64,
+    rows: Vec<Row>,
+    last_stamp_at: u64,
+    prev_sender: Option<String>,
+}
+
+impl MessageRowCache {
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.built = 0;
+    }
+}
+
+/// Fingerprint of the fields that change a message's rows: text, parts,
+/// status, completed time, reactions, and the stamp / sender-run context
+/// (plus speech / details / thumbs / width-class flags).
+#[allow(clippy::too_many_arguments)]
+fn message_render_version(
+    message: &Message,
+    last_stamp_at: u64,
+    prev_sender: Option<&str>,
+    is_last_reply: bool,
+    show_details: bool,
+    speech: &SpeechRows<'_>,
+    me_id: &str,
+    thumb_keys: &HashSet<&str>,
+    names_senders: bool,
+    // Width class: multi-party layout changes who gets a name caption.
+    width_class: u8,
+) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    message.id.hash(&mut h);
+    std::mem::discriminant(&message.role).hash(&mut h);
+    message.sender.hash(&mut h);
+    std::mem::discriminant(&message.status).hash(&mut h);
+    message.pending.hash(&mut h);
+    message.created_at.hash(&mut h);
+    message.completed_at.hash(&mut h);
+    message.hidden.hash(&mut h);
+    message.worker.hash(&mut h);
+    message.greeting.hash(&mut h);
+    message.waiting_user.hash(&mut h);
+    message.waiting_approval.hash(&mut h);
+    message.plain_text().hash(&mut h);
+    for (emoji, people) in &message.reactions {
+        emoji.hash(&mut h);
+        for (who, on) in people {
+            who.hash(&mut h);
+            on.hash(&mut h);
+        }
+    }
+    // Parts: Debug covers every variant; thumb presence is mixed in so a
+    // late-decoded preview reloads the attachment row.
+    for p in &message.parts {
+        format!("{p:?}").hash(&mut h);
+        if let Part::Attachment { attachment, .. } = p {
+            attachment
+                .blob_ref
+                .as_deref()
+                .is_some_and(|k| thumb_keys.contains(k))
+                .hash(&mut h);
+        }
+    }
+    message.sender_name.hash(&mut h);
+    message.sender_handle.hash(&mut h);
+    message.sender_avatar.hash(&mut h);
+    message.sender_avatar_color.hash(&mut h);
+    message.sender_icon.hash(&mut h);
+    message.in_reply_to.hash(&mut h);
+    message.reply_to.hash(&mut h);
+    message.forwarded_from.hash(&mut h);
+    message.agent_reply_to.hash(&mut h);
+    message.asked_by_handle.hash(&mut h);
+    message.owner_handle.hash(&mut h);
+    message.routine_name.hash(&mut h);
+    message.activity.hash(&mut h);
+    format!("{:?}", message.turn).hash(&mut h);
+    format!("{:?}", message.reply_ref).hash(&mut h);
+    format!("{:?}", message.job).hash(&mut h);
+    last_stamp_at.hash(&mut h);
+    prev_sender.hash(&mut h);
+    is_last_reply.hash(&mut h);
+    show_details.hash(&mut h);
+    speech.enabled.hash(&mut h);
+    speech.voice_mode.hash(&mut h);
+    speech.spoken.contains(&message.id).hash(&mut h);
+    speech.failed.contains_key(&message.id).hash(&mut h);
+    me_id.hash(&mut h);
+    names_senders.hash(&mut h);
+    width_class.hash(&mut h);
+    h.finish()
+}
+
 /// The transcript shows only what the agent said and made: prose, files,
 /// questions, errors. Everything the agent did (tool calls, status events,
 /// JSON, usage) is hidden; the Details drawer has it. One indicator per chat
@@ -3447,8 +3576,8 @@ fn is_json_block(block: &Block) -> bool {
 /// mixed into row versions so a late thumbnail reloads the picture row.
 /// `names_senders` landed from a parallel feedback; keep it a plain arg
 /// rather than a one-off options struct.
-#[allow(clippy::too_many_arguments)]
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub fn build_rows(
     messages: &[Message],
     show_details: bool,
@@ -3472,6 +3601,8 @@ pub fn build_rows(
 
 /// [`build_rows`] with the senders I blocked (`user:<id>` keys): their messages fold into
 /// one [`RowKind::Hidden`] line per run instead of bubbles, and carry no date stamp.
+/// Production sync goes through [`build_rows_with_cache`] (same fold, plus the row cache).
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn build_rows_hiding(
     messages: &[Message],
@@ -3483,6 +3614,36 @@ pub fn build_rows_hiding(
     names_senders: bool,
     hidden_senders: &HashSet<String>,
 ) -> Vec<Row> {
+    let mut cache = MessageRowCache::default();
+    build_rows_with_cache(
+        messages,
+        show_details,
+        speech,
+        me_id,
+        thumb_keys,
+        mentions,
+        names_senders,
+        &mut cache,
+        hidden_senders,
+    )
+}
+
+/// Like [`build_rows`], but reuses per-message rows whose render version is
+/// unchanged. A streaming upsert then rebuilds one message, not all of them.
+/// Blocked senders fold into [`RowKind::Hidden`] the same way as [`build_rows_hiding`].
+#[allow(clippy::too_many_arguments)]
+pub fn build_rows_with_cache(
+    messages: &[Message],
+    show_details: bool,
+    speech: SpeechRows<'_>,
+    me_id: &str,
+    thumb_keys: &HashSet<&str>,
+    mentions: &Mentions,
+    names_senders: bool,
+    cache: &mut MessageRowCache,
+    hidden_senders: &HashSet<String>,
+) -> Vec<Row> {
+    cache.built = 0;
     let mine = |m: &Message| {
         m.sender == "user" || m.sender.is_empty() || m.sender == format!("user:{me_id}")
     };
@@ -3505,7 +3666,10 @@ pub fn build_rows_hiding(
     // with no words yet — takes its stamp back, so no date line hangs over
     // empty space above the status row ([feedback status-row-gap-mac-2026-10-26]).
     let mut pending_stamp: Option<(usize, u64, Option<String>)> = None;
+    let width_class = u8::from(names_senders);
+    let mut keep: HashSet<Id> = HashSet::new();
     for (mix, message) in messages.iter().enumerate() {
+        keep.insert(message.id.clone());
         retract_dangling_stamp(
             &mut rows,
             &mut pending_stamp,
@@ -3513,6 +3677,7 @@ pub fn build_rows_hiding(
             &mut prev_sender,
         );
         // Someone I blocked: fold the run into one hidden line, no bubble, no stamp.
+        // Cross-message fold — do not serve from the per-message row cache.
         if message.role == Role::User && hidden_senders.contains(&message.sender) {
             match rows.last_mut() {
                 Some(Row {
@@ -3541,6 +3706,30 @@ pub fn build_rows_hiding(
             prev_sender = None;
             continue;
         }
+        let is_last_reply = last_reply == Some(mix);
+        let version = message_render_version(
+            message,
+            last_stamp_at,
+            prev_sender.as_deref(),
+            is_last_reply,
+            show_details,
+            &speech,
+            me_id,
+            thumb_keys,
+            names_senders,
+            width_class,
+        );
+        if let Some(hit) = cache.entries.get(&message.id) {
+            if hit.version == version {
+                rows.extend(hit.rows.iter().cloned());
+                last_stamp_at = hit.last_stamp_at;
+                prev_sender = hit.prev_sender.clone();
+                pending_stamp = None;
+                continue;
+            }
+        }
+        cache.built += 1;
+        let start = rows.len();
         let streaming = message.is_streaming();
         if message.created_at > 0 && message.created_at.saturating_sub(last_stamp_at) > STAMP_GAP_MS
         {
@@ -4277,6 +4466,25 @@ pub fn build_rows_hiding(
         if rows.len() > rows_before_message {
             prev_sender = Some(message.sender.clone());
         }
+        // Finalize a no-content message's stamp now so the cached slice is
+        // complete (same outcome as retract on the next turn).
+        if rows.len() == rows_before_message {
+            retract_dangling_stamp(
+                &mut rows,
+                &mut pending_stamp,
+                &mut last_stamp_at,
+                &mut prev_sender,
+            );
+        }
+        cache.entries.insert(
+            message.id.clone(),
+            CachedMessageRows {
+                version,
+                rows: rows[start..].to_vec(),
+                last_stamp_at,
+                prev_sender: prev_sender.clone(),
+            },
+        );
     }
     retract_dangling_stamp(
         &mut rows,
@@ -4284,6 +4492,7 @@ pub fn build_rows_hiding(
         &mut last_stamp_at,
         &mut prev_sender,
     );
+    cache.entries.retain(|id, _| keep.contains(id));
     // Who is working is the presence row over the composer (`ui::presence`),
     // not a transcript row: one notice per agent, never a caption plus a line.
     let _ = (running, queued, last_stamp_at, prev_sender);
@@ -4367,7 +4576,9 @@ struct Segment {
 fn block_segments(block: &Block, literal: bool) -> Vec<Segment> {
     let inline = |t: &str| {
         if literal {
-            t.to_string()
+            // As typed, except that bare URLs carry their wrap hints (as
+            // `plain_text` draws them).
+            urlwrap::hint_bare_urls(t)
         } else {
             inline_plain(t)
         }
@@ -4377,6 +4588,21 @@ fn block_segments(block: &Block, literal: bool) -> Vec<Segment> {
         Block::Paragraph(text) | Block::Heading { text, .. } => {
             vec![seg(String::new(), inline(text))]
         }
+        // A quote's blocks follow one another one newline apart, as the
+        // bubble's blocks do.
+        Block::Quote(inner) => inner
+            .iter()
+            .enumerate()
+            .flat_map(|(i, b)| {
+                let mut segs = block_segments(b, literal);
+                if i > 0 {
+                    if let Some(first) = segs.first_mut() {
+                        first.lead.insert(0, '\n');
+                    }
+                }
+                segs
+            })
+            .collect(),
         Block::Bullets(items) => items
             .iter()
             .enumerate()
@@ -4431,10 +4657,11 @@ fn block_segments(block: &Block, literal: bool) -> Vec<Segment> {
 /// hands its `Selectable::bubble`: the text as typed, or its blocks when it
 /// carries a fenced code block.
 fn user_bubble_plain(text: &str) -> String {
-    if has_fenced_code(text) {
-        bubble_plain(&split_blocks(text), true)
+    let blocks = split_blocks(text);
+    if is_plain_paragraph(&blocks) {
+        urlwrap::hint_bare_urls(text)
     } else {
-        text.to_string()
+        bubble_plain(&blocks, false)
     }
 }
 
@@ -4547,7 +4774,8 @@ fn plain_text(
             }
             let url: String = chars[i..url_end].iter().collect();
             let start = full.len();
-            links.push((start..start + url.len(), url.clone()));
+            // `text` already carries the wrap hints; the target never does.
+            links.push((start..start + url.len(), urlwrap::plain(&url)));
             runs.push(TextRun {
                 len: url.len(),
                 font: font.clone(),
@@ -4618,50 +4846,48 @@ fn user_message_body(
     copy: &CodeCopy,
 ) -> AnyElement {
     let key = format!("{row_id}.u");
-    if !has_fenced_code(text) {
-        let bubble = selectable.bubble(key, text.to_string());
-        return plain_text(text, color, theme, &bubble, 0);
-    }
     let blocks = split_blocks(text);
-    let bubble = selectable.bubble(key, bubble_plain(&blocks, true));
-    let offsets = block_offsets(&blocks, true);
+    // A typed message with no formatting at all stays one plain element: the
+    // text as typed, bare URLs linked ([`user_bubble_plain`]).
+    if is_plain_paragraph(&blocks) {
+        let text = urlwrap::hint_bare_urls(text);
+        let bubble = selectable.bubble(key, text.clone());
+        return plain_text(&text, color, theme, &bubble, 0);
+    }
+    let bubble = selectable.bubble(key, bubble_plain(&blocks, false));
+    let offsets = block_offsets(&blocks, false);
     // Same as `render_block`: no `min_w_0`, so the quote header above never
     // sets this column's width.
     let mut col = div().flex().flex_col().gap(px(6.0)).w_full();
     for (i, block) in blocks.iter().enumerate() {
         let id = format!("{row_id}.u{i}");
-        let at = offsets[i];
-        col = match block {
-            Block::Code { lang, code } => col.child(code_fence_card(
-                &id,
-                lang,
-                code,
-                color,
-                theme,
-                &bubble,
-                at,
-                None,
-                Instant::now(),
-                copy,
-            )),
-            // Prose, lists and tables stay literal in a typed bubble (a
-            // "# heading" is still a "# heading"); one element per block.
-            Block::Paragraph(_)
-            | Block::Heading { .. }
-            | Block::Bullets(_)
-            | Block::Numbered(_)
-            | Block::Table { .. }
-            | Block::Math { .. }
-            | Block::Chart { .. } => col.child(plain_text(
-                &block_plain(block, true),
-                color,
-                theme,
-                &bubble,
-                at,
-            )),
-        };
+        col = col.child(render_block_in(
+            &id,
+            block,
+            color,
+            offsets[i],
+            None,
+            Instant::now(),
+            theme,
+            &bubble,
+            copy,
+        ));
     }
     col.into_any_element()
+}
+
+/// Whether a typed message renders exactly as typed: one paragraph whose
+/// inline runs carry no style (links aside — `plain_text` draws those).
+fn is_plain_paragraph(blocks: &[Block]) -> bool {
+    match blocks {
+        [Block::Paragraph(text)] => inline_spans(text).iter().all(|s| {
+            let mut style = s.style;
+            style.link = false;
+            style == markdown::InlineStyle::default() && s.icon.is_none()
+        }),
+        [] => true,
+        _ => false,
+    }
 }
 
 /// Inline-markdown prose as one selectable element. `veil_offset` is where
@@ -4678,7 +4904,9 @@ fn styled_text(
     bubble: &BubbleSelectable,
     at: usize,
 ) -> AnyElement {
-    let (full, runs, links, icons) = inline_runs(text, base_color, theme);
+    let (full, runs, links, icons, spoilers) = inline_runs(text, base_color, theme, at, &|start| {
+        bubble.spoiler_revealed(start)
+    });
     let runs = match veil {
         Some(veil) => apply_veil(runs, &veil.spans(now), veil_offset),
         None => runs,
@@ -4687,6 +4915,7 @@ fn styled_text(
         .text(at, full, runs)
         .with_links(links)
         .with_icons(icons)
+        .with_spoilers(spoilers)
         .into_any_element()
 }
 
@@ -4705,22 +4934,38 @@ pub fn link_icon_placeholder(theme: &Theme) -> gpui::Hsla {
 type Links = Vec<(std::ops::Range<usize>, String)>;
 /// Icon cells of the named links (element-local bytes of the cell → site host).
 type Icons = Vec<(std::ops::Range<usize>, String)>;
+/// Spoiler ranges (element-local bytes → where the spoiler starts in the bubble).
+type Spoilers = Vec<(std::ops::Range<usize>, usize)>;
 
-/// The rendered text, its styled runs, its link ranges and its icon cells for
-/// inline markdown `text` (`**bold**`, `*italic*`, `` `code` ``, links). A
-/// named link's cell ([`markdown::LINK_ICON_CELL`]) is an unpainted run — the
-/// site's picture goes there at paint time — and the link's click range
-/// covers cell and name.
+/// A hidden spoiler's fill: a solid pill in the muted ink; open, a faint wash.
+pub fn spoiler_fill(color: gpui::Hsla, theme: &Theme, revealed: bool) -> gpui::Hsla {
+    let ink = muted_of(color, theme);
+    Theme::with_alpha(ink, if revealed { 0.16 } else { 0.9 })
+}
+
+/// The rendered text, its styled runs, its link ranges, its icon cells and
+/// its spoiler ranges for inline markdown `text` (`**bold**`, `*italic*`,
+/// `~~strike~~`, `||spoiler||`, `` `code` ``, links). A named link's cell
+/// ([`markdown::LINK_ICON_CELL`]) is an unpainted run — the site's picture
+/// goes there at paint time — and the link's click range covers cell and
+/// name. A spoiler the viewer has not opened (`revealed(start)` is false for
+/// its start byte in the bubble's plain text) paints as a solid pill with its
+/// text invisible; `at` is where `text` starts in the bubble's plain text.
 fn inline_runs(
     text: &str,
     base_color: gpui::Hsla,
     theme: &Theme,
-) -> (String, Vec<TextRun>, Links, Icons) {
+    at: usize,
+    revealed: &dyn Fn(usize) -> bool,
+) -> (String, Vec<TextRun>, Links, Icons, Spoilers) {
     let spans = inline_spans(text);
     let mut full = String::new();
     let mut runs: Vec<TextRun> = Vec::new();
     let mut links: Links = Vec::new();
     let mut icons: Icons = Vec::new();
+    let mut spoilers: Spoilers = Vec::new();
+    // Where each spoiler's first run starts (element-local), by its index.
+    let mut spoiler_starts: HashMap<u16, usize> = HashMap::new();
     let sans = sans_font(theme);
     let mono = gpui::Font {
         family: theme.font_mono.into(),
@@ -4761,29 +5006,37 @@ fn inline_runs(
                 text_len -= cell;
             }
         }
+        let mut color = if style.link { theme.accent } else { base_color };
+        let mut background = style.code.then_some(theme.code_bg);
+        let mut underline = style.link.then(|| gpui::UnderlineStyle {
+            color: Some(Theme::with_alpha(theme.accent, 0.6)),
+            thickness: px(1.0),
+            wavy: false,
+        });
+        if style.spoiler != 0 {
+            let first = *spoiler_starts.entry(style.spoiler).or_insert(start);
+            let open = revealed(at + first);
+            spoilers.push((start..start + span.text.len(), at + first));
+            background = Some(spoiler_fill(base_color, theme, open));
+            if !open {
+                color = gpui::transparent_black();
+                underline = None;
+            }
+        }
         runs.push(TextRun {
             len: text_len,
             font,
-            color: if style.link { theme.accent } else { base_color },
-            background_color: if style.code {
-                Some(theme.code_bg)
-            } else {
-                None
-            },
-            underline: if style.link {
-                Some(gpui::UnderlineStyle {
-                    color: Some(Theme::with_alpha(theme.accent, 0.6)),
-                    thickness: px(1.0),
-                    wavy: false,
-                })
-            } else {
-                None
-            },
-            strikethrough: None,
+            color,
+            background_color: background,
+            underline,
+            strikethrough: style.strike.then(|| gpui::StrikethroughStyle {
+                thickness: px(1.0),
+                color: Some(color),
+            }),
         });
         full.push_str(&span.text);
     }
-    (full, runs, links, icons)
+    (full, runs, links, icons, spoilers)
 }
 
 /// Split runs at chunk boundaries and multiply alpha in (zeron veil.rs).
@@ -4848,6 +5101,40 @@ fn render_block(
     bubble: &BubbleSelectable,
     copy: &CodeCopy,
 ) -> AnyElement {
+    render_block_in(
+        row_id, block, theme.text, at, veil, now, theme, bubble, copy,
+    )
+}
+
+/// The quote bar's width and the gap to the quoted text (Grok Bot: a thin
+/// muted bar, the text inset and muted).
+pub const QUOTE_BAR: f32 = 3.0;
+pub const QUOTE_GAP: f32 = 10.0;
+
+/// A muted version of the bubble's text colour: the theme's muted ink on the
+/// agent's grey bubble, the same ink at lower alpha on my accent bubble.
+fn muted_of(color: gpui::Hsla, theme: &Theme) -> gpui::Hsla {
+    if color == theme.text {
+        theme.text_muted
+    } else {
+        Theme::with_alpha(color, 0.72)
+    }
+}
+
+/// One block in `color` (the bubble's ink: `theme.text` on an agent's bubble,
+/// the white of my own).
+#[allow(clippy::too_many_arguments)]
+fn render_block_in(
+    row_id: &str,
+    block: &Block,
+    color: gpui::Hsla,
+    at: usize,
+    veil: Option<&Veil>,
+    now: Instant,
+    theme: &Theme,
+    bubble: &BubbleSelectable,
+    copy: &CodeCopy,
+) -> AnyElement {
     // No `min_w_0` here. Inside a flex-column bubble (a quote header stacked
     // over the text, #1447) taffy sizes the column from its items, and an
     // item with `min-width: 0` contributes nothing to that width — the bubble
@@ -4858,7 +5145,7 @@ fn render_block(
     // the bubble itself keeps `min_w_0`). `layout_tests::a_quoted_bubble_…`.
     let base = div()
         .w_full()
-        .text_color(theme.text)
+        .text_color(color)
         .text_size(px(CHAT_BODY))
         .line_height(px(CHAT_LINE_HEIGHT));
     // Where each selectable element's text starts in the bubble's plain text.
@@ -4870,10 +5157,11 @@ fn render_block(
         starts.push(pos);
         pos += s.text.len();
     }
+    let muted = muted_of(color, theme);
     match block {
         Block::Paragraph(text) => base
             .child(styled_text(
-                text, theme.text, theme, veil, now, 0, bubble, starts[0],
+                text, color, theme, veil, now, 0, bubble, starts[0],
             ))
             .into_any_element(),
         Block::Heading { level, text } => {
@@ -4885,9 +5173,37 @@ fn render_block(
             base.text_size(px(size))
                 .font_weight(STRONG_WEIGHT)
                 .pt(px(6.0))
+                .debug_selector(move || format!("heading-{level}"))
                 .child(styled_text(
-                    text, theme.text, theme, veil, now, 0, bubble, starts[0],
+                    text, color, theme, veil, now, 0, bubble, starts[0],
                 ))
+                .into_any_element()
+        }
+        // `> quoted`: a thin bar, the blocks inset and muted; a quote inside
+        // a quote draws its own bar inside this one.
+        Block::Quote(inner) => {
+            let mut col = div().flex_1().min_w_0().flex().flex_col().gap(px(6.0));
+            let mut inner_at = at;
+            for (i, b) in inner.iter().enumerate() {
+                let id = format!("{row_id}.q{i}");
+                col = col.child(render_block_in(
+                    &id, b, muted, inner_at, None, now, theme, bubble, copy,
+                ));
+                inner_at += block_plain(b, false).len() + 1;
+            }
+            base.flex()
+                .items_stretch()
+                .gap(px(QUOTE_GAP))
+                .debug_selector(|| "quote-block".into())
+                .child(
+                    div()
+                        .w(px(QUOTE_BAR))
+                        .flex_shrink_0()
+                        .rounded_full()
+                        .bg(Theme::with_alpha(muted, 0.55))
+                        .debug_selector(|| "quote-bar".into()),
+                )
+                .child(col)
                 .into_any_element()
         }
         Block::Bullets(items) | Block::Numbered(items) => {
@@ -4907,7 +5223,7 @@ fn render_block(
                     .flex_shrink_0()
                     .flex()
                     .items_center()
-                    .text_color(theme.text_muted)
+                    .text_color(muted)
                     .debug_selector(move || format!("list-marker-{i}"));
                 let marker = if numbered {
                     marker.child(format!("{}.", i + 1))
@@ -4919,7 +5235,7 @@ fn render_block(
                             .size(px(BULLET_DOT))
                             .flex_shrink_0()
                             .rounded_full()
-                            .bg(theme.text_muted)
+                            .bg(muted)
                             .debug_selector(move || format!("list-bullet-{i}")),
                     )
                 };
@@ -4934,7 +5250,7 @@ fn render_block(
                                 .min_w_0()
                                 .debug_selector(move || format!("list-text-{i}"))
                                 .child(styled_text(
-                                    item, theme.text, theme, veil, now, offset, bubble, starts[i],
+                                    item, color, theme, veil, now, offset, bubble, starts[i],
                                 )),
                         ),
                 );
@@ -4950,8 +5266,9 @@ fn render_block(
             // markdown-tables-mac-2026-10-25]: the Lima table showed raw
             // `[…](https://…)` in every first column).
             let cell = |text: &str, head: bool, ri: usize, i: usize, start: usize| {
-                let color = if head { theme.text } else { theme.text_muted };
-                let (full, mut runs, links, icons) = inline_runs(text, color, theme);
+                let color = if head { color } else { muted };
+                let (full, mut runs, links, icons, spoilers) =
+                    inline_runs(text, color, theme, start, &|s| bubble.spoiler_revealed(s));
                 if head {
                     for run in &mut runs {
                         if run.font.weight < FontWeight::SEMIBOLD {
@@ -4974,7 +5291,8 @@ fn render_block(
                         bubble
                             .text(start, full, runs)
                             .with_links(links)
-                            .with_icons(icons),
+                            .with_icons(icons)
+                            .with_spoilers(spoilers),
                     )
             };
             // Taffy sizes a nested flex column from its cells' text, not their
@@ -5027,7 +5345,7 @@ fn render_block(
             .into_any_element()
         }
         Block::Code { lang, code } => code_fence_card(
-            row_id, lang, code, theme.text, theme, bubble, starts[0], veil, now, copy,
+            row_id, lang, code, color, theme, bubble, starts[0], veil, now, copy,
         ),
         Block::Chart { part_id, spec, .. } => {
             crate::ui::chart_card::card(row_id, part_id, spec, theme, copy)
@@ -5035,7 +5353,7 @@ fn render_block(
         // Display math: typeset, a size up, centred on its own line (KaTeX's
         // display mode in Grok Bot).
         Block::Math { source } => {
-            let (full, runs) = math_runs(source, theme.text, theme);
+            let (full, runs) = math_runs(source, color, theme);
             let runs = match veil {
                 Some(veil) => apply_veil(runs, &veil.spans(now), 0),
                 None => runs,
@@ -5421,7 +5739,9 @@ fn copy_pill(row_id: &str, code: &str, theme: &Theme, copy: &CodeCopy) -> AnyEle
         .bg(base)
         .text_color(fg)
         .when(!copied, |el| {
+            // hover-fill: exception code-card
             el.hover(move |s| s.bg(hover_bg).text_color(hover_fg))
+                // hover-fill: exception code-card
                 .active(move |s| s.bg(down_bg).text_color(down_fg))
         })
         .child(if copied {
@@ -5610,6 +5930,34 @@ mod selection_tests {
         assert_eq!(bubble_plain(&one, true), "not a heading");
     }
 
+    /// A typed bubble's plain text — what its selection reads — is the text
+    /// its elements draw: bare URLs carry their wrap hints in both, with and
+    /// without a code fence, and every block still starts at its offset.
+    #[test]
+    fn user_bubble_plain_text_hints_its_urls_like_the_elements_draw_them() {
+        let typed = "see https://a.io/x/y now";
+        assert_eq!(user_bubble_plain(typed), urlwrap::hint_bare_urls(typed));
+        assert_ne!(user_bubble_plain(typed), typed, "the hints are in");
+        assert_eq!(urlwrap::plain(&user_bubble_plain(typed)), typed);
+
+        let fenced = "see https://a.io/x/y\n\n```sh\ncurl https://a.io/x/y\n```\n\nhttps://b.io/z";
+        let blocks = split_blocks(fenced);
+        let text = bubble_plain(&blocks, true);
+        assert_eq!(user_bubble_plain(fenced), text);
+        assert!(
+            text.contains(&urlwrap::breakable("https://b.io/z")),
+            "prose URLs are hinted"
+        );
+        assert!(
+            text.contains("curl https://a.io/x/y"),
+            "code is as typed: {text:?}"
+        );
+        for (block, at) in blocks.iter().zip(block_offsets(&blocks, true)) {
+            let plain = block_plain(block, true);
+            assert_eq!(&text[at..at + plain.len()], plain, "block at {at}");
+        }
+    }
+
     #[test]
     fn table_cells_pad_to_the_header() {
         let block = Block::Table {
@@ -5648,7 +5996,8 @@ mod selection_tests {
             markdown::LINK_ICON_CELL
         )));
         let theme = Theme::dark(crate::ui::theme::Surface::Matte);
-        let (text, runs, links, icons) = inline_runs(&rows[0][0], theme.text_muted, &theme);
+        let (text, runs, links, icons, _) =
+            inline_runs(&rows[0][0], theme.text_muted, &theme, 0, &|_| false);
         let cell = markdown::LINK_ICON_CELL;
         assert_eq!(text, format!("{cell}Librería El Virrey"));
         assert_eq!(
@@ -7838,9 +8187,13 @@ mod cross_bubble_copy_tests {
         );
     }
 
+    /// A typed bubble's selectable text is what it renders: a heading reads
+    /// without its `#` ([feedback chat-markdown-mac-2026-10-27]), `#hashtag`
+    /// and plain lines as typed, a fenced block as its code.
     #[test]
-    fn a_user_bubble_is_selectable_as_typed() {
-        assert_eq!(user_bubble_plain("# not a heading"), "# not a heading");
+    fn a_user_bubble_is_selectable_as_rendered() {
+        assert_eq!(user_bubble_plain("# a heading"), "a heading");
+        assert_eq!(user_bubble_plain("#hashtag stays"), "#hashtag stays");
         assert_eq!(
             user_bubble_plain("see\n```rs\nlet x = 1;\n```"),
             "see\nlet x = 1;"
@@ -7873,12 +8226,15 @@ mod link_icon_tests {
         assert_eq!(links.len(), 3);
         assert_eq!(links[0].text, format!("{cell}El Virrey"));
         assert_eq!(links[0].icon.as_deref(), Some("www.elvirrey.com"));
-        assert_eq!(links[1].text, "https://x.com/a", "a bare URL has no cell");
+        // Bare URLs (and a URL as its own label) have no cell; their text
+        // carries the wrap hints (`urlwrap`), their target never does.
+        assert_eq!(urlwrap::plain(&links[1].text), "https://x.com/a");
+        assert_eq!(links[1].text, urlwrap::breakable("https://x.com/a"));
+        assert_eq!(links[1].href.as_deref(), Some("https://x.com/a"));
         assert_eq!(links[1].icon, None);
-        assert_eq!(
-            links[2].text, "https://y.com",
-            "a URL as its own label has no cell"
-        );
+        assert_eq!(urlwrap::plain(&links[2].text), "https://y.com");
+        assert_eq!(links[2].text, urlwrap::breakable("https://y.com"));
+        assert_eq!(links[2].href.as_deref(), Some("https://y.com"));
         assert_eq!(links[2].icon, None);
         assert_eq!(
             markdown::link_host("https://user@Sub.Example.com:8443/p?q#f").as_deref(),
@@ -7952,7 +8308,8 @@ mod link_icon_tests {
         assert_eq!(items.len(), 7);
         let theme = Theme::dark(crate::ui::theme::Surface::Matte);
         for item in items {
-            let (text, runs, links, icons) = inline_runs(item, theme.text, &theme);
+            let (text, runs, links, icons, _) =
+                inline_runs(item, theme.text, &theme, 0, &|_| false);
             assert!(text.starts_with(markdown::LINK_ICON_CELL), "{text}");
             assert_eq!(icons.len(), 1);
             assert_eq!(icons[0].1, "nypost.com");
@@ -8038,7 +8395,8 @@ mod markdown_tests {
     #[test]
     fn strong_runs_are_bold() {
         let theme = Theme::dark(crate::ui::theme::Surface::Matte);
-        let (text, runs, _, _) = inline_runs("Surf **gear** list", theme.text, &theme);
+        let (text, runs, _, _, _) =
+            inline_runs("Surf **gear** list", theme.text, &theme, 0, &|_| false);
         assert_eq!(text, "Surf gear list");
         let weights: Vec<(usize, FontWeight)> =
             runs.iter().map(|r| (r.len, r.font.weight)).collect();
@@ -8138,6 +8496,222 @@ mod markdown_tests {
     fn list_plain_text_keeps_its_markers() {
         let block = Block::Bullets(vec!["a".into(), "b".into()]);
         assert_eq!(block_plain(&block, false), "• a\n• b");
+    }
+}
+
+#[cfg(test)]
+mod chat_markdown_tests {
+    //! Jacob, 2026-10-27 ([feedback chat-markdown-mac-2026-10-27]): "allow these
+    //! common chat highlighting stuff for users to use > etc." Grok Bot renders a
+    //! typed `> hello` as a quote block; the Mac composer sent it as raw text.
+    //! Typed bubbles now go through the shared grammar (quotes, headings, lists,
+    //! code cards, bold / italic / strike / spoiler / code / links), and plain
+    //! text still renders as typed.
+    use gpui::{point, TestAppContext};
+
+    use super::*;
+
+    /// A typed `> hello` is a quote; `>5` and a lone `>` are text.
+    #[test]
+    fn a_typed_quote_is_a_quote_block_and_a_glued_angle_is_text() {
+        assert_eq!(
+            split_blocks("> hello\nthat is what the quote looks like now"),
+            vec![
+                Block::Quote(vec![Block::Paragraph("hello".into())]),
+                Block::Paragraph("that is what the quote looks like now".into()),
+            ]
+        );
+        assert_eq!(
+            split_blocks("> a\n>> b"),
+            vec![Block::Quote(vec![
+                Block::Paragraph("a".into()),
+                Block::Quote(vec![Block::Paragraph("b".into())]),
+            ])]
+        );
+        for text in [">5 means more than five", ">", "a > b"] {
+            assert_eq!(split_blocks(text), vec![Block::Paragraph(text.into())]);
+        }
+    }
+
+    /// The plain text of a typed bubble: as typed when nothing formats, the
+    /// rendered words (markers gone, list markers kept) otherwise.
+    #[test]
+    fn typed_bubble_plain_text() {
+        assert_eq!(
+            user_bubble_plain("snake_case 2*3*4 jacob_s@example.com $5"),
+            "snake_case 2*3*4 jacob_s@example.com $5"
+        );
+        assert!(is_plain_paragraph(&split_blocks("hello https://a.com/x_y")));
+        assert!(!is_plain_paragraph(&split_blocks("> hello")));
+        assert!(!is_plain_paragraph(&split_blocks("**hello**")));
+        assert_eq!(user_bubble_plain("> **hi**\n- a\n- b"), "hi\n• a\n• b");
+        assert_eq!(
+            block_plain(
+                &Block::Quote(vec![
+                    Block::Paragraph("q".into()),
+                    Block::Bullets(vec!["a".into()])
+                ]),
+                false
+            ),
+            "q\n• a"
+        );
+        // Every segment's start is where its text sits in the bubble's text.
+        let blocks = split_blocks("> one\n> two\n\nafter ~~x~~");
+        let plain = bubble_plain(&blocks, false);
+        let offsets = block_offsets(&blocks, false);
+        assert_eq!(plain, "one\ntwo\nafter x");
+        assert_eq!(&plain[offsets[1]..], "after x");
+    }
+
+    /// `~~strike~~` strikes through; a `||spoiler||` paints as a pill with the
+    /// glyphs invisible until the viewer opens it, and its range is clickable.
+    #[test]
+    fn strike_and_spoiler_runs() {
+        let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+        let (text, runs, _, _, spoilers) =
+            inline_runs("a ~~gone~~ ||secret|| b", theme.text, &theme, 10, &|_| {
+                false
+            });
+        assert_eq!(text, "a gone secret b");
+        assert!(runs[1].strikethrough.is_some(), "{runs:?}");
+        assert!(runs[0].strikethrough.is_none());
+        let pill = &runs[3];
+        assert_eq!(pill.len, "secret".len());
+        assert_eq!(pill.color.a, 0.0, "hidden glyphs");
+        assert_eq!(
+            pill.background_color,
+            Some(spoiler_fill(theme.text, &theme, false))
+        );
+        assert_eq!(
+            spoilers,
+            vec![(7..13, 17)],
+            "range in the element, start in the bubble"
+        );
+        let (_, runs, _, _, _) =
+            inline_runs("a ~~gone~~ ||secret|| b", theme.text, &theme, 10, &|at| {
+                at == 17
+            });
+        assert_eq!(runs[3].color, theme.text, "open: readable");
+        assert_eq!(
+            runs[3].background_color,
+            Some(spoiler_fill(theme.text, &theme, true))
+        );
+        // A spoiler with styled parts is one spoiler: every run shares its start.
+        let (_, _, _, _, spoilers) = inline_runs("||**a** b||", theme.text, &theme, 0, &|_| false);
+        assert_eq!(spoilers, vec![(0..1, 0), (1..3, 0)]);
+    }
+
+    struct QuoteBubble {
+        selection: Entity<TextSelection>,
+    }
+
+    const QUOTED: &str = "> hello there\n\nthe ||butler|| did it";
+
+    impl gpui::Render for QuoteBubble {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+            let selectable = Selectable::new(&self.selection, theme.accent_soft, cx);
+            let blocks = split_blocks(QUOTED);
+            let bubble = selectable.bubble("u#text", bubble_plain(&blocks, false));
+            let offsets = block_offsets(&blocks, false);
+            let mut col = div()
+                .w(px(400.0))
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .debug_selector(|| "test-block".into());
+            for (i, block) in blocks.iter().enumerate() {
+                col = col.child(render_block_in(
+                    &format!("u{i}"),
+                    block,
+                    theme.text,
+                    offsets[i],
+                    None,
+                    Instant::now(),
+                    &theme,
+                    &bubble,
+                    &CodeCopy::default(),
+                ));
+            }
+            div().w(px(500.0)).h(px(300.0)).p(px(20.0)).child(col)
+        }
+    }
+
+    /// Rendered: the quote bar is 3 pt wide at the block's left, the quoted
+    /// text starts `QUOTE_GAP` after it; a click on the spoiler opens it for
+    /// this viewer, a second click hides it again.
+    #[gpui::test]
+    fn a_quote_draws_its_bar_and_a_click_opens_a_spoiler(cx: &mut TestAppContext) {
+        let selection = cx.update(|cx| cx.new(TextSelection::new));
+        let (_view, vcx) = cx.add_window_view(|_, _| QuoteBubble {
+            selection: selection.clone(),
+        });
+        vcx.run_until_parked();
+        let block = vcx.debug_bounds("test-block").expect("block drawn");
+        let bar = vcx.debug_bounds("quote-bar").expect("quote bar drawn");
+        assert_eq!(f32::from(bar.size.width), QUOTE_BAR);
+        assert!(
+            (f32::from(bar.left() - block.left())).abs() <= 0.5,
+            "bar at the left"
+        );
+        assert!(
+            f32::from(bar.size.height) >= CHAT_LINE_HEIGHT - 1.0,
+            "the bar spans the quoted line: {bar:?}"
+        );
+        let quote = vcx.debug_bounds("quote-block").expect("quote drawn");
+        assert!(f32::from(quote.size.height) >= CHAT_LINE_HEIGHT - 1.0);
+
+        // The second paragraph: "the ||butler|| did it" — click inside "butler".
+        let plain = bubble_plain(&split_blocks(QUOTED), false);
+        let start = plain.find("butler").expect("spoiler text in the bubble");
+        let revealed = |vcx: &gpui::VisualTestContext| {
+            selection.read_with(vcx, |s, _| s.spoiler_revealed(&("u#text".into(), start)))
+        };
+        assert!(!revealed(vcx), "hidden at first");
+        let para = quote.bottom() + px(6.0);
+        let line_h = vcx.update(|window, _| window.line_height());
+        // "the " is four glyphs in; the pill starts after them.
+        let x = block.left() + px(40.0);
+        vcx.simulate_click(point(x, para + line_h / 2.0), gpui::Modifiers::default());
+        vcx.run_until_parked();
+        assert!(revealed(vcx), "one click opens the spoiler");
+        vcx.simulate_click(point(x, para + line_h / 2.0), gpui::Modifiers::default());
+        vcx.run_until_parked();
+        assert!(!revealed(vcx), "a second click hides it again");
+        assert!(cx.opened_url().is_none(), "nothing opened in the browser");
+    }
+
+    /// Headings, lists, fences and links a user types render as blocks; the
+    /// one-line preview and the link hosts see inside quotes.
+    #[test]
+    fn typed_formats_split_into_blocks() {
+        let blocks = split_blocks(
+            "# Title\n> [Docs](https://docs.arbos.life/x)\n- a\n1. b\n```py\nx = 1\n```\n**done**",
+        );
+        assert_eq!(blocks.len(), 6, "{blocks:?}");
+        assert!(matches!(blocks[0], Block::Heading { level: 1, .. }));
+        assert!(matches!(blocks[1], Block::Quote(_)));
+        assert!(matches!(blocks[2], Block::Bullets(_)));
+        assert!(matches!(blocks[3], Block::Numbered(_)));
+        assert!(matches!(blocks[4], Block::Code { .. }));
+        assert_eq!(
+            one_line("> **hello** there\n\n||secret||"),
+            "hello there secret"
+        );
+        assert_eq!(
+            markdown::link_hosts("> see [Docs](https://docs.arbos.life/x)"),
+            vec!["docs.arbos.life".to_string()]
+        );
+        // A named link's label keeps its styles and its one icon cell.
+        let spans = inline_spans("[**Bold** link](https://arbos.life/a)");
+        assert_eq!(spans.len(), 2);
+        assert!(spans[0].text.starts_with(markdown::LINK_ICON_CELL) && spans[0].style.bold);
+        assert_eq!(spans[0].icon.as_deref(), Some("arbos.life"));
+        assert!(spans[1].icon.is_none() && spans[1].style.link);
     }
 }
 
@@ -9285,6 +9859,94 @@ mod delivery_tests {
             vec![Some(Delivery::Delivered), None, Some(Delivery::Pending)],
             "mine: delivered / pending; Sam's bubble: no state"
         );
+    }
+
+    #[test]
+    fn row_cache_returns_cached_rows_and_rebuilds_only_the_changed_message() {
+        let t = 1_700_000_000_000u64;
+        let mut messages = vec![
+            mine("a", t),
+            mine("b", t + 1_000),
+            message("c", "assistant", "agent:x", "streaming", false, t + 2_000),
+        ];
+        // Give the streaming reply some text so it draws a bubble.
+        if let Some(Part::Text { text, .. }) = messages[2].parts.get_mut(0) {
+            *text = "hel".into();
+        }
+        let spoken = HashSet::new();
+        let failed = HashMap::new();
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        let mut cache = MessageRowCache::default();
+        let first = build_rows_with_cache(
+            &messages,
+            false,
+            speech,
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+            &mut cache,
+            &HashSet::new(),
+        );
+        assert_eq!(cache.built, 3, "cold build walks every message");
+
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        let again = build_rows_with_cache(
+            &messages,
+            false,
+            speech,
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+            &mut cache,
+            &HashSet::new(),
+        );
+        assert_eq!(
+            cache.built, 0,
+            "unchanged messages are served from the cache"
+        );
+        let ids = |rows: &[Row]| -> Vec<(String, u64)> {
+            rows.iter().map(|r| (r.id.clone(), r.version)).collect()
+        };
+        assert_eq!(ids(&first), ids(&again));
+
+        // Streaming upsert: only the last message's text changes.
+        if let Some(Part::Text { text, .. }) = messages[2].parts.get_mut(0) {
+            *text = "hello".into();
+        }
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        let updated = build_rows_with_cache(
+            &messages,
+            false,
+            speech,
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+            &mut cache,
+            &HashSet::new(),
+        );
+        assert_eq!(
+            cache.built, 1,
+            "a streaming upsert rebuilds only the changed message"
+        );
+        assert_ne!(ids(&again), ids(&updated));
     }
 
     /// The three states as the row draws them: one bubble per state, no
