@@ -1197,7 +1197,7 @@ impl FromRequestParts<AppState> for AgentPrincipal {
     }
 }
 
-fn chat_json_for(state: &AppState, project: &Project, chat_id: &str) -> Option<Value> {
+pub(crate) fn chat_json_for(state: &AppState, project: &Project, chat_id: &str) -> Option<Value> {
     if let Ok(Some(c)) = state.db.chat(&project.id, chat_id) {
         return Some(
             json!({ "id": c.id, "kind": "agent", "project_id": project.id, "title": c.title }),
@@ -1256,6 +1256,9 @@ pub struct InboxQuery {
     pub wait: u64,
     #[serde(default)]
     pub limit: Option<i64>,
+    /// Rows of context to attach to each wake event (0 = none; ≤ 20; `chat.read`).
+    #[serde(default)]
+    pub context: usize,
 }
 
 fn events_json(events: Vec<(i64, Value)>, since: i64) -> Value {
@@ -1288,11 +1291,12 @@ pub async fn inbox(
     let wait = q.wait.min(WAIT_MAX_S);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(wait);
     loop {
-        let events = state
+        let mut events = state
             .db
             .asp_events_after(&me.project.id, q.since, limit)
             .unwrap_or_default();
         if !events.is_empty() || wait == 0 {
+            crate::outside_sidecar::attach_context(&state, &me.project, &mut events, q.context);
             return Json(events_json(events, q.since)).into_response();
         }
         let n = waiter(&me.project.id);
@@ -1345,7 +1349,7 @@ pub async fn events(
     Json(json!({ "results": results })).into_response()
 }
 
-type EventResult = Result<Value, (&'static str, String)>;
+pub(crate) type EventResult = Result<Value, (&'static str, String)>;
 
 fn field<'a>(e: &'a Value, k: &str) -> Option<&'a str> {
     e.get(k).and_then(|v| v.as_str()).filter(|s| !s.is_empty())
@@ -1399,7 +1403,7 @@ fn settle_send(doc: &ChatDoc, reply_to: Option<&str>, status: CommandStatus) {
     }
 }
 
-async fn apply_event(state: &AppState, me: &AgentPrincipal, e: &Value) -> EventResult {
+pub(crate) async fn apply_event(state: &AppState, me: &AgentPrincipal, e: &Value) -> EventResult {
     let ty = field(e, "type").ok_or(("bad_request", "type required".to_owned()))?;
     let pid = me.project.id.clone();
     match ty {
@@ -1603,6 +1607,47 @@ async fn apply_event(state: &AppState, me: &AgentPrincipal, e: &Value) -> EventR
             }
             Ok(json!({ "ok": true, "type": ty, "message": msg_id, "chat": chat_id }))
         }
+        "message.react" => {
+            if !crate::outside_sidecar::allows("chat.react") {
+                return Err((
+                    "scope",
+                    "reacting is switched off for this agent".to_owned(),
+                ));
+            }
+            let chat_id = field(e, "chat").ok_or(("bad_request", "chat required".to_owned()))?;
+            let chat = chat_json_for(state, &me.project, chat_id)
+                .ok_or(("forbidden", "not a chat of this agent".to_owned()))?;
+            let msg_id = field(e, "message")
+                .ok_or(("bad_request", "message required".to_owned()))?
+                .to_owned();
+            let emoji = field(e, "emoji")
+                .ok_or(("bad_request", "emoji required".to_owned()))?
+                .to_owned();
+            if emoji.chars().count() > 16 {
+                return Err(("bad_request", "emoji too long".to_owned()));
+            }
+            let on = e.get("on").and_then(|v| v.as_bool()).unwrap_or(true);
+            let project_id = chat["project_id"].as_str().map(str::to_owned);
+            let sender = format!("agent:{pid}");
+            let (m, em) = (msg_id.clone(), emoji.clone());
+            crate::notices::write_doc_as(
+                state,
+                project_id.as_deref(),
+                chat_id,
+                &device_of(&pid),
+                move |doc| {
+                    if doc.message(&m).is_none() {
+                        anyhow::bail!("no such message");
+                    }
+                    doc.set_reaction(&m, &em, &sender, on)?;
+                    Ok(())
+                },
+            )
+            .await
+            .map_err(|e| ("write_failed", e.to_string()))?;
+            let _ = state.db.touch_outside_agent(&pid, None);
+            Ok(json!({ "ok": true, "type": ty, "message": msg_id, "chat": chat_id, "on": on }))
+        }
         other => Err(("unknown_type", format!("unknown event type {other}"))),
     }
 }
@@ -1634,10 +1679,16 @@ pub async fn socket(
         );
     }
     ws.max_message_size(64 * 1024)
-        .on_upgrade(move |socket| run_socket(socket, state, me, q.since))
+        .on_upgrade(move |socket| run_socket(socket, state, me, q.since, q.context))
 }
 
-async fn run_socket(socket: WebSocket, state: AppState, me: AgentPrincipal, mut cursor: i64) {
+async fn run_socket(
+    socket: WebSocket,
+    state: AppState,
+    me: AgentPrincipal,
+    mut cursor: i64,
+    context: usize,
+) {
     let (mut sink, mut stream) = socket.split();
     let pid = me.project.id.clone();
     let hello = json!({
@@ -1655,10 +1706,11 @@ async fn run_socket(socket: WebSocket, state: AppState, me: AgentPrincipal, mut 
     let mut lease = tokio::time::interval(std::time::Duration::from_secs(45));
     loop {
         // Drain what is queued first.
-        let events = state
+        let mut events = state
             .db
             .asp_events_after(&pid, cursor, 100)
             .unwrap_or_default();
+        crate::outside_sidecar::attach_context(&state, &me.project, &mut events, context);
         for (id, mut e) in events {
             e["id"] = json!(id);
             cursor = id;
@@ -1845,6 +1897,8 @@ pub async fn connect_page(State(state): State<AppState>, Path(id): Path<String>)
     let relay = state.cfg.public_url.trim_end_matches('/').to_owned();
     let body = format!(
         "Connect {name} to Arbos\n\n\
+         Agent instructions (paste into your agent): {relay}/llms.txt\n\
+         Sidecar installer:                           {relay}/sidecar/install.sh\n\n\
          Relay:   {relay}\n\
          Agent:   {id}\n\n\
          Every call carries the key the Arbos app showed you once:  Authorization: Bearer arbk_…\n\n\

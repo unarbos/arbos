@@ -46,6 +46,7 @@ mod moderation;
 mod notices;
 mod notify;
 mod outside;
+mod outside_sidecar;
 mod people;
 mod perf;
 mod proxy;
@@ -603,6 +604,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/asp/files/{slot}/{key}", get(outside::file))
         .route("/asp/chats/{id}/messages", get(outside::history))
         .route("/asp/connect/{id}", get(outside::connect_page))
+        // Sidecar support (#2189): members, and the public texts an agent is handed.
+        .route("/asp/chats/{id}/members", get(outside_sidecar::members))
+        .route("/llms.txt", get(outside_sidecar::llms_txt))
+        .route("/agents/llms.txt", get(outside_sidecar::llms_txt))
+        .route("/sidecar/install.sh", get(outside_sidecar::install_sh))
         .route(
             "/projects/{project_id}/chats/{chat_id}/notify",
             post(notify::notify_project_chat),
