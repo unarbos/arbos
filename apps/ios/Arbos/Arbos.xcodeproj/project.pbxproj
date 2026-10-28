@@ -40,6 +40,8 @@
 		A1C1E00000000000000000A2 /* PresenceRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C1E00000000000000000A1 /* PresenceRow.swift */; };
 		A1B7A11E00000000000000A2 /* WorkingSpinner.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B7A11E00000000000000A1 /* WorkingSpinner.swift */; };
 		A1B7A11E00000000000000B2 /* WorkingSpinnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B7A11E00000000000000B1 /* WorkingSpinnerTests.swift */; };
+		A1B7A11E00000000000000C2 /* StatusMarks.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B7A11E00000000000000C1 /* StatusMarks.swift */; };
+		A1B7A11E00000000000000D2 /* StatusDotLintTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B7A11E00000000000000D1 /* StatusDotLintTests.swift */; };
 		A1C1E00000000000000000B2 /* PresenceRowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C1E00000000000000000B1 /* PresenceRowTests.swift */; };
 		A1D8800000000000000000B8 /* AvatarPickerTabsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D8800000000000000000B7 /* AvatarPickerTabsTests.swift */; };
 		A1D8800000000000000000E6 /* ProfilePictureViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D8800000000000000000E5 /* ProfilePictureViewTests.swift */; };
@@ -257,6 +259,8 @@
 		A1C1E00000000000000000A1 /* PresenceRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PresenceRow.swift; sourceTree = "<group>"; };
 		A1B7A11E00000000000000A1 /* WorkingSpinner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkingSpinner.swift; sourceTree = "<group>"; };
 		A1B7A11E00000000000000B1 /* WorkingSpinnerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkingSpinnerTests.swift; sourceTree = "<group>"; };
+		A1B7A11E00000000000000C1 /* StatusMarks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusMarks.swift; sourceTree = "<group>"; };
+		A1B7A11E00000000000000D1 /* StatusDotLintTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusDotLintTests.swift; sourceTree = "<group>"; };
 		A1C1E00000000000000000B1 /* PresenceRowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PresenceRowTests.swift; sourceTree = "<group>"; };
 		A1D8800000000000000000B7 /* AvatarPickerTabsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AvatarPickerTabsTests.swift; sourceTree = "<group>"; };
 		A1D8800000000000000000E5 /* ProfilePictureViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfilePictureViewTests.swift; sourceTree = "<group>"; };
@@ -580,6 +584,7 @@
 				A1D8800000000000000000A7 /* AvatarPickerSheet.swift */,
 				A1C1E00000000000000000A1 /* PresenceRow.swift */,
 				A1B7A11E00000000000000A1 /* WorkingSpinner.swift */,
+				A1B7A11E00000000000000C1 /* StatusMarks.swift */,
 				A1DE700000000000000000B1 /* MentionChips.swift */,
 				A1F7B0000000000000000001 /* BlockedState.swift */,
 				A1C0F1000000000000000001 /* Confirm.swift */,
@@ -635,6 +640,7 @@
 				A15C0000000000000000000A /* SessionRoomTests.swift */,
 				A1C1E00000000000000000B1 /* PresenceRowTests.swift */,
 				A1B7A11E00000000000000B1 /* WorkingSpinnerTests.swift */,
+				A1B7A11E00000000000000D1 /* StatusDotLintTests.swift */,
 				A1D8800000000000000000B7 /* AvatarPickerTabsTests.swift */,
 				A1D8800000000000000000E5 /* ProfilePictureViewTests.swift */,
 				A1D8800000000000000000E7 /* AvatarGenerateErrorStateTests.swift */,
@@ -924,6 +930,7 @@
 				A17FC3E175B29A6CC8654F7C /* ChatView.swift in Sources */,
 				A1C1E00000000000000000A2 /* PresenceRow.swift in Sources */,
 				A1B7A11E00000000000000A2 /* WorkingSpinner.swift in Sources */,
+				A1B7A11E00000000000000C2 /* StatusMarks.swift in Sources */,
 				A10A6AAB1A89692C252B33E4 /* FeedbackSheet.swift in Sources */,
 				A19DEA501A654ADE6E17D7D0 /* HomeView.swift in Sources */,
 				A1269EB98439212913CF2C3D /* NotificationsPrimerView.swift in Sources */,
@@ -990,6 +997,7 @@
 				A15C0000000000000000000B /* SessionRoomTests.swift in Sources */,
 				A1C1E00000000000000000B2 /* PresenceRowTests.swift in Sources */,
 				A1B7A11E00000000000000B2 /* WorkingSpinnerTests.swift in Sources */,
+				A1B7A11E00000000000000D2 /* StatusDotLintTests.swift in Sources */,
 				A1D8800000000000000000B8 /* AvatarPickerTabsTests.swift in Sources */,
 				A1D8800000000000000000E6 /* ProfilePictureViewTests.swift in Sources */,
 				A1D8800000000000000000E8 /* AvatarGenerateErrorStateTests.swift in Sources */,
