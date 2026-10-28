@@ -350,16 +350,19 @@ pub fn reveal_sheet(_shell: &Shell, reveal: &ConnectReveal, cx: &mut Context<She
 }
 
 /// The agent pane's Details for an outside agent: **Connection** (Status · Transport ·
-/// Protocol) and **Key** (Rotate key… · Revoke access). Replaces the Settings card — model,
-/// reasoning and voice are the outside agent's own business.
+/// Protocol), **Wake URL** (URL · Authorization value · Save · Send test wake) and **Key**
+/// (Rotate key… · Revoke access). Replaces the Settings card — model, reasoning and voice are
+/// the outside agent's own business.
 pub fn details_sections(
     project_id: &Id,
     info: &OutsideInfo,
+    shell: &Shell,
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> Vec<Section> {
     let mut out = Vec::new();
     out.push(Section::Title("Connection".into()));
+    prefill_wake_form(project_id, info, shell, cx);
     let waiting = !info.connected && info.status != "revoked";
     let status_trailing: Option<gpui::AnyElement> = if waiting && info.status == "never" {
         PulseClock::request(cx);
@@ -404,6 +407,10 @@ pub fn details_sections(
         "It reads and posts in the chats it is in, reacts, and shows typing and status. Secrets and members stay off."
             .into(),
     ));
+    // The card needs the relay half (#2185): an older relay reports no `wake` at all.
+    if info.status != "revoked" && info.wake.is_some() {
+        out.extend(wake_sections(project_id, info, shell, theme, cx));
+    }
     out.push(Section::Title("Key".into()));
     let pid = project_id.clone();
     let rotate = kit::row(
@@ -445,9 +452,254 @@ pub fn details_sections(
     out
 }
 
+/// Fill the two Wake URL fields the first time the pane shows this agent (the stored URL;
+/// the header value is never shown back, so that field starts empty). Done after this
+/// render, so the fields' own observers do not re-enter it.
+fn prefill_wake_form(project_id: &Id, info: &OutsideInfo, shell: &Shell, cx: &mut Context<Shell>) {
+    if shell.wake_form_project.as_ref() == Some(project_id) {
+        return;
+    }
+    let pid = project_id.clone();
+    let url = info
+        .wake
+        .as_ref()
+        .and_then(|w| w.url.clone())
+        .unwrap_or_default();
+    let weak = cx.weak_entity();
+    cx.defer(move |cx| {
+        let _ = weak.update(cx, |shell, cx| {
+            shell.wake_form_project = Some(pid);
+            shell
+                .wake_url_input
+                .update(cx, |input, cx| input.set_text(url, cx));
+            shell
+                .wake_auth_input
+                .update(cx, |input, cx| input.clear(cx));
+            cx.notify();
+        });
+    });
+}
+
+/// What the line under the Wake URL buttons says: the in-flight word, the last Save / test
+/// outcome, else the relay's last delivery. Pure, so the words are testable.
+pub(crate) fn wake_note(
+    saving: bool,
+    sending: bool,
+    note: Option<&(bool, String)>,
+    last: Option<&crate::model::WakeLast>,
+    now: i64,
+) -> Option<(bool, String)> {
+    if saving {
+        return Some((true, "Saving…".to_owned()));
+    }
+    if sending {
+        return Some((true, "Sending…".to_owned()));
+    }
+    if let Some((ok, text)) = note {
+        return Some((*ok, text.clone()));
+    }
+    last.map(|l| (l.error.is_none(), format!("Last wake · {}", l.line(now))))
+}
+
+/// **Wake URL** card: the URL field, the masked Authorization value field, Save and Send
+/// test wake, the outcome line (braille spinner while something is in flight).
+fn wake_sections(
+    project_id: &Id,
+    info: &OutsideInfo,
+    shell: &Shell,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> Vec<Section> {
+    let form = shell
+        .state
+        .read(cx)
+        .wake_form
+        .clone()
+        .filter(|f| &f.project_id == project_id);
+    let saving = form.as_ref().is_some_and(|f| f.saving);
+    let sending = form.as_ref().is_some_and(|f| f.sending);
+    let wake = info.wake.clone().unwrap_or_default();
+    let busy = saving || sending;
+
+    let field = |label: &'static str,
+                 hint: Option<String>,
+                 input: gpui::Entity<crate::ui::composer::ComposerInput>,
+                 selector: &'static str| {
+        div()
+            .px(px(kit::INSET))
+            .pt(px(10.0))
+            .pb(px(10.0))
+            .flex()
+            .flex_col()
+            .gap(px(5.0))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(crate::ui::theme::TEXT_TINY))
+                            .text_color(theme.text_muted)
+                            .child(label),
+                    )
+                    .when_some(hint, |el, h| {
+                        el.child(
+                            div()
+                                .text_size(px(crate::ui::theme::TEXT_TINY))
+                                .text_color(theme.text_muted)
+                                .child(h),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .min_h(px(32.0))
+                    .px(px(10.0))
+                    .rounded(px(9.0))
+                    .bg(theme.field)
+                    .border_1()
+                    .border_color(theme.field_border)
+                    .text_size(px(crate::ui::theme::TEXT_SMALL))
+                    .debug_selector(move || selector.into())
+                    .child(input),
+            )
+    };
+    let url_field = field("URL", None, shell.wake_url_input.clone(), "wake-url-field");
+    let auth_field = field(
+        "Authorization header value",
+        wake.auth_set
+            .then(|| "saved · paste again to replace".to_owned()),
+        shell.wake_auth_input.clone(),
+        "wake-auth-field",
+    );
+
+    let pid = project_id.clone();
+    let save = kit::pill_button("wake-save", "checkmark", "Save", theme)
+        .when(busy, |el| el.opacity(0.5))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            let url = this.wake_url_input.read(cx).text().to_owned();
+            let auth = this.wake_auth_input.read(cx).text().to_owned();
+            let pid = pid.clone();
+            this.state.update(cx, |s, cx| {
+                if s.wake_form.as_ref().is_some_and(|f| f.saving || f.sending) {
+                    return;
+                }
+                s.save_wake_url(pid, url, auth, cx);
+            });
+            this.wake_auth_input.update(cx, |input, cx| input.clear(cx));
+        }));
+    let can_test = wake.url_set && wake.auth_set && !busy;
+    let pid = project_id.clone();
+    let test = kit::pill_button(
+        "wake-test",
+        "antenna.radiowaves.left.and.right",
+        "Send test wake",
+        theme,
+    )
+    .when(!can_test, |el| el.opacity(0.5))
+    .when(can_test, |el| {
+        el.on_click(cx.listener(move |this, _, _, cx| {
+            let pid = pid.clone();
+            this.state.update(cx, |s, cx| s.send_test_wake(pid, cx));
+        }))
+    });
+    let note = wake_note(
+        saving,
+        sending,
+        form.as_ref().and_then(|f| f.note.as_ref()),
+        wake.last.as_ref(),
+        now_ms() as i64,
+    );
+    // A delivery readout ("Last wake · Failed · HTTP 401 · 3 min ago"), muted like the status
+    // rows — not an error note.
+    let note_el: Option<gpui::AnyElement> = note.map(|(_, text)| {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .text_size(px(crate::ui::theme::TEXT_TINY))
+            .text_color(theme.text_muted)
+            .debug_selector(|| "wake-note".into())
+            .when(busy, |el| el.child(crate::ui::working::glyph(theme, cx)))
+            .child(text)
+            .into_any_element()
+    });
+    let buttons = div()
+        .px(px(kit::INSET))
+        .pt(px(6.0))
+        .pb(px(12.0))
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(save)
+                .child(test),
+        )
+        .children(note_el);
+
+    vec![
+        Section::Title("Wake URL".into()),
+        Section::Custom(
+            kit::card(theme)
+                .flex()
+                .flex_col()
+                .child(url_field)
+                .child(kit::divider(theme))
+                .child(auth_field)
+                .child(kit::divider(theme))
+                .child(buttons)
+                .into_any_element(),
+        ),
+        Section::Footnote(
+            "When a message needs an answer, Arbos posts a small signed nudge here at once — no message text. The value is sent as the Authorization header, verbatim, and is never shown again. Keep a slow poll as the fallback."
+                .into(),
+        ),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wake_note_words() {
+        let last = crate::model::WakeLast {
+            at: 1_000_000 - 12_000,
+            status: Some(200),
+            error: None,
+        };
+        assert_eq!(
+            wake_note(false, false, None, Some(&last), 1_000_000),
+            Some((true, "Last wake · Delivered · HTTP 200 · 12 s ago".into()))
+        );
+        assert_eq!(
+            wake_note(true, false, None, Some(&last), 1_000_000),
+            Some((true, "Saving…".into()))
+        );
+        assert_eq!(
+            wake_note(false, true, None, None, 1_000_000),
+            Some((true, "Sending…".into()))
+        );
+        let note = (false, "Failed · HTTP 500: boom".to_owned());
+        assert_eq!(
+            wake_note(false, false, Some(&note), Some(&last), 1_000_000),
+            Some(note.clone())
+        );
+        assert_eq!(wake_note(false, false, None, None, 1_000_000), None);
+        let failed = crate::model::WakeLast {
+            at: 1_000_000 - 180_000,
+            status: Some(401),
+            error: Some("HTTP 401".into()),
+        };
+        assert_eq!(failed.line(1_000_000), "Failed · HTTP 401 · 3 min ago");
+    }
 
     #[test]
     fn keys_and_links_are_shortened_for_the_row() {

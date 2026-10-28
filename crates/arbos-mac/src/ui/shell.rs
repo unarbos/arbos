@@ -430,6 +430,11 @@ pub struct Shell {
     pub people_input: Entity<ComposerInput>,
     /// Agent profile page: inline description editor.
     pub(crate) description_input: Entity<ComposerInput>,
+    /// Connected agent's Connection card: the Wake URL and its Authorization value (masked).
+    pub(crate) wake_url_input: Entity<ComposerInput>,
+    pub(crate) wake_auth_input: Entity<ComposerInput>,
+    /// The agent whose Wake URL the two fields were last filled for.
+    pub(crate) wake_form_project: Option<crate::model::Id>,
     /// Double-click rename: the inline name field for an agent.
     pub(crate) agent_name_input: Entity<ComposerInput>,
     /// Header name (#1068): a single click opens the profile only after
@@ -819,6 +824,18 @@ impl Shell {
         });
         cx.observe(&description_input, |_, _, cx| cx.notify())
             .detach();
+        let wake_url_input = cx.new(ComposerInput::new);
+        wake_url_input.update(cx, |input, _| {
+            input.set_placeholder("https://…");
+        });
+        cx.observe(&wake_url_input, |_, _, cx| cx.notify()).detach();
+        let wake_auth_input = cx.new(ComposerInput::new);
+        wake_auth_input.update(cx, |input, _| {
+            input.set_placeholder("Paste the Authorization header value");
+            input.set_masked(true);
+        });
+        cx.observe(&wake_auth_input, |_, _, cx| cx.notify())
+            .detach();
         let agent_name_input = cx.new(ComposerInput::new);
         {
             let weak = cx.weak_entity();
@@ -1197,6 +1214,9 @@ impl Shell {
             server_leave_armed: false,
             people_input,
             description_input,
+            wake_url_input,
+            wake_auth_input,
+            wake_form_project: None,
             agent_name_input,
             name_click_serial: 0,
             model_search_input,
@@ -1331,6 +1351,8 @@ impl Shell {
             || focused(&self.handle_input)
             || focused(&self.agent_name_input)
             || focused(&self.description_input)
+            || focused(&self.wake_url_input)
+            || focused(&self.wake_auth_input)
             || focused(&self.avatar_prompt_input)
             || focused(&self.model_search_input)
             || focused(&self.tab_rename_input)

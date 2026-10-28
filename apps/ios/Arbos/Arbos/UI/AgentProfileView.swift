@@ -239,6 +239,13 @@ struct AgentProfileView: View {
     @State private var showVoice = false
     /// Connect an agent (#2142): Rotate key… pushes the reveal screen with the fresh key.
     @State private var rotated: ConnectReveal?
+    /// Wake URL form ([feedback outside-agents-wake-ios-2026-10-28]): the two drafts, what is in
+    /// flight ("saving" | "sending"), the last outcome line, and which agent the drafts were filled for.
+    @State private var wakeURLDraft = ""
+    @State private var wakeAuthDraft = ""
+    @State private var wakeBusy: String?
+    @State private var wakeNote: (ok: Bool, text: String)?
+    @State private var wakeFilledFor: Id?
 
     private var project: Project? { model.project(projectId) ?? fallback }
     /// A connected (outside) agent: no Computer tab; Connection + Key under Details (#2142).
@@ -503,8 +510,11 @@ struct AgentProfileView: View {
             AnyView(PaneRow(title: "Protocol", value: info.proto)),
         ]))
         out.append(.footnote("It reads and posts in the chats it is in, reacts, and shows typing and status. Secrets and members stay off."))
-        out.append(.title("Key"))
         let revoked = info.status == "revoked"
+        if info.hasWake, !revoked {
+            out.append(contentsOf: wakeSections(project, info))
+        }
+        out.append(.title("Key"))
         out.append(.card([
             AnyView(
                 Button {
@@ -526,6 +536,120 @@ struct AgentProfileView: View {
         ]))
         out.append(.footnote("Revoke stops it at once. Its messages stay."))
         return out
+    }
+
+    // MARK: Details for a connected agent — Wake URL ([feedback outside-agents-wake-ios-2026-10-28])
+
+    /// What the line under the Wake URL buttons says: the in-flight word, the last Save / test
+    /// outcome, else the relay's last delivery (the Mac's `connect_agent::wake_note`).
+    static func wakeNoteLine(busy: String?, note: (ok: Bool, text: String)?, last: OutsideWakeLast?,
+                             now: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) -> (ok: Bool, text: String)? {
+        if busy == "saving" { return (true, "Saving…") }
+        if busy == "sending" { return (true, "Sending…") }
+        if let note { return note }
+        if let last { return (last.error == nil, "Last wake · \(last.line(now: now))") }
+        return nil
+    }
+
+    /// **Wake URL** card: URL field, the Authorization value (secure, never shown back), Save and
+    /// Send test wake, the outcome line — the braille spinner while something is in flight.
+    private func wakeSections(_ project: Project, _ info: OutsideAgentInfo) -> [PaneSection] {
+        let busy = wakeBusy != nil
+        let canTest = info.wakeURL != nil && info.wakeAuthSet && !busy
+        let line = Self.wakeNoteLine(busy: wakeBusy, note: wakeNote, last: info.wakeLast)
+        let urlRow = VStack(alignment: .leading, spacing: 6) {
+            Text("URL").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+            TextField("", text: $wakeURLDraft, prompt: Text("https://…").foregroundStyle(theme.placeholder))
+                .font(theme.font(Theme.body))
+                .foregroundStyle(theme.text)
+                .keyboardType(.URL)
+                .textContentType(.URL)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .controlField()
+                .accessibilityIdentifier("wake-url-field")
+        }
+        .padding(.horizontal, PaneKit.inset).padding(.vertical, 12)
+        .onAppear { fillWakeForm(project.id, info) }
+        let authRow = VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Authorization header value").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                Spacer()
+                if info.wakeAuthSet {
+                    Text("saved · paste again to replace").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                }
+            }
+            SecureField("", text: $wakeAuthDraft, prompt: Text("Paste the Authorization header value").foregroundStyle(theme.placeholder))
+                .font(theme.font(Theme.body))
+                .foregroundStyle(theme.text)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .controlField()
+                .accessibilityIdentifier("wake-auth-field")
+        }
+        .padding(.horizontal, PaneKit.inset).padding(.vertical, 12)
+        let buttonsRow = VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                PanePillButton(glyph: "checkmark", title: "Save") { saveWake(project.id) }
+                    .disabled(busy)
+                    .opacity(busy ? 0.5 : 1)
+                    .accessibilityIdentifier("wake-save")
+                PanePillButton(glyph: "antenna.radiowaves.left.and.right", title: "Send test wake") { testWake(project.id) }
+                    .disabled(!canTest)
+                    .opacity(canTest ? 1 : 0.5)
+                    .accessibilityIdentifier("wake-test")
+            }
+            if let line {
+                HStack(spacing: 6) {
+                    if busy { WorkingSpinner() }
+                    // A delivery readout ("Last wake · Failed · HTTP 401 · 3 min ago"), muted
+                    // like the status rows — not an error note.
+                    Text(line.text)
+                        .font(theme.font(Theme.tiny))
+                        .foregroundStyle(theme.muted)
+                        .lineLimit(2)
+                }
+                .accessibilityIdentifier("wake-note")
+            }
+        }
+        .padding(.horizontal, PaneKit.inset).padding(.vertical, 12)
+        return [
+            .title("Wake URL"),
+            .card([AnyView(urlRow), AnyView(authRow), AnyView(buttonsRow)]),
+            .footnote("When a message needs an answer, Arbos posts a small signed nudge here at once — no message text. The value is sent as the Authorization header, verbatim, and is never shown again. Keep a slow poll as the fallback."),
+        ]
+    }
+
+    /// Fill the two fields the first time the pane shows this agent (the stored URL; the value
+    /// field starts empty because the value is never shown back).
+    private func fillWakeForm(_ projectId: Id, _ info: OutsideAgentInfo) {
+        guard wakeFilledFor != projectId else { return }
+        wakeFilledFor = projectId
+        wakeURLDraft = info.wakeURL ?? ""
+        wakeAuthDraft = ""
+        wakeNote = nil
+    }
+
+    private func saveWake(_ projectId: Id) {
+        guard wakeBusy == nil else { return }
+        wakeBusy = "saving"; wakeNote = nil
+        let url = wakeURLDraft, auth = wakeAuthDraft
+        Task {
+            let error = await model.saveOutsideWake(projectId, url: url, auth: auth)
+            wakeAuthDraft = ""
+            wakeBusy = nil
+            wakeNote = error.map { (ok: false, text: $0) } ?? (ok: true, text: "Saved")
+        }
+    }
+
+    private func testWake(_ projectId: Id) {
+        guard wakeBusy == nil else { return }
+        wakeBusy = "sending"; wakeNote = nil
+        Task {
+            let r = await model.testOutsideWake(projectId)
+            wakeBusy = nil
+            wakeNote = r
+        }
     }
 
     // MARK: Details — Settings (Coding and Routines ahead of it while the flag is on)
