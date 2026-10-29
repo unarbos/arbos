@@ -46,4 +46,38 @@ final class HiddenWorkerRowTests: XCTestCase {
         XCTAssertTrue(DocJSON.message(flagged, chatId: chat)?.worker ?? false)
         XCTAssertFalse(DocJSON.message(plain, chatId: chat)?.worker ?? true)
     }
+
+    /// Arbonites, 2026-10-28 (01M627S7…, 01M627VG…): a box wrote a hand-off row and a job row
+    /// into a group with a bare `sender: "agent"` and no words. A people chat draws neither — no
+    /// "Messaged ◉ Bob" from no one, no empty bubble; the same row with the agent's sender, or in
+    /// a project chat, keeps its hand-off line.
+    func testASenderlessBlankRowDrawsNothingInAPeopleChat() {
+        func row(_ id: String, sender: String, role: String = "assistant", at: Int64, extra: [String: Any] = [:]) -> Message {
+            var json: [String: Any] = ["id": id, "role": role, "sender": sender, "status": "done", "createdAt": at,
+                                       "parts": [["id": "\(id)-t", "kind": "text", "text": ""]]]
+            json.merge(extra) { _, new in new }
+            return DocJSON.message(json, chatId: chat)!
+        }
+        let handoff: [String: Any] = ["turn": ["kind": "spawn"], "subagentName": "Bob", "handoffMessages": 1]
+        var morning = row("m1", sender: "user:gh_bob", role: "user", at: t0)
+        morning.parts = [.text(id: "m1-t", text: "morning")]
+        let messages = [
+            morning,
+            row("h1", sender: "agent", at: t0 + 1_000, extra: handoff),
+            row("u1", sender: "", role: "user", at: t0 + 1_500),
+        ]
+        XCTAssertTrue(messages[1].isSenderlessBlank)
+        XCTAssertTrue(messages[2].isSenderlessBlank)
+        XCTAssertFalse(messages[0].isSenderlessBlank)
+        let group = Transcript.rows(messages, projectId: "people", me: "user:gh_me", people: true, multiParty: true)
+        XCTAssertFalse(group.contains { $0.messageId == "h1" || $0.messageId == "u1" }, "\(group.map(\.id))")
+        XCTAssertTrue(group.contains { $0.messageId == "m1" })
+
+        let named = row("h2", sender: "agent:p-bubble", at: t0, extra: handoff)
+        XCTAssertFalse(named.isSenderlessBlank)
+        let attributed = Transcript.rows([named], projectId: "people", me: "user:gh_me", people: true, multiParty: true)
+        XCTAssertEqual(systemLines(attributed), [Transcript.handoffText([("Bob", 1)])])
+        let project = Transcript.rows([messages[1]], projectId: "fx-comms")
+        XCTAssertEqual(systemLines(project), [Transcript.handoffText([("Bob", 1)])])
+    }
 }

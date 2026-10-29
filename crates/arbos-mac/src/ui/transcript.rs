@@ -1547,6 +1547,13 @@ impl Transcript {
             state.active_chat(),
             state.selected_channel.is_some(),
         );
+        // A group, a DM or a server channel: every row there names who wrote it, so a
+        // wordless one that does not is a blank line from no one. A shared project chat's
+        // agent rows say a bare `agent` by design.
+        let people_space = state.selected_channel.is_some()
+            || state
+                .selected()
+                .is_some_and(|p| matches!(p.kind, SpaceKind::Group | SpaceKind::Dm));
         if chat_changed {
             self.row_cache.clear();
         }
@@ -1569,6 +1576,7 @@ impl Transcript {
             &thumb_keys,
             &mentions,
             multi_party,
+            people_space,
             &mut self.row_cache,
             &hidden_senders,
         );
@@ -4179,6 +4187,7 @@ pub fn build_rows_hiding(
         thumb_keys,
         mentions,
         names_senders,
+        false,
         &mut cache,
         hidden_senders,
     )
@@ -4196,6 +4205,7 @@ pub fn build_rows_with_cache(
     thumb_keys: &HashSet<&str>,
     mentions: &Mentions,
     names_senders: bool,
+    people_space: bool,
     cache: &mut MessageRowCache,
     hidden_senders: &HashSet<String>,
 ) -> Vec<Row> {
@@ -4263,6 +4273,9 @@ pub fn build_rows_with_cache(
                 }),
             }
             run_tail = None;
+            continue;
+        }
+        if people_space && message.is_senderless_blank() {
             continue;
         }
         let is_last_reply = last_reply == Some(mix);
@@ -10675,6 +10688,7 @@ mod grouping_tests {
             &HashSet::new(),
             &Mentions::empty(),
             names_senders,
+            names_senders,
             &mut cache,
             &HashSet::new(),
         );
@@ -10711,6 +10725,69 @@ mod grouping_tests {
     }
 
     const T: u64 = 1_700_000_000_000;
+
+    /// Arbonites, 2026-10-28 (01M627S7…, 01M627VG…): a box wrote a hand-off row and a job
+    /// row into a group with bare `sender: "agent"` and no words. A group draws neither — no
+    /// "Messaged ◉ Bob" line from no one, no empty bubble — and Bob's run is not broken; a
+    /// 1:1 agent chat keeps its hand-off line, and an attributed one still draws in a group.
+    #[test]
+    fn senderless_blank_rows_draw_nothing_in_a_group() {
+        let blank = |id: &str, extra: serde_json::Value, at: u64| -> Message {
+            let mut v = serde_json::json!({
+                "id": id,
+                "chatId": "chat_group",
+                "role": "assistant",
+                "sender": "agent",
+                "status": "done",
+                "createdAt": at,
+                "parts": [{ "id": format!("p-{id}"), "kind": "text", "text": "" }],
+            });
+            v.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value(v).expect("blank row")
+        };
+        let handoff = serde_json::json!({
+            "turn": { "kind": "spawn" },
+            "subagentName": "Bob",
+            "handoffMessages": 1,
+        });
+        let messages = vec![
+            person("m1", "bob", "morning", T),
+            blank("h1", handoff.clone(), T + 1_000),
+            blank("u1", serde_json::json!({ "role": "user" }), T + 1_500),
+            person("m2", "bob", "anyone around?", T + 2_000),
+            agent("m3", "Here.", T + 3_000),
+        ];
+        let (rows, _) = rows_of(&messages, true);
+        assert!(
+            rows.iter()
+                .all(|r| !matches!(r.kind, RowKind::Handoff { .. })
+                    && r.message_id != "h1"
+                    && r.message_id != "u1"),
+            "{:?}",
+            rows.iter().map(|r| &r.id).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            shape(&rows),
+            vec![
+                ("morning".into(), true, true),
+                ("anyone around?".into(), false, false),
+                ("agent".into(), true, true),
+            ]
+        );
+
+        let (rows, _) = rows_of(&[blank("h1", handoff.clone(), T)], false);
+        assert!(rows
+            .iter()
+            .any(|r| matches!(r.kind, RowKind::Handoff { .. })));
+        let mut named = blank("h2", handoff, T);
+        named.sender = "agent:doug".into();
+        let (rows, _) = rows_of(&[named], true);
+        assert!(rows
+            .iter()
+            .any(|r| matches!(r.kind, RowKind::Handoff { .. })));
+    }
 
     #[test]
     fn the_window_is_two_minutes_and_the_gaps_are_groks() {
@@ -10958,6 +11035,7 @@ mod grouping_tests {
                 "gh_me",
                 &HashSet::new(),
                 &Mentions::empty(),
+                true,
                 true,
                 cache,
                 &HashSet::new(),
@@ -11462,6 +11540,7 @@ mod delivery_tests {
             &HashSet::new(),
             &Mentions::empty(),
             false,
+            false,
             &mut cache,
             &HashSet::new(),
         );
@@ -11480,6 +11559,7 @@ mod delivery_tests {
             "gh_me",
             &HashSet::new(),
             &Mentions::empty(),
+            false,
             false,
             &mut cache,
             &HashSet::new(),
@@ -11510,6 +11590,7 @@ mod delivery_tests {
             "gh_me",
             &HashSet::new(),
             &Mentions::empty(),
+            false,
             false,
             &mut cache,
             &HashSet::new(),

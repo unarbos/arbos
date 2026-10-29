@@ -375,6 +375,11 @@ enum Transcript {
             // the working line through `AppModel.currentActivity`. Skipping only the hand-off name
             // (6e7261a5) left the legacy `.status(.handoff)` fallback drawing "Messaged ◉ <worker>".
             if message.worker && message.turn?.isProgress == true { continue }
+            // Every row in a people chat names who wrote it: a wordless one that does not (a
+            // box's hand-off or job row with a bare `agent`, Arbonites 2026-10-28) draws
+            // nothing — no "Messaged ◉ X" from no one, no empty bubble. A shared project
+            // chat's agent rows say a bare `agent` by design and keep their lines.
+            if people && message.isSenderlessBlank { continue }
             // Someone I blocked: fold the run into one hidden line, no bubble, no date line.
             if message.role == .user, hiddenSenders.contains(message.sender) {
                 if let last = rows.indices.last,

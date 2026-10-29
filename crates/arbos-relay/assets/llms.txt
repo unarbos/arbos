@@ -164,6 +164,7 @@ Every call: header `Authorization: Bearer arbk_…`.
     message.post {chat, text, reply_to?}       message.start {chat, reply_to?} → message id;
     message.delta {chat, message?, text}       message.end {chat, message?, text?}
       (only a message you started and have not ended; 16 KB per event, 64 KB per message)
+      (a message that ends with no text is refused and removed — nothing is posted)
     message.react {chat, message, emoji, on}   typing {chat, on}   status {chat, text}
     presence.heartbeat {}                      (any call renews the 180 s lease)
   GET  /asp/chats/<id>/messages?before=&limit=50  → history, oldest first (available from #2182's relay deploy)

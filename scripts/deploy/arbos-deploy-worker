@@ -174,10 +174,26 @@ marker_fresh() { # marker_fresh <file>: 0 when the file exists and is younger th
 }
 canary_running() { marker_fresh "$STATE/agentd.canary"; }
 relay_deploying() { marker_fresh "$STATE/relay.deploying"; }
-wait_for_relay_lane() { # before a canary smoke: no relay deploy in flight, and the relay up for RELAY_SETTLE_S
+# arbos-www (Caddy) reloads close every proxied WebSocket for a second (2026-10-29: 12 reloads between
+# 23:30 and 04:03, 49–57 boxes dropped each, two canary smokes broken mid-probe). refresh-mac-download
+# writes `www.reloading` around a reload and `www.reload-pending` when it had to defer one behind a
+# canary smoke / relay deploy; the tick applies a pending reload once the lanes are clear.
+www_reloading() { marker_fresh "$STATE/www.reloading"; }
+apply_pending_www_reload() {
+  [[ -f "$STATE/www.reload-pending" ]] || return 0
+  if canary_running || relay_deploying; then return 0; fi
+  dry && { log "dry-run: would apply the deferred arbos-www reload"; return 0; }
+  systemctl is-active --quiet arbos-www.service || { rm -f "$STATE/www.reload-pending"; return 0; }
+  printf 'by=%s\nat=%s\n' "arbos-deploy-worker" "$(date -u +%FT%TZ)" > "$STATE/www.reloading"
+  systemctl reload arbos-www.service || true
+  rm -f "$STATE/www.reloading" "$STATE/www.reload-pending"
+  log "www: applied the arbos-www reload deferred by refresh-mac-download (lanes clear)"
+  event relay "$(deployed_sha relay)" www_reload_applied "deferred Caddy reload applied once no canary smoke / relay deploy was in flight"
+}
+wait_for_relay_lane() { # before a canary smoke: no relay deploy / Caddy reload in flight, and the relay up for RELAY_SETTLE_S
   local waited=0 up last
-  while relay_deploying; do
-    (( waited == 0 )) && log "agentd: canary smoke waits — relay deploy in flight ($(cat "$STATE/relay.deploying" 2>/dev/null | tr '\n' ' '))"
+  while relay_deploying || www_reloading; do
+    (( waited == 0 )) && log "agentd: canary smoke waits — relay deploy or arbos-www reload in flight ($(cat "$STATE/relay.deploying" "$STATE/www.reloading" 2>/dev/null | tr '\n' ' '))"
     (( waited >= CANARY_WAIT_MAX_S )) && { log "agentd: relay deploy still in flight after ${waited}s; running the canary anyway"; return 0; }
     sleep 10; waited=$((waited + 10))
   done
@@ -606,17 +622,54 @@ for u in json.load(sys.stdin):
 
 real_min_sha() {
   # real_min_sha [skipped uids] — the relay's real_min_sha (the sha of the earliest-reporting awake real
-  # box), recomputed here from the same box list when skipped boxes must not count.
-  curl -fsS --max-time 30 -H "Authorization: Bearer $(secret_from "$RELAY_ENV" ARBOS_RELAY_ADMIN_TOKEN)" "$RELAY_URL/admin/calls" \
-    | python3 -c '
-import sys, json
+  # box), recomputed here from the same box list so that skipped boxes and LIMBO boxes do not count.
+  # Limbo (2026-10-29 03:50): gh_17856706 had a boxes row with no sandbox_id and no snapshot but a 0.1.181
+  # hello from 01:03 and a ticking meter, and held the 0.1.183 roll at "not done" although every real box
+  # ran the image. A box whose row has no sandbox/snapshot, or whose last hello predates the row's
+  # last_started_at while naming another image than the row's snapshot, is logged (so it stays visible) and left out.
+  local rows out
+  rows="$(relay_db -separator $'\t' "select user_id, coalesce(sandbox_id,''), coalesce(snapshot,''), coalesce(last_started_at,0) from boxes" 2>/dev/null || true)"
+  out="$(curl -fsS --max-time 30 -H "Authorization: Bearer $(secret_from "$RELAY_ENV" ARBOS_RELAY_ADMIN_TOKEN)" "$RELAY_URL/admin/calls" \
+    | ROWS="$rows" python3 -c '
+import sys, json, os
 a = json.load(sys.stdin).get("agentd") or {}
 skipped = set(sys.argv[1].split()) if len(sys.argv) > 1 else set()
-if not skipped:
-    print(a.get("real_min_sha") or a.get("fleet_min_sha") or ""); sys.exit(0)
-real = sorted(((b.get("reported_at") or 0), b.get("sha") or "") for b in a.get("boxes") or []
-              if not b.get("test") and b.get("state") == "awake" and b.get("sha") and b.get("user_id") not in skipped)
-print(real[0][1] if real else (a.get("real_min_sha") or ""))' "${1:-}" 2>/dev/null || true
+rows = {}
+for line in (os.environ.get("ROWS") or "").splitlines():
+    f = line.split("\t")
+    if len(f) == 4:
+        rows[f[0]] = (f[1], f[2], int(f[3] or 0))
+real, ignored = [], []
+for b in a.get("boxes") or []:
+    uid = b.get("user_id") or ""
+    if b.get("test") or b.get("state") != "awake" or not b.get("sha") or uid in skipped:
+        continue
+    row = rows.get(uid)
+    why = None
+    if row is not None:
+        sandbox, snapshot, started = row
+        if not sandbox or not snapshot:
+            why = "no sandbox/snapshot on its row"
+        elif started and (b.get("reported_at") or 0) < started and not snapshot.endswith("-" + str(b.get("image") or "?")):
+            # a stale hello from before the row was (re)started AND for another image than the row says:
+            # a hello that already names the row snapshot is just older than a later wake, and counts
+            why = "last hello predates the row last_started_at and names another image than the row snapshot"
+    if why:
+        img = b.get("image"); short = (b.get("sha") or "")[:8]
+        ignored.append(f"{uid}: {why} (hello image {img} sha {short})")
+        continue
+    real.append(((b.get("reported_at") or 0), b.get("sha") or ""))
+real.sort()
+sha = real[0][1] if real else (a.get("real_min_sha") or a.get("fleet_min_sha") or "")
+print(sha)
+for i in ignored:
+    print("IGNORED " + i)' "${1:-}" 2>/dev/null || true)"
+  local line
+  while IFS= read -r line; do
+    # log() echoes to stdout, which is this function's return value: send the note to stderr + the log file only
+    [[ "$line" == IGNORED\ * ]] && log "agentd: real_min_sha ignores limbo box ${line#IGNORED }" >&2
+  done <<< "$out"
+  head -n1 <<< "$out"
 }
 
 box_quiet() {
@@ -1348,6 +1401,7 @@ continue_roll_if_due() {
 
 tick() {
   need_root
+  apply_pending_www_reload
   if dry; then
     # Throwaway state: the real metadata files and queue are copied, the repo clone is shared read-only
     # (fetch only), the lock is private so a live tick is never blocked, nothing is removed or written
@@ -1393,6 +1447,7 @@ status() {
   if agentd_held; then echo "agentd lane HELD: $(tr '\n' ' ' < "$(agentd_hold_file)")"; else echo "agentd lane: open"; fi
   if canary_running; then echo "agentd canary smoke: running ($(tr '\n' ' ' < "$STATE/agentd.canary")) — relay deploys wait"; fi
   if relay_deploying; then echo "relay deploy: in flight ($(tr '\n' ' ' < "$STATE/relay.deploying")) — canary smokes wait"; fi
+  if [[ -f "$STATE/www.reload-pending" ]]; then echo "arbos-www reload: PENDING ($(tr '\n' ' ' < "$STATE/www.reload-pending")) — applied by the tick once the lanes are clear"; fi
   if [[ -s "$STATE/agentd.skip" ]]; then
     echo "skipped boxes (left on their image; 'unskip <uid>' after the fix):"
     while IFS='|' read -r u r w; do echo "  $u since $w: $r"; done < "$STATE/agentd.skip"
