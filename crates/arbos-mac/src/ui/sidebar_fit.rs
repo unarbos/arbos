@@ -17,6 +17,13 @@
 //!   state. Dragging the rail's edge back out past [`SNAP_WIDTH`] restores
 //!   the width the column had (macOS's `NSSplitView` collapse behaviour),
 //!   and the handle follows the pointer again once it passes that width.
+//!   The two directions are mirror images (Jacob 2026-10-29, [feedback
+//!   mac-sidebar-drag-open-2026-10-29]): folding, the column follows the
+//!   pointer down to the snap width and past the snap point settles into
+//!   the rail on the toggle's slide; unfolding, the rail morph follows the
+//!   pointer up to the snap width ([`EdgeDrag::track`]) and past it settles
+//!   at the restored width on the same slide, and a hand let go short of it
+//!   settles back into the rail (`ui::slide`).
 //! * **Rows**: the name wins over the time. From [`HANDLE_MIN`] down a DM's
 //!   `@handle` goes; from [`TIME_FULL_MIN`] down the time drops to
 //!   [`TIME_SMALL_SIZE`] pt; from [`TIME_SMALL_MIN`] down the time is hidden
@@ -151,6 +158,14 @@ pub struct EdgeDrag {
     /// the handle passed through on the way down.
     start: Option<f32>,
     restored: Option<f32>,
+    /// While a gesture that began on the rail is short of the snap width:
+    /// the width the rail morph is drawn at (the pointer's x, from the rail's
+    /// width up to [`SNAP_WIDTH`]), so the unfold follows the hand the way
+    /// the fold follows it down to the snap width.
+    track: Option<f32>,
+    /// The gesture has crossed the snap width once: the morph no longer
+    /// follows the pointer, a further collapse settles like the toggle.
+    crossed: bool,
 }
 
 /// What a pointer at `x` asks of the column.
@@ -171,24 +186,37 @@ impl EdgeDrag {
     pub fn begin(width: Option<f32>) -> Self {
         Self {
             start: width,
-            restored: None,
+            ..Self::default()
         }
+    }
+
+    /// The rail morph's pointer-tracked width (see the field), `None` when
+    /// the column draws at its own width.
+    pub fn track(&self) -> Option<f32> {
+        self.track
     }
 
     /// `x` = the pointer's distance from the window's left edge (the column
     /// docks there, so it is the width asked for); `rail` = collapsed now;
     /// `last_width` = the column's saved width.
     pub fn target(&mut self, x: f32, rail: bool, last_width: f32) -> EdgeTarget {
+        self.track = None;
         if rail {
             if x >= SNAP_WIDTH {
                 let restored = SidebarWidth::clamp(last_width);
                 self.restored = Some(restored);
+                self.crossed = true;
                 EdgeTarget::Expanded(restored)
             } else {
+                let rail_width = crate::ui::rail::metrics::WIDTH;
+                if self.start.is_none() && !self.crossed && x > rail_width + 0.5 {
+                    self.track = Some(x);
+                }
                 EdgeTarget::Rail { keep: last_width }
             }
         } else if x < SNAP_WIDTH - SNAP_HYSTERESIS {
             self.restored = None;
+            self.crossed = true;
             EdgeTarget::Rail {
                 keep: self.start.unwrap_or(last_width).max(last_width),
             }
@@ -361,5 +389,51 @@ mod tests {
             drag.target(900.0, false, 296.0),
             EdgeTarget::Expanded(SIDEBAR_WIDTH_MAX)
         );
+    }
+
+    /// Scout's report (2026-10-29): dragging the rail open flipped straight
+    /// to the unfolded column. A drag from the rail now asks the morph to
+    /// follow the pointer up to the snap width — the mirror of the fold,
+    /// where the column follows it down — and stops asking once the snap
+    /// width is crossed (the unfold settles on the slide from there).
+    #[test]
+    fn a_drag_from_the_rail_tracks_the_pointer_until_the_snap_width() {
+        let rail = crate::ui::rail::metrics::WIDTH;
+        let mut drag = EdgeDrag::begin(None);
+        assert_eq!(drag.track(), None);
+        drag.target(rail - 4.0, true, 296.0);
+        assert_eq!(drag.track(), None, "on the rail's own edge: the rail");
+        for x in [100.0, 150.0, 219.0] {
+            assert_eq!(
+                drag.target(x, true, 296.0),
+                EdgeTarget::Rail { keep: 296.0 }
+            );
+            assert_eq!(drag.track(), Some(x), "the morph follows the hand at {x}");
+        }
+        assert_eq!(drag.target(220.0, true, 296.0), EdgeTarget::Expanded(296.0));
+        assert_eq!(drag.track(), None, "crossed: the slide takes it to 296");
+        // Back under the snap point in the same gesture: the fold settles
+        // like the toggle, the morph does not chase the pointer again.
+        assert_eq!(
+            drag.target(150.0, false, 296.0),
+            EdgeTarget::Rail { keep: 296.0 }
+        );
+        assert_eq!(drag.track(), None);
+        assert_eq!(
+            drag.target(120.0, true, 296.0),
+            EdgeTarget::Rail { keep: 296.0 }
+        );
+        assert_eq!(drag.track(), None);
+
+        // A fold from the expanded column never tracks below the snap width:
+        // it follows the pointer as a width, then settles into the rail.
+        let mut drag = EdgeDrag::begin(Some(296.0));
+        assert_eq!(
+            drag.target(150.0, false, 296.0),
+            EdgeTarget::Rail { keep: 296.0 }
+        );
+        assert_eq!(drag.track(), None);
+        drag.target(120.0, true, 296.0);
+        assert_eq!(drag.track(), None);
     }
 }
