@@ -2381,6 +2381,16 @@ fn cache_archived(shared: &Arc<Shared>, chat_id: &str, archived: bool) {
     });
 }
 
+/// A people chat's sidebar row is hidden exactly when its chat is archived for me. `chats` is
+/// the merged list, so an (un)archive made on this Mac after the refresh started still wins.
+fn align_people_archive(projects: &mut [Project], chats: &[Chat]) {
+    for p in projects.iter_mut().filter(|p| p.is_people()) {
+        if let Some(c) = chats.iter().find(|c| c.id == p.id) {
+            p.archived_at = c.archived_at;
+        }
+    }
+}
+
 /// Push a presence frame on the chat's room right away (focus / call changes).
 fn presence_now(shared: &Arc<Shared>, chat_id: &str) {
     if let Some(room) = shared.rooms.lock().unwrap().get(chat_id) {
@@ -2754,6 +2764,7 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
             c.unread_count = count;
             c.unread = count > 0;
         }
+        align_people_archive(&mut projects, &merged);
         *local = merged;
     }
     // One copy of each agent's avatar everywhere: the newest stamp wins over any roster copy
@@ -9589,6 +9600,57 @@ mod refused_retry_tests {
 
 /// [feedback toast-stack-mac-2026-10-27]: a failing 15 s poll asks less and less often
 /// instead of failing — and toasting — every tick.
+/// [feedback archived-chat-stays-archived-2026-10-29]: a refresh never brings back a hidden
+/// people chat, and an (un)archive made on this Mac during the refresh wins.
+#[cfg(test)]
+mod people_archive_tests {
+    use super::align_people_archive;
+    use crate::model::{Chat, ChatKind, Project, SpaceKind};
+
+    fn space(id: &str, kind: SpaceKind, archived_at: Option<u64>) -> Project {
+        Project {
+            id: id.into(),
+            kind,
+            archived_at,
+            ..Project::default()
+        }
+    }
+
+    fn chat(id: &str, archived_at: Option<u64>) -> Chat {
+        Chat {
+            id: id.into(),
+            project_id: id.into(),
+            title: String::new(),
+            is_pinned: true,
+            is_system: false,
+            unread: false,
+            unread_count: 0,
+            last_message_at: 0,
+            archived_at,
+            kind: ChatKind::Chat,
+            participants: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn people_rows_follow_their_merged_chat_and_agents_keep_their_own_mark() {
+        let mut projects = vec![
+            space("dm", SpaceKind::Dm, None),
+            space("grp", SpaceKind::Group, Some(5)),
+            space("agent", SpaceKind::Project, Some(7)),
+        ];
+        let merged = vec![chat("dm", Some(9)), chat("grp", None), chat("agent", None)];
+        align_people_archive(&mut projects, &merged);
+        assert_eq!(projects[0].archived_at, Some(9), "archived DM stays hidden");
+        assert_eq!(projects[1].archived_at, None, "unarchived group comes back");
+        assert_eq!(
+            projects[2].archived_at,
+            Some(7),
+            "agents use the space archive"
+        );
+    }
+}
+
 #[cfg(test)]
 mod secrets_poll_tests {
     use super::secrets_poll_skip_after;
