@@ -2255,20 +2255,7 @@ impl Agent {
         // Busy agent (a turn holds the lock): the message gets its quick reply first — a status
         // answer ends here, guidance goes into the running turn, anything else queues with no
         // acknowledgement bubble (the apps' working indicator covers the wait; `status.rs`).
-        // A message that is just "stop" (trim, case-insensitive) cancels the running turn; it is
-        // never queued or steered (the apps have no Stop button while busy).
-        let typed_stop = match cmd.kind.as_str() {
-            "send" | "steer" | "guide" => {
-                let id = cmd.payload.get("messageId").and_then(Value::as_str).unwrap_or("");
-                let h = host.lock().await;
-                h.doc
-                    .message(id)
-                    .is_some_and(|m| m.text().trim().eq_ignore_ascii_case("stop"))
-            }
-            _ => false,
-        };
         let quick = match cmd.kind.as_str() {
-            _ if typed_stop => crate::status::QuickOutcome::NotBusy,
             "send" | "steer" | "guide" => self.quick_reply(chat_id, &host, &cmd).await,
             _ => crate::status::QuickOutcome::NotBusy,
         };
@@ -2290,7 +2277,6 @@ impl Agent {
         let res = match (cmd.kind.as_str(), quick) {
             (_, crate::status::QuickOutcome::Answered)
             | (_, crate::status::QuickOutcome::Steered) => Ok(()),
-            (_, _) if typed_stop => self.handle_stop_cmd(chat_id, &cmd).await,
             ("send", _) => self.handle_send(chat_id, &host, &cmd).await,
             ("stop", _) => self.handle_stop_cmd(chat_id, &cmd).await,
             // Guide: inject into the running turn (no turn_lock). Same as stop — mid-task.
