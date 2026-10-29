@@ -55,6 +55,8 @@ mod outside_wake;
 mod people;
 mod perf;
 mod pins;
+#[cfg(test)]
+mod preview_token_tests;
 mod proxy;
 mod push;
 mod releases;
@@ -364,6 +366,7 @@ async fn main() -> anyhow::Result<()> {
         presence_seen: Arc::new(Mutex::new(HashMap::new())),
         activity: Arc::new(Mutex::new(HashMap::new())),
         box_http_seen: Arc::new(Mutex::new(HashMap::new())),
+        fresh_preview_tokens: Arc::new(Mutex::new(HashMap::new())),
         turn_running: Arc::new(Mutex::new(HashMap::new())),
         evicted: Arc::new(Mutex::new(HashMap::new())),
         fleet_pressure: Arc::new(Mutex::new(None)),
