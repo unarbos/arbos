@@ -3521,6 +3521,7 @@ impl Composer {
         let theme = Theme::of(cx).clone();
         let mut menu = div()
             .id("mention-menu")
+            .debug_selector(|| "composer-mention-menu".into())
             .flex()
             .flex_col()
             .w(px(MENTION_MENU_WIDTH))
@@ -3597,11 +3598,7 @@ impl Composer {
                 .text_color(theme.text_faint)
                 .child("↑↓ move · Tab or ↵ insert · esc close"),
         );
-        div()
-            .absolute()
-            .bottom(px(COMPOSER_HEIGHT + MENTION_MENU_GAP))
-            .left(px(0.0))
-            .child(frosted(PANEL_RADIUS, PANEL_BLUR, menu))
+        frosted(PANEL_RADIUS, PANEL_BLUR, menu)
     }
 }
 
@@ -4189,7 +4186,7 @@ impl Render for Composer {
                     .child(note),
             );
         }
-        column = column.child(field_wrap.child(frosted(field_radius, PANEL_BLUR, field)));
+        field_wrap = field_wrap.child(frosted(field_radius, PANEL_BLUR, field));
 
         let query = self.mention_query(cx);
         if query.is_none() {
@@ -4201,16 +4198,32 @@ impl Render for Composer {
         } else {
             self.sync_mention_selection(mentions.len(), query.as_deref());
             let selected = self.mention_selected;
-            column = column.child(glass::popover(self.render_mentions(mentions, selected, cx)));
+            field_wrap =
+                field_wrap.child(above_field(self.render_mentions(mentions, selected, cx)));
         }
         if self.fun.menu_open {
-            column = column.child(self.render_attach_menu(cx));
+            field_wrap = field_wrap.child(above_field(self.render_attach_menu(cx)));
         }
         if self.fun.open {
-            column = column.child(self.render_fun(cx));
+            field_wrap = field_wrap.child(above_field(self.render_fun(cx)));
         }
-        column
+        column.child(field_wrap)
     }
+}
+
+/// A floating layer over the transcript, `MENTION_MENU_GAP` above the field:
+/// the `@` picker, the + menu, the emoji / sticker / GIF picker. It is
+/// absolute on the field's own box and takes no room in the composer column:
+/// an in-flow child there, even an empty wrapper, gets the column's 8 pt gap
+/// and lifts the pill and the transcript while the layer is open ([feedback
+/// mention-list-overlay-2026-10-29]).
+fn above_field(layer: impl IntoElement) -> Div {
+    div()
+        .absolute()
+        .bottom(relative(1.0))
+        .left(px(0.0))
+        .pb(px(MENTION_MENU_GAP))
+        .child(glass::popover(layer))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -6599,5 +6612,252 @@ mod layout_chord_tests {
         cx.run_until_parked();
         cx.simulate_keystrokes("ctrl-alt-l");
         assert_eq!(text(&input, cx), "", "blurred: nothing is typed anywhere");
+    }
+}
+
+#[cfg(test)]
+mod overlay_tests {
+    //! The composer's floating layers — the `@` picker, the + menu, the emoji
+    //! picker — float over the transcript and move nothing ([feedback
+    //! mention-list-overlay-2026-10-29], Scout: typing `@` "pushes the chatbar
+    //! and texts up"). The real `Shell` over a real `AppState`, headless, in a
+    //! group with people and an agent.
+    use futures::future::BoxFuture;
+    use gpui::{Bounds, Entity, Pixels, TestAppContext, VisualTestContext};
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::model::{AgentMember, Chat, Person, Project, SpaceKind};
+    use crate::sync::{ClientCommand, SyncEvent, SyncSource};
+    use crate::ui::motion::PulseClock;
+    use crate::ui::shell::Shell;
+
+    struct Idle;
+
+    impl SyncSource for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            _commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    fn message(id: &str, sender: &str, text: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "chatId": "c1", "role": "user", "sender": sender, "status": "done",
+            "createdAt": at, "completedAt": at,
+            "parts": [{ "id": format!("{id}-t"), "kind": "text", "text": text }],
+        }))
+        .expect("message")
+    }
+
+    fn person(id: &str, handle: &str, name: &str) -> Person {
+        Person {
+            id: id.into(),
+            handle: handle.into(),
+            name: Some(name.into()),
+            status: "member".into(),
+            ..Person::default()
+        }
+    }
+
+    struct Mounted<'a> {
+        _rt: tokio::runtime::Runtime,
+        state: Entity<AppState>,
+        shell: Entity<Shell>,
+        composer: Entity<Composer>,
+        vcx: &'a mut VisualTestContext,
+    }
+
+    fn mount(cx: &mut TestAppContext) -> Mounted<'_> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| {
+            gpui_tokio::init_from_handle(cx, handle);
+            cx.set_global(Theme::dark(crate::ui::theme::Surface::Matte));
+            if !cx.has_global::<PulseClock>() {
+                PulseClock::init(cx);
+            }
+        });
+        let state = cx.new(|cx| AppState::new(Box::new(Idle), cx));
+        let now = crate::model::now_ms();
+        state.update(cx, |s, cx| {
+            s.projects.push(Project {
+                id: "p1".into(),
+                name: "Arbonites".into(),
+                kind: SpaceKind::Group,
+                people: vec![
+                    person("gh_1", "agrippa", "Agrippa"),
+                    person("gh_2", "allan", "Allan"),
+                    person("gh_3", "aureum", "Aureum"),
+                ],
+                agents: vec![AgentMember {
+                    project_id: "p2".into(),
+                    name: "Grok".into(),
+                    handle: "grok".into(),
+                    ..AgentMember::default()
+                }],
+                ..Project::default()
+            });
+            let chat: Chat = serde_json::from_value(serde_json::json!({
+                "id": "c1", "project_id": "p1", "title": "Arbonites", "is_pinned": true,
+                "is_system": false, "unread": false, "last_message_at": now,
+            }))
+            .expect("chat");
+            s.chats.insert("p1".into(), vec![chat]);
+            s.messages.insert(
+                "c1".into(),
+                vec![
+                    message(
+                        "m1",
+                        "user:gh_1",
+                        "oof the second message is wrong i think",
+                        now - 60_000,
+                    ),
+                    message(
+                        "m2",
+                        "user:gh_2",
+                        "i'll wait so i don't overload him",
+                        now - 30_000,
+                    ),
+                ],
+            );
+            s.selected_project = Some("p1".into());
+            s.active_tab.insert("p1".into(), "c1".into());
+            cx.notify();
+        });
+        let (shell, vcx) = cx.add_window_view(|window, cx| Shell::new(state.clone(), window, cx));
+        vcx.run_until_parked();
+        let composer = shell.read_with(&*vcx, |sh, _| sh.composer.clone());
+        vcx.update(|window, cx| Composer::focus(&composer, window, cx));
+        settle(&state, &shell, vcx);
+        Mounted {
+            _rt: rt,
+            state,
+            shell,
+            composer,
+            vcx,
+        }
+    }
+
+    /// Enough frames for the list to measure its rows and settle. The
+    /// transcript syncs when the state notifies, so the state is poked once.
+    fn settle(state: &Entity<AppState>, shell: &Entity<Shell>, vcx: &mut VisualTestContext) {
+        state.update(vcx, |_, cx| cx.notify());
+        for _ in 0..40 {
+            shell.update(vcx, |_, cx| cx.notify());
+            vcx.run_until_parked();
+        }
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct Layout {
+        composer: Bounds<Pixels>,
+        field: Bounds<Pixels>,
+        rows: Vec<Bounds<Pixels>>,
+    }
+
+    fn layout(shell: &Entity<Shell>, vcx: &mut VisualTestContext) -> Layout {
+        let rows = shell.read_with(&*vcx, |sh, cx| {
+            let t = sh.transcript.read(cx);
+            ["m1#stamp", "m1#user", "m2#user"]
+                .iter()
+                .map(|id| t.row_frame(id).unwrap_or_else(|| panic!("row {id} drawn")))
+                .collect()
+        });
+        Layout {
+            composer: vcx
+                .debug_bounds("chat-composer-block")
+                .expect("composer drawn"),
+            field: vcx.debug_bounds("composer-field").expect("field drawn"),
+            rows,
+        }
+    }
+
+    /// The layer floats over the transcript: it ends `MENTION_MENU_GAP` above
+    /// the field and leaves the pill and every row where they were.
+    fn assert_floats(name: &str, layer: Bounds<Pixels>, closed: &Layout, open: &Layout) {
+        assert_eq!(
+            open, closed,
+            "{name} open: the composer and the transcript stay put"
+        );
+        let gap = f32::from(open.field.top() - layer.bottom());
+        assert!(
+            (gap - MENTION_MENU_GAP).abs() <= 0.5,
+            "{name}: {gap} pt above the field (want {MENTION_MENU_GAP})"
+        );
+        assert!(
+            layer.top() < open.rows[2].bottom(),
+            "{name} lies over the transcript rows, not in a band of its own"
+        );
+    }
+
+    #[gpui::test]
+    fn the_mention_list_floats_over_the_chat_and_moves_nothing(cx: &mut TestAppContext) {
+        let Mounted {
+            state, shell, vcx, ..
+        } = mount(cx);
+        let closed = layout(&shell, vcx);
+        assert!(vcx.debug_bounds("composer-mention-menu").is_none());
+
+        vcx.simulate_input("@");
+        settle(&state, &shell, vcx);
+        let menu = vcx
+            .debug_bounds("composer-mention-menu")
+            .expect("typing @ opens the mention list");
+        assert_floats("the mention list", menu, &closed, &layout(&shell, vcx));
+
+        // Filtering it (fewer rows, a shorter card) moves nothing either.
+        vcx.simulate_input("al");
+        settle(&state, &shell, vcx);
+        let menu = vcx
+            .debug_bounds("composer-mention-menu")
+            .expect("@al still lists Allan");
+        assert_floats("the filtered list", menu, &closed, &layout(&shell, vcx));
+
+        // Closing it puts nothing back: nothing had moved.
+        vcx.simulate_input(" ");
+        settle(&state, &shell, vcx);
+        assert!(vcx.debug_bounds("composer-mention-menu").is_none());
+        assert_eq!(layout(&shell, vcx), closed);
+    }
+
+    #[gpui::test]
+    fn the_plus_menu_and_the_emoji_picker_float_too(cx: &mut TestAppContext) {
+        let Mounted {
+            state,
+            shell,
+            composer,
+            vcx,
+            ..
+        } = mount(cx);
+        let closed = layout(&shell, vcx);
+
+        composer.update(vcx, |c, cx| c.toggle_attach_menu(cx));
+        settle(&state, &shell, vcx);
+        let menu = vcx
+            .debug_bounds("composer-attach-menu")
+            .expect("+ opens its menu");
+        assert_floats("the + menu", menu, &closed, &layout(&shell, vcx));
+
+        composer.update(vcx, |c, cx| c.open_fun(fun::FunTab::Emoji, cx));
+        settle(&state, &shell, vcx);
+        let picker = vcx.debug_bounds("fun-picker").expect("the picker opens");
+        assert_eq!(
+            layout(&shell, vcx),
+            closed,
+            "the emoji picker moves nothing"
+        );
+        let gap = f32::from(closed.field.top() - picker.bottom());
+        assert!((gap - MENTION_MENU_GAP).abs() <= 0.5, "picker gap {gap}");
     }
 }
