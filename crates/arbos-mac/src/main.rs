@@ -243,6 +243,10 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", composer::Escape, input),
         KeyBinding::new("backspace", composer::Backspace, input),
         KeyBinding::new("delete", composer::Delete, input),
+        // ⇧⌫ / ⇧⌦ delete like ⌫ / ⌦: Shift is often still down after ⇧↑ selected
+        // text, and a binding matches its exact modifiers.
+        KeyBinding::new("shift-backspace", composer::Backspace, input),
+        KeyBinding::new("shift-delete", composer::Delete, input),
         KeyBinding::new("alt-backspace", composer::DeleteWordBackward, input),
         KeyBinding::new("ctrl-backspace", composer::DeleteWordBackward, input),
         KeyBinding::new("alt-delete", composer::DeleteWordForward, input),
