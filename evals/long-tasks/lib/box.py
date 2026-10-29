@@ -121,7 +121,12 @@ class Box:
         (the relay has no /version; a P0 rollback mid-run must be visible in the record)."""
         if self.provider == "daytona":
             return {}
-        cmd = "stat -c %y /usr/local/bin/arbos-relay; strings /usr/local/bin/arbos-relay | grep -oE '[0-9a-f]{40}' | sort | uniq -c | sort -rn | head -1"
+        # The embedded-string sha was the same across three relay deploys in run 12 (it is a
+        # dependency's hash, not the build's), so the deploy log name — `relay-<sha>.log`,
+        # written by the deploy script next to the binary — is the commit when present.
+        cmd = ("stat -c %y /usr/local/bin/arbos-relay; "
+               "ls -t /var/lib/arbos-deploy/runs/relay-*.log 2>/dev/null | head -1 | grep -oE '[0-9a-f]{40}' || "
+               "strings /usr/local/bin/arbos-relay | grep -oE '[0-9a-f]{40}' | sort | uniq -c | sort -rn | head -1")
         p = subprocess.run(["ssh", "-i", SSH_KEY, "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", SSH_HOST, cmd], capture_output=True, text=True, timeout=90)
         lines = p.stdout.strip().splitlines()
         sha = lines[1].split()[-1] if len(lines) > 1 and lines[1].split() else None
