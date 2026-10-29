@@ -1894,16 +1894,8 @@ struct GroupProfileView: View {
             parts.append(rights)
         }
         if isSilenced {
-            if let until = member?.silencedUntil {
-                let date = Date(timeIntervalSince1970: TimeInterval(until) / 1000)
-                let f = DateFormatter()
-                f.doesRelativeDateFormatting = true
-                f.dateStyle = .short
-                f.timeStyle = .short
-                parts.append("Muted until \(f.string(from: date))")
-            } else {
-                parts.append("Muted")
-            }
+            let now = Int64(Date().timeIntervalSince1970 * 1000)
+            parts.append(BlockedState.mutedUntilLabel(untilMs: member?.silencedUntil, nowMs: now))
         }
         return parts.joined(separator: " · ")
     }

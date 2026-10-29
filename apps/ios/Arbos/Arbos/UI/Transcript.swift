@@ -152,15 +152,17 @@ struct Quote: Equatable, Hashable {
 enum RowKind: Equatable {
     /// My bubble; `delivery` is its opacity (pending dimmed, delivered / failed full).
     case user(text: String, delivery: Delivery, quote: Quote?, preview: LinkPreview? = nil)
-    /// Another person's message in a people chat: left bubble with avatar; the name above
-    /// only when the sender changed (`named`, Grok Bot's group style) and the chat names its
-    /// senders at all (group / channel, `rows(multiParty:)`); the name sits inside the bubble
-    /// (Jacob, 2026-10-23). No time inside any bubble: the time is the transcript's
+    /// Another person's message in a people chat: left bubble on the avatar lane; the name
+    /// only when the message starts a sender run (`named`, Grok Bot's group style; see
+    /// `Transcript.runWindowMs`) and the chat names its senders at all (group / channel,
+    /// `rows(multiParty:)`); the name sits inside the bubble (Jacob, 2026-10-23). The avatar
+    /// itself is `Row.showsAvatar`. No time inside any bubble: the time is the transcript's
     /// drag-to-reveal only (Jacob, 2026-10-24, docs/mac-design-rules.md).
     case other(text: String, handle: String, avatar: String?, named: Bool, quote: Quote?, preview: LinkPreview? = nil)
     case assistant(blocks: [Block], live: Bool, caption: String?, quote: Quote? = nil)
-    /// Shared agent in a people chat: same shape as `.other` (avatar + bubble, name on each
-    /// reply — consecutive answers from the same agent must not merge, #1447). No
+    /// Shared agent in a people chat: same shape as `.other` (lane + bubble, name on the
+    /// first reply of a run — a quoted reply starts its own run, so each answer to an ask
+    /// is still named; unquoted follow-ups group, Jacob 2026-10-28, supersedes #1447). No
     /// "answering @x · owned by @y" meta — ownership lives in the profile pane
     /// (Jacob, 2026-10-22). `agentId` opens that pane from the avatar / name.
     /// `quote` is the user message this answers (`inReplyTo`).
@@ -232,13 +234,65 @@ struct Row: Identifiable, Equatable {
     var replyCount: Int = 0
     /// The message's `createdAt` (ms), so the swipe-revealed time needs no lookup.
     var createdAt: Int64 = 0
-    /// Space above this row (8 pt within a run, 24 pt at a sender / turn change,
-    /// 20 pt around system lines), fixed at build time so a row's layout does not
-    /// depend on its position in the visible window.
+    /// Space above this row (`Transcript.runGap` inside a sender run, `turnGap` where a
+    /// new run starts, `systemGap` around system lines), fixed at build time so a row's
+    /// layout does not depend on its position in the visible window.
     var gapBefore: CGFloat = 0
+    /// The row's message starts a sender run (see `Transcript.runWindowMs`): its first
+    /// bubble carries the name and the row above it opens the turn gap. A message that
+    /// continues the run sits under the first one's text in the in-run gap.
+    var runStart: Bool = true
+    /// Draw the sender's avatar beside this row: once per run, on the last avatar-bearing
+    /// row of the run's first message; every other row keeps the avatar column empty
+    /// ([feedback grouped-messages-ios-2026-10-28]).
+    var showsAvatar: Bool = true
 }
 
 enum Transcript {
+    /// Grouped messages (Jacob, 2026-10-28, [feedback grouped-messages-ios-2026-10-28]):
+    /// consecutive messages from one sender this close together (ms) form one **run** —
+    /// the name and the avatar show once, on the run's first message; the later messages
+    /// sit under its text with the avatar column empty and `runGap` between them. The run
+    /// breaks when the sender changes, when this window passes between two messages, at a
+    /// date line or a system line, and at a bubble that carries a reply quote (it starts a
+    /// run of its own). People and agents group alike, my own messages too. Mirrors the
+    /// Mac's `transcript::RUN_WINDOW_MS` (the row builders live in the two clients, not in
+    /// `arbos_core`): keep the two in step.
+    static let runWindowMs: Int64 = 2 * 60 * 1000
+    /// Space between two bubbles of one run — half of the 8 pt the phone had.
+    static let runGap: CGFloat = 4
+    /// Space a new run opens (a sender change, the window passed, a quoted reply): Grok
+    /// Bot's iPhone turn gap (≈ 15–16 pt measured on `internal/refs/grokbot-ios/ref-01`,
+    /// 1.17 px/pt); was 24.
+    static let turnGap: CGFloat = 16
+    /// Space around a centred system line (dates, hand-offs, membership notices).
+    static let systemGap: CGFloat = 20
+
+    /// Whether a message from `sender` at `at` continues the run that ended with
+    /// `prevSender` at `prevAt`: the same sender, within `runWindowMs` of the run's last
+    /// message, and no reply quote on the new bubble (`quoted`). Rows without a clock
+    /// never group.
+    static func continuesRun(prevSender: String?, prevAt: Int64, sender: String, at: Int64, quoted: Bool) -> Bool {
+        guard let prevSender, !quoted, prevSender == sender, at > 0, prevAt > 0 else { return false }
+        return abs(at - prevAt) <= runWindowMs
+    }
+
+    /// Whether the message's bubble draws a reply quote — a person's `replyRef` / `replyTo`;
+    /// an agent's `replyTo`, else `inReplyTo` in a people chat (the row builder's fallback
+    /// for member bubbles). A quoted bubble names its sender and starts its own run.
+    static func carriesQuote(_ message: Message, people: Bool) -> Bool {
+        func set(_ id: String?) -> Bool { !(id ?? "").isEmpty }
+        switch message.role {
+        case .user:
+            if let r = message.replyRef, !r.chatId.isEmpty, !r.messageId.isEmpty { return true }
+            return set(message.replyTo)
+        case .assistant, .project:
+            return set(message.replyTo) || (people && message.senderHandle != nil && set(message.inReplyTo))
+        case .system:
+            return false
+        }
+    }
+
     /// id → message, built once per rebuild; replies and the chat's row lookups use it
     /// instead of scanning the transcript per row.
     static func index(_ messages: [Message]) -> [Id: Message] {
@@ -272,9 +326,11 @@ enum Transcript {
         var rows: [Row] = []
         rows.reserveCapacity(messages.count + messages.count / 8)
         var lastAt: Int64 = 0
-        // Who spoke last: a name sits above a bubble only when the sender changed or a date
-        // line broke the run (Grok Bot's group style).
+        // The sender run the builder is in (who spoke last, when): a message that continues
+        // it draws no name and no avatar and sits in the in-run gap; a date line, a system
+        // line or a hidden fold ends it ([feedback grouped-messages-ios-2026-10-28]).
         var prevSender: String? = nil
+        var prevAt: Int64 = 0
         /// Hand-off rows by id (name, messages exchanged), merged into one line when consecutive.
         var handoffs: [String: (String, Int)] = [:]
         let replyCounts = Self.replyCounts(in: messages)
@@ -337,10 +393,13 @@ enum Transcript {
             var chunk: [Row] = []
             let streaming = message.isStreaming
             let dateBreak = message.createdAt > 0 && (lastAt == 0 || message.createdAt - lastAt > 3_600_000)
-            // People-chat agent replies always name the sender (#1447): two answers in a
-            // row from the same agent must not look like one run.
-            let agentInPeople = people && (message.role == .assistant || message.role == .project)
-            let named = multiParty && (dateBreak || prevSender != message.sender || agentInPeople)
+            // Does this message start a sender run? Agents group like people (Jacob,
+            // 2026-10-28; supersedes #1447's name on every reply): a reply that quotes the
+            // ask starts its own run and is named, a quick follow-up within the window is not.
+            let runStart = dateBreak || !Self.continuesRun(prevSender: prevSender, prevAt: prevAt,
+                                                           sender: message.sender, at: message.createdAt,
+                                                           quoted: Self.carriesQuote(message, people: people))
+            let named = multiParty && runStart
             switch message.role {
             case .user:
                 var hasImage = false
@@ -666,7 +725,16 @@ enum Transcript {
                                  kind: .system(icon: nil, text: "Replied to \u{FFFC}\(to)", avatarProject: nil)))
             }
             guard !chunk.isEmpty else { continue }
-            for i in chunk.indices { chunk[i].createdAt = message.createdAt }
+            for i in chunk.indices {
+                chunk[i].createdAt = message.createdAt
+                chunk[i].runStart = runStart
+                chunk[i].showsAvatar = false
+            }
+            // The avatar once per run: on the last avatar-bearing row of the run's first
+            // message (the Mac's rule — the disc at the bottom of the message).
+            if runStart, let ix = chunk.lastIndex(where: { Self.bearsAvatar($0.kind) }) {
+                chunk[ix].showsAvatar = true
+            }
             if !message.reactions.isEmpty,
                let ix = chunk.lastIndex(where: {
                    switch $0.kind {
@@ -694,21 +762,38 @@ enum Transcript {
             }
             if message.createdAt > 0 { lastAt = message.createdAt }
             rows.append(contentsOf: chunk)
-            prevSender = message.sender
+            if message.role == .system {
+                // A system line breaks the run: the next bubble names its sender again.
+                prevSender = nil
+                prevAt = 0
+            } else {
+                prevSender = message.sender
+                prevAt = message.createdAt
+            }
         }
         return Self.withGaps(Self.mergeHandoffs(rows, handoffs))
     }
 
-    /// Spacing between neighbours (measured on the Grok Bot references).
-    static func gap(from prev: Row, to cur: Row) -> CGFloat {
-        if case .system = prev.kind { return 20 }
-        if case .system = cur.kind { return 20 }
-        if prev.role != cur.role { return 24 }
-        // Same role: still open the turn gap when an agent starts a new message.
-        if prev.messageId != cur.messageId && (cur.role == .assistant || cur.role == .project) {
-            return 24
+    /// Rows that draw the sender's avatar on the lane when they are the run's first.
+    static func bearsAvatar(_ kind: RowKind) -> Bool {
+        switch kind {
+        case .other, .member: return true
+        case .secretGhost(name: _, mine: let mine, handle: _, avatar: _, named: _): return !mine
+        case .image(item: _, fromUser: _, caption: _, lane: _, source: _, forwardedFrom: _, sender: let sender, named: _, quote: _),
+             .file(item: _, subtitle: _, caption: _, forwardedFrom: _, sender: let sender, named: _, quote: _):
+            return sender != nil
+        case .user, .assistant, .system, .hidden, .question, .voiceMemo, .forwardHint, .error: return false
         }
-        return 8
+    }
+
+    /// Spacing between neighbours: `systemGap` around a centred line, `turnGap` where a
+    /// new sender run starts, `runGap` between the rows of one run (its messages and the
+    /// rows of one message alike).
+    static func gap(from prev: Row, to cur: Row) -> CGFloat {
+        if case .system = prev.kind { return systemGap }
+        if case .system = cur.kind { return systemGap }
+        if prev.messageId != cur.messageId && cur.runStart { return turnGap }
+        return runGap
     }
 
     private static func withGaps(_ rows: [Row]) -> [Row] {
@@ -1481,13 +1566,14 @@ struct RowView: View, Equatable {
             let personLabel = ProfileToggle.label(name: personName, showing: model.profileShows(personTarget))
             let openPerson = { model.toggleProfile(personTarget) }
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
-                Button(action: openPerson) {
-                    PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
+                avatarColumn {
+                    Button(action: openPerson) {
+                        PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(personLabel)
+                    .accessibilityIdentifier("sender-avatar")
                 }
-                .buttonStyle(.plain)
-                .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
-                .accessibilityLabel(personLabel)
-                .accessibilityIdentifier("sender-avatar")
                 // Group / channel: the name inside the bubble, in the sender's colour,
                 // then the reply quote, then the text. No time in the bubble (drag to reveal).
                 VStack(alignment: .leading, spacing: 0) {
@@ -1533,11 +1619,12 @@ struct RowView: View, Equatable {
             let memberLabel = ProfileToggle.label(name: agent.name, showing: model.profileShows(memberTarget))
             let openMember = { model.toggleProfile(memberTarget) }
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
-                Button(action: openMember) { memberAvatar(agent) }
-                    .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(memberLabel)
-                    .accessibilityIdentifier("sender-avatar")
+                avatarColumn {
+                    Button(action: openMember) { memberAvatar(agent) }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(memberLabel)
+                        .accessibilityIdentifier("sender-avatar")
+                }
                 memberBubble(
                     agent,
                     content: VStack(alignment: .leading, spacing: 0) {
@@ -1656,8 +1743,10 @@ struct RowView: View, Equatable {
                 }
             } else {
                 HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
-                    PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
-                        .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
+                    avatarColumn {
+                        PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
+                            .accessibilityIdentifier("sender-avatar")
+                    }
                     ghost.frame(maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset), alignment: .leading)
                     Spacer(minLength: 0)
                 }
@@ -1888,6 +1977,24 @@ struct RowView: View, Equatable {
         AgentAvatar(project: agent, theme: theme, size: Theme.memberAvatar, still: true)
     }
 
+    /// The avatar column beside an incoming row: the sender's picture when this row shows
+    /// it (`Row.showsAvatar` — once per run, on the run's first message), else an empty
+    /// slot of the same width so the bubble keeps its lane and aligns under the first
+    /// one's text ([feedback grouped-messages-ios-2026-10-28]).
+    @ViewBuilder
+    private func avatarColumn<Avatar: View>(@ViewBuilder avatar: () -> Avatar) -> some View {
+        if row.showsAvatar {
+            avatar()
+                .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
+        } else {
+            Color.clear
+                .frame(width: Theme.memberAvatar, height: 1)
+                .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
+                .accessibilityHidden(true)
+                .accessibilityIdentifier("sender-avatar-slot")
+        }
+    }
+
     /// Someone else's picture / file row in a people chat: their avatar on the lane (the
     /// same profile target as their bubble's), the name above the card when `named`, then
     /// the card — a picture is a message like any other
@@ -1901,13 +2008,14 @@ struct RowView: View, Equatable {
             let personLabel = ProfileToggle.label(name: personName, showing: model.profileShows(personTarget))
             let openPerson = { model.toggleProfile(personTarget) }
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
-                Button(action: openPerson) {
-                    PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
+                avatarColumn {
+                    Button(action: openPerson) {
+                        PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(personLabel)
+                    .accessibilityIdentifier("sender-avatar")
                 }
-                .buttonStyle(.plain)
-                .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
-                .accessibilityLabel(personLabel)
-                .accessibilityIdentifier("sender-avatar")
                 VStack(alignment: .leading, spacing: 4) {
                     if named {
                         Button(action: openPerson) {
@@ -1930,11 +2038,12 @@ struct RowView: View, Equatable {
             let memberLabel = ProfileToggle.label(name: agent.name, showing: model.profileShows(memberTarget))
             let openMember = { model.toggleProfile(memberTarget) }
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
-                Button(action: openMember) { memberAvatar(agent) }
-                    .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(memberLabel)
-                    .accessibilityIdentifier("sender-avatar")
+                avatarColumn {
+                    Button(action: openMember) { memberAvatar(agent) }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(memberLabel)
+                        .accessibilityIdentifier("sender-avatar")
+                }
                 VStack(alignment: .leading, spacing: 4) {
                     if named {
                         Button(action: openMember) { memberName(agent) }
@@ -2101,12 +2210,14 @@ struct BlockView: View {
                     .font(theme.font(Theme.body))
                     .lineSpacing(Theme.bodyLineSpacing)
                     .tint(theme.accent)
+                    .mentionPills()
             }
         case .heading(let level, let text):
             // Bolder, larger text; never an anchor (Mac: 20 / 17 / 15 pt on a 13 pt body).
             Markdown.inlineText(text, color: color, link: theme.accent, codeChip: codeChip, mentions: mentions)
                 .font(theme.font(Self.headingSize(level), weight: .bold))
                 .tint(theme.accent)
+                .mentionPills()
                 .padding(.top, 4)
                 .accessibilityIdentifier("heading-\(level)")
         case .quote(let inner):
@@ -2143,6 +2254,7 @@ struct BlockView: View {
                             Markdown.inlineText(item, color: color, link: theme.accent, codeChip: codeChip, mentions: mentions)
                                 .font(theme.font(Theme.body))
                                 .tint(theme.accent)
+                                .mentionPills()
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
@@ -2356,6 +2468,7 @@ struct TableBlock: View {
                 Markdown.inlineText(cell, color: head ? theme.text : theme.muted, link: theme.accent, codeChip: theme.codeChip, mentions: mentions)
                     .font(theme.font(14, weight: head ? .semibold : .regular))
                     .tint(theme.accent)
+                    .mentionPills()
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(width: widths[ci], alignment: .topLeading)
@@ -3038,6 +3151,7 @@ struct ImageBubble: View {
                             .font(theme.font(Theme.body))
                             .lineSpacing(Theme.bodyLineSpacing)
                             .tint(theme.accent)
+                            .mentionPills()
                             .multilineTextAlignment(.leading)
                             .accessibilityIdentifier("photo-caption")
                             .accessibilityLabel("Description")

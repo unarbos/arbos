@@ -137,9 +137,10 @@ pub async fn pair(State(state): State<AppState>, Json(b): Json<PairBody>) -> Api
     .into_response())
 }
 
-/// `GET /devices` — the caller's own devices (the admin token sees every account's). Until
+/// `GET /devices` — the caller's own live devices (the admin token sees every account's). Until
 /// 2026-10-26 this listed every device of every user to any signed-in device, and
 /// `DELETE /devices/{id}` revoked any of them: one test account could log every other user out.
+/// Device tokens see only non-revoked rows of their own user (same list as `/auth/devices`).
 pub async fn list_devices(State(state): State<AppState>, principal: Principal) -> ApiResult {
     if principal.is_box() {
         return Err((
@@ -148,7 +149,7 @@ pub async fn list_devices(State(state): State<AppState>, principal: Principal) -
         ));
     }
     let devices = match principal.user_id() {
-        Some(uid) => state.db.devices_of_user(uid).map_err(internal)?,
+        Some(uid) => state.db.live_devices_of_user(uid).map_err(internal)?,
         None => state.db.list_devices().map_err(internal)?,
     };
     Ok(Json(devices).into_response())

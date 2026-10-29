@@ -886,6 +886,9 @@ final class AppModel: ObservableObject {
     /// The relay's reason for each refused room, in plain words ([feedback blocked-state-ios-2026-10-26]);
     /// the chat-level note under the header draws it. Cleared with the room's next ACK.
     @Published private(set) var pushRefusalText: [Id: String] = [:]
+    /// The relay's `reason` next to `pushRefusalText` (so a timed mute can clear only a
+    /// `silenced` entry once the end passes — [feedback app-01M61GZ5B66VCSKF40458KH3DP]).
+    @Published private(set) var pushRefusalReason: [Id: String] = [:]
     /// Rooms with a full re-read scheduled by `requestSnapshot` (one per coalesce window).
     private var snapshotPending: Set<Id> = []
     /// When each room's transcript was last re-read from its doc (`Date` seconds).
@@ -2410,6 +2413,7 @@ final class AppModel: ObservableObject {
             guard let self, !isProjectDoc else { return }
             if self.pushRefused.remove(key) != nil {
                 self.pushRefusalText.removeValue(forKey: key)
+                self.pushRefusalReason.removeValue(forKey: key)
             }
             guard self.unacked[key] != nil else { return }
             self.unacked[key] = nil
@@ -2439,8 +2443,15 @@ final class AppModel: ObservableObject {
             let why = room?.lastRefusal
             let fresh = self.pushRefused.insert(key).inserted
             if fresh || why?.reason != nil {
-                let text = why?.sentence ?? BlockedState.refusalSentence(reason: nil, name: nil, handle: nil)
+                let until = why?.reason == "silenced" ? self.peopleChat(key)?.silencedUntil : nil
+                let text = why?.sentence(silencedUntilMs: until)
+                    ?? BlockedState.refusalSentence(reason: nil, name: nil, handle: nil)
                 self.pushRefusalText[key] = text
+                if let reason = why?.reason {
+                    self.pushRefusalReason[key] = reason
+                } else {
+                    self.pushRefusalReason.removeValue(forKey: key)
+                }
             }
         }
         rooms[key] = room
@@ -2498,6 +2509,7 @@ final class AppModel: ObservableObject {
         unacked[key] = nil
         pushRefused.remove(key)
         pushRefusalText[key] = nil
+        pushRefusalReason[key] = nil
         roomCreatedAt[key] = nil
         roomRestoredCursors[key] = nil
         roomUnavailableFailures[key] = nil
@@ -2999,6 +3011,26 @@ final class AppModel: ObservableObject {
     func peopleChat(_ id: String) -> PeopleChat? { peopleChats.first { $0.id == id } }
 
     func isPeopleChat(_ id: String) -> Bool { peopleChat(id) != nil }
+
+    /// Timed admin mute ended: clear local `silenced` on the chat and drop a silenced
+    /// refusal note. Messages refused while muted stay as they are (no resend).
+    func clearExpiredSilence(chatId: Id) {
+        if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+            let chat = peopleChats[i]
+            if chat.silenced, let until = chat.silencedUntil {
+                let now = Int64(Date().timeIntervalSince1970 * 1000)
+                if until <= now {
+                    peopleChats[i].silenced = false
+                    peopleChats[i].silencedUntil = nil
+                }
+            }
+        }
+        if pushRefusalReason[chatId] == "silenced" {
+            pushRefused.remove(chatId)
+            pushRefusalText.removeValue(forKey: chatId)
+            pushRefusalReason.removeValue(forKey: chatId)
+        }
+    }
 
     func refreshPeople() async {
         guard credentials != nil, !isFixture else { return }

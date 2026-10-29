@@ -294,6 +294,18 @@ extension AppModel {
             reply.inReplyTo = "g5"
             messages["fx-group-launch", default: []].append(reply)
         }
+        if DebugHooks.fixtureChips {
+            messages["fx-group-launch", default: []].append(contentsOf: [
+                Message(id: "g10", chatId: "fx-group-launch", role: .user, sender: "user:fx-u4", status: .done, turn: nil, decision: nil, subagentId: nil,
+                        subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 20 * 60_000, completedAt: nil, pending: false,
+                        parts: [.text(id: "g10t", text: "@comms and @unconst, the embargo lifts at 9.")], hiddenCount: 0,
+                        senderHandle: "sam", senderName: "Sam Okafor"),
+                Message(id: "g11", chatId: "fx-group-launch", role: .user, sender: "user:fx-me", status: .done, turn: nil, decision: nil, subagentId: nil,
+                        subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 19 * 60_000, completedAt: nil, pending: false,
+                        parts: [.text(id: "g11t", text: "Thanks @sam. @comms, ask `@unconst` for the list.")], hiddenCount: 0,
+                        senderHandle: "jacob", senderName: "Jacob Steeves"),
+            ])
+        }
         if let rows = DebugHooks.fixtureLongRows, rows > 0 {
             messages["fx-group-launch"] = Self.longGroupTranscript(rows: rows, before: now - 4 * 3_600_000, rich: DebugHooks.fixtureLongRich)
                 + (messages["fx-group-launch"] ?? [])

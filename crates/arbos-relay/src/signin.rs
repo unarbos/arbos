@@ -512,6 +512,16 @@ pub async fn github_callback(
             );
         }
     }
+    // Reinstall / re-login: retire the previous live GitHub session that shared
+    // this device name so Settings → Devices does not pile up duplicates.
+    if let Ok(prev) = state
+        .db
+        .revoke_named_github_devices(&user.id, &flow.device_name, None)
+    {
+        for id in &prev {
+            crate::matrix::servers::revoke_device(&state, id).await;
+        }
+    }
     let device_id = ulid();
     let mut salt = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut salt);
@@ -707,15 +717,24 @@ pub async fn logout(State(state): State<AppState>, principal: Principal) -> Resp
 
 /// `GET /auth/devices` — the caller's signed-in devices (this one marked `current`). Rows a
 /// sign-out or revoke already closed (`revoked_at` set) are left out: until 2026-10-28 they were
-/// listed too, so a tester who had signed four Macs out still saw "9 devices". The admin token
-/// may read one account with `?user=<id>` and add `include_revoked=1` to see the closed rows.
+/// listed too, so a tester who had signed four Macs out still saw "9 devices". Same-name GitHub
+/// reinstall leftovers are collapsed to one row (this device, or the most recently seen) so the
+/// list cannot look like other people's sessions. The admin token may read one account with
+/// `?user=<id>` and add `include_revoked=1` to see the closed rows (admin view does not collapse).
 pub async fn devices_list(
     State(state): State<AppState>,
     principal: Principal,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     let (user_id, current_id, include_revoked) = match &principal {
-        Principal::Device { id, user_id, .. } => (user_id.clone(), Some(id.as_str()), false),
+        Principal::Device { id, user_id, .. } => {
+            if let Ok(extra) = state.db.collapse_github_device_duplicates(user_id, id) {
+                for rid in &extra {
+                    crate::matrix::servers::revoke_device(&state, rid).await;
+                }
+            }
+            (user_id.clone(), Some(id.as_str()), false)
+        }
         Principal::Admin => {
             let Some(user) = q
                 .get("user")
@@ -1636,6 +1655,34 @@ mod devices_list_tests {
         )
         .await;
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn same_name_reinstall_duplicates_collapse_on_list() {
+        let state = test_state(AuthMode::Github);
+        let (user_a, dev_a) = person(&state, 11);
+        let stale = second_device(&state, &user_a, "iPhone");
+        let newer = second_device(&state, &user_a, "iPhone");
+        state.db.touch_device(&newer).expect("touch");
+
+        let (status, rows) =
+            list(devices_list(State(state.clone()), dev_a.clone(), query(&[])).await).await;
+        assert_eq!(status, StatusCode::OK);
+        let ids: Vec<&str> = rows.iter().filter_map(|d| d["id"].as_str()).collect();
+        // Current device (dev_a) stays; of the two "iPhone" reinstalls only the
+        // most recently seen survives. The stale twin is revoked.
+        assert!(ids.contains(&newer.as_str()), "{rows:?}");
+        assert!(
+            !ids.contains(&stale.as_str()),
+            "stale same-name reinstall must leave the list: {rows:?}"
+        );
+        assert!(
+            state.db.device_status(&stale).unwrap().unwrap().1,
+            "stale twin is revoked, not merely hidden"
+        );
+        // A second list call is a no-op once collapsed.
+        let (_, rows2) = list(devices_list(State(state.clone()), dev_a, query(&[])).await).await;
+        assert_eq!(rows2.len(), rows.len());
     }
 }
 
