@@ -126,6 +126,29 @@ pub async fn create_box(
     provider: Provider,
     snapshot: Option<&str>,
 ) -> Result<Sandbox> {
+    create_box_row(state, user_id, provider, snapshot, true).await
+}
+
+/// A Daytona sandbox for the user whose row is NOT written: the upgrade carries `/work` onto it
+/// while the row stays on the source, and writes the returned row itself once the carry is in.
+pub async fn create_staged_box(
+    state: &AppState,
+    user_id: &str,
+    snapshot: Option<&str>,
+) -> Result<Sandbox> {
+    create_box_row(state, user_id, Provider::Daytona, snapshot, false).await
+}
+
+async fn create_box_row(
+    state: &AppState,
+    user_id: &str,
+    provider: Provider,
+    snapshot: Option<&str>,
+    write_row: bool,
+) -> Result<Sandbox> {
+    if !write_row && provider != Provider::Daytona {
+        return Err(anyhow!("only a Daytona box can be created staged"));
+    }
     let snapshot_name = snapshot
         .map(str::to_owned)
         .unwrap_or_else(|| state.default_snapshot());
@@ -155,7 +178,7 @@ pub async fn create_box(
     // and the whole new row is written in one go: a restart in between leaves the user on the
     // box they had, never on a row without a sandbox (#2262). The new box's early hellos are
     // refused until then and agentd retries every 3 s.
-    if replacing.is_none() {
+    if replacing.is_none() && write_row {
         state.db.upsert_box(&sb)?;
     }
     state
@@ -229,20 +252,33 @@ pub async fn create_box(
             sb.device_id = format!("box:{}", created.id);
             sb.snapshot = Some(snapshot_name.clone());
             sb.daytona_state = Some(format!("{:?}", created.state).to_ascii_lowercase());
-            state.db.upsert_box(&sb)?;
+            if write_row {
+                state.db.upsert_box(&sb)?;
+            }
             let _ = state.db.end_box_create(user_id);
-            let started = dt
+            let started = match dt
                 .wait_for(&created.id, Duration::from_secs(180), |s| {
                     s.state == SandboxState::Started
                 })
-                .await?;
+                .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    if !write_row {
+                        discard_empty_staged(state, dt, &sb).await;
+                    }
+                    return Err(e);
+                }
+            };
             sb.daytona_state = Some(format!("{:?}", started.state).to_ascii_lowercase());
             sb.last_started_at = Some(now_ms());
             if let Ok(p) = dt.preview_url(&created.id, 7788).await {
                 sb.box_url = Some(p.url);
                 sb.preview_token = Some(p.token);
             }
-            state.db.upsert_box(&sb)?;
+            if write_row {
+                state.db.upsert_box(&sb)?;
+            }
             push_relay_url(state, dt, &created.id).await;
             state.db.record_timing(
                 &timing_key(user_id),
@@ -302,6 +338,29 @@ pub async fn create_box(
         .await
         .insert(user_id.to_owned(), now_ms());
     Ok(sb)
+}
+
+/// Delete a staged sandbox that never became the user's box and holds no user data. When Daytona
+/// refuses (a 502, a state in transition) it is recorded in `box_history`, due now, so the hourly
+/// sweeper retries the delete instead of leaving it running with no record.
+pub async fn discard_empty_staged(
+    state: &AppState,
+    dt: &crate::daytona::Daytona,
+    staged: &Sandbox,
+) {
+    let Some(id) = staged.sandbox_id.as_deref() else {
+        return;
+    };
+    let _ = dt.stop(id, true).await;
+    match dt.delete(id).await {
+        Ok(_) => tracing::info!(user = %staged.user_id, sandbox = %id, "empty staged box deleted"),
+        Err(e) => {
+            tracing::warn!(user = %staged.user_id, sandbox = %id, error = %e, "empty staged box delete failed; the history sweeper retries it");
+            if let Err(e) = state.db.insert_partial_box_history(staged, now_ms()) {
+                tracing::error!(user = %staged.user_id, sandbox = %id, error = %e, "could not record the staged box for the sweeper");
+            }
+        }
+    }
 }
 
 /// Box-level timings are recorded under the user key (`GET /projects/{id}/timings` merges them in).
@@ -558,7 +617,15 @@ pub async fn start_box(state: &AppState, user_id: &str) -> Result<()> {
                 sb.preview_token = Some(p.token);
             }
             sb.last_started_at = Some(now_ms());
-            state.db.upsert_box(&sb)?;
+            if !state.db.write_back_box(&sb, Some(&id))? {
+                // The row moved on while this start ran (an upgrade swapped or rolled back): the
+                // sandbox just started is not the user's box, so it goes back to sleep.
+                tracing::warn!(%user_id, sandbox = %id, "box row moved to another sandbox while this start ran; not writing it back");
+                let _ = dt.stop(&id, false).await;
+                return Err(anyhow!(
+                    "the box row moved to another sandbox while {id} was starting"
+                ));
+            }
             if state.cfg.always_on {
                 // Boxes created before always-on still carry a 30-minute autostop.
                 let _ = dt.set_autostop(&id, 0).await;
@@ -669,7 +736,10 @@ pub async fn stop_box(state: &AppState, user_id: &str, force: bool) -> Result<()
         }
     }
     sb.last_stopped_at = Some(now_ms());
-    state.db.upsert_box(&sb)?;
+    if !state.db.write_back_box(&sb, sb.sandbox_id.as_deref())? {
+        tracing::warn!(%user_id, sandbox = ?sb.sandbox_id, "box row moved to another sandbox while this stop ran; not writing it back");
+        return Ok(());
+    }
     state.box_conns.lock().await.remove(user_id);
     state
         .set_box_state(
