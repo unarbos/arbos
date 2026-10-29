@@ -2850,6 +2850,36 @@ impl Message {
         out
     }
 
+    /// A finished row with no words, nothing to look at and no named sender (`user:`,
+    /// `agent:`, `project:`): in a chat that names its senders it is a blank line from no
+    /// one (Arbonites, 2026-10-28: a box's hand-off row and job row, bare `sender: "agent"`).
+    pub fn is_senderless_blank(&self) -> bool {
+        matches!(self.role, Role::User | Role::Assistant)
+            && !self.is_streaming()
+            && !["user:", "agent:", "project:"]
+                .iter()
+                .any(|p| self.sender.starts_with(p))
+            && self.parts.iter().all(|p| match p {
+                Part::Text { text, .. } => text.trim().is_empty(),
+                Part::Reasoning { .. }
+                | Part::Status { .. }
+                | Part::SubagentResult { .. }
+                | Part::Unknown => true,
+                Part::Tool { .. }
+                | Part::Attachment { .. }
+                | Part::Error { .. }
+                | Part::Diff { .. }
+                | Part::File { .. }
+                | Part::Browser { .. }
+                | Part::Question { .. }
+                | Part::Skills { .. }
+                | Part::Approval { .. }
+                | Part::SecretRedacted { .. }
+                | Part::Chart { .. }
+                | Part::LinkPreview { .. } => false,
+            })
+    }
+
     pub fn text_len(&self) -> usize {
         self.parts
             .iter()

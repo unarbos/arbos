@@ -6298,6 +6298,20 @@ impl Agent {
             .await
         {
             ""
+        } else if Self::already_posted(t, text) {
+            // A relay turn's `route.reply` result tells the model its line "is not the answer",
+            // and the model can send the same line again. It is in the chat once already.
+            tracing::info!(chat_id = %t.chat_id, chars = text.chars().count(), "send_message repeats a line this turn already posted; not posted again");
+            let _ = self.store.t3_append(
+                &t.chat_id,
+                None,
+                Some(&t.chat_id),
+                "interim",
+                Some("assistant"),
+                text,
+                Some(&json!({ "message_id": t.assistant_msg_id, "duplicate": true })),
+            );
+            ""
         } else {
             text
         };
@@ -6479,6 +6493,14 @@ impl Agent {
         h.doc
             .message(&t.assistant_msg_id)
             .is_some_and(|m| !m.text().trim().is_empty())
+    }
+
+    fn already_posted(t: &TurnState, text: &str) -> bool {
+        let key = norm_head(text, usize::MAX);
+        !key.is_empty()
+            && std::iter::once(t.streamed_text.as_str())
+                .chain(t.progress_texts.iter().map(String::as_str))
+                .any(|p| norm_head(p, usize::MAX) == key)
     }
 
     fn posted_result(t: &TurnState) -> bool {
@@ -7585,6 +7607,9 @@ impl Agent {
                         ],
                     );
                 }
+            }
+            if let Some(fields) = self.people_sender_fields(chat_id) {
+                h.doc.set_message_fields(&msg_id, &fields);
             }
         }
         if let Some(j) = &job {

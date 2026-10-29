@@ -1324,6 +1324,21 @@ struct Message: Identifiable, Equatable {
         parts.compactMap(\.textValue).joined(separator: "\n")
     }
 
+    /// A finished row with no words, nothing to look at and no named sender (`user:`,
+    /// `agent:`, `project:`): in a people chat it is a blank line from no one (Arbonites,
+    /// 2026-10-28: a box's hand-off row and job row, bare `sender: "agent"`).
+    var isSenderlessBlank: Bool {
+        guard role == .user || role == .assistant, !isStreaming,
+              !["user:", "agent:", "project:"].contains(where: { sender.hasPrefix($0) }) else { return false }
+        return parts.allSatisfy { part in
+            switch part {
+            case .text(_, let t): return t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            case .reasoning, .status, .subagentResult, .unknown: return true
+            case .tool, .attachment, .error, .question, .chart, .linkPreview, .secretRedacted: return false
+            }
+        }
+    }
+
     var textLength: Int {
         parts.compactMap(\.textValue).reduce(0) { $0 + $1.utf8.count }
     }

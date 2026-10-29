@@ -190,6 +190,7 @@ pub fn context_for(
         .into_iter()
         .filter(|m| matches!(m.role.as_str(), "user" | "assistant" | "project"))
         .filter(|m| !matches!(m.status.as_str(), "queued" | "streaming"))
+        .filter(|m| m.has_visible_content())
         .collect();
     let end = before
         .and_then(|b| rows.iter().position(|m| m.id == b))
