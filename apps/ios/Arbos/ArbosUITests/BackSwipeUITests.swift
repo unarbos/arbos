@@ -219,12 +219,19 @@ final class BackSwipeUITests: XCTestCase {
     /// Swipe right on a message bubble, away from the edge: the chat goes back (the
     /// full-screen rule); no reply starts, the composer stays unfocused.
     func testSwipeRightOnABubbleGoesBackAndStartsNoReply() {
-        let app = launch(["ARBOS_OPEN_PROJECT": "fx-comms"])
-        let back = chatBack(app, "fx-comms-main")
-        XCTAssertTrue(back.waitForExistence(timeout: appear), "the Comms chat opened")
-        let bubble = lastBubble(app)
-        let start = bubble.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
-        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 180, dy: 0)), withVelocity: .fast, thenHoldForDuration: 0.05)
+        let app = launch(["ARBOS_OPEN_PEOPLE": "fx-group-launch"])
+        let back = chatBack(app, "fx-group-launch")
+        XCTAssertTrue(back.waitForExistence(timeout: appear), "the Launch week group opened")
+        let bubbles = app.descendants(matching: .any).matching(bubbleQuery)
+        XCTAssertTrue(bubbles.firstMatch.waitForExistence(timeout: settle), "the transcript shows bubbles")
+        let window = app.windows.firstMatch.frame
+        // A bubble in the lower half, clear of the composer; the drag starts on its left
+        // part and stays inside the screen (a drag that leaves the screen is not a swipe).
+        let bubble = bubbles.allElementsBoundByIndex.last { $0.frame.minY > window.midY && $0.frame.maxY < window.maxY - 160 }
+        XCTAssertNotNil(bubble, "a bubble is on screen")
+        let start = bubble!.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.5))
+        let dx = min(180, window.maxX - 24 - (bubble!.frame.minX + bubble!.frame.width * 0.3))
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: dx, dy: 0)), withVelocity: .fast, thenHoldForDuration: 0.05)
         assertGone(back)
         XCTAssertFalse(app.descendants(matching: .any)["composer-reply-preview"].exists, "no reply started")
         XCTAssertFalse(app.keyboards.firstMatch.exists, "the composer was not focused")
