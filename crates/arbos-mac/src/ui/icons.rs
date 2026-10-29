@@ -542,6 +542,8 @@ mod tests {
         }
         for item in [
             crate::ui::member_menu::MemberMenuItem::ViewProfile,
+            crate::ui::member_menu::MemberMenuItem::MakeAdmin,
+            crate::ui::member_menu::MemberMenuItem::RemoveAdmin,
             crate::ui::member_menu::MemberMenuItem::Remove,
         ] {
             names.push((item.glyph(), format!("member menu {}", item.label())));
