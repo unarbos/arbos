@@ -147,6 +147,22 @@ pub(crate) fn tile_top(index: usize) -> f32 {
     metrics::FIRST_TILE_TOP + index as f32 * metrics::PITCH
 }
 
+/// The rail list's scroll offset as its tiles land this frame. GPUI adds wheel
+/// deltas to the shared offset unclamped and clamps them only in the list's
+/// own prepaint, so a read during render runs past either end while the user
+/// keeps scrolling there ([feedback mac-rail-hover-label-overscroll-2026-10-29]).
+pub(crate) fn painted_scroll_y(scroll: &gpui::ScrollHandle) -> f32 {
+    let y: f32 = scroll.offset().y.into();
+    let max: f32 = scroll.max_offset().y.into();
+    y.clamp(-max.max(0.0), 0.0)
+}
+
+/// The hover tip's top beside the `index`-th picture, centred on its tile.
+pub(crate) fn tip_top(index: usize, scroll_y: f32) -> f32 {
+    metrics::LIST_TOP + metrics::PITCH / 2.0 + index as f32 * metrics::PITCH + scroll_y
+        - metrics::TIP_HEIGHT / 2.0
+}
+
 /// How many pictures fit between the discs and my footer picture without
 /// scrolling, in a window `height` tall (the list scrolls past it).
 #[cfg_attr(not(test), allow(dead_code))]
@@ -511,14 +527,12 @@ pub(crate) fn render_tip(shell: &Shell, cx: &Context<Shell>) -> Option<Div> {
         .enumerate()
         .find(|(_, e)| e.id() == hovered)?;
     let theme = Theme::of(cx);
-    let scroll_y: f32 = shell.rail_scroll.offset().y.into();
-    let tile_centre =
-        metrics::LIST_TOP + metrics::PITCH / 2.0 + index as f32 * metrics::PITCH + scroll_y;
+    let scroll_y = painted_scroll_y(&shell.rail_scroll);
     Some(
         div()
             .absolute()
             .left(px(metrics::WIDTH + metrics::TIP_GAP))
-            .top(px(tile_centre - metrics::TIP_HEIGHT / 2.0))
+            .top(px(tip_top(index, scroll_y)))
             .h(px(metrics::TIP_HEIGHT))
             .px(px(10.0))
             .rounded(px(8.0))
@@ -576,7 +590,7 @@ pub(crate) fn render_overlay(
     let snap = shell.morph.borrow();
     let entries = sidebar::list_entries(shell, cx);
     let machine = shell.state.read(cx).machine.shown_state();
-    let scroll_y: f32 = shell.rail_scroll.offset().y.into();
+    let scroll_y = painted_scroll_y(&shell.rail_scroll);
     let mut layer = div().absolute().inset_0();
 
     // Rows, clipped to the band both lists share (above the footer, under the strip).
@@ -998,5 +1012,129 @@ mod tests {
         assert_eq!((ax, aw, ah), (24.0, 36.0, 36.0));
         assert_eq!(1079.0 - (ay + ah), FOOTER_BOTTOM);
         assert_eq!(1079.0 - (ay + ah / 2.0), CONTROL_LINE);
+    }
+
+    const SCROLL_TILES: usize = 20;
+    const SCROLL_WINDOW: f32 = 760.0;
+
+    /// A scrolling rail list (more pictures than fit) with the hover tip
+    /// placed the way [`render_tip`] places it.
+    struct RailScrollFrame {
+        scroll: gpui::ScrollHandle,
+        hovered: usize,
+    }
+
+    impl gpui::Render for RailScrollFrame {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let mut list = div()
+                .id("rail-list")
+                .absolute()
+                .left_0()
+                .top(px(LIST_TOP))
+                .bottom(px(FOOTER_HEIGHT))
+                .w(px(WIDTH - 1.0))
+                .flex()
+                .flex_col()
+                .overflow_y_scroll()
+                .track_scroll(&self.scroll);
+            for i in 0..SCROLL_TILES {
+                list = list.child(
+                    div()
+                        .h(px(PITCH))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            div()
+                                .size(px(TILE))
+                                .debug_selector(move || format!("tile-{i}")),
+                        ),
+                );
+            }
+            div()
+                .relative()
+                .w(px(WIDTH + 200.0))
+                .h(px(SCROLL_WINDOW))
+                .child(list)
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(WIDTH + TIP_GAP))
+                        .top(px(tip_top(self.hovered, painted_scroll_y(&self.scroll))))
+                        .w(px(80.0))
+                        .h(px(TIP_HEIGHT))
+                        .debug_selector(|| "tip".into()),
+                )
+        }
+    }
+
+    fn wheel(vcx: &mut gpui::VisualTestContext, dy: f32) {
+        vcx.simulate_event(gpui::ScrollWheelEvent {
+            position: gpui::point(px(CENTRE_X), px(400.0)),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(dy))),
+            modifiers: Default::default(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+    }
+
+    fn centre_y(vcx: &mut gpui::VisualTestContext, sel: &'static str) -> f32 {
+        let b = vcx
+            .debug_bounds(sel)
+            .unwrap_or_else(|| panic!("{sel} drawn"));
+        f32::from(b.origin.y) + f32::from(b.size.height) / 2.0
+    }
+
+    /// Scout, 2026-10-29: with the list already at its top or bottom, more
+    /// scrolling carried the hover name away from its picture while the
+    /// pictures stayed put. The tip stays centred on its tile through
+    /// wheel events past either end, in the frame each event draws.
+    #[gpui::test]
+    fn the_hover_tip_stays_on_its_tile_when_scrolling_past_the_ends(cx: &mut gpui::TestAppContext) {
+        let (view, vcx) = cx.add_window_view(|_, _| RailScrollFrame {
+            scroll: gpui::ScrollHandle::new(),
+            hovered: 2,
+        });
+        vcx.run_until_parked();
+        assert_eq!(centre_y(vcx, "tip"), centre_y(vcx, "tile-2"));
+
+        for _ in 0..3 {
+            wheel(vcx, 240.0);
+            assert_eq!(
+                centre_y(vcx, "tile-2"),
+                tile_top(2) + TILE / 2.0,
+                "top: list unmoved"
+            );
+            assert_eq!(
+                centre_y(vcx, "tip"),
+                centre_y(vcx, "tile-2"),
+                "top: tip on its tile"
+            );
+        }
+
+        let last = SCROLL_TILES - 1;
+        view.update(vcx, |frame, cx| {
+            frame.hovered = last;
+            frame
+                .scroll
+                .set_offset(gpui::point(px(0.0), px(-100_000.0)));
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        let resting = centre_y(vcx, "tile-19");
+        assert_eq!(centre_y(vcx, "tip"), resting);
+        assert!(
+            resting < SCROLL_WINDOW - FOOTER_HEIGHT,
+            "the last tile is in view at the bottom ({resting})"
+        );
+        for _ in 0..3 {
+            wheel(vcx, -240.0);
+            assert_eq!(centre_y(vcx, "tile-19"), resting, "bottom: list unmoved");
+            assert_eq!(centre_y(vcx, "tip"), resting, "bottom: tip on its tile");
+        }
     }
 }
