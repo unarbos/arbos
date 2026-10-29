@@ -42,6 +42,9 @@ final class MentionTable {
     /// the instance, so a rebuilt-but-equal table does not redraw every bubble.
     var stamp = 0
     private var byHandle: [String: MentionEntry] = [:]
+    /// `byHandle`'s entries in the order they were added: two that share a display name
+    /// resolve the same way on every rebuild.
+    private var order: [MentionEntry] = []
     /// Display names, longest first, so `@Launch week` beats `@Launch`.
     private var names: [(String, MentionEntry)] = []
 
@@ -135,8 +138,28 @@ final class MentionTable {
                 picture: AnyView(ServerAvatar(server: server, size: Self.picture))
             ))
         }
-        names = byHandle.values.map { ($0.name, $0) }
-            .sorted { a, b in a.0.count != b.0.count ? a.0.count > b.0.count : a.0 < b.0 }
+        finish()
+    }
+
+    /// A fixed table, entries in the order the sources add them (tests).
+    init(entries: [(String, MentionEntry)]) {
+        for (handle, entry) in entries { add(handle, entry) }
+        finish()
+    }
+
+    /// Two entities with one name (a chat member "Scout" with a photo and a directory "Scout"
+    /// without one) keep the first added — chat people before the directory — never the
+    /// dictionary's order, which differs per table and flipped the chip between the photo and
+    /// the other one's initials ([feedback mention-chip-name-tie-ios-2026-10-29]).
+    private func finish() {
+        names = order.enumerated()
+            .sorted { a, b in
+                let (x, y) = (a.element.name, b.element.name)
+                if x.count != y.count { return x.count > y.count }
+                if x != y { return x < y }
+                return a.offset < b.offset
+            }
+            .map { ($0.element.name, $0.element) }
     }
 
     /// One shared table for the open chat — rebuilt only when the mention
@@ -207,7 +230,10 @@ final class MentionTable {
 
     private func add(_ handle: String, _ entry: MentionEntry) {
         let key = handle.lowercased()
-        if byHandle[key] == nil { byHandle[key] = entry }
+        if byHandle[key] == nil {
+            byHandle[key] = entry
+            order.append(entry)
+        }
     }
 
     var isEmpty: Bool { byHandle.isEmpty }
