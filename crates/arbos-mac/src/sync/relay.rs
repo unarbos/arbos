@@ -5670,6 +5670,26 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 let _ = refresh_registry(&shared).await;
             });
         }
+        ClientCommand::SetMemberRole {
+            chat_id,
+            user_id,
+            role,
+        } => {
+            let shared = shared.clone();
+            let path = format!("/chats/{chat_id}/members/{user_id}");
+            let role = role.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared.put_json(&path, json!({ "role": role })).await {
+                    let _ = shared
+                        .events
+                        .send(SyncEvent::PeopleError(UserError::classify(
+                            "change their role",
+                            &err,
+                        )));
+                }
+                let _ = refresh_registry(&shared).await;
+            });
+        }
         ClientCommand::LeaveChat { chat_id } => {
             let shared = shared.clone();
             tokio::spawn(async move {
