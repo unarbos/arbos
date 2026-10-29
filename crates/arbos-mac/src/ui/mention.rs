@@ -679,6 +679,9 @@ impl Mentions {
 #[derive(Default)]
 struct Table {
     by_handle: HashMap<String, Rc<Mention>>,
+    /// `by_handle`'s entities in the order they were added, so two that share a
+    /// display name resolve the same way on every rebuild.
+    order: Vec<Rc<Mention>>,
     by_id: HashMap<String, Rc<Mention>>,
     ambiguous: HashSet<String>,
 }
@@ -694,6 +697,7 @@ impl Table {
         }
         match self.by_handle.get(&key) {
             None => {
+                self.order.push(m.clone());
                 self.by_handle.insert(key, m);
             }
             Some(first) => {
@@ -707,7 +711,7 @@ impl Table {
     }
 
     fn finish(self, opener: Option<Opener>) -> Mentions {
-        let names = sorted_names(&self.by_handle);
+        let names = sorted_names(&self.order);
         Mentions {
             by_handle: self.by_handle,
             by_id: self.by_id,
@@ -719,12 +723,14 @@ impl Table {
 }
 
 /// Display names, longest first (so `@Launch week` beats `@Launch`), one
-/// entry per name.
-fn sorted_names(by_handle: &HashMap<String, Rc<Mention>>) -> Vec<(String, Rc<Mention>)> {
-    let mut names: Vec<(String, Rc<Mention>)> = by_handle
-        .values()
-        .map(|m| (m.name.clone(), m.clone()))
-        .collect();
+/// entry per name. Two entities with one name (a chat member "Scout" and a
+/// directory result "Scout") keep the first added — chat people before search
+/// results — never the hash map's per-rebuild order, which swapped the chip's
+/// photo for the other entity's initials on every state change
+/// ([feedback avatar-flicker-mention-chip-photo-2026-10-29]).
+fn sorted_names(order: &[Rc<Mention>]) -> Vec<(String, Rc<Mention>)> {
+    let mut names: Vec<(String, Rc<Mention>)> =
+        order.iter().map(|m| (m.name.clone(), m.clone())).collect();
     names.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));
     names.dedup_by(|a, b| a.0 == b.0);
     names
@@ -1008,6 +1014,38 @@ pub(crate) mod tests {
         assert_eq!(chips.len(), 2);
         assert_eq!(&text[chips[0].0.clone()], format!("{CELL}Launch week"));
         assert_eq!(&text[chips[1].0.clone()], format!("{CELL}Launch"));
+    }
+
+    /// Affinity, 2026-10-29: `@A` (Scout, a chat member with a photo) drew as
+    /// the photo on one frame and as another "Scout"'s initials (a directory
+    /// result) on the next — every state change rebuilt the table and the
+    /// name tie went to whichever the hash map listed first.
+    #[test]
+    fn a_shared_display_name_resolves_to_the_first_entity_on_every_rebuild() {
+        for _ in 0..64 {
+            let m = mentions(&[
+                (
+                    "a",
+                    "Scout",
+                    ProfilePage::User {
+                        handle: "a".into(),
+                        space_id: None,
+                    },
+                ),
+                (
+                    "le-scout",
+                    "Scout",
+                    ProfilePage::User {
+                        handle: "le-scout".into(),
+                        space_id: None,
+                    },
+                ),
+            ]);
+            let text = m.display("@A did our server get nuked?");
+            let chips = m.find(&text);
+            assert_eq!(chips.len(), 1);
+            assert_eq!(chips[0].1.id.as_deref(), Some("user:gh_a"));
+        }
     }
 
     #[test]
