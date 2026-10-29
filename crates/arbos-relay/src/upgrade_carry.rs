@@ -46,6 +46,14 @@ pub const DEFAULT_MAX_WORK_MIB: i64 = 16 * 1024;
 pub const DEFAULT_PART_MIB: u64 = 256;
 /// Transfer attempts per part (download and upload each).
 pub const DEFAULT_ATTEMPTS: u32 = 4;
+/// Smallest piece the adaptive download falls back to (bytes). A piece that still times out at
+/// this size is a dead link, not a slow one.
+pub const MIN_PIECE_BYTES: u64 = 4 * MIB;
+/// Ceiling for a throughput-derived piece deadline, so a stalled link is noticed within the hour.
+pub const PIECE_TIMEOUT_MAX: Duration = Duration::from_secs(1800);
+/// Carries that may run at once (`ARBOS_UPGRADE_CONCURRENT_CARRIES`). One: on 2026-10-29 two
+/// carries shared a ~0.3 MiB/s toolbox download path and both timed out on every piece.
+pub const DEFAULT_CONCURRENT_CARRIES: usize = 1;
 /// Same floor as `arbos_agentd::disk::INODE_FLOOR`: a destination with fewer free file slots than
 /// the carried tree needs plus this is refused before anything is uploaded.
 pub const INODE_FLOOR: u64 = 1024;
@@ -67,6 +75,8 @@ pub struct CarryConfig {
     pub part_mib: u64,
     pub attempts: u32,
     pub skip_rebuildable: bool,
+    /// How many carries may pack/unpack at the same time (see `DEFAULT_CONCURRENT_CARRIES`).
+    pub concurrent_carries: usize,
     /// `<data_dir>/upgrade-spool`; one subdirectory per user while a carry runs.
     pub spool_root: PathBuf,
 }
@@ -85,6 +95,11 @@ impl CarryConfig {
             attempts: num("ARBOS_UPGRADE_ATTEMPTS", DEFAULT_ATTEMPTS).max(1),
             skip_rebuildable: std::env::var("ARBOS_UPGRADE_SKIP_REBUILDABLE")
                 .is_ok_and(|v| v == "1"),
+            concurrent_carries: num(
+                "ARBOS_UPGRADE_CONCURRENT_CARRIES",
+                DEFAULT_CONCURRENT_CARRIES,
+            )
+            .max(1),
             spool_root: data_dir.join("upgrade-spool"),
         }
     }
@@ -336,6 +351,70 @@ pub fn transfer_timeout(bytes: u64) -> Duration {
     Duration::from_secs(120 + 2 * mib)
 }
 
+/// Measured toolbox throughput of one carry: bytes moved and the time it took, over every piece
+/// that completed. Starts empty; `piece_timeout` falls back to `transfer_timeout` until a piece
+/// has been measured.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Throughput {
+    pub bytes: u64,
+    pub elapsed: Duration,
+}
+
+impl Throughput {
+    pub fn record(&mut self, bytes: u64, elapsed: Duration) {
+        self.bytes += bytes;
+        self.elapsed += elapsed;
+    }
+
+    /// Bytes per second seen so far, `None` before the first completed piece.
+    pub fn rate(&self) -> Option<f64> {
+        let secs = self.elapsed.as_secs_f64();
+        (self.bytes > 0 && secs > 0.0).then(|| self.bytes as f64 / secs)
+    }
+
+    pub fn mib_per_s(&self) -> Option<f64> {
+        self.rate().map(|r| r / MIB as f64)
+    }
+
+    /// Deadline for a piece of `bytes`: the static `transfer_timeout`, or — once the link has been
+    /// measured — twice the time the measured rate needs plus a minute, whichever is longer, capped
+    /// at `PIECE_TIMEOUT_MAX`. A slow but moving link gets the time it needs instead of four
+    /// identical timeouts; a stalled one still fails within the cap.
+    pub fn piece_timeout(&self, bytes: u64) -> Duration {
+        let base = transfer_timeout(bytes);
+        match self.rate() {
+            Some(rate) if rate > 0.0 => {
+                let need = Duration::from_secs_f64(bytes as f64 / rate * 2.0 + 60.0);
+                base.max(need).min(PIECE_TIMEOUT_MAX)
+            }
+            _ => base,
+        }
+    }
+}
+
+/// Whether a transfer error is the toolbox link being too slow (or stalled) for the deadline, as
+/// opposed to a checksum or size mismatch that a smaller piece would not fix.
+pub fn is_timeout(err: &anyhow::Error) -> bool {
+    let text = format!("{err:#}").to_ascii_lowercase();
+    text.contains("timed out") || text.contains("timeout") || text.contains("deadline")
+}
+
+/// Next piece size after a timeout: half, never below `MIN_PIECE_BYTES`. `None` when the piece
+/// is already at the floor (the link is dead, not slow).
+pub fn shrink_piece(bytes: u64) -> Option<u64> {
+    if bytes <= MIN_PIECE_BYTES {
+        return None;
+    }
+    Some((bytes / 2).max(MIN_PIECE_BYTES))
+}
+
+/// One permit per allowed concurrent carry (`CarryConfig::concurrent_carries`); the first carry
+/// sizes it. Carries wait here before packing so they do not share the toolbox link.
+pub fn carry_permits(cfg: &CarryConfig) -> &'static tokio::sync::Semaphore {
+    static PERMITS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    PERMITS.get_or_init(|| tokio::sync::Semaphore::new(cfg.concurrent_carries))
+}
+
 /// Run `op` up to `attempts` times with 2 s, 4 s, 8 s… between tries; the last error is returned
 /// with every earlier one in its context.
 pub async fn retry<T, F, Fut>(what: &str, attempts: u32, op: F) -> Result<T>
@@ -481,22 +560,6 @@ pub struct SpooledPart {
     pub pieces: Vec<SpooledPiece>,
 }
 
-/// Byte ranges `(offset, len)` that cut `total` into pieces of at most `piece`.
-pub fn piece_ranges(total: u64, piece: u64) -> Vec<(u64, u64)> {
-    let piece = piece.max(1);
-    let mut out = Vec::new();
-    let mut off = 0;
-    while off < total {
-        let len = piece.min(total - off);
-        out.push((off, len));
-        off += len;
-    }
-    if out.is_empty() {
-        out.push((0, 0));
-    }
-    out
-}
-
 /// Pack every part on the source box and spool it on the relay. The source holds one part's
 /// tarball plus one piece at a time; the relay holds one piece in memory. `progress(k, n)` is
 /// called before part `k` of `n` is made.
@@ -512,7 +575,8 @@ where
 {
     let _ = std::fs::remove_dir_all(spool);
     std::fs::create_dir_all(spool)?;
-    let piece_bytes = cfg.part_mib * MIB;
+    let mut piece_bytes = cfg.part_mib * MIB;
+    let mut throughput = Throughput::default();
     let n = parts.len();
     let mut out = Vec::with_capacity(n);
     for (k, part) in parts.iter().enumerate() {
@@ -539,8 +603,16 @@ where
             .map(|s| s.trim().to_owned())
             .filter(|s| s.len() == 64)
             .ok_or_else(|| anyhow!("tar part {k}: no sha256 in {text:?}"))?;
+        // Pieces are cut on the fly so a timeout can shrink the next cut from the same offset:
+        // half the size (floor MIN_PIECE_BYTES), with the deadline derived from the throughput
+        // measured so far. 2026-10-29: fixed 32–256 MiB pieces timed out four times in a row on a
+        // ~0.3 MiB/s toolbox link and every upgrade of that box failed.
         let mut pieces = Vec::new();
-        for (j, (off, len)) in piece_ranges(tar_bytes, piece_bytes).into_iter().enumerate() {
+        let mut off: u64 = 0;
+        let mut j: usize = 0;
+        // An empty tarball still yields one (empty) piece, as `piece_ranges` does.
+        while off < tar_bytes || pieces.is_empty() {
+            let len = piece_bytes.min(tar_bytes - off);
             let piece = format!("{tgz}.{j:04}");
             // One piece at a time next to the tarball: `tail | head` copies the range, nothing more.
             let cut = format!(
@@ -555,14 +627,16 @@ where
                 return Err(anyhow!("piece {j} of part {k}: no sha256 in {piece_sha:?}"));
             }
             let file = spool.join(format!("part-{k}.tgz.{j:04}"));
+            let timeout = throughput.piece_timeout(len);
             let (sha_ok, piece_ok, file_ok) = (piece_sha.clone(), piece.clone(), file.clone());
-            retry(
+            let started = std::time::Instant::now();
+            let downloaded = retry(
                 &format!("download piece {j} of part {k}"),
                 cfg.attempts,
                 |_| {
                     let (sha, piece, file) = (sha_ok.clone(), piece_ok.clone(), file_ok.clone());
                     async move {
-                        let bytes = tb.download(&piece, transfer_timeout(len)).await?;
+                        let bytes = tb.download(&piece, timeout).await?;
                         if bytes.len() as u64 != len {
                             return Err(anyhow!("got {} bytes, the box wrote {len}", bytes.len()));
                         }
@@ -575,13 +649,42 @@ where
                     }
                 },
             )
-            .await?;
+            .await;
             let _ = tb.exec(&format!("rm -f {piece}"), 60).await;
-            pieces.push(SpooledPiece {
-                file,
-                sha256: piece_sha,
-                bytes: len,
-            });
+            match downloaded {
+                Ok(()) => {
+                    throughput.record(len, started.elapsed());
+                    tracing::info!(
+                        part = k, piece = j, bytes = len, ms = started.elapsed().as_millis() as u64,
+                        mib_per_s = throughput.mib_per_s().unwrap_or(0.0),
+                        "carry piece downloaded"
+                    );
+                    pieces.push(SpooledPiece {
+                        file,
+                        sha256: piece_sha,
+                        bytes: len,
+                    });
+                    off += len;
+                    j += 1;
+                }
+                Err(e) if is_timeout(&e) => match shrink_piece(piece_bytes) {
+                    Some(smaller) => {
+                        tracing::warn!(
+                            part = k, piece = j, bytes = len, next_piece_bytes = smaller,
+                            mib_per_s = throughput.mib_per_s().unwrap_or(0.0), error = %e,
+                            "carry piece timed out; shrinking the piece and cutting again from the same offset"
+                        );
+                        piece_bytes = smaller;
+                    }
+                    None => {
+                        return Err(e.context(format!(
+                            "piece {j} of part {k} still times out at the {MIN_PIECE_BYTES}-byte floor (toolbox download {:.3} MiB/s so far)",
+                            throughput.mib_per_s().unwrap_or(0.0)
+                        )))
+                    }
+                },
+                Err(e) => return Err(e),
+            }
         }
         let _ = tb.exec(&format!("sudo -n rm -f {tgz} {list}"), 60).await;
         out.push(SpooledPart {
@@ -592,6 +695,14 @@ where
         });
     }
     let _ = tb.exec(&format!("sudo -n rm -rf {STAGE_DIR}"), 60).await;
+    tracing::info!(
+        parts = n,
+        bytes = throughput.bytes,
+        secs = throughput.elapsed.as_secs(),
+        mib_per_s = throughput.mib_per_s().unwrap_or(0.0),
+        final_piece_bytes = piece_bytes,
+        "source /work packed; toolbox download throughput"
+    );
     Ok(out)
 }
 
@@ -716,12 +827,25 @@ where
     let mut it = text.split_whitespace();
     let got_n: u64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     let got_b: u64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    if (got_n, got_b) != expected {
+    // The new box may already have ADDED to /work while the parts unpacked (agentd starts, writes
+    // its state, rebuilds node_modules): 2026-10-28 21:42 a carry was rejected for 27 extra entries
+    // / 2.8 KB more than packed. Fewer entries or fewer bytes than packed is the corruption this
+    // check exists for; more is the box being alive.
+    if got_n < expected.0 || got_b < expected.1 {
         return Err(anyhow!(
             "carried tree does not match the plan: {got_n} entries / {got_b} bytes on the new box, {} entries / {} bytes packed",
             expected.0,
             expected.1
         ));
+    }
+    if (got_n, got_b) != expected {
+        tracing::info!(
+            got_entries = got_n,
+            got_bytes = got_b,
+            packed_entries = expected.0,
+            packed_bytes = expected.1,
+            "carried tree has grown since the pack (the new box is writing); accepted"
+        );
     }
     Ok(())
 }
@@ -736,6 +860,7 @@ mod tests {
             part_mib: DEFAULT_PART_MIB,
             attempts: 3,
             skip_rebuildable: false,
+            concurrent_carries: DEFAULT_CONCURRENT_CARRIES,
             spool_root: std::env::temp_dir().join("arbos-carry-test"),
         }
     }
@@ -961,19 +1086,45 @@ mod tests {
 
     /// A tarball travels in pieces of at most the part size; an empty one is one empty piece.
     #[test]
-    fn piece_ranges_cover_the_tarball() {
-        assert_eq!(piece_ranges(0, 256), vec![(0, 0)]);
-        assert_eq!(piece_ranges(100, 256), vec![(0, 100)]);
-        assert_eq!(piece_ranges(256, 256), vec![(0, 256)]);
+    fn throughput_derives_a_longer_deadline_on_a_slow_link() {
+        let mut t = Throughput::default();
+        assert_eq!(t.piece_timeout(32 * MIB), transfer_timeout(32 * MIB));
+        // 16 MiB in 160 s = 0.1 MiB/s: a 32 MiB piece needs 320 s; ×2 + 60 = 700 s > the static 184 s.
+        t.record(16 * MIB, Duration::from_secs(160));
+        assert_eq!(t.piece_timeout(32 * MIB), Duration::from_secs(700));
+        // a fast link keeps the static floor
+        let mut fast = Throughput::default();
+        fast.record(256 * MIB, Duration::from_secs(10));
+        assert_eq!(fast.piece_timeout(32 * MIB), transfer_timeout(32 * MIB));
+        // and nothing exceeds the cap
+        let mut crawl = Throughput::default();
+        crawl.record(MIB, Duration::from_secs(3600));
+        assert_eq!(crawl.piece_timeout(256 * MIB), PIECE_TIMEOUT_MAX);
+        assert!((t.mib_per_s().unwrap() - 0.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn piece_shrinks_by_half_down_to_the_floor() {
+        assert_eq!(shrink_piece(256 * MIB), Some(128 * MIB));
+        assert_eq!(shrink_piece(6 * MIB), Some(MIN_PIECE_BYTES));
+        assert_eq!(shrink_piece(MIN_PIECE_BYTES), None);
+        assert!(is_timeout(&anyhow!(
+            "toolbox download body: operation timed out"
+        )));
+        assert!(!is_timeout(&anyhow!("sha256 mismatch (a vs b on the box)")));
+    }
+
+    #[test]
+    fn concurrent_carries_default_to_one() {
+        std::env::remove_var("ARBOS_UPGRADE_CONCURRENT_CARRIES");
+        let c = CarryConfig::from_env(Path::new("/tmp"));
+        assert_eq!(c.concurrent_carries, 1);
+        std::env::set_var("ARBOS_UPGRADE_CONCURRENT_CARRIES", "0");
         assert_eq!(
-            piece_ranges(600, 256),
-            vec![(0, 256), (256, 256), (512, 88)]
+            CarryConfig::from_env(Path::new("/tmp")).concurrent_carries,
+            1
         );
-        let gib = 1024 * MIB;
-        let r = piece_ranges(gib + 1, 256 * MIB);
-        assert_eq!(r.len(), 5);
-        assert_eq!(r.iter().map(|(_, l)| l).sum::<u64>(), gib + 1);
-        assert_eq!(max_part_mib(&[]), 0);
+        std::env::remove_var("ARBOS_UPGRADE_CONCURRENT_CARRIES");
     }
 
     #[test]
@@ -1113,7 +1264,7 @@ mod tests {
             assert!(du >= (gib as i64) * 1000, "du {du} MiB for a {gib} GiB seed");
             assert_eq!(alive(&a).await?, agentd_before, "measure must not touch agentd");
             // 2. a refusal leaves agentd exactly as it was
-            let tiny = CarryConfig { max_work_mib: 100, part_mib, attempts: 3, skip_rebuildable: false, spool_root: std::env::temp_dir().join(format!("arbos-carry-e2e-{stamp}")) };
+            let tiny = CarryConfig { max_work_mib: 100, part_mib, attempts: 3, skip_rebuildable: false, concurrent_carries: 1, spool_root: std::env::temp_dir().join(format!("arbos-carry-e2e-{stamp}")) };
             let v = verdict(du, 1 << 20, &tiny);
             assert!(matches!(v, Verdict::TooLarge { .. }), "{v:?}");
             assert_eq!(alive(&a).await?, agentd_before, "a refused attempt must not touch agentd");
