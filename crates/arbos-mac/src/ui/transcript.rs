@@ -814,8 +814,9 @@ pub const RAIL_GAP: f32 = 2.0;
 pub const RAIL_PLATE_PAD_X: f32 = 2.0;
 /// The rail's widest box: three buttons, their gaps and the Glass capsule's insets.
 pub const RAIL_WIDTH: f32 = 3.0 * RAIL_BUTTON + 2.0 * RAIL_GAP + 2.0 * RAIL_PLATE_PAD_X;
-/// Room for the widest 11 pt hover time ("12:44 PM").
-pub const HOVER_TIME_WIDTH: f32 = 52.0;
+/// Room for the widest 11 pt hover time ("12:44 PM": 49 pt in the Mac system
+/// font, 53 in the Linux test font).
+pub const HOVER_TIME_WIDTH: f32 = 56.0;
 /// The lane on my bubble's outer (left) edge that holds the hover time and the
 /// rail. It is reserved at rest too, so a narrow column (a scaled display, a
 /// small window) narrows the bubble instead of pushing the time out past the
