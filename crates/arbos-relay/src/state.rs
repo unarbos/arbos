@@ -204,6 +204,12 @@ impl Room {
 pub struct RestartSignal {
     pub closing: tokio::sync::watch::Sender<bool>,
     pub open_sockets: std::sync::atomic::AtomicUsize,
+    /// A planned restart is under way: no box upgrade or repair may start (#2262). Set and read
+    /// under the `upgrading` lock so a run cannot slip in between the check and the restart.
+    pub box_work_frozen: std::sync::atomic::AtomicBool,
+    /// Users whose `create_box` is between its first row write and the new sandbox id landing
+    /// in the row, with the start time (#2262: a restart in that window orphaned a sandbox).
+    pub creating: std::sync::Mutex<HashMap<String, i64>>,
 }
 
 impl Default for RestartSignal {
@@ -211,6 +217,8 @@ impl Default for RestartSignal {
         Self {
             closing: tokio::sync::watch::Sender::new(false),
             open_sockets: std::sync::atomic::AtomicUsize::new(0),
+            box_work_frozen: std::sync::atomic::AtomicBool::new(false),
+            creating: std::sync::Mutex::new(HashMap::new()),
         }
     }
 }
@@ -218,6 +226,40 @@ impl Default for RestartSignal {
 impl RestartSignal {
     pub fn is_closing(&self) -> bool {
         *self.closing.borrow()
+    }
+
+    pub fn box_work_frozen(&self) -> bool {
+        self.box_work_frozen
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Marks one `create_box` as in flight for as long as it lives; dropped on every exit path,
+/// including a cancelled task.
+pub struct CreatingGuard {
+    restart: Arc<RestartSignal>,
+    user_id: String,
+}
+
+impl CreatingGuard {
+    pub fn new(restart: &Arc<RestartSignal>, user_id: &str) -> Self {
+        restart
+            .creating
+            .lock()
+            .expect("creating lock")
+            .insert(user_id.to_owned(), arbos_core::ids::now_ms());
+        Self {
+            restart: restart.clone(),
+            user_id: user_id.to_owned(),
+        }
+    }
+}
+
+impl Drop for CreatingGuard {
+    fn drop(&mut self) {
+        if let Ok(mut m) = self.restart.creating.lock() {
+            m.remove(&self.user_id);
+        }
     }
 }
 

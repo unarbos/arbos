@@ -297,11 +297,22 @@ relay_planned_restart() {
   # Before any restart of the running relay (#1347): POST /admin/restart sends every room socket a
   # `restart_soon` notice, waits, closes them with 1012 Service Restart and drains, so the apps redial
   # at once instead of backing off. Answers when the relay is ready; an old relay (404) is just restarted.
-  local code
-  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 -X POST \
-    -H "Authorization: Bearer $(secret_from "$RELAY_ENV" ARBOS_RELAY_ADMIN_TOKEN)" -H "Content-Type: application/json" \
-    -d "{\"notice_s\":${RELAY_RESTART_NOTICE_S:-10},\"drain_s\":5}" "$RELAY_URL/admin/restart" || echo 000)
-  log "relay: planned-restart handshake answered HTTP $code"
+  # 409 box_work_in_flight (#2262): a box upgrade or create is running; wait, then force.
+  local code waited=0 force=false
+  while :; do
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 -X POST \
+      -H "Authorization: Bearer $(secret_from "$RELAY_ENV" ARBOS_RELAY_ADMIN_TOKEN)" -H "Content-Type: application/json" \
+      -d "{\"notice_s\":${RELAY_RESTART_NOTICE_S:-10},\"drain_s\":5,\"force\":$force}" "$RELAY_URL/admin/restart" || echo 000)
+    [[ "$code" == 409 ]] || break
+    if (( waited >= ${RELAY_BOX_WORK_WAIT_MAX_S:-1800} )); then
+      log "relay: box work still in flight after ${waited}s; restarting with force"
+      force=true
+      continue
+    fi
+    (( waited == 0 )) && log "relay: restart waits — box upgrade or create in flight"
+    sleep 15; waited=$((waited + 15))
+  done
+  log "relay: planned-restart handshake answered HTTP $code (waited ${waited}s for box work)"
 }
 
 relay_connect_probe() {
@@ -801,7 +812,7 @@ ROLL_FAILED_UIDS=""
 roll_pass() {
   # roll_pass <target> — one pass over every pending box (real first, then test), quiet ones only.
   # Returns 2 when the consecutive-failure limit stopped the roll.
-  local target="$1" uid tier outcome go counts passes reason
+  local target="$1" uid tier outcome go counts passes reason answer
   for tier in real test; do
     for uid in $(pending_boxes "$target" "$tier" || true); do
       go=0
@@ -824,7 +835,12 @@ roll_pass() {
       if (( go )); then
         busy_counter "$uid" "$target" reset >/dev/null
         attempt_ms=$(date +%s%3N)
-        log "agentd: upgrading box of $uid → $target: $(upgrade_box "$uid")"
+        answer="$(upgrade_box "$uid")"
+        log "agentd: upgrading box of $uid → $target: $answer"
+        if [[ "$answer" == *"the relay is restarting"* ]]; then
+          log "agentd: $uid not started — a relay restart is under way; the box is untouched, the next pass retries"
+          continue
+        fi
         # One at a time: give it up to 4 minutes before the next box.
         outcome=pending
         for _ in $(seq 1 24); do
