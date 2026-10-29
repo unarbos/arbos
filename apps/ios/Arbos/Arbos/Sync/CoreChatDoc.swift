@@ -81,11 +81,28 @@ final class CoreChatDoc {
     /// row crossed the FFI `count` times; a long group chat paid for that on every
     /// snapshot (2026-10-23, long-chat-perf).
     func readAll() -> [Message] {
-        let raw = doc.readRowsJson()
-        guard let data = raw.data(using: .utf8),
-              let rows = (try? JSONSerialization.jsonObject(with: data)) as? [Any]
-        else { return [] }
-        return rows.compactMap { DocJSON.message($0, chatId: key) }
+        Self.decodeRows(doc.readRowsJson(), count: count, chatId: key, row: readMessage)
+    }
+
+    /// One unreadable row must not blank the chat ([feedback arbonites-blank-chat-ios-2026-10-28]):
+    /// when the whole-list read does not parse, read row by row and leave out (log) only
+    /// the rows that do not decode.
+    static func decodeRows(_ raw: String, count: Int, chatId: Id, row: (Int) -> Message?) -> [Message] {
+        if let data = raw.data(using: .utf8),
+           let rows = (try? JSONSerialization.jsonObject(with: data)) as? [Any],
+           !(rows.isEmpty && count > 0) {
+            return rows.compactMap { DocJSON.message($0, chatId: chatId) }
+        }
+        var out: [Message] = []
+        out.reserveCapacity(count)
+        var skipped: [Int] = []
+        for ix in 0..<max(0, count) {
+            if let m = row(ix) { out.append(m) } else { skipped.append(ix) }
+        }
+        if !skipped.isEmpty {
+            NSLog("chat doc \(chatId): \(skipped.count) of \(count) rows unreadable, skipped (first index \(skipped[0]))")
+        }
+        return out
     }
 
     func mapValue(_ name: String) -> [String: Any] {
