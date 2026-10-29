@@ -107,6 +107,8 @@ pub const FALLBACKS: &[(&str, &str)] = &[
     ("square.and.arrow.up", "share"),
     ("square.and.pencil", "square-pencil"),
     ("person.badge.plus", "person-plus"),
+    ("person.badge.key", "key"),
+    ("person.badge.minus", "person"),
     ("person.2.fill", "people"),
     ("stop.fill", "stop"),
     ("play.fill", "play"),
