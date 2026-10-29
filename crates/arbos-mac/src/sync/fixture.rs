@@ -22,7 +22,7 @@ use tokio::sync::mpsc;
 use tokio::time::sleep;
 
 use crate::model::{
-    AgentMember, Call, CallEnded, CallKind, LinkState, Machine, MachineState, Person,
+    AgentMember, Call, CallEnded, CallKind, LinkState, Machine, MachineState, MediaPick, Person,
     ProjectDocView, ReplyPolicy, ReplyRef, Sender, SpaceKind, ThreadInfo, Voice,
 };
 
@@ -32,15 +32,15 @@ use super::{
     ClientCommand, DraftPicture, PictureSource, PictureTarget, PushRefusal, SyncEvent, SyncSource,
 };
 use crate::model::{
-    new_id, now_ms, ApprovalRisk, ApprovalState, Attachment, AttachmentKind, BoxReport, BoxState,
-    BoxWorkspace, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelPlatformState,
-    ChannelsView, Chat, ChatKind, ChoiceOption, Connector, ConnectorAction, ConnectorProvider,
-    ConnectorStatus, ConnectorsView, DeviceView, Effort, FieldKind, FormField, Id, Job, JobRollout,
-    JobState, Link, LocalDevice, LocalView, Message, MessageStatus, Part, Project, QuestionState,
-    Role, RolloutEntry, RolloutKind, RolloutParent, Routine, RoutineRun, RoutineRunStatus,
-    RoutineTrigger, Secret, SecretActivity, SecretAgent, SecretDirector, SecretRequest,
-    SecretScope, SecretsView, ServerChannel, ServerInfo, Skill, StatusKind, ToolCall, ToolStatus,
-    TurnKind, Widget,
+    new_id, now_ms, ApprovalRisk, ApprovalState, Attachment, AttachmentKind, AttachmentSource,
+    BoxReport, BoxState, BoxWorkspace, ChannelBinding, ChannelPairing, ChannelPlatform,
+    ChannelPlatformState, ChannelsView, Chat, ChatKind, ChoiceOption, Connector, ConnectorAction,
+    ConnectorProvider, ConnectorStatus, ConnectorsView, DeviceView, Effort, FieldKind, FormField,
+    Id, Job, JobRollout, JobState, Link, LocalDevice, LocalView, Message, MessageStatus, Part,
+    Project, QuestionState, Role, RolloutEntry, RolloutKind, RolloutParent, Routine, RoutineRun,
+    RoutineRunStatus, RoutineTrigger, Secret, SecretActivity, SecretAgent, SecretDirector,
+    SecretRequest, SecretScope, SecretsView, ServerChannel, ServerInfo, Skill, StatusKind,
+    ToolCall, ToolStatus, TurnKind, Widget,
 };
 
 pub const STREAM_FRAME_MS: u64 = arbos_core::STREAM_COMMIT_MS;
@@ -1337,6 +1337,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     kind: None,
                     title: None,
                     chart_part: None,
+                    url: None,
                     source: None,
                 })
                 .collect();
@@ -1352,6 +1353,98 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 mentions,
             );
         }
+        ClientCommand::SendMedia {
+            chat_id,
+            message_id,
+            pick,
+            reply_to,
+        } => {
+            // The fixture has no relay: a sticker keeps its bytes under a `local:` key the
+            // optimistic echo already decoded; a GIF keeps its provider URL (fixture_png).
+            let attachment = match pick {
+                MediaPick::Sticker { pack, item, .. } => Attachment {
+                    name: format!("{}.png", item.id),
+                    source: Some(Box::new(AttachmentSource {
+                        provider: pack.name.clone(),
+                        id: format!("{}/{}", pack.id, item.id),
+                        page_url: pack.page_url.clone(),
+                    })),
+                    mime: item.mime,
+                    blob_ref: Some(format!("local:{message_id}")),
+                    bytes: None,
+                    kind: Some(AttachmentKind::Sticker),
+                    title: None,
+                    chart_part: None,
+                    url: None,
+                },
+                MediaPick::Gif(gif) => {
+                    let gif = *gif;
+                    Attachment {
+                        name: format!("{}.gif", gif.id),
+                        mime: "image/gif".into(),
+                        blob_ref: None,
+                        bytes: None,
+                        kind: Some(AttachmentKind::Image),
+                        title: None,
+                        chart_part: None,
+                        url: Some(gif.url),
+                        source: Some(Box::new(AttachmentSource {
+                            provider: "KLIPY".into(),
+                            id: gif.id,
+                            page_url: gif.page_url,
+                        })),
+                    }
+                }
+            };
+            send_user(
+                shared,
+                chat_id,
+                message_id,
+                String::new(),
+                vec![attachment],
+                reply_to,
+                None,
+                None,
+                Vec::new(),
+            );
+        }
+        ClientCommand::GifSearch { query, pos } => {
+            // Rig: a few fixture tiles so the GIFs tab has a grid to screenshot.
+            let items = (0..9)
+                .map(|i| crate::model::GifItem {
+                    id: format!("fixture-gif-{i}"),
+                    title: format!(
+                        "{} {}",
+                        if query.is_empty() {
+                            "trending"
+                        } else {
+                            query.as_str()
+                        },
+                        i + 1
+                    ),
+                    width: 220,
+                    height: if i % 3 == 1 { 160 } else { 220 },
+                    url: format!("https://static.klipy.com/fixture/{i}/full.gif"),
+                    preview: crate::model::GifPreview {
+                        url: format!("https://static.klipy.com/fixture/{i}/tiny.gif"),
+                        width: 220,
+                        height: if i % 3 == 1 { 160 } else { 220 },
+                    },
+                    page_url: "https://klipy.com".into(),
+                })
+                .collect();
+            let _ = shared.events.send(SyncEvent::GifResults {
+                query,
+                pos,
+                page: crate::model::GifPage::Items { items, next: None },
+            });
+        }
+        ClientCommand::StickerPacks => {
+            let _ = shared.events.send(SyncEvent::StickerPacks {
+                packs: Some(Vec::new()),
+            });
+        }
+        ClientCommand::GifShare { .. } => {}
         ClientCommand::Forward {
             chat_id,
             message_id,
@@ -1470,6 +1563,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 kind: Some(AttachmentKind::Audio),
                 title: None,
                 chart_part: None,
+                url: None,
                 source: None,
             }];
             send_user(
@@ -5031,6 +5125,7 @@ fn user_attachments(attachments: &[Attachment]) -> Vec<UserAttachment> {
                 .and_then(|k| serde_json::to_value(k).ok())
                 .and_then(|v| v.as_str().map(str::to_owned)),
             blob_ref: a.blob_ref.clone(),
+            url: a.url.clone(),
             source: a
                 .source
                 .as_ref()
@@ -5795,6 +5890,7 @@ fn attachment(name: &str, mime: &str, kind: AttachmentKind, title: &str, bytes: 
             kind: Some(kind),
             title: Some(title.into()),
             chart_part: None,
+            url: None,
             source: None,
         },
     }
@@ -6446,6 +6542,7 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
                 kind: Some(AttachmentKind::Audio),
                 title: None,
                 chart_part: None,
+                url: None,
                 source: None,
             }],
         );

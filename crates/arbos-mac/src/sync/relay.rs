@@ -59,9 +59,10 @@ use super::{
 use crate::model::{
     new_id, now_ms, trace_rows, AccountView, Attachment, AttachmentKind, BoxReport, BoxState, Call,
     CallEnded, CallLeft, CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView,
-    ChartBody, Chat, Effort, Id, Link, LinkState, Machine, MachineState, Message, Part, Person,
-    Project, ProjectDocView, ProjectSecrets, Reachable, ReplyRef, Role, Routine, RoutineRun,
-    Sender, ServerInfo, ThreadInfo,
+    ChartBody, Chat, Effort, GifItem, GifPage, Id, Link, LinkState, Machine, MachineState,
+    MediaPick, Message, Part, Person, Project, ProjectDocView, ProjectSecrets, Reachable, ReplyRef,
+    Role, Routine, RoutineRun, Sender, ServerInfo, StickerPack, ThreadInfo, STICKER_KEY_PREFIX,
+    URL_KEY_PREFIX,
 };
 use crate::update;
 
@@ -4344,6 +4345,24 @@ pub(crate) fn mime_for(path: &Path) -> &'static str {
     }
 }
 
+/// Where a thumbnail key's bytes live on the relay: the chat slot's blob, or — for the
+/// picker's keys (ARB-544) — the GIF pass-through (`url:<url>`) or a hosted sticker
+/// (`sticker:<pack>/<id>`). The GIF bytes are never stored by the relay; the Mac keeps only
+/// its in-memory decode.
+fn blob_request_url(shared: &Shared, id: &str, key: &str) -> String {
+    if let Some(url) = key.strip_prefix(URL_KEY_PREFIX) {
+        return format!(
+            "{}/gif/media?u={}",
+            shared.http_url,
+            crate::auth::url_encode(url)
+        );
+    }
+    if let Some(path) = key.strip_prefix(STICKER_KEY_PREFIX) {
+        return format!("{}/stickers/{}", shared.http_url, path);
+    }
+    format!("{}/blob/{}/{}", shared.http_url, shared.blob_slot(id), key)
+}
+
 /// `GET /blob/{slot}/{key}` → (mime, bytes); `id` is a project id or a people chat id.
 async fn fetch_blob_bytes(shared: &Arc<Shared>, id: &str, key: &str) -> Result<(String, Vec<u8>)> {
     // Same refresh-once path as `get_json`: an expired access token must not leave
@@ -4354,12 +4373,7 @@ async fn fetch_blob_bytes(shared: &Arc<Shared>, id: &str, key: &str) -> Result<(
         let token = shared.token();
         let r = shared
             .http
-            .get(format!(
-                "{}/blob/{}/{}",
-                shared.http_url,
-                shared.blob_slot(id),
-                key
-            ))
+            .get(blob_request_url(shared, id, key))
             .bearer_auth(&token)
             .send()
             .await?;
@@ -4421,6 +4435,44 @@ fn safe_name(name: &str) -> String {
 }
 
 /// Upload attachments as blobs, then write the user row and its `send`
+/// `GET /gif/search?q=` (or `/gif/trending` for an empty query) → the page, or the reason
+/// the picker shows instead of a grid (ARB-544).
+async fn gif_search(shared: &Arc<Shared>, query: &str, pos: Option<&str>) -> GifPage {
+    let q = query.trim();
+    let mut path = if q.is_empty() {
+        "/gif/trending?".to_owned()
+    } else {
+        format!("/gif/search?q={}&", crate::auth::url_encode(q))
+    };
+    if let Some(pos) = pos.filter(|p| !p.is_empty()) {
+        path.push_str(&format!("pos={}&", crate::auth::url_encode(pos)));
+    }
+    let path = path.trim_end_matches(['?', '&']).to_owned();
+    match shared.get_json(&path).await {
+        Ok(v) => {
+            let items: Vec<GifItem> = v
+                .get("items")
+                .cloned()
+                .and_then(|i| serde_json::from_value(i).ok())
+                .unwrap_or_default();
+            let next = v
+                .get("next")
+                .and_then(Value::as_str)
+                .filter(|n| !n.is_empty())
+                .map(str::to_owned);
+            GifPage::Items { items, next }
+        }
+        Err(err) => match err.downcast_ref::<RelayError>() {
+            Some(e) if e.kind == "gif_unavailable" => GifPage::Unavailable,
+            Some(e) if e.kind == "gif_busy" || e.status == 429 => GifPage::Busy,
+            _ => {
+                log::warn!("gif search: {err:#}");
+                GifPage::Failed
+            }
+        },
+    }
+}
+
 /// command in one commit (crdt-sync §6.2).
 #[allow(clippy::too_many_arguments)]
 fn attachment_kind_str(kind: AttachmentKind) -> String {
@@ -4432,6 +4484,7 @@ fn attachment_kind_str(kind: AttachmentKind) -> String {
         AttachmentKind::Sheet => "sheet".into(),
         AttachmentKind::Pdf => "pdf".into(),
         AttachmentKind::Audio => "audio".into(),
+        AttachmentKind::Sticker => "sticker".into(),
         AttachmentKind::File => "file".into(),
     }
 }
@@ -4442,6 +4495,7 @@ fn user_attachment_from_part(att: Attachment) -> UserAttachment {
         mime: att.mime,
         kind: att.kind.map(attachment_kind_str),
         blob_ref: att.blob_ref,
+        url: att.url,
         source: att.source.map(|s| arbos_core::doc::AttachmentSource {
             provider: s.provider,
             id: s.id,
@@ -4458,6 +4512,58 @@ enum Outgoing {
         from_slot: String,
         attachment: Attachment,
     },
+    /// A picker sticker (ARB-544): bytes the picker already fetched, stored in the chat
+    /// slot like any picture, `kind: sticker` so both apps draw it without a bubble.
+    Sticker {
+        name: String,
+        mime: String,
+        bytes: Arc<Vec<u8>>,
+        source: arbos_core::doc::AttachmentSource,
+    },
+    /// A picked GIF: nothing uploaded — the row carries the provider URL and attribution.
+    Gif {
+        name: String,
+        mime: String,
+        url: String,
+        source: arbos_core::doc::AttachmentSource,
+    },
+}
+
+impl Outgoing {
+    fn from_pick(pick: MediaPick) -> Self {
+        match pick {
+            MediaPick::Sticker { pack, item, bytes } => {
+                let ext = if item.mime == "image/webp" {
+                    "webp"
+                } else {
+                    "png"
+                };
+                Outgoing::Sticker {
+                    name: format!("{}.{ext}", item.id),
+                    mime: item.mime,
+                    bytes,
+                    source: arbos_core::doc::AttachmentSource {
+                        provider: pack.name,
+                        id: format!("{}/{}", pack.id, item.id),
+                        page_url: pack.page_url,
+                    },
+                }
+            }
+            MediaPick::Gif(gif) => {
+                let gif = *gif;
+                Outgoing::Gif {
+                    name: format!("{}.gif", gif.id),
+                    mime: "image/gif".into(),
+                    url: gif.url,
+                    source: arbos_core::doc::AttachmentSource {
+                        provider: "KLIPY".into(),
+                        id: gif.id,
+                        page_url: gif.page_url,
+                    },
+                }
+            }
+        }
+    }
 }
 
 fn outgoing_paths(paths: Vec<PathBuf>) -> Vec<Outgoing> {
@@ -4508,7 +4614,37 @@ async fn upload_outgoing(
     blob_slot: &str,
     outgoing: Outgoing,
 ) -> UserAttachment {
+    let mut source = None;
     let (name, mime, kind, bytes) = match outgoing {
+        Outgoing::Gif {
+            name,
+            mime,
+            url,
+            source,
+        } => {
+            return UserAttachment {
+                name,
+                mime,
+                kind: Some("image".into()),
+                blob_ref: None,
+                url: Some(url),
+                source: Some(source),
+            };
+        }
+        Outgoing::Sticker {
+            name,
+            mime,
+            bytes,
+            source: src,
+        } => {
+            source = Some(src);
+            (
+                name,
+                mime,
+                Some("sticker".to_owned()),
+                Ok::<Vec<u8>, String>(bytes.as_ref().clone()),
+            )
+        }
         Outgoing::Path(path) => {
             let name = path
                 .file_name()
@@ -4573,7 +4709,8 @@ async fn upload_outgoing(
         mime,
         kind,
         blob_ref,
-        source: None,
+        url: None,
+        source,
     }
 }
 
@@ -4898,6 +5035,7 @@ async fn upload_voice_memo(shared: &Shared, blob_slot: &str, wav: Arc<Vec<u8>>) 
             kind: Some(AttachmentKind::Audio),
             title: None,
             chart_part: None,
+            url: None,
             source: None,
         },
     }
@@ -5875,6 +6013,67 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 reply_ref,
                 mentions,
             );
+        }
+        ClientCommand::SendMedia {
+            chat_id,
+            message_id,
+            pick,
+            reply_to,
+        } => {
+            enqueue_send(
+                shared,
+                chat_id,
+                message_id,
+                String::new(),
+                vec![Outgoing::from_pick(pick)],
+                None,
+                "send",
+                None,
+                reply_to,
+                None,
+                None,
+                Vec::new(),
+            );
+        }
+        ClientCommand::GifSearch { query, pos } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let page = gif_search(&shared, &query, pos.as_deref()).await;
+                let _ = shared
+                    .events
+                    .send(SyncEvent::GifResults { query, pos, page });
+            });
+        }
+        ClientCommand::StickerPacks => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let packs = match shared.get_json("/stickers/packs").await {
+                    Ok(v) => serde_json::from_value::<Vec<StickerPack>>(v["packs"].clone())
+                        .map_err(|e| log::warn!("sticker packs: bad JSON: {e}"))
+                        .ok(),
+                    Err(err) => {
+                        log::warn!("sticker packs: {err:#}");
+                        None
+                    }
+                };
+                let _ = shared.events.send(SyncEvent::StickerPacks { packs });
+            });
+        }
+        ClientCommand::GifShare { id, query } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let _ = shared
+                    .http
+                    .post(format!(
+                        "{}/gif/share?id={}&q={}",
+                        shared.http_url,
+                        crate::auth::url_encode(&id),
+                        crate::auth::url_encode(&query)
+                    ))
+                    .bearer_auth(shared.token())
+                    .send()
+                    .await;
+            });
         }
         ClientCommand::Forward {
             chat_id,
