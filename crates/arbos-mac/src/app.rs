@@ -2906,6 +2906,14 @@ impl AppState {
                 {
                     c.archived_at = archived_at;
                 }
+                // A people chat is its own sidebar row: the row hides or returns with it.
+                if let Some(p) = self
+                    .projects
+                    .iter_mut()
+                    .find(|p| p.id == chat_id && p.is_people())
+                {
+                    p.archived_at = archived_at;
+                }
                 if let Some(project_id) = self.project_of_chat(&chat_id).map(|p| p.id.clone()) {
                     self.enforce_tab(&project_id);
                 }
@@ -4222,7 +4230,10 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         self.search_chat = Some(chat_id.clone());
-        if self.archived_chats.remove(&chat_id) {
+        // An agent's previous chat comes back onto its tab strip; a people chat is a sidebar
+        // row, and opening one from Hidden chats or a search hit must leave it hidden.
+        let people = self.project(&project_id).is_some_and(|p| p.is_people());
+        if !people && self.archived_chats.remove(&chat_id) {
             self.command(ClientCommand::ArchiveChat {
                 chat_id: chat_id.clone(),
                 archived: false,
@@ -13081,6 +13092,284 @@ mod unread_arrival_tests {
         assert_eq!(arrival_read(false, false, false), ArrivalRead::MarkUnread);
         assert_eq!(arrival_read(false, false, true), ArrivalRead::Nothing);
         assert_eq!(arrival_read(true, false, true), ArrivalRead::Nothing);
+    }
+}
+
+#[cfg(test)]
+mod hidden_chat_open_tests {
+    //! Scout (Arbonites, 2026-10-29 16:49 UTC): "it also unarchives the chat if you open it"
+    //! ([feedback archived-chat-stays-archived-2026-10-29]). Opening a row from Hidden chats —
+    //! or from a search hit — only views it; only an incoming message from someone else while
+    //! the user looks elsewhere brings it back (Telegram), and Unarchive does.
+    use std::sync::{Arc, Mutex};
+
+    use futures::future::BoxFuture;
+    use gpui::{AppContext as _, Entity, TestAppContext};
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::model::{AccountView, ChatKind, SpaceKind};
+
+    type Commands = Arc<Mutex<Option<mpsc::UnboundedReceiver<ClientCommand>>>>;
+
+    struct Recording(Commands);
+
+    impl SyncSource for Recording {
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            *self.0.lock().expect("commands slot") = Some(commands);
+            Box::pin(std::future::pending())
+        }
+    }
+
+    fn chat(id: &str, project_id: &str) -> Chat {
+        Chat {
+            id: id.into(),
+            project_id: project_id.into(),
+            title: String::new(),
+            is_pinned: true,
+            is_system: false,
+            unread: false,
+            unread_count: 0,
+            last_message_at: 1_000,
+            archived_at: None,
+            kind: ChatKind::Chat,
+            participants: Vec::new(),
+        }
+    }
+
+    fn message(id: &str, chat_id: &str, sender: &str, text: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "chatId": chat_id, "role": "user", "sender": sender, "status": "done",
+            "createdAt": at, "completedAt": at,
+            "parts": [{ "id": format!("{id}-t"), "kind": "text", "text": text }],
+        }))
+        .expect("message")
+    }
+
+    /// Agent `arbos` open; agent `lium` and DM `dm` (with Sam) both in Hidden chats.
+    fn mount(cx: &mut TestAppContext) -> (tokio::runtime::Runtime, Commands, Entity<AppState>) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| gpui_tokio::init_from_handle(cx, handle));
+        let commands: Commands = Arc::new(Mutex::new(None));
+        let state = cx.new(|cx| AppState::new(Box::new(Recording(commands.clone())), cx));
+        cx.run_until_parked();
+        for _ in 0..3 {
+            rt.block_on(tokio::task::yield_now());
+        }
+        state.update(cx, |s, cx| {
+            s.account = Some(AccountView {
+                id: "gh_1".into(),
+                login: "scout".into(),
+                name: "Scout".into(),
+                avatar_url: String::new(),
+                device_name: "test".into(),
+                balance_usd: 0.0,
+                spent_today_usd: 0.0,
+                daily_cap_usd: None,
+            });
+            for (id, kind) in [
+                ("arbos", SpaceKind::Project),
+                ("lium", SpaceKind::Project),
+                ("dm", SpaceKind::Dm),
+            ] {
+                s.projects.push(Project {
+                    id: id.into(),
+                    name: id.into(),
+                    kind,
+                    people: if kind == SpaceKind::Dm {
+                        vec![Person {
+                            id: "gh_2".into(),
+                            handle: "sam".into(),
+                            ..Person::default()
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                    ..Project::default()
+                });
+            }
+            s.chats
+                .insert("arbos".into(), vec![chat("arbos-main", "arbos")]);
+            s.chats
+                .insert("lium".into(), vec![chat("lium-main", "lium")]);
+            s.chats.insert("dm".into(), vec![chat("dm", "dm")]);
+            s.select_project("arbos".into(), cx);
+            s.window_active = true;
+            s.set_space_archived("lium".into(), true, cx);
+            s.set_space_archived("dm".into(), true, cx);
+            // What the next registry refresh adds for an archived people chat.
+            s.archived_chats.insert("dm".into());
+        });
+        let _ = unarchives(&commands);
+        (rt, commands, state)
+    }
+
+    /// Every unarchive the state sent to the relay since the last call.
+    fn unarchives(commands: &Commands) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(rx) = commands.lock().expect("commands").as_mut() {
+            while let Ok(c) = rx.try_recv() {
+                match c {
+                    ClientCommand::ArchiveChat {
+                        chat_id,
+                        archived: false,
+                    } => out.push(chat_id),
+                    ClientCommand::ArchiveSpace {
+                        space_id,
+                        archived: false,
+                        ..
+                    } => out.push(space_id),
+                    _ => {}
+                }
+            }
+        }
+        out
+    }
+
+    fn hidden(state: &Entity<AppState>, cx: &mut TestAppContext) -> (bool, bool, usize) {
+        state.read_with(cx, |s, _| {
+            (
+                s.is_space_archived("lium"),
+                s.is_space_archived("dm"),
+                s.archived_space_count(),
+            )
+        })
+    }
+
+    #[gpui::test]
+    fn opening_a_hidden_agent_or_dm_only_views_it(cx: &mut TestAppContext) {
+        let (_rt, commands, state) = mount(cx);
+        assert_eq!(hidden(&state, cx), (true, true, 2));
+        state.update(cx, |s, cx| s.select_project("dm".into(), cx));
+        assert_eq!(
+            state.read_with(cx, |s, _| s.active_chat_id()),
+            Some("dm".into())
+        );
+        state.update(cx, |s, cx| s.select_project("lium".into(), cx));
+        assert_eq!(
+            state.read_with(cx, |s, _| s.active_chat_id()),
+            Some("lium-main".into())
+        );
+        assert_eq!(
+            hidden(&state, cx),
+            (true, true, 2),
+            "both stay in Hidden chats"
+        );
+        assert!(
+            unarchives(&commands).is_empty(),
+            "nothing asked the relay to unarchive"
+        );
+    }
+
+    #[gpui::test]
+    fn a_message_arriving_in_the_open_hidden_chat_keeps_it_hidden(cx: &mut TestAppContext) {
+        let (_rt, commands, state) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.select_project("dm".into(), cx);
+            s.apply(
+                SyncEvent::MessageUpsert {
+                    chat_id: "dm".into(),
+                    message: Box::new(message("m1", "dm", "user:gh_2", "you there?", now_ms())),
+                },
+                cx,
+            );
+        });
+        assert_eq!(
+            hidden(&state, cx),
+            (true, true, 2),
+            "seen on screen: still hidden"
+        );
+        assert!(unarchives(&commands).is_empty());
+    }
+
+    #[gpui::test]
+    fn a_search_hit_in_a_hidden_dm_opens_it_and_leaves_it_hidden(cx: &mut TestAppContext) {
+        let (_rt, commands, state) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.messages.insert(
+                "dm".into(),
+                vec![message("m1", "dm", "user:gh_2", "pizza tonight", 1_000)],
+            );
+            s.index_chat("dm");
+            s.open_from_home_search("dm".into(), "pizza", cx);
+        });
+        assert_eq!(
+            state.read_with(cx, |s, _| s.highlight_message.clone()),
+            Some("m1".into()),
+            "the hit was revealed"
+        );
+        assert_eq!(
+            state.read_with(cx, |s, _| s.active_chat_id()),
+            Some("dm".into())
+        );
+        assert_eq!(hidden(&state, cx), (true, true, 2));
+        assert!(state.read_with(cx, |s, _| s.archived_chats.contains("dm")));
+        assert!(unarchives(&commands).is_empty());
+    }
+
+    #[gpui::test]
+    fn someone_writing_while_i_look_elsewhere_brings_the_row_back(cx: &mut TestAppContext) {
+        let (_rt, commands, state) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.apply(
+                SyncEvent::MessageUpsert {
+                    chat_id: "dm".into(),
+                    message: Box::new(message("m1", "dm", "user:gh_2", "you there?", now_ms())),
+                },
+                cx,
+            );
+        });
+        assert_eq!(
+            hidden(&state, cx),
+            (true, false, 1),
+            "Telegram: new activity unhides"
+        );
+        assert_eq!(unarchives(&commands), vec!["dm".to_string()]);
+    }
+
+    #[gpui::test]
+    fn another_device_archiving_a_dm_hides_its_row_here(cx: &mut TestAppContext) {
+        let (_rt, _commands, state) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.apply(
+                SyncEvent::ChatArchived {
+                    chat_id: "dm".into(),
+                    archived_at: None,
+                },
+                cx,
+            );
+        });
+        assert_eq!(
+            hidden(&state, cx),
+            (true, false, 1),
+            "unarchived elsewhere: back"
+        );
+        state.update(cx, |s, cx| {
+            s.apply(
+                SyncEvent::ChatArchived {
+                    chat_id: "dm".into(),
+                    archived_at: Some(5),
+                },
+                cx,
+            );
+        });
+        assert_eq!(
+            hidden(&state, cx),
+            (true, true, 2),
+            "archived elsewhere: hidden here"
+        );
     }
 }
 
