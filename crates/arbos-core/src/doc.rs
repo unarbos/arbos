@@ -328,6 +328,17 @@ impl MessageView {
             .collect::<Vec<_>>()
             .join("")
     }
+
+    /// Words or a visible attachment: what a reader of the chat can see on this row. A
+    /// hand-off row, a background job's host row or a stream that never got text has
+    /// neither and is a blank, sender-less line to anyone reading the transcript as text.
+    pub fn has_visible_content(&self) -> bool {
+        !self.text().trim().is_empty()
+            || self.parts.iter().any(|p| {
+                p.get("kind").and_then(Value::as_str) == Some("attachment")
+                    && p.get("hidden").and_then(Value::as_bool) != Some(true)
+            })
+    }
 }
 
 /// A chat doc with handles cached for the streaming hot path.
@@ -3062,6 +3073,63 @@ mod tests {
         assert_eq!(json["parts"][0]["kind"], "text");
         assert_eq!(json["hiddenParts"].as_array().unwrap().len(), 1);
         assert_eq!(json["hiddenParts"][0]["kind"], "tool");
+    }
+
+    /// The two blank Arbonites rows of 2026-10-28 (an agent-to-agent hand-off row and a job's
+    /// host row) have no words and no visible attachment; a reply, a picture, and a row whose
+    /// only attachment is hidden are told apart.
+    #[test]
+    fn has_visible_content_tells_blank_rows_apart() {
+        use super::*;
+        use serde_json::json;
+        let d = ChatDoc::new(None, false);
+        d.start_assistant_message("handoff", "ask", "box:1");
+        d.set_message_fields(
+            "handoff",
+            &[
+                ("turn", json!({ "kind": "spawn" })),
+                ("subagentName", json!("Bob")),
+            ],
+        );
+        d.add_hidden_part("handoff", "agent_message_sent", "Hey Bob", &json!({}));
+        d.finish_message("handoff", MessageStatus::Done);
+        let part = d.start_assistant_message("reply", "ask", "box:1");
+        d.append_text("reply", &part, "Bob's here.");
+        d.finish_message("reply", MessageStatus::Done);
+        d.transact(|d| {
+            d.append_user_message(
+                "photo",
+                "",
+                "dev",
+                &UserMessageOpts {
+                    attachments: vec![UserAttachment {
+                        name: "a.jpg".into(),
+                        mime: "image/jpeg".into(),
+                        kind: Some("image".into()),
+                        blob_ref: Some("k".into()),
+                        url: None,
+                        source: None,
+                    }],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        });
+        let by_id = |id: &str| d.message(id).unwrap();
+        assert!(!by_id("handoff").has_visible_content());
+        assert!(by_id("reply").has_visible_content());
+        assert!(by_id("photo").has_visible_content());
+        let hidden_card = MessageView {
+            id: "h".into(),
+            role: "assistant".into(),
+            status: "done".into(),
+            parts: vec![
+                json!({ "kind": "text", "text": "  " }),
+                json!({ "kind": "attachment", "hidden": true, "attachment": { "ref": "k" } }),
+            ],
+            rest: json!({}),
+        };
+        assert!(!hidden_card.has_visible_content());
     }
 
     /// An attachment with and without `source` round-trips through the doc

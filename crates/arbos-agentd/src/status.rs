@@ -2033,6 +2033,51 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// @mwbob on a scratch box (2026-10-29 02:43 UTC, agentd 0.1.181): the relay turn for
+    /// @mwbubble's answer routed `reply` with the line, the extension said the line "is not the
+    /// answer", and the model sent the same line with `send_message`. The group showed it twice.
+    #[tokio::test]
+    async fn send_message_repeating_the_route_reply_posts_once() {
+        use crate::config::SendTool;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000016";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.ack_text.clear();
+            t.activity = None;
+            t.send_tool = SendTool::On;
+            t.reply_only = true;
+            agent.test_open_row(&host, t).await;
+        }
+        let line = "mwbubble says dinner after the offsite is booked at Saffron House, at 7 pm. It got that from the Long-task eval peer's message in this chat.";
+        let more = "Want me to ask it who else is coming?";
+        agent
+            .hook_route(&json!({ "action": "reply", "reply": line }))
+            .await
+            .unwrap();
+        agent.hook_send_message(line, None, None).await.unwrap();
+        agent
+            .hook_send_message(&format!("{line}\n"), None, None)
+            .await
+            .unwrap();
+        agent.hook_send_message(more, None, None).await.unwrap();
+        agent.hook_send_message(more, None, None).await.unwrap();
+        let posted: Vec<String> = reply_rows(&host, "m-busy")
+            .iter()
+            .map(|r| r.text().trim().to_owned())
+            .filter(|t| !t.is_empty())
+            .collect();
+        assert_eq!(
+            posted,
+            vec![line.to_owned(), more.to_owned()],
+            "a line already posted in this turn is not posted again"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The send-tool switch: default on, `off` restores streamed prose, `strict` drops the fallback.
     #[test]
     fn send_tool_switch_parses() {
