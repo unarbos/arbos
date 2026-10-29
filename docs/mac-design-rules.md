@@ -960,15 +960,16 @@ keyboard open.
 | Item | Rule (pt / alpha) | Code |
 | --- | --- | --- |
 | Layer | one layer at the canvas's bottom, over the content, under the controls — the page colour masked by a ramp; the bar has no background of its own | `BottomBarFadeView`, the canvas `.overlay(alignment: .bottom)` in `ChatView` / `HomeView` |
-| Ramp | clear **28** above the bar's top edge → **0.3** at that edge → **0.5** at the controls' bottom edge → **0.8** at the screen's (or keyboard's) edge; never 1 — no band, no hard edge; readable over every control (≤ **0.6**) | `BottomBarFade.fade / edgeWash / controlsWash / bottomWash / readableMax`, `.chat` / `.home` |
-| Controls | glass pills on Glass (Liquid Glass on iOS 26, frost before; the Search-in-chat bar's light `field` tint so a placeholder reads), the field colour on Matte; sizes are the control family's | `ControlSurface`, `HeaderGlassBackground`, `GlassCircle` |
+| Ramp | clear **28** above the bar's top edge → **0.25** at that edge → **0.4** at the controls' bottom edge → **0.75** at the screen's (or keyboard's) edge (0.3 / 0.5 / 0.8 until the pills became clear glass); never 1 — no band, no hard edge; readable over every control (≤ **0.6**) | `BottomBarFade.fade / edgeWash / controlsWash / bottomWash / readableMax`, `.chat` / `.home` |
+| Controls | **real, clear glass on Glass** (Jacob 2026-10-28, [feedback iphone-composer-glass-2026-10-28]: "Grok chat is actual transparent glass. Ours isn't."): Liquid Glass `.clear` on iOS 26, plain `.ultraThinMaterial` before — no fill, no `field` tint, no wash of ours on the pill, so the text reads through it with only the system's frost; the `+` disc and the field in the chat, the search capsule on Home; Home's `+` takes the chat header's glass. Matte: the field colour. Sizes are the control family's | `ChatHeaderGlass.pillGlass`, `ControlSurface`, `HeaderGlassBackground(clear:)` |
 | Lists | the last row / result at rest sits above the fade: transcript tail = Home's trailing clear row = the fade | `Theme.transcriptTail`, `HomeChrome.listBottom` |
 | Keyboard | the keyboard is the bar's safe area: the layer ends on it and moves with it | `BottomBarFadeView` (GeometryReader reads the inset) |
 | System edge effect | none under the bar on iOS 26+ (`scrollEdgeEffectHidden(for: .bottom)`): one fade, ours | `NoBottomScrollEdgeEffect` |
 
-Pinned by `ArbosTests/BottomBarFadeTests`. Record: project store
-`internal/feedback-loop/iphone-composer-see-through-2026-10-28.md`, shots in
-`media/feedback/iphone-composer-fade/`.
+Pinned by `ArbosTests/BottomBarFadeTests` and `PillGlassTests`. Records: project store
+`internal/feedback-loop/iphone-composer-see-through-2026-10-28.md` and
+`iphone-composer-glass-2026-10-28.md`, shots in `media/feedback/iphone-composer-fade/` and
+`media/feedback/iphone-composer-glass/`.
 
 ### iPhone Home: the bars float over the list, rows fade out under them (Jacob 2026-10-28, [feedback iphone-home-bar-fades-2026-10-28])
 
@@ -1131,6 +1132,51 @@ the same width. The hover rail lives in the free 20 %. Pinned by
 and the `people_chat` rule in `names_senders_follows_the_chat_kind`. Record:
 project store `internal/feedback-loop/chat-density-2026-10-26.md`, shots in
 `media/feedback/chat-density/`.
+
+## Grouped messages: one name and picture per run (Jacob 2026-10-28, iPhone [feedback grouped-messages-ios-2026-10-28], Mac [feedback grouped-messages-mac-2026-10-28])
+
+Asked by the Arbonites (DaWizzaa / Scout / Affinity), approved by Jacob 17:56
+UTC: "consecutive messages from one sender within ~2 min form a run — name and
+avatar once, phone gaps inside a run about half of the normal, Mac grouped the
+same with its spacing otherwise unchanged." Grok Bot's stacked agent bubbles
+(`internal/refs/grokbot-ios/web-09`, `ref-01`) are the visual reference.
+
+### The run (both platforms, one rule)
+
+| | Rule |
+| --- | --- |
+| A run | Consecutive messages from one sender (`sender` key: a person, an agent, me) each within **2 min** (`RUN_WINDOW_MS` = `Transcript.runWindowMs` = 120 000 ms) of the run's last message. The window is measured from the previous message, so a steady stream chains. A row with no clock never groups. |
+| Breaks | The sender changes · the window passes · a date stamp · a system line (call lines, membership notices) · a bubble with a **reply quote** (`replyTo` / `replyRef`; an agent's `inReplyTo` in a people chat) — the quoted bubble starts a run of its own, and the next unquoted line from the same sender joins it. A hidden fold ("3 messages hidden …") also ends the run. |
+| First message of a run | Name inside the bubble (in chats that name their senders) and the sender's picture on the avatar column — on the message's last row, as before (the disc at the bottom of the message; redesign mocks a/f). |
+| Later messages of a run | No name, no picture; the avatar column stays **empty at the picture's width**, so the bubble aligns under the first one's text. Reply quotes, reactions, attachments, the hover rail (Mac) / swipe-left time (iPhone) and the per-row menus are unchanged: every row is still its own message. |
+| Who groups | People, agents (in groups and in their own 1:1 chat) and my own messages alike. Supersedes #1447's "name and gap on every agent reply": an agent's reply that quotes the ask is still named (the quote breaks the run); its unquoted follow-up bubbles group. |
+
+The two row builders live in the clients (`crates/arbos-mac/src/ui/transcript.rs`
+`continues_run` / `carries_quote`; `apps/ios/…/UI/Transcript.swift`
+`Transcript.continuesRun` / `carriesQuote`), not in `arbos_core`, so the window is
+one constant per client, pinned by a test on each side (`grouping_tests::
+the_window_is_two_minutes_and_the_gaps_are_groks`, `GroupedMessagesTests.
+testTheWindowIsTwoMinutesAndTheGapsAreTighter`). Change both or neither.
+
+### Spacing
+
+| Gap | iPhone | Was | Mac | Was |
+| --- | --- | --- | --- | --- |
+| Inside a run (between its messages, and between the rows of one message) | **4** (`Transcript.runGap`) | 8 | **6** (`2 × ROW_GAP_HALF`) | 6 |
+| A new run (sender change, window passed, quoted reply) | **16** (`Transcript.turnGap`; Grok Bot's iPhone turn gap, ≈ 15–16 pt on `ref-01` at 1.17 px/pt) | 24 | **20** (`TURN_GAP_EXTRA + 2 × ROW_GAP_HALF`) | 20 |
+| Around a centred system / date line | 20 (`Transcript.systemGap`) | 20 | 20 / 24 (stamp pads) | same |
+
+The Mac's rhythm is Grok's Mac measurement and stays; only *where* the 20 pt
+opens changed (at run starts, not at every agent message). On the phone the two
+gaps fall from 8 / 24 to 4 / 16 — "overall phone spacing tighter".
+
+Pinned by `transcript::grouping_tests` (the rule, agents, own messages, the row
+cache's run starts) and `transcript_smoke_tests::a_run_shows_one_disc_and_opens_no_turn_gap`
+(the real transcript drawn: one disc, same left edge, 6 / 20 pt) on the Mac;
+`ArbosTests/GroupedMessagesTests` (rule, gaps, avatar once per run, agents, own,
+DM) and the updated `SenderNameRowTests` on the iPhone. Record: project store
+`internal/feedback-loop/grouped-messages-2026-10-28.md`, shots in
+`media/feedback/grouped-messages/`.
 
 ## Glass surface: readable content, translucent chrome (Jacob 2026-10-26, [feedback mac-glass-contrast-2026-10-26])
 

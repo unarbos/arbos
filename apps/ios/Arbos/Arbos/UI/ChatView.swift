@@ -689,9 +689,9 @@ struct ChatSession: View {
             let slug = member.isAgent ? mentionSlug(member.project?.name ?? member.handle) : member.handle
             return "Message @\(slug)"
         }
-        // No chip pick: match the header name ("Message Kenobi"), not "@handle".
+        // No chip pick: match the header name ("Message Kenobi", "Message Arbonites"), not "@handle".
         if let people {
-            return "Message \(counterpart?.displayName ?? people.title)"
+            return "Message \(people.composerName(me: model.user?.id))"
         }
         return "Message \(name)"
     }
@@ -991,14 +991,11 @@ struct ChatSession: View {
                             .frame(maxWidth: .infinity)
                             .frame(height: Theme.composerHeight)
                             .accessibilityIdentifier("channel-read-only")
-                    } else if isPeople, people?.isSilencedNow == true {
-                        // Group admin muted me from posting — one quiet line, no composer.
-                        Text("You've been muted in this group")
-                            .font(theme.font(Theme.small))
-                            .foregroundStyle(theme.muted)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: Theme.composerHeight)
-                            .accessibilityIdentifier("group-silenced")
+                    } else if isPeople, let people, people.isSilencedNow {
+                        // Group admin muted me from posting — one quiet line, no composer
+                        // ([feedback app-01M61GZ5B66VCSKF40458KH3DP]). Extracted so ChatView
+                        // type-checks; `sessionRootTasks` clears silenced when the end passes.
+                        SilencedComposerLine(untilMs: people.silencedUntil)
                     } else if let peer = blockedPeer {
                         // A DM with someone I blocked has no input ([feedback
                         // blocked-state-ios-2026-10-26]): "You blocked X · Unblock" in its place.
@@ -1183,6 +1180,20 @@ struct ChatSession: View {
                     guard !Task.isCancelled, calls.activeByChat[chatId] != nil else { return }
                     await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId)
                 }
+            }
+            // Timed group mute: sleep until `silencedUntil`, then clear local silenced state and
+            // a silenced refusal note so the composer returns without a chat reload
+            // ([feedback app-01M61GZ5B66VCSKF40458KH3DP]). Lives here (not on the muted line) so
+            // the sleep is not cancelled when `isSilencedNow` flips false a tick early.
+            .task(id: people?.silencedUntil) {
+                guard isPeople, let people, people.silenced, let until = people.silencedUntil else { return }
+                let end = Date(timeIntervalSince1970: TimeInterval(until) / 1000)
+                let delay = end.timeIntervalSinceNow
+                if delay > 0 {
+                    try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                }
+                guard !Task.isCancelled else { return }
+                await MainActor.run { model.clearExpiredSilence(chatId: chatId) }
             }
     }
 
@@ -4080,7 +4091,10 @@ private struct ComposerField: View {
         .fixedSize(horizontal: false, vertical: true)
         // A true capsule at one line (Grok's edge follows a circle); the radius stays
         // 24 pt as the field grows.
-        .background(fieldShape.fill(theme.field)) // control-size: source (the family's field, rim below)
+        // The family's field: solid on Matte; on Glass the clear system glass and nothing of
+        // ours on it, so the transcript reads through the pill ([feedback
+        // iphone-composer-glass-2026-10-28]). Rim below.
+        .background(PillSurface(shape: fieldShape)) // control-size: source (the family's field, rim below)
         .overlay(ComposerRim(shape: fieldShape, tint: rimTint))
         .alert("Microphone access is off", isPresented: $recorder.permissionDenied) {
             Button("OK", role: .cancel) { }
