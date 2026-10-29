@@ -75,6 +75,8 @@ mod stickers;
 mod unfurl;
 mod upgrade;
 mod upgrade_carry;
+#[cfg(test)]
+mod upgrade_rollback_tests;
 mod vault;
 mod vaults;
 mod voice;
