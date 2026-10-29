@@ -28,7 +28,7 @@ use gpui::{
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::app::AppState;
+use crate::app::{AppState, OpenLink};
 use crate::ui::chat_search as chat_search_ui;
 use crate::ui::composer;
 use crate::ui::feedback;
@@ -55,23 +55,20 @@ fn main() {
 
     // `arbos://` URLs from the platform. Invite links (D88): `arbos://join/<code>` — what
     // arbos.life/s/<code> hands to the installed app — opens the Join sheet with the code.
+    // Group invite links: `arbos://join-group/<code>` (from arbos.life/g/<code>) joins the
+    // people group and opens it, as on the iPhone.
     // `arbos://auth/callback?code=…` is the relay's answer when GitHub sign-in ran in the
     // default browser (no window to attach the system sheet to, or "Open in browser").
     // The platform delivers URLs before the app exists (cold start) or any time after; the
     // hook fills in once the state is up.
     type JoinHook = Rc<RefCell<Option<(gpui::AsyncApp, gpui::Entity<AppState>)>>>;
     let join_hook: JoinHook = Rc::new(RefCell::new(None));
-    let pending_joins: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let pending_joins: Rc<RefCell<Vec<OpenLink>>> = Rc::new(RefCell::new(Vec::new()));
     let app = gpui_platform::application().with_assets(crate::ui::icons::Assets);
     {
         let (hook, pending) = (join_hook.clone(), pending_joins.clone());
         app.on_open_urls(move |urls| {
-            let codes: Vec<String> = urls
-                .iter()
-                .filter_map(|u| u.strip_prefix("arbos://join/"))
-                .map(|c| c.trim_matches('/').to_string())
-                .filter(|c| !c.is_empty())
-                .collect();
+            let codes: Vec<OpenLink> = urls.iter().filter_map(|u| OpenLink::parse(u)).collect();
             let callbacks: Vec<String> = urls
                 .iter()
                 .filter(|u| auth::is_callback_url(u))
@@ -82,11 +79,9 @@ fn main() {
             }
             match hook.borrow().as_ref() {
                 Some((async_cx, state)) => {
-                    for code in codes {
+                    for link in codes {
                         let state = state.clone();
-                        async_cx.update(|cx| {
-                            state.update(cx, |s, cx| s.open_join_link(code, cx));
-                        });
+                        async_cx.update(|cx| state.update(cx, |s, cx| link.open(s, cx)));
                     }
                     for url in callbacks {
                         let state = state.clone();
@@ -142,8 +137,8 @@ fn main() {
             _ => Bounds::centered(None, size(px(1320.0), px(880.0)), cx),
         };
         *join_hook.borrow_mut() = Some((cx.to_async(), state.clone()));
-        for code in pending_joins.borrow_mut().drain(..) {
-            state.update(cx, |s, cx| s.open_join_link(code, cx));
+        for link in pending_joins.borrow_mut().drain(..) {
+            state.update(cx, |s, cx| link.open(s, cx));
         }
         let theme = Theme::of(cx).clone();
         let window = cx
