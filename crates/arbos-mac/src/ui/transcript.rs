@@ -25,6 +25,7 @@ use crate::ui::avatars;
 use crate::ui::cards;
 use crate::ui::chat_search;
 use crate::ui::frost::edge_faded;
+use crate::ui::glass::WindowDragPress;
 use crate::ui::highlight;
 use crate::ui::identity;
 use crate::ui::markdown::{
@@ -3735,6 +3736,18 @@ impl Render for Transcript {
                         return;
                     }
                     if this.selection.read(cx).is_dragging() {
+                        return;
+                    }
+                    // The header and its drag catchment float over the list: a
+                    // press there is the window's to move. While AppKit drags the
+                    // window the pointer keeps jittering against the lagging frame,
+                    // and as a drag-scroll each jitter broke or restored the pin,
+                    // so the presence row blinked ([feedback
+                    // mac-typing-line-drag-flicker-2026-10-29]).
+                    if cx
+                        .try_global::<WindowDragPress>()
+                        .is_some_and(|press| press.start.is_some())
+                    {
                         return;
                     }
                     this.begin_drag_scroll(event.position);
