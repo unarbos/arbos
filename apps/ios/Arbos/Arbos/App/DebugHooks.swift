@@ -165,6 +165,9 @@ enum DebugHooks {
     static var secretSheet: String? { value("ARBOS_SECRET_SHEET") }
     /// Text Size factor for screenshot sweeps (one of TextScale.steps, e.g. 0.85 / 1.3).
     static var textScale: Double? { value("ARBOS_TEXT_SCALE").flatMap(Double.init) }
+    /// `ARBOS_TIME_REVEAL=1`: the open chat holds the iMessage time peek fully drawn out, for
+    /// screenshot rigs (`simctl` cannot drag the transcript).
+    static var timeReveal: Bool { value("ARBOS_TIME_REVEAL") == "1" }
     /// `system | light | dark`: the theme for one launch, over the saved choice and the
     /// D90 Dark default (the rig shoots light + dark by toggling the simulator with `system`).
     static var appearance: Appearance? { value("ARBOS_APPEARANCE").flatMap(Appearance.init(rawValue:)) }

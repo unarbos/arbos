@@ -1241,6 +1241,11 @@ struct ChatSession: View {
             demoPresentNext()
         }
         .task {
+            guard DebugHooks.timeReveal else { return }
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            timeReveal = RowView.timeRevealWidth
+        }
+        .task {
             guard DebugHooks.demo, model.isFixture, !model.demoStarted else { return }
             model.demoStarted = true
             try? await Task.sleep(nanoseconds: 1_800_000_000)
