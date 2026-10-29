@@ -23,6 +23,28 @@ final class BlankTranscriptGuardTests: XCTestCase {
         }
     }
 
+    /// A row nested deeper than JSONSerialization's limit (~512; 400 parses, 600 does not) makes
+    /// the whole list fail to parse though the core serialises it fine. On the TF 2048 build a
+    /// copy of the real Arbonites doc with one 700-deep row appended drew a blank chat with no
+    /// spinner. Now the rows around it read and only that row is left out.
+    func testAOverlyDeepRowIsSkippedNotTheWholeTranscript() {
+        var deep = "1"
+        for _ in 0..<700 { deep = "{\"k\":" + deep + "}" }
+        let good = { (id: String, text: String) in
+            "{\"id\":\"\(id)\",\"role\":\"user\",\"sender\":\"user:gh_1\",\"status\":\"done\",\"parts\":[{\"id\":\"\(id)-p\",\"kind\":\"text\",\"text\":\"\(text)\"}]}"
+        }
+        let deepRow = "{\"id\":\"01M62ZZCORRUPTROWDEEP000000\",\"role\":\"user\",\"sender\":\"user:gh_1\",\"meta\":\(deep)}"
+        let raw = "[" + [good("a", "Can’t wait!"), deepRow, good("c", "AR???")].joined(separator: ",") + "]"
+        XCTAssertNil(try? JSONSerialization.jsonObject(with: Data(raw.utf8)), "premise: the whole list must not parse")
+
+        let perRow = [good("a", "Can’t wait!"), deepRow, good("c", "AR???")]
+        let out = CoreChatDoc.decodeRows(raw, count: perRow.count, chatId: chat) { ix in
+            (try? JSONSerialization.jsonObject(with: Data(perRow[ix].utf8))).flatMap { DocJSON.message($0, chatId: self.chat) }
+        }
+        XCTAssertEqual(out.map(\.id), ["a", "c"])
+        XCTAssertEqual(out.last?.plainText, "AR???")
+    }
+
     /// Row shapes from the Arbonites doc: a blank sender-`agent` row (#2247), a row with no id,
     /// and a row that is not an object. The good rows around them still read.
     func testOffendingRowShapesDoNotDropTheirNeighbours() {
