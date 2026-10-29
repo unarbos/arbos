@@ -1573,6 +1573,12 @@ pub struct Agent {
     /// A respawn is replacing the child right now: the supervisor must not spawn a second one
     /// because `pi` is momentarily empty.
     pub(crate) pi_respawning: AtomicBool,
+    /// The main pi child was stopped after [`Self::PI_PARK_IDLE_MS`] without use; the next
+    /// `pi()` wakes the supervisor to start it again. One resident pi per agent is ~220 MB, and
+    /// a box with many agents ran out of its 3 GB with all of them idle.
+    pub(crate) pi_parked: AtomicBool,
+    pub(crate) pi_wake: tokio::sync::Notify,
+    pub(crate) pi_last_use_ms: std::sync::atomic::AtomicU64,
     /// agentd stopped listening to a pi run before pi settled it (a Prompt call that timed out,
     /// a relay turn cut short, a turn deadline): pi may still be running it, and would reject
     /// the next plain prompt with "Agent is already processing" (#2073, Doug 2026-10-27). The
@@ -1683,6 +1689,9 @@ impl Agent {
             prompt_refresh_due_ms: std::sync::atomic::AtomicU64::new(0),
             pi_lease: Mutex::new(()),
             pi_respawning: AtomicBool::new(false),
+            pi_parked: AtomicBool::new(false),
+            pi_wake: tokio::sync::Notify::new(),
+            pi_last_use_ms: std::sync::atomic::AtomicU64::new(now_ms() as u64),
             pi_run_orphaned: AtomicBool::new(false),
             compaction_floor: std::sync::Mutex::new(HashMap::new()),
             pending_sends: std::sync::atomic::AtomicUsize::new(0),
@@ -1946,7 +1955,10 @@ impl Agent {
         let me = self.clone();
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                    _ = me.pi_wake.notified() => {}
+                }
                 let alive = me
                     .pi
                     .lock()
@@ -1960,7 +1972,25 @@ impl Agent {
                 if me.pi_respawning.load(Ordering::SeqCst) {
                     continue;
                 }
-                if !alive && !me.turn_running.load(Ordering::SeqCst) {
+                if me.pi_parked.load(Ordering::SeqCst) {
+                    if me.pi_idle_ms() >= Self::PI_PARK_IDLE_MS {
+                        continue;
+                    }
+                    // the respawn writes the current system prompt, so a refresh that came in
+                    // while parked needs no second restart
+                    me.prompt_refresh_pending.store(false, Ordering::SeqCst);
+                    let chat = me.current_chat.lock().await.clone().unwrap_or_default();
+                    match me.respawn_pi(&chat).await {
+                        Ok(()) => {
+                            me.pi_parked.store(false, Ordering::SeqCst);
+                            tracing::info!("pi main woken from park");
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "pi wake from park failed");
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                        }
+                    }
+                } else if !alive && !me.turn_running.load(Ordering::SeqCst) {
                     me.pi_ready.store(false, Ordering::SeqCst);
                     let chat = me.current_chat.lock().await.clone().unwrap_or_default();
                     tracing::warn!("pi main child is gone; respawning");
@@ -1968,6 +1998,26 @@ impl Agent {
                         tracing::error!(error = %e, "pi respawn failed");
                         tokio::time::sleep(Duration::from_secs(5)).await;
                     }
+                } else if alive
+                    && me.pi_idle_ms() >= Self::PI_PARK_IDLE_MS
+                    && !me.any_turn_running()
+                {
+                    let Ok(_lease) = me.pi_lease.try_lock() else {
+                        continue;
+                    };
+                    let old = {
+                        let mut slot = me.pi.lock().await;
+                        if me.any_turn_running() || me.pi_idle_ms() < Self::PI_PARK_IDLE_MS {
+                            continue;
+                        }
+                        me.pi_parked.store(true, Ordering::SeqCst);
+                        me.pi_ready.store(false, Ordering::SeqCst);
+                        slot.take()
+                    };
+                    if let Some(old) = old {
+                        old.shutdown().await;
+                    }
+                    tracing::info!(idle_s = me.pi_idle_ms() / 1000, "pi main parked while idle");
                 } else if alive && me.prompt_refresh_ready() {
                     // The system prompt changed (#1431, #1908): pi reads it at spawn, so the
                     // session restarts — at a turn boundary only (the lease is free), once the
@@ -1997,6 +2047,15 @@ impl Agent {
     pub(crate) async fn respawn_pi_current(self: &Arc<Self>) -> Result<()> {
         let chat = self.current_chat.lock().await.clone().unwrap_or_default();
         self.respawn_pi(&chat).await
+    }
+
+    /// An agent whose main pi was not used for this long gives its process back; the next use
+    /// starts it again on the same session file (~1 s).
+    pub(crate) const PI_PARK_IDLE_MS: u64 = 10 * 60_000;
+
+    fn pi_idle_ms(&self) -> u64 {
+        (arbos_core::ids::now_ms() as u64)
+            .saturating_sub(self.pi_last_use_ms.load(Ordering::SeqCst))
     }
 
     /// How long a prompt change settles before the session restarts on it: a rename and its
@@ -2073,6 +2132,11 @@ impl Agent {
     /// Wait briefly for the supervisor to respawn pi (it polls every 2 s). A send that
     /// lands between death and respawn must not permanently Fail with no assistant bubble.
     async fn pi(&self) -> Result<Arc<RpcChild>> {
+        self.pi_last_use_ms
+            .store(arbos_core::ids::now_ms() as u64, Ordering::SeqCst);
+        if self.pi_parked.load(Ordering::SeqCst) {
+            self.pi_wake.notify_one();
+        }
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             if let Some(c) = self.pi.lock().await.clone() {
@@ -8636,7 +8700,7 @@ impl Agent {
     }
 
     pub fn is_healthy(&self) -> bool {
-        self.pi_ready.load(Ordering::SeqCst)
+        self.pi_ready.load(Ordering::SeqCst) || self.pi_parked.load(Ordering::SeqCst)
     }
 }
 
