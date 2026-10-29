@@ -629,7 +629,9 @@ pub(super) fn collect(state: &AppState, chats: &[&Chat]) -> Content {
                             part_id: id.clone(),
                         };
                         match attachment.kind() {
-                            AttachmentKind::Image | AttachmentKind::Video => out.media.push(found),
+                            AttachmentKind::Image
+                            | AttachmentKind::Video
+                            | AttachmentKind::Sticker => out.media.push(found),
                             AttachmentKind::Audio => out.voice.push(found),
                             _ => out.files.push(found),
                         }

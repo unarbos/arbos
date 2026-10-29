@@ -11,6 +11,8 @@
 		A1EE0000000000000000000A /* ToastStackTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EE00000000000000000009 /* ToastStackTests.swift */; };
 		A1EE00000000000000000006 /* UserErrorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EE00000000000000000005 /* UserErrorTests.swift */; };
 		A1EE00000000000000000004 /* ErrorNote.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EE00000000000000000003 /* ErrorNote.swift */; };
+		A1F0A5440000000000000002 /* FunPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F0A5440000000000000001 /* FunPicker.swift */; };
+		A1F0A5440000000000000004 /* Fun in Resources */ = {isa = PBXBuildFile; fileRef = A1F0A5440000000000000003 /* Fun */; };
 		A1EE00000000000000000002 /* UserError.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EE00000000000000000001 /* UserError.swift */; };
 		A1BB87570AFC8FD22F77F310 /* ArbosApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EF7B8D4ACE5D286ED5271D /* ArbosApp.swift */; };
 		A1B8CC06713710E1DE0950B9 /* DebugHooks.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B4441E009E79A1090EF589 /* DebugHooks.swift */; };
@@ -246,6 +248,8 @@
 		A1EE00000000000000000009 /* ToastStackTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToastStackTests.swift; sourceTree = "<group>"; };
 		A1EE00000000000000000005 /* UserErrorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserErrorTests.swift; sourceTree = "<group>"; };
 		A1EE00000000000000000003 /* ErrorNote.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ErrorNote.swift; sourceTree = "<group>"; };
+		A1F0A5440000000000000001 /* FunPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FunPicker.swift; sourceTree = "<group>"; };
+		A1F0A5440000000000000003 /* Fun */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Fun; sourceTree = "<group>"; };
 		A1EE00000000000000000001 /* UserError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserError.swift; sourceTree = "<group>"; };
 		A15AA920DF43B1E0D5ECD962 /* Arbos.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Arbos.entitlements; sourceTree = "<group>"; };
 		A1E59E8E49DC7AEE0EE9D0F3 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -546,6 +550,7 @@
 			isa = PBXGroup;
 			children = (
 				A1FEF1EDAC69C84BDD3779FC,
+				A1F0A5440000000000000003 /* Fun */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -590,6 +595,7 @@
 			isa = PBXGroup;
 			children = (
 				A1EE00000000000000000003 /* ErrorNote.swift */,
+				A1F0A5440000000000000001 /* FunPicker.swift */,
 				A1BB00000000000000000001 /* BackSwipe.swift */,
 				A1AD0000000000000000B001 /* SheetHeader.swift */,
 				A124D4FA40F4E5025A2B2C9D,
@@ -890,6 +896,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A12DF47CDA1B30754EA90287 /* Assets.xcassets in Resources */,
+				A1F0A5440000000000000004 /* Fun in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -923,6 +930,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A1EE00000000000000000004 /* ErrorNote.swift in Sources */,
+				A1F0A5440000000000000002 /* FunPicker.swift in Sources */,
 				A1EE00000000000000000002 /* UserError.swift in Sources */,
 				A1BB87570AFC8FD22F77F310 /* ArbosApp.swift in Sources */,
 				A1B8CC06713710E1DE0950B9 /* DebugHooks.swift in Sources */,

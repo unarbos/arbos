@@ -32,6 +32,7 @@ mod export;
 mod features;
 mod feedback;
 mod fleet;
+mod gifs;
 mod goals;
 mod groups;
 mod image_sniff;
@@ -68,6 +69,7 @@ mod sites;
 mod skills;
 mod smoke;
 mod state;
+mod stickers;
 mod unfurl;
 mod upgrade;
 mod upgrade_carry;
@@ -882,6 +884,15 @@ async fn main() -> anyhow::Result<()> {
         .route("/blob/{project}/{key}", get(blobs::get).put(blobs::put))
         .route("/link-icon", get(link_icons::get))
         .route("/unfurl/icon", get(site_icons::get))
+        // Emoji / stickers / GIFs picker (ARB-544): GIF search + media pass-through via
+        // KLIPY (key server-side only), relay-hosted open sticker packs.
+        .route("/gif/search", get(gifs::search))
+        .route("/gif/trending", get(gifs::trending))
+        .route("/gif/categories", get(gifs::categories))
+        .route("/gif/share", post(gifs::share))
+        .route("/gif/media", get(gifs::media))
+        .route("/stickers/packs", get(stickers::packs))
+        .route("/stickers/{pack}/{id}", get(stickers::get))
         .route("/feedback", post(feedback::submit))
         .route("/feedback/capture/{id}", post(feedback::device_capture))
         .route("/box/feedback/capture", post(feedback::box_capture_request))

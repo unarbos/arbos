@@ -3194,13 +3194,15 @@ impl Transcript {
                 forwarded_from,
                 quote,
             } => {
-                let preview = match attachment.blob_ref.as_ref() {
+                // The blob `ref`, or `url:<url>` for a picked GIF that lives with its
+                // provider (ARB-544) — the sync layer fetches either.
+                let preview = match attachment.preview_key() {
                     None => attachments::Preview::Unavailable,
                     Some(k) => {
                         let state = self.state.read(cx);
-                        match state.card_thumbnail(k) {
+                        match state.card_thumbnail(&k) {
                             Some(image) => attachments::Preview::Ready(image),
-                            None if state.thumbnails_failed.contains(k) => {
+                            None if state.thumbnails_failed.contains(&k) => {
                                 attachments::Preview::Unavailable
                             }
                             None => attachments::Preview::Loading,
