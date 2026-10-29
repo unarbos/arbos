@@ -160,6 +160,7 @@ if command -v op >/dev/null 2>&1 && [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; th
   : "${ARBOS_RELAY_ADMIN_TOKEN:=$(opread 'op://Arbos/pjwsl7tjrhcbzbqos2masde2u4/credential')}"
   : "${ARBOS_RELAY_KEY:=$(opread 'op://Arbos/t5a4ugctkgljhb3t6f732cxbeu/credential')}"
   : "${ARBOS_JWT_KEY:=$(opread 'op://Arbos/3f4ks7535m2riceop42hyohlaq/credential')}"
+  : "${KLIPY_API_KEY:=$(opread 'op://Arbos/ikdzr7vpentedu2a2mhj3d5uye/credential' | tr -d '[:space:]')}"
   : "${ARBOS_GITHUB_CLIENT_ID:=$(opread 'op://Arbos/Arbos GitHub OAuth app/ARBOS_GITHUB_CLIENT_ID')}"
   : "${ARBOS_GITHUB_CLIENT_SECRET:=$(opread 'op://Arbos/Arbos GitHub OAuth app/ARBOS_GITHUB_CLIENT_SECRET')}"
   # Calls (LiveKit, scripts/deploy/livekit): absent until the SFU is set up; the relay keeps calls off without them.
@@ -211,6 +212,11 @@ FLEET_KEYS=(ARBOS_DEFAULT_PROVIDER ARBOS_LOCAL_BOX_IMAGE ARBOS_HOST_MAX_BOXES AR
   ARBOS_BOX_CPUS ARBOS_BOX_MEM_GB ARBOS_BOX_WORK_GB ARBOS_BOX_PIDS ARBOS_BOX_NETWORK ARBOS_BOX_DNS ARBOS_BOX_RUNTIME)
 MATRIX_KEYS=(ARBOS_MATRIX ARBOS_MATRIX_HS_URL ARBOS_MATRIX_SERVER_NAME ARBOS_MATRIX_AS_TOKEN_USERS ARBOS_MATRIX_HS_TOKEN_USERS
   ARBOS_MATRIX_AS_TOKEN_AGENTS ARBOS_MATRIX_HS_TOKEN_AGENTS ARBOS_MATRIX_AS_TOKEN_BRIDGES ARBOS_MATRIX_HS_TOKEN_BRIDGES)
+# GIF search (#2235, crates/arbos-relay/src/gifs.rs): the KLIPY key is pulled from the vault item
+# "KLIPY — Arbos GIF API key" (never a device secret); filter and budget have the relay's documented defaults.
+# Hand-added KLIPY lines were lost on the 2026-10-29 00:11 deploy because the env file is rewritten from these
+# lists — anything the relay reads must be listed here.
+GIF_KEYS=(KLIPY_API_KEY KLIPY_API_BASE KLIPY_CONTENT_FILTER KLIPY_HOURLY_BUDGET)
 # Remote feature flags the apps read from the relay (no client release to flip): operator switches,
 # kept from the env file, never read from the vault. Unset = the relay's default (off).
 #   ARBOS_FEATURE_VAULT_CONNECT=1  shows "Connect a vault…" (1Password, D83 Phase 2) in the apps again.
@@ -239,7 +245,7 @@ fi
 # keep values already in the env file when nothing new was supplied
 if [[ -f "$ENV_FILE" ]]; then
   keep() { local k=$1; [[ -n "${!k:-}" ]] || printf -v "$k" '%s' "$(sed -n "s/^$k=//p" "$ENV_FILE" | head -1)"; }
-  for k in OPENROUTER_API_KEY OPENAI_API_KEY DAYTONA_API_KEY ARBOS_RELAY_ADMIN_TOKEN ARBOS_RELAY_KEY ARBOS_JWT_KEY ARBOS_GITHUB_CLIENT_ID ARBOS_GITHUB_CLIENT_SECRET ARBOS_DAYTONA_SNAPSHOT LIVEKIT_URL LIVEKIT_API_KEY LIVEKIT_API_SECRET ARBOS_AUTH_REDIRECTS "${MATRIX_KEYS[@]}" "${FLEET_KEYS[@]}" "${FEATURE_KEYS[@]}" "${UPGRADE_KEYS[@]}" "${SITES_KEYS[@]}" "${APNS_KEYS[@]}"; do keep "$k"; done
+  for k in OPENROUTER_API_KEY OPENAI_API_KEY DAYTONA_API_KEY ARBOS_RELAY_ADMIN_TOKEN ARBOS_RELAY_KEY ARBOS_JWT_KEY ARBOS_GITHUB_CLIENT_ID ARBOS_GITHUB_CLIENT_SECRET ARBOS_DAYTONA_SNAPSHOT LIVEKIT_URL LIVEKIT_API_KEY LIVEKIT_API_SECRET ARBOS_AUTH_REDIRECTS "${MATRIX_KEYS[@]}" "${FLEET_KEYS[@]}" "${FEATURE_KEYS[@]}" "${UPGRADE_KEYS[@]}" "${SITES_KEYS[@]}" "${APNS_KEYS[@]}" "${GIF_KEYS[@]}"; do keep "$k"; done
 fi
 # A kept APNS_KEY_P8 path whose file is gone is no key at all; the relay would log an error and run with push off.
 if [[ -n "${APNS_KEY_P8:-}" && "$APNS_KEY_P8" != *"-----BEGIN"* && ! -r "$APNS_KEY_P8" ]]; then
@@ -298,6 +304,16 @@ done
 for k in "${MATRIX_KEYS[@]}"; do
   [[ -z "${!k:-}" ]] || printf '%s=%s\n' "$k" "${!k}" >> "$ENV_FILE"
 done
+# GIF search: filter/budget defaults only travel with a key; no key means /gif/* answers 503 gif_unavailable.
+if [[ -n "${KLIPY_API_KEY:-}" ]]; then
+  : "${KLIPY_CONTENT_FILTER:=low}"
+  : "${KLIPY_HOURLY_BUDGET:=90}"
+  for k in "${GIF_KEYS[@]}"; do
+    [[ -z "${!k:-}" ]] || printf '%s=%s\n' "$k" "${!k}" >> "$ENV_FILE"
+  done
+else
+  echo "WARNING: KLIPY_API_KEY is empty — GIF search stays off (vault item \"KLIPY — Arbos GIF API key\")"
+fi
 # Remote feature flags: only the keys that have a value; unset means the relay default.
 for k in "${FEATURE_KEYS[@]}"; do
   [[ -z "${!k:-}" ]] || printf '%s=%s\n' "$k" "${!k}" >> "$ENV_FILE"
