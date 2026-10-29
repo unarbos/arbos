@@ -978,18 +978,18 @@ pub async fn chat_history(
         .box_for_project(&id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no box".to_owned()))?;
-    let Some(url) = sb.box_url else {
+    let Some(url) = sb.box_url.clone() else {
         return Err((StatusCode::CONFLICT, "box has no url yet".into()));
     };
     // One box per user: the workspace is named in the path.
-    let mut req = state
-        .http
-        .get(format!("{url}/w/{id}/history/{chat}"))
-        .query(&q);
-    if let Some(t) = &sb.preview_token {
-        req = req.header("x-daytona-preview-token", t);
-    }
-    match req.send().await {
+    let sent = boxes::send_to_box(&state, &sb, || {
+        state
+            .http
+            .get(format!("{url}/w/{id}/history/{chat}"))
+            .query(&q)
+    })
+    .await;
+    match sent {
         Ok(r) if r.status().is_success() => Ok((
             [("content-type", "application/json")],
             r.bytes().await.unwrap_or_default(),

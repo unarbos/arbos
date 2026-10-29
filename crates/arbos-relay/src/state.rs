@@ -324,6 +324,9 @@ pub struct AppState {
     /// user_id → last HTTP call from that user's box (`/box/hello`, `/box/projects`,
     /// `/box/keepalive`). A box with no project opens no room socket; this is its heartbeat.
     pub box_http_seen: Arc<Mutex<HashMap<String, i64>>>,
+    /// sandbox_id → the Daytona preview token learned after the row's one got a 401
+    /// (`boxes::send_to_box`). Memory only: the row is rewritten only by a start the relay finishes.
+    pub fresh_preview_tokens: Arc<Mutex<HashMap<String, String>>>,
     /// Users whose box said "turn running" in its last keepalive, with the time (D89: eviction skips them).
     pub turn_running: Arc<Mutex<HashMap<String, i64>>>,
     /// Sandboxes evicted under host pressure (D89), with the time; only the user's own activity wakes them.
@@ -673,6 +676,7 @@ pub(crate) mod test_support {
             presence_seen: Arc::new(Mutex::new(HashMap::new())),
             activity: Arc::new(Mutex::new(HashMap::new())),
             box_http_seen: Arc::new(Mutex::new(HashMap::new())),
+            fresh_preview_tokens: Arc::new(Mutex::new(HashMap::new())),
             turn_running: Arc::new(Mutex::new(HashMap::new())),
             evicted: Arc::new(Mutex::new(HashMap::new())),
             fleet_pressure: Arc::new(Mutex::new(None)),

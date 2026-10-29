@@ -626,6 +626,7 @@ pub async fn start_box(state: &AppState, user_id: &str) -> Result<()> {
                     "the box row moved to another sandbox while {id} was starting"
                 ));
             }
+            state.fresh_preview_tokens.lock().await.remove(&id);
             if state.cfg.always_on {
                 // Boxes created before always-on still carry a 30-minute autostop.
                 let _ = dt.set_autostop(&id, 0).await;
@@ -1224,6 +1225,66 @@ fn safe_work_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
+/// The preview token to send to this box: one learned after a 401 wins over the row's.
+pub(crate) async fn preview_token_for(state: &AppState, sb: &Sandbox) -> Option<String> {
+    if let Some(id) = &sb.sandbox_id {
+        if let Some(t) = state.fresh_preview_tokens.lock().await.get(id) {
+            return Some(t.clone());
+        }
+    }
+    sb.preview_token.clone()
+}
+
+/// Daytona's current preview token for the box when it differs from `used`, remembered in memory.
+async fn fresh_preview_token(state: &AppState, sb: &Sandbox, used: Option<&str>) -> Option<String> {
+    if sb.provider != Provider::Daytona.as_str() {
+        return None;
+    }
+    let (dt, id) = (state.daytona.as_ref()?, sb.sandbox_id.as_ref()?);
+    let token = match dt.preview_url(id, 7788).await {
+        Ok(p) => p.token,
+        Err(e) => {
+            tracing::warn!(user = %sb.user_id, sandbox = %id, error = %e, "box answered 401; preview token lookup failed");
+            return None;
+        }
+    };
+    if used == Some(token.as_str()) {
+        return None;
+    }
+    tracing::warn!(user = %sb.user_id, sandbox = %id, "box answered 401 to a stale preview token; using Daytona's current one");
+    state
+        .fresh_preview_tokens
+        .lock()
+        .await
+        .insert(id.clone(), token.clone());
+    Some(token)
+}
+
+/// Send one request to the user's box URL. Daytona gives a sandbox a new preview token every time
+/// it stops and starts, and the row learns it only when a start run by the relay finishes. A start
+/// that timed out, or one Daytona completed later, leaves the row's token stale and the proxy
+/// answers 401 to every call while the box itself is fine (2026-10-29 16:05–16:45, four boxes).
+/// On a 401 the current token is read from Daytona and the request is sent once more.
+pub(crate) async fn send_to_box(
+    state: &AppState,
+    sb: &Sandbox,
+    build: impl Fn() -> reqwest::RequestBuilder,
+) -> reqwest::Result<reqwest::Response> {
+    let with = |t: Option<&str>| match t {
+        Some(t) => build().header("x-daytona-preview-token", t),
+        None => build(),
+    };
+    let used = preview_token_for(state, sb).await;
+    let r = with(used.as_deref()).send().await?;
+    if r.status() != reqwest::StatusCode::UNAUTHORIZED {
+        return Ok(r);
+    }
+    match fresh_preview_token(state, sb, used.as_deref()).await {
+        Some(fresh) => with(Some(&fresh)).send().await,
+        None => Ok(r),
+    }
+}
+
 /// Ask agentd to stop (hold) or restart (release) one workspace on the user box.
 async fn hold_workspace(
     state: &AppState,
@@ -1235,18 +1296,15 @@ async fn hold_workspace(
         return Err(anyhow!("user box has no url yet"));
     };
     let verb = if hold { "hold" } else { "release" };
-    let mut req = state
-        .http
-        .post(format!("{url}/w/{project_id}/{verb}"))
-        .bearer_auth(&sb.mcp_token)
-        .timeout(Duration::from_secs(60));
-    if let Some(t) = &sb.preview_token {
-        req = req.header("x-daytona-preview-token", t);
-    }
-    let r = req
-        .send()
-        .await
-        .with_context(|| format!("{verb} workspace"))?;
+    let r = send_to_box(state, sb, || {
+        state
+            .http
+            .post(format!("{url}/w/{project_id}/{verb}"))
+            .bearer_auth(&sb.mcp_token)
+            .timeout(Duration::from_secs(60))
+    })
+    .await
+    .with_context(|| format!("{verb} workspace"))?;
     if !r.status().is_success() {
         return Err(anyhow!("{verb} workspace: HTTP {}", r.status()));
     }
