@@ -5039,6 +5039,11 @@ impl Render for Shell {
             .as_ref()
             .or(self.pane_page_drawn.as_ref())
             .map_or(profiles::SHEET_WIDTH, |page| self.pane_width(page));
+        let sidebar_track = self
+            .split_drag
+            .active()
+            .then(|| self.state.read(cx).sidebar_edge_drag.track())
+            .flatten();
         let frame = self.slides.step(
             slide::Want {
                 viewport_width: width,
@@ -5049,6 +5054,7 @@ impl Render for Shell {
                 pane_shown: profile.is_some(),
                 pane_width,
                 reduce_motion: cx.reduce_motion(),
+                sidebar_track,
             },
             std::time::Instant::now(),
         );
