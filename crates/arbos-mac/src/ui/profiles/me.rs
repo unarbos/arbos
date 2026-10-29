@@ -786,91 +786,86 @@ impl Shell {
 
         // ----- Notifications page body -------------------------------------------
         let notifications_body = {
-            // macOS's own answer first: a denial here is why "no banners" — and the
-            // one place to fix it is System Settings, so the row opens it.
-            let system_row = match permission {
-                crate::ui::notify::Permission::Denied => Some(
-                    glass::row("Allowed by macOS".to_string(), &theme)
-                        .child(value("Off".to_string(), &theme))
-                        .child(
-                            link_button(
-                                "notify-system-settings",
-                                "Open System Settings",
-                                false,
-                                &theme,
-                            )
-                            .ml(px(10.0))
+            // macOS's own answer first. Denied: the toggle would read "On" while
+            // nothing can show, so the row states the block instead and the next
+            // row opens System Settings; the saved choice is untouched and comes
+            // back once macOS allows. State and action are two rows, as on the
+            // iPhone: label, value and link on one row do not fit the pane.
+            let notify_toggle = || {
+                div()
+                    .flex()
+                    .gap(px(2.0))
+                    .child(
+                        glass::segment("notify-on", "On", notify_on, &theme).on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.state
+                                    .update(cx, |s, cx| s.set_notifications_enabled(true, cx));
+                            },
+                        )),
+                    )
+                    .child(
+                        glass::segment("notify-off", "Off", !notify_on, &theme).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.state.update(cx, |s, cx| {
+                                    s.set_notifications_enabled(false, cx);
+                                });
+                            }),
+                        ),
+                    )
+            };
+            let group = settings_group(&theme);
+            let group = match permission {
+                crate::ui::notify::Permission::Denied => group
+                    .child(
+                        glass::row("Notifications".to_string(), &theme)
+                            .child(value("Blocked by macOS".to_string(), &theme)),
+                    )
+                    .child(
+                        glass::hot_row("notify-system-settings", "Open System Settings", &theme)
+                            .text_color(theme.accent)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.state.update(cx, |s, _| s.open_notification_settings());
                             })),
-                        ),
-                ),
-                crate::ui::notify::Permission::NotDetermined => Some(
-                    glass::row("Allowed by macOS".to_string(), &theme)
-                        .child(value("Not asked yet".to_string(), &theme))
-                        .child(
-                            link_button("notify-system-allow", "Allow", false, &theme)
-                                .ml(px(10.0))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.state.update(cx, |s, cx| s.allow_notifications(cx));
-                                })),
-                        ),
-                ),
+                    ),
+                crate::ui::notify::Permission::NotDetermined => group
+                    .child(
+                        glass::row("Allowed by macOS".to_string(), &theme)
+                            .child(value("Not asked yet".to_string(), &theme)),
+                    )
+                    .child(
+                        glass::hot_row("notify-system-allow", "Allow notifications", &theme)
+                            .text_color(theme.accent)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.state.update(cx, |s, cx| s.allow_notifications(cx));
+                            })),
+                    )
+                    .child(seg_row("Notifications", notify_toggle(), &theme)),
                 crate::ui::notify::Permission::Allowed | crate::ui::notify::Permission::Unknown => {
-                    None
+                    group.child(seg_row("Notifications", notify_toggle(), &theme))
                 }
             };
-            let mut group = settings_group(&theme);
-            if let Some(row) = system_row {
-                group = group.child(row);
-            }
-            let group = group
-                .child(seg_row(
-                    "Notifications",
-                    div()
-                        .flex()
-                        .gap(px(2.0))
-                        .child(
-                            glass::segment("notify-on", "On", notify_on, &theme).on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.state
-                                        .update(cx, |s, cx| s.set_notifications_enabled(true, cx));
-                                }),
-                            ),
-                        )
-                        .child(
-                            glass::segment("notify-off", "Off", !notify_on, &theme).on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.state.update(cx, |s, cx| {
-                                        s.set_notifications_enabled(false, cx);
-                                    });
-                                }),
-                            ),
+            let group = group.child(seg_row(
+                "Read receipts",
+                div()
+                    .flex()
+                    .gap(px(2.0))
+                    .child(
+                        glass::segment("receipts-on", "On", read_receipts, &theme).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.state.update(cx, |s, cx| s.set_read_receipts(true, cx));
+                            }),
                         ),
-                    &theme,
-                ))
-                .child(seg_row(
-                    "Read receipts",
-                    div()
-                        .flex()
-                        .gap(px(2.0))
-                        .child(
-                            glass::segment("receipts-on", "On", read_receipts, &theme).on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.state.update(cx, |s, cx| s.set_read_receipts(true, cx));
-                                }),
-                            ),
-                        )
-                        .child(
-                            glass::segment("receipts-off", "Off", !read_receipts, &theme).on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.state
-                                        .update(cx, |s, cx| s.set_read_receipts(false, cx));
-                                }),
-                            ),
+                    )
+                    .child(
+                        glass::segment("receipts-off", "Off", !read_receipts, &theme).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.state
+                                    .update(cx, |s, cx| s.set_read_receipts(false, cx));
+                            }),
                         ),
-                    &theme,
-                ));
+                    ),
+                &theme,
+            ));
             div()
                 .flex()
                 .flex_col()
