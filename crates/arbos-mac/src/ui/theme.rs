@@ -1156,6 +1156,17 @@ impl Theme {
         }
     }
 
+    /// The plate under the transcript's hover rail (☺ ↩ ⋯ beside a bubble)
+    /// on Glass ([feedback message-hover-actions-backing-2026-10-29]): the
+    /// search popup's frosted plate ([`Self::popup`], thick enough that the
+    /// desktop under the chat column cannot break the glyphs up), worn under
+    /// the round-button wash ([`Self::control_fill`]). `None` on Matte — the
+    /// rail sits on the flat page there and stays as it was — and on light
+    /// Glass, whose chrome waits on Jacob's light-mode pick.
+    pub fn rail_plate(&self) -> Option<Hsla> {
+        (self.is_frost() && !self.is_light()).then(|| self.popup())
+    }
+
     /// The sidebar filter's selected capsule ("All" · Agents · People ·
     /// Servers): Grok's `bubble_assistant` on Matte; on Glass the round-button
     /// family's wash ([`Self::control_fill`]), so the one opaque chip left on

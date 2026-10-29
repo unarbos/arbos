@@ -213,6 +213,24 @@ pub(crate) fn progress(visible: f32, full: f32) -> f32 {
     ((full - visible) / span).clamp(0.0, 1.0)
 }
 
+/// Top of the list frame the morph's travelling pictures are clipped to and
+/// edge-faded in at progress `t`: the expanded list's frame (under the filter
+/// segment) at 0, the rail list's (under Search) at 1, on the pictures' own
+/// linear path. Both lists fade their rows over `LIST_FADE_BAND` at the
+/// frame's top and bottom, so the pictures keep that fade the whole way and
+/// the rail at rest adds none ([feedback mac-sidebar-slide-jank-2026-10-29]:
+/// it used to appear the frame the fold ended, and vanish the frame an unfold
+/// began).
+pub(crate) fn morph_list_top(t: f32) -> f32 {
+    let expanded = crate::ui::theme::HEADER_HEIGHT
+        + sidebar::FILTER_TOP
+        + sidebar::FILTER_HEIGHT
+        + sidebar::FILTER_BOTTOM
+        - LIST_FADE_BAND;
+    let rail = metrics::LIST_TOP - LIST_FADE_BAND;
+    expanded + (rail - expanded) * t.clamp(0.0, 1.0)
+}
+
 /// The text's fade during the morph: gone by half-way, back from half-way.
 pub(crate) fn text_alpha(t: f32) -> f32 {
     (1.0 - 2.0 * t).clamp(0.0, 1.0)
@@ -593,12 +611,9 @@ pub(crate) fn render_overlay(
     let scroll_y = painted_scroll_y(&shell.rail_scroll);
     let mut layer = div().absolute().inset_0();
 
-    // Rows, clipped to the band both lists share (above the footer, under the strip).
-    let clip_top = crate::ui::theme::HEADER_HEIGHT
-        + sidebar::FILTER_TOP
-        + sidebar::FILTER_HEIGHT
-        + sidebar::FILTER_BOTTOM
-        - LIST_FADE_BAND;
+    // Rows, clipped to the list frame between the two lists' and faded at
+    // its edges the way both lists are.
+    let clip_top = morph_list_top(t);
     let mut rows = div()
         .absolute()
         .left_0()
@@ -648,7 +663,7 @@ pub(crate) fn render_overlay(
                 .child(entry.picture(shell, metrics::AVATAR, &theme, cx)),
         );
     }
-    layer = layer.child(rows);
+    layer = layer.child(edge_faded(LIST_FADE_BAND, true, true, rows));
 
     for control in [
         StripControl::Search,
@@ -906,6 +921,31 @@ mod tests {
         assert_eq!(f32::from(mid.origin.x), 22.0);
         assert_eq!(f32::from(mid.origin.y), 135.5);
         assert_eq!(f32::from(mid.size.width), 36.0);
+    }
+
+    /// Scout on v0.6.350 ([feedback mac-sidebar-slide-jank-2026-10-29]): "it
+    /// folds in and the second it is folded in it just overlays the blur".
+    /// The travelling pictures are faded in a list frame that starts as the
+    /// expanded list's (its fade band ending at the filter segment's foot) and
+    /// lands on the rail list's (ending at the first tile's slot), moving
+    /// with the pictures — so the fade is on them from the first frame of a
+    /// fold to the last of an unfold, never added or dropped at either end.
+    #[test]
+    fn the_morph_fades_its_pictures_in_a_frame_that_moves_with_them() {
+        let expanded_band_foot = crate::ui::theme::HEADER_HEIGHT
+            + sidebar::FILTER_TOP
+            + sidebar::FILTER_HEIGHT
+            + sidebar::FILTER_BOTTOM;
+        assert_eq!(morph_list_top(0.0) + LIST_FADE_BAND, expanded_band_foot);
+        assert_eq!(morph_list_top(1.0) + LIST_FADE_BAND, LIST_TOP);
+        // On the pictures' linear path (`lerp_bounds`), clamped at both ends.
+        let mid = morph_list_top(0.5);
+        assert!((mid - (morph_list_top(0.0) + morph_list_top(1.0)) / 2.0).abs() < 1e-4);
+        assert_eq!(morph_list_top(-1.0), morph_list_top(0.0));
+        assert_eq!(morph_list_top(2.0), morph_list_top(1.0));
+        // The first picture keeps the same place relative to the frame's top
+        // band all the way: inside the frame, below the band, at both ends.
+        assert!(tile_top(0) >= morph_list_top(1.0) + LIST_FADE_BAND);
     }
 
     /// The rail as `render` lays it out, in a 1079 pt window: toggle 52,

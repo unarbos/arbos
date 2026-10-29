@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     actions, canvas, div, list, prelude::*, px, Animation, AnimationExt, AnyElement, App, Bounds,
-    Context, Div, Entity, FontWeight, ListAlignment, ListScrollEvent, ListState, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, SharedString, Stateful,
-    TextRun, Window,
+    BoxShadow, Context, Div, Entity, FontWeight, ListAlignment, ListScrollEvent, ListState,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, SharedString,
+    Stateful, TextRun, Window,
 };
 
 use crate::app::{AppEvent, AppState, DetailsTarget};
@@ -648,8 +648,9 @@ pub enum RowKind {
         reactions: Vec<(String, Vec<String>)>,
         /// Under my right-hand bubble (chips align right).
         mine: bool,
-        /// Under another person's bubble (chips clear the avatar column).
-        indent: bool,
+        /// The bubble sits after the sender's avatar lane (people chats: another
+        /// person, or an agent in a group), so the chips start at its left edge.
+        lane: bool,
     },
     /// Grok's hand-off line: "Messaged ◉ A" / "N messages with ◉ A, ◉ B and ◉ C".
     Handoff {
@@ -808,6 +809,8 @@ const JUMP_ARRIVE_FROM_ALPHA: f32 = 0.35;
 pub const RAIL_BUTTON: f32 = 24.0;
 pub const RAIL_GLYPH: f32 = 16.0;
 pub const RAIL_GAP: f32 = 2.0;
+/// The Glass capsule's inset either side of the rail's buttons.
+pub const RAIL_PLATE_PAD_X: f32 = 2.0;
 
 /// A reaction chip under a bubble (iPhone `reactionChips`: 14 pt emoji, 12 pt
 /// medium count, 8 pt side pads, 4 pt vertical pads, 1 pt rim). The height is
@@ -2085,10 +2088,24 @@ impl Transcript {
         // Keep the checkmark readable even if the pointer leaves mid-feedback.
         let more_opacity = if just_copied { 1.0 } else { opacity };
         let more_glyph = if just_copied { "checkmark" } else { "ellipsis" };
+        // On Glass the three sit in one capsule over the desktop; the capsule
+        // fades as a whole, so the buttons inside carry only what differs
+        // from it (the smiley and reply keep fading under a held checkmark).
+        let plate = theme.rail_plate();
+        let glyph_color = if plate.is_some() {
+            theme.text
+        } else {
+            theme.text_muted
+        };
+        let (group_opacity, opacity, more_opacity) = match plate {
+            Some(_) if just_copied => (1.0, opacity, 1.0),
+            Some(_) => (opacity, 1.0, 1.0),
+            None => (1.0, opacity, more_opacity),
+        };
         let more_color = if just_copied {
             theme.online
         } else {
-            theme.text_muted
+            glyph_color
         };
         let btn = |id: SharedString, glyph: &'static str, opacity: f32, color: gpui::Hsla| {
             div()
@@ -2110,12 +2127,30 @@ impl Transcript {
             .flex()
             .items_center()
             .gap(px(RAIL_GAP))
+            .when_some(plate, |el, plate| {
+                el.debug_selector(|| "rail-plate".into())
+                    .h(px(RAIL_BUTTON))
+                    .px(px(RAIL_PLATE_PAD_X))
+                    .rounded_full()
+                    .opacity(group_opacity)
+                    // Every row carries a rail; only a revealed one paints its plate.
+                    .when(group_opacity > 0.0, |el| {
+                        el.bg(highlight::over(plate, theme.control_fill()))
+                            .shadow(vec![
+                                BoxShadow::new(px(0.0), px(0.0), theme.pane_card_rim())
+                                    .spread_radius(px(1.0))
+                                    .inset(),
+                                BoxShadow::new(px(0.0), px(1.0), gpui::hsla(0.0, 0.0, 0.0, 0.28))
+                                    .blur_radius(px(3.0)),
+                            ])
+                    })
+            })
             .child(
                 btn(
                     SharedString::from(format!("{row_id}#react")),
                     "face.smiling",
                     opacity,
-                    theme.text_muted,
+                    glyph_color,
                 )
                 .on_click(cx.listener(
                     move |_, event: &gpui::ClickEvent, _, cx| {
@@ -2134,7 +2169,7 @@ impl Transcript {
                     SharedString::from(format!("{row_id}#reply")),
                     "arrowshape.turn.up.left",
                     opacity,
-                    theme.text_muted,
+                    glyph_color,
                 )
                 .on_click(cx.listener(move |_, _, _, cx| {
                     if let Some(chat_id) = chat_id.clone() {
@@ -2950,7 +2985,13 @@ impl Transcript {
                                     (delivery == Delivery::Pending)
                                         .then(|| pending_glyph(&theme).mr(px(8.0))),
                                 )
-                                .child(own_bubble(bubble, delivery))
+                                .child(own_bubble(
+                                    // One selector per element: a ghost keeps "secret-ghost".
+                                    bubble.when(ghost.is_none(), |b| {
+                                        b.debug_selector(|| format!("own-bubble#{}", row.id))
+                                    }),
+                                    delivery,
+                                ))
                         })
                         .into_any_element()
                 }
@@ -3089,7 +3130,7 @@ impl Transcript {
             RowKind::Reactions {
                 reactions,
                 mine,
-                indent,
+                lane,
             } => {
                 // iPhone parity: small capsules under the bubble, mine tinted;
                 // click toggles my reaction. Hover shows who used that emoji
@@ -3099,7 +3140,13 @@ impl Transcript {
                 // ([feedback app-01M61440FP54FHVZ69QWEVD844]).
                 let me = format!("user:{}", self.state.read(cx).me_id());
                 let chat_id = self.chat_id.clone().unwrap_or_default();
-                let mut chips = div().flex().flex_wrap().gap(px(4.0));
+                let chips_selector: SharedString = format!("reactions#{}", row.message_id).into();
+                let mut chips = div()
+                    .debug_selector(move || chips_selector.to_string())
+                    .flex()
+                    .flex_wrap()
+                    .when(mine, |el| el.justify_end())
+                    .gap(px(4.0));
                 for (emoji, senders) in &reactions {
                     let on = senders.contains(&me);
                     let (state, chat, message_id, e) = (
@@ -3174,7 +3221,9 @@ impl Transcript {
                     .flex()
                     .when(mine, |el| el.justify_end())
                     .when(!mine, |el| el.justify_start())
-                    .when(indent, |el| el.pl(px(2.0)))
+                    // The bubble's own left edge: after the avatar lane when its row
+                    // has one (`SENDER_LANE`, grouped continuations included).
+                    .when(lane && !mine, |el| el.pl(px(SENDER_LANE)))
                     .mt(px(-2.0))
                     .pb(px(ROW_GAP_HALF))
                     .child(chips)
@@ -4534,7 +4583,7 @@ pub fn build_rows_with_cache(
                 if message.status == MessageStatus::Queued {
                     queued = true;
                 }
-                push_reactions(&mut rows, message, mine(message));
+                push_reactions(&mut rows, message, is_mine, !is_mine);
             }
             Role::System => {
                 // Call lines and membership notices ("Jacob added Home, hjkb and
@@ -5144,7 +5193,7 @@ pub fn build_rows_with_cache(
                     });
                 }
                 if !streaming {
-                    push_reactions(&mut rows, message, false);
+                    push_reactions(&mut rows, message, false, lane.is_some());
                 }
                 // Speaker (F11): every reply whose speech is cached or failed,
                 // plus the newest finished reply while voice mode is on.
@@ -5263,21 +5312,21 @@ fn retract_dangling_stamp(
     }
 }
 
-/// One chips row under a message that carries reactions.
-fn push_reactions(rows: &mut Vec<Row>, message: &Message, mine: bool) {
+/// One chips row under a message that carries reactions. `mine` and `lane` are
+/// the ones its bubble was laid out with, so the chips share its edge.
+fn push_reactions(rows: &mut Vec<Row>, message: &Message, mine: bool, lane: bool) {
     let reactions = message.reaction_list();
     if reactions.is_empty() {
         return;
     }
-    let indent = message.role == Role::User && !mine;
     rows.push(Row {
-        version: hash_version(&(&reactions, mine, indent), false),
+        version: hash_version(&(&reactions, mine, lane), false),
         id: format!("{}#reactions", message.id),
         message_id: message.id.clone(),
         kind: RowKind::Reactions {
             reactions,
             mine,
-            indent,
+            lane,
         },
     });
 }
@@ -9100,6 +9149,128 @@ mod reaction_chip_tests {
                 vcx.debug_bounds(sel).expect("chip after the pointer left"),
                 sel,
             );
+        }
+    }
+
+    struct SizedHost {
+        transcript: Entity<Transcript>,
+        width: f32,
+    }
+
+    impl Render for SizedHost {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(self.width))
+                .h(px(900.0))
+                .bg(gpui::black())
+                .child(self.transcript.clone())
+        }
+    }
+
+    /// Chips sit right under their own bubble, on its leading edge, in a people group:
+    /// the first line of Bob's run (disc), its grouped continuation (empty lane — Scout's
+    /// "let me add him lol" 🥹 drew at the column's far left on v0.6.350), my own line
+    /// (right edge) and an agent in the group (its lane), at a narrow and a wide window
+    /// ([feedback reaction-chip-anchor-mac-2026-10-29]).
+    #[gpui::test]
+    fn chips_sit_under_their_own_bubble_on_its_leading_edge(cx: &mut TestAppContext) {
+        let t = 1_700_000_000_000u64;
+        let msg = |id: &str, role: &str, sender: &str, handle: &str, text: &str, at: u64| {
+            let mut m: Message = serde_json::from_value(serde_json::json!({
+                "id": id, "chatId": "c1", "role": role, "sender": sender,
+                "senderHandle": handle, "senderName": handle, "status": "done",
+                "createdAt": at, "completedAt": at,
+                "parts": [{ "id": format!("{id}-t"), "kind": "text", "text": text }],
+            }))
+            .expect("message");
+            m.reactions
+                .entry("🥹".into())
+                .or_default()
+                .insert("user:gh_sam".into(), true);
+            m
+        };
+        let (_rt, state, transcript) = mount_with(cx, Vec::new());
+        let me = state.read_with(cx, |s, _| format!("user:{}", s.me_id()));
+        state.update(cx, |s, cx| {
+            s.projects[0].kind = SpaceKind::Group;
+            let rows = s.messages.entry("c1".into()).or_default();
+            rows.clear();
+            rows.extend([
+                msg(
+                    "m1",
+                    "user",
+                    "user:gh_bob",
+                    "bob",
+                    "hes already on the app",
+                    t,
+                ),
+                msg(
+                    "m2",
+                    "user",
+                    "user:gh_bob",
+                    "bob",
+                    "let me add him lol",
+                    t + 30_000,
+                ),
+                msg("m3", "user", &me, "me", "nice", t + 60_000),
+                msg(
+                    "m4",
+                    "assistant",
+                    "agent:a1",
+                    "helper",
+                    "Added.",
+                    t + 90_000,
+                ),
+            ]);
+            cx.notify();
+        });
+        transcript.update(cx, |t, cx| t.sync(cx));
+        for width in [520.0_f32, 1400.0] {
+            let (_view, vcx) = cx.add_window_view(|_, _| SizedHost {
+                transcript: transcript.clone(),
+                width,
+            });
+            vcx.run_until_parked();
+            let mut bounds = |sel: String| {
+                let sel: &'static str = Box::leak(sel.into_boxed_str());
+                vcx.debug_bounds(sel)
+                    .unwrap_or_else(|| panic!("{width} pt: {sel} drawn"))
+            };
+            let column = bounds("chat-column".into());
+            assert!(
+                f32::from(column.size.width) <= width,
+                "{width} pt: the column follows the window"
+            );
+            let bubbles = [
+                ("m1", bounds("person-bubble#m1#user".into()), false),
+                ("m2", bounds("person-bubble#m2#user".into()), false),
+                ("m3", bounds("own-bubble#m3#user".into()), true),
+                ("m4", bounds("chat-bubble-assistant".into()), false),
+            ];
+            for (id, bubble, mine) in bubbles {
+                let chips = bounds(format!("reactions#{id}"));
+                let below = f32::from(chips.origin.y - (bubble.origin.y + bubble.size.height));
+                assert!(
+                    (0.0..=8.0).contains(&below),
+                    "{width} pt {id}: chips start {below} pt below their bubble"
+                );
+                if mine {
+                    let right = |b: Bounds<Pixels>| f32::from(b.origin.x + b.size.width);
+                    assert!(
+                        (right(chips) - right(bubble)).abs() < 0.5,
+                        "{width} pt {id}: my chips end at {} but my bubble at {}",
+                        right(chips),
+                        right(bubble)
+                    );
+                } else {
+                    assert!(
+                        (f32::from(chips.origin.x) - f32::from(bubble.origin.x)).abs() < 0.5,
+                        "{width} pt {id}: chips start at x {:?} but the bubble at x {:?}",
+                        chips.origin.x,
+                        bubble.origin.x
+                    );
+                }
+            }
         }
     }
 
