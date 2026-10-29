@@ -145,32 +145,77 @@ enum MessagePasteboard {
     // MARK: - Reading back (the composer's paste)
 
     /// Does the general pasteboard hold a picture or a file the composer can stage?
+    /// Declared types only: this runs from `canPerformAction` when the edit menu opens, and
+    /// reading another app's bytes there puts up iOS's "Allow Paste" prompt and blocks the app.
     static func hasMedia(_ pb: UIPasteboard = .general) -> Bool {
-        !pendingAttachments(from: pb).isEmpty
+        picks(pb.types(forItemSet: nil) ?? []).contains { $0 != .nothing }
     }
 
-    /// Every pasteboard item that is a picture or a file, as composer attachments in
-    /// pasteboard order: the first declared image type we know (the native one — a GIF
-    /// comes back as a GIF, not its PNG twin), else the item's first file-like type.
-    /// Items that are only text are skipped.
+    /// The flavors a text copy carries next to its plain words (Notes, Safari, Mail, Pages,
+    /// Word, UIKit's archived attributed string). Some of them resolve to a data type with no
+    /// file extension, which is how a copied sentence used to stage as "Pasted file ….bin".
+    static let richTextTypes: Set<String> = [
+        "public.rtf", "public.html", "com.apple.rtfd", "com.apple.flat-rtfd",
+        "com.apple.webarchive", "com.apple.uikit.attributedstring",
+        "com.apple.WebKit.custom-pasteboard-data", "iOS rich content paste pasteboard type",
+        "com.apple.notes.richtext", "com.apple.mail.richtext",
+    ]
+
+    static func isPlainText(_ type: String) -> Bool {
+        type == text || UTType(type)?.conforms(to: .plainText) == true
+    }
+
+    /// What the composer's paste stages from one pasteboard item.
+    enum Pick: Equatable {
+        case image(String)
+        case file(String)
+        case nothing
+    }
+
+    /// The composer's paste rule, on the declared types alone (per item, in order):
+    /// - a pasteboard with words is a text paste — no file data is staged from it;
+    /// - words plus a rich-text flavor is a rich-text copy — a picture on it is a rendering
+    ///   of the words (Word, Pages, Numbers), not a picture to send;
+    /// - a picture next to plain words and nothing richer stays a picture (a copied Arbos
+    ///   message: picture + caption), under its native type before any twin;
+    /// - file data (a PDF from Files, …) stages only when no words are on the pasteboard.
+    static func picks(_ perItem: [[String]]) -> [Pick] {
+        let all = perItem.joined()
+        let hasText = all.contains(where: isPlainText)
+        let richCopy = hasText && all.contains { richTextTypes.contains($0) }
+        return perItem.map { types in
+            if !richCopy, let native = readPreference.first(where: { types.contains($0) }) {
+                return .image(native)
+            }
+            guard !hasText else { return .nothing }
+            let file = types.lazy
+                .filter { !richTextTypes.contains($0) }
+                .compactMap { UTType($0) }
+                .first { t in t.conforms(to: .data) && !t.conforms(to: .text) && !t.conforms(to: .url) && t != .data }
+            return file.map { .file($0.identifier) } ?? .nothing
+        }
+    }
+
+    /// Every pasteboard item `picks(_:)` stages, as composer attachments in pasteboard order.
     static func pendingAttachments(from pb: UIPasteboard = .general) -> [AppModel.PendingAttachment] {
         var out: [AppModel.PendingAttachment] = []
         let stamp = Self.stamp.string(from: Date())
         let perItem: [[String]] = pb.types(forItemSet: nil) ?? []
-        for (ix, itemTypes) in perItem.enumerated() {
-            if let native = readPreference.first(where: { itemTypes.contains($0) }),
-               let data = pb.data(forPasteboardType: native, inItemSet: IndexSet(integer: ix))?.first, !data.isEmpty {
+        for (ix, pick) in picks(perItem).enumerated() {
+            switch pick {
+            case let .image(native):
+                guard let data = pb.data(forPasteboardType: native, inItemSet: IndexSet(integer: ix))?.first, !data.isEmpty else { continue }
                 let ext = UTType(native)?.preferredFilenameExtension ?? "png"
                 let mime = UTType(native)?.preferredMIMEType ?? "image/\(ext)"
                 let n = out.count + 1
                 out.append(.init(name: "Pasted image \(stamp)\(n > 1 ? " (\(n))" : "").\(ext)", mime: mime, data: data))
+            case let .file(type):
+                guard let data = pb.data(forPasteboardType: type, inItemSet: IndexSet(integer: ix))?.first, !data.isEmpty else { continue }
+                let fileType = UTType(type)
+                let ext = fileType?.preferredFilenameExtension ?? "bin"
+                out.append(.init(name: "Pasted file \(stamp).\(ext)", mime: fileType?.preferredMIMEType ?? "application/octet-stream", data: data))
+            case .nothing:
                 continue
-            }
-            if let fileType = itemTypes.compactMap({ UTType($0) }).first(where: { t in
-                t.conforms(to: .data) && !t.conforms(to: .text) && !t.conforms(to: .url) && t != .data
-            }), let data = pb.data(forPasteboardType: fileType.identifier, inItemSet: IndexSet(integer: ix))?.first, !data.isEmpty {
-                let ext = fileType.preferredFilenameExtension ?? "bin"
-                out.append(.init(name: "Pasted file \(stamp).\(ext)", mime: fileType.preferredMIMEType ?? "application/octet-stream", data: data))
             }
         }
         return out

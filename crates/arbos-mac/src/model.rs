@@ -91,6 +91,12 @@ pub struct Project {
     /// People chats: my `me.muted` on the relay (synced across devices).
     #[serde(default)]
     pub muted: bool,
+    /// People group: an admin muted me from posting (`me.silenced`).
+    #[serde(default)]
+    pub silenced: bool,
+    /// When my admin mute ends (ms). `None` while silenced = until unmuted.
+    #[serde(default)]
+    pub silenced_until: Option<i64>,
     /// Sidebar archive (2026-10-23): hidden from the list for me, on every
     /// device (the relay's per-user flag); the agent keeps running.
     #[serde(default)]
@@ -414,6 +420,14 @@ impl Project {
     /// Is this agent (by its project id) already in the space?
     pub fn has_agent(&self, project_id: &str) -> bool {
         self.agents.iter().any(|a| a.project_id == project_id)
+    }
+
+    /// True while an admin mute still blocks posting (honours timed `silenced_until`).
+    pub fn is_silenced_now(&self, now_ms: i64) -> bool {
+        if !self.silenced {
+            return false;
+        }
+        !matches!(self.silenced_until, Some(until) if until <= now_ms)
     }
 }
 

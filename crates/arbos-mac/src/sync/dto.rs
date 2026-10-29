@@ -694,6 +694,8 @@ pub(crate) fn project_from_dto(
         machine_info: Some(machine_from_dto(&p.machine)),
         outside: None,
         muted: false,
+        silenced: false,
+        silenced_until: None,
         primary_chat: p.primary_chat_id.as_deref().and_then(non_empty),
         voice: p.voice.as_deref().and_then(non_empty),
         vision_enabled: p.vision_enabled,
@@ -1014,6 +1016,8 @@ pub(crate) fn people_space_from(
         machine_info: None,
         outside: None,
         muted: dto.me.muted.unwrap_or(false),
+        silenced: dto.me.silenced.unwrap_or(false),
+        silenced_until: dto.me.silenced_until.filter(|&t| t > 0),
         archived_at: None,
         primary_chat: None,
         voice: None,
@@ -1465,6 +1469,8 @@ mod tests {
         assert_eq!(space.name, "user102");
         assert_eq!(space.people.len(), 1);
         assert!(space.agents.is_empty());
+        assert!(!space.silenced);
+        assert!(space.silenced_until.is_none());
 
         let without_me: PeopleChatDto = load_json("people_chat_json_without_me.json");
         let (space, _) = people_space_from(&without_me, "", "", "http://relay", "tok");
@@ -1478,6 +1484,18 @@ mod tests {
         let (space, _) = people_space_from(&with_agent, "gh_101", "user101", "http://relay", "tok");
         assert_eq!(space.agents.len(), 1);
         assert_eq!(space.agents[0].name, "Fixture");
+    }
+
+    #[test]
+    fn people_space_from_copies_me_silenced_until() {
+        let mut dto: PeopleChatDto = load_json("people_chat_json_with_me.json");
+        dto.me.silenced = Some(true);
+        dto.me.silenced_until = Some(1_793_200_000_000);
+        let (space, _) = people_space_from(&dto, "gh_101", "user101", "http://relay", "tok");
+        assert!(space.silenced);
+        assert_eq!(space.silenced_until, Some(1_793_200_000_000));
+        assert!(space.is_silenced_now(1_793_100_000_000));
+        assert!(!space.is_silenced_now(1_793_200_000_001));
     }
 
     #[test]

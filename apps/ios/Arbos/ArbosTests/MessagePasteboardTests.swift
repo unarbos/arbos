@@ -188,4 +188,92 @@ final class MessagePasteboardTests: XCTestCase {
         XCTAssertFalse(MessagePasteboard.hasMedia())
         XCTAssertTrue(MessagePasteboard.pendingAttachments().isEmpty)
     }
+
+    // MARK: Rich-text paste ([feedback paste-rich-text-ios-2026-10-28])
+
+    private let sentence = "It’s better than fantastic tbh"
+
+    private func rtf(_ s: String) throws -> Data {
+        let attributed = NSAttributedString(string: s, attributes: [.font: UIFont.boldSystemFont(ofSize: 17)])
+        return try attributed.data(from: NSRange(location: 0, length: attributed.length),
+                                   documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf])
+    }
+
+    func testRtfNextToPlainTextPastesTheWordsOnly() throws {
+        UIPasteboard.general.setItems([[MessagePasteboard.text: sentence, "public.rtf": try rtf(sentence)]], options: [:])
+        XCTAssertFalse(MessagePasteboard.hasMedia(), "no Paste-for-media, the field's own Paste handles the words")
+        XCTAssertTrue(MessagePasteboard.pendingAttachments().isEmpty)
+        XCTAssertEqual(UIPasteboard.general.string, sentence)
+    }
+
+    func testHtmlNextToPlainTextPastesTheWordsOnly() {
+        let html = Data("<meta charset=\"utf-8\"><b>\(sentence)</b>".utf8)
+        UIPasteboard.general.setItems([[MessagePasteboard.text: sentence, "public.html": html]], options: [:])
+        XCTAssertFalse(MessagePasteboard.hasMedia())
+        XCTAssertTrue(MessagePasteboard.pendingAttachments().isEmpty)
+        XCTAssertEqual(UIPasteboard.general.string, sentence)
+    }
+
+    func testAUIKitTextCopyStagesNoFile() throws {
+        // What a styled text view puts on the pasteboard on Copy: the words plus archived
+        // attributed-string / flat-RTFD flavors (the latter staged as "Pasted file ….bin").
+        let attributed = NSAttributedString(string: sentence, attributes: [.font: UIFont.italicSystemFont(ofSize: 17)])
+        let archive = try NSKeyedArchiver.archivedData(withRootObject: attributed, requiringSecureCoding: false)
+        let rtfd = try attributed.data(from: NSRange(location: 0, length: attributed.length),
+                                       documentAttributes: [.documentType: NSAttributedString.DocumentType.rtfd])
+        UIPasteboard.general.setItems([[
+            "com.apple.uikit.attributedstring": archive,
+            "com.apple.flat-rtfd": rtfd,
+            "public.rtf": try rtf(sentence),
+            MessagePasteboard.text: sentence,
+        ]], options: [:])
+        XCTAssertTrue(MessagePasteboard.pendingAttachments().isEmpty)
+        XCTAssertFalse(MessagePasteboard.hasMedia())
+    }
+
+    func testAPictureRenderedNextToRichTextIsNotStaged() throws {
+        // Word / Pages / Numbers put a picture of the selection next to the words.
+        UIPasteboard.general.setItems([[
+            MessagePasteboard.text: sentence,
+            "public.rtf": try rtf(sentence),
+            MessagePasteboard.png: png(40, 10),
+        ]], options: [:])
+        XCTAssertTrue(MessagePasteboard.pendingAttachments().isEmpty)
+    }
+
+    func testAnImagePasteStillAttaches() {
+        let shot = png(5, 5)
+        UIPasteboard.general.setItems([[MessagePasteboard.png: shot]], options: [:])
+        XCTAssertTrue(MessagePasteboard.hasMedia())
+        let staged = MessagePasteboard.pendingAttachments()
+        XCTAssertEqual(staged.map(\.mime), ["image/png"])
+        XCTAssertEqual(staged.first?.data, shot)
+        XCTAssertTrue(staged.first?.name.hasPrefix("Pasted image ") == true)
+    }
+
+    func testAFileStagesOnlyWithoutWords() {
+        let pdf = Data("%PDF-1.4\n%%EOF\n".utf8)
+        UIPasteboard.general.setItems([["com.adobe.pdf": pdf]], options: [:])
+        XCTAssertTrue(MessagePasteboard.hasMedia())
+        XCTAssertEqual(MessagePasteboard.pendingAttachments().map(\.mime), ["application/pdf"])
+        UIPasteboard.general.setItems([["com.adobe.pdf": pdf, MessagePasteboard.text: "notes.pdf"]], options: [:])
+        XCTAssertFalse(MessagePasteboard.hasMedia())
+        XCTAssertTrue(MessagePasteboard.pendingAttachments().isEmpty)
+    }
+
+    func testPicksOnDeclaredTypes() {
+        let text = MessagePasteboard.text
+        XCTAssertEqual(MessagePasteboard.picks([[text, "public.rtf"]]), [.nothing])
+        XCTAssertEqual(MessagePasteboard.picks([[text, "public.html"]]), [.nothing])
+        XCTAssertEqual(MessagePasteboard.picks([["com.apple.uikit.attributedstring", text]]), [.nothing])
+        XCTAssertEqual(MessagePasteboard.picks([["com.apple.flat-rtfd"]]), [.nothing], "a rich-text flavor is never a file")
+        XCTAssertEqual(MessagePasteboard.picks([[MessagePasteboard.png]]), [.image(MessagePasteboard.png)])
+        XCTAssertEqual(MessagePasteboard.picks([[MessagePasteboard.png, MessagePasteboard.gif]]), [.image(MessagePasteboard.gif)])
+        XCTAssertEqual(MessagePasteboard.picks([[MessagePasteboard.png, text], [MessagePasteboard.jpeg]]),
+                       [.image(MessagePasteboard.png), .image(MessagePasteboard.jpeg)],
+                       "a copied message's pictures + caption still stage")
+        XCTAssertEqual(MessagePasteboard.picks([[text, "public.rtf", MessagePasteboard.tiff]]), [.nothing])
+        XCTAssertEqual(MessagePasteboard.picks([["com.adobe.pdf"]]), [.file("com.adobe.pdf")])
+        XCTAssertEqual(MessagePasteboard.picks([["com.adobe.pdf"], [text]]), [.nothing, .nothing])
+    }
 }

@@ -200,3 +200,45 @@ final class MentionDraftTests: XCTestCase {
         XCTAssertEqual(c.attributedOffset(forPlain: 5, mentions: mentions), 4, "inside the chip snaps after it")
     }
 }
+
+/// The empty composer's "Message …" name ([feedback group-composer-placeholder-ios-2026-10-28]):
+/// a group says the chat's name, a DM says the other person's.
+final class ComposerPlaceholderTests: XCTestCase {
+    private func human(_ id: String, _ handle: String, _ name: String? = nil) -> ChatMember {
+        ChatMember(id: id, kind: .user, member: "user:\(id)", role: "member", handle: handle, avatarUrl: nil,
+                   name: name, status: "member", joinedAt: 0, project: nil, ownerId: nil, ownerHandle: nil, replyPolicy: nil)
+    }
+
+    private func agent(_ id: String, _ name: String) -> ChatMember {
+        let p = Project(id: id, name: name, icon: "A", color: "#000000", state: .awake, stateSince: nil, stateDetail: nil,
+                        model: "", effort: .low, spendTodayUsd: 0, spendCapUsd: 0)
+        return ChatMember(id: id, kind: .agent, member: "agent:\(id)", role: "member", handle: mentionSlug(name), avatarUrl: nil,
+                          name: name, status: "member", joinedAt: 0, project: p, ownerId: nil, ownerHandle: nil, replyPolicy: nil)
+    }
+
+    private func chat(_ kind: String, _ title: String, _ members: [ChatMember]) -> PeopleChat {
+        PeopleChat(id: "chat_\(title)", kind: kind, createdBy: "gh_jacob", createdAt: 0, title: title, pending: false,
+                   members: members, headSeq: 0, readSeq: 0, unread: false, lockState: "people_only", lastActivityAt: 0,
+                   myRole: "member", muted: false, silenced: false)
+    }
+
+    private var me: ChatMember { human("gh_terry", "terry", "Terry") }
+    private var jacob: ChatMember { human("gh_jacob", "unarbos", "Jacob") }
+    private var sam: ChatMember { human("gh_sam", "sam", "Sam Okafor") }
+
+    func testAGroupIsNamedByItsTitleNeverByAMember() {
+        let arbonites = chat("group", "Arbonites", [jacob, me, sam, agent("p_comms", "Comms")])
+        XCTAssertEqual(arbonites.composerName(me: me.id), "Arbonites")
+        XCTAssertEqual(arbonites.composerName(me: jacob.id), "Arbonites", "the owner sees the same name")
+        XCTAssertEqual(chat("group", "Pair", [jacob, me]).composerName(me: me.id), "Pair", "two people, still a group")
+        XCTAssertEqual(chat("group", "Solo", [me]).composerName(me: me.id), "Solo")
+    }
+
+    func testADMIsNamedByTheOtherPerson() {
+        XCTAssertEqual(chat("dm", "Chat", [me, sam]).composerName(me: me.id), "Sam Okafor")
+        XCTAssertEqual(chat("dm", "Chat", [sam, me]).composerName(me: me.id), "Sam Okafor", "member order does not matter")
+        XCTAssertEqual(chat("dm", "Chat", [me, human("gh_k", "kenobi")]).composerName(me: me.id), "kenobi", "no display name: the handle")
+        XCTAssertEqual(chat("dm", "Chat", [me, sam, agent("p_comms", "Comms")]).composerName(me: me.id), "Sam Okafor",
+                       "a DM that gained an agent keeps the person, like the header")
+    }
+}

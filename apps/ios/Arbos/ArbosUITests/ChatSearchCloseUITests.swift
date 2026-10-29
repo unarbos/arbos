@@ -7,6 +7,8 @@ import XCTest
 final class ChatSearchCloseUITests: XCTestCase {
     private let appear: TimeInterval = 90
     private let settle: TimeInterval = 15
+    /// The fixture's newest "Launch week" row (`Fixture.swift`, g9).
+    private static let newestRow = "1,284 signups"
 
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -75,8 +77,10 @@ final class ChatSearchCloseUITests: XCTestCase {
         let field = app.textFields["chat-search-field"]
         field.tap()
         shot(app, "3-bar-open")
-        // A message bubble in the messages area (not empty chrome): the newest row.
-        let row = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "landing page")).firstMatch
+        // A message bubble in the messages area (not empty chrome): the newest row, Comms's
+        // "Slide 4 now reads 1,284 signups…" (fixture g9; the rows above may sit outside the
+        // lazy stack or under the keyboard).
+        let row = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", Self.newestRow)).firstMatch
         XCTAssertTrue(row.waitForExistence(timeout: settle), "a message row is on screen")
         row.tap()
         barGone(app, "tap on the transcript")
@@ -116,7 +120,7 @@ final class ChatSearchCloseUITests: XCTestCase {
         shot(app, "8-after-x-from-no-matches")
         XCTAssertFalse(app.descendants(matching: .any)["chat-search-no-matches"].exists, "the no-matches line went with the bar")
         // The newest row (the close re-pins the tail; older rows may sit outside the lazy stack).
-        let newest = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "landing page")).firstMatch
+        let newest = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", Self.newestRow)).firstMatch
         XCTAssertTrue(newest.waitForExistence(timeout: settle), "the messages are back")
     }
 }

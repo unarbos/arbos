@@ -697,8 +697,12 @@ struct PushRefusalWhy: Equatable {
     var byHandle: String?
     var byName: String?
 
-    /// The plain sentence the chat shows.
-    var sentence: String { BlockedState.refusalSentence(reason: reason, name: byName, handle: byHandle) }
+    /// The plain sentence the chat shows. Pass `silencedUntilMs` when `reason` is `silenced`.
+    func sentence(silencedUntilMs: Int64? = nil) -> String {
+        BlockedState.refusalSentence(
+            reason: reason, name: byName, handle: byHandle, silencedUntilMs: silencedUntilMs
+        )
+    }
 }
 
 /// Which pushes nudge a refused room to resend ([feedback 2005]): the ones that change who may
