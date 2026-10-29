@@ -739,6 +739,12 @@ pub enum ClientCommand {
         chat_id: Id,
         user_id: String,
     },
+    /// `PUT /chats/{id}/members/{user_id} {"role": "admin" | "member"}` (group owner).
+    SetMemberRole {
+        chat_id: Id,
+        user_id: String,
+        role: String,
+    },
     /// `POST /chats/{id}/leave`.
     LeaveChat {
         chat_id: Id,

@@ -10393,6 +10393,32 @@ impl AppState {
         cx.notify();
     }
 
+    /// Group owner: make a member an admin, or an admin a member again. The pane shows
+    /// the new role at once; the relay's list confirms it.
+    pub fn set_people_member_role(
+        &mut self,
+        chat_id: Id,
+        user_id: String,
+        role: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(m) = self
+            .projects
+            .iter_mut()
+            .find(|p| p.id == chat_id)
+            .and_then(|p| p.people.iter_mut().find(|m| m.id == user_id))
+            .filter(|m| m.role != "owner")
+        {
+            m.role = role.to_owned();
+        }
+        self.command(ClientCommand::SetMemberRole {
+            chat_id,
+            user_id,
+            role: role.to_owned(),
+        });
+        cx.notify();
+    }
+
     pub fn leave_chat(&mut self, chat_id: Id, cx: &mut Context<Self>) {
         if self.selected_project.as_deref() == Some(chat_id.as_str()) {
             self.selected_project = None;
