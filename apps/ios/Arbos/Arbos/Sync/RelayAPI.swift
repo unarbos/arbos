@@ -152,6 +152,65 @@ final class RelayAPI {
         return (data, http)
     }
 
+    // MARK: Emoji · stickers · GIFs picker (ARB-544)
+
+    /// `GET /gif/search?q=` (or `/gif/trending` for an empty query): the relay's page, or why
+    /// there is none. The relay talks to KLIPY; this app never holds the key.
+    func gifSearch(query: String, pos: String?) async -> GifPage {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        var path: String
+        if q.isEmpty {
+            path = "/gif/trending"
+            if let pos, !pos.isEmpty, let enc = pos.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+                path += "?pos=\(enc)"
+            }
+        } else {
+            guard let enc = q.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return .failed }
+            path = "/gif/search?q=\(enc)"
+            if let pos, !pos.isEmpty, let penc = pos.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+                path += "&pos=\(penc)"
+            }
+        }
+        do {
+            let (data, _) = try await request("GET", path)
+            let page = try JSONDecoder().decode(GifPageDto.self, from: data)
+            return .items(page.items, next: page.next)
+        } catch let error as RelayError {
+            if error.type == "gif_unavailable" || error.status == 503 { return .unavailable }
+            if error.type == "gif_busy" || error.status == 429 { return .busy }
+            return .failed
+        } catch {
+            return .failed
+        }
+    }
+
+    /// `POST /gif/share?id=&q=` — the provider's ranking signal; never an error for the app.
+    func gifShare(id: String, query: String) async {
+        guard let i = id.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let q = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return }
+        _ = try? await request("POST", "/gif/share?id=\(i)&q=\(q)")
+    }
+
+    /// `GET /stickers/packs` — the relay's sticker-pack manifest; `nil` when it could not be read.
+    func stickerPacks() async -> [StickerPack]? {
+        guard let (data, _) = try? await request("GET", "/stickers/packs"),
+              let m = try? JSONDecoder().decode(StickerPacksDto.self, from: data) else { return nil }
+        return m.packs
+    }
+
+    /// `GET /stickers/{pack}/{id}` — one sticker's bytes (the relay caches them; MIT / CC BY).
+    func stickerData(path: String) async -> Data? {
+        guard let (data, http) = try? await request("GET", path), http.statusCode == 200, !data.isEmpty else { return nil }
+        return data
+    }
+
+    /// The relay's GIF pass-through for a provider media URL (`GET /gif/media?u=`); the caller
+    /// adds the device bearer. `nil` when the URL cannot be encoded.
+    func gifMediaURL(_ remote: String) -> URL? {
+        guard let enc = remote.addingPercentEncoding(withAllowedCharacters: .alphanumerics) else { return nil }
+        return URL(string: "\(endpoint.httpUrl)/gif/media?u=\(enc)")
+    }
+
     /// `GET /link-icon?domain=` — the site's 64×64 PNG for the bubbles' named links, `nil` when the
     /// site has none (204) or the call failed (nobody asked; the bubble keeps its placeholder).
     func linkIcon(host: String) async -> Data? {

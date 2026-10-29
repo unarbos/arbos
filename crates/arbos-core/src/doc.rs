@@ -465,14 +465,21 @@ pub struct AttachmentSource {
 }
 
 /// One attachment part on a client user message (`name` / `mime` / optional `kind` / `ref`
-/// / optional `source`).
-#[derive(Debug, Clone)]
+/// / optional `url` / optional `source`).
+///
+/// `kind` is a free string the clients agree on: `image`, `audio`, `video`, `file`,
+/// and `sticker` (a picker sticker: drawn at a fixed size with no bubble).
+#[derive(Debug, Clone, Default)]
 pub struct UserAttachment {
     pub name: String,
     pub mime: String,
     pub kind: Option<String>,
     pub blob_ref: Option<String>,
-    /// Attribution for a GIF picker result; omitted when absent.
+    /// A picture that lives with its provider, not in the chat slot (a GIF picked from
+    /// KLIPY: the provider's terms allow no stored copy). Clients load it through the
+    /// relay's pass-through (`GET /gif/media?u=`). Never set together with `blob_ref`.
+    pub url: Option<String>,
+    /// Attribution for a GIF / sticker picker result; omitted when absent.
     pub source: Option<AttachmentSource>,
 }
 
@@ -860,6 +867,9 @@ impl ChatDoc {
             }
             if let Some(r) = att.blob_ref.as_deref() {
                 loro_err(a.insert("ref", r))?;
+            }
+            if let Some(u) = att.url.as_deref() {
+                loro_err(a.insert("url", u))?;
             }
             if let Some(src) = &att.source {
                 let s = loro_err(a.insert_container("source", LoroMap::new()))?;
@@ -2578,6 +2588,7 @@ mod tests {
                         mime: "image/png".into(),
                         kind: Some("image".into()),
                         blob_ref: Some("blob-1".into()),
+                        url: None,
                         source: None,
                     }],
                     ..UserMessageOpts::default()
@@ -3070,6 +3081,7 @@ mod tests {
                         mime: "image/gif".into(),
                         kind: Some("image".into()),
                         blob_ref: Some("blob-gif".into()),
+                        url: None,
                         source: Some(AttachmentSource {
                             provider: "giphy".into(),
                             id: "abc".into(),
@@ -3098,6 +3110,7 @@ mod tests {
                         mime: "image/png".into(),
                         kind: Some("image".into()),
                         blob_ref: Some("blob-png".into()),
+                        url: None,
                         source: None,
                     }],
                     ..UserMessageOpts::default()

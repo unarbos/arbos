@@ -86,6 +86,19 @@ impl Agent {
                 .unwrap_or("application/octet-stream")
                 .to_owned();
             let Some(blob_ref) = a.get("ref").and_then(Value::as_str) else {
+                // A picked GIF (ARB-544) lives with its provider: the row carries a `url` and
+                // attribution, never a relay copy. Tell the model what it is — it is not a
+                // failed upload, and nobody should be asked to send it again.
+                if a.get("url").and_then(Value::as_str).is_some() {
+                    let provider = a
+                        .pointer("/source/provider")
+                        .and_then(Value::as_str)
+                        .unwrap_or("a GIF provider");
+                    out.notes.push(format!(
+                        "[The user sent a GIF (\"{name}\", via {provider}).]"
+                    ));
+                    continue;
+                }
                 out.notes.push(format!(
                     "[Attachment \"{name}\" ({mime}) was not uploaded by the client; ask the user to send it again.]"
                 ));

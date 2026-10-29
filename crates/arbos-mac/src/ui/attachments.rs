@@ -40,6 +40,8 @@ const DOC_W: f32 = 20.0;
 const DOC_H: f32 = 27.0;
 /// The hover ↓ disc.
 const DISC: f32 = 28.0;
+/// A picker sticker's square (ARB-544): no bubble, no hairline, fixed size.
+pub const STICKER_SIZE: f32 = 128.0;
 
 /// The doc glyph's colour by kind: Grok's Docs yellow for documents, PDF red,
 /// Sheets green, Slides orange; media and the rest stay neutral.
@@ -58,6 +60,7 @@ pub fn kind_color(kind: AttachmentKind, theme: &Theme) -> Hsla {
         AttachmentKind::Image
         | AttachmentKind::Video
         | AttachmentKind::Audio
+        | AttachmentKind::Sticker
         | AttachmentKind::File => theme.text_muted,
     }
 }
@@ -127,6 +130,9 @@ pub fn card(
     state: Entity<AppState>,
     theme: &Theme,
 ) -> AnyElement {
+    if attachment.is_sticker() {
+        return sticker_tile(row_id, preview, open, theme);
+    }
     if attachment.kind() == AttachmentKind::Image {
         picture_bubble(
             row_id,
@@ -149,6 +155,38 @@ pub fn card(
             theme,
         )
     }
+}
+
+/// A sticker (ARB-544): the picture alone on the chat background at a fixed square —
+/// no bubble, no hairline, no caption — like Telegram / iMessage stickers. Click opens the
+/// viewer like any picture. Both apps draw this the same (iPhone 160 pt, Mac 128 pt).
+fn sticker_tile(row_id: &str, preview: Preview, open: Option<OpenFn>, theme: &Theme) -> AnyElement {
+    let mut tile = div()
+        .id(SharedString::from(row_id.to_owned()))
+        .w(px(STICKER_SIZE))
+        .h(px(STICKER_SIZE))
+        .flex()
+        .items_center()
+        .justify_center();
+    tile = match preview {
+        Preview::Ready(image) => tile.child(
+            img(image)
+                .w(px(STICKER_SIZE))
+                .h(px(STICKER_SIZE))
+                .object_fit(ObjectFit::Contain),
+        ),
+        Preview::Loading => tile.child(
+            div()
+                .size(px(STICKER_SIZE * 0.6))
+                .rounded(px(BUBBLE_RADIUS))
+                .bg(theme.surface_2),
+        ),
+        Preview::Unavailable => tile.child(sf_symbols::glyph("photo", 22.0, theme.text_faint)),
+    };
+    if let Some(open) = open {
+        tile = tile.cursor_pointer().on_click(move |_, _, cx| open(cx));
+    }
+    tile.into_any_element()
 }
 
 /// A picture: aspect-fit at its own ratio, bubble radius, slim outline. Hover

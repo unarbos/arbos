@@ -1706,6 +1706,23 @@ struct RowView: View, Equatable {
                     .frame(maxWidth: maxBubble, alignment: fromUser ? .trailing : .leading)
                 if !fromUser { Spacer(minLength: 0) }
             }
+        case .image(let item, let fromUser, _, let lane, _, _, let sender, let named, _) where item.sticker:
+            // A picker sticker (ARB-544): the picture alone, fixed square, no bubble — like
+            // Telegram / iMessage stickers; same lane rules as a picture.
+            if let sender {
+                mediaRow(sender: sender, named: named) {
+                    StickerBubble(item: item, chatId: chatId)
+                        .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: false) }
+                }
+            } else {
+                HStack(spacing: 0) {
+                    if fromUser { Spacer(minLength: 0) }
+                    if lane { Color.clear.frame(width: Theme.memberLane(composerInset: composerInset), height: 1) }
+                    StickerBubble(item: item, chatId: chatId)
+                        .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: fromUser) }
+                    if !fromUser { Spacer(minLength: 0) }
+                }
+            }
         case .image(let item, let fromUser, let caption, let lane, let source, let forwardedFrom, let sender, let named, let quote):
             // Same left edge and cap as an incoming bubble: after the avatar lane in a
             // people chat ([feedback ADUIX9xlGQxCSzeXke7JVBw], Mac Attachment.lane) — with
@@ -2970,7 +2987,7 @@ struct ImageBubble: View {
         }
         // Not decoded yet (a lazily re-realised row, or the bitmap evicted): the remembered
         // natural size keeps the row's height steady while the picture comes back.
-        if let ref = item.blobRef, let known = ChatImageCache.naturalSize(for: ref), known.width > 0, known.height > 0 {
+        if let ref = item.cacheKey, let known = ChatImageCache.naturalSize(for: ref), known.width > 0, known.height > 0 {
             return Self.fit(known, maxWidth: bubbleWidth)
         }
         return Self.placeholder
@@ -3041,7 +3058,7 @@ struct ImageBubble: View {
         .background(fill)
         .clipShape(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous))
         .accessibilityIdentifier("photo-bubble")
-        .task(id: item.blobRef) { await load() }
+        .task(id: item.cacheKey) { await load() }
         .onAppear { animate = stillFrame != nil }
         .onDisappear { animate = false }
         .fullScreenCover(item: $viewer) { v in
@@ -3064,7 +3081,7 @@ struct ImageBubble: View {
                     Image(uiImage: shown)
                         .resizable()
                         .scaledToFit()
-                } else if failed || item.blobRef == nil {
+                } else if failed || item.cacheKey == nil {
                     Image(systemName: "photo")
                         .font(theme.font(28))
                         .foregroundStyle(fromUser ? theme.userText.opacity(0.7) : theme.muted)
@@ -3090,7 +3107,7 @@ struct ImageBubble: View {
     private func load() async {
         // Decoded before (this row realised again, or the same picture elsewhere): no bytes,
         // no decode, no placeholder flash.
-        if let ref = item.blobRef, let hit = ChatImageCache.decoded(for: ref) {
+        if let ref = item.cacheKey, let hit = ChatImageCache.decoded(for: ref) {
             show(hit)
             return
         }
@@ -3105,7 +3122,7 @@ struct ImageBubble: View {
             failed = true
             return
         }
-        if let ref = item.blobRef { ChatImageCache.store(decoded, for: ref) }
+        if let ref = item.cacheKey { ChatImageCache.store(decoded, for: ref) }
         show(decoded)
     }
 
