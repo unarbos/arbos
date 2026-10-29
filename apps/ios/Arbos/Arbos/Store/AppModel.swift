@@ -427,6 +427,7 @@ final class AppModel: ObservableObject {
     /// Navigation: home → chat. Shared so menus anywhere can open a chat.
     @Published var path: [Route] = [] {
         didSet {
+            dropDraftDMIfLeft()
             // The open chat is loaded first next launch and evicted last.
             if case .chat(let chatId, let pid)? = path.last, pid != channelSlot, let store {
                 store.touchDoc(chatId)
@@ -1273,7 +1274,7 @@ final class AppModel: ObservableObject {
 
     /// Opening a chat: is a call on there? (GET /chats/{id}/call)
     func refreshActiveCall(chatId: Id, projectId: Id?) async {
-        guard credentials != nil, !isFixture else { return }
+        guard credentials != nil, !isFixture, !Self.isDraftDM(chatId) else { return }
         if let c = try? await api.activeCall(chatId: chatId, projectId: projectId) {
             CallManager.shared.noteActive(c, chatId: chatId)
         } else {
@@ -3023,7 +3024,9 @@ final class AppModel: ObservableObject {
 
     var myUserId: String? { user.map { "user:\($0.id)" } }
 
-    func peopleChat(_ id: String) -> PeopleChat? { peopleChats.first { $0.id == id } }
+    func peopleChat(_ id: String) -> PeopleChat? {
+        peopleChats.first { $0.id == id } ?? draftDM.flatMap { $0.id == id ? $0 : nil }
+    }
 
     func isPeopleChat(_ id: String) -> Bool { peopleChat(id) != nil }
 
@@ -3362,22 +3365,123 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Open (or create) the DM with a handle and navigate to it.
+    /// Open the DM with a handle and navigate to it. With nobody to open, a draft DM opens
+    /// instead and nothing goes to the relay until the first send (`sendDraftDM`).
     func openDM(handle: String, navigate: Bool = true) async -> PeopleChat? {
+        let handle = handle.trimmingCharacters(in: CharacterSet(charactersIn: "@ "))
+        guard !handle.isEmpty else { return nil }
+        if let dm = peopleChats.first(where: { $0.kind == "dm" && $0.humans.contains { $0.handle == handle && $0.member != myUserId } }) {
+            if navigate { path = [.chat(chatId: dm.id, projectId: peopleSlot)] }
+            return dm
+        }
+        let draft = openDraftDM(handle: handle)
+        if navigate { path = [.chat(chatId: draft.id, projectId: peopleSlot)] }
+        return draft
+    }
+
+    /// `POST /chats/dm`: the relay makes the DM (or answers the one it has) and tells the
+    /// other person. Only the first send of a draft calls it.
+    private func createDM(handle: String) async -> PeopleChat? {
         #if DEBUG
-        if isFixture { return fixtureOpenDM(handle: handle, navigate: navigate) }
+        if isFixture {
+            let dm = fixtureOpenDM(handle: handle, navigate: false)
+            if let dm { fixtureAttachDoc(chatId: dm.id) }
+            return dm
+        }
         #endif
         do {
             let chat = try await api.openDM(handle: handle)
             if !peopleChats.contains(where: { $0.id == chat.id }) { peopleChats.insert(chat, at: 0) }
             ensureRoom(projectId: peopleSlot, key: chat.id, roomChat: chat.id)
-            if navigate { path = [.chat(chatId: chat.id, projectId: peopleSlot)] }
             return chat
         } catch {
             fail((error as? RelayError)?.type == "not_available"
                  ? UserError.refused("open the chat", "You can't message this person.")
                  : UserError.classify("open the chat", error))
             return nil
+        }
+    }
+
+    // MARK: Draft DM ([feedback draft-chat-from-search-ios-2026-10-29])
+
+    /// A DM with someone I have no chat with, not sent to yet. The chat screen draws it like
+    /// an empty DM (`peopleChat` answers for it); the home list never shows it. Leaving the
+    /// screen before a send drops it.
+    @Published private(set) var draftDM: PeopleChat?
+    /// The draft's first send is with the relay: popping the screen no longer drops it.
+    private(set) var draftDMSending = false
+    static let draftDMPrefix = "draft-dm:"
+    static func isDraftDM(_ chatId: Id) -> Bool { chatId.hasPrefix(draftDMPrefix) }
+
+    private func openDraftDM(handle: String) -> PeopleChat {
+        let id = Self.draftDMPrefix + handle
+        if let d = draftDM, d.id == id { return d }
+        dropDraftDM()
+        let now = nowMs()
+        let known = peopleChats.lazy.flatMap(\.humans).first { $0.handle == handle }
+        let listed = directory.first { $0.handle == handle }
+        let peer = ChatMember(id: known?.id ?? listed?.id ?? handle, kind: .user,
+                              member: known?.member ?? "user:\(listed?.id ?? handle)", role: "owner", handle: handle,
+                              avatarUrl: known?.avatarUrl ?? listed?.avatarUrl, name: known?.name ?? listed?.name,
+                              status: "member", joinedAt: now, project: nil, ownerId: nil, ownerHandle: nil, replyPolicy: nil,
+                              avatarColorIndex: known?.avatarColorIndex ?? listed?.avatarColorIndex)
+        var members = [peer]
+        if let me = user {
+            members.append(ChatMember(id: me.id, kind: .user, member: "user:\(me.id)", role: "owner", handle: me.login,
+                                      avatarUrl: me.avatarUrl, name: me.name, status: "member", joinedAt: now, project: nil,
+                                      ownerId: nil, ownerHandle: nil, replyPolicy: nil,
+                                      avatarColorIndex: me.avatarColorIndexEffective))
+        }
+        let draft = PeopleChat(id: id, kind: "dm", createdBy: user?.id ?? "", createdAt: now, title: "@\(handle)", pending: false,
+                               members: members, headSeq: 0, readSeq: 0, unread: false, lockState: "people_only",
+                               lastActivityAt: now, myRole: "owner", muted: false, silenced: false)
+        draftDM = draft
+        messages[id] = []
+        caughtUp.insert(id)
+        return draft
+    }
+
+    /// The draft's screen left before anything was sent: it is gone, with its typed text.
+    func dropDraftDM() {
+        guard let d = draftDM, !draftDMSending else { return }
+        draftDM = nil
+        messages[d.id] = nil
+        caughtUp.remove(d.id)
+        setComposerDraft("", for: d.id)
+    }
+
+    /// `path` moved: a draft that is no longer on the stack is dropped.
+    private func dropDraftDMIfLeft() {
+        guard let d = draftDM else { return }
+        let shown = path.contains { if case .chat(let id, _) = $0 { return id == d.id } else { return false } }
+        if !shown { dropDraftDM() }
+    }
+
+    /// Sends made in the draft while the relay makes the DM, in order.
+    private var draftDMSends: [(Id) -> Void] = []
+
+    /// A send in a draft: the first one makes the DM on the relay, swaps the screen onto it,
+    /// then every send made meanwhile goes out there. The relay refusing keeps the draft and
+    /// says why.
+    private func sendDraftDM(_ draft: PeopleChat, send: @escaping (Id) -> Void) {
+        draftDMSends.append(send)
+        guard !draftDMSending else { return }
+        let handle = String(draft.id.dropFirst(Self.draftDMPrefix.count))
+        draftDMSending = true
+        Task { @MainActor in
+            let dm = await createDM(handle: handle)
+            draftDMSending = false
+            let sends = draftDMSends
+            draftDMSends = []
+            guard let dm else { return }
+            draftDM = nil
+            messages[draft.id] = nil
+            caughtUp.remove(draft.id)
+            setComposerDraft("", for: draft.id)
+            if let i = path.lastIndex(where: { if case .chat(let id, _) = $0 { return id == draft.id } else { return false } }) {
+                path[i] = .chat(chatId: dm.id, projectId: peopleSlot)
+            }
+            for s in sends { s(dm.id) }
         }
     }
 
@@ -3399,6 +3503,14 @@ final class AppModel: ObservableObject {
                     chipMentions: [String] = [], attachments: [PendingAttachment] = [],
                     forwardedFrom: String? = nil, chipTokens: [String: String] = [:],
                     replyRef: ReplyRef? = nil, extraParts: [[String: Any]] = []) {
+        if let draft = draftDM, draft.id == chatId {
+            sendDraftDM(draft) { [weak self] dmId in
+                self?.sendPeople(chatId: dmId, text: text, replyTo: replyTo, address: address, chipMentions: chipMentions,
+                                 attachments: attachments, forwardedFrom: forwardedFrom, chipTokens: chipTokens,
+                                 replyRef: replyRef, extraParts: extraParts)
+            }
+            return
+        }
         guard let doc = docs[chatId], let chat = peopleChat(chatId), let me = user else { return }
         var mentions = AppModel.mentions(in: text, members: chat.members, senderHandle: me.login, chipTokens: chipTokens)
         // Leading bare agent names ("Bob?", "hey Bob …", "Arbos what is your name") count as
@@ -3710,6 +3822,7 @@ final class AppModel: ObservableObject {
     /// Pass `force` to re-PUT the same cursor (e.g. onAppear / foreground) so the
     /// relay clears unread events recorded after the last PUT.
     func markPeopleRead(_ chatId: String, force: Bool = false) {
+        if Self.isDraftDM(chatId) { return }
         let hadRemote = (unreadCounts[chatId] ?? 0) > 0
         let hadLocalFlag = peopleUnread.contains(chatId)
         peopleUnread.remove(chatId)
@@ -5356,6 +5469,10 @@ final class AppModel: ObservableObject {
     func sendMedia(chatId: Id, pick: MediaPick) {
         clearSendError(chatId)
         if JobTabs.isJobChat(chatId) { return }
+        if let draft = draftDM, draft.id == chatId {
+            sendDraftDM(draft) { [weak self] dmId in self?.sendMedia(chatId: dmId, pick: pick) }
+            return
+        }
         let people = peopleChat(chatId) != nil
         switch pick {
         case .gif(let gif):
