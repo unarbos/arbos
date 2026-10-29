@@ -63,6 +63,13 @@ CREATE TABLE IF NOT EXISTS boxes (
   snapshot TEXT, region TEXT, last_started_at INTEGER, last_stopped_at INTEGER, last_seen_at INTEGER,
   box_url TEXT, preview_token TEXT, local_pid INTEGER, migrated_from TEXT NOT NULL DEFAULT '[]'
 );
+-- A box create in flight (#2262): written before the provider is asked for the sandbox, removed
+-- once the row holds the sandbox id or the create failed. A row left here after a restart names
+-- the sandbox that may be running without a row pointing at it.
+CREATE TABLE IF NOT EXISTS box_creates (
+  user_id TEXT PRIMARY KEY, sandbox_name TEXT NOT NULL, provider TEXT NOT NULL, snapshot TEXT,
+  replacing TEXT, started_at INTEGER NOT NULL
+);
 -- Per-user box class: the Daytona snapshot (which fixes vCPU/RAM/disk) a user's box is created
 -- from; NULL = the relay default (ARBOS_DAYTONA_SNAPSHOT). Raise a user's class later by setting
 -- it and recreating the box; no code change needed.
@@ -324,6 +331,18 @@ pub struct Sandbox {
     /// Project ids whose legacy per-project sandbox was copied into this box.
     #[serde(default)]
     pub migrated_from: Vec<String>,
+}
+
+/// One row of `box_creates`: a create that started and has not finished.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BoxCreate {
+    pub user_id: String,
+    pub sandbox_name: String,
+    pub provider: String,
+    pub snapshot: Option<String>,
+    /// The sandbox the user's row named when the create began (an upgrade or repair).
+    pub replacing: Option<String>,
+    pub started_at: i64,
 }
 
 /// A scheduled or event-triggered prompt (design §10 "Routines").
@@ -1368,7 +1387,28 @@ impl Db {
         })
     }
 
+    /// Write the user's box row. A row that names a sandbox is never overwritten by one that does
+    /// not (#2262: a sandbox-less row over a live box hid it from rolls and always-on); that write
+    /// is refused with an error and the row stays as it was. Use
+    /// [`Db::upsert_box_clearing_sandbox`] when the sandbox is really gone.
     pub fn upsert_box(&self, s: &Sandbox) -> Result<()> {
+        let written = self.write_box(s, false)?;
+        if !written {
+            tracing::error!(user = %s.user_id, "refused to overwrite a box row that has a sandbox with one that has none");
+            anyhow::bail!(
+                "box row of {} has a sandbox; refusing to write one without it",
+                s.user_id
+            );
+        }
+        Ok(())
+    }
+
+    /// [`Db::upsert_box`] that may drop the row's sandbox: only for a sandbox that was deleted.
+    pub fn upsert_box_clearing_sandbox(&self, s: &Sandbox) -> Result<()> {
+        self.write_box(s, true).map(|_| ())
+    }
+
+    fn write_box(&self, s: &Sandbox, may_clear_sandbox: bool) -> Result<bool> {
         self.with(|c| {
             c.execute(
                 "INSERT INTO boxes(user_id, provider, sandbox_id, daytona_state, device_id, box_token_hash, mcp_token, snapshot,
@@ -1378,14 +1418,68 @@ impl Db {
                     daytona_state=excluded.daytona_state, device_id=excluded.device_id, box_token_hash=excluded.box_token_hash,
                     mcp_token=excluded.mcp_token, snapshot=excluded.snapshot, last_started_at=excluded.last_started_at,
                     last_stopped_at=excluded.last_stopped_at, last_seen_at=excluded.last_seen_at, box_url=excluded.box_url,
-                    preview_token=excluded.preview_token, local_pid=excluded.local_pid, migrated_from=excluded.migrated_from",
+                    preview_token=excluded.preview_token, local_pid=excluded.local_pid, migrated_from=excluded.migrated_from
+                 WHERE ?16 OR excluded.sandbox_id IS NOT NULL OR boxes.sandbox_id IS NULL",
                 params![
                     s.user_id, s.provider, s.sandbox_id, s.daytona_state, s.device_id, s.box_token_hash, s.mcp_token, s.snapshot,
                     s.last_started_at, s.last_stopped_at, s.last_seen_at, s.box_url, s.preview_token, s.local_pid,
-                    serde_json::to_string(&s.migrated_from).unwrap_or_else(|_| "[]".into())
+                    serde_json::to_string(&s.migrated_from).unwrap_or_else(|_| "[]".into()),
+                    may_clear_sandbox
                 ],
             )
+            .map(|n| n > 0)
+        })
+    }
+
+    /// Record a box create before the provider is asked for the sandbox (see `box_creates`).
+    pub fn begin_box_create(
+        &self,
+        user_id: &str,
+        sandbox_name: &str,
+        provider: &str,
+        snapshot: Option<&str>,
+        replacing: Option<&str>,
+    ) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO box_creates(user_id, sandbox_name, provider, snapshot, replacing, started_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(user_id) DO UPDATE SET sandbox_name = excluded.sandbox_name, provider = excluded.provider,
+                    snapshot = excluded.snapshot, replacing = excluded.replacing, started_at = excluded.started_at",
+                params![user_id, sandbox_name, provider, snapshot, replacing, now_ms()],
+            )
             .map(|_| ())
+        })
+    }
+
+    pub fn end_box_create(&self, user_id: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "DELETE FROM box_creates WHERE user_id = ?1",
+                params![user_id],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Box creates recorded before `before_ms` and never finished.
+    pub fn unfinished_box_creates(&self, before_ms: i64) -> Result<Vec<BoxCreate>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT user_id, sandbox_name, provider, snapshot, replacing, started_at FROM box_creates
+                 WHERE started_at < ?1 ORDER BY started_at",
+            )?;
+            let rows = st.query_map(params![before_ms], |r| {
+                Ok(BoxCreate {
+                    user_id: r.get(0)?,
+                    sandbox_name: r.get(1)?,
+                    provider: r.get(2)?,
+                    snapshot: r.get(3)?,
+                    replacing: r.get(4)?,
+                    started_at: r.get(5)?,
+                })
+            })?;
+            rows.collect()
         })
     }
 
