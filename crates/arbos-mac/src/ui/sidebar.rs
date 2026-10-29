@@ -1178,7 +1178,7 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
     let round = |id: &'static str, control: StripControl, theme: &Theme| {
         let (glyph, size) = control.glyph();
         debug_assert_eq!(control.size(), crate::ui::theme::CONTROL);
-        glass::control_disc(id, glyph, size, theme)
+        glass::strip_disc(id, glyph, size, theme)
             .when(hide_morphing, |el| el.opacity(0.0))
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
     };
