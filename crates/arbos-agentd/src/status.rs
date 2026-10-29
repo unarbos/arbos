@@ -1993,6 +1993,46 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Bubble in Arbonites (2026-10-28 21:50 UTC, agentd 0.6.338): `route reply` with a first
+    /// line, then `send_message` parts. The first part was appended to the first line's row and
+    /// the bubble read "…never became a reply for him.Bob was up. When I messaged him…".
+    #[tokio::test]
+    async fn send_message_after_route_reply_line_is_its_own_bubble() {
+        use crate::config::SendTool;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000015";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.ack_text.clear();
+            t.activity = None;
+            t.send_tool = SendTool::On;
+            agent.test_open_row(&host, t).await;
+        }
+        let first = "Bob was up. That line never became a reply for him.";
+        let part1 = "Bob was up. When I messaged him a minute later he answered right away.";
+        let part2 = "Want me to ask Bob what he saw on that message?";
+        agent
+            .hook_route(&json!({ "action": "reply", "reply": first }))
+            .await
+            .unwrap();
+        agent.hook_send_message(part1, None, None).await.unwrap();
+        agent.hook_send_message(part2, None, None).await.unwrap();
+        let posted: Vec<String> = reply_rows(&host, "m-busy")
+            .iter()
+            .map(|r| r.text().trim().to_owned())
+            .filter(|t| !t.is_empty())
+            .collect();
+        assert_eq!(
+            posted,
+            vec![first.to_owned(), part1.to_owned(), part2.to_owned()],
+            "each line is one bubble, none glued onto another"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The send-tool switch: default on, `off` restores streamed prose, `strict` drops the fallback.
     #[test]
     fn send_tool_switch_parses() {
