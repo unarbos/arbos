@@ -1818,6 +1818,12 @@ pub async fn start(
     if !state.allows(&principal, &p.id) || principal.is_box() {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
+    if state.upgrading.lock().await.contains_key(&p.user_id) {
+        return Err((
+            StatusCode::CONFLICT,
+            "the computer is being upgraded; it starts when the upgrade ends".into(),
+        ));
+    }
     boxes::start_box(&state, &p.user_id)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;

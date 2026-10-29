@@ -115,6 +115,21 @@ async fn record_refusal(state: &AppState, user_id: &str, reason: &str, work_mib:
     );
 }
 
+/// A planned restart is under way (`/admin/restart`, SIGTERM): no new run may start, or the
+/// restart would cut it short with the old box stopped and the new one half made (#2262). Called
+/// under the `upgrading` lock, which the restart holds while it checks for runs in flight.
+fn refuse_while_restarting(state: &AppState) -> Result<()> {
+    if state.restart.box_work_frozen() {
+        return Err(anyhow!(
+            "{RESTARTING_PHRASE}; the box was not touched, try again after the restart"
+        ));
+    }
+    Ok(())
+}
+
+/// Words the deploy worker can match in a refused upgrade.
+pub const RESTARTING_PHRASE: &str = "the relay is restarting";
+
 /// What `run` ended with.
 #[derive(Debug)]
 enum Outcome {
@@ -158,6 +173,7 @@ pub async fn start(state: &AppState, user_id: &str, force: bool) -> Result<bool>
         if running.contains_key(user_id) {
             return Ok(false);
         }
+        refuse_while_restarting(state)?;
         running.insert(
             user_id.to_owned(),
             UpgradeStatus {
@@ -274,6 +290,7 @@ async fn start_gvisor(
         if running.contains_key(user_id) {
             return Ok(false);
         }
+        refuse_while_restarting(state)?;
         running.insert(
             user_id.to_owned(),
             UpgradeStatus {
@@ -643,7 +660,7 @@ async fn carry_onto_new_box(
             let _ = dt.delete(&new_id).await;
             let mut empty = new.clone();
             empty.sandbox_id = None;
-            let _ = state.db.upsert_box(&empty);
+            let _ = state.db.upsert_box_clearing_sandbox(&empty);
         }
         return Err(e.context("carry /work onto the new box"));
     }
@@ -766,6 +783,7 @@ pub async fn start_repair(state: &AppState, user_id: &str) -> Result<bool> {
         if running.contains_key(user_id) {
             return Ok(false);
         }
+        refuse_while_restarting(state)?;
         running.insert(
             user_id.to_owned(),
             UpgradeStatus {
@@ -803,6 +821,9 @@ pub async fn admin_repair(
         )
             .into_response(),
         Ok(false) => Json(json!({ "user_id": id, "upgrade": status_json(&state, &id).await, "note": "nothing to repair (the box row has a live sandbox) or a run is in progress" })).into_response(),
+        Err(e) if e.to_string().contains(RESTARTING_PHRASE) => {
+            api_error(StatusCode::SERVICE_UNAVAILABLE, "restarting", e.to_string())
+        }
         Err(e) => api_error(StatusCode::BAD_GATEWAY, "repair", e.to_string()),
     }
 }
@@ -865,6 +886,9 @@ async fn kick(state: &AppState, user_id: &str, force: bool) -> Response {
                 Json(json!({ "user_id": user_id, "upgrade": st, "note": "already on the current snapshot (use ?force=true to recreate anyway)" }))
                     .into_response()
             }
+        }
+        Err(e) if e.to_string().contains(RESTARTING_PHRASE) => {
+            api_error(StatusCode::SERVICE_UNAVAILABLE, "restarting", e.to_string())
         }
         Err(e) => api_error(StatusCode::BAD_GATEWAY, "upgrade", e.to_string()),
     }

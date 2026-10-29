@@ -1194,11 +1194,13 @@ impl Db {
         })
     }
 
-    /// `(user_id, sandbox_id)` of old sandboxes past their fallback window.
+    /// `(user_id, sandbox_id)` of old sandboxes past their fallback window. A sandbox a box row
+    /// names again (an upgrade cut short after the old box went into history) is never due.
     pub fn box_history_due(&self) -> Result<Vec<(String, String)>> {
         self.with(|c| {
             let mut st = c.prepare(
-                "SELECT user_id, sandbox_id FROM box_history WHERE deleted_at IS NULL AND delete_after <= ?1",
+                "SELECT user_id, sandbox_id FROM box_history WHERE deleted_at IS NULL AND delete_after <= ?1
+                   AND sandbox_id NOT IN (SELECT sandbox_id FROM boxes WHERE sandbox_id IS NOT NULL)",
             )?;
             let rows = st.query_map(params![now_ms()], |r| Ok((r.get(0)?, r.get(1)?)))?;
             rows.collect()
@@ -1221,6 +1223,7 @@ impl Db {
                           ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY replaced_at DESC, sandbox_id DESC) AS rn
                    FROM box_history WHERE deleted_at IS NULL AND archived_at IS NULL
                      AND (?1 IS NULL OR user_id = ?1)
+                     AND sandbox_id NOT IN (SELECT sandbox_id FROM boxes WHERE sandbox_id IS NOT NULL)
                  ) WHERE rn > ?2 ORDER BY user_id, rn",
             )?;
             let rows = st.query_map(params![user_id, keep as i64], |r| Ok((r.get(0)?, r.get(1)?)))?;

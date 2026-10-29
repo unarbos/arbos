@@ -16,7 +16,7 @@ use arbos_core::wire::BoxState;
 
 use crate::daytona::{CreateSandbox, SandboxState};
 use crate::db::Sandbox;
-use crate::state::AppState;
+use crate::state::{AppState, CreatingGuard};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
@@ -131,6 +131,8 @@ pub async fn create_box(
         .unwrap_or_else(|| state.default_snapshot());
     let box_token = mint(TokenKind::Box);
     let mcp_token = mint(TokenKind::Mcp);
+    let replacing = state.db.user_box(user_id)?.and_then(|r| r.sandbox_id);
+    let _creating = CreatingGuard::new(&state.restart, user_id);
     let mut sb = Sandbox {
         user_id: user_id.to_owned(),
         provider: provider.as_str().to_owned(),
@@ -148,7 +150,14 @@ pub async fn create_box(
         local_pid: None,
         migrated_from: Vec::new(),
     };
-    state.db.upsert_box(&sb)?; // token hash must exist before the box dials in
+    // A first box gets its row (and token hash) now, so the box can dial in at once. A row that
+    // already names a sandbox (upgrade, repair) is left alone until the new sandbox id is known
+    // and the whole new row is written in one go: a restart in between leaves the user on the
+    // box they had, never on a row without a sandbox (#2262). The new box's early hellos are
+    // refused until then and agentd retries every 3 s.
+    if replacing.is_none() {
+        state.db.upsert_box(&sb)?;
+    }
     state
         .set_box_state(user_id, BoxState::Waking, Some("creating"))
         .await;
@@ -171,14 +180,15 @@ pub async fn create_box(
             // Unique per sandbox: a retained old sandbox (upgrade fallback) keeps its name, and
             // Daytona refuses a duplicate with 409.
             let suffix = arbos_core::ids::ulid().to_ascii_lowercase();
+            let sandbox_name = format!(
+                "arbos-{}-{}",
+                user_id
+                    .to_ascii_lowercase()
+                    .replace(|c: char| !c.is_ascii_alphanumeric(), "-"),
+                &suffix[suffix.len().saturating_sub(6)..]
+            );
             let mut body = CreateSandbox {
-                name: Some(format!(
-                    "arbos-{}-{}",
-                    user_id
-                        .to_ascii_lowercase()
-                        .replace(|c: char| !c.is_ascii_alphanumeric(), "-"),
-                    &suffix[suffix.len().saturating_sub(6)..]
-                )),
+                name: Some(sandbox_name.clone()),
                 snapshot: if inline.is_none() {
                     Some(snapshot_name.clone())
                 } else {
@@ -200,12 +210,27 @@ pub async fn create_box(
             }
             body.labels
                 .insert("arbos.user".into(), Value::String(user_id.to_owned()));
-            let created = dt.create(&body).await?;
+            state.db.begin_box_create(
+                user_id,
+                &sandbox_name,
+                provider.as_str(),
+                Some(&snapshot_name),
+                replacing.as_deref(),
+            )?;
+            tracing::info!(user = %user_id, sandbox_name, replacing = ?replacing, snapshot = %snapshot_name, "creating box sandbox");
+            let created = match dt.create(&body).await {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = state.db.end_box_create(user_id);
+                    return Err(e);
+                }
+            };
             sb.sandbox_id = Some(created.id.clone());
             sb.device_id = format!("box:{}", created.id);
             sb.snapshot = Some(snapshot_name.clone());
             sb.daytona_state = Some(format!("{:?}", created.state).to_ascii_lowercase());
             state.db.upsert_box(&sb)?;
+            let _ = state.db.end_box_create(user_id);
             let started = dt
                 .wait_for(&created.id, Duration::from_secs(180), |s| {
                     s.state == SandboxState::Started
@@ -258,7 +283,9 @@ pub async fn create_box(
                 crate::fleet::create_box(state, user_id, &mut sb, &box_token, &mcp_token).await
             {
                 // A half-made sandbox must not count as a resident: the next attempt starts clean.
-                let _ = state.db.delete_box_row(user_id);
+                if replacing.is_none() {
+                    let _ = state.db.delete_box_row(user_id);
+                }
                 return Err(e);
             }
             state.db.record_timing(
@@ -1447,6 +1474,86 @@ pub async fn spawn_always_on(state: AppState) {
     });
 }
 
+/// A sign of life this recent makes a box count as live for [`sandboxless_live_boxes`].
+const LIVE_BOX_MS: i64 = 15 * 60_000;
+/// A `box_creates` row this old, with no create running in this process, was cut short.
+const CREATE_STALE_MS: i64 = 10 * 60_000;
+const SANDBOXLESS_CHECK_EVERY: Duration = Duration::from_secs(600);
+/// After boot the boxes need a moment to dial in again before "live" means anything.
+const SANDBOXLESS_CHECK_FIRST: Duration = Duration::from_secs(120);
+
+/// Box rows that name no sandbox while their box shows signs of life (#2262: a live box that
+/// rolls and always-on cannot see), plus box creates that never finished. Read-only.
+pub async fn sandboxless_live_boxes(state: &AppState) -> Vec<Value> {
+    let now = now_ms();
+    let recent = |t: Option<i64>| t.is_some_and(|t| now - t < LIVE_BOX_MS);
+    let mut out = Vec::new();
+    for b in state.db.list_boxes().unwrap_or_default() {
+        if b.sandbox_id.is_some() {
+            continue;
+        }
+        let reachable = box_reachable(state, &b.user_id).await;
+        let meter = state.db.meter_tick(&b.user_id).ok().flatten();
+        let meter_running = meter
+            .as_ref()
+            .is_some_and(|(at, st)| st == "running" && recent(Some(*at)));
+        let hello_at = state
+            .db
+            .box_agentd(&b.user_id)
+            .ok()
+            .flatten()
+            .map(|a| a.reported_at);
+        if reachable || recent(b.last_seen_at) || meter_running || recent(hello_at) {
+            out.push(json!({
+                "kind": "sandboxless_live_row",
+                "user_id": b.user_id, "provider": b.provider, "reachable": reachable,
+                "last_seen_at": b.last_seen_at, "meter_tick": meter.map(|m| m.0), "hello_at": hello_at,
+            }));
+        }
+    }
+    let running: std::collections::HashSet<String> = state
+        .restart
+        .creating
+        .lock()
+        .expect("creating lock")
+        .keys()
+        .cloned()
+        .collect();
+    for c in state
+        .db
+        .unfinished_box_creates(now - CREATE_STALE_MS)
+        .unwrap_or_default()
+    {
+        if !running.contains(&c.user_id) {
+            out.push(json!({
+                "kind": "unfinished_create",
+                "user_id": c.user_id, "provider": c.provider, "sandbox_name": c.sandbox_name,
+                "snapshot": c.snapshot, "replacing": c.replacing, "started_at": c.started_at,
+            }));
+        }
+    }
+    out
+}
+
+/// At boot (after the boxes had time to dial in) and every 10 minutes: log every finding of
+/// [`sandboxless_live_boxes`]. Logs only; rows are re-attached by hand.
+pub async fn spawn_sandboxless_box_check(state: AppState) {
+    tokio::spawn(async move {
+        tokio::time::sleep(SANDBOXLESS_CHECK_FIRST).await;
+        loop {
+            for f in sandboxless_live_boxes(&state).await {
+                let user = f["user_id"].as_str().unwrap_or_default().to_owned();
+                if f["kind"] == "unfinished_create" {
+                    tracing::error!(user = %user, finding = %f, "box create never finished: its sandbox may run without a row naming it (#2262); not repaired");
+                } else {
+                    tracing::error!(user = %user, finding = %f, "box row has no sandbox but its box is live (#2262); not repaired");
+                }
+            }
+            tokio::time::sleep(SANDBOXLESS_CHECK_EVERY).await;
+        }
+    });
+}
+
 /// Wake-job runner: 3 attempts with backoff, then S13 error (crdt-sync §8.4 step 5).
 pub async fn spawn_wake_runner(state: AppState) {
     tokio::spawn(async move {
@@ -1462,6 +1569,12 @@ pub async fn spawn_wake_runner(state: AppState) {
                     // Awake: the dial finished it. Error: the stale-box detector gave up; only an
                     // explicit wake/start re-arms it.
                     let _ = state.db.finish_wake_job(&user_id);
+                    continue;
+                }
+                if state.upgrading.lock().await.contains_key(&user_id) {
+                    // The upgrade starts the box it ends on (or the old one on rollback). A start
+                    // from here would bounce a box mid-carry and write back a row read before
+                    // the new box landed in it (#2262); the job waits for the upgrade.
                     continue;
                 }
                 // Mark the job as in flight by pushing its due time out; the box dial finishes it.
