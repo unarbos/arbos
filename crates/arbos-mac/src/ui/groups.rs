@@ -33,6 +33,22 @@ pub fn picture(space: &Project, state: &AppState, size: f32, theme: &Theme) -> D
     }
 }
 
+/// A chat's picture in a list of chats (palette, Forward to): a DM is the other person's
+/// photo, else their initials disc from their display name; anything else is [`picture`].
+/// A DM space has no `image_url` and its name is the other side's handle, so [`picture`]
+/// alone draws the handle's initial and never the photo.
+pub fn chat_picture(space: &Project, state: &AppState, size: f32, theme: &Theme) -> Div {
+    match space
+        .person()
+        .filter(|_| space.is_people() && !space.is_people_group())
+    {
+        Some(person) => {
+            crate::ui::people::avatar(state.avatar(&person.avatar_url), person, size, theme)
+        }
+        None => picture(space, state, size, theme),
+    }
+}
+
 /// Group tab: the participants' glyphs stacked, host first. The "Projects ⇄" tab shows `⇄`.
 pub fn tab_glyphs(
     chat: &Chat,
