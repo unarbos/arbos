@@ -1170,6 +1170,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::RemoveAgent { .. }
         | ClientCommand::AddMembers { .. }
         | ClientCommand::RemoveMember { .. }
+        | ClientCommand::SetMemberRole { .. }
         | ClientCommand::LeaveChat { .. }
         | ClientCommand::BlockUser { .. }
         | ClientCommand::UnblockUser { .. }
@@ -8065,6 +8066,25 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             };
             if let Some(name) = removed {
                 membership_notice(shared, chat_id, &format!("{} removed {name}", ME_NAME));
+            }
+            emit_projects(shared);
+            true
+        }
+        ClientCommand::SetMemberRole {
+            chat_id,
+            user_id,
+            role,
+        } => {
+            if let Some(m) = shared
+                .projects
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .find(|p| p.id == *chat_id)
+                .and_then(|p| p.people.iter_mut().find(|x| x.id == *user_id))
+                .filter(|m| m.role != "owner")
+            {
+                m.role = role.clone();
             }
             emit_projects(shared);
             true
