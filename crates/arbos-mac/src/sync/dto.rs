@@ -1018,7 +1018,7 @@ pub(crate) fn people_space_from(
         muted: dto.me.muted.unwrap_or(false),
         silenced: dto.me.silenced.unwrap_or(false),
         silenced_until: dto.me.silenced_until.filter(|&t| t > 0),
-        archived_at: None,
+        archived_at: dto.archived_at.filter(|t| *t > 0).map(|t| t as u64),
         primary_chat: None,
         voice: None,
         vision_enabled: true,
@@ -1496,6 +1496,24 @@ mod tests {
         assert_eq!(space.silenced_until, Some(1_793_200_000_000));
         assert!(space.is_silenced_now(1_793_100_000_000));
         assert!(!space.is_silenced_now(1_793_200_000_001));
+    }
+
+    /// Scout, 2026-10-29: an archived DM / group came back into the list on the next 15-s
+    /// registry poll because its row was rebuilt with no archive mark.
+    #[test]
+    fn people_space_from_keeps_the_archive_on_the_row() {
+        let mut dto: PeopleChatDto = load_json("people_chat_json_with_me.json");
+        dto.archived_at = Some(1_793_288_000_000);
+        let (space, chat) = people_space_from(&dto, "gh_101", "user101", "http://relay", "tok");
+        assert_eq!(space.archived_at, Some(1_793_288_000_000));
+        assert_eq!(chat.archived_at, Some(1_793_288_000_000));
+
+        dto.archived_at = None;
+        let (space, _) = people_space_from(&dto, "gh_101", "user101", "http://relay", "tok");
+        assert!(space.archived_at.is_none());
+        dto.archived_at = Some(0);
+        let (space, _) = people_space_from(&dto, "gh_101", "user101", "http://relay", "tok");
+        assert!(space.archived_at.is_none(), "0 = not archived");
     }
 
     #[test]
