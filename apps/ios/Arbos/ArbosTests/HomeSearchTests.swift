@@ -387,3 +387,51 @@ final class HomePinsTests: XCTestCase {
         XCTAssertEqual(model.pinnedHomeIds, ["chat:c9"], "another device's list replaces mine")
     }
 }
+
+/// Scout (Arbonites, 2026-10-29): "it also unarchives the chat if you open it"
+/// ([feedback archived-chat-stays-archived-2026-10-29]). Opening a row from Hidden chats only
+/// views it; new activity from someone else (`unarchiveOnActivity`) and Unarchive bring it back.
+/// Mirrors crates/arbos-mac `hidden_chat_open_tests`.
+@MainActor
+final class HiddenChatOpenTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        for key in ["archivedProjects", "archivedPeopleChats", "archivedServers", HomePins.cacheKey] {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+    }
+
+    private func hiddenModel() -> AppModel {
+        let model = AppModel()
+        model.isFixture = true
+        model.chats = ["a1": [Chat(id: "a1-main", projectId: "a1", title: "Main", isPinned: true, unread: false, lastMessageAt: 0)]]
+        model.peopleChats = [PeopleChat(id: "dm1", kind: "dm", createdBy: "gh_me", createdAt: 0, title: "", pending: false,
+                                        members: [], headSeq: 0, readSeq: 0, unread: false, lockState: "people_only",
+                                        lastActivityAt: 0, myRole: "owner", muted: false, silenced: false)]
+        model.archive("a1")
+        model.archive(peopleChatId: "dm1")
+        return model
+    }
+
+    func testOpeningAHiddenAgentChatOrDMOnlyViewsIt() throws {
+        let model = hiddenModel()
+        model.open(chat: try XCTUnwrap(model.chats["a1"]?.first))
+        XCTAssertEqual(model.path, [.chat(chatId: "a1-main", projectId: "a1")])
+        model.open(peopleChat: try XCTUnwrap(model.peopleChat("dm1")))
+        XCTAssertEqual(model.path.count, 1)
+        XCTAssertTrue(model.isArchived("a1"), "the agent stays in Hidden chats")
+        XCTAssertTrue(model.isArchived(peopleChatId: "dm1"), "the DM stays in Hidden chats")
+        XCTAssertNotNil(model.peopleChat("dm1")?.archivedAt)
+    }
+
+    func testNewActivityAndUnarchiveStillBringTheRowBack() {
+        let model = hiddenModel()
+        model.unarchiveOnActivity(chatId: "dm1")
+        XCTAssertFalse(model.isArchived(peopleChatId: "dm1"), "someone wrote: back in the list")
+        model.unarchiveOnActivity(chatId: "a1-main")
+        XCTAssertFalse(model.isArchived("a1"))
+        model.archive("a1")
+        model.unarchive("a1")
+        XCTAssertFalse(model.isArchived("a1"))
+    }
+}
