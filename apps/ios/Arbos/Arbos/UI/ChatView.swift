@@ -1288,6 +1288,7 @@ struct ChatSession: View {
         }
         .onChange(of: model.user?.name) { _, _ in refreshRows() }
         .onChange(of: model.caughtUp.contains(chatId), initial: true) { _, ready in
+            model.repaintIfBlank(chatId)
             handleCaughtUpAutoSend(ready)
         }
     }
@@ -1971,7 +1972,12 @@ struct ChatSession: View {
                         .frame(maxWidth: .infinity)
                         .padding(.bottom, 16)
                     }
-                    if !model.caughtUp.contains(chatId) && messages.isEmpty && !model.isFixture {
+                    if model.transcriptPending(chatId) {
+                        // The doc has rows that are not on screen yet: a spinner, never a
+                        // blank people chat ([feedback arbonites-blank-chat-ios-2026-10-28]).
+                        HStack { Spacer(); ProgressView().tint(theme.muted); Spacer() }.padding(.top, 60)
+                            .accessibilityIdentifier("chat-transcript-loading")
+                    } else if !model.caughtUp.contains(chatId) && messages.isEmpty && !model.isFixture {
                         // Known-empty (optimistic new chat seeds `messages[id] = []`):
                         // show the empty hint at once — no spinner flash while the
                         // room catches up on a thread we already know has no rows.
