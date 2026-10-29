@@ -10,10 +10,6 @@
    "reply_regex": "42",
    "reply_from": "lane-a",
    "timeout_s": 200,
-   "rubric": {
-    "criteria": "The reply text shown is the two agents' bubbles joined (one line each is expected, so two lines with 42 is the PASS shape). Pass if both lane-a and lane-b answered with 42, each in one line; fail if only one answered, if one agent answered twice, or if one answered on behalf of the other.",
-    "min": 3
-   },
    "also_reply_from": "lane-b"
   },
   {
@@ -33,5 +29,6 @@
    "title": "eval respond gate everyone"
   }
  ],
- "regression": "the judge's `all agents` verdict (everyone replies) and silence on the remark that follows ('task is done' woke Affine on 2026-10-27)."
+ "regression": "the judge's `all agents` verdict (everyone replies) and silence on the remark that follows ('task is done' woke Affine on 2026-10-27).",
+ "notes": "Graded programmatically: reply_from lane-a + also_reply_from lane-b, 42 in the text; the judge read the joined two-line text as repetition/format faults."
 }

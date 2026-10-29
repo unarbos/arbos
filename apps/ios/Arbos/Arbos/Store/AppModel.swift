@@ -505,14 +505,14 @@ final class AppModel: ObservableObject {
         return false
     }
 
+    /// Opening only views: an archived row stays in Hidden chats until Unarchive or a new
+    /// message from someone else (`unarchiveOnActivity`) brings it back.
     func open(chat: Chat) {
-        unarchive(chat.projectId)
         path = [.chat(chatId: chat.id, projectId: chat.projectId)]
     }
 
     /// Tapping an agent opens its one chat (D78).
     func open(project: Project) {
-        unarchive(project.id)
         if let chat = singleChat(of: project.id) {
             open(chat: chat)
         } else {
@@ -3367,7 +3367,6 @@ final class AppModel: ObservableObject {
     }
 
     func open(peopleChat chat: PeopleChat) {
-        unarchive(peopleChatId: chat.id)
         path = [.chat(chatId: chat.id, projectId: peopleSlot)]
     }
 
@@ -5959,7 +5958,6 @@ final class AppModel: ObservableObject {
             let title = jobRow(jobId)?.title ?? rollouts[jobId]?.title ?? ""
             jobTabs[projectId, default: []].append(JobTabs.tab(projectId: projectId, jobId: jobId, title: title, at: nowMs()))
         }
-        unarchive(projectId)
         var next: [Route] = []
         if let main = singleChat(of: projectId) ?? chats(of: projectId).first {
             next.append(.chat(chatId: main.id, projectId: projectId))
