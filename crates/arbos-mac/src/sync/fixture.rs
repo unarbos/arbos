@@ -2120,6 +2120,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 machine_info: None,
                 outside: None,
                 muted: false,
+                silenced: false,
+                silenced_until: None,
                 archived_at: None,
                 primary_chat: None,
                 voice: None,
@@ -5322,6 +5324,8 @@ fn seed_projects() -> Vec<Project> {
             machine_info: None,
             outside: None,
             muted: false,
+            silenced: false,
+            silenced_until: None,
             archived_at: None,
             primary_chat: None,
             voice: None,
@@ -5361,6 +5365,8 @@ fn seed_projects() -> Vec<Project> {
             machine_info: None,
             outside: None,
             muted: false,
+            silenced: false,
+            silenced_until: None,
             archived_at: None,
             primary_chat: None,
             voice: None,
@@ -5400,6 +5406,8 @@ fn seed_projects() -> Vec<Project> {
             machine_info: None,
             outside: None,
             muted: false,
+            silenced: false,
+            silenced_until: None,
             archived_at: None,
             primary_chat: None,
             voice: None,
@@ -6699,6 +6707,13 @@ fn emoji_names_seeded() -> bool {
     std::env::var("ARBOS_FIXTURE_EMOJI_NAMES").is_ok_and(|v| v == "1")
 }
 
+/// `ARBOS_FIXTURE_CHIPS=1` ([feedback mention-chip-highlight-2026-10-28]): the
+/// group ends with someone else's and my own bubble, each with an agent and a
+/// person chip (mine has one inside a code span).
+fn mention_chips_seeded() -> bool {
+    std::env::var("ARBOS_FIXTURE_CHIPS").is_ok_and(|v| v == "1")
+}
+
 /// The emoji-only name (a mage with a skin tone and a ZWJ: one grapheme, four scalars).
 pub const MAGE_NAME: &str = "🧙🏽\u{200d}♂\u{fe0f}";
 pub const MAGE_HANDLE: &str = "dawizzaa";
@@ -6766,6 +6781,8 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
         machine_info: None,
         outside: None,
         muted: false,
+        silenced: false,
+        silenced_until: None,
         archived_at: None,
         primary_chat: None,
         voice: None,
@@ -6892,6 +6909,8 @@ fn seed_people_projects() -> Vec<Project> {
             machine_info: None,
             outside: None,
             muted: false,
+            silenced: false,
+            silenced_until: None,
             archived_at: None,
             primary_chat: None,
             voice: None,
@@ -7534,6 +7553,26 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
             base + 455_000,
         ),
     );
+    if mention_chips_seeded() {
+        insert_message_via_core(
+            &group,
+            &human_message(
+                GROUP_LAUNCH,
+                &sara,
+                "@arbos and @sam, the embargo lifts at 9.",
+                base + 456_000,
+            ),
+        );
+        insert_message_via_core(
+            &group,
+            &human_message(
+                GROUP_LAUNCH,
+                &me(),
+                "Thanks @sara. @arbos, ask `@sam` for the list.",
+                base + 457_000,
+            ),
+        );
+    }
     out.push(group);
     if emoji_names_seeded() {
         let dm = ChatDoc::new(DM_MAGE, "people");

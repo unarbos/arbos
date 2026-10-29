@@ -610,7 +610,7 @@ mod render_tests {
         );
         let why = state.read_with(vcx, |s, _| s.push_refused.get("d1").cloned().unwrap());
         assert_eq!(
-            why.sentence(),
+            why.sentence(None),
             "Couldn't post: you've blocked Sam Rivera, who is in this chat. Unblock to post."
         );
         click("delivery-error-unblock", &state, &shell, vcx);
@@ -639,7 +639,10 @@ mod render_tests {
         shell.update(vcx, |sh, cx| sh.cancel_unblock(cx));
         settle(&state, &shell, vcx);
         let why = state.read_with(vcx, |s, _| s.push_refused.get("d1").cloned().unwrap());
-        assert_eq!(why.sentence(), "Sam Rivera has blocked you in this chat.");
+        assert_eq!(
+            why.sentence(None),
+            "Sam Rivera has blocked you in this chat."
+        );
         assert!(
             vcx.debug_bounds("delivery-error-unblock").is_none(),
             "nothing to unblock"

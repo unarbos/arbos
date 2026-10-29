@@ -1199,7 +1199,7 @@ struct DevicesPage: View {
                 Text("No devices yet").font(theme.font(Theme.small)).foregroundStyle(theme.muted)
                     .frame(maxWidth: .infinity).padding(.top, 36)
             } else {
-                SettingsGroup(footer: "Every GitHub sign-in is a device. Signing one out ends its session at once; it can sign in again. This iPhone signs out from the Settings tab.") {
+                SettingsGroup(footer: "Every GitHub sign-in is a device. Reinstalls of the same phone or Mac keep one row. Signing one out ends its session at once; it can sign in again. This iPhone signs out from the Settings tab.") {
                     ForEach(rows) { d in
                         PaneRow(
                             leading: .tile(d.glyph),

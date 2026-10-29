@@ -518,6 +518,23 @@ enum ChatHeaderGlass {
     static let searchBarTint: Double = 0.55
     /// Tint under the legacy glass controls elsewhere (home header, sheets).
     static let legacyTint: Double = 0.85
+
+    /// The composer's pills and Home's search capsule on Glass ([feedback
+    /// iphone-composer-glass-2026-10-28], Jacob: "Grok chat is actual transparent glass. Ours
+    /// isn't."): the system's clear Liquid Glass (frost before iOS 26) with **no** fill, tint or
+    /// wash of ours on it, so the transcript reads through the pill like Grok's. Matte: solid.
+    struct PillGlass: Equatable {
+        let material: HeaderMaterial
+        /// Liquid Glass `.clear` (the transparent variant for glass over content), not `.regular`.
+        let clear: Bool
+        /// No `field` tint over the material.
+        let tinted: Bool
+    }
+
+    static func pillGlass(surface: Surface, liquidGlassAvailable: Bool = liquidGlassAvailable) -> PillGlass {
+        let m = material(surface: surface, liquidGlassAvailable: liquidGlassAvailable)
+        return PillGlass(material: m, clear: m != .solid, tinted: false)
+    }
 }
 
 /// The glass behind a header control: one shape, three materials.
@@ -531,6 +548,10 @@ struct HeaderGlassBackground<S: InsettableShape>: View {
     /// clear glass; a light `field` tint keeps its placeholder readable. Discs and the pill
     /// stay untinted, as in the reference.
     var tinted: Bool = false
+    /// The transparent variant (`Glass.clear`; frost without any tint before iOS 26): the
+    /// composer's pills and Home's search capsule, where the content must read through
+    /// ([feedback iphone-composer-glass-2026-10-28]). The header keeps `.regular`.
+    var clear: Bool = false
 
     var body: some View {
         switch material {
@@ -551,17 +572,18 @@ struct HeaderGlassBackground<S: InsettableShape>: View {
 
     @available(iOS 26.0, *)
     private var liquid: Glass {
-        let glass: Glass = interactive ? .regular.interactive() : .regular
+        let base: Glass = clear ? .clear : .regular
+        let glass: Glass = interactive ? base.interactive() : base
         return tinted ? glass.tint(theme.field.opacity(ChatHeaderGlass.searchBarTint)) : glass
     }
 
-    /// `.ultraThinMaterial`, a thin tint so the content stays visible through it, and a
-    /// rim lit from the top (the specular edge of the reference) — see the Mac's
-    /// `Theme::header_glass()` for the same recipe in quads.
+    /// `.ultraThinMaterial`, a thin tint so the content stays visible through it (none when
+    /// `clear`), and a rim lit from the top (the specular edge of the reference) — see the
+    /// Mac's `Theme::header_glass()` for the same recipe in quads.
     private var frosted: some View {
         ZStack {
             shape.fill(.ultraThinMaterial)
-            shape.fill(theme.field.opacity(ChatHeaderGlass.frostedTint))
+            if !clear { shape.fill(theme.field.opacity(ChatHeaderGlass.frostedTint)) }
             ComposerRim(shape: shape)
         }
     }
@@ -822,16 +844,37 @@ struct ControlSurface<S: InsettableShape>: View {
     var body: some View {
         ZStack {
             if theme.isGlass {
-                // Glass: the real material (Liquid Glass on iOS 26, frost before), a light
-                // `field` tint so a placeholder stays readable over a line of content — the
-                // Search-in-chat bar's recipe; the content scrolls under the pills and reads
-                // through them ([feedback iphone-composer-see-through-2026-10-28]).
-                HeaderGlassBackground(shape: shape, material: ChatHeaderGlass.material(surface: .glass), tinted: true)
+                PillSurface(shape: shape)
             } else {
                 shape.fill(theme.field)
                 ComposerRim(shape: shape)
             }
             if pressed { shape.fill(theme.text.opacity(0.12)) }
+        }
+    }
+}
+
+/// The pill's surface on Glass: the real material and nothing of ours on it — clear Liquid
+/// Glass on iOS 26, plain frost before — so the content reads through the pill like Grok's
+/// ([feedback iphone-composer-glass-2026-10-28]; the 0.55 `field` tint of the first see-through
+/// cut read as a near-opaque dark fill on the phone). On Matte: the field colour.
+/// Rig (`ARBOS_PILL_STYLE=translucent`, Debug): the no-blur alternative for Jacob's eye — the
+/// field colour at `translucentAlpha`, the rim, no material — if the system glass still smears
+/// the text on the phone.
+struct PillSurface<S: InsettableShape>: View {
+    @Environment(\.theme) private var theme
+    let shape: S
+    static var translucentAlpha: Double { 0.3 }
+
+    var body: some View {
+        if !theme.isGlass {
+            shape.fill(theme.field)
+        } else if DebugHooks.pillStyle == "translucent" {
+            shape.fill(theme.field.opacity(Self.translucentAlpha))
+            ComposerRim(shape: shape)
+        } else {
+            let glass = ChatHeaderGlass.pillGlass(surface: .glass)
+            HeaderGlassBackground(shape: shape, material: glass.material, tinted: glass.tinted, clear: glass.clear)
         }
     }
 }
@@ -1075,9 +1118,12 @@ enum BottomBarFade {
     /// rest sits above the fade (`Theme.transcriptTail`, `HomeChrome.listBottom`).
     static let fade: CGFloat = Theme.composerFade
     /// The wash at the bar's top edge, at the controls' bottom edge, and at the screen's edge.
-    static let edgeWash: Double = 0.3
-    static let controlsWash: Double = 0.5
-    static let bottomWash: Double = 0.8
+    /// Lighter under the pills since [feedback iphone-composer-glass-2026-10-28] (0.3 / 0.5 /
+    /// 0.8 before): the pills are clear glass now and the text must read through them, so the
+    /// layer under them dims less; the edge still darkens.
+    static let edgeWash: Double = 0.25
+    static let controlsWash: Double = 0.4
+    static let bottomWash: Double = 0.75
     /// Readable: the wash over any control never passes this.
     static let readableMax: Double = 0.6
 
