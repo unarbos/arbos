@@ -513,6 +513,10 @@ struct ChatSession: View {
     private var showsMemberChips: Bool { false }
 
     private func startCall(_ kind: CallKind, ring: [String]? = nil) {
+        if AppModel.isDraftDM(chatId) {
+            model.fail(UserError.refused("start the call", "Say hi first, then call."))
+            return
+        }
         Task { await calls.start(chatId: chatId, projectId: isPeople ? nil : projectId, kind: kind, title: callTitle, ring: ring) }
     }
 
