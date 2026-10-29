@@ -467,6 +467,14 @@ pub struct Touched {
     pub other: bool,
 }
 
+/// Where a picked GIF / sticker came from (maps to core `AttachmentSource`).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AttachmentSourceRecord {
+    pub provider: String,
+    pub id: String,
+    pub page_url: String,
+}
+
 /// One attachment on a client user message (maps to core `UserAttachment`).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct UserAttachmentRecord {
@@ -474,6 +482,12 @@ pub struct UserAttachmentRecord {
     pub mime: String,
     pub kind: Option<String>,
     pub blob_ref: Option<String>,
+    /// Provider-hosted picture (a picked GIF): loaded through the relay, never copied.
+    #[uniffi(default = None)]
+    pub url: Option<String>,
+    /// Picker attribution ("via KLIPY", the sticker pack's credit line).
+    #[uniffi(default = None)]
+    pub source: Option<AttachmentSourceRecord>,
 }
 
 impl From<UserAttachmentRecord> for doc::UserAttachment {
@@ -483,8 +497,12 @@ impl From<UserAttachmentRecord> for doc::UserAttachment {
             mime: r.mime,
             kind: r.kind,
             blob_ref: r.blob_ref,
-            // GIF-picker attribution is written by a later path; clients leave it unset.
-            source: None,
+            url: r.url,
+            source: r.source.map(|s| doc::AttachmentSource {
+                provider: s.provider,
+                id: s.id,
+                page_url: s.page_url,
+            }),
         }
     }
 }
@@ -1094,6 +1112,8 @@ mod tests {
                     mime: "image/jpeg".into(),
                     kind: Some("image".into()),
                     blob_ref: Some("blob:1".into()),
+                    url: None,
+                    source: None,
                 }],
                 mentions: vec!["user:a".into(), "user:b".into()],
                 reply_to: Some("m0".into()),

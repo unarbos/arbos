@@ -186,6 +186,8 @@ struct ChatSession: View {
     @State private var showPhotos = false
     @State private var showFiles = false
     @State private var showAttach = false
+    /// The Emoji · Stickers · GIFs picker (ARB-544), from the attach sheet's third row.
+    @State private var showFun = false
     @State private var scroller: ScrollViewProxy?
     /// Scrolled more than ~120 pt above the end: show Grok's round chevron
     /// (or the new-messages pill when rows landed below).
@@ -2924,7 +2926,27 @@ struct ChatSession: View {
             } onFile: {
                 showAttach = false
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showFiles = true }
+            } onFun: {
+                showAttach = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showFun = true }
             }
+            .environment(\.theme, theme)
+        }
+        .sheet(isPresented: $showFun) {
+            FunPickerSheet(chatId: chatId, onEmoji: { glyph in
+                // Into the draft like typed text; the field keeps the caret at the end.
+                composerDraft.text += glyph
+            }, onSend: { pick in
+                Haptics.send()
+                jumpBackTo = nil
+                pinnedToBottom = true
+                awayFromBottom = false
+                newBelowCount = 0
+                model.sendMedia(chatId: chatId, pick: pick)
+                sentOnce = true
+                scrollAfterSend()
+            })
+            .environmentObject(model)
             .environment(\.theme, theme)
         }
         .photosPicker(isPresented: $showPhotos, selection: $photoItem, matching: .any(of: [.images, .videos]))
@@ -3510,22 +3532,28 @@ private struct ScrollInterruptTap: UIViewRepresentable {
     }
 }
 
-/// "+" sheet: Photo or video, File — Grok's attach options as a short bottom sheet.
+/// "+" sheet: Photo or video, File, and — ARB-544, Jacob's option B — Emoji, stickers & GIFs,
+/// as a short bottom sheet.
 struct AttachSheet: View {
     @Environment(\.theme) private var theme
     let onPhoto: () -> Void
     let onFile: () -> Void
+    var onFun: (() -> Void)? = nil
 
     var body: some View {
         VStack(spacing: 0) {
             Capsule().fill(theme.muted.opacity(0.4)).frame(width: 36, height: 5).padding(.top, 8).padding(.bottom, 14)
             row(icon: "photo", title: "Photo or video", subtitle: "From your library", action: onPhoto)
             row(icon: "doc", title: "File", subtitle: "From Files or iCloud Drive", action: onFile)
+            if let onFun {
+                row(icon: "face.smiling", title: "Emoji, stickers & GIFs", subtitle: "Add some fun to the chat", action: onFun)
+                    .accessibilityIdentifier("attach-fun")
+            }
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 16)
         .background(theme.bg)
-        .presentationDetents([.height(190)])
+        .presentationDetents([.height(onFun == nil ? 190 : 258)])
         .presentationDragIndicator(.hidden)
         .presentationBackground(theme.bg)
     }

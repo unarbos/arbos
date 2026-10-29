@@ -515,24 +515,31 @@ struct Attachment: Codable, Equatable {
     /// The fallback picture of a chart bubble: names the `chart` part of the same message.
     /// A client that draws the chart hides this attachment ([feedback chart-bubble-ios-2026-10-26]).
     var chartPart: String? = nil
+    /// A picture that lives with its provider (a picked GIF, ARB-544): no `ref`; the bytes come
+    /// through the relay's pass-through (`GET /gif/media?u=`), nothing is stored.
+    var url: String? = nil
     /// GIF-picker attribution; when set the bubble shows "via \<provider\>".
     var source: AttachmentSource? = nil
 
     enum CodingKeys: String, CodingKey {
-        case name, mime, kind, bytes, chartPart, source
+        case name, mime, kind, bytes, chartPart, url, source
         case blobRef = "ref"
     }
 
     init(name: String, mime: String, blobRef: String?, kind: String? = nil, bytes: Int64? = nil,
-         chartPart: String? = nil, source: AttachmentSource? = nil) {
+         chartPart: String? = nil, url: String? = nil, source: AttachmentSource? = nil) {
         self.name = name
         self.mime = mime
         self.blobRef = blobRef
         self.kind = kind
         self.bytes = bytes
         self.chartPart = chartPart
+        self.url = url
         self.source = source
     }
+
+    /// A picker sticker (`kind: sticker`): drawn at a fixed size with no bubble.
+    var isSticker: Bool { kind?.lowercased() == "sticker" }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -542,6 +549,7 @@ struct Attachment: Codable, Equatable {
         kind = try c.decodeIfPresent(String.self, forKey: .kind)
         bytes = try c.decodeIfPresent(Int64.self, forKey: .bytes)
         chartPart = try c.decodeIfPresent(String.self, forKey: .chartPart)
+        url = try c.decodeIfPresent(String.self, forKey: .url)
         if let map = try c.decodeIfPresent([String: String].self, forKey: .source),
            let provider = map["provider"], let id = map["id"],
            let pageUrl = map["pageUrl"] ?? map["page_url"] {
@@ -559,6 +567,7 @@ struct Attachment: Codable, Equatable {
         try c.encodeIfPresent(kind, forKey: .kind)
         try c.encodeIfPresent(bytes, forKey: .bytes)
         try c.encodeIfPresent(chartPart, forKey: .chartPart)
+        try c.encodeIfPresent(url, forKey: .url)
         if let source {
             try c.encode(
                 ["provider": source.provider, "id": source.id, "pageUrl": source.pageUrl],
