@@ -177,6 +177,7 @@
 		A1670000000000000000A051 /* ControlTokenLintTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1670000000000000000A050 /* ControlTokenLintTests.swift */; };
 		A1680000000000000000A061 /* ListTopFadeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1680000000000000000A060 /* ListTopFadeTests.swift */; };
 		A1CF0000000000000000B081 /* PillGlassTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CF0000000000000000B080 /* PillGlassTests.swift */; };
+		A1D0C10500000000000000A1 /* ViewerChromeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D0C10500000000000000A0 /* ViewerChromeTests.swift */; };
 		A1CF0000000000000000B071 /* HomeBarFadeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CF0000000000000000B070 /* HomeBarFadeTests.swift */; };
 		A1CF0000000000000000B061 /* BottomBarFadeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CF0000000000000000B060 /* BottomBarFadeTests.swift */; };
 		A1670000000000000000A041 /* ControlMetricsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1670000000000000000A040 /* ControlMetricsTests.swift */; };
@@ -421,6 +422,7 @@
 		A1670000000000000000A050 /* ControlTokenLintTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlTokenLintTests.swift; sourceTree = "<group>"; };
 		A1680000000000000000A060 /* ListTopFadeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ListTopFadeTests.swift; sourceTree = "<group>"; };
 		A1CF0000000000000000B080 /* PillGlassTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PillGlassTests.swift; sourceTree = "<group>"; };
+		A1D0C10500000000000000A0 /* ViewerChromeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerChromeTests.swift; sourceTree = "<group>"; };
 		A1CF0000000000000000B070 /* HomeBarFadeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeBarFadeTests.swift; sourceTree = "<group>"; };
 		A1CF0000000000000000B060 /* BottomBarFadeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BottomBarFadeTests.swift; sourceTree = "<group>"; };
 		A1670000000000000000A040 /* ControlMetricsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlMetricsTests.swift; sourceTree = "<group>"; };
@@ -691,6 +693,7 @@
 				A1670000000000000000A050 /* ControlTokenLintTests.swift */,
 				A1680000000000000000A060 /* ListTopFadeTests.swift */,
 				A1CF0000000000000000B080 /* PillGlassTests.swift */,
+				A1D0C10500000000000000A0 /* ViewerChromeTests.swift */,
 				A1CF0000000000000000B070 /* HomeBarFadeTests.swift */,
 				A1CF0000000000000000B060 /* BottomBarFadeTests.swift */,
 				A1670000000000000000A040 /* ControlMetricsTests.swift */,
@@ -1075,6 +1078,7 @@
 				A1670000000000000000A051 /* ControlTokenLintTests.swift in Sources */,
 				A1680000000000000000A061 /* ListTopFadeTests.swift in Sources */,
 				A1CF0000000000000000B081 /* PillGlassTests.swift in Sources */,
+				A1D0C10500000000000000A1 /* ViewerChromeTests.swift in Sources */,
 				A1CF0000000000000000B071 /* HomeBarFadeTests.swift in Sources */,
 				A1CF0000000000000000B061 /* BottomBarFadeTests.swift in Sources */,
 				A1670000000000000000A041 /* ControlMetricsTests.swift in Sources */,
