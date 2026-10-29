@@ -109,6 +109,10 @@ const UNDO_LIMIT: usize = 100;
 
 pub const MAX_LINES: usize = 10;
 pub const COMPOSER_RADIUS: f32 = COMPOSER_HEIGHT / 2.0;
+/// The `+` disc's distance from the pill's left edge. The trailing discs keep
+/// it too: phone → right edge and mic → phone, so the pair never reads as one
+/// cramped blob ([feedback glass-composer-button-spacing-mac-2026-10-29]).
+const BUTTON_INSET: f32 = (COMPOSER_HEIGHT - 2.0 - PLUS_BUTTON) / 2.0;
 
 pub type SubmitHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 /// Returns true when the @-mention menu handled the key (skip caret / send).
@@ -223,6 +227,9 @@ struct Layout {
     /// Where the clickable chips were painted (tests aim the pointer).
     #[cfg(test)]
     chips: Vec<(Range<usize>, Vec<Bounds<Pixels>>)>,
+    /// The mask the pills were painted under.
+    #[cfg(test)]
+    pill_mask: Bounds<Pixels>,
 }
 
 pub struct ComposerInput {
@@ -2330,10 +2337,16 @@ impl Element for InputElement {
                 window.paint_quad(bar);
             }
         });
-        window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+        // A pill reaches `PILL_PAD_X` / `PILL_PAD_Y` past its text, so a chip
+        // that starts or ends a row would lose its rounded end to the text's
+        // mask; the pills get the field padding they reach into.
+        let pill_mask = pill_mask(bounds);
+        window.with_content_mask(Some(gpui::ContentMask { bounds: pill_mask }), |window| {
             for pill in prepaint.pills.drain(..) {
                 window.paint_quad(pill);
             }
+        });
+        window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
             for sel in prepaint.selections.drain(..) {
                 window.paint_quad(sel);
             }
@@ -2389,6 +2402,8 @@ impl Element for InputElement {
                 bounds,
                 #[cfg(test)]
                 chips: chip_rects,
+                #[cfg(test)]
+                pill_mask,
             });
             input.scroll_y = scroll_y;
             // Remember the caret we just (or previously) kept in view so a
@@ -2514,6 +2529,22 @@ impl InputElement {
 /// The live quote bar's distance from the text and its vertical inset in the row.
 const QUOTE_BAR_GAP: f32 = 5.0;
 const QUOTE_BAR_INSET: f32 = 2.0;
+/// The field's padding left of the text; the chip pills and quote bars draw in it.
+const FIELD_TEXT_INSET: f32 = 10.0;
+
+/// The text box grown by the chip pills' reach past their text.
+fn pill_mask(text: Bounds<Pixels>) -> Bounds<Pixels> {
+    Bounds::new(
+        point(
+            text.left() - px(mention::PILL_PAD_X),
+            text.top() - px(mention::PILL_PAD_Y),
+        ),
+        size(
+            text.size.width + px(mention::PILL_PAD_X * 2.0),
+            text.size.height + px(mention::PILL_PAD_Y * 2.0),
+        ),
+    )
+}
 
 /// Restyle one paragraph's runs by the chat-Markdown grammar as it is typed:
 /// marker bytes (`**`, `` ` ``, `~~`, `||`, `[`, `](…)`) in the faint ink, the
@@ -3922,7 +3953,7 @@ impl Render for Composer {
                 .min_w_0()
                 .flex()
                 .items_center()
-                .pl(px(10.0))
+                .pl(px(FIELD_TEXT_INSET))
                 // In the card the row above and the buttons below set the rhythm.
                 .py(px(if self.attachments.is_empty() {
                     (COMPOSER_HEIGHT - 2.0 - INPUT_LINE_HEIGHT) / 2.0
@@ -3938,7 +3969,7 @@ impl Render for Composer {
         let mut trailing = div()
             .flex()
             .items_center()
-            .gap(px(2.0))
+            .gap(px(BUTTON_INSET))
             // In the pill the row is the pill's height; in the card the
             // circles set it and the card's padding does the rest.
             .h(px(if staged {
@@ -4000,8 +4031,8 @@ impl Render for Composer {
                 .flex()
                 .items_end()
                 .gap(px(4.0))
-                .pl(px((COMPOSER_HEIGHT - 2.0 - PLUS_BUTTON) / 2.0))
-                .pr(px((COMPOSER_HEIGHT - 2.0 - SEND_BUTTON) / 2.0))
+                .pl(px(BUTTON_INSET))
+                .pr(px(BUTTON_INSET))
                 .child(
                     div()
                         .h(px(COMPOSER_HEIGHT - 2.0))
@@ -5294,6 +5325,87 @@ mod mention_token_tests {
         cx.run_until_parked();
         assert_eq!(opened.borrow().len(), 1, "a drag opens nothing");
         assert!(!cx.update(|_, cx| input.read(cx).selected_range.is_empty()));
+    }
+
+    /// Scout (Oct 29): a chip first in the field lost its left end — its pill
+    /// reaches `PILL_PAD_X` past the text and the text's mask cut it square.
+    /// First in the draft, mid-row, at a paragraph's start and at a wrapped
+    /// row's start, every pill is painted whole, inside the field's padding.
+    #[gpui::test]
+    fn a_chip_at_the_start_of_a_row_keeps_both_rounded_ends(cx: &mut TestAppContext) {
+        let (input, cx) = input(cx);
+        let pick = |cx: &mut VisualTestContext| {
+            cx.simulate_input("@s");
+            cx.update(|_, cx| {
+                input.update(cx, |i, cx| {
+                    i.insert_mention("sam", "Sam Rivera", Some("user:gh_sam".into()), cx)
+                })
+            });
+            cx.run_until_parked();
+        };
+        let layout = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                let l = input.read(cx).layout.as_ref().unwrap();
+                (l.bounds, l.pill_mask, l.chips.clone())
+            })
+        };
+        let row_start = |bounds: Bounds<Pixels>, r: &Bounds<Pixels>| {
+            r.left() == bounds.left() - px(mention::PILL_PAD_X)
+        };
+
+        pick(cx);
+        let (bounds, _, chips) = layout(cx);
+        assert!(
+            row_start(bounds, &chips[0].1[0]),
+            "the first chip's pill starts in the field's padding: {:?} vs {bounds:?}",
+            chips[0].1[0]
+        );
+        cx.simulate_input("hi ");
+        pick(cx);
+        cx.simulate_input("\n");
+        pick(cx);
+        assert!(text(&input, cx).contains('\n'));
+
+        let mut row_starts = 0;
+        for _ in 0..80 {
+            let (bounds, _, chips) = layout(cx);
+            row_starts = chips
+                .iter()
+                .flat_map(|(_, rects)| rects)
+                .filter(|r| row_start(bounds, r))
+                .count();
+            if row_starts >= 3 {
+                break;
+            }
+            cx.simulate_input("and ");
+            pick(cx);
+        }
+        assert!(
+            row_starts >= 3,
+            "first, paragraph start and a wrapped row start"
+        );
+
+        let (bounds, mask, chips) = layout(cx);
+        assert!(mask.left() >= bounds.left() - px(FIELD_TEXT_INSET));
+        let pad_y = px(mention::PILL_PAD_Y);
+        let on_screen = |r: &&Bounds<Pixels>| {
+            r.top() + pad_y >= bounds.top() && r.bottom() - pad_y <= bounds.bottom()
+        };
+        for (range, rects) in &chips {
+            for r in rects.iter().filter(on_screen) {
+                assert!(
+                    mask.contains(&r.origin)
+                        && mask.contains(&(r.bottom_right() - point(px(0.01), px(0.01)))),
+                    "chip {range:?}: pill {r:?} is clipped by its mask {mask:?}"
+                );
+            }
+        }
+        assert!(
+            chips.iter().any(|(_, rects)| rects
+                .iter()
+                .any(|r| r.left() > bounds.left() + px(mention::PILL_PAD_X))),
+            "a mid-row chip too"
+        );
     }
 
     #[gpui::test]
