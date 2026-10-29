@@ -1923,6 +1923,9 @@ struct ChatSession: View {
             withTransaction(still) { timeReveal = reveal }
         case .timeEnded:
             withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) { timeReveal = 0 }
+        case .back:
+            BackSwipe.dismissKeyboard()
+            dismiss()
         }
     }
 
@@ -2009,13 +2012,14 @@ struct ChatSession: View {
                     Color.clear.frame(height: Theme.transcriptTail).id("bottom")
                 }
                 .padding(.horizontal, 16)
-                // The time peek's recognizer (swipe left) lives on the scroll view; the same
-                // host watches the scroll view's own pan: a scroll with the search bar open and
+                // The transcript's horizontal swipes (left: time peek, right: back) live on the
+                // scroll view, beside its pan; the same host watches that pan: a scroll with the search bar open and
                 // nothing typed closes it (with a keyword the list IS the results, so scrolling
                 // them keeps the bar). No SwiftUI drag: it would run per move and contend with
                 // the system's edge pop.
                 .background {
-                    TranscriptSwipeHost(timePeek: ChatGestures.timeReveal, onEvent: handleTranscriptSwipe) {
+                    TranscriptSwipeHost(timePeek: ChatGestures.timeReveal, backSwipe: ChatGestures.backSwipe,
+                                        onEvent: handleTranscriptSwipe) {
                         if ChatSearchClose.scrollCloses(open: showSearch, query: searchText) { closeSearch() }
                     }
                 }
