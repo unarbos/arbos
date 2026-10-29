@@ -15,6 +15,11 @@
 //! width it had when the slide began ([`ChatSlide::start_width`]) inside a
 //! clip, placed by an [`Anchor`], and is laid out once more at the end at its
 //! final width. Header pill and composer are cheap and follow the live width.
+//! The sidebar holds the transcript only where that final layout moves
+//! nothing — rows capped at every width it passes, gliding centred; where the
+//! rows fill the column the transcript follows the live width, so the bubbles
+//! move with the sidebar instead of waiting and jumping ([feedback
+//! mac-sidebar-slide-jank-2026-10-29]).
 //!
 //! An edge drag from the rail is the one case the width follows the hand
 //! instead of the clock: the rail morph is drawn at the pointer's x
@@ -387,15 +392,43 @@ impl PaneSlides {
         if self.pane.is_some_and(|s| (s.to - pane_target).abs() > 0.5) {
             self.pane = None;
         }
-        if self.sidebar.is_none() && self.pane.is_none() && track.is_none() {
+        let sidebar_visible =
+            track.unwrap_or_else(|| self.sidebar.map_or(sidebar_target, |s| s.value(now)));
+        let pane_visible = self.pane.map_or(pane_target, |s| s.value(now));
+        let sidebar_moving = self.sidebar.is_some() || track.is_some();
+        if !sidebar_moving && self.pane.is_none() {
             self.chat = None;
+        }
+        // The sidebar moving: the held transcript only glides (centred) while
+        // its rows are capped at every width the column passes — the start,
+        // this frame's and the narrowest it can end at (a tracked drag may
+        // still settle at the full width). Anywhere else the rows fill the
+        // column, so a held layout either sits still while the sidebar moves
+        // and jumps by the whole distance at the end, or slides under the
+        // column's edge: the transcript is laid out at the live width instead,
+        // as it is under a width drag ([feedback
+        // mac-sidebar-slide-jank-2026-10-29]).
+        if sidebar_moving {
+            let narrowest_sidebar = match track {
+                Some(tracked) => tracked.max(sidebar_full),
+                None => sidebar_target.max(sidebar_visible),
+            };
+            let live = want.viewport_width - sidebar_visible - pane_visible;
+            let end = want.viewport_width - narrowest_sidebar - pane_target.max(pane_visible);
+            if self.chat.is_some_and(|c| {
+                c.anchor != Anchor::Centre
+                    || !capped(c.start_width)
+                    || !capped(live)
+                    || !capped(end)
+            }) {
+                self.chat = None;
+            }
         }
 
         Frame {
-            sidebar_visible: track
-                .unwrap_or_else(|| self.sidebar.map_or(sidebar_target, |s| s.value(now))),
-            sidebar_sliding: self.sidebar.is_some() || track.is_some(),
-            pane_visible: self.pane.map_or(pane_target, |s| s.value(now)),
+            sidebar_visible,
+            sidebar_sliding: sidebar_moving,
+            pane_visible,
             pane_sliding: self.pane.is_some(),
             chat: self.chat,
         }
@@ -537,7 +570,7 @@ mod tests {
         let f = slides.step(want_rail(true), ms(t0, 16));
         assert!(f.sidebar_sliding);
         assert_eq!(f.sidebar_visible, SIDEBAR);
-        assert_eq!(f.chat.expect("chat slide").start_width, W - SIDEBAR);
+        assert_eq!(f.chat, None, "884 pt fills with rows: laid out live");
         let mut last = SIDEBAR;
         for i in 1..10 {
             let f = slides.step(want_rail(true), ms(t0, 16 + i * 16));
@@ -593,7 +626,7 @@ mod tests {
             assert_eq!(f.sidebar_visible, x);
             let p = f.rail_progress(SIDEBAR).expect("a rail morph");
             assert!(p > 0.0 && p < 1.0, "{p}");
-            assert_eq!(f.chat.expect("transcript held").start_width, W - rail);
+            assert_eq!(f.chat, None, "it may settle at 296 (884 pt, rows fill it)");
             frame += 16;
         }
         // Past the snap width the state unfolds to 296: the open slide runs
@@ -821,20 +854,71 @@ mod tests {
         assert!(!f.animating());
     }
 
+    /// Scout on v0.6.350 ([feedback mac-sidebar-slide-jank-2026-10-29]): "the
+    /// text bubbles teleport … sometimes chat messages lag behind". At the
+    /// default 1180 pt window the rows fill the 884 pt column; the transcript
+    /// used to be held at 884 against the slot's right edge, so the agent
+    /// bubbles sat still while the sidebar moved and jumped the whole 296 (or
+    /// 212 to the rail) when it settled. The sidebar's slides there lay the
+    /// transcript out live; the right pane keeps its hold (it slides over).
     #[test]
-    fn at_the_default_width_the_transcript_anchors_away_from_the_moving_sidebar() {
-        // 1180 pt window: 884 → 1180; the rows fill the column at 884 (852 <
-        // 960), so the transcript keeps its right edge and the sidebar slides
-        // away from (or over) its left end.
+    fn at_the_default_width_the_transcript_follows_the_moving_sidebar_live() {
         let t0 = Instant::now();
         let mut slides = PaneSlides::default();
         slides.step(want(true, false), t0);
         let f = slides.step(want(false, false), ms(t0, 16));
-        assert_eq!(f.chat.map(|c| c.anchor), Some(Anchor::Right));
-        let chat = f.chat.unwrap();
-        assert_eq!(chat.start_width, W - SIDEBAR);
-        assert_eq!(chat.offset(W), SIDEBAR);
-        assert_eq!(chat.offset(W - SIDEBAR), 0.0);
+        assert!(f.sidebar_sliding);
+        assert_eq!(f.chat, None);
+        let f = slides.step(want(false, false), ms(t0, 16 + CLOSE_MS / 2));
+        assert!(f.sidebar_sliding);
+        assert_eq!(f.chat, None);
+        // To the rail and back (884 ↔ 1096): the same.
+        let mut slides = PaneSlides::default();
+        slides.step(want_rail(false), t0);
+        for i in 1..12 {
+            let f = slides.step(want_rail(true), ms(t0, i * 16));
+            assert_eq!(f.chat, None, "collapse frame {i}");
+        }
+        for i in 1..14 {
+            let f = slides.step(want_rail(false), ms(t0, 400 + i * 16));
+            assert_eq!(f.chat, None, "open frame {i}");
+        }
+        // The right pane alone still holds the rows and slides over them.
+        let mut slides = PaneSlides::default();
+        slides.step(want(true, false), t0);
+        let f = slides.step(want(true, true), ms(t0, 16));
+        assert_eq!(f.chat.map(|c| c.anchor), Some(Anchor::Left));
+    }
+
+    /// A wide window holds the capped rows centred through a drag from the
+    /// rail, and lets them go to the live width the frame the column the
+    /// drag is heading for falls under the cap.
+    #[test]
+    fn a_held_transcript_is_let_go_once_the_column_falls_under_the_cap() {
+        let wide = 1400.0;
+        let rail = crate::ui::rail::metrics::WIDTH;
+        let at = |w: Want| Want {
+            viewport_width: wide,
+            ..w
+        };
+        let t0 = Instant::now();
+        let mut slides = PaneSlides::default();
+        slides.step(at(want_rail(true)), t0);
+        let f = slides.step(at(want_track(150.0)), ms(t0, 16));
+        let chat = f.chat.expect("1316 → 1104: capped both ways, held");
+        assert_eq!(chat.anchor, Anchor::Centre);
+        assert_eq!(chat.start_width, wide - rail);
+        // Unfolded, then dragged on to 420: 980 pt, under the 992 cap.
+        slides.step(at(want_rail(false)), ms(t0, 32));
+        let f = slides.step(
+            Want {
+                sidebar_width: 420.0,
+                ..at(want_rail(false))
+            },
+            ms(t0, 48),
+        );
+        assert!(f.sidebar_sliding);
+        assert_eq!(f.chat, None);
     }
 
     #[test]
@@ -947,6 +1031,8 @@ mod layout_tests {
         /// `None` = the bare three-pane row as `Shell::render` composes it at
         /// rest; `Some(frame)` = the same row through the slide clips.
         frame: Option<Frame>,
+        /// The window's width.
+        width: f32,
     }
 
     struct Row(Layout);
@@ -1007,7 +1093,8 @@ mod layout_tests {
                     )
                     .into_any_element()
             };
-            let mut row = div().flex().flex_row().w(px(W)).h(px(H));
+            let width = self.0.width;
+            let mut row = div().flex().flex_row().w(px(width)).h(px(H));
             match self.0.frame {
                 None => {
                     row = row.child(sidebar());
@@ -1027,7 +1114,7 @@ mod layout_tests {
                     } else if f.sidebar_visible > 0.0 {
                         row = row.child(sidebar());
                     }
-                    let live = W - f.sidebar_visible - f.pane_visible;
+                    let live = width - f.sidebar_visible - f.pane_visible;
                     let body = match f.chat {
                         Some(c) => transcript_clip(c, live, transcript()),
                         None => transcript(),
@@ -1077,7 +1164,13 @@ mod layout_tests {
 
     #[gpui::test]
     fn at_rest_the_clipped_layout_is_the_static_layout(cx: &mut TestAppContext) {
-        let plain = bounds(cx, Layout { frame: None });
+        let plain = bounds(
+            cx,
+            Layout {
+                frame: None,
+                width: W,
+            },
+        );
         // The frame the tracker answers one tick after both slides end: the
         // panes at their full widths, nothing sliding, no chat clip.
         let rest = bounds(
@@ -1090,6 +1183,7 @@ mod layout_tests {
                     pane_sliding: false,
                     chat: None,
                 }),
+                width: W,
             },
         );
         assert_eq!(plain, rest);
@@ -1108,6 +1202,7 @@ mod layout_tests {
                         anchor: Anchor::Left,
                     }),
                 }),
+                width: W,
             },
         );
         assert_eq!(plain, last);
@@ -1133,6 +1228,7 @@ mod layout_tests {
                     pane_sliding: true,
                     chat: Some(chat),
                 }),
+                width: W,
             },
         );
         let get = |name: &str| b.iter().find(|(n, _)| *n == name).map(|(_, v)| *v);
@@ -1160,5 +1256,79 @@ mod layout_tests {
         // past the window's right edge.
         assert_eq!(get("pane"), Some((W - 170.0, PANE, 0.0)));
         assert_eq!(get("close-x"), Some((W - 170.0 + PANE - 40.0, 30.0, 15.0)));
+    }
+
+    /// Scout on v0.6.350 ([feedback mac-sidebar-slide-jank-2026-10-29]):
+    /// bubbles that teleport, or lag behind the sidebar. Every frame the
+    /// tracker answers for the sidebar's toggles (hide, rail, back) and a drag
+    /// out from the rail puts the rows exactly where the static layout at that
+    /// frame's live width does — at the default width, where the rows fill the
+    /// column, and in a wide window, where they glide centred — so nothing
+    /// waits and nothing jumps when the slide ends.
+    #[gpui::test]
+    fn every_frame_of_a_sidebar_slide_lays_the_rows_out_at_the_live_width(cx: &mut TestAppContext) {
+        let rail = crate::ui::rail::metrics::WIDTH;
+        for width in [W, 1400.0] {
+            let want = |shown: bool, collapsed: bool, track: Option<f32>| Want {
+                viewport_width: width,
+                sidebar_shown: shown,
+                sidebar_width: SIDEBAR,
+                sidebar_rail: collapsed,
+                narrow: false,
+                pane_shown: false,
+                pane_width: PANE,
+                reduce_motion: false,
+                sidebar_track: track,
+            };
+            let t0 = Instant::now();
+            let mut script: Vec<(u64, Want)> = vec![(0, want(true, false, None))];
+            let mut at = 0;
+            let mut hold = |w: Want, frames: u64, script: &mut Vec<(u64, Want)>| {
+                for _ in 0..frames {
+                    at += 16;
+                    script.push((at, w));
+                }
+            };
+            hold(want(true, true, None), 13, &mut script);
+            hold(want(true, false, None), 15, &mut script);
+            hold(want(false, false, None), 13, &mut script);
+            hold(want(true, false, None), 15, &mut script);
+            hold(want(true, true, None), 13, &mut script);
+            for x in [110.0, 150.0, 190.0, 215.0] {
+                hold(want(true, true, Some(x)), 1, &mut script);
+            }
+            hold(want(true, false, None), 15, &mut script);
+            let mut slides = PaneSlides::default();
+            let mut moving = 0;
+            for (ms, w) in script {
+                let f = slides.step(w, t0 + Duration::from_millis(ms));
+                if !f.sidebar_sliding {
+                    continue;
+                }
+                moving += 1;
+                let b = bounds(
+                    cx,
+                    Layout {
+                        frame: Some(f),
+                        width,
+                    },
+                );
+                let (x, w_col, _) = b
+                    .iter()
+                    .find(|(n, _)| *n == "chat-column")
+                    .map(|(_, v)| *v)
+                    .expect("chat column drawn");
+                let live = width - f.sidebar_visible;
+                let col = (live - 2.0 * COLUMN_MARGIN).min(COLUMN_MAX_WIDTH);
+                let want_x = f.sidebar_visible + (live - col) / 2.0;
+                assert!(
+                    (x - want_x).abs() <= 1.0 && (w_col - col).abs() <= 1.0,
+                    "{width} pt window, sidebar at {} (rail {rail}) at {ms} ms: rows at x {x} w {w_col}, \
+                     the live layout puts them at x {want_x} w {col}",
+                    f.sidebar_visible
+                );
+            }
+            assert!(moving > 60, "{moving} sliding frames checked");
+        }
     }
 }
