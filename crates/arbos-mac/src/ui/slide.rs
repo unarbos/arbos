@@ -16,6 +16,12 @@
 //! clip, placed by an [`Anchor`], and is laid out once more at the end at its
 //! final width. Header pill and composer are cheap and follow the live width.
 //!
+//! An edge drag from the rail is the one case the width follows the hand
+//! instead of the clock: the rail morph is drawn at the pointer's x
+//! ([`Want::sidebar_track`]) and settles from there on these same curves —
+//! the drag unfolds exactly as it folds ([feedback
+//! mac-sidebar-drag-open-2026-10-29]).
+//!
 //! Reduce Motion (`cx.reduce_motion()`): no slide is started; everything
 //! snaps as before.
 
@@ -231,6 +237,8 @@ pub struct PaneSlides {
     last_sidebar: Option<(bool, f32)>,
     /// Collapsed to the rail as last drawn.
     last_sidebar_rail: bool,
+    /// The pointer-tracked width last drawn (`Want::sidebar_track`).
+    last_sidebar_track: Option<f32>,
     last_pane: Option<(bool, f32)>,
     chat: Option<ChatSlide>,
 }
@@ -253,6 +261,11 @@ pub struct Want {
     pub pane_width: f32,
     /// Reduce Motion: snap, never slide.
     pub reduce_motion: bool,
+    /// An edge drag from the rail asks for this visible width (the pointer's
+    /// x, `ui::sidebar_fit::EdgeDrag::track`): the rail morph follows it, no
+    /// slide runs, and when it goes (the snap width crossed, or the hand let
+    /// go) the sidebar settles from there on the toggle's slide.
+    pub sidebar_track: Option<f32>,
 }
 
 impl PaneSlides {
@@ -268,11 +281,15 @@ impl PaneSlides {
             sidebar_full
         };
         let pane_target = if want.pane_shown { pane_full } else { 0.0 };
+        let track = want
+            .sidebar_track
+            .filter(|_| want.sidebar_shown && want.sidebar_rail && !want.narrow);
 
         // Where things were drawn last frame (for the chat's start width).
-        let sidebar_before = match (self.sidebar, self.last_sidebar) {
-            (Some(s), _) => s.value(now),
-            (None, Some((shown, w))) => {
+        let sidebar_before = match (self.last_sidebar_track, self.sidebar, self.last_sidebar) {
+            (Some(tracked), _, _) => tracked,
+            (None, Some(s), _) => s.value(now),
+            (None, None, Some((shown, w))) => {
                 if !shown {
                     0.0
                 } else if self.last_sidebar_rail {
@@ -281,7 +298,7 @@ impl PaneSlides {
                     w
                 }
             }
-            (None, None) => sidebar_target,
+            (None, None, None) => sidebar_target,
         };
         let pane_before = match (self.pane, self.last_pane) {
             (Some(s), _) => s.value(now),
@@ -302,7 +319,22 @@ impl PaneSlides {
             || (self.last_sidebar.is_some()
                 && want.sidebar_shown
                 && self.last_sidebar_rail != want.sidebar_rail);
-        if sidebar_changed && !snap && !want.narrow {
+        // A drag from the rail let go (or turned into the expanded column):
+        // settle from the tracked width, as the toggle would from the rail.
+        let track_ended = self
+            .last_sidebar_track
+            .is_some_and(|tracked| track.is_none() && (tracked - sidebar_target).abs() > 0.5);
+        if let Some(tracked) = track {
+            self.sidebar = None;
+            if self.chat.is_none() {
+                let start_width = want.viewport_width - sidebar_before - pane_before;
+                let end_width = want.viewport_width - tracked.max(sidebar_full) - pane_before;
+                self.chat = Some(ChatSlide {
+                    start_width,
+                    anchor: anchor_for(Side::Left, start_width, end_width),
+                });
+            }
+        } else if (sidebar_changed || track_ended) && !snap && !want.narrow {
             self.start(
                 Side::Left,
                 sidebar_target,
@@ -333,6 +365,7 @@ impl PaneSlides {
         }
         self.last_sidebar = Some((want.sidebar_shown, sidebar_full));
         self.last_sidebar_rail = want.sidebar_rail;
+        self.last_sidebar_track = track;
         self.last_pane = Some((want.pane_shown, pane_full));
 
         // Finished slides come to rest at their target.
@@ -342,24 +375,26 @@ impl PaneSlides {
         if self.pane.is_some_and(|s| s.done(now)) {
             self.pane = None;
         }
-        // A slide whose target the state moved away from (a resize, a wider
-        // settings page) is dropped rather than left pointing at a stale width.
-        if self
-            .sidebar
-            .is_some_and(|s| (s.to - sidebar_target).abs() > 0.5)
-        {
-            self.sidebar = None;
+        // The sidebar's width moved under a running slide (an edge drag that
+        // passed the width the unfold settles at): the slide turns towards
+        // the new width from where it is, so the column never jumps.
+        if let Some(s) = self.sidebar.filter(|s| (s.to - sidebar_target).abs() > 0.5) {
+            self.sidebar =
+                (!snap && !want.narrow).then(|| s.retarget(sidebar_target, sidebar_full, now));
         }
+        // A pane slide whose target the state moved away from (a wider
+        // settings page) is dropped rather than left pointing at a stale width.
         if self.pane.is_some_and(|s| (s.to - pane_target).abs() > 0.5) {
             self.pane = None;
         }
-        if self.sidebar.is_none() && self.pane.is_none() {
+        if self.sidebar.is_none() && self.pane.is_none() && track.is_none() {
             self.chat = None;
         }
 
         Frame {
-            sidebar_visible: self.sidebar.map_or(sidebar_target, |s| s.value(now)),
-            sidebar_sliding: self.sidebar.is_some(),
+            sidebar_visible: track
+                .unwrap_or_else(|| self.sidebar.map_or(sidebar_target, |s| s.value(now))),
+            sidebar_sliding: self.sidebar.is_some() || track.is_some(),
             pane_visible: self.pane.map_or(pane_target, |s| s.value(now)),
             pane_sliding: self.pane.is_some(),
             chat: self.chat,
@@ -475,6 +510,7 @@ mod tests {
             pane_shown,
             pane_width: PANE,
             reduce_motion: false,
+            sidebar_track: None,
         }
     }
 
@@ -524,6 +560,92 @@ mod tests {
         assert!(f.sidebar_visible > rail && f.sidebar_visible < SIDEBAR);
         let f = slides.step(want_rail(false), ms(t1, OPEN_MS + 1));
         assert_eq!(f.sidebar_visible, SIDEBAR);
+        assert!(!f.animating());
+    }
+
+    fn want_track(track: f32) -> Want {
+        Want {
+            sidebar_track: Some(track),
+            ..want_rail(true)
+        }
+    }
+
+    /// Scout's report, Jacob's "symmetric animations for folding the side bar
+    /// in and out with the drag" ([feedback mac-sidebar-drag-open-2026-10-29]):
+    /// before, a drag from the rail drew nothing until the snap width, then
+    /// the unfold slide was dropped the moment the width moved under it — the
+    /// column flipped open. Now the morph follows the pointer, crossing the
+    /// snap width settles at the column's width on the open curve from where
+    /// the hand left it, the column then chases the pointer without a jump,
+    /// and a hand let go short of the snap width settles back into the rail
+    /// on the close curve.
+    #[test]
+    fn dragging_the_rail_open_follows_the_pointer_then_settles_like_the_toggle() {
+        let rail = crate::ui::rail::metrics::WIDTH;
+        let t0 = Instant::now();
+        let mut slides = PaneSlides::default();
+        slides.step(want_rail(true), t0);
+        // The hand pulls the rail's edge out: the morph is drawn at the pointer.
+        let mut frame = 16;
+        for x in [100.0, 140.0, 180.0, 215.0] {
+            let f = slides.step(want_track(x), ms(t0, frame));
+            assert!(f.sidebar_sliding, "the morph is drawn at {x}");
+            assert_eq!(f.sidebar_visible, x);
+            let p = f.rail_progress(SIDEBAR).expect("a rail morph");
+            assert!(p > 0.0 && p < 1.0, "{p}");
+            assert_eq!(f.chat.expect("transcript held").start_width, W - rail);
+            frame += 16;
+        }
+        // Past the snap width the state unfolds to 296: the open slide runs
+        // from 215, not from the rail and not as a flip.
+        let t1 = ms(t0, frame);
+        let f = slides.step(want_rail(false), t1);
+        assert!(f.sidebar_sliding);
+        assert!(
+            (f.sidebar_visible - 215.0).abs() < 0.5,
+            "{}",
+            f.sidebar_visible
+        );
+        let f = slides.step(want_rail(false), ms(t1, 48));
+        assert!(f.sidebar_visible > 215.0 && f.sidebar_visible < SIDEBAR);
+        // The pointer passes 296 mid-slide (the column now follows it): the
+        // slide turns towards the new width from where it is — no jump.
+        let before = f.sidebar_visible;
+        let f = slides.step(
+            Want {
+                sidebar_width: 330.0,
+                ..want_rail(false)
+            },
+            ms(t1, 64),
+        );
+        assert!(f.sidebar_sliding, "retargeted, not dropped");
+        assert!(
+            f.sidebar_visible >= before && f.sidebar_visible < before + 40.0,
+            "{before} → {}",
+            f.sidebar_visible
+        );
+        let f = slides.step(
+            Want {
+                sidebar_width: 330.0,
+                ..want_rail(false)
+            },
+            ms(t1, 64 + OPEN_MS + 1),
+        );
+        assert_eq!(f.sidebar_visible, 330.0);
+        assert!(!f.animating());
+
+        // A drag let go short of the snap width: back into the rail on the
+        // close curve, from where the hand left it.
+        let mut slides = PaneSlides::default();
+        slides.step(want_rail(true), t0);
+        slides.step(want_track(160.0), ms(t0, 16));
+        let f = slides.step(want_rail(true), ms(t0, 32));
+        assert!(f.sidebar_sliding);
+        assert!((f.sidebar_visible - 160.0).abs() < 0.5);
+        let f = slides.step(want_rail(true), ms(t0, 32 + CLOSE_MS / 2));
+        assert!(f.sidebar_visible > rail && f.sidebar_visible < 160.0);
+        let f = slides.step(want_rail(true), ms(t0, 32 + CLOSE_MS + 1));
+        assert_eq!(f.sidebar_visible, rail);
         assert!(!f.animating());
     }
 
