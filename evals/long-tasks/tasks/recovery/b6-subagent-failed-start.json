@@ -30,5 +30,5 @@
     "no_truncated_reply": true
   },
   "cleanup": "rm -f {P}/.arbos/home/.local/bin/prime-agent; pkill -f 'sleep 600' 2>/dev/null; echo cleaned",
-  "regression": "subagent failed start: plain line, kill stuck child, result turn replies only (bc-d117b386, #1349)"
+  "regression": "subagent failed start: plain line, kill stuck child, result turn replies only (bc-d117b386, #1349); #2240 (first line + first send_message glued in one bubble → the duplicate-sentence check; run 12 on 0.1.179, fix in 0.1.181); #2240 verified on 0.1.185 (run 13 PASS)"
 }

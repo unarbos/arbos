@@ -3,7 +3,7 @@
  "lane": "c",
  "category": "background",
  "title": "A two-step job under the job tools; a steer between the steps changes step 2",
- "regression": "#1778 (a job request uses start_job; a steer uses steer_job, never kill + restart) — on 0.1.141 the agent still ran a detached script and its kill+rewrite got a destructive-shell card (refused) so the steer was lost; b9 stays red",
+ "regression": "#1778 (a job request uses start_job; a steer uses steer_job, never kill + restart) — on 0.1.141 the agent still ran a detached script and its kill+rewrite got a destructive-shell card (refused) so the steer was lost; b9 stays red; run 12 note on #1778: the agent edited the running script in place, the run died, it restarted instead of steer_job (output right); #2276 (run 13, 0.1.185: steer_job → worker sed -i + rm -f + restart, file-delete approval in the pinned chat, main agent claimed 'now writes the cubes' before anything happened)",
  "turns": [
   {
    "prompt": "Start a job with two steps, as a job (not in this turn): step 1 — write the numbers 1 to 10 to {D}/step1.txt, one per line, then wait 45 seconds; step 2 — write the SQUARES of those numbers to {D}/step2.txt, one per line. Tell me when it has started, and tell me when it is done.",
