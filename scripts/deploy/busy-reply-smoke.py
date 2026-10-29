@@ -16,7 +16,9 @@ whose ops depend on the user message — sits as a pending Loro import in the pr
 That showed as "same-chat probe: no row for 150 s" on images 0.1.81 / 0.1.84 (the box had
 answered in 2.7 s) and passed on the images in between by timing alone. Needs `arbosctl` on PATH and ARBOS_RELAY_ADMIN_TOKEN in
 the environment (the deploy worker passes it). Prints one JSON report line; exit 0 = gate held,
-1 = gate failed, 2 = the smoke itself could not run (no verdict).
+1 = gate failed, 2 = the smoke itself could not run (no verdict). A SIGTERM (an outer `timeout`)
+still prints the report — with the verdict if both probes had finished — and appends it to the
+log, which is line-buffered so a killed run keeps every arbosctl line it saw.
 
     busy-reply-smoke.py [--relay URL] [--user USER_ID] [--gate-seconds 5] [--busy-seconds 90]
 """
@@ -25,6 +27,7 @@ import json
 import os
 import re
 import select
+import signal
 import subprocess
 import sys
 import tempfile
@@ -44,6 +47,15 @@ PROBE_SAME = "what is going on now?"
 PROBE_OTHER = "hello? are you there?"
 
 
+class Terminated(Exception):
+    pass
+
+
+def on_sigterm(_sig, _frame):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    raise Terminated()
+
+
 def api(relay, token, method, path, body=None):
     data = None if body is None else json.dumps(body).encode()
     req = urllib.request.Request(
@@ -60,8 +72,9 @@ def api(relay, token, method, path, body=None):
 class Timed:
     """Run `arbosctl chat send … --stream` and time what a user would see on screen."""
 
-    def __init__(self, cmd, log, env=None):
+    def __init__(self, cmd, log, env=None, procs=None):
         self.cmd, self.log, self.env = cmd, log, env
+        self.procs = procs if procs is not None else []
         self.t_sent = self.t_row = self.t_text = self.t_done = None
         self.rows_before, self.rows_after = set(), set()
         self.cur_row, self.first_text = None, ""
@@ -100,6 +113,7 @@ class Timed:
 
     def run(self):
         p = subprocess.Popen(self.cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0, env=self.env)
+        self.procs.append(p)
         fds = {p.stdout.fileno(): 1, p.stderr.fileno(): 2}
         while fds:
             r, _, _ = select.select(list(fds), [], [], 0.2)
@@ -110,7 +124,10 @@ class Timed:
                 else:
                     del fds[f]
         p.wait()
-        t_exit = time.time()
+        return self.summary(time.time(), p.returncode)
+
+    def summary(self, t_exit=None, rc=None):
+        """Timings so far; `t_exit`/`rc` stay None for a probe cut off mid-run."""
 
         def dl(t):
             return None if (t is None or self.t_sent is None) else round(t - self.t_sent, 2)
@@ -120,7 +137,7 @@ class Timed:
             "first_text_s": dl(self.t_text),
             "done_s": dl(self.t_done) if self.t_done else dl(t_exit),
             "first_text": self.first_text,
-            "exit": p.returncode,
+            "exit": rc,
         }
 
 
@@ -139,17 +156,32 @@ def main():
         return 2
     relay = args.relay.rstrip("/")
     work = tempfile.mkdtemp(prefix="busy-reply-smoke-")
-    log = open(args.log or os.path.join(work, "stream.log"), "a")
+    log = open(args.log or os.path.join(work, "stream.log"), "a", buffering=1)
     devices = []  # (token, device_id), one per arbosctl client
+    procs, threads, timers = [], [], {}
     report = {"ok": None, "relay": relay, "user": args.user, "gate_s": args.gate_seconds}
+
+    def emit():
+        line = json.dumps(report)
+        print(line, flush=True)
+        log.write(f"{time.time():.3f} report {line}\n")
+
+    def stop_children():
+        for p in procs:
+            if p.poll() is None:
+                p.kill()
+        for t in threads:
+            t.join(timeout=5)
+
     try:
+        signal.signal(signal.SIGTERM, on_sigterm)
         cfgs = []
         for name in ("busy", "same", "other"):
             st, dev = api(relay, admin, "POST", f"/admin/users/{args.user}/devices",
                           {"name": f"busy-reply smoke {name} (deploy worker; revoked at the end)"})
             if st != 200 and st != 201:
                 report["error"] = f"device mint HTTP {st}"
-                print(json.dumps(report))
+                emit()
                 return 2
             devices.append((dev["access_token"], dev["device_id"]))
             d = os.path.join(work, name)
@@ -166,7 +198,7 @@ def main():
         projects = projects if isinstance(projects, list) else (projects or {}).get("projects", [])
         if not projects:
             report["error"] = "the smoke user has no project"
-            print(json.dumps(report))
+            emit()
             return 2
         project = projects[0]["id"]
         report["project"] = project
@@ -183,6 +215,7 @@ def main():
 
         stamp = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())
         chat1 = open_chat(cfgs[0], f"busy-reply smoke {stamp}")
+        report["chat_busy"] = chat1
         busy_env = dict(env, ARBOSCTL_CONFIG=cfgs[0])
         busy_err = open(os.path.join(work, "busy.stderr"), "w+")
         busy = subprocess.Popen(
@@ -190,7 +223,9 @@ def main():
              BUSY_PROMPT.format(n=args.busy_seconds, t=args.busy_seconds + 60),
              "--stream", "--timeout", str(args.busy_seconds + 240)],
             env=busy_env, stdout=subprocess.DEVNULL, stderr=busy_err)
+        procs.append(busy)
         chat2 = open_chat(cfgs[2], f"busy-reply smoke (other chat) {stamp}")
+        report["chat_other"] = chat2
 
         def dump(cfg, chat):
             out = subprocess.run(["arbosctl", "chat", "dump", project, chat],
@@ -249,11 +284,15 @@ def main():
         def probe(name, cfg, chat, text):
             running_at[name] = long_turn_state() == "running"
             env_p = dict(os.environ, ARBOSCTL_CONFIG=cfg)
-            results[name] = Timed(["arbosctl", "chat", "send", project, chat, text,
-                                   "--stream", "--timeout", "150"], log, env_p).run()
+            timers[name] = Timed(["arbosctl", "chat", "send", project, chat, text,
+                                  "--stream", "--timeout", "150"], log, env_p, procs)
+            results[name] = timers[name].run()
 
-        t_same = threading.Thread(target=probe, args=("same_chat", cfgs[1], chat1, PROBE_SAME))
-        t_other = threading.Thread(target=probe, args=("other_chat", cfgs[2], chat2, PROBE_OTHER))
+        # Daemon threads: a SIGTERM lands in the main thread, which must be able to exit
+        # without waiting for a probe that is still streaming.
+        t_same = threading.Thread(target=probe, args=("same_chat", cfgs[1], chat1, PROBE_SAME), daemon=True)
+        t_other = threading.Thread(target=probe, args=("other_chat", cfgs[2], chat2, PROBE_OTHER), daemon=True)
+        threads.extend([t_same, t_other])
         t_same.start()
         time.sleep(10)
         t_other.start()
@@ -261,18 +300,7 @@ def main():
         t_other.join()
         r_same, r_other = results["same_chat"], results["other_chat"]
         busy_still_running = all(running_at.values())
-        try:
-            busy.wait(timeout=args.busy_seconds + 300)
-        except subprocess.TimeoutExpired:
-            busy.kill()
-        # Leave the agent idle for the next run: wait for the long turn to finish.
-        t_end = time.time()
-        while long_turn_state() != "done" and time.time() - t_end < args.busy_seconds + 180:
-            time.sleep(3)
-        busy_err.close()
         report.update({
-            "chat_busy": chat1,
-            "chat_other": chat2,
             "same_chat": r_same,
             "other_chat": r_other,
             "busy_turn_still_running_at_probes": busy_still_running,
@@ -286,13 +314,32 @@ def main():
         report["ok"] = all(verdicts) and busy_still_running
         if not busy_still_running:
             report["note"] = "the long turn ended before the probes; the gate was not exercised"
-        print(json.dumps(report))
+        try:
+            busy.wait(timeout=args.busy_seconds + 300)
+        except subprocess.TimeoutExpired:
+            busy.kill()
+        # Leave the agent idle for the next run: wait for the long turn to finish.
+        t_end = time.time()
+        while long_turn_state() != "done" and time.time() - t_end < args.busy_seconds + 180:
+            time.sleep(3)
+        busy_err.close()
+        emit()
         return 0 if report["ok"] else 1
+    except Terminated:
+        stop_children()
+        for name, t in timers.items():
+            report.setdefault(name, t.summary())
+        report["terminated"] = ("SIGTERM while waiting for the long turn to end (verdict stands)"
+                                if report["ok"] is not None else "SIGTERM before the gate verdict")
+        emit()
+        return 2 if report["ok"] is None else (0 if report["ok"] else 1)
     except Exception as e:  # noqa: BLE001 — one report line, whatever broke
         report["error"] = str(e)[:400]
-        print(json.dumps(report))
+        emit()
         return 2
     finally:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        stop_children()
         for tok, dev_id in devices:
             try:
                 api(relay, tok, "DELETE", f"/auth/devices/{dev_id}")
