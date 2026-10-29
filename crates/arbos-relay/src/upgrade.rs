@@ -552,6 +552,18 @@ async fn run(state: &AppState, user_id: &str, target: &str, source: Source) -> R
         }
     }
 
+    // One carry at a time on the toolbox link (#2254): a second carry halves the throughput for
+    // both and every piece times out. Waiting here keeps the box running; nothing is stopped yet.
+    let permits = carry::carry_permits(&cfg);
+    if permits.available_permits() == 0 {
+        set_phase(state, user_id, "wait").await;
+        tracing::info!(user = %user_id, "another /work carry is running; waiting for the toolbox link");
+    }
+    let _carry_permit = permits
+        .acquire()
+        .await
+        .map_err(|_| anyhow!("carry permits closed"))?;
+
     set_phase(state, user_id, "pack").await;
     let packed = match pack(state, user_id, &tb, work_mib, &cfg).await {
         Ok(p) => p,
