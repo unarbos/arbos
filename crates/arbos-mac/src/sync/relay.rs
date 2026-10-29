@@ -9236,11 +9236,34 @@ async fn refresh_shell_grants(shared: &Arc<Shared>, project_id: &str) {
             });
         }
         Err(err) => {
-            if !format!("{err:#}").contains("HTTP 404") {
-                shared.fail("load the shell approvals", &err);
+            if let Some(event) = shell_grants_failed(project_id, &err) {
+                let _ = shared.events.send(event);
             }
         }
     }
+}
+
+/// What a failed shell-approvals load becomes. Shell approvals are the owner's: a viewer of
+/// someone else's agent (a guest, a connected agent run by another account) gets 403
+/// `not_owner`, which is the expected answer — the pane just has none, no toast. A 404 (older
+/// relay) says nothing; anything else is a real failure and is told.
+pub(super) fn shell_grants_failed(project_id: &str, err: &anyhow::Error) -> Option<SyncEvent> {
+    let not_ours = err
+        .downcast_ref::<RelayError>()
+        .is_some_and(|e| e.status == 403 && e.kind == "not_owner");
+    if not_ours {
+        return Some(SyncEvent::ShellGrants {
+            project_id: project_id.to_string(),
+            items: Vec::new(),
+        });
+    }
+    if format!("{err:#}").contains("HTTP 404") {
+        return None;
+    }
+    Some(SyncEvent::Failure {
+        error: UserError::classify("load the shell approvals", err),
+        retry: None,
+    })
 }
 
 /// Marker in a `run_session` error chain: the WebSocket never opened (TCP,
@@ -9668,6 +9691,62 @@ mod people_archive_tests {
             Some(7),
             "agents use the space archive"
         );
+    }
+}
+
+/// [feedback shell-approvals-403-quiet-2026-10-29]: opening someone else's agent hides its
+/// shell approvals quietly; every other failure still reaches the user.
+#[cfg(test)]
+mod shell_grants_failed_tests {
+    use super::{shell_grants_failed, RelayError, SyncEvent};
+    use reqwest::StatusCode;
+
+    fn relay(status: u16, kind: &str, message: &str) -> anyhow::Error {
+        let body = serde_json::json!({ "error": { "type": kind, "message": message } });
+        RelayError::from_body(
+            StatusCode::from_u16(status).expect("status"),
+            &body.to_string(),
+        )
+        .into()
+    }
+
+    fn is_toast(event: Option<SyncEvent>) -> bool {
+        matches!(event, Some(SyncEvent::Failure { .. }))
+    }
+
+    #[test]
+    fn not_owner_hides_the_approvals_without_a_toast() {
+        let err =
+            relay(403, "not_owner", "not your project").context("GET /projects/p1/shell-grants");
+        match shell_grants_failed("p1", &err) {
+            Some(SyncEvent::ShellGrants { project_id, items }) => {
+                assert_eq!(project_id, "p1");
+                assert!(items.is_empty());
+            }
+            _ => panic!("403 not_owner must be an empty list, not a failure"),
+        }
+    }
+
+    #[test]
+    fn real_failures_still_surface() {
+        for (status, kind) in [
+            (403, "forbidden"),
+            (401, "unauthorized"),
+            (400, "bad_request"),
+            (500, "internal"),
+        ] {
+            let err = relay(status, kind, "refused");
+            assert!(is_toast(shell_grants_failed("p1", &err)), "{status} {kind}");
+        }
+        assert!(is_toast(shell_grants_failed(
+            "p1",
+            &anyhow::anyhow!("connection reset").context("GET /projects/p1/shell-grants")
+        )));
+    }
+
+    #[test]
+    fn an_older_relay_without_the_route_says_nothing() {
+        assert!(shell_grants_failed("p1", &relay(404, "not_found", "no route")).is_none());
     }
 }
 
