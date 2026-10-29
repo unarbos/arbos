@@ -174,10 +174,26 @@ marker_fresh() { # marker_fresh <file>: 0 when the file exists and is younger th
 }
 canary_running() { marker_fresh "$STATE/agentd.canary"; }
 relay_deploying() { marker_fresh "$STATE/relay.deploying"; }
-wait_for_relay_lane() { # before a canary smoke: no relay deploy in flight, and the relay up for RELAY_SETTLE_S
+# arbos-www (Caddy) reloads close every proxied WebSocket for a second (2026-10-29: 12 reloads between
+# 23:30 and 04:03, 49–57 boxes dropped each, two canary smokes broken mid-probe). refresh-mac-download
+# writes `www.reloading` around a reload and `www.reload-pending` when it had to defer one behind a
+# canary smoke / relay deploy; the tick applies a pending reload once the lanes are clear.
+www_reloading() { marker_fresh "$STATE/www.reloading"; }
+apply_pending_www_reload() {
+  [[ -f "$STATE/www.reload-pending" ]] || return 0
+  if canary_running || relay_deploying; then return 0; fi
+  dry && { log "dry-run: would apply the deferred arbos-www reload"; return 0; }
+  systemctl is-active --quiet arbos-www.service || { rm -f "$STATE/www.reload-pending"; return 0; }
+  printf 'by=%s\nat=%s\n' "arbos-deploy-worker" "$(date -u +%FT%TZ)" > "$STATE/www.reloading"
+  systemctl reload arbos-www.service || true
+  rm -f "$STATE/www.reloading" "$STATE/www.reload-pending"
+  log "www: applied the arbos-www reload deferred by refresh-mac-download (lanes clear)"
+  event relay "$(deployed_sha relay)" www_reload_applied "deferred Caddy reload applied once no canary smoke / relay deploy was in flight"
+}
+wait_for_relay_lane() { # before a canary smoke: no relay deploy / Caddy reload in flight, and the relay up for RELAY_SETTLE_S
   local waited=0 up last
-  while relay_deploying; do
-    (( waited == 0 )) && log "agentd: canary smoke waits — relay deploy in flight ($(cat "$STATE/relay.deploying" 2>/dev/null | tr '\n' ' '))"
+  while relay_deploying || www_reloading; do
+    (( waited == 0 )) && log "agentd: canary smoke waits — relay deploy or arbos-www reload in flight ($(cat "$STATE/relay.deploying" "$STATE/www.reloading" 2>/dev/null | tr '\n' ' '))"
     (( waited >= CANARY_WAIT_MAX_S )) && { log "agentd: relay deploy still in flight after ${waited}s; running the canary anyway"; return 0; }
     sleep 10; waited=$((waited + 10))
   done
@@ -1385,6 +1401,7 @@ continue_roll_if_due() {
 
 tick() {
   need_root
+  apply_pending_www_reload
   if dry; then
     # Throwaway state: the real metadata files and queue are copied, the repo clone is shared read-only
     # (fetch only), the lock is private so a live tick is never blocked, nothing is removed or written
@@ -1430,6 +1447,7 @@ status() {
   if agentd_held; then echo "agentd lane HELD: $(tr '\n' ' ' < "$(agentd_hold_file)")"; else echo "agentd lane: open"; fi
   if canary_running; then echo "agentd canary smoke: running ($(tr '\n' ' ' < "$STATE/agentd.canary")) — relay deploys wait"; fi
   if relay_deploying; then echo "relay deploy: in flight ($(tr '\n' ' ' < "$STATE/relay.deploying")) — canary smokes wait"; fi
+  if [[ -f "$STATE/www.reload-pending" ]]; then echo "arbos-www reload: PENDING ($(tr '\n' ' ' < "$STATE/www.reload-pending")) — applied by the tick once the lanes are clear"; fi
   if [[ -s "$STATE/agentd.skip" ]]; then
     echo "skipped boxes (left on their image; 'unskip <uid>' after the fix):"
     while IFS='|' read -r u r w; do echo "  $u since $w: $r"; done < "$STATE/agentd.skip"
