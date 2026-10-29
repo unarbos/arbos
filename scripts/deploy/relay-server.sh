@@ -368,11 +368,26 @@ systemctl enable --now arbos-relay.service >/dev/null
 # closes them with 1012 Service Restart and drains, so the apps redial at once instead of backing off
 # (the Oct 22 "Reconnecting…" banners). Answers when ready; a relay too old for the endpoint (404) is
 # simply restarted. RELAY_RESTART_NOTICE_S=0 skips the notice (hotfixes).
+# A relay with a box upgrade or create in flight answers 409 box_work_in_flight and changes nothing
+# (#2262: a restart at 01:03 on Oct 29 cut an upgrade between its new sandbox and its row). Wait for
+# it, up to RELAY_BOX_WORK_WAIT_MAX_S, then restart anyway with force.
 if systemctl is-active --quiet arbos-relay.service; then
-  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 -X POST \
-    -H "Authorization: Bearer $ARBOS_RELAY_ADMIN_TOKEN" -H 'Content-Type: application/json' \
-    -d "{\"notice_s\":${RELAY_RESTART_NOTICE_S:-10},\"drain_s\":5}" "http://$LISTEN/admin/restart" || echo 000)
-  echo "relay: planned-restart handshake answered HTTP $code"
+  waited=0
+  force=false
+  while :; do
+    code=$(curl -s -o /tmp/arbos-relay-restart.json -w '%{http_code}' --max-time 60 -X POST \
+      -H "Authorization: Bearer $ARBOS_RELAY_ADMIN_TOKEN" -H 'Content-Type: application/json' \
+      -d "{\"notice_s\":${RELAY_RESTART_NOTICE_S:-10},\"drain_s\":5,\"force\":$force}" "http://$LISTEN/admin/restart" || echo 000)
+    [[ "$code" == 409 ]] || break
+    if (( waited >= ${RELAY_BOX_WORK_WAIT_MAX_S:-1800} )); then
+      echo "relay: box work still in flight after ${waited}s; restarting with force: $(cat /tmp/arbos-relay-restart.json)"
+      force=true
+      continue
+    fi
+    (( waited == 0 )) && echo "relay: restart waits for box work in flight: $(cat /tmp/arbos-relay-restart.json)"
+    sleep 15; waited=$((waited + 15))
+  done
+  echo "relay: planned-restart handshake answered HTTP $code (waited ${waited}s for box work)"
 fi
 systemctl restart arbos-relay.service
 sleep 2
