@@ -525,7 +525,10 @@ private struct VerticalDismissProbe: UIViewRepresentable {
                 offset.wrappedValue = t.y
                 progress.wrappedValue = min(1, t.y / 400)
             case .ended, .cancelled:
-                if dragOffset > 120, t.y > abs(t.x) * 1.2 {
+                // `dragOffset` only advances on a clearly vertical pull, so past
+                // 120 pt is enough — do not re-test the final point (a slight
+                // sideways lift at the end used to cancel a good dismiss).
+                if dragOffset > 120 {
                     onClose()
                 } else {
                     withAnimation(.easeOut(duration: 0.2)) {
@@ -542,12 +545,25 @@ private struct VerticalDismissProbe: UIViewRepresentable {
         func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
             guard enabled, let pan = gestureRecognizer as? UIPanGestureRecognizer else { return false }
             let v = pan.velocity(in: pan.view)
-            return v.y > 0 && v.y >= abs(v.x) * 1.2
+            let t = pan.translation(in: pan.view)
+            // Velocity when the finger is moving; translation when it is slow — either
+            // must read clearly downward so a horizontal album page is never claimed.
+            if abs(v.y) + abs(v.x) > 80 {
+                return v.y > 0 && v.y >= abs(v.x) * 1.2
+            }
+            return t.y > 0 && t.y >= abs(t.x) * 1.2
         }
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                                shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
             true
+        }
+
+        /// Do not wait on AVKit / page pans — a clear downward drag must be able to
+        /// begin while a video is playing ([feedback app-01M64DX30WRXK7B4VSNWBYRGAH]).
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldBeRequiredToFailBy other: UIGestureRecognizer) -> Bool {
+            false
         }
     }
 
@@ -696,6 +712,9 @@ private struct VideoPage: View {
 
     var body: some View {
         ZStack {
+            // Full-bleed hit target so letterboxing around the 16:9 player still
+            // receives the swipe-down dismiss pan.
+            Color.clear
             if let player {
                 VideoPlayer(player: player)
                     .aspectRatio(16 / 9, contentMode: .fit)
@@ -732,7 +751,12 @@ private struct VideoPage: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .modifier(DismissDrag(progress: $dismissProgress, onClose: onClose, enabled: player == nil))
+        .contentShape(Rectangle())
+        // Swipe-down closes while the poster is up *and* while the video plays
+        // ([feedback app-01M64DX30WRXK7B4VSNWBYRGAH]); the pan only begins when the
+        // drag is clearly vertical, so album paging and Play still work.
+        .modifier(DismissDrag(progress: $dismissProgress, onClose: onClose))
+        .accessibilityHint("Swipe down to close")
     }
 
     @MainActor
