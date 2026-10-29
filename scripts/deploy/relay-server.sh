@@ -224,7 +224,7 @@ FEATURE_KEYS=(ARBOS_FEATURE_VAULT_CONNECT)
 # Box upgrade carry (ARB-339): operator knobs, kept from the env file, never read from the vault.
 # Unset = the relay's defaults (16 GiB ceiling, 256 MiB parts, 4 attempts, rebuildable trees carried).
 #   ARBOS_UPGRADE_MAX_WORK_MIB / ARBOS_UPGRADE_PART_MIB / ARBOS_UPGRADE_ATTEMPTS / ARBOS_UPGRADE_SKIP_REBUILDABLE=1
-UPGRADE_KEYS=(ARBOS_UPGRADE_MAX_WORK_MIB ARBOS_UPGRADE_PART_MIB ARBOS_UPGRADE_ATTEMPTS ARBOS_UPGRADE_SKIP_REBUILDABLE)
+UPGRADE_KEYS=(ARBOS_UPGRADE_MAX_WORK_MIB ARBOS_UPGRADE_PART_MIB ARBOS_UPGRADE_ATTEMPTS ARBOS_UPGRADE_SKIP_REBUILDABLE ARBOS_UPGRADE_CONCURRENT_CARRIES)
 # Agent-hosted sites (#2060): the relay pushes published snapshots to the Cloudflare R2 bucket
 # the edge Worker serves from. Endpoint from the vault config item, S3 keys from the account-wide
 # R2 key pair ("Cloudflare R2 — S3 access key ID / secret key, account-wide, no IP lock").
