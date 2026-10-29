@@ -1408,6 +1408,28 @@ impl Db {
         self.write_box(s, true).map(|_| ())
     }
 
+    /// Write back a row read before a slow provider call (start, stop) only while the row still
+    /// names `sandbox_id`. `Ok(false)` when it moved on meanwhile: an upgrade rollback put the
+    /// source back (2026-10-25 21:35, a wake that started in the same second as the rollback wrote
+    /// the half-filled new sandbox over it and the full source ran on with no row).
+    pub fn write_back_box(&self, s: &Sandbox, sandbox_id: Option<&str>) -> Result<bool> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE boxes SET provider=?2, sandbox_id=?3, daytona_state=?4, device_id=?5, box_token_hash=?6, mcp_token=?7,
+                    snapshot=?8, last_started_at=?9, last_stopped_at=?10, last_seen_at=?11, box_url=?12, preview_token=?13,
+                    local_pid=?14, migrated_from=?15
+                 WHERE user_id = ?1 AND sandbox_id IS ?16",
+                params![
+                    s.user_id, s.provider, s.sandbox_id, s.daytona_state, s.device_id, s.box_token_hash, s.mcp_token, s.snapshot,
+                    s.last_started_at, s.last_stopped_at, s.last_seen_at, s.box_url, s.preview_token, s.local_pid,
+                    serde_json::to_string(&s.migrated_from).unwrap_or_else(|_| "[]".into()),
+                    sandbox_id
+                ],
+            )
+            .map(|n| n > 0)
+        })
+    }
+
     fn write_box(&self, s: &Sandbox, may_clear_sandbox: bool) -> Result<bool> {
         self.with(|c| {
             c.execute(
