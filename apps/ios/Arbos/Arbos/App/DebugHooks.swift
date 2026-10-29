@@ -139,6 +139,9 @@ enum DebugHooks {
     /// `ARBOS_VIEWER_CLOSE_MS=<ms>`: the media viewer closes itself through its own Close path
     /// that long after it appears (a shot of what is underneath afterwards).
     static var viewerCloseMs: Int? { value("ARBOS_VIEWER_CLOSE_MS").flatMap(Int.init) }
+    /// `white | dark | busy`: every fixture picture is a full-screen portrait of that kind, so
+    /// the viewer's controls sit on the picture ([feedback image-viewer-close-button-2026-10-29]).
+    static var fixturePicture: String? { value("ARBOS_FIXTURE_PICTURE") }
     /// With a Settings page open: scroll to the card with this id (e.g. `people` on a Secret page).
     static var settingsScroll: String? { value("ARBOS_SETTINGS_SCROLL") }
     /// `ARBOS_RIG_AGENT_PICKED=<name>,<name>`: a Secrets form's agent picker starts with these
