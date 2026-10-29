@@ -417,6 +417,10 @@ impl Composer {
             .border_1()
             .border_color(theme.border_strong)
             .shadow_lg()
+            // The menu floats over the transcript: its own hitbox must block the rows
+            // beneath (the popover wrapper has no size of its own to occlude with).
+            .occlude()
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
                 row("attach-menu-file", "photo", "Photo or file…", &theme).on_click(cx.listener(
                     |this, _, _, cx| {
@@ -521,6 +525,13 @@ impl Composer {
             .border_color(theme.border_strong)
             .shadow_lg()
             .overflow_hidden()
+            // The card covers transcript rows; without its own occluding hitbox a tap on a
+            // tab also reached the picture under it and opened the media viewer (rig
+            // shots, 2026-10-29). Same for the wheel: scrolling the grid must not move
+            // the transcript.
+            .occlude()
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .child(header)
             .child(body);
         glass::popover(
@@ -1162,7 +1173,8 @@ fn sticker_cell(
 ) -> gpui::Stateful<gpui::Div> {
     let mut cell = div()
         .id(id)
-        .w(px((WIDTH - 2.0 * PAD) / STICKER_COLS as f32))
+        // A hair under a quarter of the row so four cells wrap per line (flex_wrap rounds).
+        .w(px((WIDTH - 2.0 * PAD - 8.0) / STICKER_COLS as f32))
         .h(px(STICKER_CELL))
         .rounded(px(10.0))
         .flex()
