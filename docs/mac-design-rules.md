@@ -189,6 +189,7 @@ strip's discs no longer fit beside the lights. Rules (`ui/sidebar_fit.rs`):
 | **220** (`SNAP_WIDTH` = `SIDEBAR_WIDTH_MIN`) | the narrowest layout: the strip's search · + · collapse exactly fill the band right of the lights (72 + 12 + 3 × 36 + 2 × 8 + 12 = 220, `strip_fits`); a row keeps a `NAME_MIN` 96 pt name (`text_column` = width − 86 chrome). The handle holds here while the pointer is within 16 pt below |
 | < 204 (`SNAP_WIDTH − SNAP_HYSTERESIS`) | **snaps to the icon rail** (the rail morph, as the toggle) and keeps the width the gesture started from as the column's saved width (`EdgeTarget::Rail { keep }`) |
 | rail → out past 220 | **restores that width** (`NSSplitView` collapse behaviour): the column re-expands at it, the handle holds until the pointer passes it, then follows (`EdgeTarget::Hold` → `Expanded`). The rail's right edge is the same handle (`rail-resize`) |
+| rail → out, short of 220 | **the rail morph follows the pointer** (`EdgeDrag::track` → `slide::Want::sidebar_track`), the mirror of the fold following it down to 220. Crossing 220 settles at the restored width on the open curve from where the hand is; letting go short of it settles back into the rail on the close curve; a width change under a running slide retargets it, never drops it. Drag open and drag close are symmetric with each other and with the toggle (Jacob 2026-10-29, [feedback mac-sidebar-drag-open-2026-10-29]) |
 | Filter capsules | never clipped: the row scrolls horizontally under a 12 pt side fade (`FILTER_FADE_BAND`, `Shell::filter_scroll`) when the four do not fit — Grok Bot's iPhone home filter row — and is centred when they do (first / last capsule carry `auto` side margins); the selected capsule is scrolled into view. No icons, no overflow menu |
 | Strip | unchanged at every width ≥ 220 |
 
@@ -196,7 +197,9 @@ Breakpoints derive from `ROW_CHROME` 86 (8 + 8 list, 12 + 12 row, 36 picture,
 10 gap) + `NAME_MIN` 96 + the time's footprint (56 full / 44 small) + the
 handle's 50. Pinned by `sidebar_fit::tests::{the_width_breakpoints_keep_every_part_readable,
 the_rows_time_shrinks_then_hides_before_the_name_gives,
-dragging_past_the_snap_point_collapses_to_the_rail_and_back_restores_the_width}`.
+dragging_past_the_snap_point_collapses_to_the_rail_and_back_restores_the_width,
+a_drag_from_the_rail_tracks_the_pointer_until_the_snap_width}` and
+`slide::tests::dragging_the_rail_open_follows_the_pointer_then_settles_like_the_toggle`.
 Rig: `<config>/sidebar_width` (the saved width) + `ARBOS_SIDEBAR_COLLAPSED=0`.
 
 ## Split handles: a wide grab, a hairline look (Jacob 2026-10-28, [feedback sidebar-slide-handle-minimal-2026-10-28])
