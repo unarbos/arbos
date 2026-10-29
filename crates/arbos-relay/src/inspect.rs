@@ -464,19 +464,16 @@ async fn box_page(state: &AppState, project: &Project, q: &InspectQuery) -> Resu
         k.sort_unstable();
         params.push(("kind", k.join(",")));
     }
-    let mut req = state
-        .http
-        .get(format!("{url}/w/{}/inspect", project.id))
-        .query(&params)
-        .bearer_auth(&sb.mcp_token)
-        .timeout(BOX_TIMEOUT);
-    if let Some(t) = &sb.preview_token {
-        req = req.header("x-daytona-preview-token", t);
-    }
-    let r = req
-        .send()
-        .await
-        .map_err(|e| format!("box unreachable: {e}"))?;
+    let r = crate::boxes::send_to_box(state, &sb, || {
+        state
+            .http
+            .get(format!("{url}/w/{}/inspect", project.id))
+            .query(&params)
+            .bearer_auth(&sb.mcp_token)
+            .timeout(BOX_TIMEOUT)
+    })
+    .await
+    .map_err(|e| format!("box unreachable: {e}"))?;
     if !r.status().is_success() {
         return Err(format!("box answered {}", r.status()));
     }
@@ -720,16 +717,16 @@ pub async fn project_job(
             "the agent's box is asleep or starting",
         );
     };
-    let mut req = state
-        .http
-        .get(format!("{url}/w/{}/jobs/{job_id}", project.id))
-        .query(&[("after", after.to_string())])
-        .bearer_auth(&sb.mcp_token)
-        .timeout(BOX_TIMEOUT);
-    if let Some(t) = &sb.preview_token {
-        req = req.header("x-daytona-preview-token", t);
-    }
-    let r = match req.send().await {
+    let sent = crate::boxes::send_to_box(&state, &sb, || {
+        state
+            .http
+            .get(format!("{url}/w/{}/jobs/{job_id}", project.id))
+            .query(&[("after", after.to_string())])
+            .bearer_auth(&sb.mcp_token)
+            .timeout(BOX_TIMEOUT)
+    })
+    .await;
+    let r = match sent {
         Ok(r) => r,
         Err(e) => {
             return api_error(
