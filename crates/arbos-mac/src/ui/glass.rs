@@ -125,6 +125,25 @@ pub fn control_disc(
         .child(sf_symbols::glyph(glyph, glyph_size, theme.text))
 }
 
+/// The sidebar strip's search · + · collapse — also while they travel into
+/// the rail and at rest there: a [`control_disc`] that wears the chat header's
+/// glass plate ([`header_surface`]) on Glass, so the three read as glass
+/// beside the frosted pill (Jacob 2026-10-29, [feedback
+/// sidebar-header-glass-plate-mac-2026-10-29]). Matte keeps the solid disc.
+pub fn strip_disc(
+    id: impl Into<ElementId>,
+    glyph: &str,
+    glyph_size: f32,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let disc = control_disc(id, glyph, glyph_size, theme);
+    if theme.is_frost() {
+        header_surface(disc, theme)
+    } else {
+        disc
+    }
+}
+
 /// What a chat-header control is made of ([feedback mac-header-glass-2026-10-25],
 /// [feedback mac-header-pill-glass-matte-2026-10-26]; the iPhone's
 /// `HeaderGlassBackground`).
