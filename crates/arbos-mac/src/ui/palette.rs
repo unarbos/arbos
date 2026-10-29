@@ -480,15 +480,7 @@ fn picture(shell: &Shell, entry: &Entry, theme: &Theme, cx: &Context<Shell>) -> 
             let Some(space) = state.project(id) else {
                 return tile("person.fill").into_any_element();
             };
-            if let Some(person) = space
-                .person()
-                .filter(|_| space.is_people() && !space.is_people_group())
-            {
-                let image = state.avatar(&person.avatar_url);
-                people::avatar(image, person, AVATAR, theme).into_any_element()
-            } else {
-                groups::picture(space, state, AVATAR, theme).into_any_element()
-            }
+            groups::chat_picture(space, state, AVATAR, theme).into_any_element()
         }
         Target::Server(id) | Target::Channel { server_id: id, .. } => {
             let Some(server) = state.server(id) else {
