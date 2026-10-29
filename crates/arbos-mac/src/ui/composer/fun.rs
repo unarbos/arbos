@@ -25,14 +25,14 @@ use gpui::{
 use serde::Deserialize;
 
 use super::fun_starter::{self, Starter};
-use super::{Composer, ComposerInput, MENTION_MENU_GAP};
+use super::{Composer, ComposerInput};
 use crate::model::{
     GifItem, GifPage, MediaPick, StickerItem, StickerPack, STICKER_KEY_PREFIX, URL_KEY_PREFIX,
 };
 use crate::ui::glass;
 use crate::ui::highlight;
 use crate::ui::sf_symbols;
-use crate::ui::theme::{Theme, COMPOSER_HEIGHT, PANEL_RADIUS, TEXT_SMALL, TEXT_TINY};
+use crate::ui::theme::{Theme, PANEL_RADIUS, TEXT_SMALL, TEXT_TINY};
 
 /// Card geometry (pt) — the mock's 380 × 440.
 pub const WIDTH: f32 = 380.0;
@@ -408,6 +408,7 @@ impl Composer {
         };
         let menu = div()
             .id("attach-menu")
+            .debug_selector(|| "composer-attach-menu".into())
             .flex()
             .flex_col()
             .w(px(MENU_W))
@@ -418,7 +419,7 @@ impl Composer {
             .border_color(theme.border_strong)
             .shadow_lg()
             // The menu floats over the transcript: its own hitbox must block the rows
-            // beneath (the popover wrapper has no size of its own to occlude with).
+            // beneath.
             .occlude()
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
@@ -442,14 +443,7 @@ impl Composer {
                     this.open_fun(FunTab::Emoji, cx);
                 })),
             );
-        glass::popover(
-            div()
-                .absolute()
-                .bottom(px(COMPOSER_HEIGHT + MENTION_MENU_GAP))
-                .left(px(0.0))
-                .child(menu),
-        )
-        .into_any_element()
+        menu.into_any_element()
     }
 
     /// The picker card above the composer.
@@ -534,14 +528,7 @@ impl Composer {
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .child(header)
             .child(body);
-        glass::popover(
-            div()
-                .absolute()
-                .bottom(px(COMPOSER_HEIGHT + MENTION_MENU_GAP))
-                .left(px(0.0))
-                .child(card),
-        )
-        .into_any_element()
+        card.into_any_element()
     }
 
     fn search_field(&self, theme: &Theme) -> AnyElement {
