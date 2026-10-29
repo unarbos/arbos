@@ -218,7 +218,6 @@ pub enum ComposerEvent {
         message_id: String,
         text: String,
     },
-    Stop,
 }
 
 struct Layout {
@@ -3827,7 +3826,6 @@ impl Render for Composer {
                 ))
                 .on_click(cx.listener(move |this, _, window, cx| match action {
                     ButtonAction::Send | ButtonAction::Guide => this.submit(window, cx),
-                    ButtonAction::Stop => cx.emit(ComposerEvent::Stop),
                     ButtonAction::StopMemo => this.voice.update(cx, |v, cx| v.stop_memo(cx)),
                     ButtonAction::Call => {
                         let live = this.state.read(cx).my_call.is_some();
@@ -4231,8 +4229,6 @@ enum ButtonAction {
     Send,
     /// Send as guidance while a turn is running ("Guide" pill).
     Guide,
-    /// Stop the running turn.
-    Stop,
     /// Stop the recording memo and transcribe it.
     StopMemo,
     Call,
@@ -4243,7 +4239,7 @@ impl ButtonAction {
         match self {
             ButtonAction::Send => "arrow.up",
             ButtonAction::Guide => "",
-            ButtonAction::Stop | ButtonAction::StopMemo => "stop.fill",
+            ButtonAction::StopMemo => "stop.fill",
             ButtonAction::Call => "phone",
         }
     }
@@ -4295,15 +4291,13 @@ impl Render for TextTip {
 
 /// What the round primary button does. A recording memo wins: the user needs
 /// a visible way to stop the microphone before anything else.
-fn primary_action(has_text: bool, running: bool, recording: bool, guide: bool) -> ButtonAction {
+fn primary_action(has_text: bool, _running: bool, recording: bool, guide: bool) -> ButtonAction {
     if recording {
         ButtonAction::StopMemo
     } else if guide {
         ButtonAction::Guide
     } else if has_text {
         ButtonAction::Send
-    } else if running {
-        ButtonAction::Stop
     } else {
         ButtonAction::Call
     }
@@ -4767,7 +4761,7 @@ mod tests {
         assert!(!mic_mounted(true, false));
         assert_eq!(
             primary_action(false, true, false, false),
-            ButtonAction::Stop
+            ButtonAction::Call
         );
         assert_eq!(primary_action(true, true, false, false), ButtonAction::Send);
         assert_eq!(primary_action(true, true, false, true), ButtonAction::Guide);
