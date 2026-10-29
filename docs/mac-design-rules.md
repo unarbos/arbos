@@ -440,6 +440,20 @@ Pinned by `ui::composer::caret_tests` (every move and extend on a wrapped
 two-paragraph draft in a 360 pt field, ⌘⌫, ⌥ arrows, focused vs blurred
 routing — all through the real keymap) and `keymap_tests::caret_chords_route_to_the_focused_composer_only`.
 
+### Composer — floating layers (Scout 2026-10-29, [feedback mention-list-overlay-2026-10-29])
+
+The `@` mention list, the + menu and the emoji / sticker / GIF picker float
+over the transcript, `MENTION_MENU_GAP` (8) above the field, left-aligned to
+it. Opening, filtering or closing one moves nothing: the pill, the composer
+block and every transcript row keep their frames. Rule: **a floating layer is
+never an in-flow child of the composer column** — it is absolute on the
+field's own box (`ui::composer::above_field`). The column stacks its children
+with an 8 pt gap, and the old in-flow `glass::popover` wrapper (zero height,
+its card absolute inside it) still took one gap, so every open layer grew the
+composer block by 8 pt and lifted the pill and the chat with it. Pinned by
+`ui::composer::overlay_tests` (the real `Shell`, a group with people and an
+agent: frames before / with each layer open / after).
+
 ### Composer — keyboard layouts (Scout 2026-10-28, [feedback mention-hotkey-layout-2026-10-28])
 
 There is no `@` hotkey: the mention picker opens when an `@` is **typed** at a
