@@ -31,7 +31,34 @@ MIRROR_KEEP="${MIRROR_KEEP:-2}"
 MIRROR="${MIRROR:-1}"
 RELOAD=1
 [[ "${1:-}" == "--no-reload" ]] && RELOAD=0
+# `changed` = anything changed (logged); `config_changed` = a Caddy snippet changed, the only thing a
+# reload is for. Mirrored FILES (appcast.xml, the tar.gz) are served from disk and need no reload —
+# until 2026-10-29 every mirrored release reloaded Caddy, and each reload closed every proxied
+# WebSocket (49–57 boxes plus real clients, 12 times between 23:30 and 04:03) and twice broke an
+# agentd canary smoke mid-probe (0.1.180 at 00:12, 0.1.184 at 04:02).
 changed=0
+config_changed=0
+# Lane collision: while an agentd canary smoke (`agentd.canary`) or a relay deploy (`relay.deploying`)
+# is in flight, a needed reload is DEFERRED — `www.reload-pending` is written and the deploy worker's
+# tick (or the next run of this script) applies it once the lanes are clear. Markers older than
+# LANE_MARKER_MAX_S are stale. `www.reloading` marks the reload itself for the canary to wait on.
+DEPLOY_STATE="${ARBOS_DEPLOY_STATE:-/var/lib/arbos-deploy}"
+LANE_MARKER_MAX_S="${LANE_MARKER_MAX_S:-1800}"
+marker_fresh() { local f="$1" at; [[ -f "$f" ]] || return 1; at="$(stat -c %Y "$f" 2>/dev/null || echo 0)"; (( $(date +%s) - at < LANE_MARKER_MAX_S )); }
+lanes_busy() { marker_fresh "$DEPLOY_STATE/agentd.canary" || marker_fresh "$DEPLOY_STATE/relay.deploying"; }
+reload_www() { # the one place Caddy is reloaded; marked so a canary smoke starting now waits for it
+  systemctl is-active --quiet arbos-www.service || return 0
+  mkdir -p "$DEPLOY_STATE"
+  printf 'by=%s\nat=%s\n' "arbos-refresh-mac-download" "$(date -u +%FT%TZ)" > "$DEPLOY_STATE/www.reloading"
+  systemctl reload arbos-www.service || true
+  rm -f "$DEPLOY_STATE/www.reloading" "$DEPLOY_STATE/www.reload-pending"
+  echo "refresh-mac-download: arbos-www reloaded"
+}
+# A reload deferred by an earlier run is applied first when the lanes are clear now.
+if [[ $RELOAD -eq 1 && -f "$DEPLOY_STATE/www.reload-pending" ]] && ! lanes_busy; then
+  echo "refresh-mac-download: applying the reload deferred at $(sed -n 's/^at=//p' "$DEPLOY_STATE/www.reload-pending" | head -1)"
+  reload_www
+fi
 
 api=https://api.github.com/repos/unarbos/arbos
 latest=$(curl -fsSL "$api/releases/latest" 2>/dev/null || true)
@@ -102,6 +129,7 @@ if [[ ! -f "$OUT" ]] || [[ "$(grep -v '^#' "$OUT")" != "$(printf '%s' "$new" | g
   chmod 0644 "$OUT"
   echo "download/mac → $dmg ($tag)"
   changed=1
+  config_changed=1
 fi
 
 # ---- 2. mirror for the in-app updater -----------------------------------------------------------
@@ -173,9 +201,18 @@ if [[ "$MIRROR" == 1 && "$tag" == v* ]]; then
     chmod 0644 "$UPDATES_SNIPPET"
     echo "updates/mac fallback → github.com/unarbos/arbos/releases/download/$tag/"
     changed=1
+    config_changed=1
   fi
 fi
 
-if [[ $changed -eq 1 && $RELOAD -eq 1 ]] && systemctl is-active --quiet arbos-www.service; then
-  systemctl reload arbos-www.service || true
+if [[ $config_changed -eq 1 && $RELOAD -eq 1 ]]; then
+  if lanes_busy; then
+    mkdir -p "$DEPLOY_STATE"
+    printf 'at=%s\nreason=%s\n' "$(date -u +%FT%TZ)" "caddy snippet changed for $tag while an agentd canary smoke or a relay deploy is in flight" > "$DEPLOY_STATE/www.reload-pending"
+    echo "refresh-mac-download: arbos-www reload DEFERRED (agentd canary / relay deploy in flight); the deploy worker applies it"
+  else
+    reload_www
+  fi
+elif [[ $changed -eq 1 ]]; then
+  echo "refresh-mac-download: files mirrored, no Caddy config change — no reload"
 fi

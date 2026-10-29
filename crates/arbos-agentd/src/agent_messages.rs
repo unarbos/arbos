@@ -302,6 +302,9 @@ impl Agent {
             text,
             &json!({ "to": delivery.to_id, "toName": delivery.to_name }),
         );
+        if let Some(fields) = self.people_sender_fields(chat_id) {
+            h.doc.set_message_fields(row_id, &fields);
+        }
         h.doc.finish_message(row_id, MessageStatus::Done);
     }
 
@@ -739,6 +742,59 @@ mod tests {
         assert!(agent_reply_prompt("lane-b", "done", "hello", "fine")
             .contains("[Arbos] lane-b replied"));
         assert!(agent_reply_prompt("lane-b", "empty", "hello", "").contains("wrote nothing back"));
+    }
+
+    /// Arbonites, 2026-10-28 (01M627S7…): a hand-off row in a group came out as bare
+    /// `sender: "agent"` with no name — a blank line from no one. It now names this agent, and
+    /// carries no reply fields (it is not the answer).
+    #[tokio::test]
+    async fn people_chat_handoff_row_names_its_agent() {
+        use super::Delivery;
+        use crate::people::PeopleChatInfo;
+        use crate::status::tests::test_agent;
+
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATHANDOFFROW000001";
+        agent.people.test_insert(
+            chat,
+            PeopleChatInfo {
+                members: vec![
+                    json!({ "member": "user:gh_owner", "handle": "jacob", "name": "Jacob" }),
+                    json!({ "member": format!("agent:{}", agent.cfg.project_id), "handle": "lane-a" }),
+                ],
+                settings: json!({ "reply_policy": "mention" }),
+                owner_user: "gh_owner".into(),
+                slug: "lane-a".into(),
+                kind: "group".into(),
+                owner_address: None,
+            },
+        );
+        agent.sync.open_room(chat).await.unwrap();
+        let delivery = Delivery {
+            id: "d1".into(),
+            status: "delivered".into(),
+            to_id: "p2".into(),
+            to_name: "Bob".into(),
+        };
+        agent
+            .write_handoff_row(chat, "u1", "row1", &delivery, "Hey Bob")
+            .await;
+        let host = agent.sync.host(chat).await.unwrap();
+        let row = host.lock().await.doc.message("row1").unwrap();
+        assert_eq!(
+            row.rest["sender"],
+            json!(format!("agent:{}", agent.cfg.project_id))
+        );
+        assert_eq!(row.rest["senderHandle"], json!(agent.identity.handle()));
+        assert!(row.rest.get("replyTo").is_none());
+        assert!(row.rest.get("askedBy").is_none());
+        assert_eq!(row.rest["subagentName"], "Bob");
+        assert!(!row.has_visible_content());
+        assert!(
+            !agent.people_already_replied(&host, "u1").await,
+            "a hand-off row is not the answer to the ask"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Arbonites 2026-10-28 21:48: Jacob wrote "@bob talk to @bubble" in the group; Bubble's
