@@ -1569,6 +1569,9 @@ enum DocJSON {
                     kind: str(a["kind"]).flatMap { $0 == "attachment" ? nil : $0 },
                     bytes: (a["bytes"] as? NSNumber)?.int64Value,
                     chartPart: str(a["chartPart"]),
+                    // A picked GIF lives with its provider (ARB-544): without `url` the row
+                    // had neither ref nor url and drew the broken-picture glyph.
+                    url: str(a["url"]),
                     source: source
                 )
             )
