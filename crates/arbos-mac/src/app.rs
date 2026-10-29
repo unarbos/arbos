@@ -7232,9 +7232,12 @@ impl AppState {
     /// the snap point the column collapses to the rail (the saved width is
     /// kept); from the rail, crossing the snap width restores that width,
     /// and the handle follows the pointer again once it passes it
-    /// (`ui::sidebar_fit::EdgeDrag`). The rail flip animates like the toggle.
+    /// (`ui::sidebar_fit::EdgeDrag`). The rail flip animates like the toggle;
+    /// short of the snap width a drag from the rail draws the morph at the
+    /// pointer, so every move that changes it is a frame.
     pub fn drag_sidebar_edge(&mut self, x: f32, cx: &mut Context<Self>) {
         use crate::ui::sidebar_fit::EdgeTarget;
+        let tracked = self.sidebar_edge_drag.track();
         match self
             .sidebar_edge_drag
             .target(x, self.rail_collapsed, self.sidebar_width)
@@ -7259,6 +7262,9 @@ impl AppState {
                 self.set_sidebar_width(width, cx);
             }
             EdgeTarget::Hold => {}
+        }
+        if self.sidebar_edge_drag.track() != tracked {
+            cx.notify();
         }
     }
 
