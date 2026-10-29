@@ -32,5 +32,5 @@
    "title": "eval respond gate one of you"
   }
  ],
- "regression": "Arbonites 2026-10-27 17:16: 'To any of the available agents, i got a challenge for you' was taken by three agents ('just wanted one agent to do it'); the judge's `any one agent` verdict picks the best-scored single agent."
+ "regression": "Arbonites 2026-10-27 17:16: 'To any of the available agents, i got a challenge for you' was taken by three agents ('just wanted one agent to do it'); the judge's `any one agent` verdict picks the best-scored single agent.; AFTER on #2110's judge: exactly one answered (BEFORE: both)"
 }
