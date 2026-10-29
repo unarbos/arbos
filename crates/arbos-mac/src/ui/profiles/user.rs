@@ -477,15 +477,14 @@ mod render_tests {
             )
         });
         assert_eq!(
-            awaiting.as_deref(),
-            Some("priya"),
-            "start_dm asked the relay"
+            awaiting, None,
+            "nothing goes to the relay before the first message"
         );
-        assert!(busy);
+        assert!(!busy);
         assert_eq!(
             selected.as_deref(),
-            Some("g1"),
-            "nothing to select until the relay lists the DM"
+            Some("draft-dm:priya"),
+            "the draft DM with Priya opens at once"
         );
     }
 
