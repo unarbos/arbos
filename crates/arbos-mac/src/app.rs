@@ -698,7 +698,9 @@ pub struct AppState {
     /// the bar on the sender's bubbles. Absent = colourless picture → D79.
     pub accents: HashMap<String, arbos_core::avatar::Accent>,
     /// A DM just started from the sheet: select it when it arrives.
-    awaiting_dm: Option<String>,
+    pub(crate) awaiting_dm: Option<String>,
+    /// A DM with someone I have no chat with, not sent to yet: local only (`draft_dm`).
+    pub(crate) draft_dm: Option<crate::draft_dm::DraftDm>,
     /// Reply in DM: the cross-chat reply to arm once the DM opens (new DMs
     /// arrive from the relay a moment after `start_dm`).
     pending_dm_reply: Option<ReplyRef>,
@@ -1266,6 +1268,7 @@ impl AppState {
             avatars: HashMap::new(),
             accents: HashMap::new(),
             awaiting_dm: None,
+            draft_dm: None,
             pending_dm_reply: None,
             awaiting_group: None,
             invite_target: None,
@@ -2036,6 +2039,7 @@ impl AppState {
                 if !self.new_chat_open && self.awaiting_dm.is_some() {
                     self.push_failure(err.clone(), None);
                 }
+                self.fail_draft_dm(&err, cx);
                 self.people_error = Some(error_note::Slot::new(err));
                 self.awaiting_dm = None;
                 self.awaiting_group = None;
@@ -2348,15 +2352,15 @@ impl AppState {
                     }
                 }
                 if let Some(handle) = self.awaiting_dm.clone() {
-                    if let Some(space) = projects
-                        .iter()
-                        .find(|p| p.is_people() && p.people.iter().any(|x| x.handle == handle))
-                    {
+                    if let Some(space) = projects.iter().find(|p| {
+                        p.kind == SpaceKind::Dm && p.people.iter().any(|x| x.handle == handle)
+                    }) {
                         self.awaiting_dm = None;
                         self.new_chat_open = false;
                         let id = space.id.clone();
                         self.projects = projects.clone();
-                        self.select_project(id, cx);
+                        self.select_project(id.clone(), cx);
+                        self.land_draft_dm(&handle, &id, cx);
                         self.arm_pending_dm_reply(cx);
                     }
                 }
@@ -3341,7 +3345,12 @@ impl AppState {
     // ----- selectors -------------------------------------------------------
 
     pub fn project(&self, id: &str) -> Option<&Project> {
-        self.projects.iter().find(|p| p.id == id)
+        self.projects.iter().find(|p| p.id == id).or_else(|| {
+            self.draft_dm
+                .as_ref()
+                .filter(|d| d.id() == id)
+                .map(|d| &d.space)
+        })
     }
 
     pub fn selected(&self) -> Option<&Project> {
@@ -3354,6 +3363,12 @@ impl AppState {
         self.chats
             .get(project_id)
             .map(|v| v.as_slice())
+            .or_else(|| {
+                self.draft_dm
+                    .as_ref()
+                    .filter(|d| d.id() == project_id)
+                    .map(|d| d.chat.as_slice())
+            })
             .unwrap_or(&[])
     }
 
@@ -3729,10 +3744,16 @@ impl AppState {
     // ----- commands --------------------------------------------------------
 
     pub(crate) fn command(&self, cmd: ClientCommand) {
+        if crate::draft_dm::names_draft(&cmd) {
+            return;
+        }
         let _ = self.commands.send(cmd);
     }
 
     pub fn select_project(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        if !crate::draft_dm::is_draft(&project_id) {
+            self.drop_draft_dm();
+        }
         let switching = self.selected_project.as_deref() != Some(project_id.as_str())
             || self.selected_channel.is_some();
         // A chat replaces the channel in the centre (D88).
@@ -4456,6 +4477,11 @@ impl AppState {
         if crate::jobtabs::is_job_chat(&chat_id) || self.selected_channel.is_some() {
             return;
         }
+        if crate::draft_dm::is_draft(&chat_id) {
+            self.push_notice("Say hi first. Stickers and GIFs work once the chat has started.");
+            cx.notify();
+            return;
+        }
         self.send_errors.remove(&chat_id);
         let message_id = new_id();
         let reply_to = {
@@ -4923,7 +4949,7 @@ impl AppState {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn send_with(
+    pub(crate) fn send_with(
         &mut self,
         text: String,
         attachments: Vec<PathBuf>,
@@ -5125,6 +5151,15 @@ impl AppState {
                 message_id,
                 text,
                 reply_to,
+            });
+        } else if crate::draft_dm::is_draft(&chat_id) {
+            self.queue_draft_send(crate::draft_dm::DraftSend {
+                text,
+                attachments,
+                voice_wav,
+                reply_to,
+                reply_ref,
+                mentions,
             });
         } else if let Some(wav) = voice_wav {
             self.command(ClientCommand::SendVoice {
@@ -10223,9 +10258,7 @@ impl AppState {
             self.select_project(existing, cx);
             return;
         }
-        self.people_busy = true;
-        self.awaiting_dm = Some(handle.clone());
-        self.command(ClientCommand::StartDm { handle });
+        self.open_draft_dm(handle, cx);
         cx.notify();
     }
 
@@ -11785,6 +11818,11 @@ impl AppState {
             return;
         };
         if self.my_call.is_some() {
+            return;
+        }
+        if crate::draft_dm::is_draft(&space_id) {
+            self.push_notice("Say hi first, then call.".to_string());
+            cx.notify();
             return;
         }
         // Already a live call here: join it instead of starting another.

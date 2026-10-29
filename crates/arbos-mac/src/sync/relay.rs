@@ -5452,9 +5452,51 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .post_json("/chats/dm", json!({ "handle": handle }))
                     .await
                 {
-                    Ok(_) => {
+                    Ok(v) => {
+                        // A draft's first message is sent the moment the app sees the DM
+                        // listed, and the refresh opens the DM's room only after that: hold
+                        // those sends until the room is there.
+                        let new_dm = serde_json::from_value::<PeopleChatDto>(v)
+                            .ok()
+                            .map(|dto| dto.id)
+                            .filter(|id| {
+                                !id.is_empty() && !shared.docs.lock().unwrap().contains_key(id)
+                            });
+                        if let Some(id) = &new_dm {
+                            shared
+                                .pending_new_chats
+                                .lock()
+                                .unwrap()
+                                .entry(id.clone())
+                                .or_default();
+                        }
                         if let Err(err) = refresh_registry(&shared).await {
                             shared.diagnostic("refresh", format!("{err:#}"));
+                        }
+                        let Some(id) = new_dm else {
+                            return;
+                        };
+                        let queued = shared
+                            .pending_new_chats
+                            .lock()
+                            .unwrap()
+                            .remove(&id)
+                            .unwrap_or_default();
+                        for q in queued {
+                            enqueue_send(
+                                &shared,
+                                id.clone(),
+                                q.message_id,
+                                q.text,
+                                q.attachments,
+                                q.voice_wav,
+                                q.command,
+                                q.answer,
+                                q.reply_to,
+                                q.forwarded,
+                                q.reply_ref,
+                                q.mentions,
+                            );
                         }
                     }
                     Err(err) => {
