@@ -238,7 +238,9 @@ final class BackSwipeUITests: XCTestCase {
         let bubble = lastBubble(app)
         bubble.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 0.9)
         XCTAssertTrue(app.descendants(matching: .any)["message-actions-menu"].waitForExistence(timeout: settle), "the actions menu opened")
-        XCTAssertTrue(app.descendants(matching: .any)["message-menu-reply"].waitForExistence(timeout: settle), "Reply is in the menu")
+        // The menu rows are buttons labelled by their item; the container carries the identifier.
+        let reply = app.buttons.matching(NSPredicate(format: "identifier == 'message-menu-reply' OR label == 'Reply'")).firstMatch
+        XCTAssertTrue(reply.waitForExistence(timeout: settle), "Reply is in the menu")
     }
 
     /// The edge zone is the edge pop's: a swipe from the edge at a bubble's height goes
