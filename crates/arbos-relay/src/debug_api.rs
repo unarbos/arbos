@@ -257,15 +257,15 @@ pub async fn machine_debug(
     let on_box = match &sb {
         Some(sb) => match &sb.box_url {
             Some(url) => {
-                let mut req = state
-                    .http
-                    .get(format!("{url}/box/state"))
-                    .bearer_auth(&sb.mcp_token)
-                    .timeout(BOX_TIMEOUT);
-                if let Some(t) = &sb.preview_token {
-                    req = req.header("x-daytona-preview-token", t);
-                }
-                match req.send().await {
+                let sent = boxes::send_to_box(&state, sb, || {
+                    state
+                        .http
+                        .get(format!("{url}/box/state"))
+                        .bearer_auth(&sb.mcp_token)
+                        .timeout(BOX_TIMEOUT)
+                })
+                .await;
+                match sent {
                     Ok(r) if r.status().is_success() => match r.json::<Value>().await {
                         Ok(mut v) => {
                             scrub_value(&mut v);
