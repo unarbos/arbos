@@ -45,6 +45,11 @@ use crate::ui::theme::{
 use crate::ui::transcript;
 use crate::ui::voice::{render_recording_row, Voice, VoiceEvent};
 
+/// Emoji · Stickers · GIFs picker and the `+` attach menu (ARB-544).
+mod fun;
+/// The bundled starter stickers (generated).
+mod fun_starter;
+
 actions!(
     composer,
     [
@@ -583,6 +588,22 @@ impl ComposerInput {
         self.last_followed_caret = None;
         self.undo_stack.clear();
         self.redo_stack.clear();
+        cx.notify();
+    }
+
+    /// Put `text` where the caret is (replacing a selection), keeping the chips:
+    /// the picker's emoji land in the draft like typed characters (ARB-544).
+    pub fn insert_at_caret(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.record_undo();
+        let range = self
+            .marked_range
+            .take()
+            .unwrap_or(self.selected_range.clone());
+        let range = self.splice(range, text);
+        let end = range.start + text.len();
+        self.selected_range = end..end;
+        self.selection_reversed = false;
+        self.caret_downstream = false;
         cx.notify();
     }
 
@@ -2795,6 +2816,8 @@ pub struct Composer {
     /// field once the mention table is known (`@s` leaves the picker open,
     /// `@sam deck ready?` shows the resolved chip).
     rig_draft: Option<String>,
+    /// The `+` menu and the Emoji · Stickers · GIFs picker (ARB-544).
+    fun: fun::FunState,
 }
 
 impl EventEmitter<ComposerEvent> for Composer {}
@@ -2838,6 +2861,20 @@ impl Composer {
                     .unwrap_or(false)
             }));
         });
+        // The picker's search field: its own single-line input; Esc closes the picker.
+        let fun_search = cx.new(ComposerInput::new);
+        let weak_fun_escape = cx.weak_entity();
+        fun_search.update(cx, |input, _| {
+            input.set_placeholder("Search emoji");
+            input.set_font_size(TEXT_SMALL);
+            input.on_mention_escape = Some(Rc::new(move |cx| {
+                weak_fun_escape
+                    .update(cx, |composer, cx| composer.dismiss_fun(cx))
+                    .unwrap_or(false)
+            }));
+        });
+        cx.observe(&fun_search, |this, _, cx| this.fun_search_changed(cx))
+            .detach();
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
         cx.observe(&input, |_, _, cx| cx.notify()).detach();
         cx.observe(&voice, |_, _, cx| cx.notify()).detach();
@@ -2887,6 +2924,7 @@ impl Composer {
             rig_draft: std::env::var("ARBOS_COMPOSER_DRAFT")
                 .ok()
                 .filter(|v| !v.is_empty()),
+            fun: fun::FunState::new(fun_search),
         }
     }
 
@@ -2896,6 +2934,9 @@ impl Composer {
         if active == self.draft_chat {
             return;
         }
+        // The picker belongs to the chat it was opened in.
+        self.fun.open = false;
+        self.fun.menu_open = false;
         let text = self.input.read(cx).text().to_string();
         let tokens = self.input.read(cx).tokens().to_vec();
         if let Some(prev) = self.draft_chat.take() {
@@ -3842,7 +3883,9 @@ impl Render for Composer {
             .cursor_pointer()
             .map(|el| highlight::washed(el, theme.surface_2, &theme))
             .child(sf_symbols::glyph("plus", 16.0, theme.text_muted))
-            .on_click(cx.listener(|this, _, _, cx| this.attach(cx)));
+            // Option B (ARB-544): `+` opens the attach menu; "Photo or file…" is the
+            // old file prompt, the second row the Emoji · Stickers · GIFs picker.
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_attach_menu(cx)));
 
         let field_body = if recording {
             // iPhone recorder row: ✕ (discard) · red dot · timer · level bars.
@@ -4128,6 +4171,12 @@ impl Render for Composer {
             self.sync_mention_selection(mentions.len(), query.as_deref());
             let selected = self.mention_selected;
             column = column.child(glass::popover(self.render_mentions(mentions, selected, cx)));
+        }
+        if self.fun.menu_open {
+            column = column.child(self.render_attach_menu(cx));
+        }
+        if self.fun.open {
+            column = column.child(self.render_fun(cx));
         }
         column
     }

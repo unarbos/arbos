@@ -22,11 +22,12 @@ use crate::model::{
     MembershipNotice, NoticeSubject, OptimisticNotice, Person, Reachable, Sender, Voice,
 };
 use crate::model::{
-    new_id, now_ms, Attachment, AttachmentKind, BoxReport, BoxState, ChannelSel, ChannelsView,
-    Chat, ChatKind, ConnectorsView, DevicesView, Effort, Id, Job, JobRollout, Link, LinkState,
-    LocalView, Machine, Message, MessageBody, MessageStatus, NewSecret, Part, Project,
-    ProjectDocView, ProjectSecrets, QuestionState, ReplyRef, Role, Routine, RoutineRun,
-    RoutineTrigger, SecretDirector, SecretScope, SecretsView, ServerInfo, Skill, StatusKind,
+    new_id, now_ms, Attachment, AttachmentKind, AttachmentSource, BoxReport, BoxState, ChannelSel,
+    ChannelsView, Chat, ChatKind, ConnectorsView, DevicesView, Effort, GifPage, Id, Job,
+    JobRollout, Link, LinkState, LocalView, Machine, MediaPick, Message, MessageBody,
+    MessageStatus, NewSecret, Part, Project, ProjectDocView, ProjectSecrets, QuestionState,
+    ReplyRef, Role, Routine, RoutineRun, RoutineTrigger, SecretDirector, SecretScope, SecretsView,
+    ServerInfo, Skill, StatusKind, StickerPack,
 };
 use crate::palette;
 use crate::search;
@@ -420,6 +421,7 @@ impl ViewerItem {
                 kind: Some(AttachmentKind::Image),
                 title: None,
                 chart_part: None,
+                url: None,
                 source: None,
             },
             by: name.to_owned(),
@@ -764,6 +766,18 @@ pub struct AppState {
     link_icons_requested: HashSet<String>,
     /// Blob keys whose thumbnail fetch failed: the card says "No preview" instead of loading.
     pub thumbnails_failed: HashSet<String>,
+    /// Picker (ARB-544): the GIF results on screen — the query they answer and the page
+    /// (`None` while the first page is on its way).
+    pub gif_results: Option<(String, GifPage)>,
+    /// Picker: the query a GIF fetch is in flight for (a stale answer is dropped).
+    gif_query_pending: Option<String>,
+    /// Picker: the relay's sticker packs once fetched (`Some(None)` = the relay failed).
+    pub sticker_packs: Option<Option<Vec<StickerPack>>>,
+    /// Picker: the sticker-pack fetch is in flight or answered this session.
+    sticker_packs_requested: bool,
+    /// Picker: raw bytes of fetched stickers by `sticker:<pack>/<id>` key — a tap uploads
+    /// these into the chat slot (the thumbnail cache holds only the decoded picture).
+    sticker_raw: HashMap<String, Arc<Vec<u8>>>,
     /// The Copy whose attachment bytes are on their way
     /// ([feedback copy-image-messages-mac-2026-10-27]); a newer Copy replaces it and the
     /// older answer is dropped by its `request` number.
@@ -1278,6 +1292,11 @@ impl AppState {
             link_icon_tones: HashMap::new(),
             link_icons_requested: HashSet::new(),
             thumbnails_failed: HashSet::new(),
+            gif_results: None,
+            gif_query_pending: None,
+            sticker_packs: None,
+            sticker_packs_requested: false,
+            sticker_raw: HashMap::new(),
             copy_request: None,
             copy_request_seq: 0,
             notices: Vec::new(),
@@ -1430,8 +1449,9 @@ impl AppState {
             UpdateEvent::Available(available) => {
                 let available = *available;
                 self.update.last_checked_at = Some(now_ms());
-                // An installed build waiting for its relaunch outranks whatever the feed says now.
-                if !self.update.busy() && self.pending_relaunch.is_none() {
+                if self.pending_relaunch.is_some() {
+                    self.supersede_pending_install(available, cx);
+                } else if !self.update.busy() {
                     // Never offer a build that is not strictly newer than what is running.
                     if !arbos_update::version::is_newer(
                         &available.item.version,
@@ -1504,7 +1524,9 @@ impl AppState {
                     available,
                     deadline_ms: now_ms() + update::RELAUNCH_COUNTDOWN_MS,
                 };
-                self.pending_relaunch = Some(installed);
+                // A newer build installed over one that was already waiting keeps the watcher
+                // that is running for it.
+                let watching = self.pending_relaunch.replace(installed).is_some();
                 update::log(format!(
                     "auto-update: {version} installed; waiting for a safe moment to relaunch"
                 ));
@@ -1515,23 +1537,25 @@ impl AppState {
                     "Arbos {version} is installed — it restarts in a minute while you are in Arbos, \
                      or when you pause. Press the blue update button at the bottom of the chat list to do it at once."
                 ));
-                cx.spawn(async move |this, cx| loop {
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(1000))
-                        .await;
-                    let done = this.update(cx, |state, cx| {
-                        if state.pending_relaunch.is_none() {
-                            return true;
+                if !watching {
+                    cx.spawn(async move |this, cx| loop {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(1000))
+                            .await;
+                        let done = this.update(cx, |state, cx| {
+                            if state.pending_relaunch.is_none() {
+                                return true;
+                            }
+                            let relaunched = state.try_relaunch(cx);
+                            cx.notify();
+                            relaunched
+                        });
+                        if done.unwrap_or(true) {
+                            break;
                         }
-                        let relaunched = state.try_relaunch(cx);
-                        cx.notify();
-                        relaunched
-                    });
-                    if done.unwrap_or(true) {
-                        break;
-                    }
-                })
-                .detach();
+                    })
+                    .detach();
+                }
             }
             UpdateEvent::Failed(message) => {
                 if let Some(a) = self.update.available() {
@@ -1565,6 +1589,10 @@ impl AppState {
     fn relaunch_is_safe(&self) -> bool {
         let now = now_ms();
         if self.my_call.is_some() || self.incoming_call.is_some() {
+            return false;
+        }
+        // A newer build is being swapped into the bundle the relaunch would open.
+        if self.update.busy() {
             return false;
         }
         if !self.window_active {
@@ -1605,6 +1633,41 @@ impl AppState {
         update::log("auto-update: safe moment — relaunching");
         self.relaunch_into(installed, cx);
         true
+    }
+
+    /// A newer build announced while an older one waits for its relaunch (the app sat
+    /// unfocused while releases landed) is installed over it first, so the user gets one
+    /// restart into the newest build instead of one restart per release they missed.
+    /// Manual mode keeps the waiting build: the user already chose to restart into it.
+    fn supersede_pending_install(
+        &mut self,
+        available: arbos_update::client::Available,
+        cx: &mut Context<Self>,
+    ) {
+        let UpdatePhase::Installed {
+            available: waiting, ..
+        } = &self.update.phase
+        else {
+            return;
+        };
+        let version = available.item.version.clone();
+        if !self.update.auto
+            || self.auto_update_failed.as_deref() == Some(version.as_str())
+            || !arbos_update::version::is_newer(&version, &waiting.item.version)
+        {
+            return;
+        }
+        update::log(format!(
+            "auto-update: {version} supersedes the waiting {}; installing it before the relaunch",
+            waiting.item.version
+        ));
+        self.update.phase = UpdatePhase::Downloading {
+            available,
+            got: 0,
+            total: None,
+        };
+        let _ = self.update_commands.send(UpdateCommand::Install);
+        cx.notify();
     }
 
     /// One frame shows "Restarting", then the relauncher takes over.
@@ -2120,6 +2183,9 @@ impl AppState {
                 cx.notify();
             }
             SyncEvent::Thumbnail { key, bytes } => {
+                if key.starts_with(crate::model::STICKER_KEY_PREFIX) {
+                    self.sticker_raw.insert(key.clone(), bytes.clone());
+                }
                 if let Some((image, trimmed)) = decode_image_pair(&bytes) {
                     self.thumbnails_failed.remove(&key);
                     match trimmed {
@@ -2150,6 +2216,14 @@ impl AppState {
                 if let Some(chat_id) = self.active_chat_id() {
                     cx.emit(AppEvent::TranscriptChanged { chat_id });
                 }
+                cx.notify();
+            }
+            SyncEvent::GifResults { query, pos, page } => {
+                self.gif_results_arrived(query, pos, page);
+                cx.notify();
+            }
+            SyncEvent::StickerPacks { packs } => {
+                self.sticker_packs = Some(packs);
                 cx.notify();
             }
             SyncEvent::CopyBlobs { request, blobs } => {
@@ -4350,6 +4424,260 @@ impl AppState {
         self.send_with(text, attachments, None, reply_to, false, mentions, cx);
     }
 
+    // ----- emoji / stickers / GIFs picker (ARB-544) --------------------------
+
+    /// One tap in the picker: the sticker or GIF goes out as its own message at once
+    /// (Jacob: "tap sends immediately"). The row shows at once — a sticker from the bytes
+    /// the picker already holds, a GIF through the relay pass-through — and the server's
+    /// frame with the same id replaces it.
+    pub fn send_media(&mut self, pick: MediaPick, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.active_chat_id() else {
+            return;
+        };
+        if crate::jobtabs::is_job_chat(&chat_id) || self.selected_channel.is_some() {
+            return;
+        }
+        self.send_errors.remove(&chat_id);
+        let message_id = new_id();
+        let reply_to = {
+            let ui = self.chat_ui.entry(chat_id.clone()).or_default();
+            ui.reply_ref = None;
+            ui.editing = None;
+            ui.reply_to.take()
+        };
+        let att_id = new_id();
+        let attachment = match &pick {
+            MediaPick::Sticker { pack, item, bytes } => {
+                let key = format!("local:{att_id}");
+                if let Some((image, trimmed)) = decode_image_pair(bytes) {
+                    self.thumbnails.insert(key.clone(), Arc::new(image));
+                    if let Some(t) = trimmed {
+                        self.thumbnails_trimmed.insert(key.clone(), Arc::new(t));
+                    }
+                }
+                self.thumbnails_requested.insert(key.clone());
+                Attachment {
+                    name: format!(
+                        "{}.{}",
+                        item.id,
+                        if item.mime == "image/webp" {
+                            "webp"
+                        } else {
+                            "png"
+                        }
+                    ),
+                    mime: item.mime.clone(),
+                    blob_ref: Some(key),
+                    bytes: Some(bytes.len() as u64),
+                    kind: Some(AttachmentKind::Sticker),
+                    title: None,
+                    chart_part: None,
+                    url: None,
+                    source: Some(Box::new(AttachmentSource {
+                        provider: pack.name.clone(),
+                        id: format!("{}/{}", pack.id, item.id),
+                        page_url: pack.page_url.clone(),
+                    })),
+                }
+            }
+            MediaPick::Gif(gif) => {
+                let attachment = Attachment {
+                    name: format!("{}.gif", gif.id),
+                    mime: "image/gif".into(),
+                    blob_ref: None,
+                    bytes: None,
+                    kind: Some(AttachmentKind::Image),
+                    title: None,
+                    chart_part: None,
+                    url: Some(gif.url.clone()),
+                    source: Some(Box::new(AttachmentSource {
+                        provider: "KLIPY".into(),
+                        id: gif.id.clone(),
+                        page_url: gif.page_url.clone(),
+                    })),
+                };
+                if let Some(key) = attachment.preview_key() {
+                    self.request_fun_thumbnail(key);
+                }
+                attachment
+            }
+        };
+        let parts = vec![
+            Part::Attachment {
+                id: att_id,
+                attachment,
+            },
+            Part::Text {
+                id: new_id(),
+                text: String::new(),
+            },
+        ];
+        self.messages
+            .entry(chat_id.clone())
+            .or_default()
+            .push(Message {
+                id: message_id.clone(),
+                chat_id: chat_id.clone(),
+                role: Role::User,
+                sender: "user".into(),
+                status: MessageStatus::Queued,
+                turn: None,
+                decision: None,
+                subagent_id: None,
+                subagent_name: None,
+                handoff_messages: None,
+                notice: None,
+                worker: false,
+                job: None,
+                hidden: false,
+                agent_reply_to: None,
+                reactions: Default::default(),
+                in_reply_to: None,
+                routine_name: None,
+                sender_name: None,
+                sender_icon: None,
+                sender_handle: None,
+                sender_avatar: None,
+                sender_avatar_color: None,
+                mentions: Vec::new(),
+                reply_to: reply_to.clone(),
+                forwarded_from: None,
+                reply_ref: None,
+                asked_by_handle: None,
+                owner_handle: None,
+                usage: None,
+                return_contract: None,
+                waiting_user: false,
+                waiting_approval: false,
+                model: None,
+                effort: None,
+                created_at: now_ms(),
+                completed_at: None,
+                call_id: None,
+                activity: None,
+                pending: true,
+                parts,
+                hidden_parts: Vec::new(),
+                greeting: false,
+                preview: None,
+            });
+        if let MediaPick::Gif(gif) = &pick {
+            let query = self
+                .gif_results
+                .as_ref()
+                .map(|(q, _)| q.clone())
+                .unwrap_or_default();
+            self.command(ClientCommand::GifShare {
+                id: gif.id.clone(),
+                query,
+            });
+        }
+        self.command(ClientCommand::SendMedia {
+            chat_id: chat_id.clone(),
+            message_id,
+            pick,
+            reply_to,
+        });
+        cx.emit(AppEvent::TranscriptChanged { chat_id });
+        cx.notify();
+    }
+
+    /// Picker: ask the relay for GIFs matching `query` (empty = trending). The answer lands
+    /// in `gif_results`; an answer for an older query is dropped.
+    pub fn gif_search(&mut self, query: String, cx: &mut Context<Self>) {
+        let query = query.trim().to_owned();
+        if self
+            .gif_results
+            .as_ref()
+            .is_some_and(|(q, page)| *q == query && !matches!(page, GifPage::Failed))
+        {
+            return;
+        }
+        if self.gif_query_pending.as_deref() == Some(query.as_str()) {
+            return;
+        }
+        self.gif_query_pending = Some(query.clone());
+        self.gif_results = None;
+        self.command(ClientCommand::GifSearch { query, pos: None });
+        cx.notify();
+    }
+
+    /// Picker: the next page of the current GIF results, if there is one.
+    pub fn gif_more(&mut self, cx: &mut Context<Self>) {
+        let Some((
+            query,
+            GifPage::Items {
+                next: Some(pos), ..
+            },
+        )) = self.gif_results.clone()
+        else {
+            return;
+        };
+        if self.gif_query_pending.is_some() {
+            return;
+        }
+        self.gif_query_pending = Some(query.clone());
+        self.command(ClientCommand::GifSearch {
+            query,
+            pos: Some(pos),
+        });
+        cx.notify();
+    }
+
+    fn gif_results_arrived(&mut self, query: String, pos: Option<String>, page: GifPage) {
+        if self.gif_query_pending.as_deref() != Some(query.as_str()) {
+            return;
+        }
+        self.gif_query_pending = None;
+        match (pos, self.gif_results.take()) {
+            (Some(_), Some((q, GifPage::Items { mut items, next: _ }))) if q == query => {
+                if let GifPage::Items { items: more, next } = page {
+                    items.extend(more);
+                    self.gif_results = Some((query, GifPage::Items { items, next }));
+                } else {
+                    self.gif_results = Some((query, GifPage::Items { items, next: None }));
+                }
+            }
+            _ => self.gif_results = Some((query, page)),
+        }
+        if let Some((_, GifPage::Items { items, .. })) = &self.gif_results {
+            let keys: Vec<String> = items
+                .iter()
+                .map(|g| format!("{}{}", crate::model::URL_KEY_PREFIX, g.preview.url))
+                .collect();
+            for key in keys {
+                self.request_fun_thumbnail(key);
+            }
+        }
+    }
+
+    /// Picker: fetch the sticker-pack manifest once per session.
+    pub fn ensure_sticker_packs(&mut self, cx: &mut Context<Self>) {
+        if self.sticker_packs_requested {
+            return;
+        }
+        self.sticker_packs_requested = true;
+        self.command(ClientCommand::StickerPacks);
+        cx.notify();
+    }
+
+    /// Picker: fetch a sticker's or a GIF preview's bytes into the thumbnail cache
+    /// (`sticker:<pack>/<id>` / `url:<url>` keys; the sync layer routes them).
+    pub fn request_fun_thumbnail(&mut self, key: String) {
+        if !self.thumbnails_requested.insert(key.clone()) {
+            return;
+        }
+        self.command(ClientCommand::FetchThumbnail {
+            project_id: self.selected_project.clone().unwrap_or_default(),
+            key,
+        });
+    }
+
+    /// Picker: the raw bytes of a fetched sticker (`sticker:<pack>/<id>`), for a send.
+    pub fn sticker_bytes(&self, key: &str) -> Option<Arc<Vec<u8>>> {
+        self.sticker_raw.get(key).cloned()
+    }
+
     /// Guide: inject `text` into the agent's running turn instead of queuing a
     /// follow-up; `mentions` as for [`Self::send`].
     pub fn guide(
@@ -4650,6 +4978,7 @@ impl AppState {
                     kind: None,
                     title: None,
                     chart_part: None,
+                    url: None,
                     source: None,
                 };
                 if probe.is_image() {
@@ -4677,6 +5006,7 @@ impl AppState {
                     kind: None,
                     title: None,
                     chart_part: None,
+                    url: None,
                     source: None,
                 },
             });
@@ -4692,6 +5022,7 @@ impl AppState {
                     kind: Some(AttachmentKind::Audio),
                     title: None,
                     chart_part: None,
+                    url: None,
                     source: None,
                 },
             });
@@ -10773,9 +11104,12 @@ impl AppState {
                         }
                     }
                     Part::Attachment { attachment, .. }
-                        if attachment.kind() == AttachmentKind::Image =>
+                        if matches!(
+                            attachment.kind(),
+                            AttachmentKind::Image | AttachmentKind::Sticker
+                        ) =>
                     {
-                        attachment.blob_ref.clone()
+                        attachment.preview_key()
                     }
                     _ => None,
                 };
@@ -12802,6 +13136,195 @@ mod new_message_first_paint_tests {
         assert!(is_directory_query("@"));
         assert!(!is_directory_query("al"));
         assert!(!is_directory_query("@al"));
+    }
+}
+
+#[cfg(test)]
+mod update_restart_chain_tests {
+    //! Affinity (Arbonites, 2026-10-28 21:47 UTC): "bubble just caused my arbos to restart".
+    //! No chat event did it: her Mac had 0.6.334 installed and waiting since 17:57, relaunched
+    //! into it at 21:38, into 0.6.338 at 21:47 and into 0.6.339 at 22:00 — a build that waits
+    //! for its relaunch ignored every newer one, so each missed release was one more restart
+    //! ([feedback mac-update-restart-chain-2026-10-28]).
+    use futures::future::BoxFuture;
+    use gpui::{AppContext as _, TestAppContext};
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use arbos_update::client::{Available, Install};
+
+    struct Idle;
+
+    impl SyncSource for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            _commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    fn build(version: &str) -> Available {
+        Available {
+            item: arbos_update::appcast::Item {
+                title: format!("Arbos {version}"),
+                version: version.into(),
+                build: "1".into(),
+                ..Default::default()
+            },
+            url: format!("https://arbos.life/updates/mac/Arbos-{version}-macos-universal.tar.gz"),
+            length: 1,
+            ed_signature: String::new(),
+        }
+    }
+
+    fn bundle() -> Install {
+        Install::MacBundle("/Applications/Arbos.app".into())
+    }
+
+    /// Auto-update on, running 0.6.333, the window in the background (no relaunch yet).
+    #[allow(clippy::type_complexity)]
+    fn mount(
+        cx: &mut TestAppContext,
+    ) -> (
+        tokio::runtime::Runtime,
+        gpui::Entity<AppState>,
+        mpsc::UnboundedReceiver<UpdateCommand>,
+    ) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| gpui_tokio::init_from_handle(cx, handle));
+        let state = cx.new(|cx| AppState::new(Box::new(Idle), cx));
+        let (tx, rx) = mpsc::unbounded_channel();
+        state.update(cx, |s, _| {
+            s.update_commands = tx;
+            s.update.auto = true;
+            s.update.needs_relocation = false;
+            s.update.current_version = "0.6.333".into();
+            s.window_active = false;
+        });
+        (rt, state, rx)
+    }
+
+    fn installs(rx: &mut mpsc::UnboundedReceiver<UpdateCommand>) -> usize {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|c| matches!(c, UpdateCommand::Install))
+            .count()
+    }
+
+    fn waiting_version(state: &AppState, _: &App) -> Option<String> {
+        match &state.update.phase {
+            UpdatePhase::Installed { available, .. } => Some(available.item.version.clone()),
+            _ => None,
+        }
+    }
+
+    /// Install `version` through the automatic path the way the worker reports it.
+    fn land(cx: &mut TestAppContext, state: &gpui::Entity<AppState>, version: &str) {
+        state.update(cx, |s, cx| {
+            s.apply_update(UpdateEvent::Installing, cx);
+            s.apply_update(UpdateEvent::Installed(bundle()), cx);
+        });
+        let waiting = state.read_with(cx, waiting_version);
+        assert_eq!(
+            waiting.as_deref(),
+            Some(version),
+            "{version} waits for its relaunch"
+        );
+    }
+
+    #[gpui::test]
+    fn a_newer_release_replaces_the_waiting_build_so_there_is_one_restart(cx: &mut TestAppContext) {
+        let (_rt, state, mut rx) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.apply_update(UpdateEvent::Available(Box::new(build("0.6.334"))), cx)
+        });
+        assert_eq!(installs(&mut rx), 1, "0.6.334 installs in the background");
+        land(cx, &state, "0.6.334");
+
+        // Releases that land while 0.6.334 waits are installed over it.
+        for newer in ["0.6.338", "0.6.339"] {
+            state.update(cx, |s, cx| {
+                s.apply_update(UpdateEvent::Available(Box::new(build(newer))), cx)
+            });
+            assert_eq!(
+                installs(&mut rx),
+                1,
+                "{newer} is installed over the waiting build"
+            );
+            state.read_with(cx, |s, _| {
+                assert!(s.update.busy(), "{newer} is downloading");
+                assert!(s.pending_relaunch.is_some(), "the relaunch still waits");
+            });
+            land(cx, &state, newer);
+        }
+
+        // The same or an older build in the feed changes nothing.
+        for same in ["0.6.339", "0.6.338"] {
+            state.update(cx, |s, cx| {
+                s.apply_update(UpdateEvent::Available(Box::new(build(same))), cx)
+            });
+            assert_eq!(
+                installs(&mut rx),
+                0,
+                "{same} is not newer than the waiting 0.6.339"
+            );
+            assert_eq!(
+                state.read_with(cx, waiting_version).as_deref(),
+                Some("0.6.339")
+            );
+        }
+    }
+
+    /// The relaunch never fires while the newer build is being swapped into the bundle.
+    #[gpui::test]
+    fn no_relaunch_while_the_newer_build_installs(cx: &mut TestAppContext) {
+        let (_rt, state, mut rx) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.apply_update(UpdateEvent::Available(Box::new(build("0.6.334"))), cx)
+        });
+        land(cx, &state, "0.6.334");
+        state.update(cx, |s, cx| {
+            s.apply_update(UpdateEvent::Available(Box::new(build("0.6.338"))), cx);
+            let long_ago = now_ms().saturating_sub(10 * update::IDLE_RELAUNCH_MS);
+            s.window_active = true;
+            s.became_active_at = long_ago;
+            s.last_input_at = long_ago;
+            assert!(!s.relaunch_is_safe(), "downloading 0.6.338");
+            s.apply_update(UpdateEvent::Installing, cx);
+            assert!(!s.relaunch_is_safe(), "installing 0.6.338");
+            assert!(!s.try_relaunch(cx));
+            assert!(s.pending_relaunch.is_some());
+        });
+        assert_eq!(installs(&mut rx), 2);
+    }
+
+    /// Manual mode: the waiting build is what the user clicked for; the feed does not move it.
+    #[gpui::test]
+    fn manual_mode_keeps_the_waiting_build(cx: &mut TestAppContext) {
+        let (_rt, state, mut rx) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.apply_update(UpdateEvent::Available(Box::new(build("0.6.334"))), cx)
+        });
+        land(cx, &state, "0.6.334");
+        let _ = installs(&mut rx);
+        state.update(cx, |s, cx| {
+            s.update.auto = false;
+            s.apply_update(UpdateEvent::Available(Box::new(build("0.6.338"))), cx);
+        });
+        assert_eq!(installs(&mut rx), 0);
+        assert_eq!(
+            state.read_with(cx, waiting_version).as_deref(),
+            Some("0.6.334")
+        );
     }
 }
 

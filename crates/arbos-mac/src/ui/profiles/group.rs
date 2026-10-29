@@ -186,7 +186,7 @@ pub(super) fn page(
         name,
         badge: None,
         subtitle: Some(subtitle.into()),
-        subtitle_color: theme.text_muted,
+        subtitle_color: theme.label_muted(),
         subtitle_click: None,
         subtitle_element: None,
         editor: None,
@@ -250,7 +250,7 @@ pub(super) fn page(
                     .min_w_0()
                     .max_w(px(DESCRIPTION_VALUE_MAX_W))
                     .text_size(px(TEXT_SMALL))
-                    .text_color(theme.text_muted)
+                    .text_color(theme.label_muted())
                     .truncate()
                     .child(desc.to_owned())
                     .into_any_element();
@@ -325,7 +325,7 @@ pub(super) fn page(
                             .into_any_element(),
                         title,
                         format!("@{}", p.handle),
-                        theme.text_muted,
+                        theme.label_muted(),
                         trailing,
                         &theme,
                     )
@@ -400,7 +400,7 @@ pub(super) fn page(
                             },
                             a.name.clone(),
                             sub,
-                            theme.text_muted,
+                            theme.label_muted(),
                             // The relay lets only the agent's own owner remove it.
                             mine.then(|| remove_x(key.clone(), &theme, cx).into_any_element()),
                             &theme,
@@ -455,7 +455,7 @@ pub(super) fn page(
                         .into_any_element(),
                         space.name.clone(),
                         sub,
-                        theme.text_muted,
+                        theme.label_muted(),
                         None,
                         &theme,
                     )
@@ -514,7 +514,7 @@ fn remove_x(key: String, theme: &Theme, cx: &mut Context<Shell>) -> Stateful<Div
         .opacity(0.0)
         .group_hover(kit::HOT, |s| s.opacity(1.0));
     highlight::button(x, theme)
-        .child(sf_symbols::glyph("xmark", 11.0, theme.text_muted))
+        .child(sf_symbols::glyph("xmark", 11.0, theme.label_muted()))
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(cx.listener(move |this, _, _, cx| {
             cx.stop_propagation();

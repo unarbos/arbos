@@ -186,6 +186,8 @@ struct ChatSession: View {
     @State private var showPhotos = false
     @State private var showFiles = false
     @State private var showAttach = false
+    /// The Emoji · Stickers · GIFs picker (ARB-544), from the attach sheet's third row.
+    @State private var showFun = false
     @State private var scroller: ScrollViewProxy?
     /// Scrolled more than ~120 pt above the end: show Grok's round chevron
     /// (or the new-messages pill when rows landed below).
@@ -1569,6 +1571,8 @@ struct ChatSession: View {
 
     /// Rig auto-send once the chat is caught up (`ARBOS_AUTO_SEND`).
     private func handleCaughtUp(_ ready: Bool) {
+        // Blank-screen recovery when catch-up flips (main: repaintIfBlank on this onChange).
+        model.repaintIfBlank(chatId)
         guard ready, !sentOnce, !DebugHooks.liveDemo, let text = DebugHooks.autoSend, DebugHooks.openChat == chatId else { return }
         // Several messages separated by " ||| " go out a few seconds apart
         // (multitasking checks: the composer never waits for a reply).
@@ -1897,6 +1901,9 @@ struct ChatSession: View {
             withTransaction(still) { timeReveal = reveal }
         case .timeEnded:
             withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) { timeReveal = 0 }
+        case .back:
+            BackSwipe.dismissKeyboard()
+            dismiss()
         }
     }
 
@@ -1942,7 +1949,12 @@ struct ChatSession: View {
                         .frame(maxWidth: .infinity)
                         .padding(.bottom, 16)
                     }
-                    if !model.caughtUp.contains(chatId) && messages.isEmpty && !model.isFixture {
+                    if model.transcriptPending(chatId) {
+                        // The doc has rows that are not on screen yet: a spinner, never a
+                        // blank people chat ([feedback arbonites-blank-chat-ios-2026-10-28]).
+                        HStack { Spacer(); ProgressView().tint(theme.muted); Spacer() }.padding(.top, 60)
+                            .accessibilityIdentifier("chat-transcript-loading")
+                    } else if !model.caughtUp.contains(chatId) && messages.isEmpty && !model.isFixture {
                         // Known-empty (optimistic new chat seeds `messages[id] = []`):
                         // show the empty hint at once — no spinner flash while the
                         // room catches up on a thread we already know has no rows.
@@ -1983,13 +1995,14 @@ struct ChatSession: View {
                     Color.clear.frame(height: Theme.transcriptTail).id("bottom")
                 }
                 .padding(.horizontal, 16)
-                // The time peek's recognizer (swipe left) lives on the scroll view; the same
-                // host watches the scroll view's own pan: a scroll with the search bar open and
+                // The transcript's horizontal swipes (left: time peek, right: back) live on the
+                // scroll view, beside its pan; the same host watches that pan: a scroll with the search bar open and
                 // nothing typed closes it (with a keyword the list IS the results, so scrolling
                 // them keeps the bar). No SwiftUI drag: it would run per move and contend with
                 // the system's edge pop.
                 .background {
-                    TranscriptSwipeHost(timePeek: ChatGestures.timeReveal, onEvent: handleTranscriptSwipe) {
+                    TranscriptSwipeHost(timePeek: ChatGestures.timeReveal, backSwipe: ChatGestures.backSwipe,
+                                        onEvent: handleTranscriptSwipe) {
                         if ChatSearchClose.scrollCloses(open: showSearch, query: searchText) { closeSearch() }
                     }
                 }
@@ -2900,7 +2913,27 @@ struct ChatSession: View {
             } onFile: {
                 showAttach = false
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showFiles = true }
+            } onFun: {
+                showAttach = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showFun = true }
             }
+            .environment(\.theme, theme)
+        }
+        .sheet(isPresented: $showFun) {
+            FunPickerSheet(chatId: chatId, onEmoji: { glyph in
+                // Into the draft like typed text; the field keeps the caret at the end.
+                composerDraft.text += glyph
+            }, onSend: { pick in
+                Haptics.send()
+                jumpBackTo = nil
+                pinnedToBottom = true
+                awayFromBottom = false
+                newBelowCount = 0
+                model.sendMedia(chatId: chatId, pick: pick)
+                sentOnce = true
+                scrollAfterSend()
+            })
+            .environmentObject(model)
             .environment(\.theme, theme)
         }
         .photosPicker(isPresented: $showPhotos, selection: $photoItem, matching: .any(of: [.images, .videos]))
@@ -3486,22 +3519,28 @@ private struct ScrollInterruptTap: UIViewRepresentable {
     }
 }
 
-/// "+" sheet: Photo or video, File — Grok's attach options as a short bottom sheet.
+/// "+" sheet: Photo or video, File, and — ARB-544, Jacob's option B — Emoji, stickers & GIFs,
+/// as a short bottom sheet.
 struct AttachSheet: View {
     @Environment(\.theme) private var theme
     let onPhoto: () -> Void
     let onFile: () -> Void
+    var onFun: (() -> Void)? = nil
 
     var body: some View {
         VStack(spacing: 0) {
             Capsule().fill(theme.muted.opacity(0.4)).frame(width: 36, height: 5).padding(.top, 8).padding(.bottom, 14)
             row(icon: "photo", title: "Photo or video", subtitle: "From your library", action: onPhoto)
             row(icon: "doc", title: "File", subtitle: "From Files or iCloud Drive", action: onFile)
+            if let onFun {
+                row(icon: "face.smiling", title: "Emoji, stickers & GIFs", subtitle: "Add some fun to the chat", action: onFun)
+                    .accessibilityIdentifier("attach-fun")
+            }
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 16)
         .background(theme.bg)
-        .presentationDetents([.height(190)])
+        .presentationDetents([.height(onFun == nil ? 190 : 258)])
         .presentationDragIndicator(.hidden)
         .presentationBackground(theme.bg)
     }

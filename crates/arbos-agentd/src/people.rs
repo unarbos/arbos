@@ -8,11 +8,13 @@
 //! agents"). The judge sees the people (name + @handle), every agent (handle, role, how the
 //! text @mentions it), the last 12 lines, the message and the line it replies to, and says
 //! who it is for: one agent, any one agent, several, all, or nobody. The agent replies only on
-//! a confident yes (`decision_model.threshold`, 0.60). An @mention, a bare name, a reply to the
-//! agent's bubble or a follow-up are signals in that state, never a verdict; the owner's
-//! `reply_policy: every_message` is the one setting that bypasses the judge. When the judge
-//! fails, an unmentioned message is silence; a mentioned one is answered only when the mention
-//! is vocative or the text ends with "?". Silence posts nothing (`silence.rs`).
+//! a confident yes (`decision_model.threshold`, 0.60). A bare name, a reply to the agent's
+//! bubble or a follow-up are signals in that state, never a verdict. A person's explicit
+//! @mention (typed `@handle` or a chip) is the exception: it always wakes every agent it names,
+//! whatever the judge says or when it fails (Jacob, 2026-10-28); a woken agent that was only
+//! named may still say nothing. The owner's `reply_policy: every_message` bypasses the judge.
+//! When the judge fails, an unmentioned message is silence. Silence posts nothing
+//! (`silence.rs`). An agent's own bubble never wakes another agent (#2207).
 //!
 //! Each human message is labelled with the author's display name (falling back to bare handle)
 //! and role (`owner` | `guest`) in the prompt. The author is the row's `sender: user:<id>`,
@@ -355,8 +357,38 @@ const GATE_CACHE_MAX: usize = 512;
 pub struct GateVerdict {
     pub wants: bool,
     pub reason: String,
-    /// Every agent the judge picked (the shared-send bookkeeping reads this).
+    /// Every agent the judge picked plus every agent a person @mentioned (the shared-send
+    /// bookkeeping reads this).
     pub chosen: Vec<String>,
+    /// Set when a person's explicit @mention woke this agent although the judge did not pick
+    /// it (unsure, another addressee, or no judge at all).
+    pub woken_by_mention: Option<MentionRole>,
+}
+
+impl GateVerdict {
+    /// A person's explicit @mention (typed `@handle` or a chip) always wakes every agent it
+    /// names; the judge can add agents but never veto a mentioned one (Jacob, Arbonites
+    /// 2026-10-28: "@bob talk to @bubble" judged `for=@bob (0.48) < 0.50` woke nobody).
+    fn honour_mentions(mut self, me: &str, my_role: MentionRole, mentioned: &[String]) -> Self {
+        for id in mentioned {
+            if !self.chosen.contains(id) {
+                self.chosen.push(id.clone());
+            }
+        }
+        if my_role != MentionRole::None && !self.wants {
+            self.wants = true;
+            self.reason = format!(
+                "{}; @mention {} by a person → reply (a person's @mention always wakes the agent)",
+                self.reason,
+                my_role.as_str()
+            );
+            self.woken_by_mention = Some(my_role);
+            if !self.chosen.iter().any(|c| c == me) {
+                self.chosen.push(me.to_owned());
+            }
+        }
+        self
+    }
 }
 
 #[derive(Default)]
@@ -999,11 +1031,13 @@ impl Agent {
             wants: false,
             reason,
             chosen: Vec::new(),
+            woken_by_mention: None,
         };
         let mine = |reason: String| GateVerdict {
             wants: true,
             reason,
             chosen: vec![self.cfg.project_id.clone()],
+            woken_by_mention: None,
         };
         let (msg, recent, reply_to) = {
             let h = host.lock().await;
@@ -1122,6 +1156,14 @@ impl Agent {
         if !candidates.iter().any(|c| c.id == self.cfg.project_id) {
             return silent("not a member of this chat's roster".into());
         }
+        let mentioned: Vec<String> = candidates
+            .iter()
+            .filter(|c| {
+                c.mentioned_as.is_some()
+                    || (c.id == self.cfg.project_id && my_role != MentionRole::None)
+            })
+            .map(|c| c.id.clone())
+            .collect();
         let room = Room {
             kind: "people_group",
             chat_id: chat_id.to_owned(),
@@ -1141,7 +1183,9 @@ impl Agent {
                     wants,
                     reason: d.reason_for(&self.cfg.project_id, &room),
                     chosen: d.chosen.clone(),
-                };
+                    woken_by_mention: None,
+                }
+                .honour_mentions(&self.cfg.project_id, my_role, &mentioned);
                 self.report_gate_decision(chat_id, &msg.id, &verdict, Some(&d));
                 verdict
             }
@@ -1152,36 +1196,19 @@ impl Agent {
                 if crate::budget::Refusal::classify(&error).is_some() {
                     self.note_budget_refusal(chat_id, &error, false).await;
                 }
-                // No second model. Unmentioned: silence (fail closed). Mentioned: one stated
-                // default — reply when the @mention is vocative or the text ends with "?".
-                let mentioned = my_role != MentionRole::None;
-                let verdict = if !mentioned {
-                    GateVerdict {
-                        wants: false,
-                        reason: format!(
-                            "judge failed: {error}; unmentioned → silent (fail closed)"
-                        ),
-                        chosen: Vec::new(),
-                    }
-                } else {
-                    let vocative = my_role == MentionRole::Addressed;
-                    let question = raw_text.trim_end().ends_with('?');
-                    let wants = vocative || question;
-                    GateVerdict {
-                        wants,
-                        reason: format!(
-                            "judge failed: {error}; @mention {}, {} → {} (fail-open default)",
-                            if vocative { "vocative" } else { "not vocative" },
-                            if question { "ends with ?" } else { "no ?" },
-                            if wants { "reply" } else { "silent" }
-                        ),
-                        chosen: if wants {
-                            vec![self.cfg.project_id.clone()]
-                        } else {
-                            Vec::new()
-                        },
-                    }
-                };
+                // No second model. Unmentioned: silence (fail closed). Mentioned by a person:
+                // woken, like every @mention (fail open).
+                let verdict = GateVerdict {
+                    wants: false,
+                    reason: if my_role == MentionRole::None {
+                        format!("judge failed: {error}; unmentioned → silent (fail closed)")
+                    } else {
+                        format!("judge failed: {error}")
+                    },
+                    chosen: Vec::new(),
+                    woken_by_mention: None,
+                }
+                .honour_mentions(&self.cfg.project_id, my_role, &mentioned);
                 let action = if verdict.wants { "REPLY" } else { "NONE" };
                 self.log_responder_decision(
                     &room,
@@ -1384,6 +1411,16 @@ impl Agent {
         // sentence told it to stay silent when "only mentioned". Silence stays available for a
         // genuine nothing-to-say, and a silence announcement is still never posted.
         let reply_clause = match self.people.gate_verdict(user_msg_id) {
+            // Woken by the mention alone (the judge was unsure, picked someone else, or failed):
+            // the agent reads the line itself; "thanks @you" or "@you has the notes" still
+            // gets no post (eval g7).
+            Some(GateVerdict {
+                wants: true,
+                woken_by_mention: Some(_),
+                ..
+            }) => format!(
+                "{spoken} @mentioned you; a person's @mention always reaches you, even when the reply gate was unsure. Read it and do your part: if it asks you anything or asks you to do something, answer or act (\"talk to @another-agent\" means reach that agent with send_message); a bare name ping (\"{my_slug}?\", \"hey {my_slug}\") wants a one-line presence answer. If it only thanks you, talks about you or passes something along, route `reply` with `reply` empty and no words — never post that you are staying silent, that the question is for someone else, or that you have nothing to add"
+            ),
             Some(v) if v.wants => format!(
                 "The reply gate has already judged that this message is for you ({}); answer it plainly. A bare name ping (\"{my_slug}?\", \"hey {my_slug}\") wants a one-line presence answer, not silence. Only if you truly have nothing to say, route `reply` with `reply` empty and no words — never post that you are staying silent, that the question is for someone else, or that you have nothing to add",
                 v.reason
@@ -1405,6 +1442,36 @@ impl Agent {
         }
         prelude.push('\n');
         Some(prelude)
+    }
+
+    /// The recent lines of people chat `chat_id`, rendered for a prompt, when this agent is a
+    /// member of it: what another agent's `send_message` from that chat was about (Arbonites
+    /// 2026-10-28: Bubble's "Jacob asked me to talk to you" reached Bob with nothing of the group,
+    /// so Bob asked "What's on Jacob's mind?"). `None` for chats this agent is not in — a
+    /// sender's room is never shown to a non-member.
+    pub(crate) async fn people_chat_window(&self, chat_id: &str) -> Option<String> {
+        let info = self.people.info(chat_id)?;
+        let host = self.sync.host(chat_id).await?;
+        let handles = agent_handles(&info, &self.cfg.project_id, &self.identity.handle());
+        let recent = {
+            let h = host.lock().await;
+            recent_people_context_for(
+                &h.doc.messages(),
+                "",
+                RESPOND_RECENT_MAX,
+                &info,
+                chat_id,
+                &handles,
+            )
+        };
+        if recent.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "{}{}",
+            crate::truncate::render_window(&recent),
+            crate::truncate::window_note(chat_id)
+        ))
     }
 
     /// Projects together (D72 step 3): in this Project's own chats, a message written by a guest
@@ -2326,10 +2393,9 @@ mod gate_record_tests {
     }
 
     /// No judge (the mock relay has no `/proxy/decisions`): an unmentioned message is silence;
-    /// a mentioned one follows the one default — reply when the @mention is vocative or the
-    /// text ends with "?", else silence ("thanks @doug").
+    /// every @mention by a person wakes the agent, vocative or not ("thanks @doug").
     #[tokio::test]
-    async fn judge_failure_fails_closed_unless_mentioned_vocatively_or_asked() {
+    async fn judge_failure_fails_closed_unless_mentioned() {
         let (agent, root) = test_agent().await;
         let chat = "01TESTCHATGATEFAILS0000001";
         seed_group(&agent, chat);
@@ -2341,7 +2407,7 @@ mod gate_record_tests {
         let asked = append(&host, "did you see this @doug?", vec![me.clone()]).await;
         assert!(!agent.people_wants(chat, &host, &plain).await);
         assert!(agent.people_wants(chat, &host, &vocative).await);
-        assert!(!agent.people_wants(chat, &host, &thanks).await);
+        assert!(agent.people_wants(chat, &host, &thanks).await);
         assert!(agent.people_wants(chat, &host, &asked).await);
         let reasons: HashMap<String, String> = agent
             .store
@@ -2356,15 +2422,15 @@ mod gate_record_tests {
             "{reasons:?}"
         );
         assert!(
-            reasons[&vocative].contains("@mention vocative, no ? → reply (fail-open default)"),
+            reasons[&vocative].contains("@mention addressed by a person → reply"),
             "{reasons:?}"
         );
         assert!(
-            reasons[&thanks].contains("@mention not vocative, no ? → silent (fail-open default)"),
+            reasons[&thanks].contains("@mention object by a person → reply"),
             "{reasons:?}"
         );
         assert!(
-            reasons[&asked].contains("ends with ? → reply (fail-open default)"),
+            reasons[&asked].contains("by a person → reply"),
             "{reasons:?}"
         );
         let _ = std::fs::remove_dir_all(&root);
@@ -2505,6 +2571,209 @@ mod gate_record_tests {
             .commands()
             .iter()
             .all(|c| c.payload.get("agentMention").is_none()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A judge that is never sure: the first @mentioned agent at 0.48 (under every threshold),
+    /// like the live call on "@bob talk to @bubble" (Arbonites 2026-10-28 21:48:14 UTC).
+    fn unsure_decisions(calls: StdArc<AtomicUsize>) -> axum::Router {
+        axum::Router::new().route(
+            "/proxy/decisions",
+            axum::routing::post(move |body: axum::body::Bytes| {
+                let calls = calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    let v: Value = serde_json::from_slice(&body).unwrap();
+                    let text = v["state"]["message"]["text"].as_str().unwrap_or("").to_lowercase();
+                    let names: Vec<String> = v["state"]["agents"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|a| a["name"].as_str().unwrap().to_owned())
+                        .collect();
+                    let first = names
+                        .iter()
+                        .filter_map(|n| text.find(n.as_str()).map(|i| (i, n.clone())))
+                        .min()
+                        .map(|(_, n)| n)
+                        .unwrap_or_else(|| "nobody".to_owned());
+                    let mut probs = serde_json::Map::new();
+                    for n in &names {
+                        probs.insert(n.clone(), json!(if *n == first { 0.48 } else { 0.15 }));
+                    }
+                    for opt in ["any one agent", "several agents", "all agents"] {
+                        probs.insert(opt.into(), json!(0.02));
+                    }
+                    probs.insert("nobody".into(), json!(if first == "nobody" { 0.48 } else { 0.2 }));
+                    let mut answers = serde_json::Map::new();
+                    answers.insert(
+                        "addressee".into(),
+                        json!({ "type": "choice", "choice": first, "probabilities": probs, "confidence": 0.48 }),
+                    );
+                    for i in 0..names.len() {
+                        answers.insert(format!("reply_{i}"), json!({ "type": "noul", "noul": 0.3 }));
+                    }
+                    axum::Json(json!({
+                        "model": "typesafe/jev-1.14-test",
+                        "answers": answers,
+                        "usage": { "input_tokens": 600, "output_tokens": 80, "cost": 0.00003 }
+                    }))
+                }
+            }),
+        )
+    }
+
+    /// Jacob, Arbonites 2026-10-28: "@bob talk to @bubble" woke nobody — the judge said
+    /// `for=@bob (0.48) < 0.50` and both boxes stayed silent. A person's explicit @mentions
+    /// wake every agent they name (addressed or object, typed or chip, judge unsure or down);
+    /// the same words in an agent's bubble still wake no one (#2207).
+    #[tokio::test]
+    async fn a_persons_mentions_wake_every_mentioned_agent() {
+        let calls = StdArc::new(AtomicUsize::new(0));
+        let (agent, root) = test_agent_with(unsure_decisions(calls.clone())).await;
+        let chat = "01TESTCHATMULTIMENTION0001";
+        let me_id = agent.cfg.project_id.clone();
+        let me = format!("agent:{me_id}");
+        agent.people.chats.lock().expect("people").insert(
+            chat.to_owned(),
+            PeopleChatInfo {
+                members: vec![
+                    json!({ "member": "user:gh_2", "handle": "sam", "name": "Sam" }),
+                    json!({ "member": me.clone(), "handle": "doug" }),
+                    json!({ "member": "agent:OTHER", "handle": "hjkb" }),
+                    json!({ "member": "agent:THIRD", "handle": "lane" }),
+                    json!({ "member": "agent:QUIET", "handle": "quiet" }),
+                ],
+                settings: json!({ "reply_policy": "mention" }),
+                owner_user: "gh_1".into(),
+                slug: "doug".into(),
+                kind: "group".into(),
+                owner_address: None,
+            },
+        );
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let chosen_of = |id: &str| {
+            let mut c = agent.people.gate_verdict(id).expect("judged").chosen;
+            c.sort();
+            c
+        };
+
+        // Addressed first, another agent as the object: both wake.
+        let me_first = append(
+            &host,
+            "@doug talk to @hjkb",
+            vec![me.clone(), "agent:OTHER".into()],
+        )
+        .await;
+        assert!(agent.people_wants(chat, &host, &me_first).await);
+        assert_eq!(
+            chosen_of(&me_first),
+            vec![me_id.clone(), "OTHER".to_owned()]
+        );
+
+        // This agent is the object of a request to someone else: still woken.
+        let me_object = append(
+            &host,
+            "@hjkb talk to @doug",
+            vec!["agent:OTHER".into(), me.clone()],
+        )
+        .await;
+        assert!(agent.people_wants(chat, &host, &me_object).await);
+        assert_eq!(
+            chosen_of(&me_object),
+            vec![me_id.clone(), "OTHER".to_owned()]
+        );
+
+        // Three agents in one line, one by chip only; the unmentioned fourth is not added.
+        let three = append(
+            &host,
+            "@hjkb and @lane, loop in doug please",
+            vec!["agent:OTHER".into(), "agent:THIRD".into(), me.clone()],
+        )
+        .await;
+        assert!(agent.people_wants(chat, &host, &three).await);
+        assert_eq!(
+            chosen_of(&three),
+            vec![me_id.clone(), "OTHER".to_owned(), "THIRD".to_owned()]
+        );
+
+        // Not mentioned among several mentions: the unsure judge's silence stands.
+        let others_only = append(
+            &host,
+            "@hjkb talk to @lane",
+            vec!["agent:OTHER".into(), "agent:THIRD".into()],
+        )
+        .await;
+        assert!(!agent.people_wants(chat, &host, &others_only).await);
+        assert_eq!(
+            chosen_of(&others_only),
+            vec!["OTHER".to_owned(), "THIRD".to_owned()]
+        );
+
+        let reasons: HashMap<String, String> = agent
+            .store
+            .t3_after(0, Some(chat), 50)
+            .unwrap()
+            .into_iter()
+            .filter(|(r, _)| r.kind == "gate")
+            .filter_map(|(r, d)| Some((d?["message_id"].as_str()?.to_owned(), r.text)))
+            .collect();
+        assert!(
+            reasons[&me_first].contains("< 0.60")
+                && reasons[&me_first].ends_with("@mention addressed by a person → reply (a person's @mention always wakes the agent)"),
+            "{reasons:?}"
+        );
+        assert!(
+            reasons[&me_object].contains("not me")
+                && reasons[&me_object].contains("@mention object by a person → reply"),
+            "{reasons:?}"
+        );
+
+        // The prelude says why the agent woke, how to reach the other agent, and that a line
+        // that only names it still gets no post.
+        for id in [&me_first, &me_object] {
+            let prelude = agent.people_turn_context(chat, &host, id).await.unwrap();
+            assert!(
+                prelude.contains("Sam @mentioned you; a person's @mention always reaches you"),
+                "{prelude}"
+            );
+            assert!(
+                prelude.contains("means reach that agent with send_message"),
+                "{prelude}"
+            );
+            assert!(
+                prelude.contains("never post that you are staying silent"),
+                "{prelude}"
+            );
+            assert!(!prelude.contains("has already judged"), "{prelude}");
+        }
+
+        // #2207 stays: the same words in another agent's bubble wake nobody, no judge call.
+        let before = calls.load(Ordering::SeqCst);
+        let agent_row = {
+            let h = host.lock().await;
+            let id = ulid();
+            h.doc.start_assistant_message(&id, "q", "box:other");
+            h.doc.set_message_fields(
+                &id,
+                &[
+                    ("sender", json!("agent:OTHER")),
+                    ("senderHandle", json!("hjkb")),
+                    ("mentions", json!([me.clone(), "agent:THIRD"])),
+                ],
+            );
+            let part = h.doc.add_text_part(&id, "text").unwrap();
+            h.doc.append_text(&id, &part, "@doug talk to @lane");
+            h.doc
+                .finish_message(&id, arbos_core::doc::MessageStatus::Done);
+            id
+        };
+        assert!(!agent.people_wants(chat, &host, &agent_row).await);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            before,
+            "no judge call for an agent's row"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

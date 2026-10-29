@@ -52,6 +52,8 @@ const WAIT_MAX_S: u64 = 25;
 const EVENTS_PER_MIN: i64 = 240;
 /// Longest message text an outside agent may post.
 const TEXT_MAX: usize = 16 * 1024;
+/// Longest a streamed message may grow, every delta together: the socket's frame cap.
+const MESSAGE_MAX: usize = 64 * 1024;
 /// Transports the owner can pick; the value is informational (shown on the profile).
 const TRANSPORTS: &[&str] = &["acp", "grok", "custom"];
 
@@ -1565,6 +1567,35 @@ fn settle_send(doc: &ChatDoc, reply_to: Option<&str>, status: CommandStatus) {
     }
 }
 
+/// Why a `message.delta` / `message.end` was refused before anything was written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamRefused {
+    NoSuchMessage,
+    NotYours,
+    Finished,
+    TooLarge,
+}
+
+impl StreamRefused {
+    fn event_error(self) -> (&'static str, String) {
+        let (code, msg) = match self {
+            StreamRefused::NoSuchMessage => ("not_found", "no such message in this chat"),
+            StreamRefused::NotYours => ("forbidden", "this agent did not start that message"),
+            StreamRefused::Finished => ("closed", "that message is already finished"),
+            StreamRefused::TooLarge => ("too_large", "message over 64 KB in total"),
+        };
+        (code, msg.to_owned())
+    }
+}
+
+impl std::fmt::Display for StreamRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.event_error().1)
+    }
+}
+
+impl std::error::Error for StreamRefused {}
+
 pub(crate) async fn apply_event(state: &AppState, me: &AgentPrincipal, e: &Value) -> EventResult {
     let ty = field(e, "type").ok_or(("bad_request", "type required".to_owned()))?;
     let pid = me.project.id.clone();
@@ -1731,12 +1762,30 @@ pub(crate) async fn apply_event(state: &AppState, me: &AgentPrincipal, e: &Value
             let is_people = project_id.is_none();
             let full = std::sync::Arc::new(StdMutex::new(String::new()));
             let full2 = full.clone();
-            crate::notices::write_doc_as(
+            let device = device_of(&pid);
+            let device_in = device.clone();
+            let written = crate::notices::write_doc_as(
                 state,
                 project_id.as_deref(),
                 chat_id,
-                &device_of(&pid),
+                &device,
                 move |doc| {
+                    // Only a row this agent started and has not finished takes more text.
+                    let row = doc.message(&m).ok_or(StreamRefused::NoSuchMessage)?;
+                    if row.rest["deviceId"].as_str() != Some(device_in.as_str()) {
+                        return Err(StreamRefused::NotYours.into());
+                    }
+                    if row.status != MessageStatus::Streaming.as_str() {
+                        return Err(StreamRefused::Finished.into());
+                    }
+                    let total = match (ending, t.as_deref()) {
+                        (true, Some(whole)) => whole.len(),
+                        (_, Some(delta)) => row.text().len() + delta.len(),
+                        (_, None) => 0,
+                    };
+                    if total > MESSAGE_MAX {
+                        return Err(StreamRefused::TooLarge.into());
+                    }
                     let part = doc
                         .part_id_at(&m, 0)
                         .ok_or_else(|| anyhow::anyhow!("no such message"))?;
@@ -1759,8 +1808,22 @@ pub(crate) async fn apply_event(state: &AppState, me: &AgentPrincipal, e: &Value
                     Ok(())
                 },
             )
-            .await
-            .map_err(|e| ("write_failed", e.to_string()))?;
+            .await;
+            if let Err(e) = written {
+                let Some(refused) = e.downcast_ref::<StreamRefused>() else {
+                    return Err(("write_failed", e.to_string()));
+                };
+                if matches!(
+                    refused,
+                    StreamRefused::NoSuchMessage | StreamRefused::Finished
+                ) {
+                    let mut open = open_streams().lock().unwrap();
+                    if open.get(&key).is_some_and(|(id, _)| *id == msg_id) {
+                        open.remove(&key);
+                    }
+                }
+                return Err(refused.event_error());
+            }
             if ending {
                 open_streams().lock().unwrap().remove(&key);
                 let whole = full.lock().unwrap().clone();
@@ -2377,6 +2440,7 @@ mod tests {
                         mime: "image/png".into(),
                         kind: Some("image".into()),
                         blob_ref: Some("abc123".into()),
+                        url: None,
                         source: None,
                     }],
                     sender: Some(format!("user:{o2}")),
@@ -2422,6 +2486,7 @@ mod tests {
                             mime: "image/gif".into(),
                             kind: Some("image".into()),
                             blob_ref: Some("g1".into()),
+                            url: None,
                             source: None,
                         },
                         UserAttachment {
@@ -2429,6 +2494,7 @@ mod tests {
                             mime: "audio/mp4".into(),
                             kind: Some("audio".into()),
                             blob_ref: Some("a1".into()),
+                            url: None,
                             source: None,
                         },
                         UserAttachment {
@@ -2436,6 +2502,7 @@ mod tests {
                             mime: "application/pdf".into(),
                             kind: None,
                             blob_ref: Some("p1".into()),
+                            url: None,
                             source: None,
                         },
                         UserAttachment {
@@ -2443,6 +2510,7 @@ mod tests {
                             mime: "video/mp4".into(),
                             kind: Some("video".into()),
                             blob_ref: Some("v1".into()),
+                            url: None,
                             source: None,
                         },
                     ],
@@ -2543,6 +2611,185 @@ mod tests {
             reply_json(&state, Some(&doc), &chat_ref, Some("nope")),
             json!({ "id": "nope" })
         );
+    }
+
+    /// `message.delta` / `message.end` reach only a row the same agent started and has not
+    /// finished, and a stream stops at [`MESSAGE_MAX`]; a refused event leaves the row as it was.
+    #[tokio::test]
+    async fn stream_events_touch_only_own_open_messages() {
+        use crate::people::tests_support::{group, person, project_of};
+        use crate::state::test_support::test_state;
+        use crate::state::AuthMode;
+        use arbos_core::doc::UserMessageOpts;
+
+        let state = test_state(AuthMode::Github);
+        let (owner, _) = person(&state, 7201);
+        let (other, _) = person(&state, 7202);
+        let pid = project_of(&state, &owner, "Bubble Rig");
+        let key = mint_key();
+        state
+            .db
+            .insert_outside_agent(&pid, &owner, "custom", &hash(&key))
+            .unwrap();
+        let g = group(&state, &[&owner, &other]);
+        state
+            .db
+            .add_member(&g, &format!("agent:{pid}"), "agent", &owner, &json!({}))
+            .unwrap();
+        let me = AgentPrincipal {
+            agent: state
+                .db
+                .outside_agent_by_key_hash(&hash(&key))
+                .unwrap()
+                .unwrap(),
+            project: state.db.project(&pid).unwrap().unwrap(),
+        };
+
+        // A person's finished row and another agent's row that is still streaming.
+        let (human, box_row) = (ulid(), ulid());
+        let (h2, b2, o2) = (human.clone(), box_row.clone(), other.clone());
+        crate::notices::write_doc(&state, None, &g, move |doc| {
+            doc.append_user_message(
+                &h2,
+                "the numbers are 14",
+                "dev:other",
+                &UserMessageOpts {
+                    sender: Some(format!("user:{o2}")),
+                    ..Default::default()
+                },
+            )?;
+            let part = doc.start_assistant_message(&b2, "", "box:someone-else");
+            doc.append_text(&b2, &part, "thinking");
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let row = |id: &str| {
+            crate::matrix::backfill::load_doc(&state, &g, None)
+                .unwrap()
+                .unwrap()
+                .message(id)
+                .unwrap()
+        };
+        let code = |r: EventResult| r.unwrap_err().0;
+
+        // Another member's message: refused, untouched — with or without an open stream.
+        for (id, before, status) in [
+            (&human, "the numbers are 14", "done"),
+            (&box_row, "thinking", "streaming"),
+        ] {
+            let ev = |ty: &str, text: &str| json!({ "type": ty, "chat": g, "message": id, "text": text });
+            assert_eq!(
+                code(apply_event(&state, &me, &ev("message.delta", " (edited)")).await),
+                "forbidden"
+            );
+            assert_eq!(
+                code(apply_event(&state, &me, &ev("message.end", "rewritten")).await),
+                "forbidden"
+            );
+            let started = apply_event(&state, &me, &json!({ "type": "message.start", "chat": g }))
+                .await
+                .unwrap();
+            assert_eq!(
+                code(apply_event(&state, &me, &ev("message.end", "rewritten")).await),
+                "forbidden"
+            );
+            let r = row(id);
+            assert_eq!(r.text(), before);
+            assert_eq!(r.status, status);
+            apply_event(
+                &state,
+                &me,
+                &json!({ "type": "message.end", "chat": g, "message": started["message"] }),
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            code(
+                apply_event(
+                    &state,
+                    &me,
+                    &json!({ "type": "message.delta", "chat": g, "message": "nope", "text": "x" }),
+                )
+                .await
+            ),
+            "not_found"
+        );
+
+        // Its own finished messages: posted, and streamed then ended.
+        let posted = apply_event(
+            &state,
+            &me,
+            &json!({ "type": "message.post", "chat": g, "text": "done here" }),
+        )
+        .await
+        .unwrap()["message"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let streamed = apply_event(
+            &state,
+            &me,
+            &json!({ "type": "message.start", "chat": g, "text": "short" }),
+        )
+        .await
+        .unwrap()["message"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        apply_event(&state, &me, &json!({ "type": "message.end", "chat": g }))
+            .await
+            .unwrap();
+        for (id, before) in [(&posted, "done here"), (&streamed, "short")] {
+            for ty in ["message.delta", "message.end"] {
+                let ev = json!({ "type": ty, "chat": g, "message": id, "text": "late" });
+                assert_eq!(code(apply_event(&state, &me, &ev).await), "closed");
+            }
+            assert_eq!(row(id).text(), before);
+            assert_eq!(row(id).status, "done");
+        }
+        // No open stream is left behind for an implicit delta to land in.
+        assert_eq!(
+            code(
+                apply_event(
+                    &state,
+                    &me,
+                    &json!({ "type": "message.delta", "chat": g, "text": "x" }),
+                )
+                .await
+            ),
+            "bad_request"
+        );
+
+        // The total cap: deltas up to MESSAGE_MAX land, one byte more is refused, end still works.
+        let open = apply_event(&state, &me, &json!({ "type": "message.start", "chat": g }))
+            .await
+            .unwrap()["message"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let chunk = "a".repeat(TEXT_MAX);
+        for _ in 0..MESSAGE_MAX / TEXT_MAX {
+            apply_event(
+                &state,
+                &me,
+                &json!({ "type": "message.delta", "chat": g, "text": chunk }),
+            )
+            .await
+            .unwrap();
+        }
+        let over = json!({ "type": "message.delta", "chat": g, "message": open, "text": "b" });
+        assert_eq!(code(apply_event(&state, &me, &over).await), "too_large");
+        let r = row(&open);
+        assert_eq!(r.text().len(), MESSAGE_MAX);
+        assert_eq!(r.status, "streaming");
+        apply_event(&state, &me, &json!({ "type": "message.end", "chat": g }))
+            .await
+            .unwrap();
+        let r = row(&open);
+        assert_eq!(r.text().len(), MESSAGE_MAX);
+        assert_eq!(r.status, "done");
     }
 
     #[test]

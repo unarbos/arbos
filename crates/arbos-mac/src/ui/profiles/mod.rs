@@ -425,7 +425,7 @@ pub(super) fn editable_name(
     if editing {
         return field
             .w(px(SHEET_WIDTH - 64.0))
-            .bg(theme.field)
+            .bg(theme.field_fill())
             .border_color(theme.primary)
             .child(input.clone());
     }
@@ -484,9 +484,9 @@ pub(super) fn tab_bar(
                 } else {
                     FontWeight::NORMAL
                 })
-                .text_color(if on { theme.text } else { theme.text_muted })
+                .text_color(if on { theme.text } else { theme.label_muted() })
                 .cursor_pointer()
-                .map(|el| highlight::segment(el, on, theme.surface_2, theme))
+                .map(|el| highlight::segment(el, on, theme.control_fill(), theme))
                 .child(name.to_string())
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.state.update(cx, |s, cx| s.set_profile_tab(i, cx));
@@ -629,7 +629,9 @@ pub(super) fn collect(state: &AppState, chats: &[&Chat]) -> Content {
                             part_id: id.clone(),
                         };
                         match attachment.kind() {
-                            AttachmentKind::Image | AttachmentKind::Video => out.media.push(found),
+                            AttachmentKind::Image
+                            | AttachmentKind::Video
+                            | AttachmentKind::Sticker => out.media.push(found),
                             AttachmentKind::Audio => out.voice.push(found),
                             _ => out.files.push(found),
                         }

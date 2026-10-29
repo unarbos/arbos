@@ -154,6 +154,42 @@ agentd_hold_release_if_fixed() {
   done < <(git -C "$REPO" log --format='%H %s' "${held_sha:-HEAD~50}..origin/main" 2>/dev/null | grep -i 'canary-fix\]' | cut -d' ' -f1)
 }
 
+# Lane collision (2026-10-29 00:13): the 0.1.180 canary busy-reply smoke ran while the relay lane restarted
+# the relay for 9c44ba36 (sockets closed 00:12:05, probes arrived via matrix resync 7–8 s late) and the
+# agentd lane was held for a failure the image did not cause. Two markers keep the lanes apart:
+#   $STATE/agentd.canary   — written by roll_image around the canary smokes; the relay lane does not
+#                            deploy (restart) while it exists and is fresh.
+#   $STATE/relay.deploying — written by deploy_relay for the build + restart; a canary smoke waits for
+#                            it to clear (and for RELAY_SETTLE_S after a restart) before it starts.
+# Both are stale after LANE_MARKER_MAX_S so a killed unit cannot wedge the other lane.
+LANE_MARKER_MAX_S="${LANE_MARKER_MAX_S:-1800}"
+RELAY_SETTLE_S="${RELAY_SETTLE_S:-45}"
+CANARY_WAIT_MAX_S="${CANARY_WAIT_MAX_S:-900}"
+marker_fresh() { # marker_fresh <file>: 0 when the file exists and is younger than LANE_MARKER_MAX_S
+  local f="$1" at
+  [[ -f "$f" ]] || return 1
+  at="$(stat -c %Y "$f" 2>/dev/null || echo 0)"
+  (( $(date +%s) - at < LANE_MARKER_MAX_S )) || { rm -f "$f"; return 1; }
+  return 0
+}
+canary_running() { marker_fresh "$STATE/agentd.canary"; }
+relay_deploying() { marker_fresh "$STATE/relay.deploying"; }
+wait_for_relay_lane() { # before a canary smoke: no relay deploy in flight, and the relay up for RELAY_SETTLE_S
+  local waited=0 up last
+  while relay_deploying; do
+    (( waited == 0 )) && log "agentd: canary smoke waits — relay deploy in flight ($(cat "$STATE/relay.deploying" 2>/dev/null | tr '\n' ' '))"
+    (( waited >= CANARY_WAIT_MAX_S )) && { log "agentd: relay deploy still in flight after ${waited}s; running the canary anyway"; return 0; }
+    sleep 10; waited=$((waited + 10))
+  done
+  last="$(cat "$STATE/relay.last-deploy" 2>/dev/null || true)"
+  if [[ "$last" =~ ^[0-9]+$ ]] && (( $(date -u +%s) - last < RELAY_SETTLE_S )); then
+    up=$(( RELAY_SETTLE_S - ($(date -u +%s) - last) ))
+    log "agentd: canary smoke waits ${up}s for the relay to settle after its restart"
+    sleep "$up"
+  fi
+  return 0
+}
+
 gh_api() {
   # gh_api <path-after-repo> [curl args…]
   local path="$1"; shift
@@ -276,7 +312,11 @@ deploy_relay() {
   git -C "$REPO" show "$sha:scripts/feedback/deploy-relay.sh" > "$tmp/deploy-relay.sh"
   t0=$(date +%s)
   log "relay: deploying $sha (build from source as $BUILD_USER)"
-  if BUILD_USER="$BUILD_USER" bash "$tmp/deploy-relay.sh" "$sha" > "$STATE/runs/relay-$sha.log" 2>&1; then
+  printf 'sha=%s\nat=%s\n' "$sha" "$(date -u +%FT%TZ)" > "$STATE/relay.deploying"
+  local ok=1
+  BUILD_USER="$BUILD_USER" bash "$tmp/deploy-relay.sh" "$sha" > "$STATE/runs/relay-$sha.log" 2>&1 || ok=0
+  rm -f "$STATE/relay.deploying"
+  if (( ok )); then
     rm -rf "$tmp"
     local now
     now="$(deployed_sha relay)"
@@ -926,11 +966,15 @@ roll_image() {
   # Busy-reply gate on the canary box first (scripts/deploy/agentd-canary-smoke.sh, from the
   # rolled commit): a failed gate stops here — default unchanged, no real box moves.
   local smoke_rc=0
+  wait_for_relay_lane
+  printf 'image=%s\nsha=%s\nat=%s\n' "$version" "$sha" "$(date -u +%FT%TZ)" > "$STATE/agentd.canary"
+  trap 'rm -f "$STATE/agentd.canary"' EXIT
   if [[ -x "$REPO/scripts/deploy/agentd-canary-smoke.sh" ]]; then
     RELAY_URL="$RELAY_URL" RELAY_ENV="$RELAY_ENV" STATE="$STATE" EVENTS="$EVENTS" \
       bash "$REPO/scripts/deploy/agentd-canary-smoke.sh" "$sha" "$version" "$snapshot" || smoke_rc=$?
   fi
   if (( smoke_rc == 1 )); then
+    rm -f "$STATE/agentd.canary"
     record_failure agentd "$sha" "busy-reply smoke failed on the canary box (image $version); default not switched, nothing rolled"
     hold_agentd "$sha" "$version" "busy-reply canary failed (turn never started); log $STATE/runs/agentd-$version-smoke.log"
     exit 1
@@ -944,6 +988,7 @@ roll_image() {
     RELAY_URL="$RELAY_URL" RELAY_ENV="$RELAY_ENV" STATE="$STATE" EVENTS="$EVENTS" SMOKE_USER_ID="$SMOKE_HOST_USER_ID" \
       bash "$REPO/scripts/deploy/agentd-canary-smoke.sh" "$sha" "$version" "$snapshot" || host_rc=$?
     if (( host_rc == 1 )); then
+      rm -f "$STATE/agentd.canary"
       record_failure agentd "$sha" "host-box canary failed (image $version, user $SMOKE_HOST_USER_ID); default not switched, nothing rolled"
       hold_agentd "$sha" "$version" "host-box canary failed on $SMOKE_HOST_USER_ID; log $STATE/runs/agentd-$version-smoke.log"
       exit 1
@@ -955,6 +1000,7 @@ roll_image() {
   else
     log "agentd: no SMOKE_HOST_USER_ID in deploy.env — host-box canary skipped (set one: a test user whose box runs on the host provider)"
   fi
+  rm -f "$STATE/agentd.canary"; trap - EXIT
   if grep -q '^ARBOS_DAYTONA_SNAPSHOT=' "$RELAY_ENV"; then
     sed -i "s|^ARBOS_DAYTONA_SNAPSHOT=.*|ARBOS_DAYTONA_SNAPSHOT=$snapshot|" "$RELAY_ENV"
   else
@@ -1253,6 +1299,10 @@ handle_request() {
   esac
   case "$kind" in
     relay)
+      if canary_running; then
+        log "relay: $full waits — agentd canary smoke in progress ($(cat "$STATE/agentd.canary" 2>/dev/null | tr '\n' ' ')); no relay restart until it ends"
+        return 0
+      fi
       if relay_deploy_held "$full" "$age_first"; then return 0; fi
       rm -f "$STATE/relay.held"
       if deploy_relay "$full"; then date -u +%s > "$STATE/relay.last-deploy"; rm -f "$file"; fi ;;
@@ -1341,6 +1391,8 @@ status() {
   for f in "$QUEUE"/*; do [[ -f "$f" ]] && { echo "  $(basename "$f"): $(tr '\n' ' ' < "$f")"; }; done
   echo "failed:"; for f in "$STATE"/failed/*; do [[ -f "$f" ]] && echo "  $(basename "$f"): $(tr '\n' ' ' < "$f")"; done
   if agentd_held; then echo "agentd lane HELD: $(tr '\n' ' ' < "$(agentd_hold_file)")"; else echo "agentd lane: open"; fi
+  if canary_running; then echo "agentd canary smoke: running ($(tr '\n' ' ' < "$STATE/agentd.canary")) — relay deploys wait"; fi
+  if relay_deploying; then echo "relay deploy: in flight ($(tr '\n' ' ' < "$STATE/relay.deploying")) — canary smokes wait"; fi
   if [[ -s "$STATE/agentd.skip" ]]; then
     echo "skipped boxes (left on their image; 'unskip <uid>' after the fix):"
     while IFS='|' read -r u r w; do echo "  $u since $w: $r"; done < "$STATE/agentd.skip"

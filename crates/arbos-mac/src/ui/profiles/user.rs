@@ -170,7 +170,7 @@ pub(super) fn page(
         name,
         badge: None,
         subtitle: Some(format!("@{}", person.handle).into()),
-        subtitle_color: theme.text_muted,
+        subtitle_color: theme.label_muted(),
         subtitle_click: None,
         subtitle_element: None,
         editor: chip,
@@ -202,7 +202,7 @@ pub(super) fn page(
                             leading,
                             p.name.clone(),
                             sub,
-                            theme.text_muted,
+                            theme.label_muted(),
                             None,
                             &theme,
                         )

@@ -344,6 +344,7 @@ mod tests {
                 kind: None,
                 title: Some(title.into()),
                 chart_part: None,
+                url: None,
                 source: None,
             },
         });

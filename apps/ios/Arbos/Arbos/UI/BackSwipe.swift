@@ -225,20 +225,28 @@ enum TranscriptSwipeEvent {
     /// The time peek follows the finger: `dx` is the translation (negative = left).
     case timeChanged(dx: CGFloat)
     case timeEnded
+    /// A clear swipe right on the transcript, away from the edge, ended far enough: back.
+    case back
 }
 
-/// One recognizer on the transcript's `UIScrollView` for the time peek — swipe left anywhere
-/// on the transcript reveals the message times — instead of a SwiftUI drag on the ScrollView.
-/// Sits as the `.background` of the ScrollView's content. Declines every rightward pan
-/// (the edge pop's and the full-screen back's) and every vertical one (the scroll's).
+/// One recognizer on the transcript's `UIScrollView` for the two horizontal swipes inside
+/// it — swipe left anywhere on the transcript peeks the message times, swipe right (away
+/// from the edge zone, which is the system pop's) is "back" — instead of SwiftUI drags.
+/// Sits as the `.background` of the ScrollView's content. It is on the scroll view itself,
+/// beside the scroll pan, so the two decide on equal footing; a recognizer on an ancestor
+/// of the scroll view does not get a horizontal pan that starts inside it (rig, 2026-10-28).
+/// Declines every vertical pan (the scroll's).
 struct TranscriptSwipeHost: UIViewRepresentable {
-    /// Install the time peek (the Debug scroll rig can leave it out).
+    /// Install the time peek / the swipe-right back (the Debug scroll rig can leave one out).
     var timePeek = true
+    var backSwipe = true
     let onEvent: (TranscriptSwipeEvent) -> Void
     /// The scroll view's own pan began (a finger scroll started).
     let onScrollPanBegan: () -> Void
 
-    func makeCoordinator() -> Coordinator { Coordinator(timePeek: timePeek, onEvent: onEvent, onScrollPanBegan: onScrollPanBegan) }
+    func makeCoordinator() -> Coordinator {
+        Coordinator(timePeek: timePeek, backSwipe: backSwipe, onEvent: onEvent, onScrollPanBegan: onScrollPanBegan)
+    }
 
     func makeUIView(context: Context) -> HostView {
         let v = HostView()
@@ -272,13 +280,17 @@ struct TranscriptSwipeHost: UIViewRepresentable {
 
     final class Coordinator: NSObject, UIGestureRecognizerDelegate {
         let timePeek: Bool
+        let backSwipe: Bool
         var onEvent: (TranscriptSwipeEvent) -> Void
         var onScrollPanBegan: () -> Void
         private weak var scroll: UIScrollView?
         private var recognizer: DirectionalSwipeRecognizer?
+        private enum Mode { case time, back }
+        private var mode: Mode?
 
-        init(timePeek: Bool, onEvent: @escaping (TranscriptSwipeEvent) -> Void, onScrollPanBegan: @escaping () -> Void) {
+        init(timePeek: Bool, backSwipe: Bool, onEvent: @escaping (TranscriptSwipeEvent) -> Void, onScrollPanBegan: @escaping () -> Void) {
             self.timePeek = timePeek
+            self.backSwipe = backSwipe
             self.onEvent = onEvent
             self.onScrollPanBegan = onScrollPanBegan
         }
@@ -289,10 +301,13 @@ struct TranscriptSwipeHost: UIViewRepresentable {
             if let old = recognizer { old.view?.removeGestureRecognizer(old) }
             self.scroll = scroll
             scroll.panGestureRecognizer.addTarget(self, action: #selector(scrollPan(_:)))
-            guard timePeek else { return }
+            guard timePeek || backSwipe else { return }
             let gr = DirectionalSwipeRecognizer(target: self, action: #selector(handle(_:)))
             gr.delegate = self
-            gr.shouldStart = { [weak scroll] touch, _ in
+            gr.shouldStart = { [weak scroll] touch, start in
+                guard let scroll else { return false }
+                // The edge zone is the system pop's from touch-down.
+                if BackSwipe.startsAtEdge(scroll.convert(start, to: nil)) { return false }
                 // A markdown table scrolling sideways is its own scroll view's pan.
                 var node: UIView? = touch.view
                 while let current = node, current !== scroll {
@@ -301,9 +316,17 @@ struct TranscriptSwipeHost: UIViewRepresentable {
                 }
                 return true
             }
-            gr.decide = { _, translation in
+            gr.decide = { [weak self] _, translation in
+                guard let self else { return .declined }
                 let dx = translation.width, dy = translation.height
-                guard dx < 0, abs(dx) > abs(dy) * 1.15 else { return .declined }
+                guard abs(dx) > abs(dy) * 1.15 else { return .declined }
+                if dx < 0 {
+                    guard self.timePeek else { return .declined }
+                    self.mode = .time
+                } else {
+                    guard self.backSwipe else { return .declined }
+                    self.mode = .back
+                }
                 return .claimed
             }
             scroll.addGestureRecognizer(gr)
@@ -315,12 +338,24 @@ struct TranscriptSwipeHost: UIViewRepresentable {
         }
 
         @objc private func handle(_ gr: DirectionalSwipeRecognizer) {
-            switch gr.state {
-            case .began, .changed:
+            guard let mode else { return }
+            switch (mode, gr.state) {
+            case (.time, .began), (.time, .changed):
                 onEvent(.timeChanged(dx: gr.translation.width))
-            case .ended, .cancelled, .failed:
+            case (.time, .ended), (.time, .cancelled), (.time, .failed):
                 onEvent(.timeEnded)
-            case .possible:
+                self.mode = nil
+            case (.back, .ended):
+                if BackSwipe.fullScreenPops(translation: gr.translation, velocity: gr.velocity) {
+                    #if DEBUG
+                    SwipeLog.event("transcript back dx=\(Int(gr.translation.width))")
+                    #endif
+                    onEvent(.back)
+                }
+                self.mode = nil
+            case (.back, .cancelled), (.back, .failed):
+                self.mode = nil
+            case (.back, .began), (.back, .changed), (_, .possible):
                 break
             @unknown default:
                 break
@@ -336,8 +371,10 @@ struct TranscriptSwipeHost: UIViewRepresentable {
 }
 
 /// Hides the system bar and back button and owns the back gestures: the system's
-/// interactive edge pop (`NativePopEnabler`) and the full-screen swipe-right
-/// (`FullScreenBackHost` → `dismiss()`; SwiftUI pops, so the stack's path stays the truth).
+/// interactive edge pop (`NativePopEnabler`) and the swipe-right outside the transcript —
+/// header, empty space, the channel list (`FullScreenBackHost` → `dismiss()`; SwiftUI pops,
+/// so the stack's path stays the truth). Inside the transcript the swipe-right is the
+/// transcript recognizer's (`TranscriptSwipeHost`, `.back`).
 private struct BackSwipeModifier: ViewModifier {
     @Environment(\.dismiss) private var dismiss
     /// Where the composer bar starts (nil: the whole screen counts).
