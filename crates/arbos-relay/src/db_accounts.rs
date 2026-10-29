@@ -42,7 +42,8 @@ CREATE INDEX IF NOT EXISTS credit_ledger_user_at ON credit_ledger(user_id, at);
 CREATE INDEX IF NOT EXISTS credit_ledger_at ON credit_ledger(at);
 CREATE TABLE IF NOT EXISTS box_history (
   sandbox_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, snapshot TEXT, replaced_at INTEGER NOT NULL,
-  delete_after INTEGER NOT NULL, deleted_at INTEGER, row_json TEXT, archived_at INTEGER
+  delete_after INTEGER NOT NULL, deleted_at INTEGER, row_json TEXT, archived_at INTEGER,
+  partial INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS machine_meter (
   user_id TEXT PRIMARY KEY, last_tick_at INTEGER NOT NULL, last_state TEXT NOT NULL
@@ -64,6 +65,9 @@ pub fn migrate_accounts(c: &Connection) {
         "ALTER TABLE boxes ADD COLUMN held_stopped INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE box_history ADD COLUMN row_json TEXT",
         "ALTER TABLE box_history ADD COLUMN archived_at INTEGER",
+        // 1 = the new box of a rolled-back upgrade (half-carried /work): kept so the sweeper
+        // deletes it after the window, never re-adopted by a repair.
+        "ALTER TABLE box_history ADD COLUMN partial INTEGER NOT NULL DEFAULT 0",
         // Who may add this person to a people group: anyone | people_i_know | nobody.
         "ALTER TABLE users ADD COLUMN group_add TEXT NOT NULL DEFAULT 'anyone'",
         // Where `name` came from: `github` (seeded from the profile at first sign-in) or `user`
@@ -1148,6 +1152,37 @@ impl Db {
         })
     }
 
+    /// Record the new sandbox of a rolled-back upgrade so the history sweeper deletes it after
+    /// `delete_after` (retrying until Daytona agrees) — never left running unrecorded. It holds a
+    /// half-carried `/work`, so [`Db::latest_box_history`] never offers it for repair.
+    pub fn insert_partial_box_history(
+        &self,
+        row: &crate::db::Sandbox,
+        delete_after: i64,
+    ) -> Result<()> {
+        let sandbox_id = row.sandbox_id.clone().unwrap_or_default();
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO box_history(sandbox_id, user_id, snapshot, replaced_at, delete_after, row_json, partial) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)
+                 ON CONFLICT(sandbox_id) DO UPDATE SET delete_after = excluded.delete_after, deleted_at = NULL, row_json = excluded.row_json, partial = 1",
+                params![sandbox_id, row.user_id, row.snapshot, now_ms(), delete_after, serde_json::to_string(row).unwrap_or_default()],
+            )
+            .map(|_| ())
+        })
+    }
+
+    #[cfg(test)]
+    pub fn box_history_entry(&self, sandbox_id: &str) -> Result<Option<(i64, bool)>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT delete_after, partial FROM box_history WHERE sandbox_id = ?1 AND deleted_at IS NULL",
+                params![sandbox_id],
+                |r| Ok((r.get(0)?, r.get::<_, i64>(1)? == 1)),
+            )
+            .optional()
+        })
+    }
+
     #[cfg(test)]
     pub fn insert_box_history_at(
         &self,
@@ -1179,7 +1214,7 @@ impl Db {
     pub fn latest_box_history(&self, user_id: &str) -> Result<Option<RetainedBox>> {
         self.with(|c| {
             c.query_row(
-                "SELECT sandbox_id, snapshot, row_json FROM box_history WHERE user_id = ?1 AND deleted_at IS NULL ORDER BY replaced_at DESC LIMIT 1",
+                "SELECT sandbox_id, snapshot, row_json FROM box_history WHERE user_id = ?1 AND deleted_at IS NULL AND partial = 0 ORDER BY replaced_at DESC LIMIT 1",
                 params![user_id],
                 |r| {
                     let row: Option<String> = r.get(2)?;
