@@ -17,7 +17,7 @@
   "no_repeated_sentence": true,
   "max_handoffs": 1
  },
- "regression": "#1776 (empty result row) · the helper's result must reach the chat after the hand-off",
+ "regression": "#1776 (empty result row) · the helper's result must reach the chat after the hand-off; run 13: first reply 30.6 s (bound 15 s) on the handoff ack — watch",
  "verify_wait": {
   "wait_s": 420,
   "settle_s": 10,

@@ -16,10 +16,11 @@
         ]
       },
       "rubric": {
-        "criteria": "Table has the three packages with plausible current version numbers and a real source URL per row.",
+        "criteria": "Table has the three packages with plausible current version numbers and a real source URL per row. The file write and the lookups are verified programmatically (verify script); do not fail for them not being 'shown' in the reply.",
         "min": 3
       },
       "timeout_s": 480
     }
-  ]
+  ],
+  "regression": "; run 13: judge failed a correct answer for not 'showing' the write — verify covers it"
 }

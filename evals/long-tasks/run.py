@@ -570,6 +570,12 @@ class Lane(threading.Thread):
                     reasons.append(f"no assistant row carries a `{want}` part (the tool was not used or its post did not land)")
                 else:
                     task_state[f"parts_{want}"] = [{k: v for k, v in p.items() if k != "chart"} | ({"series": len((p.get("chart") or {}).get("series") or [])} if want == "chart" else {}) for p in found]
+            if dc.get("forbid_part_kind"):
+                # e.g. an `approval` card for a send after "draft it, do NOT send anything" (m12)
+                bad = dc["forbid_part_kind"]
+                hits = [p.get("title") or p.get("id") for d in all_docs for m in d.get("messages", []) if m.get("role") == "assistant" for p in m.get("parts", []) if p.get("kind") == bad]
+                if hits:
+                    reasons.append(f"an assistant row carries a `{bad}` part the task forbids: {hits[:2]}")
             if dc.get("no_wrong_self_identity"):
                 # a bubble from the renamed agent must never introduce itself by the old name
                 old_name = task_state.get("old_name") or dc.get("old_name")

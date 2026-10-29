@@ -1,0 +1,35 @@
+{
+ "id": "j3-two-jobs-stop-one-by-name",
+ "lane": "c",
+ "category": "background",
+ "title": "Two named jobs run; 'stop the slow one' stops only that job (stop_job by name); the other finishes and reports",
+ "regression": "job tools: list_jobs/stop_job target the right job by its name; the surviving job still completes and its result is posted; run 13: not measured — the harness held t1 for 646 s so the stop arrived after the slow job ended; passed in run 12",
+ "turns": [
+  {
+   "prompt": "Start two jobs, as jobs: 'fast-count' writes 1 to 5 to {D}/fast.txt one number per second; 'slow-count' writes 1 to 60 to {D}/slow.txt one number per 3 seconds. Tell me when both have started.",
+   "seed": "mkdir -p {D}",
+   "background": true,
+   "latency_max_s": 12,
+   "timeout_s": 90
+  },
+  {
+   "prompt": "Stop the slow one, keep the fast one.",
+   "pre_wait_s": 10,
+   "timeout_s": 120,
+   "reply_regex": "(?i)slow[- ]count[^.]*(stopp|cancel|ended|killed)|stopp[^.]*slow",
+   "reply_regex_not": "(?i)(both (are )?stopped|stopped both|fast[- ]count[^.]*stopp)"
+  },
+  {
+   "prompt": "Done? How many lines does each file have?",
+   "pre_wait_s": 20,
+   "timeout_s": 180,
+   "reply_regex": "\\b5\\b",
+   "verify": "f={D}/fast.txt; s={D}/slow.txt; nf=$(grep -c . $f 2>/dev/null || echo 0); ns=$(grep -c . $s 2>/dev/null || echo 0); echo \"SHOW fast=$nf slow=$ns\"; if [ \"$nf\" -eq 5 ] && [ \"$ns\" -lt 30 ]; then echo PASS; else echo FAIL: fast=$nf slow=$ns; fi",
+   "rubric": {
+    "criteria": "Pass if the reply reports fast.txt with 5 lines (finished) and slow.txt stopped early with fewer than 30 lines, and does not claim the slow job finished. Fail if both were stopped, if the fast job did not finish, or if the counts contradict the files.",
+    "min": 3
+   }
+  }
+ ],
+ "cleanup_routines": true
+}
