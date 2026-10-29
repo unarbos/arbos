@@ -606,17 +606,54 @@ for u in json.load(sys.stdin):
 
 real_min_sha() {
   # real_min_sha [skipped uids] — the relay's real_min_sha (the sha of the earliest-reporting awake real
-  # box), recomputed here from the same box list when skipped boxes must not count.
-  curl -fsS --max-time 30 -H "Authorization: Bearer $(secret_from "$RELAY_ENV" ARBOS_RELAY_ADMIN_TOKEN)" "$RELAY_URL/admin/calls" \
-    | python3 -c '
-import sys, json
+  # box), recomputed here from the same box list so that skipped boxes and LIMBO boxes do not count.
+  # Limbo (2026-10-29 03:50): gh_17856706 had a boxes row with no sandbox_id and no snapshot but a 0.1.181
+  # hello from 01:03 and a ticking meter, and held the 0.1.183 roll at "not done" although every real box
+  # ran the image. A box whose row has no sandbox/snapshot, or whose last hello predates the row's
+  # last_started_at while naming another image than the row's snapshot, is logged (so it stays visible) and left out.
+  local rows out
+  rows="$(relay_db -separator $'\t' "select user_id, coalesce(sandbox_id,''), coalesce(snapshot,''), coalesce(last_started_at,0) from boxes" 2>/dev/null || true)"
+  out="$(curl -fsS --max-time 30 -H "Authorization: Bearer $(secret_from "$RELAY_ENV" ARBOS_RELAY_ADMIN_TOKEN)" "$RELAY_URL/admin/calls" \
+    | ROWS="$rows" python3 -c '
+import sys, json, os
 a = json.load(sys.stdin).get("agentd") or {}
 skipped = set(sys.argv[1].split()) if len(sys.argv) > 1 else set()
-if not skipped:
-    print(a.get("real_min_sha") or a.get("fleet_min_sha") or ""); sys.exit(0)
-real = sorted(((b.get("reported_at") or 0), b.get("sha") or "") for b in a.get("boxes") or []
-              if not b.get("test") and b.get("state") == "awake" and b.get("sha") and b.get("user_id") not in skipped)
-print(real[0][1] if real else (a.get("real_min_sha") or ""))' "${1:-}" 2>/dev/null || true
+rows = {}
+for line in (os.environ.get("ROWS") or "").splitlines():
+    f = line.split("\t")
+    if len(f) == 4:
+        rows[f[0]] = (f[1], f[2], int(f[3] or 0))
+real, ignored = [], []
+for b in a.get("boxes") or []:
+    uid = b.get("user_id") or ""
+    if b.get("test") or b.get("state") != "awake" or not b.get("sha") or uid in skipped:
+        continue
+    row = rows.get(uid)
+    why = None
+    if row is not None:
+        sandbox, snapshot, started = row
+        if not sandbox or not snapshot:
+            why = "no sandbox/snapshot on its row"
+        elif started and (b.get("reported_at") or 0) < started and not snapshot.endswith("-" + str(b.get("image") or "?")):
+            # a stale hello from before the row was (re)started AND for another image than the row says:
+            # a hello that already names the row snapshot is just older than a later wake, and counts
+            why = "last hello predates the row last_started_at and names another image than the row snapshot"
+    if why:
+        img = b.get("image"); short = (b.get("sha") or "")[:8]
+        ignored.append(f"{uid}: {why} (hello image {img} sha {short})")
+        continue
+    real.append(((b.get("reported_at") or 0), b.get("sha") or ""))
+real.sort()
+sha = real[0][1] if real else (a.get("real_min_sha") or a.get("fleet_min_sha") or "")
+print(sha)
+for i in ignored:
+    print("IGNORED " + i)' "${1:-}" 2>/dev/null || true)"
+  local line
+  while IFS= read -r line; do
+    # log() echoes to stdout, which is this function's return value: send the note to stderr + the log file only
+    [[ "$line" == IGNORED\ * ]] && log "agentd: real_min_sha ignores limbo box ${line#IGNORED }" >&2
+  done <<< "$out"
+  head -n1 <<< "$out"
 }
 
 box_quiet() {
