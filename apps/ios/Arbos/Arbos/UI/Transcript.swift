@@ -1966,12 +1966,21 @@ struct RowView: View, Equatable {
 
     /// Match the avatar offset used by people-chat bubbles (26 pt + 8 pt gap).
     private var reactionLeading: CGFloat {
-        switch row.kind {
-        case .other, .member: return Theme.memberLane(composerInset: composerInset)
-        case .question(_, _, _, _, _, _, let lane, _, _): return lane ? Theme.memberLane(composerInset: composerInset) : 0
-        case .secretGhost(_, let mine, _, _, _): return mine ? 0 : Theme.memberLane(composerInset: composerInset)
-        case .image(_, _, _, let lane, _, _, _, _, _): return lane ? Theme.memberLane(composerInset: composerInset) : 0
-        default: return 0
+        Self.reactionLeading(for: row.kind, composerInset: composerInset)
+    }
+
+    /// Where a row's reaction chips start: the bubble's own leading edge — after the avatar
+    /// lane for every row the layout draws in it (another person's or an agent's bubble,
+    /// picture, sticker or file card in a people chat), 0 otherwise. Must match `bubble`.
+    static func reactionLeading(for kind: RowKind, composerInset: CGFloat) -> CGFloat {
+        let lane = Theme.memberLane(composerInset: composerInset)
+        switch kind {
+        case .other, .member: return lane
+        case .question(_, _, _, _, _, _, let inLane, _, _): return inLane ? lane : 0
+        case .secretGhost(_, let mine, _, _, _): return mine ? 0 : lane
+        case .image(_, _, _, let inLane, _, _, let sender, _, _): return inLane || sender != nil ? lane : 0
+        case .file(_, _, _, _, let sender, _, _): return sender != nil ? lane : 0
+        case .user, .assistant, .system, .hidden, .voiceMemo, .forwardHint, .error: return 0
         }
     }
 
