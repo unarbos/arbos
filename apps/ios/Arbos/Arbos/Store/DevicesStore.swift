@@ -37,7 +37,8 @@ struct AuthDevice: Identifiable, Equatable {
 
     /// What Settings → Devices shows: live rows only, this iPhone first, the
     /// rest in the relay's order (oldest sign-in first). A tester who had
-    /// signed four Macs out still saw "9 devices" before this filter.
+    /// signed four Macs out still saw "9 devices" before this filter. The
+    /// relay also collapses same-name GitHub reinstall leftovers to one row.
     static func visible(_ list: [AuthDevice]) -> [AuthDevice] {
         let live = list.filter(\.isLive)
         return live.filter(\.current) + live.filter { !$0.current }

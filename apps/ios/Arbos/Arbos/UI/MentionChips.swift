@@ -9,10 +9,14 @@ import UIKit
 // stay plain text. The Mac twin is `ui/mention.rs` + `select.rs`.
 //
 // SwiftUI `Text` cannot put a picture inside an attributed run, so a chip is
-// three concatenated pieces: a left cap image (the pill's rounded left end
-// with the picture in it), the name run (accent on the pill colour, a link
-// that `ChatView` routes to `showProfile`), and a right cap image (the pill's
-// rounded right end). Text selection copies the name.
+// three concatenated pieces: a lead image (the picture, with the pill's inset
+// before it and the gap to the name after it), the name run (accent, a link
+// that `ChatView` routes to `showProfile`) and a trail image (the inset after
+// the name). One pill goes behind all three: `MentionPillRenderer` draws it
+// per line, centred on the name's glyph box, before the glyphs
+// ([feedback mention-chip-highlight-2026-10-28]: the name's own text background
+// stacked a second, offset box inside the caps' pill). iOS 17 has no
+// `TextRenderer`, so there the caps still carry the pill's ends.
 
 /// One mentionable entity.
 struct MentionEntry {
@@ -41,12 +45,28 @@ final class MentionTable {
     /// Display names, longest first, so `@Launch week` beats `@Launch`.
     private var names: [(String, MentionEntry)] = []
 
-    /// The chip's geometry (Grok Bot's mention chip): picture `picture` pt in a
-    /// cap `capWidth` wide; the pill rises `padY` over the glyph box.
-    static let picture: CGFloat = 16
-    static let capWidth: CGFloat = 23
-    static let padY: CGFloat = 2
-    static let radius: CGFloat = 7
+    /// The chip's geometry (Grok Bot's mention chip): `padX` inside both ends of
+    /// the pill, the `picture` pt disc, `gap` before the name (#1533); the pill
+    /// rises `padY` over the name's glyph box and the disc sits on its centre.
+    nonisolated static let picture: CGFloat = 16
+    nonisolated static let padX: CGFloat = 4
+    nonisolated static let gap: CGFloat = 3
+    nonisolated static let capWidth: CGFloat = padX + picture + gap
+    nonisolated static let padY: CGFloat = 2
+    nonisolated static let radius: CGFloat = 7
+    /// The name's face: the pill's height and centre come from it.
+    nonisolated static let nameFont = UIFont.systemFont(ofSize: Theme.body, weight: .medium)
+    /// The glyph box's centre above the baseline.
+    nonisolated static var glyphCentre: CGFloat { (nameFont.ascender + nameFont.descender) / 2 }
+    nonisolated static var pillHeight: CGFloat { nameFont.ascender - nameFont.descender + padY * 2 }
+    /// Lifts the disc (an inline image sits on the baseline) onto the glyph box's centre.
+    nonisolated static var pictureBaselineOffset: CGFloat { glyphCentre - picture / 2 }
+
+    /// The pill for one line's share of a chip: `minX…maxX` across, centred on
+    /// the name's glyph box over `baseline`.
+    nonisolated static func pillRect(minX: CGFloat, maxX: CGFloat, baseline: CGFloat) -> CGRect {
+        CGRect(x: minX, y: baseline - glyphCentre - pillHeight / 2, width: maxX - minX, height: pillHeight)
+    }
 
     /// Empty table (no chips) — placeholder until the chat has synced one.
     init() {}
@@ -294,18 +314,21 @@ final class MentionTable {
 
     private static var capCache: [String: UIImage] = [:]
 
-    /// The pill's left end with the picture in it, rendered once per entity / pill colour.
-    func leftCap(for entry: MentionEntry, pill: Color, lineHeight: CGFloat, key: String) -> UIImage? {
+    /// The chip's lead: the picture `padX` from the pill's left edge, `gap` clear of the name,
+    /// rendered once per entity. `fill` paints the pill's rounded left end into the image
+    /// (iOS 17, no renderer); without it the image is the disc's own box on a clear ground.
+    func leftCap(for entry: MentionEntry, fill: Color?, height: CGFloat, key: String) -> UIImage? {
         let landed = entry.pictureURL.map { AvatarImageCache.shared.image(for: $0) != nil } ?? false
-        let cacheKey = "L|\(key)|\(entry.pictureURL ?? "")|\(landed)|\(pill.description)|\(lineHeight)"
+        let cacheKey = "L|\(key)|\(entry.pictureURL ?? "")|\(landed)|\(fill?.description ?? "clear")|\(height)"
         if let hit = Self.capCache[cacheKey] { return hit }
-        let h = lineHeight + Self.padY * 2
         let view = ZStack(alignment: .leading) {
-            UnevenRoundedRectangle(topLeadingRadius: Self.radius, bottomLeadingRadius: Self.radius, bottomTrailingRadius: 0, topTrailingRadius: 0, style: .continuous)
-                .fill(pill)
-            entry.picture.padding(.leading, 4)
+            if let fill {
+                UnevenRoundedRectangle(topLeadingRadius: Self.radius, bottomLeadingRadius: Self.radius, bottomTrailingRadius: 0, topTrailingRadius: 0, style: .continuous)
+                    .fill(fill)
+            }
+            entry.picture.padding(.leading, Self.padX)
         }
-        .frame(width: Self.capWidth, height: h)
+        .frame(width: Self.capWidth, height: height, alignment: .leading)
         let renderer = ImageRenderer(content: view)
         renderer.scale = UIScreen.main.scale
         guard let img = renderer.uiImage else { return nil }
@@ -313,14 +336,14 @@ final class MentionTable {
         return img
     }
 
-    /// The pill's right end.
-    func rightCap(pill: Color, lineHeight: CGFloat) -> UIImage? {
-        let cacheKey = "R|\(pill.description)|\(lineHeight)"
+    /// The chip's trail: `padX` of clear space after the name, or (iOS 17) the pill's
+    /// rounded right end in `fill`.
+    func rightCap(fill: Color?, height: CGFloat) -> UIImage? {
+        let cacheKey = "R|\(fill?.description ?? "clear")|\(height)"
         if let hit = Self.capCache[cacheKey] { return hit }
-        let h = lineHeight + Self.padY * 2
         let view = UnevenRoundedRectangle(topLeadingRadius: 0, bottomLeadingRadius: 0, bottomTrailingRadius: Self.radius, topTrailingRadius: Self.radius, style: .continuous)
-            .fill(pill)
-            .frame(width: Self.radius, height: h)
+            .fill(fill ?? .clear)
+            .frame(width: fill == nil ? Self.padX : Self.radius, height: height)
         let renderer = ImageRenderer(content: view)
         renderer.scale = UIScreen.main.scale
         guard let img = renderer.uiImage else { return nil }
@@ -347,27 +370,42 @@ final class MentionTable {
         guard !chips.isEmpty else { return icons.text(attr, lineHeight: lineHeight) }
         var out = Text("")
         var cursor = attr.startIndex
-        for (range, entry) in chips {
+        for (index, (range, entry)) in chips.enumerated() {
             // Map the plain-string range onto the attributed string by character offset.
             let loOff = plain.distance(from: plain.startIndex, to: range.lowerBound)
             let hiOff = plain.distance(from: plain.startIndex, to: range.upperBound)
             let lo = attr.characters.index(attr.startIndex, offsetBy: loOff)
             let hi = attr.characters.index(attr.startIndex, offsetBy: hiOff)
             out = out + icons.text(AttributedString(attr[cursor..<lo]), lineHeight: lineHeight)
-            // The name run: accent on the pill, a link `ChatView` routes to the pane.
+            // The name run: accent, a link `ChatView` routes to the pane.
             var name = AttributedString(attr[attr.index(afterCharacter: lo)..<hi])
             name.swiftUI.foregroundColor = link
-            name.swiftUI.backgroundColor = pill
             name.underlineStyle = nil
             name.link = Self.url(for: entry.target)
             name.swiftUI.font = .system(size: Theme.body, weight: .medium)
-            let dy = -Self.padY - 1
-            if let cap = leftCap(for: entry, pill: pill, lineHeight: lineHeight, key: Self.key(for: entry.target)) {
-                out = out + Text(Image(uiImage: cap)).baselineOffset(dy)
-            }
-            out = out + Text(name)
-            if let cap = rightCap(pill: pill, lineHeight: lineHeight) {
-                out = out + Text(Image(uiImage: cap)).baselineOffset(dy)
+            let key = Self.key(for: entry.target)
+            if #available(iOS 18.0, *) {
+                // The pill is the chip's only background: a code span's or spoiler's box
+                // behind the name would stack a second one inside it.
+                name.swiftUI.backgroundColor = nil
+                if let cap = leftCap(for: entry, fill: nil, height: Self.picture, key: key) {
+                    out = out + Text(Image(uiImage: cap)).baselineOffset(Self.pictureBaselineOffset)
+                }
+                out = out + Text(name).customAttribute(MentionPill(chip: index, fill: pill))
+                if let cap = rightCap(fill: nil, height: 1) {
+                    out = out + Text(Image(uiImage: cap))
+                }
+            } else {
+                name.swiftUI.backgroundColor = pill
+                let dy = -Self.padY - 1
+                let h = lineHeight + Self.padY * 2
+                if let cap = leftCap(for: entry, fill: pill, height: h, key: key) {
+                    out = out + Text(Image(uiImage: cap)).baselineOffset(dy)
+                }
+                out = out + Text(name)
+                if let cap = rightCap(fill: pill, height: h) {
+                    out = out + Text(Image(uiImage: cap)).baselineOffset(dy)
+                }
             }
             cursor = hi
         }
@@ -386,5 +424,77 @@ extension Markdown {
         }
         let attr = inline(mentions.display(text), color: color, link: link, codeChip: codeChip)
         return mentions.text(attr, link: link, pill: link.opacity(0.14), lineHeight: Theme.body * 1.2)
+    }
+}
+
+// MARK: - The pill
+
+/// Marks a chip's name run: which chip of the text it belongs to and the pill's colour.
+@available(iOS 18.0, *)
+struct MentionPill: TextAttribute {
+    let chip: Int
+    let fill: Color
+}
+
+/// Draws one pill per chip and line behind the text: from the lead image's left edge
+/// (`capWidth` before the name, on the chip's first line) to the trail's right edge (`padX`
+/// after the name, on its last line), centred on the name's glyph box. Text without
+/// `MentionPill` runs draws as it would without the renderer.
+@available(iOS 18.0, *)
+struct MentionPillRenderer: TextRenderer {
+    struct Pill: Equatable {
+        var rect: CGRect
+        var fill: Color
+    }
+
+    var displayPadding: EdgeInsets {
+        EdgeInsets(top: MentionTable.padY + 1, leading: 0, bottom: MentionTable.padY + 1, trailing: 0)
+    }
+
+    func draw(layout: Text.Layout, in ctx: inout GraphicsContext) {
+        for pill in Self.pills(in: layout) {
+            ctx.fill(RoundedRectangle(cornerRadius: MentionTable.radius, style: .continuous).path(in: pill.rect), with: .color(pill.fill))
+        }
+        for line in layout {
+            ctx.draw(line)
+        }
+    }
+
+    static func pills(in layout: Text.Layout) -> [Pill] {
+        var pills: [Pill] = []
+        // Per chip: where its pills are in `pills`, the first one's index and the line last seen.
+        var seen: [Int: (first: Int, last: Int, line: Int)] = [:]
+        for (lineIndex, line) in layout.enumerated() {
+            let baseline = line.typographicBounds.origin.y
+            for run in line {
+                guard let mark = run[MentionPill.self] else { continue }
+                let r = run.typographicBounds.rect
+                if let s = seen[mark.chip], s.line == lineIndex {
+                    pills[s.last].rect = MentionTable.pillRect(minX: pills[s.last].rect.minX, maxX: max(pills[s.last].rect.maxX, r.maxX), baseline: baseline)
+                    continue
+                }
+                pills.append(Pill(rect: MentionTable.pillRect(minX: r.minX, maxX: r.maxX, baseline: baseline), fill: mark.fill))
+                let first = seen[mark.chip]?.first ?? pills.count - 1
+                seen[mark.chip] = (first, pills.count - 1, lineIndex)
+            }
+        }
+        for s in seen.values {
+            let lead = pills[s.first].rect
+            pills[s.first].rect = CGRect(x: lead.minX - MentionTable.capWidth, y: lead.minY, width: lead.width + MentionTable.capWidth, height: lead.height)
+            pills[s.last].rect.size.width += MentionTable.padX
+        }
+        return pills
+    }
+}
+
+extension View {
+    /// Text inside draws its mention chips' pills (`MentionPillRenderer`); iOS 17 keeps the caps' own.
+    @ViewBuilder
+    func mentionPills() -> some View {
+        if #available(iOS 18.0, *) {
+            textRenderer(MentionPillRenderer())
+        } else {
+            self
+        }
     }
 }

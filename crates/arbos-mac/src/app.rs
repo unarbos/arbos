@@ -787,6 +787,10 @@ pub struct AppState {
     /// Rooms whose pushes were refused (`not_available` / `blocked`) and why; the chat-level
     /// note draws the sentence. Cleared when that room's next ACK arrives.
     pub push_refused: HashMap<Id, PushRefusal>,
+    /// Last `silenced_until` we armed an end timer for (per people chat).
+    silence_until_armed: HashMap<Id, i64>,
+    /// Generation per chat so a re-armed silence-end timer makes the old one a no-op.
+    silence_until_gen: HashMap<Id, u64>,
     pub selected_project: Option<Id>,
     /// Bytes and chats kept on this Mac by the on-device store (Settings → About).
     pub store_usage: (i64, i64),
@@ -1301,6 +1305,8 @@ impl AppState {
             copy_request_seq: 0,
             notices: Vec::new(),
             push_refused: HashMap::new(),
+            silence_until_armed: HashMap::new(),
+            silence_until_gen: HashMap::new(),
             selected_project: None,
             store_usage: (0, 0),
             active_tab: HashMap::new(),
@@ -2293,6 +2299,7 @@ impl AppState {
                 if refused {
                     // The chat-level note draws `why` until the room's next ACK.
                     self.push_refused.insert(chat_id, why);
+                    self.arm_silence_end_timers(cx);
                 } else {
                     self.push_refused.remove(&chat_id);
                     self.notices.retain(|n| n.text != DELIVERY);
@@ -2389,6 +2396,7 @@ impl AppState {
                     }
                 }
                 self.projects = projects;
+                self.arm_silence_end_timers(cx);
                 // Rig (screenshots without a pointer): `ARBOS_OPEN_SPACE=<space id>` selects that
                 // agent or people chat once it is known; `ARBOS_START_CALL=voice|video` then
                 // starts a call there, as the header's call button would.
@@ -9491,6 +9499,66 @@ impl AppState {
             });
         })
         .detach();
+    }
+
+    /// For each silenced people chat with an end time: clear it if the clock has
+    /// passed, else arm one timer that clears `silenced` and a silenced
+    /// `push_refused` when it fires ([feedback app-01M61GZ5B66VCSKF40458KH3DP]).
+    fn arm_silence_end_timers(&mut self, cx: &mut Context<Self>) {
+        let now = now_ms() as i64;
+        let mut changed = false;
+        for p in &mut self.projects {
+            if crate::sync::clear_silence_if_expired(p, &mut self.push_refused, now) {
+                changed = true;
+                self.silence_until_armed.remove(&p.id);
+                self.silence_until_gen.remove(&p.id);
+            }
+        }
+        let to_arm: Vec<(Id, i64)> = self
+            .projects
+            .iter()
+            .filter(|p| p.silenced)
+            .filter_map(|p| p.silenced_until.map(|u| (p.id.clone(), u)))
+            .collect();
+        let armed: HashSet<_> = to_arm.iter().map(|(id, _)| id.clone()).collect();
+        self.silence_until_armed.retain(|id, _| armed.contains(id));
+        self.silence_until_gen.retain(|id, _| armed.contains(id));
+        for (chat_id, until) in to_arm {
+            if self.silence_until_armed.get(&chat_id) == Some(&until) {
+                continue;
+            }
+            self.silence_until_armed.insert(chat_id.clone(), until);
+            let gen = self.silence_until_gen.entry(chat_id.clone()).or_insert(0);
+            *gen = gen.wrapping_add(1);
+            let gen = *gen;
+            let wait_ms = until.saturating_sub(now).max(0) as u64;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(wait_ms))
+                    .await;
+                let _ = this.update(cx, |state, cx| {
+                    if state.silence_until_gen.get(&chat_id) != Some(&gen) {
+                        return;
+                    }
+                    let Some(p) = state.projects.iter_mut().find(|p| p.id == chat_id) else {
+                        return;
+                    };
+                    if crate::sync::clear_silence_if_expired(
+                        p,
+                        &mut state.push_refused,
+                        now_ms() as i64,
+                    ) {
+                        state.silence_until_armed.remove(&chat_id);
+                        state.silence_until_gen.remove(&chat_id);
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
+        if changed {
+            cx.notify();
+        }
     }
 
     /// Cancel on the pill: close the sheet (its block reports Cancelled) and

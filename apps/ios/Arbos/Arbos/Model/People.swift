@@ -296,6 +296,14 @@ struct PeopleChat: Identifiable, Equatable {
         humans.first { $0.id != me } ?? humans.first
     }
 
+    /// Who the empty composer names ("Message …") when nobody is picked: a DM's other person
+    /// (also a DM that gained agents, like the header pill), otherwise the chat's own name —
+    /// never one member of a group ("Message Arbonites", not "Message Jacob").
+    func composerName(me: String?) -> String {
+        if !isGroup || kind == "dm", let other = counterpart(me: me) { return other.displayName }
+        return title
+    }
+
     var lockLabel: String {
         lockState == "people_only" ? "People only" : "Visible to \(agents.map { "@\($0.ownerHandle ?? "owner")" }.joined(separator: ", "))'s agent"
     }
