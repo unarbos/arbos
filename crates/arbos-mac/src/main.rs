@@ -42,10 +42,52 @@ use crate::ui::theme::{
 use crate::ui::transcript;
 use crate::ui::widgets;
 
+/// Open the GPUI platform. On Linux, gpui_linux unwraps when `DISPLAY` is set but the
+/// X11 client cannot connect (`Failed to initialize X11 client`); catch that and exit
+/// with a clear message instead of aborting into the silent-diagnostic panic path
+/// ([feedback app-01M64QW84JQHHWHMWS2CZ6Z92T]).
+fn open_platform() -> gpui::Application {
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        // Swallow the unwrap panic's default stderr dump; we print our own line below.
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let opened =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(gpui_platform::application));
+        std::panic::set_hook(previous);
+        match opened {
+            Ok(app) => app,
+            Err(_) => {
+                let display = std::env::var("DISPLAY").unwrap_or_default();
+                let hint = if display.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (DISPLAY={display})")
+                };
+                eprintln!(
+                    "Arbos could not open a display{hint}: the X11 (or Wayland) connection failed."
+                );
+                eprintln!(
+                    "Start a working display server, or unset DISPLAY / WAYLAND_DISPLAY, then try again."
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    {
+        gpui_platform::application()
+    }
+}
+
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     // Before any thread or window: a panic that would end as a bare SIGABRT leaves its
     // message and backtrace in ~/Library/Logs/Arbos/panic.log (reported on the next launch).
+    // On Linux the platform open itself can unwrap-panic when DISPLAY is set but X11 is
+    // unreachable; open that first (and exit cleanly) so a broken display does not file a
+    // silent diagnostic.
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     panic_log::install();
     // rustls has two crypto backends linked (ring via tokio-tungstenite/reqwest,
     // aws-lc-rs via matrix). It refuses to guess; install ring before any TLS.
@@ -62,7 +104,9 @@ fn main() {
     type JoinHook = Rc<RefCell<Option<(gpui::AsyncApp, gpui::Entity<AppState>)>>>;
     let join_hook: JoinHook = Rc::new(RefCell::new(None));
     let pending_joins: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
-    let app = gpui_platform::application().with_assets(crate::ui::icons::Assets);
+    let app = open_platform().with_assets(crate::ui::icons::Assets);
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    panic_log::install();
     {
         let (hook, pending) = (join_hook.clone(), pending_joins.clone());
         app.on_open_urls(move |urls| {
