@@ -6319,6 +6319,12 @@ impl Agent {
             }
             if t.row_closed {
                 self.open_row(&host, t, "progress").await;
+            } else if Self::row_has_words(&host, t).await {
+                // The live row already shows words (the `route.reply` first line, a reply ack,
+                // streamed prose): appending would glue this message onto them with no break.
+                // Those words stay their own bubble.
+                self.close_row(&host, t, "progress").await;
+                self.open_row(&host, t, "progress").await;
             }
             {
                 let h = host.lock().await;
@@ -6466,6 +6472,13 @@ impl Agent {
             .await
             .get(chat_id)
             .is_some_and(|v| v.iter().any(|(_, at)| *at >= since_ms))
+    }
+
+    async fn row_has_words(host: &SharedHost, t: &TurnState) -> bool {
+        let h = host.lock().await;
+        h.doc
+            .message(&t.assistant_msg_id)
+            .is_some_and(|m| !m.text().trim().is_empty())
     }
 
     fn posted_result(t: &TurnState) -> bool {
