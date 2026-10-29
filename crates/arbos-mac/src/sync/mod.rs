@@ -53,6 +53,56 @@ pub struct PushRefusal {
     pub by_name: Option<String>,
 }
 
+/// "Muted until 14:30" when the end is later today, "Muted until Oct 30, 14:30" on any
+/// other day, "Muted" with no end. HH:MM is 24-hour local time in `tz`.
+pub fn muted_until_label<Tz: chrono::TimeZone>(until_ms: Option<i64>, now_ms: i64, tz: Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let Some(until_ms) = until_ms else {
+        return "Muted".into();
+    };
+    let Some(until) = tz.timestamp_millis_opt(until_ms).single() else {
+        return "Muted".into();
+    };
+    let Some(now) = tz.timestamp_millis_opt(now_ms).single() else {
+        return "Muted".into();
+    };
+    if until.date_naive() == now.date_naive() {
+        format!("Muted until {}", until.format("%H:%M"))
+    } else {
+        format!("Muted until {}", until.format("%b %-d, %H:%M"))
+    }
+}
+
+/// Clear a timed admin mute once `now_ms` is at or past the end. Also drops a
+/// `push_refused` entry whose reason is `silenced`. Returns true when something changed.
+pub fn clear_silence_if_expired(
+    project: &mut Project,
+    push_refused: &mut HashMap<Id, PushRefusal>,
+    now_ms: i64,
+) -> bool {
+    if !project.silenced {
+        return false;
+    }
+    let Some(until) = project.silenced_until else {
+        return false;
+    };
+    if until > now_ms {
+        return false;
+    }
+    let chat_id = project.id.clone();
+    project.silenced = false;
+    project.silenced_until = None;
+    if push_refused
+        .get(&chat_id)
+        .is_some_and(|w| w.reason.as_deref() == Some("silenced"))
+    {
+        push_refused.remove(&chat_id);
+    }
+    true
+}
+
 impl PushRefusal {
     pub fn code(code: &str) -> Self {
         Self {
@@ -85,8 +135,26 @@ impl PushRefusal {
     }
 
     /// The plain sentence the chat-level note shows (Jacob 2026-10-26): who stands in the
-    /// way and what to do; the generic line for anything else.
-    pub fn sentence(&self) -> String {
+    /// way and what to do; the generic line for anything else. `silenced_until_ms` is the
+    /// active chat's end time for the mute line ([feedback app-01M61GZ5B66VCSKF40458KH3DP]).
+    pub fn sentence(&self, silenced_until_ms: Option<i64>) -> String {
+        self.sentence_at(
+            silenced_until_ms,
+            chrono::Local::now().timestamp_millis(),
+            chrono::Local,
+        )
+    }
+
+    /// Same as [`Self::sentence`], with a fixed clock and time zone (tests).
+    pub fn sentence_at<Tz: chrono::TimeZone>(
+        &self,
+        silenced_until_ms: Option<i64>,
+        now_ms: i64,
+        tz: Tz,
+    ) -> String
+    where
+        Tz::Offset: std::fmt::Display,
+    {
         match (self.reason.as_deref(), self.who()) {
             (Some("blocked_by"), Some(who)) => format!("{who} has blocked you in this chat."),
             (Some("blocked_by"), None) => "Someone in this chat has blocked you.".to_string(),
@@ -97,7 +165,10 @@ impl PushRefusal {
                 "Couldn't post: you've blocked someone in this chat. Unblock to post.".to_string()
             }
             (Some("silenced"), _) => {
-                "You're muted in this chat, so your messages aren't being delivered.".to_string()
+                format!(
+                    "{}. Your messages aren't being delivered.",
+                    muted_until_label(silenced_until_ms, now_ms, tz)
+                )
             }
             _ => "Messages in this chat aren't being delivered right now. We'll keep trying."
                 .to_string(),
@@ -1709,7 +1780,8 @@ mod collective_tests {
 #[cfg(test)]
 mod push_refusal_tests {
     //! The chat-level note's words for a refused push ([feedback blocked-state-relay-2026-10-26]).
-    use super::PushRefusal;
+    use super::{muted_until_label, PushRefusal};
+    use chrono::{FixedOffset, TimeZone};
 
     fn blocked(reason: &str, name: Option<&str>) -> PushRefusal {
         PushRefusal {
@@ -1720,19 +1792,72 @@ mod push_refusal_tests {
         }
     }
 
+    fn utc() -> FixedOffset {
+        FixedOffset::east_opt(0).expect("UTC")
+    }
+
+    #[test]
+    fn muted_until_label_shapes() {
+        let tz = utc();
+        let now = tz
+            .with_ymd_and_hms(2026, 10, 28, 12, 0, 0)
+            .single()
+            .expect("now")
+            .timestamp_millis();
+        let later_today = tz
+            .with_ymd_and_hms(2026, 10, 28, 14, 30, 0)
+            .single()
+            .expect("later")
+            .timestamp_millis();
+        let other_day = tz
+            .with_ymd_and_hms(2026, 10, 30, 14, 30, 0)
+            .single()
+            .expect("other")
+            .timestamp_millis();
+        assert_eq!(
+            muted_until_label(Some(later_today), now, tz),
+            "Muted until 14:30"
+        );
+        assert_eq!(
+            muted_until_label(Some(other_day), now, tz),
+            "Muted until Oct 30, 14:30"
+        );
+        assert_eq!(muted_until_label(None, now, tz), "Muted");
+    }
+
     #[test]
     fn the_sentence_names_who_stands_in_the_way() {
         assert_eq!(
-            blocked("blocked_by", Some("Sam Rivera")).sentence(),
+            blocked("blocked_by", Some("Sam Rivera")).sentence(None),
             "Sam Rivera has blocked you in this chat."
         );
         assert_eq!(
-            blocked("blocked_by", None).sentence(),
+            blocked("blocked_by", None).sentence(None),
             "@sam has blocked you in this chat."
         );
         assert_eq!(
-            blocked("blocks_member", Some("Sam Rivera")).sentence(),
+            blocked("blocks_member", Some("Sam Rivera")).sentence(None),
             "Couldn't post: you've blocked Sam Rivera, who is in this chat. Unblock to post."
+        );
+        let tz = utc();
+        let now = tz
+            .with_ymd_and_hms(2026, 10, 28, 12, 0, 0)
+            .single()
+            .expect("now")
+            .timestamp_millis();
+        let until = tz
+            .with_ymd_and_hms(2026, 10, 28, 14, 30, 0)
+            .single()
+            .expect("until")
+            .timestamp_millis();
+        assert_eq!(
+            PushRefusal {
+                code: "not_available".into(),
+                reason: Some("silenced".into()),
+                ..Default::default()
+            }
+            .sentence_at(Some(until), now, tz),
+            "Muted until 14:30. Your messages aren't being delivered."
         );
         assert_eq!(
             PushRefusal {
@@ -1740,8 +1865,8 @@ mod push_refusal_tests {
                 reason: Some("silenced".into()),
                 ..Default::default()
             }
-            .sentence(),
-            "You're muted in this chat, so your messages aren't being delivered."
+            .sentence_at(None, now, tz),
+            "Muted. Your messages aren't being delivered."
         );
     }
 
@@ -1756,7 +1881,7 @@ mod push_refusal_tests {
             },
         ] {
             assert_eq!(
-                why.sentence(),
+                why.sentence(None),
                 "Messages in this chat aren't being delivered right now. We'll keep trying."
             );
         }
@@ -1766,8 +1891,44 @@ mod push_refusal_tests {
                 by_handle: Some(String::new()),
                 ..Default::default()
             }
-            .sentence(),
+            .sentence(None),
             "Someone in this chat has blocked you."
         );
+    }
+
+    #[test]
+    fn a_timed_mute_clears_once_the_clock_passes_the_end() {
+        use crate::model::Project;
+        use std::collections::HashMap;
+
+        let mut project = Project {
+            id: "g1".into(),
+            silenced: true,
+            silenced_until: Some(1_000),
+            ..Project::default()
+        };
+        let mut refused = HashMap::from([(
+            "g1".into(),
+            PushRefusal {
+                code: "not_available".into(),
+                reason: Some("silenced".into()),
+                ..Default::default()
+            },
+        )]);
+        assert!(!super::clear_silence_if_expired(
+            &mut project,
+            &mut refused,
+            999
+        ));
+        assert!(project.silenced);
+        assert!(refused.contains_key("g1"));
+        assert!(super::clear_silence_if_expired(
+            &mut project,
+            &mut refused,
+            1_000
+        ));
+        assert!(!project.silenced);
+        assert!(project.silenced_until.is_none());
+        assert!(!refused.contains_key("g1"));
     }
 }

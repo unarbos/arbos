@@ -3426,13 +3426,27 @@ impl Shell {
     /// `reason` says so in plain words ([feedback blocked-state-relay-2026-10-26]): "<name> has
     /// blocked you in this chat." / "Couldn't post: you've blocked <name>, who is in this chat.
     /// Unblock to post." / the mute line; anything else keeps "Messages in this chat aren't
-    /// being delivered right now."
+    /// being delivered right now." Also shown when the chat data says I am silenced now, before
+    /// anything is sent ([feedback app-01M61GZ5B66VCSKF40458KH3DP]).
     fn render_delivery_note(&self, cx: &mut Context<Self>) -> Option<Div> {
         let theme = Theme::of(cx).clone();
         let state = self.state.read(cx);
         let chat = state.active_chat_id()?;
-        let why = state.push_refused.get(&chat)?.clone();
-        let error = delivery_error(&why);
+        let now = crate::model::now_ms() as i64;
+        let space = state.project(&chat);
+        let silenced_until = space.and_then(|p| p.silenced_until);
+        let why = if let Some(why) = state.push_refused.get(&chat) {
+            why.clone()
+        } else if space.is_some_and(|p| p.is_silenced_now(now)) {
+            crate::sync::PushRefusal {
+                code: "not_available".into(),
+                reason: Some("silenced".into()),
+                ..Default::default()
+            }
+        } else {
+            return None;
+        };
+        let error = delivery_error(&why, silenced_until);
         let mut handlers =
             error_note::Handlers::new().toggle_details(cx.listener(|this, _, _, cx| {
                 this.delivery_error_details_open = !this.delivery_error_details_open;
@@ -5547,7 +5561,10 @@ pub(crate) fn human_bytes(bytes: i64) -> String {
 
 /// The chat-level note's error for a push refusal: the refusal's sentence as the relay's
 /// words (`ErrorClass::Refused`), the raw code / reason behind Details.
-pub(crate) fn delivery_error(why: &crate::sync::PushRefusal) -> UserError {
+pub(crate) fn delivery_error(
+    why: &crate::sync::PushRefusal,
+    silenced_until_ms: Option<i64>,
+) -> UserError {
     let raw = match (&why.reason, &why.by_handle) {
         (Some(reason), Some(handle)) => {
             format!(
@@ -5567,7 +5584,7 @@ pub(crate) fn delivery_error(why: &crate::sync::PushRefusal) -> UserError {
     UserError {
         verb: String::new(),
         class: ErrorClass::Refused {
-            message: Some(why.sentence()),
+            message: Some(why.sentence(silenced_until_ms)),
         },
         ..error
     }

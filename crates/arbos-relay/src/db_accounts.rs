@@ -9,6 +9,8 @@
 //! machines are always on (Jacob, 2026-10-15), so their cost never gates inference, never
 //! consumes the grant, and never counts toward a user's daily cap.
 
+use std::collections::HashMap;
+
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -703,6 +705,103 @@ impl Db {
         })
     }
 
+    /// Revoke every live GitHub device of this user that shares `name`, except
+    /// `keep_id` when set. Used on re-login and when collapsing reinstalls so
+    /// Settings → Devices stays one row per machine name. Returns the revoked ids.
+    pub fn revoke_named_github_devices(
+        &self,
+        user_id: &str,
+        name: &str,
+        keep_id: Option<&str>,
+    ) -> Result<Vec<String>> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Ok(Vec::new());
+        }
+        let live = self.live_devices_of_user(user_id)?;
+        let mut revoked = Vec::new();
+        for d in live {
+            let kind = d.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+            if kind != "github" {
+                continue;
+            }
+            let id = match d.get("id").and_then(|v| v.as_str()) {
+                Some(id) => id,
+                None => continue,
+            };
+            if keep_id == Some(id) {
+                continue;
+            }
+            let dname = d.get("name").and_then(|v| v.as_str()).unwrap_or("").trim();
+            if dname != name {
+                continue;
+            }
+            if self.revoke_device_fully(id)? {
+                revoked.push(id.to_owned());
+            }
+        }
+        Ok(revoked)
+    }
+
+    /// Collapse same-name live GitHub sessions: keep `current_id` when it is in
+    /// the group, otherwise the most recently seen (else newest created); revoke
+    /// the rest. Reinstalls and re-logins used to leave a row per attempt
+    /// (Affinity, 2026-10-28: 3 stale iPhone rows beside the real one).
+    pub fn collapse_github_device_duplicates(
+        &self,
+        user_id: &str,
+        current_id: &str,
+    ) -> Result<Vec<String>> {
+        let live = self.live_devices_of_user(user_id)?;
+        let mut by_name: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+        for d in live {
+            if d.get("kind").and_then(|v| v.as_str()) != Some("github") {
+                continue;
+            }
+            let name = d
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_owned();
+            if name.is_empty() {
+                continue;
+            }
+            by_name.entry(name).or_default().push(d);
+        }
+        let mut revoked = Vec::new();
+        for group in by_name.values() {
+            if group.len() < 2 {
+                continue;
+            }
+            let keep = group
+                .iter()
+                .find(|d| d.get("id").and_then(|v| v.as_str()) == Some(current_id))
+                .or_else(|| {
+                    group.iter().max_by_key(|d| {
+                        d.get("last_seen_at")
+                            .and_then(|v| v.as_i64())
+                            .or_else(|| d.get("created_at").and_then(|v| v.as_i64()))
+                            .unwrap_or(0)
+                    })
+                });
+            let keep_id = keep.and_then(|d| d.get("id").and_then(|v| v.as_str()));
+            for d in group {
+                let id = match d.get("id").and_then(|v| v.as_str()) {
+                    Some(id) => id,
+                    None => continue,
+                };
+                if Some(id) == keep_id {
+                    continue;
+                }
+                if self.revoke_device_fully(id)? {
+                    revoked.push(id.to_owned());
+                }
+            }
+        }
+        Ok(revoked)
+    }
+
     /// Device ids of a user, most recently seen first — revoked ones included, since a row they
     /// wrote keeps its `deviceId` for good. Capped so a roster stays small.
     pub fn device_ids_of_user(&self, user_id: &str, limit: usize) -> Result<Vec<String>> {
@@ -1286,6 +1385,117 @@ mod address_name_tests {
         assert_eq!(name, None);
         assert_eq!(former, vec!["Const".to_owned(), "Jacob".to_owned()]);
         assert!(db.user_address("gh_nobody").unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod device_dedupe_tests {
+    //! Settings → Devices must collapse reinstall/re-login duplicates of the same
+    //! GitHub device name (Affinity, 2026-10-28). Live-only listing is covered by
+    //! `signin::devices_list_tests`.
+
+    use super::GithubIdentity;
+    use crate::db::Db;
+    use arbos_core::ids::ulid;
+
+    fn open() -> (std::path::PathBuf, Db) {
+        let dir = std::env::temp_dir().join(format!(
+            "arbos-devices-dedupe-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let db = Db::open(&dir.join("relay.db")).expect("db");
+        (dir, db)
+    }
+
+    fn user(db: &Db, github_id: i64) -> String {
+        db.upsert_github_user(
+            &GithubIdentity {
+                id: github_id,
+                login: format!("u{github_id}"),
+                avatar_url: None,
+                name: None,
+            },
+            20.0,
+        )
+        .unwrap()
+        .0
+        .id
+    }
+
+    #[test]
+    fn reinstall_revokes_the_same_named_github_session() {
+        let (dir, db) = open();
+        let alice = user(&db, 703);
+        let old = ulid();
+        let phone = ulid();
+        db.insert_device(&old, "iPhone", &ulid(), &alice, "github")
+            .unwrap();
+        db.insert_device(&phone, "Other Phone", &ulid(), &alice, "github")
+            .unwrap();
+        let revoked = db
+            .revoke_named_github_devices(&alice, "iPhone", None)
+            .unwrap();
+        assert_eq!(revoked, vec![old.clone()]);
+        assert!(db.device_status(&old).unwrap().unwrap().1);
+        assert!(!db.device_status(&phone).unwrap().unwrap().1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn collapse_keeps_current_or_most_recent_per_name() {
+        let (dir, db) = open();
+        let alice = user(&db, 704);
+        let stale = ulid();
+        let newer = ulid();
+        let other = ulid();
+        db.insert_device(&stale, "Mac (Mac)", &ulid(), &alice, "github")
+            .unwrap();
+        db.insert_device(&newer, "Mac (Mac)", &ulid(), &alice, "github")
+            .unwrap();
+        db.insert_device(&other, "iPhone", &ulid(), &alice, "github")
+            .unwrap();
+        db.touch_device(&newer).unwrap();
+
+        let revoked = db
+            .collapse_github_device_duplicates(&alice, &other)
+            .unwrap();
+        assert_eq!(revoked, vec![stale.clone()]);
+        let live = db.live_devices_of_user(&alice).unwrap();
+        let ids: Vec<&str> = live.iter().filter_map(|d| d["id"].as_str()).collect();
+        assert!(ids.contains(&newer.as_str()));
+        assert!(ids.contains(&other.as_str()));
+        assert!(!ids.contains(&stale.as_str()));
+
+        // Current wins even when another same-name row was seen more recently.
+        let again = ulid();
+        db.insert_device(&again, "iPhone", &ulid(), &alice, "github")
+            .unwrap();
+        db.touch_device(&again).unwrap();
+        let revoked = db
+            .collapse_github_device_duplicates(&alice, &other)
+            .unwrap();
+        assert_eq!(revoked, vec![again]);
+        assert!(!db.device_status(&other).unwrap().unwrap().1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn readers_are_not_collapsed_with_github_sign_ins() {
+        let (dir, db) = open();
+        let alice = user(&db, 705);
+        let gh = ulid();
+        let reader = ulid();
+        db.insert_device(&gh, "GrokBot-Arbos", &ulid(), &alice, "github")
+            .unwrap();
+        db.insert_device(&reader, "GrokBot-Arbos", &ulid(), &alice, "reader")
+            .unwrap();
+        let revoked = db.collapse_github_device_duplicates(&alice, &gh).unwrap();
+        assert!(revoked.is_empty());
+        assert_eq!(db.live_devices_of_user(&alice).unwrap().len(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -787,7 +787,9 @@ struct HomeView: View {
                     }
                 }
             Button { showNewChat = true } label: {
-                GlassCircle {
+                // The chat header's real glass (not the 0.85 legacy tint), beside the clear
+                // search capsule ([feedback iphone-composer-glass-2026-10-28]).
+                GlassCircle(material: ChatHeaderGlass.material(surface: theme.surface)) {
                     Image(systemName: "plus")
                         .font(theme.font(Controls.glyph, weight: .regular))
                         .foregroundStyle(theme.text)
