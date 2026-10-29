@@ -4962,6 +4962,17 @@ fn membership_notice(shared: &Arc<Shared>, chat_id: &str, text: &str) {
 }
 
 fn emit_shell_grants(shared: &Arc<Shared>, project_id: &str) {
+    // The relay answers someone else's agent (Sam's Studio, Sami's TestAgent) with 403 `not_owner`.
+    if [SHARED_STUDIO, PROJECT_TESTAGENT].contains(&project_id) {
+        let err = super::relay::RelayError::from_body(
+            reqwest::StatusCode::FORBIDDEN,
+            r#"{"error":{"type":"not_owner","message":"not your project"}}"#,
+        );
+        if let Some(event) = super::relay::shell_grants_failed(project_id, &err.into()) {
+            let _ = shared.events.send(event);
+        }
+        return;
+    }
     let items = shared
         .shell_grants
         .lock()
