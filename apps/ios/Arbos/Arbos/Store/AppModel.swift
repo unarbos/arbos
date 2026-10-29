@@ -4827,6 +4827,9 @@ final class AppModel: ObservableObject {
         ["Authorization": "Bearer \(credentials?.deviceToken ?? "")"]
     }
 
+    /// The relay's GIF pass-through URL for a picked GIF (ARB-544).
+    func gifMediaURL(_ remote: String) -> URL? { api.gifMediaURL(remote) }
+
     // MARK: One chat per agent (D78)
 
     /// The chat each agent opens into, chosen once per agent on this device and
@@ -5284,6 +5287,62 @@ final class AppModel: ObservableObject {
             write(chatId: chatId, text: text, command: "send", attachments: uploaded, replyTo: replyTo,
                   forwardedFrom: forwardedFrom, extraParts: extraParts)
         }
+    }
+
+    /// Emoji · stickers · GIFs picker (ARB-544): one tap sends the sticker or GIF as its own
+    /// message at once (Jacob: "tap sends immediately"). A sticker's bytes go into the chat
+    /// slot like any picture (`kind: sticker`, the pack as `source`); a GIF carries only the
+    /// provider URL and attribution — nothing is stored (KLIPY's terms).
+    func sendMedia(chatId: Id, pick: MediaPick) {
+        clearSendError(chatId)
+        if JobTabs.isJobChat(chatId) { return }
+        let people = peopleChat(chatId) != nil
+        switch pick {
+        case .gif(let gif):
+            let attachment = Attachment(
+                name: "\(gif.id).gif", mime: "image/gif", blobRef: nil, kind: "image", url: gif.url,
+                source: AttachmentSource(provider: "KLIPY", id: gif.id, pageUrl: gif.pageUrl))
+            if people {
+                sendPeopleAttachments(chatId: chatId, attachments: [attachment])
+            } else {
+                write(chatId: chatId, text: "", command: "send", attachments: [attachment])
+            }
+            Task { await api.gifShare(id: gif.id, query: gif.query) }
+        case .sticker(let pack, let item, let data):
+            let ext = item.mime == "image/webp" ? "webp" : "png"
+            let name = "\(item.id).\(ext)"
+            let source = AttachmentSource(provider: pack.name, id: "\(pack.id)/\(item.id)", pageUrl: pack.pageUrl)
+            if isFixture {
+                let attachment = Attachment(name: name, mime: item.mime, blobRef: nil, kind: "sticker", source: source)
+                write(chatId: chatId, text: "", command: "send", attachments: [attachment])
+                return
+            }
+            let slot = people ? "\(peopleSlot):\(chatId)" : (chat(chatId)?.projectId ?? "")
+            guard !slot.isEmpty else { return }
+            Task {
+                var attachment = Attachment(name: name, mime: item.mime, blobRef: nil, kind: "sticker",
+                                            bytes: Int64(data.count), source: source)
+                do {
+                    attachment.blobRef = try await uploadBlob(slot: slot, name: name, mime: item.mime, data: data)
+                } catch {
+                    setSendError(chatId, UserError.classify("send the sticker", error))
+                    return
+                }
+                if people {
+                    sendPeopleAttachments(chatId: chatId, attachments: [attachment])
+                } else {
+                    write(chatId: chatId, text: "", command: "send", attachments: [attachment])
+                }
+            }
+        }
+    }
+
+    /// A media-only people-chat send (ARB-544): no text, no mentions, already-uploaded rows.
+    private func sendPeopleAttachments(chatId: Id, attachments: [Attachment]) {
+        guard let doc = docs[chatId], let me = user else { return }
+        let author = CoreChatDoc.Author(sender: "user:\(me.id)", handle: me.login, name: me.name, avatar: me.avatarUrl)
+        commitPeople(chatId: chatId, doc: doc, messageId: newId(), text: "", author: author,
+                     mentions: [], reply: nil, attachments: attachments)
     }
 
     /// Attachment `kind` hint written into the doc (matches agentd / Mac).

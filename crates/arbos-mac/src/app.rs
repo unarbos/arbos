@@ -22,11 +22,12 @@ use crate::model::{
     MembershipNotice, NoticeSubject, OptimisticNotice, Person, Reachable, Sender, Voice,
 };
 use crate::model::{
-    new_id, now_ms, Attachment, AttachmentKind, BoxReport, BoxState, ChannelSel, ChannelsView,
-    Chat, ChatKind, ConnectorsView, DevicesView, Effort, Id, Job, JobRollout, Link, LinkState,
-    LocalView, Machine, Message, MessageBody, MessageStatus, NewSecret, Part, Project,
-    ProjectDocView, ProjectSecrets, QuestionState, ReplyRef, Role, Routine, RoutineRun,
-    RoutineTrigger, SecretDirector, SecretScope, SecretsView, ServerInfo, Skill, StatusKind,
+    new_id, now_ms, Attachment, AttachmentKind, AttachmentSource, BoxReport, BoxState, ChannelSel,
+    ChannelsView, Chat, ChatKind, ConnectorsView, DevicesView, Effort, GifPage, Id, Job,
+    JobRollout, Link, LinkState, LocalView, Machine, MediaPick, Message, MessageBody,
+    MessageStatus, NewSecret, Part, Project, ProjectDocView, ProjectSecrets, QuestionState,
+    ReplyRef, Role, Routine, RoutineRun, RoutineTrigger, SecretDirector, SecretScope, SecretsView,
+    ServerInfo, Skill, StatusKind, StickerPack,
 };
 use crate::palette;
 use crate::search;
@@ -420,6 +421,7 @@ impl ViewerItem {
                 kind: Some(AttachmentKind::Image),
                 title: None,
                 chart_part: None,
+                url: None,
                 source: None,
             },
             by: name.to_owned(),
@@ -764,6 +766,18 @@ pub struct AppState {
     link_icons_requested: HashSet<String>,
     /// Blob keys whose thumbnail fetch failed: the card says "No preview" instead of loading.
     pub thumbnails_failed: HashSet<String>,
+    /// Picker (ARB-544): the GIF results on screen — the query they answer and the page
+    /// (`None` while the first page is on its way).
+    pub gif_results: Option<(String, GifPage)>,
+    /// Picker: the query a GIF fetch is in flight for (a stale answer is dropped).
+    gif_query_pending: Option<String>,
+    /// Picker: the relay's sticker packs once fetched (`Some(None)` = the relay failed).
+    pub sticker_packs: Option<Option<Vec<StickerPack>>>,
+    /// Picker: the sticker-pack fetch is in flight or answered this session.
+    sticker_packs_requested: bool,
+    /// Picker: raw bytes of fetched stickers by `sticker:<pack>/<id>` key — a tap uploads
+    /// these into the chat slot (the thumbnail cache holds only the decoded picture).
+    sticker_raw: HashMap<String, Arc<Vec<u8>>>,
     /// The Copy whose attachment bytes are on their way
     /// ([feedback copy-image-messages-mac-2026-10-27]); a newer Copy replaces it and the
     /// older answer is dropped by its `request` number.
@@ -1278,6 +1292,11 @@ impl AppState {
             link_icon_tones: HashMap::new(),
             link_icons_requested: HashSet::new(),
             thumbnails_failed: HashSet::new(),
+            gif_results: None,
+            gif_query_pending: None,
+            sticker_packs: None,
+            sticker_packs_requested: false,
+            sticker_raw: HashMap::new(),
             copy_request: None,
             copy_request_seq: 0,
             notices: Vec::new(),
@@ -2164,6 +2183,9 @@ impl AppState {
                 cx.notify();
             }
             SyncEvent::Thumbnail { key, bytes } => {
+                if key.starts_with(crate::model::STICKER_KEY_PREFIX) {
+                    self.sticker_raw.insert(key.clone(), bytes.clone());
+                }
                 if let Some((image, trimmed)) = decode_image_pair(&bytes) {
                     self.thumbnails_failed.remove(&key);
                     match trimmed {
@@ -2194,6 +2216,14 @@ impl AppState {
                 if let Some(chat_id) = self.active_chat_id() {
                     cx.emit(AppEvent::TranscriptChanged { chat_id });
                 }
+                cx.notify();
+            }
+            SyncEvent::GifResults { query, pos, page } => {
+                self.gif_results_arrived(query, pos, page);
+                cx.notify();
+            }
+            SyncEvent::StickerPacks { packs } => {
+                self.sticker_packs = Some(packs);
                 cx.notify();
             }
             SyncEvent::CopyBlobs { request, blobs } => {
@@ -4394,6 +4424,260 @@ impl AppState {
         self.send_with(text, attachments, None, reply_to, false, mentions, cx);
     }
 
+    // ----- emoji / stickers / GIFs picker (ARB-544) --------------------------
+
+    /// One tap in the picker: the sticker or GIF goes out as its own message at once
+    /// (Jacob: "tap sends immediately"). The row shows at once — a sticker from the bytes
+    /// the picker already holds, a GIF through the relay pass-through — and the server's
+    /// frame with the same id replaces it.
+    pub fn send_media(&mut self, pick: MediaPick, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.active_chat_id() else {
+            return;
+        };
+        if crate::jobtabs::is_job_chat(&chat_id) || self.selected_channel.is_some() {
+            return;
+        }
+        self.send_errors.remove(&chat_id);
+        let message_id = new_id();
+        let reply_to = {
+            let ui = self.chat_ui.entry(chat_id.clone()).or_default();
+            ui.reply_ref = None;
+            ui.editing = None;
+            ui.reply_to.take()
+        };
+        let att_id = new_id();
+        let attachment = match &pick {
+            MediaPick::Sticker { pack, item, bytes } => {
+                let key = format!("local:{att_id}");
+                if let Some((image, trimmed)) = decode_image_pair(bytes) {
+                    self.thumbnails.insert(key.clone(), Arc::new(image));
+                    if let Some(t) = trimmed {
+                        self.thumbnails_trimmed.insert(key.clone(), Arc::new(t));
+                    }
+                }
+                self.thumbnails_requested.insert(key.clone());
+                Attachment {
+                    name: format!(
+                        "{}.{}",
+                        item.id,
+                        if item.mime == "image/webp" {
+                            "webp"
+                        } else {
+                            "png"
+                        }
+                    ),
+                    mime: item.mime.clone(),
+                    blob_ref: Some(key),
+                    bytes: Some(bytes.len() as u64),
+                    kind: Some(AttachmentKind::Sticker),
+                    title: None,
+                    chart_part: None,
+                    url: None,
+                    source: Some(Box::new(AttachmentSource {
+                        provider: pack.name.clone(),
+                        id: format!("{}/{}", pack.id, item.id),
+                        page_url: pack.page_url.clone(),
+                    })),
+                }
+            }
+            MediaPick::Gif(gif) => {
+                let attachment = Attachment {
+                    name: format!("{}.gif", gif.id),
+                    mime: "image/gif".into(),
+                    blob_ref: None,
+                    bytes: None,
+                    kind: Some(AttachmentKind::Image),
+                    title: None,
+                    chart_part: None,
+                    url: Some(gif.url.clone()),
+                    source: Some(Box::new(AttachmentSource {
+                        provider: "KLIPY".into(),
+                        id: gif.id.clone(),
+                        page_url: gif.page_url.clone(),
+                    })),
+                };
+                if let Some(key) = attachment.preview_key() {
+                    self.request_fun_thumbnail(key);
+                }
+                attachment
+            }
+        };
+        let parts = vec![
+            Part::Attachment {
+                id: att_id,
+                attachment,
+            },
+            Part::Text {
+                id: new_id(),
+                text: String::new(),
+            },
+        ];
+        self.messages
+            .entry(chat_id.clone())
+            .or_default()
+            .push(Message {
+                id: message_id.clone(),
+                chat_id: chat_id.clone(),
+                role: Role::User,
+                sender: "user".into(),
+                status: MessageStatus::Queued,
+                turn: None,
+                decision: None,
+                subagent_id: None,
+                subagent_name: None,
+                handoff_messages: None,
+                notice: None,
+                worker: false,
+                job: None,
+                hidden: false,
+                agent_reply_to: None,
+                reactions: Default::default(),
+                in_reply_to: None,
+                routine_name: None,
+                sender_name: None,
+                sender_icon: None,
+                sender_handle: None,
+                sender_avatar: None,
+                sender_avatar_color: None,
+                mentions: Vec::new(),
+                reply_to: reply_to.clone(),
+                forwarded_from: None,
+                reply_ref: None,
+                asked_by_handle: None,
+                owner_handle: None,
+                usage: None,
+                return_contract: None,
+                waiting_user: false,
+                waiting_approval: false,
+                model: None,
+                effort: None,
+                created_at: now_ms(),
+                completed_at: None,
+                call_id: None,
+                activity: None,
+                pending: true,
+                parts,
+                hidden_parts: Vec::new(),
+                greeting: false,
+                preview: None,
+            });
+        if let MediaPick::Gif(gif) = &pick {
+            let query = self
+                .gif_results
+                .as_ref()
+                .map(|(q, _)| q.clone())
+                .unwrap_or_default();
+            self.command(ClientCommand::GifShare {
+                id: gif.id.clone(),
+                query,
+            });
+        }
+        self.command(ClientCommand::SendMedia {
+            chat_id: chat_id.clone(),
+            message_id,
+            pick,
+            reply_to,
+        });
+        cx.emit(AppEvent::TranscriptChanged { chat_id });
+        cx.notify();
+    }
+
+    /// Picker: ask the relay for GIFs matching `query` (empty = trending). The answer lands
+    /// in `gif_results`; an answer for an older query is dropped.
+    pub fn gif_search(&mut self, query: String, cx: &mut Context<Self>) {
+        let query = query.trim().to_owned();
+        if self
+            .gif_results
+            .as_ref()
+            .is_some_and(|(q, page)| *q == query && !matches!(page, GifPage::Failed))
+        {
+            return;
+        }
+        if self.gif_query_pending.as_deref() == Some(query.as_str()) {
+            return;
+        }
+        self.gif_query_pending = Some(query.clone());
+        self.gif_results = None;
+        self.command(ClientCommand::GifSearch { query, pos: None });
+        cx.notify();
+    }
+
+    /// Picker: the next page of the current GIF results, if there is one.
+    pub fn gif_more(&mut self, cx: &mut Context<Self>) {
+        let Some((
+            query,
+            GifPage::Items {
+                next: Some(pos), ..
+            },
+        )) = self.gif_results.clone()
+        else {
+            return;
+        };
+        if self.gif_query_pending.is_some() {
+            return;
+        }
+        self.gif_query_pending = Some(query.clone());
+        self.command(ClientCommand::GifSearch {
+            query,
+            pos: Some(pos),
+        });
+        cx.notify();
+    }
+
+    fn gif_results_arrived(&mut self, query: String, pos: Option<String>, page: GifPage) {
+        if self.gif_query_pending.as_deref() != Some(query.as_str()) {
+            return;
+        }
+        self.gif_query_pending = None;
+        match (pos, self.gif_results.take()) {
+            (Some(_), Some((q, GifPage::Items { mut items, next: _ }))) if q == query => {
+                if let GifPage::Items { items: more, next } = page {
+                    items.extend(more);
+                    self.gif_results = Some((query, GifPage::Items { items, next }));
+                } else {
+                    self.gif_results = Some((query, GifPage::Items { items, next: None }));
+                }
+            }
+            _ => self.gif_results = Some((query, page)),
+        }
+        if let Some((_, GifPage::Items { items, .. })) = &self.gif_results {
+            let keys: Vec<String> = items
+                .iter()
+                .map(|g| format!("{}{}", crate::model::URL_KEY_PREFIX, g.preview.url))
+                .collect();
+            for key in keys {
+                self.request_fun_thumbnail(key);
+            }
+        }
+    }
+
+    /// Picker: fetch the sticker-pack manifest once per session.
+    pub fn ensure_sticker_packs(&mut self, cx: &mut Context<Self>) {
+        if self.sticker_packs_requested {
+            return;
+        }
+        self.sticker_packs_requested = true;
+        self.command(ClientCommand::StickerPacks);
+        cx.notify();
+    }
+
+    /// Picker: fetch a sticker's or a GIF preview's bytes into the thumbnail cache
+    /// (`sticker:<pack>/<id>` / `url:<url>` keys; the sync layer routes them).
+    pub fn request_fun_thumbnail(&mut self, key: String) {
+        if !self.thumbnails_requested.insert(key.clone()) {
+            return;
+        }
+        self.command(ClientCommand::FetchThumbnail {
+            project_id: self.selected_project.clone().unwrap_or_default(),
+            key,
+        });
+    }
+
+    /// Picker: the raw bytes of a fetched sticker (`sticker:<pack>/<id>`), for a send.
+    pub fn sticker_bytes(&self, key: &str) -> Option<Arc<Vec<u8>>> {
+        self.sticker_raw.get(key).cloned()
+    }
+
     /// Guide: inject `text` into the agent's running turn instead of queuing a
     /// follow-up; `mentions` as for [`Self::send`].
     pub fn guide(
@@ -4694,6 +4978,7 @@ impl AppState {
                     kind: None,
                     title: None,
                     chart_part: None,
+                    url: None,
                     source: None,
                 };
                 if probe.is_image() {
@@ -4721,6 +5006,7 @@ impl AppState {
                     kind: None,
                     title: None,
                     chart_part: None,
+                    url: None,
                     source: None,
                 },
             });
@@ -4736,6 +5022,7 @@ impl AppState {
                     kind: Some(AttachmentKind::Audio),
                     title: None,
                     chart_part: None,
+                    url: None,
                     source: None,
                 },
             });
@@ -10817,9 +11104,12 @@ impl AppState {
                         }
                     }
                     Part::Attachment { attachment, .. }
-                        if attachment.kind() == AttachmentKind::Image =>
+                        if matches!(
+                            attachment.kind(),
+                            AttachmentKind::Image | AttachmentKind::Sticker
+                        ) =>
                     {
-                        attachment.blob_ref.clone()
+                        attachment.preview_key()
                     }
                     _ => None,
                 };

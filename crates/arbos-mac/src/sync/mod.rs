@@ -378,6 +378,16 @@ pub enum SyncEvent {
         key: String,
         bytes: Arc<Vec<u8>>,
     },
+    /// Picker (ARB-544): a page of GIF results for `query` (empty = trending), or why none.
+    GifResults {
+        query: String,
+        pos: Option<String>,
+        page: crate::model::GifPage,
+    },
+    /// Picker: the relay's sticker packs (`None` when the relay could not be reached).
+    StickerPacks {
+        packs: Option<Vec<crate::model::StickerPack>>,
+    },
     /// The site icon for the named links to `host` (relay `GET /link-icon?domain=`): a
     /// 64×64 PNG, or `None` when the site has none (the bubbles keep the placeholder).
     LinkIcon {
@@ -1069,10 +1079,31 @@ pub enum ClientCommand {
         key: String,
         save: bool,
     },
-    /// Fetch an image attachment's bytes for the inline thumbnail (F10).
+    /// Fetch an image attachment's bytes for the inline thumbnail (F10). Keys that start
+    /// with `url:` (a picked GIF) or `sticker:` (a relay-hosted sticker) are fetched
+    /// through the relay's picker endpoints instead of `/blob` (ARB-544).
     FetchThumbnail {
         project_id: Id,
         key: String,
+    },
+    /// Picker (ARB-544): one tap sends a sticker or a GIF as its own message.
+    SendMedia {
+        chat_id: Id,
+        message_id: Id,
+        pick: crate::model::MediaPick,
+        reply_to: Option<String>,
+    },
+    /// Picker: search the GIF provider through the relay (`q` empty = trending).
+    GifSearch {
+        query: String,
+        pos: Option<String>,
+    },
+    /// Picker: the relay's sticker-pack manifest.
+    StickerPacks,
+    /// Picker: tell the provider a GIF was sent (ranking signal; never an error).
+    GifShare {
+        id: String,
+        query: String,
     },
     /// Copy of a message: the full original bytes of every attachment in `keys` (blob
     /// slot `project_id`), answered together as `SyncEvent::CopyBlobs { request, .. }`
