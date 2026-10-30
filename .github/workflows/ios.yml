@@ -90,7 +90,7 @@ jobs:
         ${{ (github.event_name == 'workflow_dispatch' && inputs.upload) ||
             (github.event_name == 'push' && github.ref_name == 'main') }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # Heavy-job cap on the shared EC2 Mac (#1839): at most two of {gate Mac half, gate iOS half, TF
       # archive, Mac release} at a time; this job waits for a slot (bounded) and releases it at the end.
       - name: Heavy-job slot
@@ -110,7 +110,7 @@ jobs:
         id: build
         run: echo "number=$(date -u +%Y%m%d%H%M)" >> "$GITHUB_OUTPUT"
       - name: Swift package cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: apps/ios/Arbos/build/spm
           key: spm-${{ runner.os }}-${{ hashFiles('apps/ios/Arbos/Arbos.xcodeproj/project.pbxproj', 'apps/ios/Arbos/Arbos.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
@@ -149,7 +149,7 @@ jobs:
           export PATH="$HOME/.cargo/bin:$PATH"
           rustup show active-toolchain || rustup toolchain install
           rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         # The self-hosted Mac keeps its target dir; saving the cache cost minutes there (#1233).
         if: runner.environment != 'self-hosted'
         with:
@@ -246,7 +246,7 @@ jobs:
       # `release_published`). Best effort — TestFlight already has the build.
       - name: Relay admin token from 1Password
         if: env.UPLOAD == 'true' && env.HAVE_OP == 'true'
-        uses: 1password/load-secrets-action@v2
+        uses: 1password/load-secrets-action@581a835fb51b8e7ec56b71cf2ffddd7e68bb25e0 # v2
         with:
           export-env: true
         env:
@@ -275,7 +275,7 @@ jobs:
           fi
       - name: Keep the xcodebuild logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: xcodebuild-logs-${{ steps.build.outputs.number }}
           path: apps/ios/Arbos/build/xcodebuild-*.log
