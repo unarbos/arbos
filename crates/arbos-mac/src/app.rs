@@ -837,6 +837,9 @@ pub struct AppState {
     /// Chat-list column width (pt). Dragged on the right edge; persisted in
     /// `<config>/sidebar_width` ([feedback app-01M5MJ9Y91W9ZET71KTCE7PS65]).
     pub sidebar_width: f32,
+    /// Height of the call strip at the top of the chat column while a call is live
+    /// (`callview::strip_layout`); the handle under the strip drags it.
+    pub call_strip_height: f32,
     /// The running edge drag's state (`ui::sidebar_fit::EdgeDrag`).
     pub sidebar_edge_drag: crate::ui::sidebar_fit::EdgeDrag,
     /// Below [`NARROW_WINDOW`](crate::ui::theme::NARROW_WINDOW) the sidebar
@@ -1095,7 +1098,7 @@ pub struct ActiveCall {
     pub participants: Vec<CallParticipant>,
     pub local_video: Option<Arc<RenderImage>>,
     pub joined_at: u64,
-    /// Full call screen (true) or the slim bar under the header (false).
+    /// The call strip at the top of the chat column (true) or the slim bar (false).
     pub expanded: bool,
     /// One line about a problem (no mic, no camera, reconnecting).
     pub notice: Option<String>,
@@ -1328,6 +1331,13 @@ impl AppState {
             relay_link: (LinkState::Live, 0),
             rail_collapsed: crate::ui::theme::SidebarCollapsed::load(),
             sidebar_width: crate::ui::theme::SidebarWidth::load(),
+            // Rig: `ARBOS_CALL_STRIP_HEIGHT=<pt>` starts the strip at that height (the
+            // resized state, for screenshots without a pointer).
+            call_strip_height: std::env::var("ARBOS_CALL_STRIP_HEIGHT")
+                .ok()
+                .and_then(|v| v.trim().parse::<f32>().ok())
+                .map(|v| crate::ui::callview::strip_layout::clamp_height(v, 780.0))
+                .unwrap_or(crate::ui::callview::strip_layout::DEFAULT_HEIGHT),
             sidebar_edge_drag: crate::ui::sidebar_fit::EdgeDrag::default(),
             sidebar_overlay: false,
             details_open: None,
@@ -7322,6 +7332,17 @@ impl AppState {
         }
         self.sidebar_width = width;
         crate::ui::theme::SidebarWidth::save(width);
+        cx.notify();
+    }
+
+    /// Drag on the call strip's handle: the strip's height, already clamped by the caller
+    /// (`strip_layout::height_after_drag`). The sidebar is not involved: the strip lives in the
+    /// chat column only.
+    pub fn set_call_strip_height(&mut self, height: f32, cx: &mut Context<Self>) {
+        if (self.call_strip_height - height).abs() < 0.5 {
+            return;
+        }
+        self.call_strip_height = height;
         cx.notify();
     }
 
@@ -14280,6 +14301,40 @@ mod new_tab_scope_tests {
             Some(&space(SpaceKind::Project)),
             false
         ));
+    }
+}
+
+#[cfg(test)]
+mod call_strip_tests {
+    //! The call strip resizes inside the chat column; the sidebar width is a different
+    //! field that no call path touches (Jacob, 2026-10-23: the sidebar stays normal).
+
+    use super::*;
+
+    #[test]
+    fn the_strip_height_is_separate_from_the_sidebar_width() {
+        let strip = crate::ui::callview::strip_layout::DEFAULT_HEIGHT;
+        let sidebar = crate::ui::theme::SidebarWidth::clamp(300.0);
+        let next = crate::ui::callview::strip_layout::height_after_drag(strip, 60.0, 780.0);
+        // The same clamp the drag uses leaves the sidebar's own clamp untouched.
+        assert_eq!(next, strip + 60.0);
+        assert_eq!(crate::ui::theme::SidebarWidth::clamp(sidebar), sidebar);
+        // And an ActiveCall carries nothing about the sidebar: ending it only drops `my_call`.
+        let active = ActiveCall {
+            call: Call::default(),
+            status: CallStatus::Connected,
+            muted: false,
+            camera: false,
+            participants: Vec::new(),
+            local_video: None,
+            joined_at: 0,
+            expanded: true,
+            notice: None,
+            outgoing: false,
+            reachable: None,
+            agent_seeing: false,
+        };
+        assert!(active.expanded);
     }
 }
 
