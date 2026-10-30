@@ -7,7 +7,7 @@
 // always reply; neither ever does the other's job.
 //
 // 1. A swipe from the screen's left edge is the system's interactive pop: the screen
-    10|//    follows the finger, a release short of halfway cancels, UIKit drives the frames. Each
+//    follows the finger, a release short of halfway cancels, UIKit drives the frames. Each
 //    chat screen hides the system navigation bar and back button for its own chevron, and
 //    SwiftUI turns the pop gesture off with them — `NativePopEnabler` turns it back on and
 //    is its delegate (begins whenever the stack has something to pop to; keyboard open or
@@ -17,7 +17,7 @@
 //    empty space, the channel list) is also "back" (since 7d2d3797, 2026-10-16) — an animated
 //    pop, never from the composer bar (a drag there selects text or slides the mic) and never
 //    from the edge zone, which is the system's. Outside the transcript that is
-    20|//    `FullScreenBackHost`; inside it the transcript's own recognizer claims the rightward pan
+//    `FullScreenBackHost`; inside it the transcript's own recognizer claims the rightward pan
 //    beside the scroll pan (fc245a08d: a root recognizer never gets a horizontal pan that
 //    started in the scroll view). Both use `BackSwipe.fullScreenPops`, so "back" needs a
 //    deliberate 70 pt — a 40 pt flick does not pop.
@@ -27,7 +27,7 @@
 // 4. A swipe to the left that is NOT on a repliable message peeks the message times
 //    (iMessage) — date separators, system rows, the channel list, a channel's transcript.
 //
-    30// A rightward pan can never reply: the reply branch is only reachable from `dx < 0`. A
+// A rightward pan can never reply: the reply branch is only reachable from `dx < 0`. A
 // leftward pan can never go back: `fullScreenPops` requires `dx > 0`. That is the whole of
 // the "not interfering with each other" guarantee, and `BackSwipeTests` pins it.
 //
@@ -37,7 +37,7 @@
 // 6 pt and, being exclusive with everything, failed the system's edge pan before it could
 // begin: the finger-tracking pop was gone and "back" became a 40 pt threshold with an
 // animation that did not follow the finger (Jacob, 2026-10-28: "very buggy and not working").
-    40// The system pop had been on since 731cdec9 (2026-10-16) until #1985 removed its enabler.
+// The system pop had been on since 731cdec9 (2026-10-16) until #1985 removed its enabler.
 // 59ea0fecd then removed swipe-to-reply outright rather than re-pointing it, because the
 // reply it removed was a RIGHT swipe — the one that collided with going back. This file
 // re-points reply to the left, which is what that call was asking for.
