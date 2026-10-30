@@ -634,7 +634,8 @@ extension AppModel {
         await refreshServer(id)
     }
 
-    /// `arbos://join/<code>` (the site's invite page): join right away and land in the server.
+    /// `arbos://join/<code>` (the site's invite page), after its Join is confirmed
+    /// (`InviteLink` in `ArbosApp.swift`): join and land in the server.
     func joinFromLink(code: String) async {
         let code = code.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
         guard !code.isEmpty else { return }

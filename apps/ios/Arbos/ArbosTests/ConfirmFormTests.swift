@@ -15,6 +15,27 @@ final class ConfirmFormTests: XCTestCase {
         XCTAssertEqual(spec.cancel, "Cancel")
     }
 
+    /// An invite link is an authenticated act handed to the app by whoever sent the link,
+    /// so it asks first. Anything that is not a `join` / `join-group` link with a code is
+    /// not an invite at all.
+    func testAnInviteLinkAsksBeforeJoining() {
+        let group = InviteLink(url: URL(string: "arbos://join-group/abc123")!)
+        XCTAssertEqual(group?.kind, .group)
+        XCTAssertEqual(group?.code, "abc123")
+        XCTAssertEqual(InviteLink(url: URL(string: "arbos://join/xyz")!)?.kind, .server)
+        for raw in ["arbos://join", "arbos://join/", "arbos://join-group/",
+                    "arbos://connectors/callback", "arbos://auth/callback?code=x",
+                    "https://arbos.life/g/abc"] {
+            XCTAssertNil(InviteLink(url: URL(string: raw)!), "\(raw) is not an invite link")
+        }
+        let spec = InviteLink.confirm(group!)
+        XCTAssertEqual(spec.title, "Join this group?")
+        XCTAssertEqual(spec.buttons, ["Join", "Cancel"])
+        XCTAssertFalse(spec.destructive)
+        XCTAssertEqual(InviteLink.confirm(InviteLink(url: URL(string: "arbos://join/xyz")!)!).title,
+                       "Join this server?")
+    }
+
     func testAPlainConfirmIsNotRed() {
         XCTAssertFalse(BlockedState.unblockConfirm(handle: "sam").destructive)
         XCTAssertFalse(ConfirmSpec(title: "Share screen", action: "Choose what to share…", destructive: false).destructive)

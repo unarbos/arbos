@@ -3973,7 +3973,8 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// `arbos://join-group/<code>` (the site's group invite page): join and open the chat.
+    /// `arbos://join-group/<code>` (the site's group invite page), after its Join is
+    /// confirmed (`InviteLink` in `ArbosApp.swift`): join and open the chat.
     func joinGroupFromLink(code: String) async {
         let code = code.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
         guard !code.isEmpty else { return }

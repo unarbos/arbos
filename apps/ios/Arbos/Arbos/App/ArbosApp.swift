@@ -16,6 +16,42 @@ struct ArbosApp: App {
     }
 }
 
+/// An `arbos://join/<code>` or `arbos://join-group/<code>` the platform delivered.
+///
+/// Nothing about the delivery says who asked for it: a web page, another app, or a link in
+/// somebody's message can send the app one of these, and joining is an authenticated act
+/// with a lasting consequence — the person lands in a server or group with whoever minted
+/// the code, visible to everyone else in it. So the link only ever fills in this question;
+/// the join is the Join button.
+struct InviteLink: Equatable {
+    enum Kind { case server, group }
+
+    let kind: Kind
+    let code: String
+
+    init?(url: URL) {
+        guard url.scheme == AuthEndpoints.callbackScheme else { return nil }
+        switch url.host {
+        case "join": kind = .server
+        case "join-group": kind = .group
+        default: return nil
+        }
+        let code = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        guard !code.isEmpty else { return nil }
+        self.code = code
+    }
+
+    static func confirm(_ invite: InviteLink) -> ConfirmSpec {
+        let what = invite.kind == .group ? "group" : "server"
+        return ConfirmSpec(
+            title: "Join this \(what)?",
+            message: "A link asked Arbos to join a \(what). Everyone in it will see you joined, so only join if you trust whoever sent the link.",
+            action: "Join",
+            destructive: false
+        )
+    }
+}
+
 struct RootView: View {
     @EnvironmentObject private var model: AppModel
     @ObservedObject private var push = PushManager.shared
@@ -24,6 +60,8 @@ struct RootView: View {
     @Environment(\.colorScheme) private var systemScheme
     @Environment(\.scenePhase) private var scenePhase
     @State private var showPrimer = false
+    /// An invite link the platform handed us, waiting for its Join.
+    @State private var pendingInvite: InviteLink?
 
     private var theme: Theme {
         Theme.resolve(appearance: model.appearance, surface: model.surface, systemDark: systemScheme == .dark, textScale: model.textScale)
@@ -150,20 +188,25 @@ struct RootView: View {
         }
         // Safari / Mac-style connector OAuth: relay redirects to arbos://connectors/callback.
         .onOpenURL { url in
-            // Invite links (D88): arbos://join/<code> — what arbos.life/s/<code> hands to the app.
-            if url.scheme == "arbos", url.host == "join" {
-                let code = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                Task { await model.joinFromLink(code: code) }
-                return
-            }
-            // Group invite links: arbos://join-group/<code> — what arbos.life/g/<code> hands to the app.
-            if url.scheme == "arbos", url.host == "join-group" {
-                let code = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                Task { await model.joinGroupFromLink(code: code) }
+            // Invite links (D88): arbos://join/<code> and arbos://join-group/<code> — what
+            // arbos.life/s/<code> and /g/<code> hand to the app. Anything can send the app one
+            // of these (a web page, another app, a link in a message), so the join waits for
+            // the Join button in `InviteLink.confirm` — joining puts the person in a room with
+            // whoever minted the code.
+            if let invite = InviteLink(url: url) {
+                pendingInvite = invite
                 return
             }
             guard AuthEndpoints.isConnectorCallback(url) else { return }
             model.refreshConnectors()
+        }
+        .confirm(item: $pendingInvite, spec: InviteLink.confirm) { invite in
+            Task {
+                switch invite.kind {
+                case .server: await model.joinFromLink(code: invite.code)
+                case .group: await model.joinGroupFromLink(code: invite.code)
+                }
+            }
         }
     }
 
