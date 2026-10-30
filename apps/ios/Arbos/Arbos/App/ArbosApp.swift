@@ -36,9 +36,9 @@ struct InviteLink: Equatable {
         case "join-group": kind = .group
         default: return nil
         }
-        let code = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
-        guard !code.isEmpty else { return nil }
-        self.code = code
+        let trimmed = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        guard !trimmed.isEmpty else { return nil }
+        code = trimmed
     }
 
     static func confirm(_ invite: InviteLink) -> ConfirmSpec {
