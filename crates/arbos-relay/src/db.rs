@@ -2738,6 +2738,22 @@ impl Db {
         })
     }
 
+    /// The helpers paired by one user's devices. `local_devices` has no owner column, so the
+    /// owner is the `devices.user_id` of the row the helper paired as; a helper whose device row
+    /// is gone belongs to nobody and is listed for nobody.
+    pub fn local_devices_of_user(&self, user_id: &str) -> Result<Vec<LocalDevice>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {} FROM local_devices WHERE device_id IN
+                   (SELECT id FROM devices WHERE user_id = ?1)
+                 ORDER BY first_seen",
+                Self::LOCAL_COLS
+            ))?;
+            let rows = st.query_map(params![user_id], Self::row_to_local)?;
+            rows.collect()
+        })
+    }
+
     pub fn local_device(&self, device_id: &str) -> Result<Option<LocalDevice>> {
         self.with(|c| {
             c.query_row(

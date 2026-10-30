@@ -162,7 +162,12 @@ pub async fn exec(
     if !state.allows(&principal, &project_id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
-    if !matches!(principal, Principal::Box { .. } | Principal::Admin) {
+    // The admin is refused outright. It has no legitimate reason to run a command or read a file
+    // on someone's personal computer, and the approval the helper relies on is checked by agentd
+    // (`arbos-agentd/src/local.rs`) rather than here — so an admin caller would reach a shell with
+    // no card ever shown. The box-token path still carries that weakness; this closes the half
+    // that an operator credential opens.
+    if !matches!(principal, Principal::Box { .. }) {
         return Err((StatusCode::FORBIDDEN, "box token required".into()));
     }
     if state.db.project(&project_id).map_err(internal)?.is_none() {
@@ -216,8 +221,14 @@ pub async fn exec(
 }
 
 /// `GET /local/devices` — device tokens (Settings → This Mac) and box tokens (`local_devices` tool).
-pub async fn list(State(state): State<AppState>, _principal: Principal) -> ApiResult {
-    let devices = state.db.local_devices().map_err(internal)?;
+///
+/// Scoped to the caller's own user: `local_devices` has no owner column, so ownership is the
+/// `devices.user_id` of the row the helper paired as. The admin sees every helper.
+pub async fn list(State(state): State<AppState>, principal: Principal) -> ApiResult {
+    let devices = match principal.user_id() {
+        Some(user_id) => state.db.local_devices_of_user(user_id).map_err(internal)?,
+        None => state.db.local_devices().map_err(internal)?,
+    };
     let online = state.local_conns.lock().await;
     let items: Vec<LocalDeviceDto> = devices
         .into_iter()
@@ -298,4 +309,96 @@ pub async fn delete(
         StatusCode::NOT_FOUND
     }
     .into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::people::tests_support::{person, project_of};
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+    use arbos_core::ids::ulid;
+
+    async fn body_json(r: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(r.into_body(), 1 << 22)
+            .await
+            .expect("body");
+        serde_json::from_slice(&bytes).expect("json body")
+    }
+
+    /// Pair a helper as one of `user`'s devices and mark it connected.
+    fn helper_of(state: &AppState, user: &str, device_id: &str) {
+        state
+            .db
+            .insert_device(device_id, "device", &ulid(), user, "github")
+            .expect("device row");
+        state
+            .db
+            .local_device_hello(device_id, "host", "macos", "/Users/x")
+            .expect("hello");
+    }
+
+    /// The admin token must not reach a command or a file on anyone's personal computer. The
+    /// approval the helper relies on is checked by agentd, not here, so an admin caller would
+    /// reach a shell with no card ever shown.
+    #[tokio::test]
+    async fn exec_refuses_the_admin() {
+        let state = test_state(AuthMode::Github);
+        let (user, _) = person(&state, 901);
+        helper_of(&state, &user, "ldev_admin");
+        let project = project_of(&state, &user, "p");
+
+        let op: LocalOp = serde_json::from_value(json!({ "op": "run", "cmd": "id" })).unwrap();
+        let r = exec(
+            State(state.clone()),
+            Principal::Admin,
+            Path((project, "ldev_admin".to_owned())),
+            Json(op),
+        )
+        .await;
+        let (status, _) = match r {
+            Ok(_) => panic!("the admin reached exec"),
+            Err((s, m)) => (s, m),
+        };
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    /// `GET /local/devices` listed every user's helpers to any caller, which is the enumeration
+    /// step of the exec chain: hostname, home directory and device id for machines the caller has
+    /// nothing to do with.
+    #[tokio::test]
+    async fn list_shows_only_the_callers_own_helpers() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 902);
+        let (bob, _) = person(&state, 903);
+        helper_of(&state, &alice, "ldev_alice");
+        helper_of(&state, &bob, "ldev_bob");
+
+        let r = list(State(state.clone()), alice_dev).await.expect("list");
+        let body = body_json(r).await;
+        let ids: Vec<&str> = body["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .map(|i| i["device_id"].as_str().expect("device_id"))
+            .collect();
+        assert_eq!(ids, vec!["ldev_alice"], "bob's helper must not be listed");
+    }
+
+    /// The operator still sees every helper: it has no user of its own, so there is nothing to
+    /// scope it to, and the fleet views depend on the full list.
+    #[tokio::test]
+    async fn list_is_unscoped_for_the_admin() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 904);
+        let (bob, _) = person(&state, 905);
+        helper_of(&state, &alice, "ldev_a");
+        helper_of(&state, &bob, "ldev_b");
+
+        let r = list(State(state.clone()), Principal::Admin)
+            .await
+            .expect("list");
+        let body = body_json(r).await;
+        assert_eq!(body["items"].as_array().expect("items").len(), 2);
+    }
 }

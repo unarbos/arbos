@@ -1219,7 +1219,19 @@ fn skill_json_matches_fixture() {
 #[tokio::test]
 async fn local_devices_match_fixture() {
     let state = test_state(AuthMode::Github);
-    let (_, device) = person(&state, 503);
+    let (user, device) = person(&state, 503);
+    // The listing is scoped to the caller's own user, so the helper pairs as one of their
+    // devices. The generic name "device" is what makes the row take the hostname.
+    state
+        .db
+        .insert_device(
+            "ldev_fixture",
+            "device",
+            &arbos_core::ids::ulid(),
+            &user,
+            "github",
+        )
+        .unwrap();
     state
         .db
         .local_device_hello("ldev_fixture", "fixture-host", "macos", "/Users/fixture")
