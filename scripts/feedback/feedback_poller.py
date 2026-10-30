@@ -876,6 +876,9 @@ class GitHub:
         for job in jobs:
             if job.get("conclusion") != "failure":
                 continue
+            # Deliberately NOT job_log(): this fetch fails on every job (the token is refused by the blob store
+            # behind the redirect), so the known-red waiver has never waived a run. Repairing it would switch on
+            # gate policy nobody has reviewed; that is Jacob's decision on its own (coordinator, 2026-10-30).
             try:
                 _status, _hdrs, body = http("GET", f"{GITHUB_API}/repos/{self.repo}/actions/jobs/{job['id']}/logs",
                                             headers=self.h, timeout=120)
