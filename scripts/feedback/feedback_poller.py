@@ -53,8 +53,8 @@ Config comes from the environment (systemd EnvironmentFile=/etc/arbos/feedback.e
   FEEDBACK_DEDUPE_DAYS (7), FEEDBACK_AGENT_TIMEOUT_MIN (75), FEEDBACK_SHIP_TIMEOUT_MIN (90)
   FEEDBACK_STALL_CHANNEL (log): where the release-queue stall guard flags a frozen merge queue —
       `log` posts nothing (log line + audit event only), `issue` adds one `release-queue-stalled` ops
-      issue per stall, `off` disables the detection. FEEDBACK_STALL_RELEASE_AFTER_MIN (5),
-      FEEDBACK_STALL_GATE_AFTER_MIN (20): how long each stall shape must hold before it is flagged.
+      issue per stall, `off` disables the detection. FEEDBACK_STALL_RELEASE_AFTER_MIN (20 on `issue`, else 5)
+      and FEEDBACK_STALL_GATE_AFTER_MIN (20): how long each stall shape must hold before it is flagged.
 
 Only the standard library plus `cryptography` (for the ES256 App Store Connect token).
 
@@ -243,7 +243,8 @@ class Config:
     # default) writes the log line and the audit event and posts nothing, so landing the guard cannot comment
     # anywhere; `issue` adds the one `release-queue-stalled` ops issue per stall. The two waits differ because
     # the two detections differ in certainty: a concluded failed/cancelled release is conclusive, a red gate
-    # may be a flake somebody is already re-running.
+    # may be a flake somebody is already re-running. The release wait also rises with the channel (5 → 20 on
+    # `issue`) so that switching the channel on cannot leave the short wait behind by accident; see from_env.
     stall_channel: str
     stall_release_after_min: int
     stall_gate_after_min: int
@@ -298,6 +299,7 @@ class Config:
                     topics.append((int(num), pattern.strip()))
         p8_b64 = env.get("ASC_KEY_P8_B64", "")
         pem = base64.b64decode(p8_b64) if p8_b64 else b""
+        stall_channel = env.get("FEEDBACK_STALL_CHANNEL", "log").strip().lower()
         return Config(
             state_dir=state_dir,
             kill_file=Path(env.get("FEEDBACK_KILL_FILE", "/etc/arbos/feedback.disabled")),
@@ -335,8 +337,14 @@ class Config:
             rust_gate_timeout_s=int(env.get("RUST_GATE_TIMEOUT_S", "3600")),
             ship_timeout_min=int(env.get("FEEDBACK_SHIP_TIMEOUT_MIN", "90")),
             operator=env.get("FEEDBACK_OPERATOR", "bc-7eefe9bf"),
-            stall_channel=env.get("FEEDBACK_STALL_CHANNEL", "log").strip().lower(),
-            stall_release_after_min=int(env.get("FEEDBACK_STALL_RELEASE_AFTER_MIN", "5")),
+            stall_channel=stall_channel,
+            # Owner decision 2026-10-30: the release stall waits 20 min once the guard FILES issues, not 5.
+            # release.yml's `*/15` cron backstop can take a quarter of an hour to START, so a 5-minute wait
+            # would have the first flags announce releases that go on to fix themselves — and a guard that
+            # cries wolf gets muted, which is worse than no guard. While nothing is posted an early log line
+            # is free, so 5 stands there. Setting the variable overrides both.
+            stall_release_after_min=int(env.get("FEEDBACK_STALL_RELEASE_AFTER_MIN")
+                                        or (20 if stall_channel == "issue" else 5)),
             stall_gate_after_min=int(env.get("FEEDBACK_STALL_GATE_AFTER_MIN", "20")),
         )
 

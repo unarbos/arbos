@@ -371,5 +371,29 @@ class StallGuardTest(unittest.TestCase):
                          "the only writes are the ops issues")
 
 
+class StallConfigTest(unittest.TestCase):
+    """The grace periods Config.from_env hands the guard. The release wait rises with the channel so that
+    switching the guard from logging to filing issues cannot leave the short wait behind by accident."""
+
+    def from_env(self, **env: str) -> fp.Config:
+        with mock.patch.dict("os.environ", env, clear=True):
+            return fp.Config.from_env()
+
+    def test_logging_only_waits_five_minutes_on_a_dead_release(self) -> None:
+        cfg = self.from_env()
+        self.assertEqual(cfg.stall_channel, "log")
+        self.assertEqual(cfg.stall_release_after_min, 5)
+        self.assertEqual(cfg.stall_gate_after_min, 20)
+
+    def test_filing_issues_waits_twenty_so_the_cron_backstop_gets_its_period(self) -> None:
+        cfg = self.from_env(FEEDBACK_STALL_CHANNEL="issue")
+        self.assertEqual(cfg.stall_release_after_min, 20)
+
+    def test_the_variable_still_overrides_both(self) -> None:
+        self.assertEqual(self.from_env(FEEDBACK_STALL_CHANNEL="issue",
+                                       FEEDBACK_STALL_RELEASE_AFTER_MIN="45").stall_release_after_min, 45)
+        self.assertEqual(self.from_env(FEEDBACK_STALL_RELEASE_AFTER_MIN="1").stall_release_after_min, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
