@@ -162,6 +162,119 @@ def touches_ios(files: list[str] | None) -> bool:
     return any(f.startswith(IOS_PATH_PREFIXES) or f == ".github/workflows/ios.yml" for f in files or [])
 
 
+# ---------------------------------------------------------------- is the fix in a build's tree
+
+# "The build's commit contains the fix commit" is ancestry only: a fix merged and then reverted on main before any build
+# carried it is still an ancestor of every later tag, and was announced "Fixed in vX" for a tree without it (#2098 /
+# #2100: merges 4aeb03b0 / ff37cbcb, reverted by 491ec9c2 / 8905386b with free-text messages no revert-message scan
+# matches). So a build is credited with a fix only when that build's files still hold the fix's diff (`fix_presence`).
+FIX_PRESENT, FIX_REVERTED, FIX_UNKNOWN = "present", "reverted", "unknown"
+
+
+def patch_hunks(patch: str) -> list[list[tuple[str, str]]]:
+    """A unified diff body (GitHub's `files[].patch`) → hunks of (op, line), op in ' ', '-', '+'."""
+    hunks: list[list[tuple[str, str]]] = []
+    for line in patch.split("\n"):
+        if line.startswith("@@"):
+            hunks.append([])
+        elif hunks and line[:1] in (" ", "-", "+"):
+            hunks[-1].append((line[0], line[1:]))
+    return [h for h in hunks if any(op != " " for op, _ in h)]
+
+
+def _has_block(lines: list[str], block: list[str]) -> bool:
+    n = len(block)
+    if n == 0 or n > len(lines):
+        return False
+    first = block[0]
+    return any(lines[i] == first and lines[i:i + n] == block for i in range(len(lines) - n + 1))
+
+
+def _trim_context(hunk: list[tuple[str, str]], k: int) -> list[tuple[str, str]]:
+    changed = [i for i, (op, _) in enumerate(hunk) if op != " "]
+    return hunk[max(0, changed[0] - k):changed[-1] + 1 + k]
+
+
+def hunk_presence(hunk: list[tuple[str, str]], lines: list[str]) -> str:
+    """Whether one hunk of the fix is in `lines` (a build's copy of the file):
+    present  — the fixed lines (context + added) are there and the original lines (context + removed) are not;
+    reverted — the original lines are back and the fixed lines are gone;
+    unknown  — both are found (the block repeats), or neither is at any context width.
+    Like `patch` fuzz, a hunk found with neither image is retried with less surrounding context (a later fix edited
+    the lines next to it), down to the changed lines alone. One image that is a sub-block of the other (an append at
+    the end of a file: the original lines are the fixed lines' head) is no evidence either way."""
+    width = len(hunk)
+    for k in (width, 2, 1, 0):
+        h = _trim_context(hunk, k)
+        post = [t for op, t in h if op != "-"]
+        pre = [t for op, t in h if op != "+"]
+        fixed = _has_block(lines, post) and not _has_block(pre, post)
+        original = _has_block(lines, pre) and not _has_block(post, pre)
+        if fixed and not original:
+            return FIX_PRESENT
+        if original and not fixed:
+            return FIX_REVERTED
+        if fixed and original:
+            return FIX_UNKNOWN
+        if not post:
+            return FIX_PRESENT  # a pure deletion whose removed lines are nowhere in the file
+    return FIX_UNKNOWN
+
+
+def file_presence(change: dict, at_ref: dict | None) -> tuple[list[str], str]:
+    """One `files[]` entry of the fix's diff (GitHub compare / commit) against the build's copy of that path: one
+    verdict per hunk, and a reason when any is not present. `at_ref` is {"sha": blob sha, "text": content or None},
+    or None when the path does not exist in the build."""
+    path, status = change.get("filename") or "", change.get("status") or ""
+    patch = change.get("patch")
+    hunks = patch_hunks(patch) if patch else []
+    n = max(1, len(hunks))
+    if status == "removed":
+        return ([FIX_PRESENT], "") if at_ref is None else ([FIX_REVERTED], f"{path}: deleted by the fix, back in the build")
+    if at_ref is None:
+        # A revert deletes a file the fix added; a file the fix only edited and that is gone was moved or rewritten.
+        if status == "added":
+            return [FIX_REVERTED] * n, f"{path}: added by the fix, missing from the build"
+        return [FIX_UNKNOWN] * n, f"{path}: edited by the fix, missing from the build"
+    if change.get("sha") and at_ref.get("sha") == change["sha"]:
+        return [FIX_PRESENT] * n, ""  # byte-identical to the fix's version
+    if not hunks or at_ref.get("text") is None:
+        # Binary, or a diff GitHub would not render: only the identical blob above proves it.
+        return [FIX_UNKNOWN], f"{path}: differs from the fix's version and has no line diff to check"
+    lines = at_ref["text"].split("\n")
+    verdicts = [hunk_presence(h, lines) for h in hunks]
+    if FIX_REVERTED in verdicts:
+        return verdicts, f"{path}: {verdicts.count(FIX_REVERTED)} of {n} hunk(s) back to the pre-fix lines"
+    if FIX_UNKNOWN in verdicts:
+        return verdicts, f"{path}: {verdicts.count(FIX_UNKNOWN)} of {n} hunk(s) neither fixed nor original in the build"
+    return verdicts, ""
+
+
+def fix_presence(changes: list[dict], read: Any) -> tuple[str, list[str]]:
+    """(verdict, reasons) for a whole fix, from the verdicts of all its hunks:
+    reverted — any hunk is back to its pre-fix lines (a revert, a partial revert, a merge resolution that undid it);
+    present  — no hunk reverted and more than half of them found as fixed, or the fix changed no files of its own;
+    unknown  — otherwise: too much of the fix was rewritten since to tell.
+    A revert restores the pre-fix lines of every hunk it touches, so it shows as `reverted` unless the same lines were
+    edited again before the build; a later follow-up that rewrote a few of the fix's lines leaves those hunks unknown
+    and the rest present. Over the 1,099 loop merges of 2026-10-16…10-29, against the first release that carried each:
+    1,080 present (51 of them with such rewritten hunks), 14 reverted (#2098 and #1058 among them), 5 unknown."""
+    if not changes:
+        return FIX_PRESENT, ["the fix changed no files of its own; nothing a revert could undo"]
+    verdicts: list[str] = []
+    reasons: list[str] = []
+    for change in changes:
+        vs, why = file_presence(change, read(change.get("filename") or ""))
+        verdicts += vs
+        if why:
+            reasons.append(why)
+    if FIX_REVERTED in verdicts:
+        return FIX_REVERTED, reasons
+    if verdicts.count(FIX_PRESENT) * 2 > len(verdicts):
+        return FIX_PRESENT, reasons
+    return FIX_UNKNOWN, reasons
+
+
 def parse_iso(s: str) -> dt.datetime:
     s = s.strip()
     if s.endswith("Z"):
@@ -460,6 +573,7 @@ class GitHub:
         self._feedback_refs: dict[str, str] | None = None
         self._releases: list[dict] | None = None
         self._contains: dict[tuple[str, str], bool] = {}
+        self._files_at: dict[tuple[str, str], dict | None] = {}
         self._login: str | None = None
 
     @staticmethod
@@ -854,6 +968,39 @@ class GitHub:
             if self.contains(tag, sha):
                 return r
         return None
+
+    def file_at(self, ref: str, path: str) -> dict | None:
+        """{"sha": blob sha, "text": content, or None above the contents API's 1 MB} of `path` at `ref`; None when
+        the path does not exist there. Memoised per process (one tick)."""
+        key = (ref, path)
+        if key not in self._files_at:
+            try:
+                doc = self.repo_api("GET", f"/contents/{urllib.parse.quote(path)}?ref={urllib.parse.quote(ref, safe='')}")
+            except HttpError as e:
+                if e.status != 404:
+                    raise
+                doc = None
+            if doc is None or isinstance(doc, list) or doc.get("type") != "file":
+                self._files_at[key] = None
+            else:
+                text = base64.b64decode(doc["content"]).decode("utf-8", "replace") if doc.get("encoding") == "base64" else None
+                self._files_at[key] = {"sha": doc.get("sha"), "text": text}
+        return self._files_at[key]
+
+    def fix_changes(self, fid: str, st: dict) -> list[dict]:
+        """The `files[]` (with patches) of what the item's fix changed on main: the net diff of its own merge commit
+        (every commit of the branch, as integrated), or the fix commit's own diff when the merge is not the item's
+        alone (an integration tree of several fixes) or brought nothing (a follow-up whose change was already on
+        main)."""
+        merge = st.get("merge_sha")
+        if merge:
+            doc = self.commit(merge)
+            parents = doc.get("parents") or []
+            if len(parents) > 1 and f"[feedback {fid}]" in ((doc.get("commit") or {}).get("message") or ""):
+                files = self.compare(parents[0]["sha"], merge).get("files") or []
+                if files:
+                    return files
+        return self.commit(st["commit"]).get("files") or []
 
 
 # ---------------------------------------------------------------- Cursor
@@ -3635,6 +3782,8 @@ class Loop:
         lb = self.asc.build_state(number) if number else None
         if not (lb and lb.get("processingState") == "VALID"):
             return False
+        if not self.build_has_fix(fid, st, later["head_sha"], f"TestFlight {number}"):
+            return False
         old = st.get("testflight_build")
         st.update(testflight_build=number, ios_run=later["html_url"], ios_uploaded_at=later["updated_at"],
                   testflight_ready_at=iso(), ios_superseded_by=later["head_sha"], ios_done=True)
@@ -3663,6 +3812,46 @@ class Loop:
         st["status"] = "handed_off"
         self.store.save_state(fid, st)
         log(f"[{fid}] {what} red on main after the merge; back to handed_off for the owner's repair")
+
+    FIX_CHECKS_KEPT = 8
+
+    def build_has_fix(self, fid: str, st: dict, ref: str, what: str) -> bool | None:
+        """Whether the build made from `ref` (a release tag, or a run's head commit) still has the item's fix in its
+        files — not merely the fix commit among its ancestors (`fix_presence`). Asked only when a build is first
+        credited with the fix, so a fix that shipped and was reverted later is a regression (reopen), not a hold.
+        False holds the item at `pushed` without a ship, a close or a comment: one log line and event per build, and
+        `status` lists it for the operator. None (falsy) when GitHub could not be read; asked again next tick.
+        The verdict per build is kept in `fix_checks`: a tag's tree does not change."""
+        commit = st.get("commit") or ""
+        if not ref or ref in (commit, st.get("merge_sha")):
+            return True
+        checks = st.setdefault("fix_checks", {})
+        listed = set(st.get("reverted") or [])
+        if listed & {commit, st.get("merge_sha")}:
+            verdict, why = FIX_REVERTED, ["the fix commit is on the item's `reverted` list"]
+        elif ref in checks:
+            verdict, why = checks[ref]["verdict"], checks[ref].get("why") or []
+        else:
+            try:
+                verdict, why = fix_presence(self.gh.fix_changes(fid, st), lambda path: self.gh.file_at(ref, path))
+            except HttpError as e:
+                log(f"[{fid}] fix check against {what} ({ref[:12]}): GitHub {e.status}; asked again next tick")
+                return None
+            checks[ref] = {"verdict": verdict, "why": why[:6], "what": what, "at": iso()}
+            for old in sorted(checks, key=lambda k: checks[k].get("at") or "")[:-self.FIX_CHECKS_KEPT]:
+                checks.pop(old, None)
+        if verdict == FIX_PRESENT:
+            if st.pop("fix_held", None):
+                self.store.event(fid, "fix_in_build", ref=ref, what=what)
+            self.store.save_state(fid, st)
+            return True
+        if (st.get("fix_held") or {}).get("ref") != ref:
+            st["fix_held"] = {"ref": ref, "what": what, "verdict": verdict, "why": why[:6], "at": iso()}
+            self.store.event(fid, "fix_not_in_build", ref=ref, what=what, verdict=verdict, why=why[:6])
+            log(f"[{fid}] {what} carries {commit[:8]} by ancestry but its files do not have the fix ({verdict}: "
+                f"{'; '.join(why[:3]) or '—'}); not shipped, not closed — held for the operator")
+        self.store.save_state(fid, st)
+        return False
 
     def check_ship(self, fid: str, st: dict) -> None:
         sha = st["commit"]
@@ -3724,6 +3913,8 @@ class Loop:
                 ios = None
         if st.get("expects_ios") and ios and ios["status"] == "completed" and not st.get("ios_done"):
             if ios["conclusion"] == "success":
+                if not self.build_has_fix(fid, st, ios["head_sha"], f"the iOS build {ios['html_url']}"):
+                    return
                 prefix = next((m.group(1) for a in self.gh.run_artifacts(ios["id"])
                                for m in [re.match(r"xcodebuild-logs-(\d{12,18})", a["name"])] if m), None)
                 number = self.resolve_build_number(prefix, ios["id"]) if prefix else None
@@ -3775,6 +3966,8 @@ class Loop:
                 # is fine now (the follow-up or someone else repaired it); ship with that build.
                 later = self.gh.later_ios_build(sha, since)
                 if later:
+                    if not self.build_has_fix(fid, st, later["head_sha"], f"the iOS build {later['html_url']}"):
+                        return
                     st["ios_superseded_by"] = later["head_sha"]
                     prefix = next((m.group(1) for a in self.gh.run_artifacts(later["id"])
                                    for m in [re.match(r"xcodebuild-logs-(\d{12,18})", a["name"])] if m), None)
@@ -3847,6 +4040,8 @@ class Loop:
                             self.store.save_state(fid, st)
                             log(f"[{fid}] Release run green ({rel['html_url']}) but no published release carries {sha[:8]} yet; waiting")
                         return
+                if not self.build_has_fix(fid, st, edge or built, f"Mac release {edge}" if edge else f"the Release run {rel['html_url']}"):
+                    return
                 st.update(release_done=True, release_run=rel["html_url"], edge_release=edge, release_at=rel["updated_at"])
                 self.store.event(fid, "edge_released", release=edge, run=rel["html_url"])
                 self.gh.comment(st["issue"], f"Mac release: **{edge or '?'}** ({rel['html_url']}).")
@@ -3893,6 +4088,8 @@ class Loop:
         if ios_ok and mac_ok and (st.get("expects_ios") or st.get("expects_ci")):
             self.ship(fid, st)
             return
+        if st.get("fix_held"):
+            return  # a build carries the commit but not the fix: the operator's call, never a timed-out "nothing shipped"
         # The ship clock pauses while a carrying run exists (coordinator, 2026-10-27 17:32): the budget is for builds
         # that never happen, not for the single Mac runner's queue. `ship_paused_min` is the time already spent
         # under a carrier; `ship_pause_started` marks a pause in progress. The clock resumes only when the last
@@ -3967,6 +4164,8 @@ class Loop:
                 if mac_ok:
                     self.ship(fid, st)
                     return
+            if st.get("fix_held"):
+                return
             # The carrying run may have flipped green in the same second the budget ran out (#1488, 2026-10-23
             # 15:0x: failed "nothing shipped" while its TestFlight run had just completed): a successful run
             # that contains the fix means the build exists and the ship checks adopt it on a later tick. Keep
@@ -4107,6 +4306,8 @@ class Loop:
                 carrying = self.gh.release_carrying(commit, min(filter(None, [st.get("commit_date"), st.get("pushed_at")]), default=""), "stable")
                 tag = carrying["tag_name"] if carrying else None  # newest stable release that carries the fix
             edge = st.get("edge_release")
+            if tag and tag != edge and ((st.get("fix_checks") or {}).get(tag) or {}).get("verdict") != FIX_PRESENT:
+                tag = None  # carries the commit by ancestry only; name the release whose files were checked
             if tag and edge and edge != tag and edge.startswith("edge-"):
                 parts.append(f"Mac {tag} ({edge})")
             elif tag or (edge and not edge.startswith("edge-")):
@@ -5169,6 +5370,13 @@ class Loop:
                   + ", ".join(f"{k} {v}" for k, v in sorted(by.items())) + " — `arbos-feedback unfreeze` lifts it")
         self.print_gate_queue(cur)
         self.print_deploy_lane()
+        held_fix = [(f, s) for f in self.store.items() for s in [self.store.state(f)] if s.get("status") == "pushed" and s.get("fix_held")]
+        if held_fix:
+            print(f"FIX NOT IN ITS BUILD ({len(held_fix)}): the build carries the commit by ancestry, not the fix in its files — not shipped, "
+                  "not closed; decide each (re-land, supersede, or close by hand):")
+            for f, s in held_fix:
+                h = s["fix_held"]
+                print(f"  {f} #{s.get('issue')} {h.get('what')}: {h.get('verdict')} — {'; '.join(h.get('why') or []) or '—'}")
         broken = cur.get("main_ios_tests_broken")
         if broken:
             print(f"MAIN iOS UNIT TESTS BROKEN at {broken.get('main')} since {broken.get('since')} (gate {broken.get('run')}); branches are not blamed — route the fix: "
