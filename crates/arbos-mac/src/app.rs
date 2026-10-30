@@ -19,7 +19,7 @@ use crate::model::SpaceKind;
 use crate::model::{
     add_members_plan, added_line, call_ended_line, created_group, reachable_line,
     reconcile_optimistic_notices, trace_rows, AccountView, Call, CallEnded, CallKind, CallMissed,
-    MembershipNotice, NoticeSubject, OptimisticNotice, Person, Reachable, Sender, Voice,
+    GroupAdd, MembershipNotice, NoticeSubject, OptimisticNotice, Person, Reachable, Sender, Voice,
 };
 use crate::model::{
     new_id, now_ms, Attachment, AttachmentKind, AttachmentSource, BoxReport, BoxState, ChannelSel,
@@ -948,6 +948,8 @@ pub struct AppState {
     pub read_receipts: bool,
     /// Settings → Chat → Link previews (this Mac).
     pub link_previews: bool,
+    /// Settings → Privacy: who may add me to a people group (on the relay, every device).
+    pub group_add: GroupAdd,
     /// People-chat read receipts: chat id → (peer handle → last seen message id).
     pub message_receipts: HashMap<Id, HashMap<String, Id>>,
     /// Last presence frame seen per handle (ms): "online" while fresh.
@@ -1379,6 +1381,7 @@ impl AppState {
                 crate::ui::link_card::set_enabled(on);
                 on
             },
+            group_add: GroupAdd::default(),
             message_receipts: HashMap::new(),
             presence_seen: HashMap::new(),
             notify_prompt_answered: false,
@@ -1910,6 +1913,10 @@ impl AppState {
                 if let Some(chat_id) = self.active_chat_id() {
                     cx.emit(AppEvent::TranscriptChanged { chat_id });
                 }
+                cx.notify();
+            }
+            SyncEvent::GroupAdd(choice) => {
+                self.group_add = choice;
                 cx.notify();
             }
             SyncEvent::Account(account) => {
@@ -6986,6 +6993,17 @@ impl AppState {
         self.link_previews = enabled;
         crate::ui::link_card::set_enabled(enabled);
         save_link_previews(enabled);
+        cx.notify();
+    }
+
+    /// Settings → Privacy: shown at once; the relay's answer (`GET /me` after the
+    /// `PATCH`) puts it back when the save is refused.
+    pub fn set_group_add(&mut self, choice: GroupAdd, cx: &mut Context<Self>) {
+        if self.group_add == choice {
+            return;
+        }
+        self.group_add = choice;
+        self.command(ClientCommand::SetGroupAdd(choice));
         cx.notify();
     }
 

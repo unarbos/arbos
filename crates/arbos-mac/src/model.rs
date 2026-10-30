@@ -4123,6 +4123,46 @@ pub struct AccountView {
     pub daily_cap_usd: Option<f64>,
 }
 
+/// Settings → Privacy: who may add me to a people group (`GET /me` →
+/// `privacy.group_add`, written with `PATCH /me {group_add}`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GroupAdd {
+    #[default]
+    Anyone,
+    PeopleIMessage,
+    Nobody,
+}
+
+impl GroupAdd {
+    pub const ALL: [GroupAdd; 3] = [GroupAdd::Anyone, GroupAdd::PeopleIMessage, GroupAdd::Nobody];
+
+    pub fn wire(self) -> &'static str {
+        match self {
+            GroupAdd::Anyone => "anyone",
+            GroupAdd::PeopleIMessage => "people_i_know",
+            GroupAdd::Nobody => "nobody",
+        }
+    }
+
+    /// An unknown word reads as the relay's open default.
+    pub fn from_wire(word: &str) -> GroupAdd {
+        match word {
+            "people_i_know" => GroupAdd::PeopleIMessage,
+            "nobody" => GroupAdd::Nobody,
+            _ => GroupAdd::Anyone,
+        }
+    }
+
+    /// The iPhone's wording (`GroupAddPolicy.label`).
+    pub fn label(self) -> &'static str {
+        match self {
+            GroupAdd::Anyone => "Anyone",
+            GroupAdd::PeopleIMessage => "People I message",
+            GroupAdd::Nobody => "Nobody",
+        }
+    }
+}
+
 /// Connection to the relay, S14 (coarse, app-wide: the sidebar's "Loading…"
 /// copy and the Settings details line). The chat header's status pill reads
 /// [`LinkState`] per room instead.
