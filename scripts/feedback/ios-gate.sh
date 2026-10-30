@@ -95,6 +95,25 @@ test_run_state() {
   fi
 }
 
+# run_verdict <xcodebuild log> → passed | failed | none. Both the watchdog below and run_suite's
+# exit code read this one function, so the banners live in one place.
+# `** TEST FAILED **` is the banner a plain test failure prints, and on a unit-only run it is the
+# only verdict there is: the parallel reporter writes no `Test Suite 'All tests'` block at all
+# (in the hosted log that block spans lines 4759-10065 and covers the UI target alone, closing on
+# `Executed 33 tests`, while the 507 unit cases start at line 10066 after a bare `Testing
+# started`). While that literal was missing from the alternation, a failing unit run never
+# registered as finished and burned the whole TEST_RUN_MAX_S before the watchdog killed it —
+# fifteen minutes of a contended Mac, on exactly the runs someone is waiting for.
+run_verdict() {
+  if grep -qE "Test Suite 'All tests' passed|\*\* TEST SUCCEEDED \*\*" "$1" 2>/dev/null; then
+    echo passed
+  elif grep -qE "Test Suite 'All tests' failed|\*\* TEST (FAILED|EXECUTE FAILED) \*\*" "$1" 2>/dev/null; then
+    echo failed
+  else
+    echo none
+  fi
+}
+
 test_sim_udid() {
   xcrun simctl list devices available 2>/dev/null | grep -F "$TEST_SIM_NAME (" | grep -oE '[0-9A-F-]{36}' | head -n 1
 }
@@ -116,7 +135,7 @@ run_suite() {
   t0=$(date +%s)
   while kill -0 "$pid" 2>/dev/null; do
     now=$(date +%s)
-    if (( done_at == 0 )) && grep -qE "Test Suite 'All tests' (passed|failed)|\*\* TEST (EXECUTE FAILED|SUCCEEDED) \*\*" "$log" 2>/dev/null; then
+    if (( done_at == 0 )) && [[ "$(run_verdict "$log")" != none ]]; then
       done_at=$now
     fi
     if (( done_at > 0 && now - done_at > 20 )) || (( now - t0 > TEST_RUN_MAX_S )); then
@@ -128,9 +147,11 @@ run_suite() {
   done
   wait "$pid" 2>/dev/null
   # The verdict line, not xcodebuild's exit code, decides: a watchdog kill after a complete run is a pass/fail by the log.
-  grep -qE "Test Suite 'All tests' passed|\*\* TEST SUCCEEDED \*\*" "$log" && return 0
-  grep -qE "Test Suite 'All tests' failed|\*\* TEST EXECUTE FAILED \*\*" "$log" && return 65
-  return 70
+  case "$(run_verdict "$log")" in
+    passed) return 0 ;;
+    failed) return 65 ;;
+    *) return 70 ;;
+  esac
 }
 TEST_RUN_MAX_S="${TEST_RUN_MAX_S:-900}"
 
@@ -278,6 +299,29 @@ if [[ "${1:-}" == "selftest" ]]; then
   else
     echo "selftest: run-state reader WRONG — parallel '$parallel', serial '$serial', selected-nothing"
     echo "          '$selected_nothing', future '$future', no-run '$no_run'"; rm -f "$tlog"; exit 1
+  fi
+  # run_verdict decides both the watchdog's "is it finished" and run_suite's exit code, so a banner
+  # missing from it costs the whole TEST_RUN_MAX_S. The first case is the one that was missing:
+  # a unit-only run that failed, whose only verdict is "** TEST FAILED **".
+  printf '%s\n' "Test case 'PinPolicyTests.testAMemberCannotPin()' failed on 'Clone 1 of iPhone 17 - Arbos (41549)' (0.002 seconds)" \
+                 "Test suite 'PinPolicyTests' failed on 'Clone 1 of iPhone 17 - Arbos (41549)'" \
+                 "** TEST FAILED **" > "$tlog"
+  unit_failed=$(run_verdict "$tlog")
+  printf '%s\n' "Test case 'PinPolicyTests.testAMemberCannotPin()' passed on 'Clone 1 of iPhone 17 - Arbos (41549)' (0.001 seconds)" \
+                 "** TEST SUCCEEDED **" > "$tlog"
+  unit_passed=$(run_verdict "$tlog")
+  printf '%s\n' "Test Suite 'All tests' failed at 2026-10-30 17:20:06.520." > "$tlog"
+  suite_failed=$(run_verdict "$tlog")
+  printf '%s\n' "** TEST EXECUTE FAILED **" > "$tlog"
+  execute_failed=$(run_verdict "$tlog")
+  printf '%s\n' "Test case 'PinPolicyTests.testAMemberCannotPin()' passed on 'Clone 1 of iPhone 17 - Arbos (41549)' (0.001 seconds)" > "$tlog"
+  unfinished=$(run_verdict "$tlog")
+  if [[ "$unit_failed" == "failed" && "$unit_passed" == "passed" && "$suite_failed" == "failed" \
+     && "$execute_failed" == "failed" && "$unfinished" == "none" ]]; then
+    echo "selftest: run_verdict reads a unit-only run's banner, so the watchdog sees it finish"
+  else
+    echo "selftest: run_verdict WRONG — unit-failed '$unit_failed', unit-passed '$unit_passed', suite-failed"
+    echo "          '$suite_failed', execute-failed '$execute_failed', unfinished '$unfinished'"; rm -f "$tlog"; exit 1
   fi
   rm -f "$tlog"
   [[ -n "$(test_sim_udid)" ]] && echo "selftest: test simulator '$TEST_SIM_NAME' present ($(test_sim_udid))" || { echo "selftest: test simulator '$TEST_SIM_NAME' MISSING"; exit 1; }
