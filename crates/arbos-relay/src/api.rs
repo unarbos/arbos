@@ -1,5 +1,9 @@
 //! REST surface (crdt-sync §9): pairing, devices, projects, chats, box lifecycle, usage.
 
+use std::collections::VecDeque;
+use std::sync::{LazyLock, Mutex, PoisonError};
+use std::time::{Duration, Instant};
+
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -111,8 +115,39 @@ pub struct PairBody {
     pub name: Option<String>,
 }
 
+/// How many wrong codes `POST /pair` answers inside a minute before it starts refusing. A
+/// pairing code is six digits (`arbos_core::auth::pairing_code`) and redeeming one mints a full
+/// device token, so an unauthenticated caller allowed to guess freely walks the whole million in
+/// minutes — well inside the ten-minute life of a code, or the hour the bootstrap code of a fresh
+/// relay lives. `/pair` carries no bearer and the relay sits behind a proxy, so there is nothing
+/// trustworthy to count per caller; the budget is the relay's as a whole. Pairing is a
+/// once-per-device act, so ten mistyped codes a minute is room to spare for the people using it,
+/// and it puts a guesser 69 days away from the code space.
+const PAIR_FAILURE_BUDGET: usize = 10;
+const PAIR_FAILURE_WINDOW: Duration = Duration::from_secs(60);
+
+static PAIR_FAILURES: LazyLock<Mutex<VecDeque<Instant>>> = LazyLock::new(Default::default);
+
+fn pair_failures() -> std::sync::MutexGuard<'static, VecDeque<Instant>> {
+    let mut q = PAIR_FAILURES.lock().unwrap_or_else(PoisonError::into_inner);
+    let now = Instant::now();
+    while q
+        .front()
+        .is_some_and(|t| now.duration_since(*t) > PAIR_FAILURE_WINDOW)
+    {
+        q.pop_front();
+    }
+    q
+}
+
 pub async fn pair(State(state): State<AppState>, Json(b): Json<PairBody>) -> ApiResult {
     pair_enabled(&state)?;
+    if pair_failures().len() >= PAIR_FAILURE_BUDGET {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many wrong pairing codes; wait a minute and try again".to_owned(),
+        ));
+    }
     let token = mint(TokenKind::Device);
     let device_id = ulid();
     let ok = state
@@ -125,6 +160,7 @@ pub async fn pair(State(state): State<AppState>, Json(b): Json<PairBody>) -> Api
         )
         .map_err(internal)?;
     if !ok {
+        pair_failures().push_back(Instant::now());
         return Err((
             StatusCode::UNAUTHORIZED,
             "invalid or expired pairing code".into(),
@@ -135,6 +171,53 @@ pub async fn pair(State(state): State<AppState>, Json(b): Json<PairBody>) -> Api
         device_token: token,
     })
     .into_response())
+}
+
+#[cfg(test)]
+mod pair_code_tests {
+    use super::*;
+    use crate::state::test_support::test_state;
+
+    fn body(code: &str) -> Json<PairBody> {
+        Json(PairBody {
+            code: code.to_owned(),
+            name: None,
+        })
+    }
+
+    /// `POST /pair` carries no bearer and mints a full device token, and a pairing code is six
+    /// digits, so unlimited guessing is an account takeover on any relay in paircode mode: the
+    /// whole code space fits inside the ten minutes a code lives. The relay refuses after ten
+    /// wrong codes in a minute, and the right code still pairs.
+    #[tokio::test]
+    async fn wrong_pairing_codes_run_out_of_budget() {
+        let state = test_state(AuthMode::Paircode);
+        pair_failures().clear();
+        state.db.new_pairing_code("123456", 600_000).unwrap();
+
+        let mut refused = 0;
+        for i in 0..200 {
+            match pair(State(state.clone()), body(&format!("{i:06}"))).await {
+                Err((StatusCode::TOO_MANY_REQUESTS, _)) => refused += 1,
+                Err((StatusCode::UNAUTHORIZED, _)) => {}
+                other => panic!("guess {i}: {:?}", other.map(|r| r.status())),
+            }
+        }
+        assert!(
+            refused >= 150,
+            "the relay answered {} of 200 guesses",
+            200 - refused
+        );
+
+        // The person who was handed the code is not locked out by someone else's guessing once
+        // the window has passed.
+        pair_failures().clear();
+        let r = pair(State(state.clone()), body("123456"))
+            .await
+            .expect("the right code pairs");
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(state.db.device_count().unwrap(), 1);
+    }
 }
 
 /// `GET /devices` — the caller's own live devices (the admin token sees every account's). Until
