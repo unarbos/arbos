@@ -102,14 +102,37 @@ class Lane(threading.Thread):
                 self.say(f"budget stop: run cost ${run_cost:.2f} ≥ ${self.rs['budget']}")
                 self.results.append({"task": task["id"], "category": task["category"], "lane": self.lane, "success": False, "skipped": "budget", "reasons": ["skipped: budget exhausted"]})
                 continue
+            t0_ms = int(time.time() * 1000)
+            boot0 = self.box.boot_epoch()
             try:
                 rec = self.run_task(task)
             except Exception as e:
                 rec = {"task": task["id"], "category": task["category"], "lane": self.lane, "success": False, "reasons": [f"driver error: {e}"], "traceback": traceback.format_exc()[-1500:]}
                 self.say(f"{task['id']}: DRIVER ERROR {e}")
+            self.mark_box_restart(task, rec, t0_ms, boot0)
             self.results.append(rec)
             with self.rs["lock"]:
                 (self.out / "records.jsonl").open("a").write(json.dumps(rec) + "\n")
+
+    def mark_box_restart(self, task, rec, t0_ms, boot0):
+        """A box that restarts mid-task (OOM, deploy, another lane's restart) wipes running work and seeds:
+        the verdict measures the box, not the agent, so it becomes `skipped: box_restart` (run 15 lost c1/c2/e3
+        to the 15:16 OOM of #2302). Tasks that restart the machine on purpose keep their verdict."""
+        acts = (task.get("setup_actions") or []) + [t.get("driver_action") or {} for t in task.get("turns") or []]
+        if any(a.get("kind") == "restart_machine" for a in acts):
+            return
+        boot1 = self.box.boot_epoch()
+        if boot0 is None or boot1 is None or abs(boot1 - boot0) < 30:
+            return
+        events = rl.fleet_events_for(self.box.user, t0_ms)
+        why = "; ".join(f"{e.get('kind')} {e.get('detail')}" for e in events)[:240] or "no fleet event recorded"
+        rec["box_restart"] = {"booted_at": time.strftime("%H:%M:%S", time.gmtime(boot1)), "fleet": [{"at": e.get("at"), "kind": e.get("kind"), "detail": e.get("detail")} for e in events]}
+        if rec.get("success"):
+            return
+        rec["first_verdict"] = rec.get("reasons")
+        rec["skipped"] = "box_restart"
+        rec["reasons"] = [f"not measured: the box restarted during the task at {rec['box_restart']['booted_at']} UTC ({why})"]
+        self.say(f"{task['id']}: box restarted mid-task → not measured ({why[:120]})")
 
     def driver_action(self, act, st):
         """Things the user (or the product) does between turns: rename the agent, store a secret,
