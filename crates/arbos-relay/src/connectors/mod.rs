@@ -237,6 +237,16 @@ pub async fn connect(
             "boxes cannot connect accounts".into(),
         ));
     }
+    // Connecting a provider replaces whatever row that provider already has, so leaving this
+    // route open would let someone outside the allowlist replace an allowed user's grant and
+    // have that user's agent act through a stranger's account. `oauth_callback` is covered with
+    // it: the callback only completes an `oauth_states` row that this route created.
+    if !may_use_connectors(&state, &principal) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "connectors are not available on this relay".into(),
+        ));
+    }
     let p = Provider::parse(&provider).ok_or((
         StatusCode::NOT_FOUND,
         format!("unknown provider {provider}"),
@@ -603,6 +613,11 @@ pub async fn disconnect(
             StatusCode::FORBIDDEN,
             "boxes cannot disconnect accounts".into(),
         ));
+    }
+    // #1952: this route has no owner to check the caller against either, so the same allowlist
+    // stands in for one until the column exists. A row the caller may not see answers 404.
+    if !may_use_connectors(&state, &principal) {
+        return Err((StatusCode::NOT_FOUND, "no such connector".to_owned()));
     }
     let ok = state.db.delete_connector(&id).map_err(internal)?;
     Ok(if ok {
@@ -1080,6 +1095,30 @@ mod tests {
         assert_eq!(
             listed(list(State(state.clone()), Principal::Admin).await).await,
             1
+        );
+
+        // Connecting and disconnecting go the same way: an outsider must not replace an allowed
+        // user's grant, and `disconnect` has no owner to check against either (#1952).
+        let connect_refused = connect(
+            State(state.clone()),
+            device("u_other"),
+            Path("github".to_owned()),
+            None,
+        )
+        .await;
+        assert_eq!(
+            connect_refused.err().map(|(s, _)| s),
+            Some(StatusCode::FORBIDDEN)
+        );
+        let disconnect_refused =
+            disconnect(State(state.clone()), device("u_other"), Path(cn.id.clone())).await;
+        assert_eq!(
+            disconnect_refused.err().map(|(s, _)| s),
+            Some(StatusCode::NOT_FOUND)
+        );
+        assert!(
+            state.db.connector(&cn.id).unwrap().is_some(),
+            "the allowed user's connector survives"
         );
 
         // Unset means admin only.
