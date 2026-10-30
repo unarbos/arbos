@@ -330,6 +330,47 @@ pub enum Source<'a> {
     Url(&'a str),
 }
 
+/// Resolve a delivery path to a working file of this project, or refuse it.
+///
+/// agentd runs as root and `deliver_file` is not gated, so the path is the only thing standing
+/// between a turn and any file on the box: an absolute path, a `..` climb or a symlink would
+/// otherwise post another workspace's `.arbos/secrets.env` (D70 keeps it from this workspace's
+/// user, not from root) or this workspace's own vault file, store and harness configs into a
+/// chat, where they land in relay message storage for every participant.
+fn resolve_in_project(cfg: &Config, path: &str) -> anyhow::Result<PathBuf> {
+    let p = Path::new(path);
+    let asked = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        cfg.work_dir.join(p)
+    };
+    let real = asked
+        .canonicalize()
+        .map_err(|e| anyhow::anyhow!("{}: {e}", asked.display()))?;
+    let root = cfg
+        .work_dir
+        .canonicalize()
+        .unwrap_or_else(|_| cfg.work_dir.clone());
+    if !real.starts_with(&root) {
+        anyhow::bail!(
+            "{} is outside this project's folder; only files under {} can be posted",
+            asked.display(),
+            root.display()
+        );
+    }
+    let state = cfg
+        .state_dir
+        .canonicalize()
+        .unwrap_or_else(|_| cfg.state_dir.clone());
+    if real.starts_with(&state) {
+        anyhow::bail!(
+            "{} is in the project's private .arbos folder (vault, store, harness credentials); nothing in it is ever posted into a chat",
+            asked.display()
+        );
+    }
+    Ok(real)
+}
+
 /// Resolve, read or fetch, upload, and write the attachment as its own finished message in the
 /// target chat — then read it back. Returns what landed, with the message id.
 pub async fn deliver(
@@ -346,12 +387,7 @@ pub async fn deliver(
     };
     let (bytes, mime, name, origin) = match source {
         Source::Path(path) => {
-            let p = Path::new(path);
-            let p = if p.is_absolute() {
-                p.to_path_buf()
-            } else {
-                a.cfg.work_dir.join(p)
-            };
+            let p = resolve_in_project(&a.cfg, path)?;
             let meta = tokio::fs::metadata(&p)
                 .await
                 .map_err(|e| anyhow::anyhow!("{}: {e}", p.display()))?;
@@ -798,6 +834,55 @@ mod tests {
             .hook_send_message("The chart is posted above as a picture.", None, None)
             .await
             .is_ok());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A delivery reads only the project's own working files: a path outside the project folder
+    /// (absolute or climbing out with `..`) and a path inside the project's own `.arbos/` state
+    /// folder are both refused, so an ungated `deliver_file` cannot turn agentd's root privilege
+    /// into a read of another workspace's secrets or of this workspace's own credential files.
+    #[tokio::test]
+    async fn a_delivery_cannot_leave_the_project_folder() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATATTACH0000000005";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+
+        // A neighbour workspace on the same box, with the secrets file isolation keeps from this
+        // workspace's user but not from agentd (which runs as root).
+        let neighbour = root.join("01OTHERPROJECTONTHISBOX00").join(".arbos");
+        std::fs::create_dir_all(&neighbour).unwrap();
+        let theirs = neighbour.join("secrets.env");
+        std::fs::write(&theirs, b"export STRIPE_KEY='sk_live_not_yours'\n").unwrap();
+        // This workspace's own state folder: the vault file, the store, the harness configs that
+        // carry the box token.
+        let mine = agent.cfg.state_dir.join("secrets.env");
+        std::fs::write(&mine, b"export OPENAI_API_KEY='sk-mine'\n").unwrap();
+
+        let before = host.lock().await.doc.messages().len();
+        for path in [
+            theirs.display().to_string(),
+            "../01OTHERPROJECTONTHISBOX00/.arbos/secrets.env".to_owned(),
+            ".arbos/secrets.env".to_owned(),
+            "/etc/hostname".to_owned(),
+        ] {
+            let v = deliver_file(&agent, &json!({ "path": path })).await;
+            assert_eq!(v["isError"], json!(true), "{path} must not be posted: {v}");
+            let text = v["content"][0]["text"].as_str().unwrap();
+            assert!(text.contains("NOT posted"), "{path}: {text}");
+        }
+        assert_eq!(
+            host.lock().await.doc.messages().len(),
+            before,
+            "no row for a refused delivery"
+        );
+
+        // A real file the agent made is still delivered.
+        let dir = out_dir(&agent.cfg);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("report.pdf"), b"%PDF-1.4 fake").unwrap();
+        let v = deliver_file(&agent, &json!({ "path": "out/report.pdf" })).await;
+        assert!(v.get("isError").is_none(), "{v}");
         let _ = std::fs::remove_dir_all(root);
     }
 
