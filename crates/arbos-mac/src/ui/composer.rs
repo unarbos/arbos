@@ -3781,28 +3781,7 @@ impl Render for Composer {
         let action = primary_action(has_text, running, recording, guide);
         let glyph = action.glyph();
         let red = action == ButtonAction::StopMemo || (action == ButtonAction::Call && hanging_up);
-        let primary_button = if action == ButtonAction::Guide {
-            div()
-                .id("composer-guide")
-                .h(px(SEND_BUTTON))
-                .px(px(14.0))
-                .flex_shrink_0()
-                .rounded_full()
-                .bg(theme.primary)
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .hover(|s| s.opacity(0.88))
-                .child(
-                    div()
-                        .text_size(px(TEXT_TINY))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme.on_primary)
-                        .child("Guide"),
-                )
-                .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx)))
-        } else {
+        let primary_button = {
             div()
                 .id("composer-send")
                 .size(px(SEND_BUTTON))
@@ -4242,7 +4221,7 @@ impl ButtonAction {
     fn glyph(self) -> &'static str {
         match self {
             ButtonAction::Send => "arrow.up",
-            ButtonAction::Guide => "",
+            ButtonAction::Guide => "arrow.up",
             ButtonAction::Stop | ButtonAction::StopMemo => "stop.fill",
             ButtonAction::Call => "phone",
         }
@@ -4771,6 +4750,12 @@ mod tests {
         );
         assert_eq!(primary_action(true, true, false, false), ButtonAction::Send);
         assert_eq!(primary_action(true, true, false, true), ButtonAction::Guide);
+    }
+
+    #[test]
+    fn guiding_a_running_turn_wears_the_send_glyph() {
+        assert_eq!(ButtonAction::Guide.glyph(), ButtonAction::Send.glyph());
+        assert_eq!(ButtonAction::Guide.glyph(), "arrow.up");
     }
 
     const SENTENCE: &str = "the quick brown fox";
