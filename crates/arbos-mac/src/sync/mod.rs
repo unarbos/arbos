@@ -338,6 +338,12 @@ pub enum SyncEvent {
         pins: Vec<String>,
         cap: usize,
     },
+    /// Settings → Notifications "Read receipts" as the account holds it (`GET /me/read-receipts`,
+    /// #1484): the setting is one answer per account now, so a switch moved on another device
+    /// lands here and this Mac follows it.
+    ReadReceipts {
+        enabled: bool,
+    },
     /// `notifications_cleared` push: I read `chat_id` on another device. This Mac drops the
     /// chat's delivered banners, stops showing it unread and re-badges; `badge` is the relay's
     /// unread total after that read.
@@ -1137,9 +1143,10 @@ pub enum ClientCommand {
         archived: bool,
     },
     /// Settings → Notifications: send and show Presence `{seen}` read receipts
-    /// in people chats (default on). Local preference; presence frames omit
-    /// `seen` when off. When `persist` is true (the Settings toggle), also
-    /// `PUT /chats/{id}/settings {read_receipts}` for every people chat.
+    /// in people chats (default on). Presence frames omit `seen` when off; the
+    /// relay enforces the same answer for every device (#1484). When `persist`
+    /// is true (the Settings toggle), also `PUT /me/read-receipts` — or, on a
+    /// relay that predates it, `PUT /chats/{id}/settings` per people chat.
     SetReadReceipts {
         enabled: bool,
         persist: bool,
