@@ -73,14 +73,16 @@ foreign-types = "0.5"
 nokhwa = { version = "0.10", default-features = false, features = ["input-avfoundation"] }
 objc2 = "0.6"
 block2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSURL", "NSString", "NSError", "NSObject", "NSGeometry", "NSBundle", "NSArray", "NSSet", "NSEnumerator", "NSData"] }
+# NSEvent / NSUserDefaults: the trackpad back swipe follows "Swipe between pages" and the
+# natural-scrolling direction (`ui::back_swipe`).
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSURL", "NSString", "NSError", "NSObject", "NSGeometry", "NSBundle", "NSArray", "NSSet", "NSEnumerator", "NSData", "NSUserDefaults"] }
 # NSVisualEffectView / NSAppearance / NSGraphics: the Glass surface's window material
 # (`ui::vibrancy`, [feedback mac-glass-contrast-2026-10-26]). NSPasteboard / NSPasteboardItem /
 # NSImage: Copy of a picture message writes every type of one item itself (`pasteboard`,
 # [feedback copy-image-messages-mac-2026-10-27]). NSImage / NSImageSymbolConfiguration /
 # NSBitmapImageRep / NSGraphicsContext / NSColor / NSFontDescriptor: SF Symbols rasterised for the menus
 # (`ui::sf_symbols`, [feedback menu-sf-symbols-2026-10-27]).
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSWindow", "NSView", "NSResponder", "NSDockTile", "NSPanel", "NSSavePanel", "NSOpenPanel", "NSVisualEffectView", "NSAppearance", "NSGraphics", "NSPasteboard", "NSPasteboardItem", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphicsContext", "NSColor", "NSFontDescriptor", "objc2-core-foundation", "block2", "objc2-uniform-type-identifiers"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSEvent", "NSWindow", "NSView", "NSResponder", "NSDockTile", "NSPanel", "NSSavePanel", "NSOpenPanel", "NSVisualEffectView", "NSAppearance", "NSGraphics", "NSPasteboard", "NSPasteboardItem", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphicsContext", "NSColor", "NSFontDescriptor", "objc2-core-foundation", "block2", "objc2-uniform-type-identifiers"] }
 # Avatar picker: NSOpenPanel limited to image UTTypes (PNG, JPEG, HEIC, GIF, WebP).
 objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = ["std", "UTType", "UTCoreTypes"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationAttachment", "UNNotificationSound", "UNNotificationTrigger", "UNNotificationAction", "UNNotificationCategory", "UNNotificationSettings"] }
