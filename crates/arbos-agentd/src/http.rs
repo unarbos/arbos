@@ -57,7 +57,10 @@ async fn healthz(State(b): State<B>) -> Response {
         .into_response()
 }
 
-async fn metrics(State(b): State<B>, Path(project): Path<String>) -> Response {
+async fn metrics(State(b): State<B>, headers: HeaderMap, Path(project): Path<String>) -> Response {
+    if !box_admin_authed(&b, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     match b.get(&project).await {
         Some(w) => {
             Json(json!({ "turns": w.store.turn_metrics(200).unwrap_or_default() })).into_response()
@@ -105,9 +108,13 @@ async fn history_legacy(
 
 async fn t3_search(
     State(b): State<B>,
+    headers: HeaderMap,
     Path(project): Path<String>,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
+    if !box_admin_authed(&b, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     let Some(w) = b.get(&project).await else {
         return (StatusCode::NOT_FOUND, "no such workspace").into_response();
     };
@@ -359,4 +366,60 @@ pub fn stub_router(agent: Arc<Agent>) -> Router {
     Router::new()
         .route("/{*path}", any(stub_forward))
         .with_state(agent)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The box port is `0.0.0.0` and every workspace's unprivileged user can reach loopback, so
+    /// a workspace read route without a bearer is a cross-project read with no credential at
+    /// all: `/w/{other}/t3/search` searches another project's whole history. Both debug reads
+    /// check the box-admin bearer before they look the workspace up, so an unauthenticated call
+    /// cannot even learn whether a project is on this box.
+    #[tokio::test]
+    async fn a_workspace_debug_read_needs_the_box_bearer() {
+        let root = std::env::temp_dir().join(format!("arbos-http-{}", arbos_core::ids::ulid()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut cfg = crate::config::BoxConfig::from_env().unwrap();
+        cfg.work_root = root.clone();
+        cfg.mcp_token = "box-admin-token".into();
+        cfg.local_box = true;
+        let sup = Supervisor::new(cfg);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, box_router(sup)).await.unwrap();
+        });
+        let base = format!("http://127.0.0.1:{port}");
+        let http = reqwest::Client::new();
+
+        for path in [
+            "/w/01OTHERPROJECT/t3/search?q=password",
+            "/w/01OTHERPROJECT/metrics",
+        ] {
+            let r = http.get(format!("{base}{path}")).send().await.unwrap();
+            assert_eq!(
+                r.status(),
+                reqwest::StatusCode::UNAUTHORIZED,
+                "{path} answered an unauthenticated caller"
+            );
+            let r = http
+                .get(format!("{base}{path}"))
+                .bearer_auth("guessed")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(r.status(), reqwest::StatusCode::UNAUTHORIZED, "{path}");
+            // With the bearer the route works and reports the missing workspace as missing.
+            let r = http
+                .get(format!("{base}{path}"))
+                .bearer_auth("box-admin-token")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(r.status(), reqwest::StatusCode::NOT_FOUND, "{path}");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
