@@ -877,7 +877,21 @@ pub fn safe_href(href: &str) -> bool {
         && href.len() > 8
         && !href.chars().any(char::is_whitespace);
     let mail = lower.starts_with("mailto:") && href.contains('@');
-    web || mail || lower.starts_with("arbos://")
+    web || mail || in_app_href(&lower)
+}
+
+/// `arbos://` targets message prose may carry. The apps hand an `arbos://` URL they
+/// did not recognise to the platform, which brings it straight back to the app's own
+/// URL handler — so an `arbos://` href written by whoever composed the message reaches
+/// the deep-link handlers (`join`, `join-group`, `auth`, `connectors`). Only the two
+/// hosts that cannot do anything but change what this reader sees are links; any other
+/// host, including one added later, stays literal text.
+fn in_app_href(lower: &str) -> bool {
+    let Some(rest) = lower.strip_prefix("arbos://") else {
+        return false;
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    matches!(host, "mention" | "spoiler")
 }
 
 /// A bare URL starting at `chars[i]`: `http://`, `https://` or `www.`, up to
@@ -1386,6 +1400,32 @@ mod tests {
             styles("[brackets] alone (parens)"),
             vec![("[brackets] alone (parens)".into(), plain())]
         );
+    }
+
+    /// An `arbos://` href the apps act on must not come out of message prose: the
+    /// platform hands an unrecognised `arbos://` URL back to the app's own URL handler,
+    /// so a link in somebody's message would reach the join / auth / connector paths.
+    #[test]
+    fn only_the_inert_arbos_hosts_are_links() {
+        for href in [
+            "arbos://join/abc",
+            "arbos://join-group/abc",
+            "arbos://auth/callback?code=abc",
+            "arbos://connectors/callback",
+            "arbos://JOIN-GROUP/abc",
+            "arbos://something-new/x",
+        ] {
+            assert!(!safe_href(href), "{href} must not be a link");
+            let typed = format!("[Launch week]({href})");
+            assert_eq!(
+                styles(&typed),
+                vec![(typed.clone(), plain())],
+                "{href} must stay literal text"
+            );
+        }
+        for href in ["arbos://mention/user/sam", "arbos://spoiler/7"] {
+            assert!(safe_href(href), "{href} is the renderer's own target");
+        }
     }
 
     #[test]
