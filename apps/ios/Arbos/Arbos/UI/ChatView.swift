@@ -1245,6 +1245,11 @@ struct ChatSession: View {
             demoPresentNext()
         }
         .task {
+            guard DebugHooks.timeReveal else { return }
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            timeReveal = RowView.timeRevealWidth(theme)
+        }
+        .task {
             guard DebugHooks.demo, model.isFixture, !model.demoStarted else { return }
             model.demoStarted = true
             try? await Task.sleep(nanoseconds: 1_800_000_000)
@@ -1934,7 +1939,7 @@ struct ChatSession: View {
             // iMessage feel: 1:1 up to the reveal width, then rubber-band
             // (a fifth of the excess, at most 24 pt) instead of a hard stop.
             let raw = max(0, -dx)
-            let w = RowView.timeRevealWidth
+            let w = RowView.timeRevealWidth(theme)
             let reveal = raw <= w ? raw : w + min(24, (raw - w) * 0.2)
             withTransaction(still) { timeReveal = reveal }
         case .timeEnded:
