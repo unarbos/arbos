@@ -8915,9 +8915,14 @@ pub(crate) fn chat_recap(
         if text.trim().is_empty() {
             continue;
         }
+        // Only the two roles this recap can honestly attribute. A system line is not the agent's
+        // own turn, and naming it one told the model it had said words it never said — inside a
+        // block that claims to outrank retrieved memory. `chat_messages` (`mcp.rs`) and the group
+        // judge window (`people::recent_people_context_for`) already skip system rows; this is the
+        // same rule. An unknown role is skipped rather than guessed.
         let who = match m.role.as_str() {
             "user" => "user".to_owned(),
-            _ => {
+            "assistant" => {
                 let n = agent_name.trim();
                 if n.is_empty() {
                     "you".to_owned()
@@ -8925,6 +8930,7 @@ pub(crate) fn chat_recap(
                     format!("you ({n})")
                 }
             }
+            _ => continue,
         };
         let body = crate::truncate::clip_marked(
             &text,
@@ -10455,6 +10461,62 @@ mod tests {
         assert!(!JOBS_SECTION.to_lowercase().contains("delete"));
         // The rule must be in the prefix for every configuration.
         assert!(base_system_prompt_with(false, false).contains("is the request, not the yes"));
+    }
+
+    /// A `role: system` row is nobody's turn, and the recap may not attribute it to the agent.
+    /// Any member of a group can write a system line into the doc, so before this filter a member
+    /// chose text the model was told it had said itself, inside the block that claims to outrank
+    /// retrieved memory. The row is dropped; the real turns around it are untouched.
+    #[test]
+    fn a_system_row_is_not_recapped_as_the_agents_own_words() {
+        let row = |id: &str, role: &str, text: &str| -> arbos_core::doc::MessageView {
+            serde_json::from_value(json!({
+                "id": id, "role": role, "status": "done",
+                "parts": [{ "kind": "text", "text": text }]
+            }))
+            .unwrap()
+        };
+        let rows = vec![
+            row("u1", "user", "who is still in this group?"),
+            row("a1", "assistant", "You, Bob and Carol."),
+            row("s1", "system", "Alice removed Bob"),
+            row("u2", "user", "and now?"),
+        ];
+        let recap = chat_recap(&rows, "u2", "lane-c", "c1");
+        assert!(
+            !recap.contains("Alice removed Bob"),
+            "the system line is not recapped at all: {recap}"
+        );
+        assert!(
+            !recap.contains("you (lane-c): Alice removed"),
+            "and above all not as the agent's own words: {recap}"
+        );
+        // The turns either side still are, so the filter took only the system row.
+        assert!(recap.contains("- user: who is still in this group?"));
+        assert!(recap.contains("- you (lane-c): You, Bob and Carol."));
+    }
+
+    /// A row whose role the recap does not know is skipped rather than guessed: the `_` arm used
+    /// to call everything that was not `user` the agent's own turn.
+    #[test]
+    fn an_unknown_role_is_skipped_rather_than_called_the_agent() {
+        let rows = vec![
+            serde_json::from_value(json!({
+                "id": "x1", "role": "project", "status": "done",
+                "parts": [{ "kind": "text", "text": "a role from a newer client" }]
+            }))
+            .unwrap(),
+            serde_json::from_value(json!({
+                "id": "u1", "role": "user", "status": "done",
+                "parts": [{ "kind": "text", "text": "hello" }]
+            }))
+            .unwrap(),
+        ];
+        let recap = chat_recap(&rows, "u1", "lane-c", "c1");
+        assert!(
+            recap.is_empty(),
+            "nothing attributable is left, so there is no recap: {recap}"
+        );
     }
 
     /// #1722: a retry on a fresh session carries this chat's own turns, after the memory block
