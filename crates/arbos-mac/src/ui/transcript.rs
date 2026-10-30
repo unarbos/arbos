@@ -10674,10 +10674,63 @@ mod system_line_tests {
                 ("attachment", Some("look at this".into())),
                 ("attachment", Some("look at this".into())),
                 ("user", None),
-                ("user", Some("IMG_0042.jpeg".into())),
+                ("user", Some("Image".into())),
             ],
             "{rows:?}"
         );
+    }
+
+    /// A picked GIF (ARB-544) has no `ref`, only a provider `url`. Replying to it used to
+    /// read "6178590884800169.gif" — the provider's numeric id — and the header never showed
+    /// the GIF itself. Both were keyed on `ref` ([feedback gif-send-and-playback-2026-10-30]).
+    #[test]
+    fn a_reply_to_a_picked_gif_names_it_and_carries_its_picture() {
+        let t = 1_700_000_000_000u64;
+        let url = "https://static.klipy.com/ii/abc/f3/bd/G88BNBBL.gif";
+        let gif: Message = serde_json::from_value(serde_json::json!({
+            "id": "gif-1",
+            "role": "user",
+            "sender": "user:gh_bob",
+            "status": "done",
+            "createdAt": t,
+            "parts": [{ "id": "a-1", "kind": "attachment", "attachment": {
+                "name": "6178590884800169.gif",
+                "mime": "image/gif",
+                "kind": "image",
+                "url": url,
+            } }],
+        }))
+        .expect("gif message");
+        let mut reply = message("user", "user:gh_me", "ha", t + 1_000);
+        reply.reply_to = Some(gif.id.clone());
+        let messages = [gif, reply];
+        let (spoken, failed) = (HashSet::new(), HashMap::new());
+        let decoded = HashSet::from([format!("url:{url}")]);
+
+        for (thumbs, want_preview) in [
+            (HashSet::new(), None),
+            (decoded, Some(format!("url:{url}"))),
+        ] {
+            let keys: HashSet<&str> = thumbs.iter().map(String::as_str).collect();
+            let rows = build_rows(
+                &messages,
+                false,
+                speech(&spoken, &failed),
+                "gh_me",
+                &keys,
+                &Mentions::empty(),
+                false,
+            );
+            let quote = rows
+                .iter()
+                .find_map(|r| match &r.kind {
+                    RowKind::User { quote, .. } => quote.clone(),
+                    _ => None,
+                })
+                .expect("the reply quotes the GIF");
+            assert_eq!(quote.text, "GIF", "{rows:?}");
+            assert_eq!(quote.preview, want_preview, "{rows:?}");
+        }
     }
 
     /// A forwarded picture keeps its forward header and never quotes, on the card or
@@ -11852,6 +11905,60 @@ mod delivery_tests {
             "a streaming upsert rebuilds only the changed message"
         );
         assert_ne!(ids(&again), ids(&updated));
+    }
+
+    /// The empty bubble Jacob, Scout and Affinity saw
+    /// ([feedback gif-send-and-playback-2026-10-30]). A picked GIF (ARB-544) is
+    /// provider-hosted: no `ref`, a `url`, and its picture cached under `url:<url>`. The row
+    /// version mixed in "has a thumbnail" by `ref` alone, so it never changed when the
+    /// picture decoded — and the transcript, which splices only rows whose version moved,
+    /// kept showing the cached "Loading" card for ever.
+    #[test]
+    fn a_decoded_gif_moves_its_row_version() {
+        let url = "https://static.klipy.com/ii/abc/f3/bd/G88BNBBL.gif";
+        let messages: Vec<Message> = vec![serde_json::from_value(serde_json::json!({
+            "id": "gif-1",
+            "role": "user",
+            "sender": "user:gh_me",
+            "status": "done",
+            "createdAt": 1_700_000_000_000u64,
+            "parts": [{ "id": "a-1", "kind": "attachment", "attachment": {
+                "name": "6178590884800169.gif",
+                "mime": "image/gif",
+                "kind": "image",
+                "url": url,
+            } }],
+        }))
+        .expect("gif message")];
+        let (spoken, failed) = (HashSet::new(), HashMap::new());
+        let versions = |thumbs: &HashSet<&str>| -> Vec<u64> {
+            build_rows(
+                &messages,
+                false,
+                SpeechRows {
+                    enabled: false,
+                    spoken: &spoken,
+                    failed: &failed,
+                    voice_mode: false,
+                },
+                "gh_me",
+                thumbs,
+                &Mentions::empty(),
+                false,
+            )
+            .iter()
+            .filter(|r| matches!(r.kind, RowKind::Attachment { .. }))
+            .map(|r| r.version)
+            .collect()
+        };
+        let key = format!("url:{url}");
+        let loading = versions(&HashSet::new());
+        let decoded = versions(&HashSet::from([key.as_str()]));
+        assert_eq!(loading.len(), 1, "the GIF draws one card");
+        assert_ne!(
+            loading, decoded,
+            "the card must reload once its picture is decoded"
+        );
     }
 
     /// The three states as the row draws them: one bubble per state, no
