@@ -179,6 +179,15 @@ impl PeopleChatInfo {
     /// roster; else the one human in the chat (a DM with only the owner and agents). `None` means
     /// the author is unknown — never assume the owner (#1580: a guest's note was read back as
     /// the owner's).
+    ///
+    /// The row's `senderHandle` is deliberately **not** a step here, and must not become one.
+    /// It is payload — whoever wrote the row chose it, and nothing on the way in checks it
+    /// against the authenticated writer — while this answer is more than a label: it becomes
+    /// `Asker.role`, and `role == "owner"` is what lets `vault.rs`'s `asker_may_direct` skip a
+    /// grant's People-list check. An authorship claim therefore has to rest on something the
+    /// row cannot choose for itself. Every writer of a human row into a people doc sets
+    /// `sender: user:<id>` unconditionally, so step 1 answers all of them; `senderHandle` is
+    /// still what [`author_handle`] *labels* an author with, which is a display question.
     pub(crate) fn author_of(&self, msg: &MessageView) -> Option<String> {
         let sender = msg.rest.get("sender").and_then(Value::as_str).unwrap_or("");
         if let Some(uid) = sender.strip_prefix("user:") {
@@ -189,24 +198,6 @@ impl PeopleChatInfo {
         if let Some(device) = msg.rest.get("deviceId").and_then(Value::as_str) {
             if let Some(uid) = self.user_of_device(device) {
                 return Some(uid);
-            }
-        }
-        if let Some(handle) = msg
-            .rest
-            .get("senderHandle")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|h| !h.is_empty())
-        {
-            let hit = self.members.iter().find_map(|m| {
-                let uid = m["member"].as_str()?.strip_prefix("user:")?;
-                m["handle"]
-                    .as_str()
-                    .is_some_and(|h| h.eq_ignore_ascii_case(handle))
-                    .then(|| uid.to_owned())
-            });
-            if hit.is_some() {
-                return hit;
             }
         }
         let humans = self.human_ids();
@@ -1855,11 +1846,18 @@ mod tests {
 
     const P: &str = "01HPROJ";
 
-    /// #1580: a guest's row with no `sender: user:<id>` / `senderHandle` (older app, arbosctl)
-    /// was read back as the owner's. The author comes from the row, its device, its handle, or
-    /// the only human in the chat — and is otherwise unknown, never the owner.
+    /// A row's own `senderHandle` never names its author. The author comes from
+    /// `sender: user:<id>`, from the row's `deviceId` through the roster's `devices`, or from
+    /// the only human in the chat — and is otherwise unknown, never the owner (#1580: a guest's
+    /// note was read back as the owner's).
+    ///
+    /// This test used to assert the handle fallback as a feature ("a handle alone still finds
+    /// the member"), which made it a defence of the thing it should have caught: the handle is
+    /// payload, and `author_of`'s answer reaches `Asker.role` and from there the vault's
+    /// `asker_may_direct`. The case below is the one that matters — an unrecognised device and
+    /// the *owner's* handle must come back unknown.
     #[test]
-    fn unlabelled_rows_never_resolve_to_the_owner() {
+    fn a_handle_alone_never_names_a_rows_author() {
         let group = PeopleChatInfo {
             members: vec![
                 json!({ "member": "user:gh_1", "handle": "jacob", "name": "Jacob", "devices": ["DEVJ1", "DEVJ2"] }),
@@ -1897,9 +1895,18 @@ mod tests {
                 .as_deref(),
             Some("gh_1")
         );
-        // A handle alone still finds the member.
-        let by_handle = bare(json!({ "deviceId": "dev:anon", "senderHandle": "Sam" }));
-        assert_eq!(group.author_of(&by_handle).as_deref(), Some("gh_2"));
+        // A handle alone names nobody, whoever it names — the owner least of all, because that
+        // answer is what `Asker.role` reads as "owner".
+        let claims_owner = bare(json!({ "deviceId": "dev:anon", "senderHandle": "Jacob" }));
+        assert_eq!(
+            group.author_of(&claims_owner),
+            None,
+            "the owner's handle on a row is a claim, not evidence"
+        );
+        let claims_guest = bare(json!({ "deviceId": "dev:anon", "senderHandle": "Sam" }));
+        assert_eq!(group.author_of(&claims_guest), None);
+        // The handle is still how the row is *labelled*, which is a display question.
+        assert_eq!(author_handle(&claims_guest, &group, None), "Sam");
 
         // Unknown device, no handle, two humans: nobody — and not the owner.
         let unknown = bare(json!({ "deviceId": "dev:anon" }));
