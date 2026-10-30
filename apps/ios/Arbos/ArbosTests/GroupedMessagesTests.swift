@@ -179,8 +179,8 @@ final class GroupedMessagesTests: XCTestCase {
     /// The row's layout facts the view reads: an avatar-less continuation still keeps the
     /// lane, so `RowView` draws an empty slot of the avatar's width in its place.
     func testTheAvatarSlotIsTheAvatarsWidth() {
-        XCTAssertEqual(Theme.memberLane(composerInset: Theme.composerInset),
-                       Theme.avatarColumnInset(composerInset: Theme.composerInset) + Theme.memberAvatar + Theme.memberAvatarGap,
+        XCTAssertEqual(Theme.memberLane,
+                       Theme.avatarColumnInset + Theme.memberAvatar + Theme.memberAvatarGap,
                        "the lane is inset + avatar + gap; the empty slot is the avatar's width at the same inset")
     }
 }

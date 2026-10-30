@@ -1381,7 +1381,6 @@ struct RowView: View, Equatable {
     /// environment dependency changed per write) — the open-time freeze on long groups
     /// (iphone-open-scroll-block, 2026-10-24). The row list reads them once.
     let theme: Theme
-    let composerInset: CGFloat
     let row: Row
     let chatId: Id
     let width: CGFloat
@@ -1426,7 +1425,6 @@ struct RowView: View, Equatable {
             && lhs.highlighted == rhs.highlighted
             && lhs.searchHit == rhs.searchHit
             && lhs.mentions.stamp == rhs.mentions.stamp
-            && lhs.composerInset == rhs.composerInset
             && lhs.people == rhs.people
             && lhs.isMessage == rhs.isMessage
             && lhs.theme == rhs.theme
@@ -1609,7 +1607,7 @@ struct RowView: View, Equatable {
                 .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
                 .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: false) }
                 .modifier(LiveSenderBar(url: avatar, seed: model.personId(handle: handle) ?? handle))
-                .frame(maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset), alignment: .leading)
+                .frame(maxWidth: maxBubble - Theme.memberLane, alignment: .leading)
                 Spacer(minLength: 0)
             }
             .task(id: avatar) { SenderAccents.shared.load(url: avatar) }
@@ -1654,7 +1652,7 @@ struct RowView: View, Equatable {
                     }
                 )
                 .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: false) }
-                .frame(maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset), alignment: .leading)
+                .frame(maxWidth: maxBubble - Theme.memberLane, alignment: .leading)
                 Spacer(minLength: 0)
             }
         case .assistant(let blocks, let live, let caption, let quote):
@@ -1752,7 +1750,7 @@ struct RowView: View, Equatable {
                         PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
                             .accessibilityIdentifier("sender-avatar")
                     }
-                    ghost.frame(maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset), alignment: .leading)
+                    ghost.frame(maxWidth: maxBubble - Theme.memberLane, alignment: .leading)
                     Spacer(minLength: 0)
                 }
             }
@@ -1760,10 +1758,10 @@ struct RowView: View, Equatable {
             // The card is a transcript row like a bubble: the same left edge (after the avatar
             // lane in a people chat) and the same cap width as an incoming bubble.
             HStack(spacing: 0) {
-                if lane { Color.clear.frame(width: Theme.memberLane(composerInset: composerInset), height: 1) }
+                if lane { Color.clear.frame(width: Theme.memberLane, height: 1) }
                 QuestionCard(rowId: row.id, chatId: chatId, questionId: questionId, title: text, options: options,
                              multi: multi, picked: picked, open: open, shellCard: shellCard, offer: offer)
-                    .frame(maxWidth: lane ? maxBubble - Theme.memberLane(composerInset: composerInset) : maxBubble, alignment: .leading)
+                    .frame(maxWidth: lane ? maxBubble - Theme.memberLane : maxBubble, alignment: .leading)
                 Spacer(minLength: 0)
             }
         case .file(let item, let subtitle, let caption, let forwardedFrom, let sender, let named, let quote):
@@ -1772,7 +1770,7 @@ struct RowView: View, Equatable {
                     FileCard(item: item, subtitle: subtitle, chatId: chatId, fromUser: false, caption: caption,
                              forwardedFrom: forwardedFrom, quote: quote, onQuoteTap: onQuoteTap)
                         .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: false) }
-                        .frame(maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset), alignment: .leading)
+                        .frame(maxWidth: maxBubble - Theme.memberLane, alignment: .leading)
                 }
             } else {
                 HStack {
@@ -1810,7 +1808,7 @@ struct RowView: View, Equatable {
             } else {
                 HStack(spacing: 0) {
                     if fromUser { Spacer(minLength: 0) }
-                    if lane { Color.clear.frame(width: Theme.memberLane(composerInset: composerInset), height: 1) }
+                    if lane { Color.clear.frame(width: Theme.memberLane, height: 1) }
                     StickerBubble(item: item, chatId: chatId)
                         .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: fromUser) }
                     if !fromUser { Spacer(minLength: 0) }
@@ -1823,7 +1821,7 @@ struct RowView: View, Equatable {
             if let sender {
                 mediaRow(sender: sender, named: named) {
                     ImageBubble(item: item, chatId: chatId, fromUser: false,
-                                maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset),
+                                maxWidth: maxBubble - Theme.memberLane,
                                 caption: caption, mentions: mentions, source: source, forwardedFrom: forwardedFrom,
                                 quote: quote, onQuoteTap: onQuoteTap)
                         .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: false) }
@@ -1831,9 +1829,9 @@ struct RowView: View, Equatable {
             } else {
                 HStack(spacing: 0) {
                     if fromUser { Spacer(minLength: 0) }
-                    if lane { Color.clear.frame(width: Theme.memberLane(composerInset: composerInset), height: 1) }
+                    if lane { Color.clear.frame(width: Theme.memberLane, height: 1) }
                     ImageBubble(item: item, chatId: chatId, fromUser: fromUser,
-                                maxWidth: lane ? maxBubble - Theme.memberLane(composerInset: composerInset) : maxBubble,
+                                maxWidth: lane ? maxBubble - Theme.memberLane : maxBubble,
                                 caption: caption, mentions: mentions, source: source, forwardedFrom: forwardedFrom,
                                 quote: quote, onQuoteTap: onQuoteTap)
                         .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: fromUser) }
@@ -1966,14 +1964,14 @@ struct RowView: View, Equatable {
 
     /// Match the avatar offset used by people-chat bubbles (26 pt + 8 pt gap).
     private var reactionLeading: CGFloat {
-        Self.reactionLeading(for: row.kind, composerInset: composerInset)
+        Self.reactionLeading(for: row.kind)
     }
 
     /// Where a row's reaction chips start: the bubble's own leading edge — after the avatar
     /// lane for every row the layout draws in it (another person's or an agent's bubble,
     /// picture, sticker or file card in a people chat), 0 otherwise. Must match `bubble`.
-    static func reactionLeading(for kind: RowKind, composerInset: CGFloat) -> CGFloat {
-        let lane = Theme.memberLane(composerInset: composerInset)
+    static func reactionLeading(for kind: RowKind) -> CGFloat {
+        let lane = Theme.memberLane
         switch kind {
         case .other, .member: return lane
         case .question(_, _, _, _, _, _, let inLane, _, _): return inLane ? lane : 0
@@ -1999,11 +1997,11 @@ struct RowView: View, Equatable {
     private func avatarColumn<Avatar: View>(@ViewBuilder avatar: () -> Avatar) -> some View {
         if row.showsAvatar {
             avatar()
-                .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
+                .padding(.leading, Theme.avatarColumnInset)
         } else {
             Color.clear
                 .frame(width: Theme.memberAvatar, height: 1)
-                .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
+                .padding(.leading, Theme.avatarColumnInset)
                 .accessibilityHidden(true)
                 .accessibilityIdentifier("sender-avatar-slot")
         }
