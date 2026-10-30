@@ -322,8 +322,8 @@ impl OutsideLogEntry {
             };
         }
         let mut parts = Vec::new();
-        if let Some(a) = self.ms.get("event_to_ack") {
-            parts.push(format!("ack {}", Self::secs(*a)));
+        if let Some(a) = self.ack_ms() {
+            parts.push(format!("ack {}", Self::secs(a)));
         }
         if let Some(r) = self.ms.get("event_to_reply") {
             parts.push(format!("reply {}", Self::secs(*r)));
@@ -331,6 +331,19 @@ impl OutsideLogEntry {
             parts.push(format!("reply {}", Self::secs(*r)));
         }
         parts.join(" · ")
+    }
+
+    /// How long the ack took. The sidecar writes `event_to_ack` on its own `ack` entry, which
+    /// the card does not show as a row, so a reply's own clocks carry it instead: the gap
+    /// between the event and the ack is what is left of `event_to_reply` after `ack_to_reply`
+    /// (`crates/arbos-sidecar/src/turns.rs`). Absent when the agent never acked.
+    fn ack_ms(&self) -> Option<i64> {
+        if let Some(a) = self.ms.get("event_to_ack") {
+            return Some(*a);
+        }
+        let event_to_reply = self.ms.get("event_to_reply")?;
+        let ack_to_reply = self.ms.get("ack_to_reply")?;
+        Some((event_to_reply - ack_to_reply).max(0))
     }
 
     /// The first line for a session event ("session resumed", "session rotated").

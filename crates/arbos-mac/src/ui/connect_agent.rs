@@ -706,84 +706,6 @@ fn wake_sections(
     ]
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn wake_note_words() {
-        let last = crate::model::WakeLast {
-            at: 1_000_000 - 12_000,
-            status: Some(200),
-            error: None,
-        };
-        assert_eq!(
-            wake_note(false, false, None, Some(&last), 1_000_000),
-            Some((true, "Last wake · Delivered · HTTP 200 · 12 s ago".into()))
-        );
-        assert_eq!(
-            wake_note(true, false, None, Some(&last), 1_000_000),
-            Some((true, "Saving…".into()))
-        );
-        assert_eq!(
-            wake_note(false, true, None, None, 1_000_000),
-            Some((true, "Sending…".into()))
-        );
-        let note = (false, "Failed · HTTP 500: boom".to_owned());
-        assert_eq!(
-            wake_note(false, false, Some(&note), Some(&last), 1_000_000),
-            Some(note.clone())
-        );
-        assert_eq!(wake_note(false, false, None, None, 1_000_000), None);
-        let failed = crate::model::WakeLast {
-            at: 1_000_000 - 180_000,
-            status: Some(401),
-            error: Some("HTTP 401".into()),
-        };
-        assert_eq!(failed.line(1_000_000), "Failed · HTTP 401 · 3 min ago");
-    }
-
-    #[test]
-    fn keys_and_links_are_shortened_for_the_row() {
-        assert_eq!(
-            short_key("arbk_14788fc5760db12964ebf67724279435f6054bcd"),
-            "arbk_14788fc5…54bcd"
-        );
-        assert_eq!(short_key("arbk_short"), "arbk_short");
-        assert_eq!(
-            short_link("https://relay.arbos.life/asp/connect/01M"),
-            "relay.arbos.life/asp/connect/01M"
-        );
-    }
-
-    #[test]
-    fn status_lines_read_as_the_mockup() {
-        let now = 1_000_000_000;
-        let mut i = OutsideInfo {
-            status: "never".into(),
-            ..Default::default()
-        };
-        assert_eq!(i.status_line(now), "Waiting for the first heartbeat");
-        i.status = "connected".into();
-        i.connected = true;
-        i.last_seen_at = Some(now - 12_000);
-        assert_eq!(i.status_line(now), "Connected · 12 s ago");
-        i.status = "away".into();
-        i.last_seen_at = Some(now - 40 * 60_000);
-        assert_eq!(i.status_line(now), "Away · 40 min ago");
-        i.status = "revoked".into();
-        assert_eq!(i.status_line(now), "Disconnected");
-        assert_eq!(
-            OutsideInfo {
-                transport: "acp".into(),
-                ..Default::default()
-            }
-            .transport_label(),
-            "ACP · on your Mac"
-        );
-    }
-}
-
 // ----- Session log (spec §13.3, [feedback sidecar-sessions-mac-2026-10-28]) ----------------
 
 /// Rows the card shows before "View all".
@@ -1070,4 +992,82 @@ pub fn log_page(project_id: &Id, shell: &Shell, cx: &mut Context<Shell>) -> Opti
         shell,
         cx,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wake_note_words() {
+        let last = crate::model::WakeLast {
+            at: 1_000_000 - 12_000,
+            status: Some(200),
+            error: None,
+        };
+        assert_eq!(
+            wake_note(false, false, None, Some(&last), 1_000_000),
+            Some((true, "Last wake · Delivered · HTTP 200 · 12 s ago".into()))
+        );
+        assert_eq!(
+            wake_note(true, false, None, Some(&last), 1_000_000),
+            Some((true, "Saving…".into()))
+        );
+        assert_eq!(
+            wake_note(false, true, None, None, 1_000_000),
+            Some((true, "Sending…".into()))
+        );
+        let note = (false, "Failed · HTTP 500: boom".to_owned());
+        assert_eq!(
+            wake_note(false, false, Some(&note), Some(&last), 1_000_000),
+            Some(note.clone())
+        );
+        assert_eq!(wake_note(false, false, None, None, 1_000_000), None);
+        let failed = crate::model::WakeLast {
+            at: 1_000_000 - 180_000,
+            status: Some(401),
+            error: Some("HTTP 401".into()),
+        };
+        assert_eq!(failed.line(1_000_000), "Failed · HTTP 401 · 3 min ago");
+    }
+
+    #[test]
+    fn keys_and_links_are_shortened_for_the_row() {
+        assert_eq!(
+            short_key("arbk_14788fc5760db12964ebf67724279435f6054bcd"),
+            "arbk_14788fc5…54bcd"
+        );
+        assert_eq!(short_key("arbk_short"), "arbk_short");
+        assert_eq!(
+            short_link("https://relay.arbos.life/asp/connect/01M"),
+            "relay.arbos.life/asp/connect/01M"
+        );
+    }
+
+    #[test]
+    fn status_lines_read_as_the_mockup() {
+        let now = 1_000_000_000;
+        let mut i = OutsideInfo {
+            status: "never".into(),
+            ..Default::default()
+        };
+        assert_eq!(i.status_line(now), "Waiting for the first heartbeat");
+        i.status = "connected".into();
+        i.connected = true;
+        i.last_seen_at = Some(now - 12_000);
+        assert_eq!(i.status_line(now), "Connected · 12 s ago");
+        i.status = "away".into();
+        i.last_seen_at = Some(now - 40 * 60_000);
+        assert_eq!(i.status_line(now), "Away · 40 min ago");
+        i.status = "revoked".into();
+        assert_eq!(i.status_line(now), "Disconnected");
+        assert_eq!(
+            OutsideInfo {
+                transport: "acp".into(),
+                ..Default::default()
+            }
+            .transport_label(),
+            "ACP · on your Mac"
+        );
+    }
 }

@@ -565,6 +565,89 @@ fn fixture_foreign_agent() -> bool {
     std::env::var("ARBOS_FIXTURE_FOREIGN_AGENT").is_ok_and(|v| v.trim() == "1")
 }
 
+/// `ARBOS_FIXTURE_OUTSIDE=1|log` (screenshot rig, #2232): "Comms" becomes a connected outside
+/// agent, so the Details pane draws the Connection card. Without the switch the fixture has no
+/// outside agent at all and neither card can be shot.
+///
+/// `=1` is a relay with no session log (the card stays away, as on an older relay); `=log`
+/// adds the log summary, which is what makes the Session log card appear.
+fn outside_fixture() -> Option<crate::model::OutsideInfo> {
+    let spec = std::env::var("ARBOS_FIXTURE_OUTSIDE").ok()?;
+    let spec = spec.trim();
+    if spec != "1" && spec != "log" {
+        return None;
+    }
+    let entries = outside_log_fixture();
+    Some(crate::model::OutsideInfo {
+        status: "connected".into(),
+        connected: true,
+        transport: "grok".into(),
+        protocol: "asp/1".into(),
+        last_seen_at: Some(now_ms() as i64 - 12_000),
+        connected_at: Some(now_ms() as i64 - 3 * 3_600_000),
+        // Empty: `OutsideInfo::scope` already falls back to the default-on set.
+        scopes: std::collections::HashMap::new(),
+        wake: None,
+        log: (spec == "log").then(|| crate::model::OutsideLogSummary {
+            entries: entries.len() as i64,
+            last_at: entries.last().map(|e| e.at),
+            last_reply_ms: Some(9603),
+        }),
+    })
+}
+
+/// The sample log behind the rig switch, oldest first as the relay serves it: replies with
+/// their latencies, one error and the session events, so the card's four rows and all four
+/// View all filters have something to show.
+fn outside_log_fixture() -> Vec<crate::model::OutsideLogEntry> {
+    let t = now_ms() as i64;
+    let ms = |pairs: &[(&str, i64)]| -> std::collections::HashMap<String, i64> {
+        pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+    };
+    let entry = |id: i64, at: i64, kind: &str| crate::model::OutsideLogEntry {
+        id,
+        at,
+        kind: kind.into(),
+        ..Default::default()
+    };
+    vec![
+        crate::model::OutsideLogEntry {
+            session: Some("01J9SESS000000000000000001".into()),
+            generation: Some(1),
+            ..entry(1, t - 3 * 3_600_000, "session.new")
+        },
+        crate::model::OutsideLogEntry {
+            chat: Some(CHAT_ARBOS_LAUNCH.into()),
+            ms: ms(&[("event_to_reply", 9603), ("ack_to_reply", 8400)]),
+            ..entry(2, t - 2 * 3_600_000, "reply")
+        },
+        crate::model::OutsideLogEntry {
+            session: Some("01J9SESS000000000000000001".into()),
+            turns: Some(12),
+            ..entry(3, t - 95 * 60_000, "session.resume")
+        },
+        crate::model::OutsideLogEntry {
+            chat: Some(CHAT_COMMS_MAIN.into()),
+            ms: ms(&[("event_to_reply", 14_200), ("ack_to_reply", 12_900)]),
+            ..entry(4, t - 90 * 60_000, "reply")
+        },
+        crate::model::OutsideLogEntry {
+            error: Some("The agent's machine refused the wake: connection timed out.".into()),
+            ..entry(5, t - 40 * 60_000, "error")
+        },
+        crate::model::OutsideLogEntry {
+            session: Some("01J9SESS000000000000000002".into()),
+            reason: Some("context_full".into()),
+            ..entry(6, t - 25 * 60_000, "session.rotate")
+        },
+        crate::model::OutsideLogEntry {
+            chat: Some(CHAT_ARBOS_LAUNCH.into()),
+            ms: ms(&[("event_to_reply", 7_480), ("ack_to_reply", 6_300)]),
+            ..entry(7, t - 11 * 60_000, "reply")
+        },
+    ]
+}
+
 /// `ARBOS_FIXTURE_LONG_ROWS=<n>` (screenshot / perf rig): pad the Launch week
 /// group with this many synthetic rows — only the message list grows; the chat
 /// header pill stays in the header row ([feedback
@@ -1197,6 +1280,18 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::SetServerLeaf { .. }
         | ClientCommand::GenerateImage { .. }
         | ClientCommand::CloseChat { .. } => {}
+        // The Session log card asks for the log when the Details pane opens (#2232); under
+        // `ARBOS_FIXTURE_OUTSIDE=1` the rig answers it so the card can be shot.
+        ClientCommand::OutsideAgentLog { project_id } => {
+            let entries = match outside_fixture() {
+                Some(info) if info.log.is_some() => outside_log_fixture(),
+                _ => Vec::new(),
+            };
+            let _ = shared.events.send(SyncEvent::OutsideAgentLog {
+                project_id,
+                entries,
+            });
+        }
         // D88 servers live on the relay only; the fixture has none.
         ClientCommand::ServersRefresh
         | ClientCommand::ServerCreate { .. }
@@ -5375,7 +5470,7 @@ fn seed_projects() -> Vec<Project> {
             description: None,
             owner_person: None,
             machine_info: None,
-            outside: None,
+            outside: outside_fixture(),
             muted: false,
             silenced: false,
             silenced_until: None,
