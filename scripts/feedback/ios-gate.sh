@@ -123,7 +123,17 @@ run_suite() {
   local dd="$1" log="$2" xctestrun udid
   xctestrun=$(ls -t "$dd"/Build/Products/*.xctestrun 2>/dev/null | head -n 1)
   udid=$(test_sim_udid)
-  [[ -n "$xctestrun" && -n "$udid" ]] || { echo "no xctestrun or no simulator '$TEST_SIM_NAME'" >"$log"; return 2; }
+  # Write what the rig actually offers, not only what is missing: the hosted runner hit the same
+  # fault on 2026-10-30 (runs 41114348485, 41116429834) and its log named the device list, which is
+  # what told us CoreSimulator had no device at all rather than one under a different name.
+  if [[ -z "$xctestrun" || -z "$udid" ]]; then
+    { echo "no xctestrun or no simulator '$TEST_SIM_NAME'"
+      echo "xctestrun: ${xctestrun:-none under $dd/Build/Products}"
+      echo "simulators this rig offers (xcrun simctl list devices available):"
+      xcrun simctl list devices available 2>&1 | head -n 25
+    } >"$log"
+    return 2
+  fi
   xcrun simctl bootstatus "$udid" -b >/dev/null 2>&1
   # xcodebuild sometimes never exits after the suite has finished (06:23 Oct 26: 222 tests done, the
   # process idle on the main thread 8 min later). Run it in the background and stop it once the log
@@ -189,34 +199,51 @@ run_unit_tests() {
   local trc=$?
   fails=$(failing_tests "$log")
   read -r state passed _ <<< "$(test_run_state "$log")"
-  # A finished run whose cases this script cannot find is a parser problem, and saying so is the
-  # whole point of the state: the alternative is calling it zero tests, which reads as a suite
-  # that never ran and sends the next person looking at the branch instead of at this file.
-  if [[ "$state" == "unreadable" ]]; then
-    echo "== tests: FAIL — the run finished but no test case line of a shape this gate knows is in"
-    echo "   its log, so it cannot tell a suite that passed from one that never ran. Either"
-    echo "   -only-testing:$TEST_ONLY selected nothing, or xcodebuild's per-case wording changed"
-    echo "   again and test_cases() needs the new shape (see its comment for the two it reads)."
-    tail -n 8 "$log" | cut -c1-200
-    rm -f "$log"; return 1
-  fi
-  if [[ "$trc" -eq 0 && -z "$fails" ]]; then
-    # A run that executed nothing is not a pass. xcodebuild exits 0 and prints "** TEST SUCCEEDED **"
-    # when -only-testing matches no test in the .xctestrun, so the verdict line above cannot see it
-    # (2026-10-30: a rig built the app, ran 0 tests and reported success because a new ArbosUITests
-    # file was never added to project.pbxproj, so it compiled into no bundle).
-    if [[ "$state" == "none" ]]; then
-      echo "== tests: FAIL — the suite reported success but ran no test; -only-testing:$TEST_ONLY"
+  # Three of the four states carry no test case at all, and they are decided together: a branch
+  # that no test ran against has not been checked, so none of them may report a pass. Each one
+  # still gets its own words, because they are repaired in three different places.
+  case "$state" in
+    unreadable)
+      # A finished run whose cases this script cannot find is a parser problem, and saying so is the
+      # whole point of the state: the alternative is calling it zero tests, which reads as a suite
+      # that never ran and sends the next person looking at the branch instead of at this file.
+      echo "== tests: FAIL — the run finished but no test case line of a shape this gate knows is in"
+      echo "   its log, so it cannot tell a suite that passed from one that never ran. Either"
+      echo "   -only-testing:$TEST_ONLY selected nothing, or xcodebuild's per-case wording changed"
+      echo "   again and test_cases() needs the new shape (see its comment for the two it reads)."
+      tail -n 8 "$log" | cut -c1-200
+      rm -f "$log"; return 1 ;;
+    none)
+      # xcodebuild exits 0 and prints "** TEST SUCCEEDED **" when -only-testing matches no test in
+      # the .xctestrun, so the verdict line cannot see it (2026-10-30: a rig built the app, ran 0
+      # tests and reported success because a new ArbosUITests file was never added to project.pbxproj,
+      # so it compiled into no bundle).
+      echo "== tests: FAIL — the suite finished but ran no test (rc=$trc); -only-testing:$TEST_ONLY"
       echo "   matched nothing in the .xctestrun. Check that $TEST_ONLY is a target of the Arbos scheme's"
       echo "   Test action and that every test file is a member of it in project.pbxproj."
       tail -n 8 "$log" | cut -c1-200
-      rm -f "$log"; return 1
-    fi
+      rm -f "$log"; return 1 ;;
+    incomplete)
+      # No verdict banner at all: the suite never started. Usually the rig (no simulator named
+      # TEST_SIM_NAME, no .xctestrun, a watchdog kill before the first case), which is why the
+      # wording points at the rig — but it is still a non-pass, because the branch went unchecked.
+      # The hosted runner lost its whole simulator set twice on 2026-10-30 (runs 41114348485 and
+      # 41116429834) and went red for it; the gate used to call the same thing "not blamed" and
+      # return a pass, which is the silent no-test run this check exists to stop.
+      echo "== tests: FAIL to run — the suite never reached a verdict banner (rc=$trc), so no test ran"
+      echo "   and this branch was NOT checked. This reads as the rig, not the branch: no simulator"
+      echo "   named '$TEST_SIM_NAME', no .xctestrun from build-for-testing, or a kill before the first"
+      echo "   case. Repair the rig and run the gate again — a run that checked nothing is not a pass."
+      tail -n 12 "$log" | cut -c1-200
+      rm -f "$log"; return 1 ;;
+  esac
+  if [[ "$trc" -eq 0 && -z "$fails" ]]; then
     echo "== tests: $passed passed ($(( $(date +%s) - t0 )) s)"
     rm -f "$log"; return 0
   fi
   if [[ -z "$fails" ]]; then
-    # xcodebuild failed without a single failing test case: simulator / infrastructure trouble, not the branch.
+    # The suite ran cases and not one of them failed, yet xcodebuild still returned non-zero (a crash
+    # after the last case, a watchdog kill once the verdict was in): infrastructure, not the branch.
     echo "== tests: could not run (rc=$trc, no test case failed) — not blamed; tail:"
     tail -n 8 "$log" | cut -c1-200
     rm -f "$log"; return 0
@@ -324,6 +351,23 @@ if [[ "${1:-}" == "selftest" ]]; then
     echo "          '$suite_failed', execute-failed '$execute_failed', unfinished '$unfinished'"; rm -f "$tlog"; exit 1
   fi
   rm -f "$tlog"
+  # The decision itself, not only the reader: stub the suite with the two logs that reach
+  # run_unit_tests without a single case line — the rig with no simulator (what the hosted runner
+  # hit on 2026-10-30), and a finished run that selected nothing — and require a failure for both.
+  # Before this, the first of the two printed "not blamed" and returned a pass on zero tests.
+  no_sim_rc=0
+  ( run_suite() { printf '%s\n' "no xctestrun or no simulator '$TEST_SIM_NAME'" >"$2"; return 2; }
+    run_unit_tests >/dev/null 2>&1 ) || no_sim_rc=$?
+  nothing_rc=0
+  ( run_suite() { printf '%s\n' "Test Suite 'Selected tests' passed at 2026-10-30 17:24:31.002." \
+                                "** TEST SUCCEEDED **" >"$2"; return 0; }
+    run_unit_tests >/dev/null 2>&1 ) || nothing_rc=$?
+  if (( no_sim_rc == 1 && nothing_rc == 1 )); then
+    echo "selftest: a run that executed no test fails the gate (no simulator, and nothing selected)"
+  else
+    echo "selftest: WRONG — no-simulator run returned $no_sim_rc, selected-nothing run returned $nothing_rc;"
+    echo "          one of them reported a pass for a branch no test ran against"; exit 1
+  fi
   [[ -n "$(test_sim_udid)" ]] && echo "selftest: test simulator '$TEST_SIM_NAME' present ($(test_sim_udid))" || { echo "selftest: test simulator '$TEST_SIM_NAME' MISSING"; exit 1; }
   # The scheme must build the unit-test target in its Test action, or build-for-testing checks nothing.
   scheme=$HOME/arbos-gate/apps/ios/Arbos/Arbos.xcodeproj/xcshareddata/xcschemes/Arbos.xcscheme
