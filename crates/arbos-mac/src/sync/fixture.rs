@@ -1473,7 +1473,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             quick_look,
             ..
         } => {
-            let bytes = if key.ends_with(".png") || name.ends_with(".png") {
+            let bytes = if fixture_picture_key(&key, &name) {
                 fixture_png(&key)
             } else {
                 format!("Fixture attachment {name} ({key}).\n").into_bytes()
@@ -2201,10 +2201,23 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             });
         }
         ClientCommand::FetchThumbnail { key, .. } => {
-            let _ = shared.events.send(SyncEvent::Thumbnail {
-                bytes: Arc::new(fixture_png(&key)),
-                key,
-            });
+            // `ARBOS_FIXTURE_SLOW_THUMBS=<ms>`: answer after a wait, the way the relay does.
+            // An instant answer hides every "the picture landed after the row was built" bug —
+            // Jacob's empty GIF bubble was exactly that ordering
+            // ([feedback gif-send-and-playback-2026-10-30]).
+            let bytes = Arc::new(fixture_png(&key));
+            match slow_thumbs() {
+                None => {
+                    let _ = shared.events.send(SyncEvent::Thumbnail { bytes, key });
+                }
+                Some(wait) => {
+                    let shared = shared.clone();
+                    tokio::spawn(async move {
+                        sleep(wait).await;
+                        let _ = shared.events.send(SyncEvent::Thumbnail { bytes, key });
+                    });
+                }
+            }
         }
         ClientCommand::FetchCopyBlobs { request, keys, .. } => {
             // The fixture's pictures are PNGs; a key that reads as a file gets a small text body.
@@ -2245,7 +2258,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             key,
             name,
         } => {
-            let bytes = if key.ends_with(".png") || name.ends_with(".png") {
+            let bytes = if fixture_picture_key(&key, &name) {
                 fixture_png(&key)
             } else {
                 format!(
@@ -5885,6 +5898,21 @@ impl Seeder<'_> {
         });
         id
     }
+}
+
+/// Whether the fixture answers `key` with picture bytes: a PNG, or a picked GIF's `url:` key
+/// ([feedback gif-send-and-playback-2026-10-30]).
+fn fixture_picture_key(key: &str, name: &str) -> bool {
+    key.starts_with(crate::model::URL_KEY_PREFIX) || key.ends_with(".png") || name.ends_with(".png")
+}
+
+/// `ARBOS_FIXTURE_SLOW_THUMBS=<ms>`: how long a thumbnail fetch takes, or `None` for at once.
+fn slow_thumbs() -> Option<Duration> {
+    std::env::var("ARBOS_FIXTURE_SLOW_THUMBS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|ms| *ms > 0)
+        .map(Duration::from_millis)
 }
 
 /// `ARBOS_FIXTURE_AGENT_MESSAGE=1`: seed the agent-to-agent messaging scenario.
