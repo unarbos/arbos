@@ -66,7 +66,7 @@ All optional unless noted.
 | `ARBOS_RELAY_LISTEN` | bind address, default `127.0.0.1:7700`; use `0.0.0.0:7700` on a server |
 | `ARBOS_RELAY_PUBLIC_URL` | the URL machines and devices dial back (**required for Daytona machines**), e.g. `https://relay.example.com`; WebSockets must pass through |
 | `ARBOS_RELAY_DATA` | SQLite + blobs + local boxes, default `./.arbos-local/relay` |
-| `ARBOS_RELAY_ADMIN_TOKEN` | token for the admin endpoints (`/admin/*`, `POST /pair/new`); generated and logged when unset |
+| `ARBOS_RELAY_ADMIN_TOKEN` | token for the admin endpoints (`/admin/*`, `POST /pair/new`); when unset one is generated into `$ARBOS_RELAY_DATA/admin-token` at mode 0600 and the log names the path, not the token |
 | `ARBOS_RELAY_KEY` | the key-encryption key for connector tokens and secrets (each user's secret values are AES-256-GCM under a per-user key wrapped by this one); generated once into the `meta` table when unset — fine for a laptop, a loud boot warning in `github` mode: set it from the environment (for example `op run`) on a real server |
 | `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | provider keys for the model proxy (never reach a machine) |
 | `ARBOS_OPENAI_BASE`, `ARBOS_ANTHROPIC_BASE` | upstreams, default OpenRouter |

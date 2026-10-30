@@ -1,4 +1,6 @@
 mod admin;
+#[cfg(test)]
+mod admin_token_tests;
 mod agent_messages;
 mod api;
 mod api_error_layer;
@@ -113,7 +115,7 @@ struct Args {
     /// Data directory (SQLite + blobs + local boxes).
     #[arg(long, env = "ARBOS_RELAY_DATA", default_value = "./.arbos-local/relay")]
     data: PathBuf,
-    /// Admin token for `POST /pair/new`; generated and printed when absent.
+    /// Admin token for `POST /pair/new`; when absent one is generated into `<data>/admin-token`.
     #[arg(long, env = "ARBOS_RELAY_ADMIN_TOKEN")]
     admin_token: Option<String>,
     /// Daytona snapshot name for new boxes.
@@ -212,11 +214,17 @@ async fn main() -> anyhow::Result<()> {
             "https://openrouter.ai/api".to_owned()
         }
     });
-    let admin_token = args.admin_token.clone().or_else(|| {
-        let t = arbos_core::auth::mint(arbos_core::auth::TokenKind::Device).replace("adv_", "adm_");
-        tracing::info!("no ARBOS_RELAY_ADMIN_TOKEN set; generated admin token: {t}");
-        Some(t)
-    });
+    let admin_token = match args.admin_token.clone() {
+        Some(t) => Some(t),
+        None => {
+            let (t, path) = generated_admin_token(&args.data)?;
+            tracing::info!(
+                "no ARBOS_RELAY_ADMIN_TOKEN set; generated an admin token and wrote it to {}",
+                path.display()
+            );
+            Some(t)
+        }
+    };
     let public_url = env_nonempty("ARBOS_PUBLIC_URL")
         .or_else(|| args.public_url.clone())
         .unwrap_or_else(|| format!("http://{}", args.listen));
@@ -1089,6 +1097,34 @@ async fn main() -> anyhow::Result<()> {
     restart::install_sigterm_handler(state_for_restart);
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Mint the admin token used when `ARBOS_RELAY_ADMIN_TOKEN` is unset, and put it in
+/// `<data>/admin-token` at mode 0600. Returns the token and the path.
+///
+/// The operator has to be able to read this token, but the startup log is the wrong place to hand
+/// it over: under systemd that is journald, where it outlives the process and is readable by the
+/// whole `systemd-journal` group. A file the relay's own user owns reaches the operator and
+/// nobody else.
+fn generated_admin_token(data_dir: &std::path::Path) -> anyhow::Result<(String, PathBuf)> {
+    use std::io::Write as _;
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+    let token = arbos_core::auth::mint(arbos_core::auth::TokenKind::Device).replace("adv_", "adm_");
+    let path = data_dir.join("admin-token");
+    std::fs::create_dir_all(data_dir)?;
+    // Create at 0600 rather than widening afterwards, so the token is never on disk world-readable.
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&path)?;
+    // An existing file keeps its old mode through `create`, so set it either way.
+    f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    writeln!(f, "{token}")?;
+    f.sync_all()?;
+    Ok((token, path))
 }
 
 fn env_nonempty(name: &str) -> Option<String> {
