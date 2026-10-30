@@ -298,14 +298,18 @@ struct MediaViewer: View {
             Spacer(minLength: 0)
 
             if let item {
-                VStack(spacing: 2) {
-                    Text(item.by).font(theme.font(15, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
+                VStack(spacing: 1) {
+                    Text(item.by).font(theme.font(15, weight: .semibold))
+                        .foregroundStyle(.white.opacity(ViewerChromeText.name.alpha)).lineLimit(1)
                     // GIF-picker "via <provider>" under the name when present;
                     // else the when/caption subline (feedback
                     // app-01M61EZD0GJ2XGV1EW4SCVXENK).
-                    MediaViaCaption(source: item.source, fallback: item.subline)
+                    MediaViaCaption(source: item.source, fallback: item.subline,
+                                    color: .white.opacity(ViewerChromeText.subline.alpha))
                 }
-                .modifier(ViewerTextShadow())
+                .padding(.horizontal, 14)
+                .padding(.vertical, 4)
+                .background(ViewerChromeBackground(shape: Capsule()))
             }
 
             Spacer(minLength: 0)
@@ -313,10 +317,11 @@ struct MediaViewer: View {
             if album.count > 1 {
                 Text("\(index + 1) of \(album.count)")
                     .font(theme.font(13, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.67))
+                    .foregroundStyle(.white.opacity(ViewerChromeText.counter.alpha))
                     .monospacedDigit()
-                    .frame(minWidth: 36, alignment: .trailing)
-                    .modifier(ViewerTextShadow())
+                    .padding(.horizontal, 10)
+                    .frame(minWidth: 36, minHeight: 28)
+                    .background(ViewerChromeBackground(shape: Capsule()))
             } else {
                 Color.clear.frame(width: 36, height: 36)
             }
@@ -341,10 +346,13 @@ struct MediaViewer: View {
             if album.count > 1 {
                 HStack(spacing: 4) {
                     ForEach(album.indices, id: \.self) { i in
-                        Circle().fill(Color.white.opacity(i == index ? 1 : 0.35)).frame(width: 6, height: 6)
+                        Circle().fill(Color.white.opacity(i == index ? ViewerChromeText.activeDot.alpha : ViewerChrome.inactiveDotAlpha))
+                            .frame(width: 6, height: 6)
                     }
                 }
-                .modifier(ViewerTextShadow())
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .background(ViewerChromeBackground(shape: Capsule()))
                 .padding(.bottom, 12)
                 .accessibilityHidden(true)
             }
@@ -490,8 +498,44 @@ enum ViewerChrome {
 
     /// WCAG contrast of the white glyph against a grey face.
     static func glyphContrast(onFace level: Double) -> Double {
+        contrast(1, level)
+    }
+
+    /// The grey level white at `alpha` reaches over a face of grey `level`.
+    static func textLevel(alpha: Double, onFace level: Double) -> Double {
+        alpha + (1 - alpha) * level
+    }
+
+    /// WCAG contrast between two sRGB grey levels.
+    static func contrast(_ a: Double, _ b: Double) -> Double {
         func linear(_ c: Double) -> Double { c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4) }
-        return 1.05 / (linear(level) + 0.05)
+        let (hi, lo) = (max(linear(a), linear(b)), min(linear(a), linear(b)))
+        return (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// The page dots that are not the current page; only the current one has to read.
+    static let inactiveDotAlpha: Double = 0.35
+    /// WCAG non-text contrast, for the current page dot.
+    static let minDotContrast: Double = 3
+}
+
+/// The caption, counter and page dots sit on the same plate as the controls
+/// ([feedback viewer-caption-white-2026-10-29]: a dark halo alone left white
+/// text faint on a white picture). On Glass over white the face is a 0.45 grey,
+/// where white dimmer than ~95 % falls under AA, so the text stays white and the
+/// caption's hierarchy comes from size and weight.
+enum ViewerChromeText: CaseIterable {
+    case name, subline, counter, activeDot
+
+    var alpha: Double { 1 }
+
+    var minContrast: Double {
+        switch self {
+        case .name, .subline, .counter:
+            return ViewerChrome.minContrast
+        case .activeDot:
+            return ViewerChrome.minDotContrast
+        }
     }
 }
 
@@ -537,14 +581,6 @@ struct ViewerChromeBackground<S: InsettableShape>: View {
             shape.fill(.ultraThinMaterial)
             plate
         }
-    }
-}
-
-/// The caption, counter and page dots have no plate; a soft dark halo keeps them
-/// readable where the picture runs under the bars.
-private struct ViewerTextShadow: ViewModifier {
-    func body(content: Content) -> some View {
-        content.shadow(color: .black.opacity(0.55), radius: 3, y: 0.5)
     }
 }
 
