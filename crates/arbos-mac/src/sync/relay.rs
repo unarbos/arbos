@@ -60,9 +60,9 @@ use crate::model::{
     new_id, now_ms, trace_rows, AccountView, Attachment, AttachmentKind, BoxReport, BoxState, Call,
     CallEnded, CallLeft, CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView,
     ChartBody, Chat, Effort, GifItem, GifPage, Id, Link, LinkState, Machine, MachineState,
-    MediaPick, Message, Part, Person, Project, ProjectDocView, ProjectSecrets, Reachable, ReplyRef,
-    Role, Routine, RoutineRun, Sender, ServerInfo, StickerPack, ThreadInfo, STICKER_KEY_PREFIX,
-    URL_KEY_PREFIX,
+    MediaPick, Message, MessageStatus, Part, Person, Project, ProjectDocView, ProjectSecrets,
+    Reachable, ReplyRef, Role, Routine, RoutineRun, Sender, ServerInfo, StickerPack, ThreadInfo,
+    STICKER_KEY_PREFIX, URL_KEY_PREFIX,
 };
 use crate::update;
 
@@ -216,6 +216,12 @@ struct Shared {
     chats: Mutex<Vec<Chat>>,
     /// Client-minted message ids whose push the relay has not `ACK`ed (S3).
     unacked: Mutex<HashSet<Id>>,
+    /// Message ids of mine whose send did not fully land (`MessageSendFailed`) — today, a
+    /// row whose attachment upload failed ([feedback failed-upload-retry]). The doc writes
+    /// no `status` for a user row, so this set is the only thing that can say "failed":
+    /// without it the red Retry mark showed once and the next snapshot wiped it. Cleared
+    /// when the row is deleted — which is how Retry starts.
+    failed_sends: Arc<Mutex<HashSet<Id>>>,
     /// Rooms whose pushes were refused with `not_available` on the live connection.
     /// Cleared by the next ACK for that room (not by draining `unacked`, which is global).
     push_refused: Mutex<HashSet<Id>>,
@@ -825,6 +831,8 @@ impl SyncSource for RelaySource {
     ) -> BoxFuture<'static, Result<()>> {
         Box::pin(async move {
             let _ = SOURCE_START.set(Instant::now());
+            // Shared with the send queue's timeout callback, which runs outside `Shared`.
+            let failed_sends: Arc<Mutex<HashSet<Id>>> = Arc::new(Mutex::new(HashSet::new()));
             let shared = Arc::new(Shared {
                 http: reqwest::Client::builder()
                     .timeout(Duration::from_secs(30))
@@ -850,6 +858,7 @@ impl SyncSource for RelaySource {
                 projects: Mutex::new(Vec::new()),
                 chats: Mutex::new(Vec::new()),
                 unacked: Mutex::new(HashSet::new()),
+                failed_sends: Arc::clone(&failed_sends),
                 push_refused: Mutex::new(HashSet::new()),
                 events: events.clone(),
                 subscriptions: Mutex::new(Vec::new()),
@@ -875,7 +884,9 @@ impl SyncSource for RelaySource {
                 servers_off: AtomicBool::new(false),
                 send_queue: {
                     let events = events.clone();
+                    let failed_sends = Arc::clone(&failed_sends);
                     ChatSendQueue::new(move |chat_id, message_id| {
+                        failed_sends.lock().unwrap().insert(message_id.clone());
                         let _ = events.send(SyncEvent::MessageSendFailed {
                             chat_id,
                             message_id,
@@ -3010,7 +3021,30 @@ fn emit_chats(shared: &Shared) {
 fn apply_pending(shared: &Shared, message: &mut Message) {
     if message.role == Role::User {
         message.pending = shared.unacked.lock().unwrap().contains(&message.id);
+        // A send of mine that did not fully land keeps its place and its red Retry mark
+        // through every later snapshot ([feedback failed-upload-retry]).
+        if shared.failed_sends.lock().unwrap().contains(&message.id) {
+            message.pending = false;
+            message.status = MessageStatus::Error;
+        }
     }
+}
+
+/// One of my sends did not fully land: the row stops being pending, is marked failed for
+/// every snapshot from here on, and the composer shows the words
+/// ([feedback failed-upload-retry]). The row itself stays in the chat.
+fn fail_send(shared: &Shared, chat_id: Id, message_id: Id, error: UserError) {
+    shared.unacked.lock().unwrap().remove(&message_id);
+    shared
+        .failed_sends
+        .lock()
+        .unwrap()
+        .insert(message_id.clone());
+    let _ = shared.events.send(SyncEvent::MessageSendFailed {
+        chat_id,
+        message_id,
+        error,
+    });
 }
 
 fn emit_snapshot(shared: &Shared, chat_id: &str) {
@@ -4670,12 +4704,14 @@ fn enqueue_send(
 
 /// Put one outgoing attachment under `blob_slot` (a file read from disk, or a
 /// relay blob copied from its source slot) and describe it for the row. A failed
-/// read or upload is reported and leaves the part without a `ref`.
+/// read or upload leaves the part without a `ref` and comes back as the second
+/// field, so the caller can mark the whole row failed instead of writing a row
+/// that points at nothing ([feedback failed-upload-retry]).
 async fn upload_outgoing(
     shared: &Arc<Shared>,
     blob_slot: &str,
     outgoing: Outgoing,
-) -> UserAttachment {
+) -> (UserAttachment, Option<UserError>) {
     let mut source = None;
     let (name, mime, kind, bytes) = match outgoing {
         Outgoing::Gif {
@@ -4684,14 +4720,17 @@ async fn upload_outgoing(
             url,
             source,
         } => {
-            return UserAttachment {
-                name,
-                mime,
-                kind: Some("image".into()),
-                blob_ref: None,
-                url: Some(url),
-                source: Some(source),
-            };
+            return (
+                UserAttachment {
+                    name,
+                    mime,
+                    kind: Some("image".into()),
+                    blob_ref: None,
+                    url: Some(url),
+                    source: Some(source),
+                },
+                None,
+            );
         }
         Outgoing::Sticker {
             name,
@@ -4739,7 +4778,10 @@ async fn upload_outgoing(
         }
     };
     let key = format!("att-{}-{}", new_id().to_lowercase(), safe_name(&name));
-    let blob_ref = match bytes {
+    // The failure is handed back, not toasted: the caller marks the row failed and the
+    // composer's note carries the words, so the row that lost its file and the message
+    // about it are the same thing ([feedback failed-upload-retry]).
+    let (blob_ref, error) = match bytes {
         Ok(bytes) => {
             let put = shared
                 .http
@@ -4750,30 +4792,33 @@ async fn upload_outgoing(
                 .send()
                 .await;
             match put {
-                Ok(r) if r.status().is_success() => Some(key),
-                Ok(r) => {
-                    shared.fail("upload the attachment", r.status());
-                    None
-                }
-                Err(err) => {
-                    shared.fail("upload the attachment", &err);
-                    None
-                }
+                Ok(r) if r.status().is_success() => (Some(key), None),
+                Ok(r) => (
+                    None,
+                    Some(Fault::from(r.status()).classify("upload the attachment")),
+                ),
+                Err(err) => (
+                    None,
+                    Some(Fault::from(&err).classify("upload the attachment")),
+                ),
             }
         }
-        Err(err) => {
-            shared.fail(&format!("attach {name}"), &err);
-            None
-        }
+        Err(err) => (
+            None,
+            Some(Fault::from(&err).classify(&format!("attach {name}"))),
+        ),
     };
-    UserAttachment {
-        name,
-        mime,
-        kind,
-        blob_ref,
-        url: None,
-        source,
-    }
+    (
+        UserAttachment {
+            name,
+            mime,
+            kind,
+            blob_ref,
+            url: None,
+            source,
+        },
+        error,
+    )
 }
 
 /// The doc parts a forwarded chart becomes on the new row: its copied fallback
@@ -4832,11 +4877,7 @@ fn fail_pending_new_chat(shared: &Shared, local_id: &str, error: UserError) {
         shared.fail_with(error.clone());
     }
     for q in queued {
-        let _ = shared.events.send(SyncEvent::MessageSendFailed {
-            chat_id: local_id.to_owned(),
-            message_id: q.message_id,
-            error: error.clone(),
-        });
+        fail_send(shared, local_id.to_owned(), q.message_id, error.clone());
     }
 }
 
@@ -4876,11 +4917,7 @@ async fn send_message(
             }
         }
         let error = UserError::from_text("send your message", "chat is not ready");
-        let _ = shared.events.send(SyncEvent::MessageSendFailed {
-            chat_id,
-            message_id,
-            error,
-        });
+        fail_send(&shared, chat_id, message_id, error);
         return;
     }
 
@@ -4895,8 +4932,14 @@ async fn send_message(
         &project_id
     });
     let mut user_attachments: Vec<UserAttachment> = Vec::new();
+    // The first upload that did not land. The row is still written — with the part and
+    // no `ref`, so the file is named and Retry has something to put back — and then
+    // marked failed ([feedback failed-upload-retry]).
+    let mut upload_error: Option<UserError> = None;
     for outgoing in attachments {
-        user_attachments.push(upload_outgoing(&shared, &blob_slot, outgoing).await);
+        let (attachment, error) = upload_outgoing(&shared, &blob_slot, outgoing).await;
+        user_attachments.push(attachment);
+        upload_error = upload_error.or(error);
     }
     if let Some(wav) = voice_wav {
         if let Part::Attachment { attachment, .. } =
@@ -4911,8 +4954,8 @@ async fn send_message(
     if let Some(f) = forwarded.as_ref() {
         for c in &f.charts {
             let fallback = match c.fallback.clone() {
-                Some(attachment) => Some(
-                    upload_outgoing(
+                Some(attachment) => {
+                    let (fallback, error) = upload_outgoing(
                         &shared,
                         &blob_slot,
                         Outgoing::Copy {
@@ -4920,8 +4963,10 @@ async fn send_message(
                             attachment,
                         },
                     )
-                    .await,
-                ),
+                    .await;
+                    upload_error = upload_error.or(error);
+                    Some(fallback)
+                }
                 None => None,
             };
             chart_parts.extend(forwarded_chart_parts(&c.chart, fallback));
@@ -4943,13 +4988,8 @@ async fn send_message(
         let Some(doc) = docs.get(&chat_id) else {
             // Room torn down between the early check and now — fail visibly.
             drop(docs);
-            shared.unacked.lock().unwrap().remove(&message_id);
             let error = UserError::from_text("send your message", "chat is not ready");
-            let _ = shared.events.send(SyncEvent::MessageSendFailed {
-                chat_id,
-                message_id,
-                error,
-            });
+            fail_send(&shared, chat_id, message_id, error);
             return;
         };
         let me = shared.me_user();
@@ -5031,6 +5071,12 @@ async fn send_message(
                 .unwrap()
                 .insert(chat_id.clone(), now_ms());
         }
+    }
+    // The row is in the doc but one of its files is not on the relay. Marking it failed
+    // is what keeps it in the chat with a working Retry; silently leaving it looked, to
+    // the sender, like the video had been sent ([feedback failed-upload-retry]).
+    if let Some(error) = upload_error {
+        fail_send(&shared, chat_id.clone(), message_id.clone(), error);
     }
     mark_activity(&shared, &chat_id);
     // Other people in the chat get a notification with the text (API §7c); the relay never
@@ -6390,6 +6436,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let room = room::room_path(&project_id, &chat_id, is_people);
             let shared = shared.clone();
             tokio::spawn(async move {
+                // The row is going, so it is no longer a failed send of mine: without this
+                // the overlay would keep marking an id that has left the chat
+                // ([feedback failed-upload-retry]).
+                shared.failed_sends.lock().unwrap().remove(&message_id);
                 if let Err(err) = shared
                     .delete(&format!("/room/{room}/messages/{message_id}"))
                     .await

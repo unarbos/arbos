@@ -657,6 +657,17 @@ pub enum HandoffState {
     Failed(crate::ui::error_note::Slot),
 }
 
+/// Everything Retry needs to send a failed row again exactly as it went the first time,
+/// files included ([feedback failed-upload-retry]).
+struct FailedSend {
+    text: String,
+    /// The files the composer picked. They are read from disk again on each attempt, so a
+    /// file the person has since moved or deleted fails the same way any send would.
+    attachments: Vec<PathBuf>,
+    reply_to: Option<String>,
+    mentions: Vec<String>,
+}
+
 pub struct AppState {
     pub source_name: &'static str,
     pub pairing: Option<Pairing>,
@@ -743,6 +754,11 @@ pub struct AppState {
     pub skills: Vec<Skill>,
     pub chats: HashMap<Id, Vec<Chat>>,
     pub messages: HashMap<Id, Vec<Message>>,
+    /// How to send a row with files again, by message id: the composer's own send, kept
+    /// until the row lands ([feedback failed-upload-retry]). Retry used to re-send the
+    /// text alone — the pictures had been read from disk at send time and were gone, so
+    /// Retry on a failed video sent an empty message and the video never came back.
+    failed_send_replay: HashMap<Id, FailedSend>,
     /// Membership notices this device shows ahead of the relay's row (ARB-393), per chat.
     pub optimistic_notices: HashMap<Id, Vec<OptimisticNotice>>,
     pub chat_ui: HashMap<Id, ChatUi>,
@@ -1288,6 +1304,7 @@ impl AppState {
             skills: Vec::new(),
             chats: HashMap::new(),
             messages: HashMap::new(),
+            failed_send_replay: HashMap::new(),
             optimistic_notices: HashMap::new(),
             chat_ui: HashMap::new(),
             blobs: HashMap::new(),
@@ -5169,6 +5186,21 @@ impl AppState {
                 wav,
             });
         } else {
+            // Keep the send while its files could still need putting back (above: a row
+            // whose upload fails keeps the part with no `ref`, and Retry re-reads the
+            // files). Dropped as soon as the row lands ([feedback failed-upload-retry]).
+            if !attachments.is_empty() {
+                self.prune_send_replays();
+                self.failed_send_replay.insert(
+                    message_id.clone(),
+                    FailedSend {
+                        text: text.clone(),
+                        attachments: attachments.clone(),
+                        reply_to: reply_to.clone(),
+                        mentions: mentions.clone(),
+                    },
+                );
+            }
             self.command(ClientCommand::Send {
                 chat_id: chat_id.clone(),
                 message_id,
@@ -5181,6 +5213,22 @@ impl AppState {
         }
         cx.emit(AppEvent::TranscriptChanged { chat_id });
         cx.notify();
+    }
+
+    /// Forget the files of every send that has landed: what is left is the sends still in
+    /// flight and the ones waiting for Retry ([feedback failed-upload-retry]).
+    fn prune_send_replays(&mut self) {
+        if self.failed_send_replay.is_empty() {
+            return;
+        }
+        let keep: HashSet<Id> = self
+            .messages
+            .values()
+            .flatten()
+            .filter(|m| m.pending || m.status == MessageStatus::Error)
+            .map(|m| m.id.clone())
+            .collect();
+        self.failed_send_replay.retain(|id, _| keep.contains(id));
     }
 
     // ----- servers and channels (D88) --------------------------------------
@@ -6989,28 +7037,48 @@ impl AppState {
         cx.notify();
     }
 
-    /// Retry on one of my bubbles the relay refused (`MessageStatus::Error`,
-    /// see `MessageSendFailed`): the failed row goes, and its text + reply-to go
-    /// out again as a new message through the normal send path (attachments
-    /// were local files picked at send time and are not re-read).
+    /// Retry on one of my own rows that did not land (`MessageStatus::Error`, see
+    /// `MessageSendFailed`): the failed row is deleted for everyone and the whole message
+    /// — words **and** files — goes out again through the normal send path
+    /// ([feedback failed-upload-retry]).
+    ///
+    /// It used to drop the row from this list only, which left the row in the chat doc, so
+    /// the next snapshot brought it straight back; and it re-sent the text alone, so a
+    /// failed video came back as an empty message or, with no caption, as nothing at all.
     pub fn resend_failed(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
-        let Some(list) = self.messages.get_mut(&chat_id) else {
-            return;
-        };
-        let Some(ix) = list
-            .iter()
-            .position(|m| m.id == message_id && m.status == MessageStatus::Error)
-        else {
-            return;
-        };
-        let failed = list.remove(ix);
-        let text = failed.plain_text();
-        if text.trim().is_empty() {
-            cx.emit(AppEvent::TranscriptChanged { chat_id });
-            cx.notify();
+        // Retry lives on the row in the open chat, and `send_with` sends to the open chat:
+        // retrying into a chat that is not open would delete the row and send nowhere.
+        if self.active_chat_id().as_deref() != Some(chat_id.as_str()) {
             return;
         }
-        self.send(text, Vec::new(), failed.reply_to.clone(), Vec::new(), cx);
+        let Some(failed) = self.messages.get(&chat_id).and_then(|list| {
+            list.iter().find(|m| {
+                m.id == message_id && m.role == Role::User && m.status == MessageStatus::Error
+            })
+        }) else {
+            return;
+        };
+        let row_text = failed.plain_text();
+        let row_reply_to = failed.reply_to.clone();
+        let replay = self.failed_send_replay.remove(&message_id);
+        let (text, attachments, reply_to, mentions) = match replay {
+            Some(r) => (r.text, r.attachments, r.reply_to, r.mentions),
+            None => (row_text, Vec::new(), row_reply_to, Vec::new()),
+        };
+        // Nothing to put back (a send with neither words nor files): leave the row alone
+        // rather than delete it and send an empty message.
+        if text.trim().is_empty() && attachments.is_empty() {
+            return;
+        }
+        // For everyone, through the relay, like the message menu's Delete — not a local
+        // hide, which the next snapshot would undo.
+        self.delete_message(chat_id.clone(), message_id.clone(), cx);
+        if let Some(list) = self.messages.get_mut(&chat_id) {
+            list.retain(|m| m.id != message_id);
+        }
+        self.send_with(text, attachments, None, reply_to, false, mentions, cx);
+        cx.emit(AppEvent::TranscriptChanged { chat_id });
+        cx.notify();
     }
 
     pub fn retry(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
@@ -9466,16 +9534,22 @@ impl AppState {
         }
     }
 
-    /// Try again on the composer's note: re-send the newest failed message in that chat (the
-    /// note clears either way; an attachment / recording failure has nothing to re-send).
+    /// Try again on the composer's note: re-send the newest row of mine in that chat that
+    /// did not land. The note stays when there is nothing to re-send — it used to clear
+    /// either way, so Try again looked like it had worked when it had done nothing
+    /// ([feedback failed-upload-retry]).
     pub fn retry_send_error(&mut self, chat: Id, cx: &mut Context<Self>) {
-        self.send_errors.remove(&chat);
         let failed = self
             .messages
             .get(&chat)
-            .and_then(|list| list.iter().rev().find(|m| m.status == MessageStatus::Error))
+            .and_then(|list| {
+                list.iter()
+                    .rev()
+                    .find(|m| m.role == Role::User && m.status == MessageStatus::Error)
+            })
             .map(|m| m.id.clone());
         if let Some(message_id) = failed {
+            self.send_errors.remove(&chat);
             self.resend_failed(chat, message_id, cx);
         }
         cx.notify();
