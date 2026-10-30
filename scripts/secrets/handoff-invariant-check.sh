@@ -17,7 +17,7 @@
 # protection does not read it as a live key.
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-cd "$ROOT"
+cd "$ROOT" || exit 1
 KEEP="${ARBOS_HANDOFF_KEEP:-$(mktemp -d /tmp/handoff-check.XXXXXX)}"
 mkdir -p "$KEEP"
 WITH_MAC=0

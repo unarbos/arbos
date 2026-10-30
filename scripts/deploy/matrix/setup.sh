@@ -37,6 +37,8 @@ PRINT_ONLY=0
 [[ "${1:-}" == "--print-env" ]] && PRINT_ONLY=1
 
 # ---- settings (env overrides; existing matrix.env is the baseline) ----------------------------------
+# the host's matrix.env, outside the repo
+# shellcheck disable=SC1090
 [[ -f "$ENV_FILE" ]] && . "$ENV_FILE"
 ARBOS_MATRIX_SERVER_NAME="${ARBOS_MATRIX_SERVER_NAME:-arbos.life}"
 ARBOS_MATRIX_PUBLIC_BASEURL="${ARBOS_MATRIX_PUBLIC_BASEURL:-https://relay.arbos.life/}"

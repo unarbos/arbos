@@ -59,7 +59,10 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get install -y -q shellcheck >/dev/null
-          shellcheck -S warning scripts/*.sh scripts/release/*.sh scripts/runner/*.sh scripts/feedback/*.sh image/*.sh
+          # Every .sh under scripts/ and image/ at any depth: the feedback poller's pre-merge check
+          # (SHELLCHECK_GLOBS, fnmatch) already holds branches to this set, so main must meet it too.
+          shopt -s globstar
+          shellcheck -S warning scripts/**/*.sh image/**/*.sh
           # One avatar resolver on both platforms (ARB-394): no surface draws an agent picture outside it.
           ./scripts/avatar-lint.sh
           curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash | bash -s -- latest /tmp >/dev/null
