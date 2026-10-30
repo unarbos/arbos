@@ -4539,7 +4539,9 @@ class Loop:
     def watch_main_red(self) -> None:
         """A failed CI / iOS run on main is announced within a tick: a GitHub issue labelled `main-red` ("main is red:
         <workflow> at <sha>") with the run link and the error lines, one per failing sha; it is closed with a note the
-        moment a later run of that workflow on main is green. The audit reads the events."""
+        moment a later run of that workflow on main is green. The audit reads the events. A red caused by Apple's
+        developer account (APPLE_ACCOUNT_BLOCKERS) is titled and labelled `apple-account` and says no commit can fix
+        it; a run whose job log was not readable yet is re-read for MAIN_RED_LOG_TRIES ticks."""
         cur = self.store.cursor()
         alerts: dict = cur.get("main_red") or {}
         changed = False
