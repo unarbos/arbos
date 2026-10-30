@@ -3167,11 +3167,13 @@ pub async fn invite_landing(
     if !wants_html {
         return Json(v).into_response();
     }
-    let inviter = v["inviter_handle"].as_str().unwrap_or("someone").to_owned();
+    // A project name is whatever its owner typed, and the handle comes from GitHub: both are
+    // escaped before they go into the page, as `group_invite_landing` does with a group title.
+    let inviter = html_escape(v["inviter_handle"].as_str().unwrap_or("someone"));
     let what = match inv.target_kind.as_str() {
         "project" => format!(
             "work with them in the project “{}”",
-            v["project"]["name"].as_str().unwrap_or("a project")
+            html_escape(v["project"]["name"].as_str().unwrap_or("a project"))
         ),
         _ => "chat with them".to_owned(),
     };
@@ -5327,6 +5329,60 @@ mod group_add_privacy_tests {
         )
         .await;
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    }
+}
+
+#[cfg(test)]
+mod invite_landing_tests {
+    //! `GET /i/{code}` is a public HTML page, so everything it shows that a person typed is
+    //! escaped — a project name is free text from its owner.
+
+    use axum::extract::{Path, State};
+    use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+
+    use super::tests_support::{person, project_of};
+    use super::*;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    #[tokio::test]
+    async fn a_project_name_cannot_write_html_into_the_invite_page() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _alice_dev) = person(&state, 61);
+        let project = project_of(&state, &alice, "<img src=x onerror=alert(1)>");
+        let invite = Invite {
+            code: "abc123xyz9".into(),
+            github_login: "victim".into(),
+            inviter_user_id: alice.clone(),
+            target_kind: "project".into(),
+            target_id: project,
+            created_at: now_ms(),
+            expires_at: now_ms() + 3_600_000,
+            accepted_at: None,
+            accepted_user_id: None,
+            revoked_at: None,
+        };
+        state.db.insert_invite(&invite).unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ACCEPT, HeaderValue::from_static("text/html"));
+        let r = invite_landing(
+            State(state.clone()),
+            Path(invite.code.clone()),
+            headers.clone(),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let page = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        let page = String::from_utf8(page.to_vec()).unwrap();
+        assert!(
+            !page.contains("<img src=x"),
+            "the project name was written into the page as markup:\n{page}"
+        );
+        assert!(
+            page.contains("&lt;img src=x onerror=alert(1)&gt;"),
+            "the name is still shown, escaped:\n{page}"
+        );
     }
 }
 
