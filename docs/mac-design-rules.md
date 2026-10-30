@@ -560,6 +560,13 @@ over the transcript, so both block hover for what lies behind them
 (`block_mouse_except_scroll`) — pointing at the pill never raises a message
 row's time or hover rail — while the wheel still scrolls the list under them.
 
+The name part's hover / pressed wash fills the pill: flush with its top, bottom
+and left edges at the pill's own radius, and the whole pill when nothing
+follows the name ([feedback mac-header-pill-highlight-fill-2026-10-30], Scout
+on Arbonites). The pill has no padding or border of its own — the name part
+carries the pads, and the open-pane accent ring is an overlay — so there is
+one outline (the rim, or the ring) and no gap inside it, on Glass and Matte.
+
 ### Connection capsule under the pill — shown for every chat kind, whole (Jacob 2026-10-22 [feedback connection-pill]; 2026-10-27 [feedback offline-chip-group-header-2026-10-27])
 
 The small dark capsule under the pill — a 6 pt dot and two words, "Offline" ·

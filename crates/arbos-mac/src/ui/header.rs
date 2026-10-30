@@ -71,7 +71,13 @@ pub fn render(
     // pad is tighter than the people/group pill's. One gate with ⌘T and the
     // dropdown's New tab (`AppState::can_new_tab`): people rooms get none.
     let show_new_chat = state.can_new_tab();
-    let mut pill = pill_frame(&theme, pane_open, if show_new_chat { 4.0 } else { 10.0 })
+    let trailing = !is_people && (show_new_chat || state.visible_tabs(&space.id).len() >= 2);
+    let pill_pr = match (trailing, show_new_chat) {
+        (false, _) => 0.0,
+        (true, true) => PILL_RING + 4.0,
+        (true, false) => PILL_RING + 10.0,
+    };
+    let mut pill = pill_frame(&theme, pane_open, pill_pr)
         // The header is a window_drag region: a mouse-down that bubbles to it
         // arms a window move, and the slightest pointer jitter before the
         // mouse-up turns the click into a drag that never completes — the
@@ -127,6 +133,7 @@ pub fn render(
             name_part(
                 people::avatar(image, person, AVATAR_HEADER, &theme),
                 label,
+                trailing,
                 &theme,
             ),
             &person.display_name(),
@@ -142,6 +149,7 @@ pub fn render(
         name_part(
             groups::picture(space, state, AVATAR_HEADER, &theme),
             name_label(space.name.clone(), &theme).into_any_element(),
+            trailing,
             &theme,
         )
         .on_click(cx.listener(move |this, _, _, cx| {
@@ -214,7 +222,11 @@ pub fn render(
             &theme,
             cx,
         );
-        let part = profile_target::mark(name_part(picture, name_el, &theme), &space.name, showing);
+        let part = profile_target::mark(
+            name_part(picture, name_el, trailing, &theme),
+            &space.name,
+            showing,
+        );
         part.on_click(
             cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                 this.members_open = false;
@@ -252,7 +264,10 @@ pub fn render(
 /// Matte alike (`glass::header_surface`; [feedback
 /// mac-header-pill-glass-matte-2026-10-26]), a 2 pt accent ring while its
 /// right pane is open (mockups b, f; parity review 2026-10-20). `pr` is the
-/// right pad (tighter when a "+" follows the name).
+/// right pad after the last trailing segment ("· Tab ⌄", "+"); 0 when the
+/// name part is the whole pill, since it carries its own pads (`name_part`).
+/// The ring is an overlay, not a border, so it takes no room and the name
+/// part's wash reaches the pill's edges.
 ///
 /// It floats over the transcript, so it blocks hover for the rows behind it
 /// ([feedback mac-header-pill-hover-2026-10-30]: the row under the pill showed
@@ -261,21 +276,28 @@ pub(crate) fn pill_frame(theme: &Theme, pane_open: bool, pr: f32) -> Stateful<Di
     let pill = div()
         .id("header-title")
         .block_mouse_except_scroll()
+        .relative()
         .flex()
         .items_center()
         .h(px(metrics::PILL_HEIGHT))
-        .pl(px(4.0))
         .pr(px(pr))
         .rounded_full()
-        .border_2()
-        .border_color(if pane_open {
-            theme.accent
-        } else {
-            gpui::transparent_black()
-        })
-        .min_w_0();
+        .min_w_0()
+        .when(pane_open, |el| {
+            el.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded_full()
+                    .border(px(PILL_RING))
+                    .border_color(theme.accent),
+            )
+        });
     glass::header_surface(pill, theme)
 }
+
+/// The open-pane ring's width; the pill's content keeps clear of it.
+const PILL_RING: f32 = 2.0;
 
 /// The chat kinds the header serves. The connection capsule's rule is written
 /// per kind ([feedback offline-chip-group-header-2026-10-27]) so a new kind
@@ -607,6 +629,7 @@ pub fn render_channel(
     let name_part = name_part(
         sidebar::server_picture(server, state, AVATAR_HEADER, &theme),
         title.into_any_element(),
+        false,
         &theme,
     )
     .on_click(cx.listener(move |this, _, _, cx| {
@@ -614,7 +637,7 @@ pub fn render_channel(
         let page = page.clone();
         this.state.update(cx, |s, cx| s.toggle_profile(page, cx));
     }));
-    let pill = pill_frame(&theme, pane_open, 10.0)
+    let pill = pill_frame(&theme, pane_open, 0.0)
         .on_mouse_down(
             gpui::MouseButton::Left,
             cx.listener(|this, _, _, cx| {
@@ -668,15 +691,25 @@ fn new_chat_plus(cx: &mut Context<Shell>) -> Stateful<Div> {
 /// shows the name and "+" only). Click toggles the dropdown, which hangs off it.
 /// The pill's picture + name for every chat kind: the one `identity::row`
 /// (fixed 22 pt slot, Grok's header gap), its own hit region so the tab
-/// segment and "+" can sit beside it.
-fn name_part(picture: impl IntoElement, name: AnyElement, theme: &Theme) -> Stateful<Div> {
+/// segment and "+" can sit beside it. It reaches the pill's top, bottom and
+/// left edges and carries the pads itself, so its hover / pressed wash fills
+/// the pill flush with the rim at the pill's radius ([feedback
+/// mac-header-pill-highlight-fill-2026-10-30]); with nothing `trailing` it is
+/// the whole pill.
+fn name_part(
+    picture: impl IntoElement,
+    name: AnyElement,
+    trailing: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
     identity::row(AVATAR_HEADER, identity::HEADER_GAP, picture, name)
         .id("header-name")
         .h_full()
         .cursor_pointer()
         .rounded_full()
         .map(|el| highlight::button(el, theme))
-        .pr(px(4.0))
+        .pl(px(PILL_RING + 4.0))
+        .pr(px(if trailing { 4.0 } else { PILL_RING + 14.0 }))
 }
 
 fn tab_segment(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option<Stateful<Div>> {
