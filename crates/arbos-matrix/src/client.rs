@@ -62,6 +62,11 @@ struct Timeline {
     at_start: bool,
 }
 
+/// Channel read receipts are private (#1484; Jacob, 2026-10-30: "make all mirrored read
+/// receipts private"). Private still clears the room's own unread count and still reaches
+/// this person's other devices; it is not federated and no other member can read it.
+const RECEIPT_KIND: ReceiptType = ReceiptType::ReadPrivate;
+
 const HISTORY_PAGE: u32 = 50;
 const ROOM_RANGE_END: u32 = 1999;
 const POLL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -514,7 +519,7 @@ impl MatrixClient {
         Ok(r.response.event_id.to_string())
     }
 
-    /// Public read receipt on the newest row the app has.
+    /// Read receipt on the newest row the app has, private ([`RECEIPT_KIND`]).
     pub async fn mark_read(&self, room_id: &str) -> Result<()> {
         let room = self.room(room_id)?;
         let last = {
@@ -526,8 +531,21 @@ impl MatrixClient {
         let Some(last) = last else { return Ok(()) };
         let event_id = matrix_sdk::ruma::EventId::parse(&last)
             .map_err(|e| Error::Homeserver(e.to_string()))?;
-        room.send_single_receipt(ReceiptType::Read, ReceiptThread::Unthreaded, event_id)
+        room.send_single_receipt(RECEIPT_KIND, ReceiptThread::Unthreaded, event_id)
             .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod receipt_kind_tests {
+    use super::*;
+
+    #[test]
+    fn a_channel_receipt_goes_to_the_private_endpoint() {
+        // The wire string, not the variant name: this is the part of the URL the homeserver
+        // reads, and it is what decides whether other members see the read.
+        assert_eq!(RECEIPT_KIND.as_str(), "m.read.private");
+        assert_ne!(RECEIPT_KIND.as_str(), ReceiptType::Read.as_str());
     }
 }
