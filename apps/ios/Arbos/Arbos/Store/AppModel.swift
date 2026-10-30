@@ -881,6 +881,15 @@ final class AppModel: ObservableObject {
     /// Client-minted message ids whose push the relay has not `ACK`ed (S3),
     /// keyed by chat id so one room's ACK cannot leave another chat's bubble faint.
     private var unacked: [Id: Set<Id>] = [:]
+    /// Rows of mine whose send did not fully land — today, a message whose attachment
+    /// upload failed ([feedback failed-upload-retry]). The doc writes no `status` for a
+    /// user row, so this client-side set is what gives the bubble `Delivery.failed` and
+    /// its red Retry mark; it is applied over every doc read exactly like `unacked`.
+    private var sendFailed: [Id: Set<Id>] = [:]
+    /// How to send a failed row again, by message id: the original send with its
+    /// attachment bytes still captured, so Retry re-uploads instead of sending the text
+    /// alone. Dropped once the row is retried or deleted.
+    private var failedSendReplay: [Id: () -> Void] = [:]
     /// Rooms whose pushes were refused with `not_available` on the live connection.
     /// Cleared by that room's next ACK (not by another room's ACK).
     @Published private(set) var pushRefused: Set<Id> = []
@@ -1736,13 +1745,15 @@ final class AppModel: ObservableObject {
         sendErrorDetailsOpen.remove(chatId)
     }
 
-    /// Try again on the composer's note: re-send the newest failed message in that chat (the
-    /// note clears either way).
+    /// Try again on the composer's note: re-send the newest failed message in that chat.
+    /// The note stays when there is nothing to re-send — it used to clear itself on every
+    /// tap, so Try again on a failed upload read as "the only thing offering me a retry
+    /// just vanished and nothing happened" ([feedback failed-upload-retry]). `resendFailed`
+    /// clears it once a retry really starts.
     func retrySendError(_ chatId: Id) {
-        clearSendError(chatId)
-        if let failed = messages[chatId]?.last(where: { $0.status == .error }) {
-            resendFailed(chatId: chatId, messageId: failed.id)
-        }
+        guard let failed = messages[chatId]?.last(where: { $0.role == .user && $0.status == .error })
+        else { return }
+        resendFailed(chatId: chatId, messageId: failed.id)
     }
 
     func pair(code: String) {
@@ -2616,8 +2627,13 @@ final class AppModel: ObservableObject {
         }
         var list = list
         let pendingIds = unacked[chatId] ?? []
+        let failedIds = sendFailed[chatId] ?? []
         for i in list.indices where list[i].role == .user {
             list[i].pending = pendingIds.contains(list[i].id)
+            if failedIds.contains(list[i].id) {
+                list[i].status = .error
+                list[i].pending = false
+            }
         }
         foldOptimisticNotices(chatId: chatId, into: &list)
         // Reassign the whole dictionary so `@Published` always fires. Subscript
@@ -2645,9 +2661,16 @@ final class AppModel: ObservableObject {
         var list = messages[chatId] ?? []
         var needSnapshot = false
         let pendingIds = unacked[chatId] ?? []
+        let failedIds = sendFailed[chatId] ?? []
         for ix in indexes.sorted() {
             guard var m = doc.readMessage(ix) else { continue }
-            if m.role == .user { m.pending = pendingIds.contains(m.id) }
+            if m.role == .user {
+                m.pending = pendingIds.contains(m.id)
+                if failedIds.contains(m.id) {
+                    m.status = .error
+                    m.pending = false
+                }
+            }
             if ix < list.count, list[ix].id == m.id {
                 list[ix] = m
             } else if ix == list.count {
@@ -2681,6 +2704,27 @@ final class AppModel: ObservableObject {
         guard var set = unacked[chatId] else { return }
         set.remove(messageId)
         unacked[chatId] = set.isEmpty ? nil : set
+    }
+
+    /// A row of mine that did not fully land: it keeps its place in the chat and draws the
+    /// red Retry mark until it is retried or deleted. `replay` re-runs the original send
+    /// with its attachment bytes; without one, Retry falls back to the text.
+    private func markSendFailed(chatId: Id, messageId: Id, replay: (() -> Void)? = nil) {
+        clearUnacked(chatId: chatId, messageId: messageId)
+        sendFailed[chatId, default: []].insert(messageId)
+        if let replay { failedSendReplay[messageId] = replay }
+        if var list = messages[chatId], let i = list.firstIndex(where: { $0.id == messageId }) {
+            list[i].status = .error
+            list[i].pending = false
+            messages[chatId] = list
+        }
+    }
+
+    private func clearSendFailed(chatId: Id, messageId: Id) {
+        failedSendReplay[messageId] = nil
+        guard var set = sendFailed[chatId] else { return }
+        set.remove(messageId)
+        sendFailed[chatId] = set.isEmpty ? nil : set
     }
 
     private func markActivity(chatId: Id) {
@@ -3574,13 +3618,21 @@ final class AppModel: ObservableObject {
         markUnacked(chatId: chatId, messageId: messageId)
         Task {
             var uploaded: [Attachment] = []
+            var failed = false
             for a in attachments {
                 let key = AppModel.blobKey(for: a.name)
+                let kind = Self.attachmentKind(mime: a.mime, name: a.name)
                 do {
                     _ = try await api.putBlob(projectId: "\(peopleSlot):\(chatId)", key: key, mime: a.mime, data: a.data)
-                    uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: key, kind: Self.attachmentKind(mime: a.mime, name: a.name)))
+                    uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: key, kind: kind))
                 } catch {
+                    // The row keeps the attachment with no `ref` — same as the agent-chat
+                    // path in `send` ([feedback failed-upload-retry]). Leaving it out wrote a
+                    // message with the caption and no video, and a caption-less send became a
+                    // part-less row that draws nothing at all: the sender's video was gone.
                     setSendError(chatId, UserError.classify("upload the attachment", error))
+                    uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: nil, kind: kind))
+                    failed = true
                 }
             }
             // The forward header rides along with the pictures ([feedback
@@ -3588,6 +3640,14 @@ final class AppModel: ObservableObject {
             commitPeople(chatId: chatId, doc: doc, messageId: messageId, text: text, author: author,
                          mentions: mentions, reply: reply, attachments: uploaded, alreadyUnacked: true,
                          forwardedFrom: forwardedFrom, replyRef: replyRef, extraParts: extraParts)
+            if failed {
+                markSendFailed(chatId: chatId, messageId: messageId) { [weak self] in
+                    self?.sendPeople(chatId: chatId, text: text, replyTo: replyTo, address: address,
+                                     chipMentions: chipMentions, attachments: attachments,
+                                     forwardedFrom: forwardedFrom, chipTokens: chipTokens,
+                                     replyRef: replyRef, extraParts: extraParts)
+                }
+            }
         }
     }
 
@@ -5115,18 +5175,9 @@ final class AppModel: ObservableObject {
                 // Activity can miss this delete; the relay delete still runs.
             }
         }
-        let room: String
-        if peopleChat(chatId) != nil {
-            room = "people/\(chatId)"
-        } else if let projectId, projectId != peopleSlot {
-            room = "\(projectId)/\(chatId)"
-        } else {
-            room = "people/\(chatId)"
-        }
         Task {
             do {
-                try await api.deleteMessage(room: room, messageId: messageId)
-                clearUnacked(chatId: chatId, messageId: messageId)
+                try await removeMessageOnRelay(chatId: chatId, messageId: messageId, projectId: projectId)
                 Haptics.pick()
             } catch {
                 let e = error as? RelayError
@@ -5135,6 +5186,32 @@ final class AppModel: ObservableObject {
                      : UserError.classify("delete the message", error))
             }
         }
+    }
+
+    /// `DELETE /room/{room}/messages/{id}` — the relay decides and edits the doc, so the
+    /// deletion comes back as a relay-signed row (same contract as the Mac's
+    /// `ClientCommand::DeleteMessage`). Awaitable so Retry can be sure the row it is
+    /// replacing is gone before it sends again.
+    private func removeMessageOnRelay(chatId: Id, messageId: Id, projectId: Id?) async throws {
+        let room: String
+        if peopleChat(chatId) != nil {
+            room = "people/\(chatId)"
+        } else if let projectId, projectId != peopleSlot {
+            room = "\(projectId)/\(chatId)"
+        } else {
+            room = "people/\(chatId)"
+        }
+        do {
+            try await api.deleteMessage(room: room, messageId: messageId)
+        } catch let e as RelayError where e.status == 404 {
+            // Already gone (never reached the relay, or a second delete): the caller's
+            // goal — this row is not in the chat — is met.
+        }
+        // The row itself is not dropped from `messages` here: the relay's doc edit is what
+        // removes it, and a local removal is undone by the next snapshot — which is the
+        // defect this fix is about ([feedback failed-upload-retry]).
+        clearUnacked(chatId: chatId, messageId: messageId)
+        clearSendFailed(chatId: chatId, messageId: messageId)
     }
 
     /// Long-press → Remove preview: the relay drops the message's link preview for everyone
@@ -5390,17 +5467,41 @@ final class AppModel: ObservableObject {
         var data: Data
     }
 
-    /// Retry on one of my bubbles the relay refused (`status == .error`): the failed row
-    /// goes and its text + reply-to go out again as a new message through the normal send
-    /// path (attachments were picked at send time and are not re-read).
+    /// Retry on one of my own rows that did not land (`status == .error`): the failed row
+    /// goes and the message goes out again through the normal send path.
+    ///
+    /// When the failure was an attachment upload the original bytes are still held
+    /// (`failedSendReplay`), so the picture or video goes with it. Before [feedback
+    /// failed-upload-retry] this dropped the row before it checked anything, then returned
+    /// early on a message with no text — so Retry on a video deleted the row and sent
+    /// nothing — and even with a caption it re-sent the words alone.
+    ///
+    /// The row is removed through the relay, as Delete is, and only once that is confirmed
+    /// does the send happen: the old shape removed the row from `messages` only, so the doc
+    /// row came back on the next snapshot. If the removal fails the row and its bytes stay
+    /// exactly where they are and Retry still works.
     func resendFailed(chatId: Id, messageId: Id) {
-        guard var list = messages[chatId],
-              let ix = list.firstIndex(where: { $0.id == messageId && $0.status == .error }) else { return }
-        let failed = list.remove(at: ix)
-        messages[chatId] = list
+        guard let failed = messages[chatId]?
+            .first(where: { $0.id == messageId && $0.role == .user && $0.status == .error })
+        else { return }
+        let replay = failedSendReplay[messageId]
         let text = failed.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        send(chatId: chatId, text: text, replyTo: failed.replyTo)
+        guard replay != nil || !text.isEmpty else { return }
+        clearSendError(chatId)
+        let projectId = peopleChat(chatId) == nil ? chat(chatId)?.projectId : nil
+        Task {
+            do {
+                try await removeMessageOnRelay(chatId: chatId, messageId: messageId, projectId: projectId)
+            } catch {
+                setSendError(chatId, UserError.classify("send your message again", error))
+                return
+            }
+            if let replay {
+                replay()
+            } else {
+                send(chatId: chatId, text: text, replyTo: failed.replyTo)
+            }
+        }
     }
 
     /// `replyTo` = the message this send answers (reply-to); it lands on the row as `replyTo`
@@ -5429,6 +5530,7 @@ final class AppModel: ObservableObject {
         }
         Task {
             var uploaded: [Attachment] = []
+            var failed = false
             for a in attachments {
                 let key = AppModel.blobKey(for: a.name)
                 let kind = Self.attachmentKind(mime: a.mime, name: a.name)
@@ -5438,12 +5540,19 @@ final class AppModel: ObservableObject {
                 } catch {
                     setSendError(chatId, UserError.classify("upload the attachment", error))
                     uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: nil, kind: kind))
+                    failed = true
                 }
             }
             // The forward header rides along with the pictures ([feedback
             // forward-attachments-ios-2026-10-27]: it was dropped on this path).
-            write(chatId: chatId, text: text, command: "send", attachments: uploaded, replyTo: replyTo,
-                  forwardedFrom: forwardedFrom, extraParts: extraParts)
+            let messageId = write(chatId: chatId, text: text, command: "send", attachments: uploaded, replyTo: replyTo,
+                                  forwardedFrom: forwardedFrom, extraParts: extraParts)
+            if failed, let messageId {
+                markSendFailed(chatId: chatId, messageId: messageId) { [weak self] in
+                    self?.send(chatId: chatId, text: text, attachments: attachments, replyTo: replyTo,
+                               forwardedFrom: forwardedFrom, extraParts: extraParts)
+                }
+            }
         }
     }
 
@@ -5695,14 +5804,18 @@ final class AppModel: ObservableObject {
         messages[chatId] = list
     }
 
+    /// Returns the id of the row it wrote, so a caller that knows the send was incomplete
+    /// (a failed attachment upload) can mark that row for Retry; `nil` when no row of this
+    /// chat's own was written here (fixture, or an optimistic chat still being minted).
+    @discardableResult
     private func write(chatId: Id, text: String, command: String, attachments: [Attachment],
                        extra: [String: Any] = [:], messageId presetId: Id? = nil, replyTo: Id? = nil,
-                       forwardedFrom: String? = nil, extraParts: [[String: Any]] = []) {
+                       forwardedFrom: String? = nil, extraParts: [[String: Any]] = []) -> Id? {
         guard let chat = chat(chatId) else {
             #if DEBUG
             if isFixture { fixtureAppend(chatId: chatId, text: text, attachments: attachments, replyTo: replyTo) }
             #endif
-            return
+            return nil
         }
         // Optimistic new chat: the relay id (and room doc) may not exist yet.
         // Echo the bubble now and flush once `finalizeNewChat` swaps the id.
@@ -5710,7 +5823,7 @@ final class AppModel: ObservableObject {
             enqueueOptimisticSend(chatId: chatId, chat: chat, text: text, command: command,
                                   attachments: attachments, extra: extra, replyTo: replyTo,
                                   forwardedFrom: forwardedFrom)
-            return
+            return nil
         }
         let messageId = presetId ?? newId()
         let author = projectAuthor(projectId: chat.projectId)
@@ -5729,7 +5842,7 @@ final class AppModel: ObservableObject {
         } catch {
             clearUnacked(chatId: chatId, messageId: messageId)
             setSendError(chatId, UserError.classify("send your message", error))
-            return
+            return nil
         }
         #if DEBUG
         SendTrace.message(messageId, chatId: chatId)
@@ -5748,6 +5861,7 @@ final class AppModel: ObservableObject {
         if let p = project(chat.projectId), p.state.isAsleep || p.state == .error {
             wake(projectId: p.id, reason: "send")
         }
+        return messageId
     }
 
     /// Append a just-written user row to `messages` so the bubble appears in the

@@ -246,6 +246,14 @@ struct Row: Identifiable, Equatable {
     /// row of the run's first message; every other row keeps the avatar column empty
     /// ([feedback grouped-messages-ios-2026-10-28]).
     var showsAvatar: Bool = true
+    /// Where one of my own media rows is, so a picture / video / file card can carry the
+    /// failed mark ([feedback failed-upload-retry]). `docs/mac-design-rules.md` puts the
+    /// red "! Retry" on my bubble's outer edge whenever a send did not land, but it was
+    /// only ever wired to text bubbles — and a picture or video with a description keeps
+    /// its words on the card, so a failed media send had no bubble to carry the mark at
+    /// all. Set on the first media row of a message of mine; `nil` everywhere else
+    /// (`RowKind.user` carries its own copy, which also drives the bubble's opacity).
+    var delivery: Delivery? = nil
 }
 
 enum Transcript {
@@ -463,6 +471,9 @@ enum Transcript {
                 } else {
                     replyQuote = message.replyTo.flatMap { $0.isEmpty ? nil : Quote.forReply($0, in: byId) }
                 }
+                // The failed mark goes once per message, on its first card — where the
+                // forward header and the reply quote already go.
+                let mediaDelivery: Delivery? = mine ? Delivery.of(message) : nil
                 for (i, part) in mediaParts.enumerated() {
                     let cap = (i == lastCaptionable) ? mediaCaption : nil
                     // Another person's picture / file sits left like their bubble, with their
@@ -475,7 +486,8 @@ enum Transcript {
                                                sender: mine ? nil : .person(handle: message.senderHandle ?? "someone",
                                                                             avatar: message.senderAvatar),
                                                named: named && i == 0,
-                                               quote: i == 0 ? replyQuote : nil))
+                                               quote: i == 0 ? replyQuote : nil,
+                                               delivery: i == 0 ? mediaDelivery : nil))
                 }
                 if let forwarded {
                     chunk.append(Row(id: "\(message.id)#forwarded", messageId: message.id, role: mine ? .user : .project,
@@ -959,24 +971,28 @@ enum Transcript {
     private static func attachmentRow(id: String, message: Message, a: Attachment, projectId: Id, fromUser: Bool,
                                       agentNames: [String: String], caption: String? = nil,
                                       lane: Bool = false, forwardedFrom: String? = nil,
-                                      sender: MediaSender? = nil, named: Bool = false, quote: Quote? = nil) -> Row {
+                                      sender: MediaSender? = nil, named: Bool = false, quote: Quote? = nil,
+                                      delivery: Delivery? = nil) -> Row {
         guard let kind = MediaAlbum.kind(of: a) else {
             return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
-                       kind: .voiceMemo(name: a.name, projectId: projectId, ref: a.blobRef, fromUser: fromUser))
+                       kind: .voiceMemo(name: a.name, projectId: projectId, ref: a.blobRef, fromUser: fromUser),
+                       delivery: delivery)
         }
         let item = MediaAlbum.item(id: id, message: message, attachment: a, kind: kind, slot: projectId,
                                    projectName: { agentNames[$0] })
         if kind == .image {
             return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
                        kind: .image(item: item, fromUser: fromUser, caption: caption, lane: lane, source: a.source,
-                                    forwardedFrom: forwardedFrom, sender: sender, named: named, quote: quote))
+                                    forwardedFrom: forwardedFrom, sender: sender, named: named, quote: quote),
+                       delivery: delivery)
         }
         // Video shows as a file card in the bubble (poster + Play live in the viewer).
         // A typed description rides the card as a caption bar (pictures/videos only).
         return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
                    kind: .file(item: item, subtitle: subtitle(for: a),
                                caption: kind == .video ? caption : nil, forwardedFrom: forwardedFrom,
-                               sender: sender, named: named, quote: quote))
+                               sender: sender, named: named, quote: quote),
+                   delivery: delivery)
     }
 
     /// Picture or video — the kinds that take a description bar with the send.
@@ -1511,6 +1527,27 @@ struct RowView: View, Equatable {
         .accessibilityIdentifier(isMessage ? "bubble:\(row.messageId)" : "row:\(row.id)")
     }
 
+    /// The red "! Retry" on the outer edge of one of my own rows that did not land
+    /// (`docs/mac-design-rules.md` § Own-bubble delivery). A text bubble draws its own from
+    /// `RowKind.user`; a picture / video / file card of mine draws this one
+    /// ([feedback failed-upload-retry]).
+    @ViewBuilder
+    private func failedRetryMark(gap: CGFloat) -> some View {
+        if row.delivery == .failed {
+            Button {
+                model.resendFailed(chatId: chatId, messageId: row.messageId)
+            } label: {
+                Image(systemName: "exclamationmark.circle.fill")
+                    .font(.system(size: 16))
+                    .foregroundStyle(theme.danger) // error-ui: exception failed-bubble-mark
+            }
+            .buttonStyle(.plain)
+            .padding(.trailing, gap)
+            .accessibilityLabel("Not sent. Retry")
+            .accessibilityIdentifier("media-retry-\(row.messageId)")
+        }
+    }
+
     @ViewBuilder
     private var bubble: some View {
         switch row.kind {
@@ -1777,6 +1814,7 @@ struct RowView: View, Equatable {
             } else {
                 HStack {
                     if row.role == .user { Spacer(minLength: 0) }
+                    failedRetryMark(gap: 0)
                     FileCard(item: item, subtitle: subtitle, chatId: chatId, fromUser: row.role == .user, caption: caption,
                              forwardedFrom: forwardedFrom, quote: quote, onQuoteTap: onQuoteTap)
                         .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: row.role == .user) }
@@ -1794,6 +1832,7 @@ struct RowView: View, Equatable {
         case .voiceMemo(let name, let projectId, let ref, let fromUser):
             HStack {
                 if fromUser { Spacer(minLength: 0) }
+                failedRetryMark(gap: 0)
                 VoiceMemoBubble(name: name, projectId: projectId, blobRef: ref, fromUser: fromUser)
                     .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: fromUser) }
                     .frame(maxWidth: maxBubble, alignment: fromUser ? .trailing : .leading)
@@ -1832,6 +1871,7 @@ struct RowView: View, Equatable {
                 HStack(spacing: 0) {
                     if fromUser { Spacer(minLength: 0) }
                     if lane { Color.clear.frame(width: Theme.memberLane(composerInset: composerInset), height: 1) }
+                    failedRetryMark(gap: 8)
                     ImageBubble(item: item, chatId: chatId, fromUser: fromUser,
                                 maxWidth: lane ? maxBubble - Theme.memberLane(composerInset: composerInset) : maxBubble,
                                 caption: caption, mentions: mentions, source: source, forwardedFrom: forwardedFrom,
