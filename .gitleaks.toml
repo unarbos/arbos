@@ -1,0 +1,33 @@
+# gitleaks configuration for the secret-scan workflow (.github/workflows/secret-scan.yml).
+#
+# The repository is public, so anything committed is world-readable for good — including in
+# history, which we do not rewrite. This check is the gate in front of that: it reads the tree a
+# commit or a pull request brings, not the history, which was scanned clean once and cannot
+# change afterwards.
+#
+# Scope note: the real credential store is the 1Password vault "Arbos"; the relay host and the CI
+# secrets read from it. Nothing in this repository is meant to hold a value, only references
+# (`op://…`), so a hit here is either a mistake or a test fixture.
+#
+# Adding an entry below: only for a string that is demonstrably not a credential — a fixture with
+# a visible alphabet sequence, a format string, a constant from a published spec. Say which, and
+# keep the regex narrow enough that it cannot match a real key that happens to sit on the same
+# line. Never paste a real value here to silence it: rotate it instead.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test fixtures, format strings and published constants — no credential among them"
+regexTarget = "line"
+regexes = [
+  # The house fixture for a key, in the redactor's tests, the secret hand-off's tests and the
+  # inspector's: a vendor prefix followed by the lowercase alphabet in order. Nothing a generator
+  # produces runs a-to-z, so this cannot cover a real key.
+  '''abcdefghijklmnopqrstuvwxyz''',
+  # crates/arbos-relay/src/apns.rs: the format string that wraps a PEM body read from disk.
+  '''-----BEGIN PRIVATE KEY-----\\n\{\}\\n-----END PRIVATE KEY-----''',
+  # scripts/deploy/arbos-deploy-worker: the Sec-WebSocket-Key from RFC 6455 §1.3, sent to the
+  # relay's own /room probe so the handshake answers. A constant, published, and not a secret.
+  '''Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==''',
+]
