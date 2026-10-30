@@ -42,7 +42,8 @@ echo "==> rustup targets (${DEVICE_TARGET}, ${SIM_TARGET}, ${SIM_X86_TARGET})"
 rustup target add "$DEVICE_TARGET" "$SIM_TARGET" "$SIM_X86_TARGET"
 
 echo "==> uniffi-bindgen ${UNIFFI_VERSION}"
-TOOLS_ROOT="$TARGET_DIR/uniffi-tools"
+# UNIFFI_TOOLS_ROOT: a CI cache keeps the binary outside target/, which rust-cache prunes.
+TOOLS_ROOT="${UNIFFI_TOOLS_ROOT:-$TARGET_DIR/uniffi-tools}"
 BINDGEN="$TOOLS_ROOT/bin/uniffi-bindgen"
 if [[ ! -x "$BINDGEN" ]] || ! "$BINDGEN" --version 2>/dev/null | grep -q "$UNIFFI_VERSION"; then
   cargo install uniffi --version "$UNIFFI_VERSION" --features cli \
