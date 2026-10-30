@@ -5058,6 +5058,9 @@ impl Render for Shell {
             },
             std::time::Instant::now(),
         );
+        let sidebar_layout = self
+            .slides
+            .sidebar_layout(frame.sidebar_visible, sidebar_width);
         let frame = match self.rig_rail_t {
             Some(t) if !sidebar_hidden => slide::Frame {
                 sidebar_visible: sidebar_width - t * (sidebar_width - rail::metrics::WIDTH),
@@ -5079,7 +5082,7 @@ impl Render for Shell {
         // carries it in between), so the header draws one only for the
         // narrow band's hidden sidebar, as before
         // ([feedback sidebar-toggle-in-rail-2026-10-27]).
-        let rail_progress = frame.rail_progress(sidebar_width);
+        let rail_progress = frame.rail_progress(sidebar_layout);
         let show_sidebar_toggle = rail::header_toggle_shown(sidebar_hidden, frame.sidebar_visible);
         let geometry = CenterGeometry {
             header_inset: (TRAFFIC_LIGHTS_INSET - frame.sidebar_visible).max(0.0),
@@ -5092,12 +5095,17 @@ impl Render for Shell {
             // Collapsing to / opening from the rail: the column morphs and the
             // moving pieces travel over the window.
             (true, Some(t)) => {
+                let column = if (sidebar_layout - sidebar_width).abs() > 0.5 {
+                    sidebar_layout
+                } else {
+                    sidebar_width
+                };
                 root = root.child(frosted(
                     0.0,
                     PANEL_BLUR,
-                    rail::render_morph(self, t, frame.sidebar_visible, cx),
+                    rail::render_morph(self, t, frame.sidebar_visible, column, cx),
                 ));
-                morph_overlay = Some(rail::render_overlay(self, t, height, cx));
+                morph_overlay = Some(rail::render_overlay(self, t, height, column, cx));
             }
             // Coming back from hidden (the window widened past the narrow
             // band): the clip reveals whichever layout the state wants.

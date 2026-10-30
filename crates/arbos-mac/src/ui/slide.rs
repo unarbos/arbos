@@ -246,6 +246,9 @@ pub struct PaneSlides {
     last_sidebar_track: Option<f32>,
     last_pane: Option<(bool, f32)>,
     chat: Option<ChatSlide>,
+    /// The expanded width a running fold to the rail left from, when that is
+    /// narrower than the saved width ([`PaneSlides::sidebar_layout`]).
+    fold_from: Option<f32>,
 }
 
 /// What the state wants this frame.
@@ -340,6 +343,15 @@ impl PaneSlides {
                 });
             }
         } else if (sidebar_changed || track_ended) && !snap && !want.narrow {
+            let rail = crate::ui::rail::metrics::WIDTH;
+            if self.sidebar.is_none()
+                && want.sidebar_rail
+                && !self.last_sidebar_rail
+                && sidebar_before > rail + 0.5
+                && sidebar_before < sidebar_full - 0.5
+            {
+                self.fold_from = Some(sidebar_before);
+            }
             self.start(
                 Side::Left,
                 sidebar_target,
@@ -399,6 +411,9 @@ impl PaneSlides {
         if !sidebar_moving && self.pane.is_none() {
             self.chat = None;
         }
+        if !sidebar_moving {
+            self.fold_from = None;
+        }
         // The sidebar moving: the held transcript only glides (centred) while
         // its rows are capped at every width the column passes — the start,
         // this frame's and the narrowest it can end at (a tracked drag may
@@ -432,6 +447,21 @@ impl PaneSlides {
             pane_sliding: self.pane.is_some(),
             chat: self.chat,
         }
+    }
+
+    /// The width the expanded sidebar is laid out at for the frame
+    /// [`PaneSlides::step`] just returned — the rail morph's full width, given
+    /// that frame's `sidebar_visible` and the saved width. The saved width,
+    /// except while a fold that left from a narrower column (a drag folds from
+    /// the snap width, not from the width it will come back to) is under way:
+    /// then the width it left from, widening with the column if the fold
+    /// turns round, so the morph starts at exactly the frame before it
+    /// ([`Frame::rail_progress`] 0, the text opaque) instead of a third of the
+    /// way in.
+    pub fn sidebar_layout(&self, sidebar_visible: f32, sidebar_full: f32) -> f32 {
+        self.fold_from.map_or(sidebar_full, |from| {
+            sidebar_visible.max(from).min(sidebar_full)
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -715,6 +745,143 @@ mod tests {
 
     fn ms(t0: Instant, ms: u64) -> Instant {
         t0 + Duration::from_millis(ms)
+    }
+
+    /// ARB-619: every fold and unfold — the toggle (⌘B is the same call) and
+    /// the edge drag, both ways, at the default and a wide saved width — is
+    /// one morph whose progress and text fade follow the visible width frame
+    /// by frame. Each frame is drawn as `Shell::render` draws it: the morph at
+    /// `rail_progress(sidebar_layout)` over a column laid out at
+    /// `sidebar_layout`, the expanded column at rest at progress 0, the rail
+    /// at 1. Before, a drag fold (the column follows the pointer down to the
+    /// 220 snap width, then the state goes to the rail and back to the saved
+    /// width) started its morph against the saved width: one frame from
+    /// progress 0 to 0.36 (0.57 from 400), the text from opaque to 0.28 (to
+    /// gone) and the faded column re-laid out 76 (180) pt wider, while the
+    /// unfold and the toggle glide from the frame before.
+    #[test]
+    fn every_fold_and_unfold_fades_and_moves_with_the_visible_width() {
+        use crate::ui::rail::metrics::WIDTH as RAIL;
+        use crate::ui::sidebar_fit::SNAP_WIDTH;
+        let exp = |w: f32| Want {
+            sidebar_width: w,
+            ..want_rail(false)
+        };
+        let rail = |w: f32| Want {
+            sidebar_width: w,
+            ..want_rail(true)
+        };
+        let track = |w: f32, x: f32| Want {
+            sidebar_width: w,
+            sidebar_track: Some(x),
+            ..want_rail(true)
+        };
+        // (morph progress, layout width, visible width, morphing) as drawn.
+        let run = |script: &[Want]| -> Vec<(f32, f32, f32, bool)> {
+            let t0 = Instant::now();
+            let mut slides = PaneSlides::default();
+            script
+                .iter()
+                .enumerate()
+                .map(|(i, w)| {
+                    let f = slides.step(*w, ms(t0, i as u64 * 16));
+                    let layout = slides.sidebar_layout(f.sidebar_visible, w.sidebar_width);
+                    match (f.sidebar_sliding, f.rail_progress(layout)) {
+                        (true, Some(t)) => (t, layout, f.sidebar_visible, true),
+                        _ if w.sidebar_rail => (1.0, RAIL, f.sidebar_visible, false),
+                        _ => (0.0, w.sidebar_width, f.sidebar_visible, false),
+                    }
+                })
+                .collect()
+        };
+        for full in [296.0, 400.0] {
+            let mut drag_in = vec![exp(full)];
+            let mut x = full;
+            while x > SNAP_WIDTH {
+                x = (x - 25.0).max(SNAP_WIDTH);
+                drag_in.push(exp(x));
+            }
+            let gestures: Vec<(&str, f32, Vec<Want>)> = vec![
+                (
+                    "toggle fold",
+                    full,
+                    [vec![exp(full); 2], vec![rail(full); 13]].concat(),
+                ),
+                (
+                    "toggle unfold",
+                    full,
+                    [vec![rail(full); 2], vec![exp(full); 15]].concat(),
+                ),
+                (
+                    "drag fold",
+                    SNAP_WIDTH,
+                    [drag_in.clone(), vec![rail(full); 13]].concat(),
+                ),
+                (
+                    "drag unfold",
+                    full,
+                    [
+                        vec![rail(full)],
+                        [110.0, 140.0, 170.0, 200.0, 219.0]
+                            .map(|x| track(full, x))
+                            .to_vec(),
+                        vec![exp(full); 15],
+                    ]
+                    .concat(),
+                ),
+            ];
+            for (name, expanded, script) in gestures {
+                let frames = run(&script);
+                let folding = name.ends_with("fold") && !name.ends_with("unfold");
+                assert!(frames.iter().filter(|f| f.3).count() >= 8, "{full} {name}");
+                for (i, &(t, layout, visible, morphing)) in frames.iter().enumerate() {
+                    if morphing {
+                        // The faded column is laid out at the gesture's expanded
+                        // end and the morph is exactly as far along as the
+                        // visible width is between it and the rail.
+                        assert_eq!(layout, expanded, "{full} {name} frame {i}");
+                        let along = (expanded - visible) / (expanded - RAIL);
+                        assert!(
+                            (t - along).abs() < 1e-4,
+                            "{full} {name} frame {i}: progress {t}, width {visible} is {along} along"
+                        );
+                    }
+                    if i == 0 {
+                        continue;
+                    }
+                    let (t0, layout0, _, morphing0) = frames[i - 1];
+                    if morphing && !morphing0 && t0 == 0.0 {
+                        assert_eq!(t, 0.0, "{full} {name}: the fold starts at the rest");
+                        assert_eq!(
+                            layout, layout0,
+                            "{full} {name}: the faded column is the column the frame before"
+                        );
+                    }
+                    assert!(
+                        (t - t0).abs() <= 0.25,
+                        "{full} {name} frame {i}: progress {t0} → {t}"
+                    );
+                    if folding {
+                        assert!(t >= t0, "{full} {name} frame {i}: {t0} → {t}");
+                    } else {
+                        assert!(t <= t0, "{full} {name} frame {i}: {t0} → {t}");
+                    }
+                }
+                let last = frames.last().expect("frames");
+                assert_eq!(last.0, if folding { 1.0 } else { 0.0 }, "{full} {name}");
+                assert!(!last.3, "{full} {name}: at rest");
+            }
+            // A drag fold turned round by the toggle: the faded column widens
+            // with the visible width from the snap width back to the saved
+            // width, and the morph still follows the visible width.
+            let frames = run(&[drag_in, vec![rail(full); 4], vec![exp(full); 20]].concat());
+            for &(t, layout, visible, _) in frames.iter().filter(|f| f.3) {
+                assert_eq!(layout, visible.clamp(SNAP_WIDTH, full), "{full} turn");
+                let along = (layout - visible) / (layout - RAIL);
+                assert!((t - along).abs() < 1e-4, "{full} turn: {t} at {visible}");
+            }
+            assert_eq!(frames.last().map(|f| (f.0, f.1)), Some((0.0, full)));
+        }
     }
 
     #[test]
