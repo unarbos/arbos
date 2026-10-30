@@ -976,18 +976,19 @@ fn unsorted_entries(shell: &Shell, cx: &Context<Shell>) -> Vec<ListEntry> {
 /// is typing there.
 ///
 /// A **group** names who is typing ([feedback group-typing-names-2026-10-30],
-/// Scout): a bare "typing…" among several people says nothing about which of
-/// them it is. The words are the row-over-the-composer's own
-/// ([`presence::typing_sentence`]), so the two cannot drift apart.
+/// Scout; Jacob's wording call 2026-10-30): a bare "typing" among several
+/// people says nothing about which of them it is. The words come from
+/// [`arbos_core::presence::typing_line`], the one place the whole app — this
+/// row, the row over the composer, and the iPhone — reads them from.
 ///
 /// A **DM** keeps the bare line, because the row's own title *is* that one
 /// person — naming them again would only repeat the row to itself — and a DM
 /// has nobody else it could be.
 fn typing_line(state: &AppState, space: &Project) -> Option<String> {
     if space.is_people_group() {
-        presence::typing_sentence(&presence::typing_names(state, space))
+        arbos_core::presence::typing_line(&presence::typing_names(state, space))
     } else {
-        (!state.typing_in(&space.id).is_empty()).then(|| "typing…".to_string())
+        (!state.typing_in(&space.id).is_empty()).then(|| "typing".to_string())
     }
 }
 
@@ -4221,7 +4222,7 @@ mod status_cell_tests {
         );
         assert!(
             vcx.debug_bounds("row-status-unread-dm").is_none(),
-            "a person typing shows no mark in the cell (the preview says typing…)"
+            "a person typing shows no mark in the cell (the preview names who is typing)"
         );
     }
 
@@ -4338,9 +4339,11 @@ mod status_cell_tests {
     }
 
     /// Scout's report ([feedback group-typing-names-2026-10-30]): a group row's
-    /// typing indicator said only "typing…", naming nobody. It now names them
-    /// in the iPhone presence row's wording. A DM row keeps the bare line: its
-    /// own title is that one person, so there is nothing to disambiguate.
+    /// typing indicator said only "typing", naming nobody. It now names them in
+    /// Scout's own wording (Jacob's call, 2026-10-30), read from
+    /// `arbos_core::presence` so the iPhone says the same. A DM row keeps the
+    /// bare line: its own title is that one person, so there is nothing to
+    /// disambiguate.
     #[gpui::test]
     fn a_group_row_names_who_is_typing_and_a_dm_row_keeps_the_bare_line(cx: &mut TestAppContext) {
         let (_rt, state, _shell, vcx) = mount(cx);
@@ -4356,14 +4359,14 @@ mod status_cell_tests {
         set_typing(&state, vcx, "group", &[("mira", soon)]);
         assert_eq!(
             typing_words(&state, vcx, "group").as_deref(),
-            Some("Mira Kaplan is typing…"),
+            Some("Mira Kaplan is typing"),
             "one person: the display name the rest of the list uses"
         );
 
         set_typing(&state, vcx, "group", &[("mira", soon), ("sam", soon)]);
         assert_eq!(
             typing_words(&state, vcx, "group").as_deref(),
-            Some("Mira and Sam are typing…"),
+            Some("Mira and Sam are typing"),
             "two: first names, so the line stays one line"
         );
 
@@ -4375,8 +4378,8 @@ mod status_cell_tests {
         );
         assert_eq!(
             typing_words(&state, vcx, "group").as_deref(),
-            Some("Kai, Mira and Sam are typing…"),
-            "three: the presence row's own form, not a bare count"
+            Some("3 people are typing"),
+            "three: a count, so the line never grows with the room"
         );
 
         // Not on the roster yet: the handle, never a raw user id — the same
@@ -4384,7 +4387,7 @@ mod status_cell_tests {
         set_typing(&state, vcx, "group", &[("newcomer", soon)]);
         assert_eq!(
             typing_words(&state, vcx, "group").as_deref(),
-            Some("@newcomer is typing…")
+            Some("@newcomer is typing")
         );
 
         // A stale mark is nobody typing.
@@ -4395,7 +4398,7 @@ mod status_cell_tests {
         // "Sam Rivera", so naming him again would only repeat the row.
         assert_eq!(
             typing_words(&state, vcx, "dm").as_deref(),
-            Some("typing…"),
+            Some("typing"),
             "a DM keeps the bare line"
         );
     }
@@ -4434,7 +4437,7 @@ mod status_cell_tests {
             first,
             "the words held still across the refresh"
         );
-        assert_eq!(first.as_deref(), Some("Mira and Sam are typing…"));
+        assert_eq!(first.as_deref(), Some("Mira and Sam are typing"));
     }
 
     /// The typing words take the preview's own box, so a narrow column
@@ -4442,6 +4445,11 @@ mod status_cell_tests {
     /// the rows under it do not move. Measured at the narrowest column the
     /// slider holds at (`sidebar_fit::SNAP_WIDTH`), with names far too long for
     /// it.
+    ///
+    /// One and two names are the cases that can outgrow the column, so they are
+    /// where truncation is worth proving. Three or more is a count ("3 people
+    /// are typing") and is short whatever the room is called — that is the whole
+    /// reason the count form exists, and the test asserts it stays short.
     #[gpui::test]
     fn long_typing_words_truncate_instead_of_moving_anything(cx: &mut TestAppContext) {
         let (_rt, state, shell, vcx) = mount(cx);
@@ -4478,9 +4486,11 @@ mod status_cell_tests {
             shell.update(vcx, |_, cx| cx.notify());
             vcx.run_until_parked();
             let words = typing_words(&state, vcx, "group").expect("someone is typing");
-            assert!(
+            assert_eq!(
                 words.len() > 30,
-                "the fixture's names must overflow the column: {words}"
+                marks.len() < 3,
+                "{} typist(s): names overflow this column, a count does not: {words}",
+                marks.len()
             );
             assert_eq!(
                 boxes(vcx),

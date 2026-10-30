@@ -21,7 +21,7 @@ This document is drawn from the code as it exists today:
 
 ### Core vs client crates
 
-- **`arbos-core`** — ids, `wire` (including `wire::room_name`), the Loro chat-doc schema, writers, `project_reactions`, `touched`, and the shared HTTP **response DTOs** in `crates/arbos-core/src/api.rs` (`ProjectDto`, `ChatDto`, `PeopleChatDto`, `UserCardDto`, `AccountUserDto`, `MeResponseDto`, `MeUserResponseDto`, `UsersPageDto`, `UnreadDto`, `MachineStatusDto`, `MachineStateDto`, …). Shared by the box, relay, and every client.
+- **`arbos-core`** — ids, `wire` (including `wire::room_name`), the Loro chat-doc schema, writers, `project_reactions`, `touched`, `presence` (the one "who is typing" sentence both apps read — the Mac calls it directly, the iPhone through `arbos-ffi`, so the wording cannot drift), and the shared HTTP **response DTOs** in `crates/arbos-core/src/api.rs` (`ProjectDto`, `ChatDto`, `PeopleChatDto`, `UserCardDto`, `AccountUserDto`, `MeResponseDto`, `MeUserResponseDto`, `UsersPageDto`, `UnreadDto`, `MachineStatusDto`, `MachineStateDto`, …). Shared by the box, relay, and every client.
 
 ### Projects and chats response shapes (`api.rs`)
 

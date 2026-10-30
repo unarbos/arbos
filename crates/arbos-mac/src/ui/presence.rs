@@ -1,12 +1,17 @@
 //! The one presence row over the composer ([feedback
 //! typing-indicator-left-2026-10-23], Jacob 2026-10-23): who is typing (people)
 //! or working (agents) in the open chat, as a stack of round profile pictures
-//! and ONE line of text — "Sam is typing…", "Lium and Home are working" — that
+//! and ONE line of text — "Sam is typing", "Lium and Home are working" — that
 //! starts flush with the chat column's left edge, like the bubbles and the
 //! pill. It replaces two older pieces that could both show at once: the
 //! transcript's "<name> is working" indicator row (which, in a people chat, sat
 //! under a sender caption with no bubble yet → a doubled notice) and the
 //! "@sam is typing…" line over the composer.
+//!
+//! The typing clause is **not** written here: it is
+//! [`arbos_core::presence::typing_line`], the one function the iPhone also
+//! calls (through `arbos-ffi`), so the two platforms cannot drift apart. The
+//! working clause is still this module's own.
 
 use std::sync::Arc;
 
@@ -79,7 +84,8 @@ pub struct Presence {
 
 impl Presence {
     /// One line. Alone, a participant keeps the full display name; from two on,
-    /// first names ("Mira and Sam are typing…"), so the line stays one line.
+    /// first names ("Mira and Sam are typing"), so the line stays one line.
+    /// From three typists on the shared line counts them and the names go.
     pub fn text(&self) -> String {
         let several = self.participants.len() > 1;
         let name = |p: &Participant| -> String {
@@ -108,8 +114,10 @@ impl Presence {
 }
 
 /// "Sam Okafor" → "Sam"; "@sam" and one-word names stay as they are.
+/// The shared rule ([`arbos_core::presence::first_name`]), which the iPhone
+/// calls too.
 pub fn first_name(name: &str) -> String {
-    name.split_whitespace().next().unwrap_or(name).to_string()
+    arbos_core::presence::first_name(name)
 }
 
 /// "A", "A and B", "A, B and C", "A, B and 2 others".
@@ -134,14 +142,14 @@ fn verb(n: usize) -> &'static str {
 /// The row's one line. Typing and working groups each get a clause; both →
 /// joined with " · ". Exactly one worker with a `detail` shows the detail;
 /// a queued single worker "is waiting for the machine".
+///
+/// The typing clause comes from [`arbos_core::presence::typing_line`] — the one
+/// the iPhone calls as well — so only the working clause is decided here.
 pub fn sentence(typing: &[&str], working: &[&str], detail: Option<&str>, queued: bool) -> String {
     let mut clauses: Vec<String> = Vec::new();
-    if !typing.is_empty() {
-        clauses.push(format!(
-            "{} {} typing…",
-            join_names(typing),
-            verb(typing.len())
-        ));
+    let typing: Vec<String> = typing.iter().map(|n| (*n).to_owned()).collect();
+    if let Some(clause) = arbos_core::presence::typing_line(&typing) {
+        clauses.push(clause);
     }
     if !working.is_empty() {
         let clause = match (working, queued, detail) {
@@ -154,30 +162,6 @@ pub fn sentence(typing: &[&str], working: &[&str], detail: Option<&str>, queued:
     clauses.join(" · ")
 }
 
-/// The typing clause for `names`, in the one wording the app already has: this
-/// module's [`sentence`] and [`first_name`], which the iPhone's `PresenceLine`
-/// mirrors — alone the full display name, first names from two on, "A and B",
-/// "A, B and C", then "A, B and N others". `None` when nobody is typing.
-///
-/// The chat list calls this so its row cannot drift from the row over the
-/// composer ([feedback group-typing-names-2026-10-30], Scout: a group row said
-/// only "typing…", naming nobody). There is no second format to keep in step.
-/// `names` must already be in a stable order ([`typing_names`]).
-pub fn typing_sentence(names: &[String]) -> Option<String> {
-    if names.is_empty() {
-        return None;
-    }
-    // The row's own rule: one name stays whole, from two on they shorten, so
-    // the line stays one line.
-    let several = names.len() > 1;
-    let shown: Vec<String> = names
-        .iter()
-        .map(|n| if several { first_name(n) } else { n.clone() })
-        .collect();
-    let shown: Vec<&str> = shown.iter().map(String::as_str).collect();
-    Some(sentence(&shown, &[], None, false))
-}
-
 /// Everyone typing in `space`, by the display name the chat list already shows
 /// for that person, in an order that does not move while they type.
 ///
@@ -187,6 +171,10 @@ pub fn typing_sentence(names: &[String]) -> Option<String> {
 /// the name instead keeps the line still: it changes when the set of typists
 /// changes, never because a ping landed. (Typing marks are keyed by the space
 /// id for a people chat, as the chat list reads them.)
+///
+/// The row over the composer does **not** sort: its words sit beside a stack of
+/// faces in newest-first order and the two must agree. The chat-list row has no
+/// faces, so it is free to hold the words still.
 pub fn typing_names(state: &AppState, space: &Project) -> Vec<String> {
     let mut rows: Vec<(String, String)> = state
         .typing_in(&space.id)
@@ -501,14 +489,15 @@ mod text_tests {
 
     #[test]
     fn one_line_whatever_the_count() {
-        assert_eq!(sentence(&["Sam"], &[], None, false), "Sam is typing…");
+        assert_eq!(sentence(&["Sam"], &[], None, false), "Sam is typing");
         assert_eq!(
             sentence(&["Sam", "Samir"], &[], None, false),
-            "Sam and Samir are typing…"
+            "Sam and Samir are typing"
         );
         assert_eq!(
             sentence(&["Sam", "Samir", "Kai", "Ava"], &[], None, false),
-            "Sam, Samir and 2 others are typing…"
+            "4 people are typing",
+            "from three on the typing clause counts instead of listing"
         );
         assert_eq!(sentence(&[], &["Lium"], None, false), "Lium is working");
         assert_eq!(
@@ -555,7 +544,7 @@ mod text_tests {
             detail: None,
             queued: false,
         };
-        assert_eq!(one.text(), "Sam Okafor is typing…");
+        assert_eq!(one.text(), "Sam Okafor is typing");
         let two = Presence {
             participants: vec![
                 p("Mira Kaplan", Activity::Typing),
@@ -564,41 +553,35 @@ mod text_tests {
             detail: None,
             queued: false,
         };
-        assert_eq!(two.text(), "Mira and Sam are typing…");
+        assert_eq!(two.text(), "Mira and Sam are typing");
         assert_eq!(first_name("@sam"), "@sam");
     }
 
-    /// The chat list's typing words are this row's words ([feedback
-    /// group-typing-names-2026-10-30], Scout: a group row said only "typing…").
-    /// The cases are `apps/ios/Arbos/ArbosTests/PresenceRowTests.swift`'s, so
-    /// the two platforms cannot drift: one name in full, first names from two
-    /// on, "A, B and C", then "A, B and N others" — and the ellipsis is the one
-    /// character, never three dots.
+    /// Scout's wording, Jacob's call on 2026-10-30 ([feedback
+    /// group-typing-names-2026-10-30]): the chat-list row, this row and the
+    /// iPhone all read one sentence, and it is decided once in
+    /// `arbos_core::presence`. If that moved, the whole app would move with it,
+    /// so this test asserts the words the user sees — not that a call happened.
     #[test]
-    fn the_chat_lists_typing_words_are_this_rows_words() {
+    fn every_surface_reads_the_one_shared_typing_line() {
         let line = |names: &[&str]| -> Option<String> {
-            typing_sentence(&names.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>())
+            arbos_core::presence::typing_line(
+                &names.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
+            )
         };
         assert_eq!(line(&[]), None, "nobody typing: the row keeps its preview");
         assert_eq!(
             line(&["Sam Okafor"]).as_deref(),
-            Some("Sam Okafor is typing…")
+            Some("Sam Okafor is typing")
         );
         assert_eq!(
             line(&["Mira Kaplan", "Sam Okafor"]).as_deref(),
-            Some("Mira and Sam are typing…")
+            Some("Mira and Sam are typing")
         );
         assert_eq!(
             line(&["Sam Okafor", "Mira Kaplan", "Kai Osei"]).as_deref(),
-            Some("Sam, Mira and Kai are typing…")
+            Some("3 people are typing")
         );
-        assert_eq!(
-            line(&["Sam", "Mira", "Kai", "Ava"]).as_deref(),
-            Some("Sam, Mira and 2 others are typing…")
-        );
-        let one = line(&["Sam"]).expect("a line");
-        assert!(one.ends_with('…'), "the ellipsis character: {one}");
-        assert!(!one.contains("..."), "never three dots: {one}");
 
         // The same people on the row over the composer read the same.
         let p = |name: &str| Participant {
@@ -613,13 +596,19 @@ mod text_tests {
             queued: false,
         };
         assert_eq!(line(&["Mira Kaplan", "Sam Okafor"]), Some(row.text()));
+        let crowd = Presence {
+            participants: vec![p("Mira Kaplan"), p("Sam Okafor"), p("Kai Osei")],
+            detail: None,
+            queued: false,
+        };
+        assert_eq!(crowd.text(), "3 people are typing");
     }
 
     #[test]
     fn typing_and_working_share_the_line() {
         assert_eq!(
             sentence(&["Sam"], &["Lium"], None, false),
-            "Sam is typing… · Lium is working"
+            "Sam is typing · Lium is working"
         );
         assert_eq!(sentence(&[], &[], None, false), "");
     }
