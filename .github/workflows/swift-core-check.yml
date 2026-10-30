@@ -41,7 +41,7 @@ jobs:
   check:
     name: build-xcframework + fastlane test
     runs-on: macos-15
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       APP_DIR: apps/ios/Arbos
     steps:
