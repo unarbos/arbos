@@ -1259,6 +1259,11 @@ struct Message: Identifiable, Equatable {
     var notice: MembershipNotice? = nil
     /// `"off"` once the sender removed the link preview for everyone (#2066).
     var preview: String? = nil
+    /// When this message was pinned in the group (`pinnedAt` in the chat doc, #1547).
+    /// nil = not pinned. Shared state: every member sees the same value.
+    var pinnedAt: Int64? = nil
+
+    var isPinned: Bool { (pinnedAt ?? 0) > 0 }
 
     var isStreaming: Bool { status == .streaming }
 
@@ -1499,7 +1504,8 @@ enum DocJSON {
             greeting: bool(m["greeting"]),
             reactions: reactions(m["reactions"]),
             notice: MembershipNotice(row: m["notice"]),
-            preview: str(m["preview"])
+            preview: str(m["preview"]),
+            pinnedAt: int(m["pinnedAt"]).flatMap { $0 > 0 ? $0 : nil }
         )
     }
 

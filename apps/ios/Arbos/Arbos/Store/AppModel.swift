@@ -430,6 +430,115 @@ final class AppModel: ObservableObject {
     /// Debug demo tours run once per process, whichever view instance starts them.
     var demoStarted = false
 
+    // MARK: Group message pins (#1547)
+
+    /// Who may pin a message in a group. The value lives in the shared chat doc,
+    /// so every member and every device reads the same one.
+    enum GroupPinPolicy: String {
+        case admins
+        case everyone
+    }
+
+    /// Mirror of each open chat's pin policy, refreshed when the transcript is
+    /// published. `@Published` so the group pane and the menu follow a change a
+    /// peer made; a chat that is missing here reads as `.admins`.
+    @Published private(set) var pinPolicyByChat: [Id: String] = [:]
+
+    func pinPolicy(for chatId: Id) -> GroupPinPolicy {
+        GroupPinPolicy(rawValue: pinPolicyByChat[chatId] ?? "") ?? .admins
+    }
+
+    /// Pinned messages in this chat, newest pin first. Read from the published
+    /// transcript, so it follows a peer's pin without another doc read.
+    ///
+    /// The doc holds any number of pins. The group shows one (#1547): `pinMessage`
+    /// clears the others. Showing several is a UI change here, not a sync change.
+    func pinnedMessages(in chatId: Id) -> [Message] {
+        (messages[chatId] ?? [])
+            .filter(\.isPinned)
+            .sorted {
+                let (a, b) = ($0.pinnedAt ?? 0, $1.pinnedAt ?? 0)
+                return a == b ? $0.id < $1.id : a > b
+            }
+    }
+
+    /// The group's pinned message, or nil.
+    func pinnedMessage(in chatId: Id) -> Message? { pinnedMessages(in: chatId).first }
+
+    /// Whether the signed-in user may pin here: people groups only, under the
+    /// group's policy. Owners and admins may always pin, and only they may
+    /// change the policy.
+    func canPinMessages(in chat: PeopleChat) -> Bool {
+        guard chat.isGroup else { return false }
+        switch pinPolicy(for: chat.id) {
+        case .everyone: return true
+        case .admins: return ownsGroup(chat)
+        }
+    }
+
+    /// Owner / admin sets who may pin. Written into the shared doc.
+    func setPinPolicy(_ policy: GroupPinPolicy, chatId: Id) {
+        guard let chat = peopleChat(chatId), chat.isGroup, ownsGroup(chat) else { return }
+        var next = pinPolicyByChat
+        next[chatId] = policy.rawValue
+        pinPolicyByChat = next
+        #if DEBUG
+        if isFixture { Haptics.pick(); return }
+        #endif
+        guard let doc = docs[chatId] else { return }
+        do {
+            try doc.setPinPolicy(policy.rawValue)
+            doc.commit()
+            Haptics.pick()
+        } catch {
+            fail("change who can pin", error)
+        }
+    }
+
+    /// Pin one message for the whole group, replacing the group's current pin.
+    func pinMessage(chatId: Id, messageId: Id) {
+        guard !messageId.isEmpty, let chat = peopleChat(chatId), canPinMessages(in: chat) else { return }
+        let replaced = pinnedMessages(in: chatId).map(\.id).filter { $0 != messageId }
+        writePins(chatId: chatId, pin: [messageId], unpin: replaced, what: "pin the message")
+    }
+
+    /// Clear the group's pin. With a `messageId`, only when that message is the
+    /// pinned one, so a stale tap cannot unpin a newer pin.
+    func unpinMessage(chatId: Id, messageId: Id? = nil) {
+        guard let chat = peopleChat(chatId), canPinMessages(in: chat) else { return }
+        let pinned = pinnedMessages(in: chatId).map(\.id)
+        let targets = messageId.map { id in pinned.contains(id) ? [id] : [] } ?? pinned
+        guard !targets.isEmpty else { return }
+        writePins(chatId: chatId, pin: [], unpin: targets, what: "unpin the message")
+    }
+
+    /// One doc write for a pin change: the transcript updates at once so the bar
+    /// does not wait for the round trip, then the doc commits and peers sync.
+    private func writePins(chatId: Id, pin: [Id], unpin: [Id], what: String) {
+        let at = nowMs()
+        if var list = messages[chatId] {
+            for i in list.indices {
+                if pin.contains(list[i].id) { list[i].pinnedAt = at }
+                if unpin.contains(list[i].id) { list[i].pinnedAt = nil }
+            }
+            var next = messages
+            next[chatId] = list
+            messages = next
+        }
+        #if DEBUG
+        if isFixture { Haptics.pick(); return }
+        #endif
+        guard let doc = docs[chatId], let me = myUserId else { return }
+        do {
+            for id in unpin { try doc.setMessagePinned(messageId: id, pinned: false, by: me) }
+            for id in pin { try doc.setMessagePinned(messageId: id, pinned: true, by: me) }
+            doc.commit()
+            Haptics.pick()
+        } catch {
+            fail(what, error)
+        }
+    }
+
     enum Route: Hashable {
         case chat(chatId: Id, projectId: Id)
         /// D88: a server's channel list (the slid-in left pane); its channels open as
@@ -2626,6 +2735,7 @@ final class AppModel: ObservableObject {
         var next = messages
         next[chatId] = list
         messages = next
+        refreshPinPolicy(chatId)
         #if DEBUG
         if SendTrace.traces(chatId) {
             SendTrace.markIfPresent("messages-has-row", ids: list.map(\.id), detail: "via=snapshot rows=\(list.count)")
@@ -2638,6 +2748,17 @@ final class AppModel: ObservableObject {
             // blue circle and drain the push queue as soon as a new row lands.
             noteLiveUnread(chatId: chatId)
         }
+    }
+
+    /// Read the chat's pin policy out of the doc into the published mirror, so a
+    /// change another member made reaches the menu and the group pane (#1547).
+    private func refreshPinPolicy(_ chatId: Id) {
+        guard let doc = docs[chatId] else { return }
+        let policy = doc.pinPolicy
+        guard pinPolicyByChat[chatId] != policy else { return }
+        var next = pinPolicyByChat
+        next[chatId] = policy
+        pinPolicyByChat = next
     }
 
     private func emitMessages(_ chatId: Id, indexes: Set<Int>) {

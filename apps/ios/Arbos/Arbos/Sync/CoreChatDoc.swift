@@ -178,6 +178,19 @@ final class CoreChatDoc {
         try doc.deleteMessage(messageId: messageId)
     }
 
+    /// Pin or unpin a message for everyone (#1547). Does not commit; peers see it
+    /// through room sync, like a reaction.
+    func setMessagePinned(messageId: Id, pinned: Bool, by: String) throws {
+        try doc.setMessagePinned(messageId: messageId, pinned: pinned, by: by)
+    }
+
+    /// Who may pin in this chat: `"admins"` or `"everyone"`.
+    var pinPolicy: String { doc.pinPolicy() }
+
+    func setPinPolicy(_ policy: String) throws {
+        try doc.setPinPolicy(policy: policy)
+    }
+
     /// Replace a message's text (edit). Does not commit. Sets `editedAt`.
     func editMessage(messageId: Id, text: String) throws {
         try doc.editMessage(messageId: messageId, text: text)

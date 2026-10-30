@@ -874,11 +874,6 @@ impl ChatDoc {
             .map_err(write_err)
     }
 
-    /// Pinned message ids, newest pin first. Empty when nothing is pinned.
-    pub fn pinned_message_ids(&self) -> Vec<String> {
-        self.lock_doc().pinned_message_ids()
-    }
-
     /// Who may pin in this chat: `"admins"` or `"everyone"`. Anything else is
     /// stored as written but reads back as `"admins"`.
     pub fn set_pin_policy(&self, policy: String) -> Result<(), FfiError> {
@@ -1230,19 +1225,25 @@ mod tests {
             )
             .unwrap();
         }
-        assert!(doc.pinned_message_ids().is_empty());
-
         doc.set_message_pinned("m1".into(), true, "user:a".into())
             .unwrap();
         doc.commit();
-        assert_eq!(doc.pinned_message_ids(), vec!["m1".to_string()]);
+        // The row the Swift transcript decodes carries the pin.
         let row: Value = serde_json::from_str(&doc.read_message_json(0).unwrap()).unwrap();
         assert_eq!(row["pinnedBy"], "user:a");
+        assert!(row["pinnedAt"].as_i64().unwrap_or(0) > 0);
+        let other: Value = serde_json::from_str(&doc.read_message_json(1).unwrap()).unwrap();
+        assert!(
+            other.get("pinnedAt").is_none(),
+            "the pin must not touch another row"
+        );
 
         doc.set_message_pinned("m1".into(), false, "user:a".into())
             .unwrap();
         doc.commit();
-        assert!(doc.pinned_message_ids().is_empty());
+        let row: Value = serde_json::from_str(&doc.read_message_json(0).unwrap()).unwrap();
+        assert!(row.get("pinnedAt").is_none());
+        assert!(row.get("pinnedBy").is_none());
     }
 
     #[test]

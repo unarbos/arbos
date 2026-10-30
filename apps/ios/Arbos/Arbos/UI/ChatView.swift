@@ -508,7 +508,15 @@ struct ChatSession: View {
         calls.isActive && !calls.isPresented && calls.call?.kind == .voice && calls.call?.chatId == chatId
     }
     @State private var chatNoteDetailsOpen = false
-    private var headerExtra: CGFloat { (hasCallBar ? 52 : 0) + (hasInCallBar ? 56 : 0) + (showSearch ? Controls.height + 8 : 0) }
+    /// The group's pinned message (#1547), or nil. Shared state: a pin another
+    /// member set arrives through room sync like any other row change.
+    private var pinnedMessage: Message? {
+        people?.isGroup == true ? model.pinnedMessage(in: chatId) : nil
+    }
+    private var headerExtra: CGFloat {
+        (hasCallBar ? 52 : 0) + (hasInCallBar ? 56 : 0) + (showSearch ? Controls.height + 8 : 0)
+            + (pinnedMessage != nil ? Controls.height + 8 : 0)
+    }
     /// Member chips under the header — off on iPhone (feedback ABDgl8tFlqeUlwP4DihfYhk).
     private var showsMemberChips: Bool { false }
 
@@ -928,6 +936,9 @@ struct ChatSession: View {
                     }
                     .padding(.horizontal, Controls.inset)
                 }
+                if let pinned = pinnedMessage {
+                    pinnedMessageBar(pinned)
+                }
                 if hasInCallBar, let c = calls.call {
                     InCallOverlay(expected: model.expectedCallPeople(c), inline: true)
                         .frame(height: 48)
@@ -1041,7 +1052,9 @@ struct ChatSession: View {
                                                 hasPreview: Transcript.linkPreviewsEnabled && messageById[row.messageId]?.linkPreview != nil,
                                                 // Reply in DM only in people groups — not in a
                                                 // DM or 1:1 agent chat you're already in (#1871).
-                                                inPrivateChat: people?.isGroup != true),
+                                                inPrivateChat: people?.isGroup != true,
+                                                canPin: canPinInThisChat,
+                                                isPinned: pinnedMessage?.id == row.messageId),
                         onReact: { emoji in
                             // One toggle per overlay: a second report of the same pick
                             // (the emoji keyboard reports an insert twice, or a cell tapped
@@ -2434,7 +2447,8 @@ struct ChatSession: View {
     /// (in a people chat the agent that wrote it becomes the recipient),
     /// View thread (when the message has replies), Forward to another chat,
     /// Reply in DM (open a private chat with the human who wrote it), Edit
-    /// (own text), Delete for everyone.
+    /// (own text), Pin / Unpin for the group (where the group's policy allows),
+    /// Delete for everyone.
     private func runMessageMenu(_ item: MessageMenuItem, row: Row) {
         switch item {
         case .copy:
@@ -2460,11 +2474,69 @@ struct ChatSession: View {
             beginEdit(row)
         case .removePreview:
             model.removeLinkPreview(chatId: chatId, messageId: row.messageId, projectId: isPeople ? nil : projectId)
+        case .pin:
+            model.pinMessage(chatId: chatId, messageId: row.messageId)
+        case .unpin:
+            model.unpinMessage(chatId: chatId, messageId: row.messageId)
         case .delete:
             // Deletes at once, for everyone (Jacob, feedback remove-delete-confirms-2026-10-24:
             // no "Delete message?" step); the menu only offers Delete where `canDelete` holds.
             model.deleteMessage(chatId: chatId, messageId: row.messageId, projectId: isPeople ? nil : projectId)
         }
+    }
+
+    /// Pin / Unpin shows only in a people group, and only where the group's pin
+    /// policy lets this member pin (#1547).
+    private var canPinInThisChat: Bool {
+        guard let people, people.isGroup else { return false }
+        return model.canPinMessages(in: people)
+    }
+
+    /// The group's pinned message, under the header: its text on one line, the
+    /// pin glyph, and ✕ to unpin for anyone who may. Tapping it jumps to the
+    /// message, the way a tapped quote does.
+    private func pinnedMessageBar(_ pinned: Message) -> some View {
+        let text = pinned.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return HStack(spacing: Controls.gap) {
+            Button { revealQuoted(pinned.id) } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "pin.fill")
+                        .font(.system(size: Controls.glyph, weight: .medium))
+                        .foregroundStyle(theme.muted)
+                    Text(text.isEmpty ? "Pinned message" : text)
+                        .font(theme.font(Theme.body))
+                        .foregroundStyle(theme.text)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Pinned message")
+            .accessibilityHint("Jumps to the pinned message")
+            .accessibilityIdentifier("chat-pinned-bar")
+            if canPinInThisChat {
+                Button { model.unpinMessage(chatId: chatId, messageId: pinned.id) } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: Controls.glyph))
+                        .foregroundStyle(theme.muted)
+                        .frame(width: ChatSearchClose.closeHitWidth, height: Controls.height)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Unpin message")
+                .accessibilityIdentifier("chat-pinned-unpin")
+            }
+        }
+        .padding(.leading, Controls.textInset).padding(.trailing, canPinInThisChat ? 4 : Controls.textInset)
+        .frame(height: Controls.height)
+        .background {
+            HeaderGlassBackground(
+                shape: Capsule(),
+                material: ChatHeaderGlass.searchBarMaterial(surface: theme.surface),
+                tinted: true)
+        }
+        .padding(.horizontal, Controls.inset)
     }
 
     /// Long-press → View thread: open the held message and every reply in its chain.

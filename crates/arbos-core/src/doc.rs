@@ -1072,7 +1072,13 @@ impl ChatDoc {
     /// The field sits on the message, not on a chat-level pointer, so the doc
     /// holds any number of pinned messages. How many a group may show is the
     /// client's rule, not the doc's — see [`Self::pinned_message_ids`].
-    pub fn set_message_pinned(&self, msg_id: &str, pinned: bool, by: &str, at: i64) -> CoreResult<()> {
+    pub fn set_message_pinned(
+        &self,
+        msg_id: &str,
+        pinned: bool,
+        by: &str,
+        at: i64,
+    ) -> CoreResult<()> {
         if msg_id.is_empty() {
             return Ok(());
         }
@@ -3012,7 +3018,10 @@ mod tests {
             d.set_message_pinned("m1", true, "user:a", 100).unwrap();
             d.set_message_pinned("m3", true, "user:b", 300).unwrap();
         });
-        assert_eq!(a.pinned_message_ids(), vec!["m3".to_string(), "m1".to_string()]);
+        assert_eq!(
+            a.pinned_message_ids(),
+            vec!["m3".to_string(), "m1".to_string()]
+        );
     }
 
     #[test]
