@@ -6,6 +6,13 @@ name: Swift core check
 
 on:
   push:
+    # main and arbos-v2 only. A branch push is compared with the branch's previous head, so merging main into a
+    # Mac-only branch looked like an iPhone change, and tag pushes ignore `paths`: 2026-10-29/30, 9,004 hosted
+    # runner-minutes in 41 h for one green run. Branches get the check from their pull request (diffed against the
+    # base) or on demand (workflow_dispatch); feedback/** and gate/** get their iPhone build from the gate's iOS
+    # half (scripts/feedback/ios-gate.sh, needs_ios_gate in feedback_poller.py), whose paths must stay a superset
+    # of these.
+    branches: [main, arbos-v2]
     paths:
       - "crates/arbos-core/**"
       - "crates/arbos-client/**"
@@ -33,6 +40,7 @@ on:
       - "rust-toolchain.toml"
       - "apps/ios/Arbos/**"
       - ".github/workflows/swift-core-check.yml"
+  workflow_dispatch:
 
 permissions:
   contents: read
