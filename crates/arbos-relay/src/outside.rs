@@ -676,15 +676,20 @@ fn load_announced_doc(state: &AppState, chat: &ChatRef) -> Option<ChatDoc> {
         .flatten()
 }
 
-/// One `message.received` per target. `attachments` is the row's own list when `doc` holds
-/// the row; otherwise the field is left out and `attachments_unknown` is set.
+/// One `message.received` per target. `text` and `attachments` come from the row itself when
+/// `doc` holds it; otherwise `attachments_unknown` is set and the body falls back to the
+/// announce's own.
 fn deliver_announced(state: &AppState, ev: &Announced, doc: Option<&ChatDoc>) {
     let chat = &ev.chat;
     let sender = &ev.sender;
     let message_id = ev.message_id.as_str();
-    let attachments = doc
-        .and_then(|d| d.message(message_id))
-        .map(|row| attachments_of(&row, chat));
+    let row = doc.and_then(|d| d.message(message_id));
+    let attachments = row.as_ref().map(|row| attachments_of(row, chat));
+    // The announce body is a push preview: the sending client cuts it to a fixed length
+    // (iPhone 140 chars, Mac 600) for the alert, so it is not the message. The row is.
+    let text = row
+        .as_ref()
+        .map_or_else(|| ev.text.clone(), |row| row.text());
     if attachments.is_none() {
         tracing::warn!(
             chat = %chat.chat_id,
@@ -709,7 +714,7 @@ fn deliver_announced(state: &AppState, ev: &Announced, doc: Option<&ChatDoc>) {
         }
         let mut message = json!({
             "id": message_id,
-            "text": ev.text,
+            "text": text,
             "from": {
                 "kind": sender.kind,
                 "id": sender.id,
@@ -2835,6 +2840,53 @@ mod tests {
         assert_eq!(msg["attachments"][0]["kind"], "image");
         assert_eq!(msg["attachments"][0]["mime"], "image/png");
         assert!(msg.get("attachments_unknown").is_none());
+    }
+
+    /// The announce body is the push preview the sending client cut to a fixed length
+    /// (`RelayAPI.swift` takes 140 chars, `arbos-mac` 600). Delivering it as the message gave
+    /// outside agents a body cut mid-word with no marker: Arbonites 01M5MHDEZF… asp_event 845
+    /// ended "…to a view with the result messa" and the tester had to re-send the rest by hand.
+    #[tokio::test]
+    async fn announce_delivers_the_row_not_the_push_preview() {
+        let full = "@grok on mobile when you press search and type in keyword and tap on \
+                    result message sometimes it scrolls you to a view with the result message \
+                    in view but sometimes it takes you to an area where the result message is \
+                    not in view but nearby";
+        let preview: String = full.chars().take(140).collect();
+        assert!(full.len() > preview.len(), "the preview is the shorter one");
+
+        let (state, pid, g, other) = outside_group(7221);
+        let msg_id = ulid();
+        let (m, o, f) = (msg_id.clone(), other.clone(), full.to_owned());
+        crate::notices::write_doc(&state, None, &g, move |doc| {
+            doc.append_user_message(
+                &m,
+                &f,
+                "dev:phone",
+                &arbos_core::doc::UserMessageOpts {
+                    sender: Some(format!("user:{o}")),
+                    ..Default::default()
+                },
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let me = Sender::user(&state, &other);
+        on_announce_waiting(
+            &state,
+            &ChatRef::people(&g),
+            &me,
+            &msg_id,
+            &preview,
+            None,
+            &[],
+            std::time::Duration::from_secs(1),
+        );
+        let events = events_eventually(&state, &pid).await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].1["message"]["text"], full);
     }
 
     /// #2305, divergent chat: the row is stored but depends on history the relay lost, so the
