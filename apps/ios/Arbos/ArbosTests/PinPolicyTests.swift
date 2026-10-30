@@ -4,6 +4,7 @@ import XCTest
 /// Who may pin under each group policy (#1547). The permission rule is enforced in the
 /// client, so these are the only thing standing between the `admins` policy and anyone
 /// pinning — there is no relay check behind them.
+@MainActor
 final class PinPolicyTests: XCTestCase {
     private func member(_ id: String, role: String) -> ChatMember {
         ChatMember(id: id, kind: .user, member: "user:\(id)", role: role, handle: id, avatarUrl: nil,
