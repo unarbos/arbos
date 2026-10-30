@@ -663,6 +663,13 @@ impl Worker {
     /// at the mark while something is still unread, on the stream-newest event once caught up
     /// (a live read is always "everything up to now").
     async fn read(&self, chat_id: &str, user_id: &str) -> MxResult<()> {
+        // Read receipts (#1484): the relay sends this one on the person's behalf, from call
+        // sites no client can reach, so with receipts off it must not be published at all.
+        // Checked here rather than where the job is queued, so a job queued before the switch
+        // moved is dropped too.
+        if !crate::read_receipts::enabled_for(&self.state, user_id, chat_id) {
+            return Ok(());
+        }
         let Some(room) = self.state.db.matrix_room(chat_id).ok().flatten() else {
             return Ok(());
         };
@@ -681,9 +688,14 @@ impl Worker {
             return Ok(());
         };
         let who = self.state.matrix.cfg.user_mxid(user_id);
+        // Always private (`m.read.private`), for everyone, whatever their setting (Jacob,
+        // 2026-10-30: "make all mirrored read receipts private"). Arbos draws no "Seen"
+        // indicator of its own, so a public receipt served only other Matrix clients while
+        // being permanent and unwithdrawable. One rule, so there is no branch here deciding
+        // whose read activity is public.
         match self
             .client
-            .read_receipt(&room.room_id, &who, &event, false)
+            .read_receipt(&room.room_id, &who, &event, true)
             .await
         {
             Ok(()) => Ok(()),
@@ -772,5 +784,151 @@ mod tests {
         assert_eq!(short_hash("x").len(), 8);
         assert_eq!(short_hash("x"), short_hash("x"));
         assert_ne!(short_hash("x"), short_hash("y"));
+    }
+}
+
+#[cfg(test)]
+mod read_receipt_tests {
+    //! #1484, the mirrored half. Two rules, and they are separate things: a receipt the relay
+    //! sends is always private (`m.read.private`), for everyone; and a person with read
+    //! receipts off has none sent on their behalf at all.
+    //!
+    //! These drive the real `Client` against a stand-in homeserver and read back the path it
+    //! was actually called on, because the receipt kind is in the path and a code reading is
+    //! not evidence.
+
+    use std::net::SocketAddr;
+    use std::sync::{Arc, Mutex};
+
+    use axum::extract::{Path as AxPath, State as AxState};
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use serde_json::json;
+
+    use super::*;
+    use crate::matrix::{Config, Mode};
+    use crate::people::tests_support::{dm, person};
+    use crate::read_receipts::ChatSetting;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    type Calls = Arc<Mutex<Vec<(String, String, String)>>>;
+
+    /// A homeserver that answers the receipt endpoint and records `(room, kind, event)`.
+    async fn fake_homeserver() -> (SocketAddr, Calls) {
+        let calls: Calls = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route(
+                "/_matrix/client/v3/rooms/{room}/receipt/{kind}/{event}",
+                post(
+                    |AxState(calls): AxState<Calls>,
+                     AxPath((room, kind, event)): AxPath<(String, String, String)>| async move {
+                        calls.lock().unwrap().push((room, kind, event));
+                        Json(json!({}))
+                    },
+                ),
+            )
+            .with_state(calls.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (addr, calls)
+    }
+
+    /// A chat already mirrored into a room, with one event to put the receipt on.
+    fn mirrored_chat(state: &AppState, seed: i64) -> (String, String) {
+        let (alice, _) = person(state, seed);
+        let (bob, _) = person(state, seed + 1);
+        let chat = dm(state, &alice, &bob);
+        state
+            .db
+            .matrix_insert_room(&chat, "!room:arbos.life", None, "dm")
+            .unwrap();
+        state
+            .db
+            .matrix_insert_event(&chat, "msg-1", "$event-1", &format!("user:{bob}"), now_ms())
+            .unwrap();
+        (alice, chat)
+    }
+
+    fn worker_against(state: &AppState, addr: SocketAddr) -> Worker {
+        let cfg = Config {
+            mode: Mode::Dual,
+            hs_url: format!("http://{addr}"),
+            as_token_users: "as_test".into(),
+            ..Config::off()
+        };
+        Worker {
+            state: state.clone(),
+            client: Client::new(state.http.clone(), cfg),
+        }
+    }
+
+    /// The claim Jacob is going to repeat to people: a mirrored receipt goes in as private.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_mirrored_receipt_is_always_private() {
+        let state = test_state(AuthMode::Github);
+        let (alice, chat) = mirrored_chat(&state, 2001);
+        let (addr, calls) = fake_homeserver().await;
+
+        worker_against(&state, addr)
+            .read(&chat, &alice)
+            .await
+            .expect("the receipt was accepted");
+
+        let calls = calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1, "one receipt");
+        assert_eq!(
+            calls[0].1, "m.read.private",
+            "a mirrored receipt must not be the public m.read; called {calls:?}",
+        );
+        assert_eq!(calls[0].0, "!room:arbos.life");
+        assert_eq!(calls[0].2, "$event-1");
+    }
+
+    /// The other rule, and the one the switch is about: receipts off means the relay publishes
+    /// nothing on that person's behalf, private or otherwise.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_receipt_at_all_is_published_for_a_person_with_receipts_off() {
+        let state = test_state(AuthMode::Github);
+        let (alice, chat) = mirrored_chat(&state, 2003);
+        let (addr, calls) = fake_homeserver().await;
+        let mut settings = json!({});
+        crate::read_receipts::set_chat_override(&mut settings, ChatSetting::Off);
+        state
+            .db
+            .set_member_settings(&chat, &format!("user:{alice}"), &settings)
+            .unwrap();
+
+        worker_against(&state, addr)
+            .read(&chat, &alice)
+            .await
+            .expect("the job completes rather than failing");
+
+        let calls = calls.lock().unwrap().clone();
+        assert!(
+            calls.is_empty(),
+            "nothing may be published on her behalf; called {calls:?}",
+        );
+    }
+
+    /// The account default reaches this path too, not only the per-chat override.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_account_default_also_stops_the_mirrored_receipt() {
+        let state = test_state(AuthMode::Github);
+        let (alice, chat) = mirrored_chat(&state, 2005);
+        let (addr, calls) = fake_homeserver().await;
+        state
+            .db
+            .set_user_read_receipts_default(&alice, false)
+            .unwrap();
+
+        worker_against(&state, addr)
+            .read(&chat, &alice)
+            .await
+            .expect("the job completes");
+
+        let calls = calls.lock().unwrap().clone();
+        assert!(calls.is_empty(), "called {calls:?}");
     }
 }
