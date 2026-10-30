@@ -198,6 +198,7 @@ pub async fn connector_call(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> 
             class: "connector-send",
             risk: Risk::Send,
             why: "leaves the box as a message the user did not write",
+            path_class: None,
         });
         if let Some(granted) = agent.take_grant("connector_call", &gate_args).await {
             tracing::info!(

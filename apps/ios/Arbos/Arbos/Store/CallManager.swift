@@ -102,9 +102,14 @@ final class CallManager: NSObject, ObservableObject {
     @Published private(set) var incoming: (call: Call, from: CallPerson?)?
     @Published private(set) var tiles: [CallTile] = []
     @Published private(set) var connectedAt: Date?
-    @Published private(set) var error: String?
+    /// The last failure (the shared element draws it under the call header).
+    @Published private(set) var error: UserError?
+    /// The words alone, for the idle headline.
+    var errorText: String? { error?.sentence }
     @Published private(set) var muted = false
     @Published private(set) var cameraOn = false
+    /// Publishing a screen-share track (system picker chooses what to share on iOS 27+).
+    @Published private(set) var screenShareOn = false
     @Published private(set) var speakerOn = false
     @Published private(set) var frontCamera = true
     /// Full-screen call UI wanted (the root view presents it). While a call is
@@ -134,9 +139,16 @@ final class CallManager: NSObject, ObservableObject {
     static let missedAfter: TimeInterval = 30
     /// Active calls per chat (for the "On a call · Join" bar), from pushes, presence and GET /chats/{id}/call.
     @Published private(set) var activeByChat: [String: Call] = [:]
+    /// Member ids we asked the relay to ring on the call we started (`ring` body). Nil =
+    /// whole group / DM (default). Cleared when the call tears down. The call screen uses
+    /// this so a selective group start only shows the people we named as "Ringing…".
+    @Published private(set) var ringIds: Set<String>?
 
     let room = LiveKit.Room()
     var localVideoTrack: VideoTrack? { room.localParticipant.firstCameraVideoTrack }
+    var localScreenShareTrack: VideoTrack? {
+        room.localParticipant.firstScreenSharePublication?.track as? VideoTrack
+    }
 
     // Wiring from AppModel.
     var api: RelayAPI?
@@ -211,9 +223,10 @@ final class CallManager: NSObject, ObservableObject {
     // MARK: Start / join / accept / leave
 
     /// From the chat header: start (201) or join (200) the chat's call.
-    func start(chatId: String, projectId: String?, kind: CallKind, title: String) async {
+    /// `ring` — optional member ids to notify (selective group call). Nil / empty = everyone.
+    func start(chatId: String, projectId: String?, kind: CallKind, title: String, ring: [String]? = nil) async {
         guard !isActive else { isPresented = true; return }
-        guard await CallManager.micGranted() else { error = "Microphone access is off in Settings."; return }
+        guard await CallManager.micGranted() else { error = UserError.refused("start the call", "Microphone access is off in Settings."); return }
         if kind == .video { _ = await CallManager.cameraGranted() }
         guard let api else { return }
         error = nil
@@ -222,8 +235,10 @@ final class CallManager: NSObject, ObservableObject {
         prepareCallAudioSession(video: kind == .video)
         ringbackWanted = true
         syncRingback()
+        let ringList = ring.flatMap { $0.isEmpty ? nil : $0 }
+        ringIds = ringList.map { Set($0) }
         do {
-            let (started, isNew) = try await api.startCall(chatId: chatId, projectId: projectId, kind: kind)
+            let (started, isNew) = try await api.startCall(chatId: chatId, projectId: projectId, kind: kind, ring: ringList)
             call = started
             if isNew, let who = me() {
                 writeSystemLine?(chatId, started.projectId, "\(who.displayName) started a \(kind == .video ? "video" : "voice") call", started.callId)
@@ -233,7 +248,7 @@ final class CallManager: NSObject, ObservableObject {
             try await connect(started, video: kind == .video)
         } catch {
             log.error("start failed: \(error.localizedDescription, privacy: .public)")
-            self.error = CallManager.describe(error)
+            self.error = CallManager.describe("start the call", error)
             await teardown(leave: false)
         }
     }
@@ -241,7 +256,7 @@ final class CallManager: NSObject, ObservableObject {
     /// From the "On a call · Join" bar.
     func join(_ existing: Call, title: String) async {
         guard !isActive, let api else { isPresented = true; return }
-        guard await CallManager.micGranted() else { error = "Microphone access is off in Settings."; return }
+        guard await CallManager.micGranted() else { error = UserError.refused("start the call", "Microphone access is off in Settings."); return }
         error = nil
         phase = .connecting
         isPresented = true
@@ -254,7 +269,7 @@ final class CallManager: NSObject, ObservableObject {
             reportOutgoing(title: title, video: fresh.kind == .video)
             try await connect(fresh, video: fresh.kind == .video)
         } catch {
-            self.error = CallManager.describe(error)
+            self.error = CallManager.describe("join the call", error)
             await teardown(leave: false)
             // 410 / call_ended left the Join bar up; re-check the chat.
             await syncActiveBar(chatId: existing.chatId, projectId: existing.isPeople ? nil : existing.projectId)
@@ -452,7 +467,7 @@ final class CallManager: NSObject, ObservableObject {
         switch answerPlan(hasIncoming: incoming != nil, micDenied: micDenied) {
         case .fail:
             if incoming != nil, micDenied {
-                error = "Microphone access is off in Settings."
+                error = UserError.refused("answer the call", "Microphone access is off in Settings.")
                 endIncoming(reason: .failed)
             }
             return
@@ -483,7 +498,7 @@ final class CallManager: NSObject, ObservableObject {
     /// Async half of answering: mic/camera if needed, then join and connect.
     private func joinAccept(_ inc: (call: Call, from: CallPerson?)) async {
         guard await CallManager.micGranted() else {
-            error = "Microphone access is off in Settings."
+            error = UserError.refused("answer the call", "Microphone access is off in Settings.")
             await teardown(leave: false, reason: .failed)
             return
         }
@@ -497,7 +512,7 @@ final class CallManager: NSObject, ObservableObject {
             call = fresh
             try await connect(fresh, video: fresh.kind == .video)
         } catch {
-            self.error = CallManager.describe(error)
+            self.error = CallManager.describe("join the call", error)
             await teardown(leave: false)
             await syncActiveBar(chatId: inc.call.chatId, projectId: inc.call.isPeople ? nil : inc.call.projectId)
         }
@@ -591,7 +606,7 @@ final class CallManager: NSObject, ObservableObject {
         phase = .connecting
         isPresented = true
         reportOutgoing(title: "Dev call", video: kind == .video)
-        do { try await connect(c, video: kind == .video) } catch { self.error = CallManager.describe(error); await teardown(leave: false) }
+        do { try await connect(c, video: kind == .video) } catch { self.error = CallManager.describe("start the call", error); await teardown(leave: false) }
     }
     #endif
 
@@ -685,9 +700,11 @@ final class CallManager: NSObject, ObservableObject {
         // Drop the call UI before the network leave so Hang up always dismisses, even
         // when POST /leave is slow or fails.
         call = nil
+        ringIds = nil
         tiles = []
         connectedAt = nil
         cameraOn = false
+        screenShareOn = false
         agentSeeing = false
         seeingAgentName = nil
         muted = false
@@ -743,7 +760,7 @@ final class CallManager: NSObject, ObservableObject {
             let fresh = try await api.inviteSpeaker(callId: c.callId, userId: userId)
             applySpeakState(fresh)
         } catch {
-            self.error = CallManager.describe(error)
+            self.error = CallManager.describe("invite the speaker", error)
         }
     }
 
@@ -754,7 +771,7 @@ final class CallManager: NSObject, ObservableObject {
             let fresh = try await api.revokeSpeaker(callId: c.callId, userId: userId)
             applySpeakState(fresh)
         } catch {
-            self.error = CallManager.describe(error)
+            self.error = CallManager.describe("change the speaker", error)
         }
     }
 
@@ -783,12 +800,12 @@ final class CallManager: NSObject, ObservableObject {
     }
 
     func toggleCamera() async {
-        if !cameraOn, !(await CallManager.cameraGranted()) { error = "Camera access is off in Settings."; return }
+        if !cameraOn, !(await CallManager.cameraGranted()) { error = UserError.refused("turn the camera on", "Camera access is off in Settings."); return }
         let turningOn = !cameraOn
         if !turningOn {
             // Off means off at once: the indicator drops now, and the camera track is
             // unpublished (not just muted) so the agent's vision sampler gets nothing.
-            agentSeeing = false
+            if !screenShareOn { agentSeeing = false }
             cameraOn = false
             objectWillChange.send()
         }
@@ -801,9 +818,45 @@ final class CallManager: NSObject, ObservableObject {
             }
             cameraOn = turningOn
         } catch {
-            self.error = CallManager.describe(error)
+            self.error = CallManager.describe("turn the camera on", error)
         }
         objectWillChange.send()
+    }
+
+    /// Start or stop screen share. Starting presents the system content picker on iOS 27+
+    /// (LiveKit ScreenCaptureKit) so the user chooses the app or screen to share; dismissing
+    /// the picker cancels with no track. Stopping unpublishes the share track.
+    func toggleScreenShare() async {
+        let turningOn = !screenShareOn
+        if !turningOn {
+            if !cameraOn { agentSeeing = false }
+            screenShareOn = false
+            objectWillChange.send()
+        }
+        do {
+            try await room.localParticipant.setScreenShare(enabled: turningOn)
+            if !turningOn {
+                for pub in room.localParticipant.videoTracks where pub.source == .screenShareVideo {
+                    if let local = pub as? LocalTrackPublication { try? await room.localParticipant.unpublish(publication: local) }
+                }
+            }
+            screenShareOn = room.localParticipant.isScreenShareEnabled()
+        } catch {
+            screenShareOn = room.localParticipant.isScreenShareEnabled()
+            // User dismissed the content picker — not an error to show on the call screen.
+            if let lk = error as? LiveKitError, lk.type == .cancelled { /* no-op */ }
+            else { self.error = CallManager.describe("share the screen", error) }
+        }
+        objectWillChange.send()
+    }
+
+    fileprivate func syncScreenShareFromRoom() {
+        let on = room.localParticipant.isScreenShareEnabled()
+        if screenShareOn != on {
+            screenShareOn = on
+            if !on, !cameraOn { agentSeeing = false }
+            objectWillChange.send()
+        }
     }
 
     // MARK: Agent camera vision (§11)
@@ -835,7 +888,7 @@ final class CallManager: NSObject, ObservableObject {
         } else {
             return
         }
-        agentSeeing = seeingMe && cameraOn
+        agentSeeing = seeingMe && (cameraOn || screenShareOn)
         if seeingMe {
             let identity = (d["agent"] as? String) ?? participant?.identity?.stringValue ?? ""
             seeingAgentName = (d["agent_name"] as? String)
@@ -878,10 +931,16 @@ final class CallManager: NSObject, ObservableObject {
             .map { p in
                 let identity = p.identity?.stringValue ?? UUID().uuidString
                 let person = CallPerson.parse(metadata: p.metadata) ?? CallPerson.placeholder(identity: identity, name: p.name)
-                let video = p.videoTracks.first { $0.source == .camera }?.track as? VideoTrack
+                // Prefer a screen share when they are sharing; otherwise their camera.
+                let screen = p.videoTracks.first { $0.source == .screenShareVideo }?.track as? VideoTrack
+                let camera = p.videoTracks.first { $0.source == .camera }?.track as? VideoTrack
+                let sharing = p.isScreenShareEnabled()
+                let video = screen ?? camera
+                let hasVideo = sharing || p.isCameraEnabled()
                 return CallTile(id: identity, person: person, isSpeaking: p.isSpeaking,
-                                micOn: CallManager.remoteMicOn(p), cameraOn: p.isCameraEnabled(), videoTrack: video)
+                                micOn: CallManager.remoteMicOn(p), cameraOn: hasVideo, videoTrack: video)
             }
+        syncScreenShareFromRoom()
         syncRingback()
     }
 
@@ -1141,18 +1200,26 @@ final class CallManager: NSObject, ObservableObject {
 
     func forgetVoipRegistration() { registeredVoipToken = nil }
 
-    static func describe(_ error: Error) -> String {
+    /// The call's failure as the shared `UserError`: the relay's call states keep their own
+    /// sentences as refusals; everything else goes through the classifier.
+    static func describe(_ verb: String, _ error: Error) -> UserError {
         if let e = error as? RelayError {
-            switch (e.status, e.type ?? "") {
-            case (503, _), (_, "calls_off"): return "Calls are not switched on for this relay yet."
-            case (410, _), (_, "call_ended"): return "That call has ended."
-            case (409, _), (_, "call_full"): return "The call is full."
-            case (404, _), (405, _): return "Calls are not on this relay yet."
-            case (403, _): return "You are not a member of this chat."
-            default: break
+            let said: String? = switch (e.status, e.type ?? "") {
+            case (503, _), (_, "calls_off"): "Calls are not switched on for this relay yet."
+            case (410, _), (_, "call_ended"): "That call has ended."
+            case (409, _), (_, "call_full"): "The call is full."
+            case (404, _), (405, _): "Calls are not on this relay yet."
+            case (403, _): "You are not a member of this chat."
+            default: nil
             }
+            if let said { return UserError.refused(verb, said) }
         }
-        return error.localizedDescription
+        return UserError.classify(verb, error)
+    }
+
+    /// The sentence alone (older callers).
+    static func describe(_ error: Error) -> String {
+        describe("start the call", error).sentence
     }
 
     /// An ARBOS_CALL alert (tap or foreground): `event` started → ring, ended → stop.
@@ -1211,7 +1278,7 @@ extension CallManager: RoomDelegate {
                 // .disconnected while a connect is still in flight.
                 if (oldConnectionState == .connected || oldConnectionState == .reconnecting),
                    self.phase == .connected || self.phase == .reconnecting {
-                    self.error = self.error ?? "Connection lost."
+                    self.error = self.error ?? UserError.of("stay on the call", .offline(deviceOffline: false), "Connection lost.")
                     await self.teardown(leave: true, reason: .failed)
                 }
             default: break
@@ -1260,6 +1327,14 @@ extension CallManager: RoomDelegate {
         Task { @MainActor in self.refreshTiles() }
     }
 
+    nonisolated func room(_ room: LiveKit.Room, participant: LocalParticipant, didPublishTrack publication: LocalTrackPublication) {
+        Task { @MainActor in self.syncScreenShareFromRoom() }
+    }
+
+    nonisolated func room(_ room: LiveKit.Room, participant: LocalParticipant, didUnpublishTrack publication: LocalTrackPublication) {
+        Task { @MainActor in self.syncScreenShareFromRoom() }
+    }
+
     nonisolated func room(_ room: LiveKit.Room, participant: Participant, didUpdateIsSpeaking isSpeaking: Bool) {
         Task { @MainActor in self.refreshTiles() }
     }
@@ -1298,7 +1373,7 @@ extension CallManager: CXProviderDelegate {
             switch answerPlan(hasIncoming: self.incoming != nil, micDenied: micDenied) {
             case .fail:
                 if self.incoming != nil {
-                    self.error = "Microphone access is off in Settings."
+                    self.error = UserError.refused("start the call", "Microphone access is off in Settings.")
                     self.endIncoming(reason: .failed)
                 }
                 action.fail()

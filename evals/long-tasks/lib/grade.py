@@ -28,7 +28,13 @@ JUDGE_MODEL = os.environ.get("LT_JUDGE_MODEL", "anthropic/claude-haiku-5.5")
 
 
 def _get_json(url, timeout=30):
-    req = urllib.request.Request(url, headers={"user-agent": "arbos-long-task-eval/1.0", "accept": "application/json"})
+    headers = {"user-agent": "arbos-long-task-eval/1.0", "accept": "application/json"}
+    # the unauthenticated GitHub API quota is shared by the VM's egress IP (run 13: r5's truth
+    # check got 403 "rate limit exceeded"); the eval's PAT is in the environment already
+    tok = os.environ.get("GH_TOKEN") or os.environ.get("ARBOS_GITHUB")
+    if tok and url.startswith("https://api.github.com/"):
+        headers["authorization"] = f"Bearer {tok}"
+    req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read())
 
@@ -270,7 +276,11 @@ def grade_turn(turn, ctx, box, project, env):
             if len(runs) < spec["min_runs"]:
                 reasons.append(f"routine ran {len(runs)} times, expected ≥ {spec['min_runs']}")
     if turn.get("latency_max_s") is not None:
-        t = res.get("ttfr_s")
+        # "first reply" = the first thing the user sees: since image 0.1.113 an `act` turn's
+        # acknowledgement rides the working line (a status part), not a text bubble, so the
+        # earlier of first text and first status counts (#1598 / kill-placeholders-working-row)
+        cands = [x for x in (res.get("ttfr_s"), res.get("first_status_s")) if x is not None]
+        t = min(cands) if cands else None
         if t is None or t > turn["latency_max_s"]:
             reasons.append(f"first reply took {t} s (limit {turn['latency_max_s']} s)")
     if turn.get("max_doc_tool_parts") is not None and (dm.get("tool_parts") or 0) > turn["max_doc_tool_parts"]:

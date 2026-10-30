@@ -39,6 +39,17 @@
                ReferencedContainer = "container:Arbos.xcodeproj">
             </BuildableReference>
          </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "A1BB00000000000000000012"
+               BuildableName = "ArbosUITests.xctest"
+               BlueprintName = "ArbosUITests"
+               ReferencedContainer = "container:Arbos.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
    </TestAction>
    <LaunchAction

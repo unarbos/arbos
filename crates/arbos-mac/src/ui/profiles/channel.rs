@@ -62,7 +62,7 @@ pub(super) fn page(
         .into_any_element()
     };
     let hero = Hero {
-        picture: Picture::Glyph("hash"),
+        picture: Picture::Glyph("number"),
         name,
         badge: restricted.then_some("lock"),
         subtitle: Some(
@@ -73,12 +73,17 @@ pub(super) fn page(
             )
             .into(),
         ),
-        subtitle_color: theme.text_muted,
+        subtitle_color: theme.label_muted(),
+        subtitle_click: None,
+        subtitle_element: None,
         editor: None,
+        action: None,
     };
 
     let body = match tab {
-        0 => profile_tab(&server, &channel, restricted, muted, count, &theme, cx),
+        0 => profile_tab(
+            &server, &channel, restricted, muted, count, shell, &theme, cx,
+        ),
         _ => settings_tab(
             &server,
             &channel,
@@ -105,6 +110,7 @@ pub(super) fn page(
             body,
             footer,
             done: None,
+            share: None,
         },
         shell,
         cx,
@@ -120,7 +126,7 @@ fn name_field(shell: &Shell, theme: &Theme) -> Div {
         .flex()
         .items_center()
         .rounded(px(8.0))
-        .bg(theme.field)
+        .bg(theme.field_fill())
         .border_1()
         .border_color(theme.primary)
         .text_size(px(TEXT_BODY))
@@ -138,13 +144,20 @@ fn topic_row(topic: &str, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-fn server_row(server: &ServerInfo, theme: &Theme, cx: &mut Context<Shell>) -> AnyElement {
+fn server_row(
+    server: &ServerInfo,
+    shell: &Shell,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> AnyElement {
     let page = ProfilePage::Server {
         server_id: server.id.clone(),
     };
+    let picture =
+        server_picture(server, shell.state.read(cx), kit::AVATAR, theme).into_any_element();
     kit::row(
         "channel-server",
-        kit::Leading::Avatar(server_picture(server, kit::AVATAR, theme).into_any_element()),
+        kit::Leading::Avatar(picture),
         server.name.clone(),
         Some("Server".into()),
         None,
@@ -153,7 +166,7 @@ fn server_row(server: &ServerInfo, theme: &Theme, cx: &mut Context<Shell>) -> An
         theme,
     )
     .cursor_pointer()
-    .hover(|s| s.bg(theme.surface_2))
+    .group(kit::HOT)
     .on_click(cx.listener(move |this, _, _, cx| {
         this.push_profile(page.clone(), cx);
     }))
@@ -194,12 +207,14 @@ fn privacy_label(restricted: bool) -> &'static str {
 }
 
 /// Profile: what the channel is, who is in it, how it is set up — read-only, plus mute.
+#[allow(clippy::too_many_arguments)]
 fn profile_tab(
     server: &ServerInfo,
     channel: &ServerChannel,
     restricted: bool,
     muted: bool,
     count: u64,
+    shell: &Shell,
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> Vec<Section> {
@@ -222,7 +237,7 @@ fn profile_tab(
             theme,
         )
         .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
+        .group(kit::HOT)
         .on_click(cx.listener(move |this, _, _, cx| {
             // The server's Members tab, pushed so ‹ comes back here.
             this.push_profile(members_page.clone(), cx);
@@ -255,7 +270,7 @@ fn profile_tab(
     let cid = channel.id.clone();
     vec![
         Section::Card(about),
-        Section::Card(vec![server_row(server, theme, cx)]),
+        Section::Card(vec![server_row(server, shell, theme, cx)]),
         Section::Card(vec![toggle_row(
             "channel-mute",
             "Mute channel",
@@ -301,7 +316,7 @@ fn settings_tab(
     if can_admin {
         name_row = name_row
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .group(kit::HOT)
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.start_rename_channel(cid.clone(), cname.clone(), window, cx);
             }));
@@ -332,7 +347,7 @@ fn settings_tab(
                         .flex()
                         .items_center()
                         .rounded(px(8.0))
-                        .bg(theme.field)
+                        .bg(theme.field_fill())
                         .border_1()
                         .border_color(theme.primary)
                         .text_size(px(TEXT_BODY))
@@ -360,7 +375,7 @@ fn settings_tab(
         if can_admin {
             topic_row = topic_row
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
+                .group(kit::HOT)
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.start_edit_channel_topic(cid.clone(), ctopic.clone(), window, cx);
                 }));
@@ -431,7 +446,7 @@ fn settings_tab(
     let mut out = vec![
         Section::Card(identity),
         Section::Card(behaviour),
-        Section::Card(vec![server_row(server, theme, cx)]),
+        Section::Card(vec![server_row(server, shell, theme, cx)]),
     ];
     if can_admin {
         out.push(Section::Footnote(
@@ -456,7 +471,11 @@ fn danger_footer(
     let (sid, cid) = (server.id.clone(), channel.id.clone());
     let mut rows: Vec<AnyElement> = vec![kit::row(
         "channel-archive",
-        kit::Leading::Tile(if archived { "tray-up" } else { "archive" }),
+        kit::Leading::Tile(if archived {
+            "tray.and.arrow.up"
+        } else {
+            "archivebox"
+        }),
         if archived {
             "Unarchive channel"
         } else {
@@ -476,7 +495,7 @@ fn danger_footer(
         theme,
     )
     .cursor_pointer()
-    .hover(|s| s.bg(theme.surface_2))
+    .group(kit::HOT)
     .on_click(cx.listener(move |this, _, _, cx| {
         let (sid, cid) = (sid.clone(), cid.clone());
         this.state
@@ -503,7 +522,7 @@ fn danger_footer(
                     .child(
                         div()
                             .text_size(px(TEXT_SMALL))
-                            .text_color(theme.text_muted)
+                            .text_color(theme.label_muted())
                             .child(
                                 "Deletes the channel and its messages for everyone in the server.",
                             ),

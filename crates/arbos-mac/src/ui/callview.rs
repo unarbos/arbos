@@ -11,13 +11,14 @@ use gpui::{
     div, prelude::*, px, Context, Div, ElementId, FontWeight, RenderImage, SharedString, Stateful,
 };
 
-use crate::app::{ActiveCall, CallParticipant, CallStatus};
+use crate::app::{ActiveCall, AppState, CallParticipant, CallStatus};
 use crate::model::{self, now_ms, Call, CallKind, Project, Sender};
 use crate::ui::avatars;
 use crate::ui::glass;
-use crate::ui::icons::icon;
+use crate::ui::highlight;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
+use crate::ui::sf_symbols;
 use crate::ui::shell::Shell;
 use crate::ui::theme::Appearance;
 use crate::ui::theme::{Theme, HEADER_HEIGHT, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
@@ -40,6 +41,23 @@ fn mmss(ms: u64) -> String {
     }
 }
 
+/// The decoded picture the loader has for a participant: a person's GitHub photo, or an
+/// agent's uploaded / generated picture found through the shared identity rule (#1592) — the
+/// same picture its bubbles and the presence row show.
+fn sender_image(state: &AppState, sender: &Sender) -> Option<Arc<RenderImage>> {
+    if sender.kind == "agent" {
+        let a = avatars::agent_identity(
+            state.selected(),
+            &state.projects,
+            &sender.id,
+            Some(&sender.handle),
+            Some(&sender.name),
+        );
+        return a.image_key.as_deref().and_then(|url| state.avatar(url));
+    }
+    state.avatar(&sender.avatar_url)
+}
+
 /// A participant's picture: GitHub photo, coloured tree, or the initial.
 fn picture(sender: &Sender, image: Option<Arc<RenderImage>>, size: f32, theme: &Theme) -> Div {
     // A photo wins; otherwise the sender's initials disc (agents and people alike).
@@ -47,79 +65,6 @@ fn picture(sender: &Sender, image: Option<Arc<RenderImage>>, size: f32, theme: &
         return people::avatar(image, &sender.as_person(), size, theme);
     }
     avatars::sender(sender, size, theme)
-}
-
-/// One tile: the camera when it is on, else the picture on a dark card.
-fn tile(
-    id: ElementId,
-    p: &CallParticipant,
-    image: Option<Arc<RenderImage>>,
-    video: Option<Arc<RenderImage>>,
-    label: String,
-    big: bool,
-    theme: &Theme,
-) -> Stateful<Div> {
-    let avatar_size = if big { 112.0 } else { 72.0 };
-    let mut card = div()
-        .id(id)
-        .relative()
-        .flex_1()
-        .min_w(px(180.0))
-        .min_h(px(if big { 260.0 } else { 160.0 }))
-        .rounded(px(24.0))
-        .overflow_hidden()
-        .bg(theme.surface_1)
-        .border_2()
-        .border_color(if p.speaking {
-            theme.online
-        } else {
-            gpui::transparent_black()
-        })
-        .flex()
-        .items_center()
-        .justify_center();
-    match video {
-        Some(frame) => {
-            card = card.child(
-                gpui::img(frame)
-                    .absolute()
-                    .inset_0()
-                    .size_full()
-                    .object_fit(gpui::ObjectFit::Cover),
-            );
-        }
-        None => {
-            card = card.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap(px(14.0))
-                    .child(picture(&p.sender, image, avatar_size, theme))
-                    .child(icon("camera-off", 22.0, theme.text_faint)),
-            );
-        }
-    }
-    // Name (and the muted mic) pinned to the bottom-left.
-    card.child(
-        div()
-            .absolute()
-            .left(px(12.0))
-            .bottom(px(10.0))
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .px(px(10.0))
-            .py(px(4.0))
-            .rounded_full()
-            .bg(gpui::hsla(0.0, 0.0, 0.0, 0.45))
-            .text_size(px(TEXT_SMALL))
-            .text_color(theme.text)
-            .when(p.muted, |el| {
-                el.child(icon("mic-off", 12.0, theme.text_muted))
-            })
-            .child(label),
-    )
 }
 
 fn round_button(
@@ -152,7 +97,7 @@ fn round_button(
                     theme.surface_2
                 })
                 .hover(|s| s.opacity(0.88))
-                .child(icon(
+                .child(sf_symbols::glyph(
                     glyph,
                     24.0,
                     if danger {
@@ -303,7 +248,7 @@ fn strip_tile(
                     .text_size(px(TEXT_SMALL))
                     .text_color(theme.text)
                     .when(p.muted, |el| {
-                        el.child(icon("mic-off", 11.0, theme.text_muted))
+                        el.child(sf_symbols::glyph("mic.slash", 11.0, theme.text_muted))
                     })
                     .child(div().truncate().child(name)),
             )
@@ -372,7 +317,7 @@ pub fn strip(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Div
         .items_stretch()
         .gap(px(8.0));
     for (i, p) in active.participants.iter().enumerate() {
-        let image = state.avatar(&p.sender.avatar_url);
+        let image = sender_image(state, &p.sender);
         tiles = tiles.child(strip_tile(
             ElementId::Name(SharedString::from(format!("strip-tile-{i}"))),
             p,
@@ -398,7 +343,7 @@ pub fn strip(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Div
         tiles = tiles.child(strip_tile(
             ElementId::Name(SharedString::from(format!("strip-ringing-{i}"))),
             &ghost,
-            state.avatar(&s.avatar_url),
+            sender_image(state, s),
             avatar,
             Some(caption),
             &theme,
@@ -471,7 +416,7 @@ pub fn strip(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Div
         .child(
             round_button(
                 "call-mute",
-                if active.muted { "mic-off" } else { "mic" },
+                if active.muted { "mic.slash" } else { "mic" },
                 if active.muted { "Unmute" } else { "Mute" },
                 active.muted,
                 false,
@@ -489,9 +434,9 @@ pub fn strip(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Div
             round_button(
                 "call-camera",
                 if active.camera {
-                    "camera"
+                    "video.fill"
                 } else {
-                    "camera-off"
+                    "video.slash.fill"
                 },
                 "Camera",
                 active.camera,
@@ -508,14 +453,21 @@ pub fn strip(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Div
         )
         .children(vision.map(|(pid, name, on)| vision_switch(pid, &name, on, &theme, cx)))
         .child(
-            round_button("call-hangup", "phone-down", "Hang up", false, true, &theme)
-                .on_mouse_down(
-                    gpui::MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.state.update(cx, |s, cx| s.leave_call(cx));
-                    }),
-                ),
+            round_button(
+                "call-hangup",
+                "phone.down.fill",
+                "Hang up",
+                false,
+                true,
+                &theme,
+            )
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.state.update(cx, |s, cx| s.leave_call(cx));
+                }),
+            ),
         );
 
     let group = div()
@@ -544,8 +496,8 @@ pub fn strip(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Div
                 .items_center()
                 .justify_center()
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
-                .child(icon("chevron-up", 12.0, theme.text_faint))
+                .map(|el| highlight::button(el, &theme))
+                .child(sf_symbols::glyph("chevron.up", 12.0, theme.text_faint))
                 .on_mouse_down(
                     gpui::MouseButton::Left,
                     cx.listener(|this, _, _, cx| {
@@ -564,6 +516,7 @@ pub fn strip(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Div
         .items_center()
         .justify_center()
         .cursor(gpui::CursorStyle::ResizeRow)
+        // hover-fill: exception handle
         .hover(|s| s.bg(Theme::with_alpha(theme.primary, 0.12)))
         .child(div().w(px(40.0)).h(px(4.0)).rounded_full().bg(theme.border))
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -657,7 +610,7 @@ pub fn bar(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> State
     let first = active.participants.first().cloned();
     let picture_el = match &first {
         Some(p) => {
-            let image = state.avatar(&p.sender.avatar_url);
+            let image = sender_image(state, &p.sender);
             picture(&p.sender, image, 30.0, &theme)
         }
         None => div()
@@ -667,7 +620,7 @@ pub fn bar(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> State
             .flex()
             .items_center()
             .justify_center()
-            .child(icon("phone", 14.0, gpui::white())),
+            .child(sf_symbols::glyph("phone", 14.0, gpui::white())),
     };
     let bg = match theme.appearance {
         Appearance::Light => palette.inner,
@@ -685,7 +638,7 @@ pub fn bar(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> State
             .cursor_pointer()
             .bg(fill)
             .hover(|s| s.opacity(0.85))
-            .child(icon(glyph, 14.0, ink))
+            .child(sf_symbols::glyph(glyph, 14.0, ink))
     };
     div()
         .id("call-bar")
@@ -744,7 +697,7 @@ pub fn bar(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> State
         .child(
             round(
                 "bar-mute",
-                if active.muted { "mic-off" } else { "mic" },
+                if active.muted { "mic.slash" } else { "mic" },
                 if active.muted {
                     theme.text
                 } else {
@@ -761,7 +714,7 @@ pub fn bar(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> State
             ),
         )
         .child(
-            round("bar-hangup", "phone-down", theme.danger, gpui::white()).on_mouse_down(
+            round("bar-hangup", "phone.down.fill", theme.danger, gpui::white()).on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     cx.stop_propagation();
@@ -769,15 +722,15 @@ pub fn bar(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> State
                 }),
             ),
         )
-        .child(
+        .child(highlight::button(
             round(
                 "bar-expand",
-                "chevron-up",
+                "chevron.up",
                 gpui::transparent_black(),
                 theme.text_muted,
-            )
-            .hover(|s| s.bg(Theme::with_alpha(theme.text, 0.08))),
-        )
+            ),
+            &theme,
+        ))
 }
 
 /// Picture-in-picture while a video call is collapsed: the remote camera (else
@@ -823,7 +776,7 @@ pub fn pip(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> State
                 .object_fit(gpui::ObjectFit::Cover),
         );
     } else if let Some(p) = active.participants.first() {
-        let image = state.avatar(&p.sender.avatar_url);
+        let image = sender_image(state, &p.sender);
         tile = tile.child(
             div()
                 .size_full()
@@ -839,7 +792,11 @@ pub fn pip(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> State
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(icon("camera", 22.0, Theme::with_alpha(gpui::white(), 0.6))),
+                .child(sf_symbols::glyph(
+                    "video.fill",
+                    22.0,
+                    Theme::with_alpha(gpui::white(), 0.6),
+                )),
         );
     }
     let seeing = (remote.is_none() && active.agent_seeing)
@@ -886,7 +843,7 @@ fn seeing_badge(agent: &str, theme: &Theme) -> Div {
         .text_size(px(TEXT_TINY))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(gpui::white())
-        .child(icon("eye", 12.0, gpui::white()))
+        .child(sf_symbols::glyph("eye", 12.0, gpui::white()))
         .child(format!("{agent} can see"))
 }
 
@@ -981,9 +938,9 @@ pub fn join_bar(call: &Call, cx: &mut Context<Shell>) -> Div {
         .gap(px(10.0))
         .rounded_full()
         .bg(theme.surface_2)
-        .child(icon(
+        .child(sf_symbols::glyph(
             if call.kind == CallKind::Video {
-                "camera"
+                "video.fill"
             } else {
                 "phone"
             },
@@ -1023,7 +980,7 @@ pub fn ringing_line(names: &[String]) -> String {
 /// Ringing card (top-right): caller, "Incoming video call", Decline / Accept.
 pub fn ring_card(shell: &Shell, call: &Call, sender: &Sender, cx: &mut Context<Shell>) -> Div {
     let theme = Theme::of(cx).clone();
-    let image = shell.state.read(cx).avatar(&sender.avatar_url);
+    let image = sender_image(shell.state.read(cx), sender);
     PulseClock::request(cx);
     let phase = PulseClock::phase(cx, 1200);
     let card = div()
@@ -1083,7 +1040,7 @@ pub fn ring_card(shell: &Shell, call: &Call, sender: &Sender, cx: &mut Context<S
                         .text_color(theme.text)
                         .cursor_pointer()
                         .hover(|s| s.opacity(0.88))
-                        .child(icon("phone-down", 14.0, theme.text))
+                        .child(sf_symbols::glyph("phone.down.fill", 14.0, theme.text))
                         .child("Decline")
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.state.update(cx, |s, cx| s.decline_incoming(cx));
@@ -1105,7 +1062,7 @@ pub fn ring_card(shell: &Shell, call: &Call, sender: &Sender, cx: &mut Context<S
                         .text_color(theme.bg)
                         .cursor_pointer()
                         .hover(|s| s.opacity(0.88))
-                        .child(icon("phone", 14.0, theme.bg))
+                        .child(sf_symbols::glyph("phone", 14.0, theme.bg))
                         .child("Accept")
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.state.update(cx, |s, cx| s.accept_incoming(cx));

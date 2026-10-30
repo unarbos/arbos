@@ -10,6 +10,8 @@ struct ArbosApp: App {
         WindowGroup {
             RootView()
                 .environmentObject(model)
+                // The code-card grammars load off the main thread at launch.
+                .task { CodeHighlight.warm() }
         }
     }
 }
@@ -30,7 +32,7 @@ struct RootView: View {
     var body: some View {
         ZStack {
             if model.isPaired {
-                HomeView()
+                MainShellView()
             } else {
                 SignInView()
             }
@@ -47,6 +49,12 @@ struct RootView: View {
         .onAppear {
             #if DEBUG
             PerfLog.shared.startIfRequested()
+            PerfLog.shared.observe(model)
+            TouchPerf.installIfRequested()
+            #endif
+            PerfDiagnostics.shared.start(model: model)
+            #if DEBUG
+            if DebugHooks.perfChanges { setlinebuf(stdout) }
             #endif
             if DebugHooks.show == "onboarding" {
                 model.demoFirstLogin(stage: DebugHooks.onboardingStage)
@@ -56,8 +64,15 @@ struct RootView: View {
         .environment(\.theme, theme)
         .preferredColorScheme(preferredScheme)
         .tint(theme.text)
-        .alert(item: $model.notice) { n in
-            Alert(title: Text("Arbos"), message: Text(n.text), dismissButton: .default(Text("OK")))
+        // Toasts (Jacob 2026-10-26 / 2026-10-27): one slot — under the open chat's header pill
+        // (`ChatView` hosts it there); here at the top under the status bar only while no chat
+        // is up — an info notice as the plain card, a failure as the shared `ErrorNote`.
+        .overlay(alignment: .top) {
+            if !model.chatIsUp {
+                ToastHost()
+                    .environmentObject(model)
+                    .environment(\.theme, theme)
+            }
         }
         // Fresh account: the name/handle sheet shows over the first-login terminal
         // screen (D82) while the machine boots (8–11 s), as Telegram and Grok ask for
@@ -141,6 +156,12 @@ struct RootView: View {
                 Task { await model.joinFromLink(code: code) }
                 return
             }
+            // Group invite links: arbos://join-group/<code> — what arbos.life/g/<code> hands to the app.
+            if url.scheme == "arbos", url.host == "join-group" {
+                let code = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                Task { await model.joinGroupFromLink(code: code) }
+                return
+            }
             guard AuthEndpoints.isConnectorCallback(url) else { return }
             model.refreshConnectors()
         }
@@ -175,10 +196,20 @@ struct RootView: View {
     }
 }
 
-/// The profile sheet: one page, or — for pages whose member rows open people —
-/// a NavigationStack rooted on it so a tapped member is pushed and its back
-/// chevron (the page's own `ProfileTopBar`) pops to the page as it was. The
-/// agent page brings its own NavigationStack and so stays a plain root.
+/// Root chrome after sign-in: the home list alone. The Telegram-style tab bar
+/// (Contacts · Calls · Chats · Settings, 2026-10-23) is gone (Jacob, 2026-10-25,
+/// [feedback iphone-bottom-search-bar-2026-10-25]): Home's bottom edge is one
+/// app-wide search bar (`HomeChrome.bottom`). Settings opens from the account
+/// circle; people are found through + (New message) and the search bar.
+struct MainShellView: View {
+    var body: some View {
+        HomeView()
+    }
+}
+
+/// The profile sheet: a NavigationStack rooted on the page so a tapped member
+/// (or an agent's owner) is pushed and its back chevron (the page's own
+/// `ProfileTopBar`) pops to the page as it was.
 private struct ProfileSheet: View {
     @EnvironmentObject private var model: AppModel
     let target: ProfileTarget

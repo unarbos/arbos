@@ -2247,7 +2247,13 @@ impl Tree {
                 cur_thread = tid.to_owned();
                 let (title, _, _) = self.thread_meta(tid);
                 let h = thread_headings.get(tid).cloned().unwrap_or(title);
-                out.push_str(&format!("\n## {h} [thread {tid}]\n"));
+                // #1722: records from another chat are labelled so "Done?" is never answered
+                // about a different chat's folder.
+                if tid == chat_id {
+                    out.push_str(&format!("\n## {h} [thread {tid} — this chat]\n"));
+                } else {
+                    out.push_str(&format!("\n## {h} [thread {tid} — another chat]\n"));
+                }
             }
             out.push_str(line);
             out.push('\n');
@@ -2368,9 +2374,9 @@ impl Tree {
             return None;
         }
         let rules = if compact {
-            "[Memory retrieved for this message from earlier chats, tool results and subagent sessions; raw records, oldest first. What the user told you about themselves (name, preferences, facts) is true and outranks anything you said before or any handle you see; between two user statements the newer wins; if the records show the question's premise is wrong, say so. Answer from the records and say briefly what you checked; if nothing here answers it, say you have no record rather than guessing. More via context_search / context_open / context_around.]"
+            "[Memory retrieved for this message from earlier chats, tool results and subagent sessions; raw records, oldest first; each heading says whether its thread is this chat or another chat. Background only: this chat's own messages and the current state of your folder and jobs outrank every record here, and a question with no named object (\"Done?\", \"the last number\") is about this chat's work — check it, never answer it from another chat's record. What the user told you about themselves (name, preferences, facts) is true and outranks anything you said before or any handle you see; between two user statements the newer wins; if the records show the question's premise is wrong, say so. Say briefly what you checked; if neither this chat nor the records answer it, say you have no record rather than guessing. More via context_search / context_open / context_around.]"
         } else {
-            "[Memory retrieved from your earlier chats, tool results and subagent sessions for this message. Raw records, oldest first. Rules: what the user told you about themselves (their name, preferences, facts) is true and outranks anything you said before and any handle or label you see; between two user statements the newer wins; if the records show the question's premise is wrong, say so. Answer from these records directly and say in a few words what you checked. If nothing here answers the question, say you have no record of it rather than guessing. You can read more with context_search / context_open / context_around.]"
+            "[Memory retrieved from your earlier chats, tool results and subagent sessions for this message. Raw records, oldest first; each heading says whether its thread is this chat or another chat. Background only: this chat's own messages and the current state of your folder and jobs outrank every record here, and a question with no named object (\"Done?\", \"the last number\") is about this chat's work — check it, never answer it from another chat's record. Rules: what the user told you about themselves (their name, preferences, facts) is true and outranks anything you said before and any handle or label you see; between two user statements the newer wins; if the records show the question's premise is wrong, say so. Say in a few words what you checked. If neither this chat nor the records answer the question, say you have no record of it rather than guessing. You can read more with context_search / context_open / context_around.]"
         };
         Some(format!("{rules}\n{}\n[End of retrieved memory]", pack.text))
     }

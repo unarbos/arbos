@@ -25,9 +25,10 @@ use arbos_core::ids::{now_ms, ulid};
 use arbos_core::wire::{self, Frame, FrameType};
 
 use crate::auth::Principal;
+use crate::boxes;
 use crate::matrix::backfill::load_doc;
 use crate::notify::{self, ChatRef};
-use crate::people::{PEOPLE_ACL_PREFIX, PEOPLE_PROJECT};
+use crate::people::{self, PEOPLE_ACL_PREFIX, PEOPLE_PROJECT};
 use crate::signin::api_error;
 use crate::state::{AppState, RoomBroadcast};
 
@@ -433,6 +434,13 @@ pub async fn send_message(
     if !state.allows(&principal, &format!("{PEOPLE_ACL_PREFIX}{id}")) {
         return api_error(StatusCode::FORBIDDEN, "not_member", "not in this chat");
     }
+    // The same gates as a room push (#2012): a blocked or silenced person writes nothing.
+    if let Err(r) = people::sender_gate(&state, &principal, &id) {
+        return api_error(StatusCode::FORBIDDEN, r.code(), r.message());
+    }
+    let Ok(cm) = people::load_chat(&state, &id) else {
+        return api_error(StatusCode::NOT_FOUND, "not_found", "no such chat");
+    };
     let b = body.map(|b| b.0).unwrap_or_default();
     let text = b.text.trim().to_owned();
     if text.is_empty() {
@@ -445,16 +453,24 @@ pub async fn send_message(
             "text is over 20000 characters",
         );
     }
-    let me = state.db.user(user_id).ok().flatten();
+    // The card's handle is never empty: a legacy device-token account gets its device-name
+    // slug, so the row is attributable even without a GitHub login (#1580).
+    let me = state.db.user_card(user_id).ok().flatten();
+    let mentions = people::resolve_mentions(&state, &cm, &text);
     let opts = UserMessageOpts {
         reply_to: b.reply_to.filter(|r| !r.trim().is_empty()),
+        mentions: mentions.clone(),
         sender: Some(format!("user:{user_id}")),
-        sender_handle: me.as_ref().and_then(|u| u.login.clone()),
+        sender_handle: me
+            .as_ref()
+            .map(|c| c.handle.clone())
+            .filter(|h| !h.is_empty())
+            .or_else(|| Some(user_id.clone())),
         sender_name: me
             .as_ref()
-            .and_then(|u| u.name.clone())
+            .and_then(|c| c.name.clone())
             .filter(|n| !n.is_empty()),
-        sender_avatar: me.as_ref().and_then(|u| u.avatar_url.clone()),
+        sender_avatar: me.as_ref().and_then(|c| c.avatar_url.clone()),
         ..Default::default()
     };
     let room_name = wire::room_name(PEOPLE_PROJECT, &id);
@@ -464,7 +480,15 @@ pub async fn send_message(
     };
     let base = doc.oplog_vv();
     let message_id = ulid();
-    if let Err(e) = doc.append_user_message(&message_id, &text, device_id, &opts) {
+    // The row and its `send` command in one transaction, as the apps write them (crdt-sync
+    // §6.2). A message without the command is history to the agent, never work: until #2120
+    // this route wrote the row alone and no agent ever answered a message posted through it.
+    let written = doc.transact(|d| {
+        d.append_user_message(&message_id, &text, device_id, &opts)?;
+        d.push_command("send", json!({ "messageId": message_id }), device_id);
+        Ok::<(), arbos_core::doc::CoreError>(())
+    });
+    if let Err(e) = written {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "doc", e.to_string());
     }
     let bytes = doc.export_updates_since(&base);
@@ -488,10 +512,16 @@ pub async fn send_message(
         bytes: frame,
         seq,
     });
+    let chat = ChatRef::people(&id);
+    // What the socket path does after a person's row (rooms.rs): the sender's own cursor moves
+    // past it, the Matrix safety net is armed, and every agent's box is woken — or, with no
+    // socket on this room, told to open it (#2120: this route never woke a box).
+    let _ = state.db.advance_user_cursor(user_id, &id, seq);
     state.matrix.touch_rows(&state, &id, None);
+    boxes::after_person_row(&state, &room, &chat, &people::serving_agents(&state, &cm)).await;
     let sender = notify::Sender::user(&state, user_id);
     let event_id =
-        notify::announce(&state, &ChatRef::people(&id), &sender, &message_id, &text).await;
+        notify::announce_with(&state, &chat, &sender, &message_id, &text, None, &mentions).await;
     (
         StatusCode::CREATED,
         Json(json!({ "message_id": message_id, "seq": seq, "recorded": event_id.is_some() })),
@@ -540,10 +570,12 @@ mod tests {
 
     use arbos_core::doc::UserAttachment;
 
+    use arbos_core::wire::BoxState;
+
     use super::*;
     use crate::matrix::backfill::{self, Scope};
     use crate::matrix::{Config, Job, Matrix, Mode};
-    use crate::people::tests_support::{dm, person};
+    use crate::people::tests_support::{dm, group, person, project_of};
     use crate::state::test_support::test_state;
     use crate::state::AuthMode;
 
@@ -594,6 +626,8 @@ mod tests {
                     mime: "application/pdf".into(),
                     kind: Some("file".into()),
                     blob_ref: Some("att-1".into()),
+                    url: None,
+                    source: None,
                 });
             }
             doc.append_user_message(&id, &format!("message {i}"), "dev1", &opts)
@@ -1119,6 +1153,114 @@ mod tests {
         );
     }
 
+    /// #2120: the first message of a brand-new people chat with an agent reaches the agent's
+    /// box inside the request — announced, mirror job queued, the box woken and told to open
+    /// the room — and the Matrix resync that follows is a safety net that finds nothing to do.
+    #[tokio::test]
+    async fn first_message_of_a_new_chat_reaches_the_agent_box_in_the_request() {
+        let mut state = test_state(AuthMode::Github);
+        dual(&mut state);
+        let (alice, alice_dev) = person(&state, 3031);
+        let (bob, _) = person(&state, 3032);
+        let project = project_of(&state, &alice, "Hezbola");
+        // What `chats_create_group` leaves behind: the group, its humans, the agent member.
+        let chat = group(&state, &[&alice, &bob]);
+        state
+            .db
+            .add_member(
+                &chat,
+                &format!("agent:{project}"),
+                "agent",
+                &alice,
+                &json!({ "reply_policy": "mention" }),
+            )
+            .unwrap();
+        let _ = state.db.take_pushes(&project).unwrap();
+        assert_eq!(state.box_state(&alice).await.0, BoxState::Asleep);
+
+        let send = |text: &str| {
+            let state = state.clone();
+            let chat = chat.clone();
+            let dev = alice_dev.clone();
+            let body = SendBody {
+                text: text.to_owned(),
+                reply_to: None,
+            };
+            async move {
+                json_of(send_message(State(state), dev, Path(chat), Some(Json(body))).await).await
+            }
+        };
+        let (status, body) = send("@hezbola are you there?").await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let message_id = body["message_id"].as_str().unwrap().to_owned();
+        let seq = body["seq"].as_i64().unwrap();
+
+        // The row is work for the agent: a pending `send` command names it (what agentd acts
+        // on; the route used to write the row alone) and the @mention resolved to the agent.
+        let doc = load_doc(&state, &chat, None).unwrap().unwrap();
+        let pending = doc.pending_commands();
+        assert_eq!(pending.len(), 1, "{pending:?}");
+        assert_eq!(pending[0].kind, "send");
+        assert_eq!(pending[0].payload["messageId"], json!(message_id));
+        let row = doc.message(&message_id).expect("row");
+        assert_eq!(
+            row.rest["mentions"],
+            json!([format!("agent:{project}")]),
+            "@hezbola resolves to the agent member"
+        );
+        // Announced (what drives unread, pushes and the mirror) and the mirror job is queued.
+        assert!(state.db.chat_event_exists(&chat, &message_id).unwrap());
+        assert!(state
+            .db
+            .matrix_pending_message_ids(&chat)
+            .unwrap()
+            .contains(&message_id));
+        // The sender's own row is read by them.
+        assert_eq!(state.db.user_cursor(&alice, &chat).unwrap(), seq);
+        // The agent's box: woken, and told to open the room it has no socket on.
+        assert_eq!(state.box_state(&alice).await.0, BoxState::Waking);
+        let pushes = state.db.take_pushes(&project).unwrap();
+        let opens: Vec<&Value> = pushes
+            .iter()
+            .filter(|(_, k, _)| k == boxes::PEOPLE_CHAT_OPEN_PUSH)
+            .map(|(_, _, p)| p)
+            .collect();
+        assert_eq!(opens.len(), 1, "{pushes:?}");
+        assert_eq!(opens[0]["chat_id"], json!(chat));
+        assert_eq!(opens[0]["reason"], "rows_pending");
+
+        // The resync (due 4 s later) is a safety net: the announced row's job is pending, so
+        // it queues nothing and counts nothing as unannounced.
+        let rep = backfill::resync_chat(&state, &chat, None);
+        assert_eq!(
+            rep,
+            backfill::Resync {
+                queued: 0,
+                pending_skipped: 1,
+                ..Default::default()
+            }
+        );
+        assert_eq!(state.matrix.counters.json()["unannounced"], 0);
+        assert_eq!(state.matrix.counters.json()["pending_skipped"], 1);
+
+        // Two more rows before the box opens the room: one open push, not one per row.
+        send("still there?").await;
+        send("hello?").await;
+        let pushes = state.db.take_pushes(&project).unwrap();
+        assert_eq!(
+            pushes
+                .iter()
+                .filter(|(_, k, _)| k == boxes::PEOPLE_CHAT_OPEN_PUSH)
+                .count(),
+            1
+        );
+        // With the box on the room, rows reach it live over the socket: no push.
+        let room = state.room(&wire::room_name(PEOPLE_PROJECT, &chat)).await;
+        room.box_joined(&alice);
+        send("there you are").await;
+        assert!(state.db.take_pushes(&project).unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn posted_message_is_a_normal_row_and_exports_back() {
         let mut state = test_state(AuthMode::Github);
@@ -1174,6 +1316,8 @@ mod tests {
         assert_eq!(row["role"], "user");
         assert_eq!(row["status"], "done");
         assert_eq!(row["sender"], format!("user:{bob}"));
+        // The row itself names its author (§3): a box reading the doc must not need the DB.
+        assert_eq!(row["senderHandle"], "user3013");
         let Principal::Device { id: bob_device, .. } = &bob_dev else {
             panic!("device")
         };

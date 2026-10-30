@@ -65,8 +65,11 @@ jobs:
           build-args: |
             AGENTD_SHA=${{ github.sha }}
             IMAGE_VERSION=${{ steps.v.outputs.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Own cache scope: release.yml builds the same Dockerfile on main with the default scope, and a
+          # tag run reads the default branch's cache — stale arbos-pi-ext seed layers were served from it
+          # on images 0.1.121–0.1.123 (2026-10-25, #1700/#1702).
+          cache-from: type=gha,scope=image
+          cache-to: type=gha,mode=max,scope=image
 
       - name: Local smoke (sandbox-image.md §6 step 4)
         run: |

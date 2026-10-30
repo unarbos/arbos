@@ -1,19 +1,20 @@
-//! Leaf avatars (D92): the default picture of an agent that has no uploaded
-//! photo. A cream leaf on a coloured disc, one of nine shapes × ten autumn
-//! colours. People keep their D79 initials.
+//! Leaf avatars (D92, amended 2026-10-23 — v2): the default picture of an agent that has no
+//! uploaded photo. A **soft pastel disc with a darker, same-hue flat leaf centred on it**, one
+//! of sixteen shapes × ten hues. People keep their D79 initials.
 //!
-//! * The shapes are Jacob's single-path SVGs in `assets/avatars/leaves/svg/`
-//!   (`manifest.json` beside them is the source of truth for ids, names,
-//!   stem pivots and the palette; `lottie/` holds the idle loop and the
-//!   hover gust per leaf). Swapping the art is a file replace: the files are
-//!   compiled in here, so the Mac, the relay and — through arbos-ffi — the
-//!   iPhone draw the same outline.
-//! * The default pick is deterministic from the agent id, as the manifest
-//!   README asks: `h = fnv1a64(id)`, `leaf = h mod 9`, `colour = (h div 9)
-//!   mod 10`. A byte sum (the D79 rule) clusters neighbouring ids; the hash
-//!   spreads them over the 90 cells.
-//! * The owner may pin a leaf and a colour (`avatar_leaf`, `avatar_leaf_color`
-//!   on the relay, `null` = automatic).
+//! * The shapes are single-path SVGs in `assets/avatars/leaves/svg/` (`manifest.json` beside
+//!   them is the source of truth for ids, names, stem pivots, the palette and the rule;
+//!   `lottie/` holds the idle loop and the hover gust per leaf, regenerated with
+//!   `tools/make_v2.py`). Swapping the art is a file replace: the files are compiled in here,
+//!   so the Mac, the relay and — through arbos-ffi — the iPhone draw the same outline.
+//! * Every glyph spans 71 of the 100-unit box (v1 + 15 %) and is centred on its opaque bbox,
+//!   so clients draw it at `LEAF_SCALE` of the disc with no offset.
+//! * The default pick is deterministic from the agent id: `h = fnv1a64(id)`, `leaf = h mod 16`,
+//!   `colour = that leaf's own hue` (the disc is a light match of the leaf, by rule). Existing
+//!   stored picks keep their indices: old leaf 0–8 show the v2 leaf at the same index, old
+//!   colour 0–9 the v2 hue at the same index, so every agent changes consistently.
+//! * The owner may pin a leaf and a hue (`avatar_leaf`, `avatar_leaf_color` on the relay,
+//!   `null` = automatic).
 //! * [`segments`] gives the outline as absolute move / line / cubic commands,
 //!   for clients that draw the path natively instead of rendering the SVG.
 
@@ -22,17 +23,47 @@ use std::sync::OnceLock;
 use super::{Accent, Rgb};
 
 /// Number of leaf shapes.
-pub const LEAF_COUNT: u8 = 9;
-/// Number of disc colours.
+pub const LEAF_COUNT: u8 = 16;
+/// Number of hues (disc + ink pairs).
 pub const COLOR_COUNT: u8 = 10;
-/// The leaf's ink on every disc colour.
-pub const LEAF_INK: Rgb = Rgb(0xF6, 0xF0, 0xE8);
-/// The SVG box as a share of the disc diameter. The path inside already spans
-/// about 62 of the box's 100 units, so 1.0 puts the cream leaf at ~62% of the
-/// disc (0.62 was applying that fraction twice and left the leaf too small).
+/// "No leaf" (Jacob, 2026-10-25): an agent, group or server created from the Create sheet
+/// without an uploaded or generated picture is stored with `avatar_leaf` **and**
+/// `avatar_leaf_color` = `NEUTRAL` and draws as **the name's first letter on a neutral grey
+/// disc** — never an automatic leaf. Distinct from `null` (= the id's automatic leaf), so
+/// every existing agent keeps the leaf it has. The relay accepts the value; [`pick_for`]
+/// ignores it, so an older client draws the automatic leaf instead of failing.
+pub const NEUTRAL: u8 = 255;
+/// Neutral disc fill and the letter's ink: dark appearance `(disc, ink)`, light appearance
+/// `(disc, ink)`. The picker's own "unselected" grey, so the sheets and the lists agree.
+pub const NEUTRAL_DARK: (Rgb, Rgb) = (Rgb(0x3A, 0x3A, 0x3A), Rgb(0xE5, 0xE5, 0xE5));
+pub const NEUTRAL_LIGHT: (Rgb, Rgb) = (Rgb(0xE6, 0xE6, 0xE6), Rgb(0x4A, 0x4A, 0x4A));
+
+/// Is this stored pick the neutral one (no leaf: initial on a grey disc)?
+pub fn is_neutral(leaf: Option<u8>) -> bool {
+    leaf == Some(NEUTRAL)
+}
+
+/// The one letter a neutral disc carries: the first letter or digit of the name, upper-cased;
+/// `?` for an empty name. One letter, not D79's two — Jacob's "the name's initial".
+pub fn initial(name: &str) -> String {
+    name.chars()
+        .find(|c| c.is_alphanumeric())
+        .map(|c| c.to_uppercase().collect::<String>())
+        .unwrap_or_else(|| "?".to_owned())
+}
+
+/// The bubble-bar accent of a neutral agent: a mid grey in both appearances.
+pub fn neutral_accent() -> Accent {
+    Accent {
+        dark: Rgb(0x8A, 0x8A, 0x8A),
+        light: Rgb(0x6E, 0x6E, 0x6E),
+    }
+}
+/// The SVG box as a share of the disc diameter: the glyph already spans 71 of the box's 100
+/// units, centred, so the box is drawn edge to edge.
 pub const LEAF_SCALE: f32 = 1.0;
 /// Bump when the index rule changes, so clients can refresh cached defaults.
-pub const LEAF_RULE_VERSION: u32 = 1;
+pub const LEAF_RULE_VERSION: u32 = 2;
 
 /// One leaf shape: its asset id (`leaf-NN-name`), picker label, SVG source,
 /// stem pivot (the point the leaf sways about, in the 100 × 100 box) and the
@@ -43,14 +74,14 @@ pub struct Leaf {
     pub slug: &'static str,
     pub name: &'static str,
     pub svg: &'static str,
-    /// Jacob's Lottie files (bodymovin 5.7, 100 × 100, 60 fps): the seamless idle loop and the
+    /// Lottie files (bodymovin 5.7, 100 × 100, 60 fps; `tools/make_v2.py`): the seamless idle loop and the
     /// one-shot 1 s gust. One shape layer `leaf` → group → fill `leaf`; recolour via keypath
     /// `**.leaf.Color`; transparent background (the app draws the disc).
     pub idle_lottie: &'static str,
     pub gust_lottie: &'static str,
     pub pivot: (f32, f32),
     pub idle_secs: f32,
-    /// The leaf's own default disc colour from the manifest (index into [`COLORS`]).
+    /// The leaf's own hue from the manifest (index into [`COLORS`]); the automatic colour.
     pub default_color: u8,
 }
 
@@ -84,17 +115,24 @@ macro_rules! leaf {
 /// `assets/avatars/leaves/manifest.json`, compiled in so a test can check this table against it.
 pub const MANIFEST_JSON: &str = include_str!("../../../../assets/avatars/leaves/manifest.json");
 
-/// The nine shapes, in the manifest's order (indices 0–8 = ids 1–9).
+/// The sixteen shapes, in the manifest's order (indices 0–15 = ids 1–16).
 pub const LEAVES: [Leaf; LEAF_COUNT as usize] = [
-    leaf!("leaf-01-maple", "Maple", (48.626, 80.443), 150, 9),
-    leaf!("leaf-02-teardrop", "Teardrop", (32.663, 80.985), 160, 3),
-    leaf!("leaf-03-poplar", "Poplar", (47.492, 80.993), 140, 0),
-    leaf!("leaf-04-split", "Split", (39.268, 81.005), 170, 4),
-    leaf!("leaf-05-cloud-tree", "Cloud tree", (49.156, 81.0), 150, 1),
-    leaf!("leaf-06-feather", "Feather", (42.027, 80.963), 144, 6),
-    leaf!("leaf-07-curl", "Curl", (42.141, 80.961), 156, 5),
-    leaf!("leaf-08-sweetgum", "Sweetgum", (49.914, 79.021), 166, 7),
-    leaf!("leaf-09-grass", "Grass", (48.196, 80.974), 136, 2),
+    leaf!("leaf-01-maple", "Maple", (50.000, 85.500), 150, 0),
+    leaf!("leaf-02-veined", "Veined", (50.000, 85.500), 160, 1),
+    leaf!("leaf-03-pair", "Pair", (50.000, 85.500), 140, 2),
+    leaf!("leaf-04-spear", "Spear", (50.000, 85.500), 170, 3),
+    leaf!("leaf-05-sprig", "Sprig", (50.000, 85.500), 150, 4),
+    leaf!("leaf-06-twin", "Twin", (50.000, 85.500), 144, 5),
+    leaf!("leaf-07-oak", "Oak", (50.000, 85.500), 156, 9),
+    leaf!("leaf-08-ginkgo", "Ginkgo", (50.000, 80.545), 166, 6),
+    leaf!("leaf-09-heart", "Heart", (50.000, 85.433), 136, 7),
+    leaf!("leaf-10-fern", "Fern", (50.000, 85.500), 148, 8),
+    leaf!("leaf-11-willow", "Willow", (50.000, 85.500), 154, 2),
+    leaf!("leaf-12-clover", "Clover", (50.000, 85.500), 162, 4),
+    leaf!("leaf-13-aspen", "Aspen", (50.000, 85.500), 142, 6),
+    leaf!("leaf-14-holly", "Holly", (50.000, 85.500), 158, 2),
+    leaf!("leaf-15-palm", "Palm", (50.000, 85.232), 146, 1),
+    leaf!("leaf-16-birch", "Birch", (50.000, 85.500), 164, 7),
 ];
 
 /// The hover gust: one shot, about this long, settling back to the rest pose.
@@ -104,54 +142,67 @@ pub const GUST_DEGREES: f32 = 9.0;
 /// Peak idle sway angle, degrees ("a few degrees about the stem base").
 pub const IDLE_DEGREES: f32 = 3.0;
 
-/// One disc colour of the autumn palette.
+/// One hue: the pastel disc and the darker same-hue ink of the leaf on it.
 #[derive(Clone, Copy, Debug)]
 pub struct LeafColor {
     pub name: &'static str,
+    /// The disc (a light, desaturated match of the leaf).
     pub rgb: Rgb,
+    /// The leaf.
+    pub ink: Rgb,
 }
 
-/// The ten disc colours, in Jacob's order (indices 0–9).
+/// The ten hues, in the manifest's order (indices 0–9).
 pub const COLORS: [LeafColor; COLOR_COUNT as usize] = [
     LeafColor {
-        name: "Mustard",
-        rgb: Rgb(0xBC, 0xA3, 0x68),
-    },
-    LeafColor {
-        name: "Olive",
-        rgb: Rgb(0x8D, 0x96, 0x59),
-    },
-    LeafColor {
-        name: "Moss",
-        rgb: Rgb(0x60, 0x64, 0x40),
-    },
-    LeafColor {
-        name: "Sage",
-        rgb: Rgb(0x60, 0x8F, 0x80),
-    },
-    LeafColor {
-        name: "Pine",
-        rgb: Rgb(0x41, 0x6A, 0x5B),
-    },
-    LeafColor {
-        name: "Dusty blue",
-        rgb: Rgb(0x39, 0x67, 0x88),
-    },
-    LeafColor {
-        name: "Mauve",
-        rgb: Rgb(0xA5, 0x64, 0x89),
-    },
-    LeafColor {
-        name: "Rose",
-        rgb: Rgb(0xB2, 0x4E, 0x61),
-    },
-    LeafColor {
         name: "Coral",
-        rgb: Rgb(0xCC, 0x6B, 0x6D),
+        rgb: Rgb(0xF9, 0xD3, 0xC6),
+        ink: Rgb(0xE0, 0x63, 0x4F),
     },
     LeafColor {
-        name: "Terracotta",
-        rgb: Rgb(0xC1, 0x72, 0x69),
+        name: "Royal blue",
+        rgb: Rgb(0xCF, 0xDF, 0xF8),
+        ink: Rgb(0x2F, 0x5B, 0xC7),
+    },
+    LeafColor {
+        name: "Green",
+        rgb: Rgb(0xD3, 0xEB, 0xD2),
+        ink: Rgb(0x3E, 0x9A, 0x5A),
+    },
+    LeafColor {
+        name: "Violet",
+        rgb: Rgb(0xE3, 0xD9, 0xF6),
+        ink: Rgb(0x7B, 0x57, 0xC9),
+    },
+    LeafColor {
+        name: "Teal",
+        rgb: Rgb(0xCD, 0xEE, 0xE6),
+        ink: Rgb(0x2A, 0x9C, 0x8C),
+    },
+    LeafColor {
+        name: "Pink",
+        rgb: Rgb(0xFA, 0xD5, 0xE3),
+        ink: Rgb(0xD9, 0x55, 0x8A),
+    },
+    LeafColor {
+        name: "Yellow",
+        rgb: Rgb(0xFB, 0xEF, 0xC2),
+        ink: Rgb(0xD9, 0xA4, 0x1E),
+    },
+    LeafColor {
+        name: "Orange",
+        rgb: Rgb(0xFB, 0xDD, 0xC0),
+        ink: Rgb(0xE4, 0x80, 0x2B),
+    },
+    LeafColor {
+        name: "Lime",
+        rgb: Rgb(0xE4, 0xF2, 0xC3),
+        ink: Rgb(0x88, 0xB4, 0x25),
+    },
+    LeafColor {
+        name: "Deep purple",
+        rgb: Rgb(0xDD, 0xD2, 0xEE),
+        ink: Rgb(0x5E, 0x3E, 0x9E),
     },
 ];
 
@@ -167,8 +218,14 @@ impl LeafPick {
         &LEAVES[(self.leaf % LEAF_COUNT) as usize]
     }
 
+    /// The pastel disc.
     pub fn disc(self) -> Rgb {
         COLORS[(self.color % COLOR_COUNT) as usize].rgb
+    }
+
+    /// The leaf's ink on that disc (darker, same hue).
+    pub fn ink(self) -> Rgb {
+        COLORS[(self.color % COLOR_COUNT) as usize].ink
     }
 }
 
@@ -179,13 +236,14 @@ pub fn fnv1a64(s: &str) -> u64 {
     })
 }
 
-/// The automatic pick for an agent id (the manifest README's rule):
-/// `leaf = h mod 9`, `colour = (h div 9) mod 10`.
+/// The automatic pick for an agent id: `leaf = h mod 16`, colour = that leaf's own hue (the
+/// disc is a light match of the leaf, by rule).
 pub fn default_pick(seed: &str) -> LeafPick {
     let h = fnv1a64(seed);
+    let leaf = (h % u64::from(LEAF_COUNT)) as u8;
     LeafPick {
-        leaf: (h % u64::from(LEAF_COUNT)) as u8,
-        color: ((h / u64::from(LEAF_COUNT)) % u64::from(COLOR_COUNT)) as u8,
+        leaf,
+        color: LEAVES[leaf as usize].default_color,
     }
 }
 
@@ -217,9 +275,10 @@ pub fn pick_for(seed: &str, leaf: Option<u8>, color: Option<u8>) -> LeafPick {
     }
 }
 
-/// The bubble-bar accent of a leaf agent: its disc colour, both appearances.
+/// The bubble-bar accent of a leaf agent: its leaf ink (the disc is too pale for a bar), both
+/// appearances.
 pub fn accent(pick: LeafPick) -> Accent {
-    let rgb = pick.disc();
+    let rgb = pick.ink();
     Accent {
         dark: rgb,
         light: rgb,
@@ -688,13 +747,41 @@ mod tests {
             assert!(p.leaf < LEAF_COUNT && p.color < COLOR_COUNT);
             cells.insert((p.leaf, p.color));
         }
-        assert_eq!(cells.len(), 90, "2000 ids should cover the whole grid");
+        assert_eq!(
+            cells.len(),
+            16,
+            "2000 ids should reach every leaf, each on its own hue"
+        );
         // Reference values other clients can check against.
         assert_eq!(fnv1a64(""), 0xcbf2_9ce4_8422_2325);
         assert_eq!(fnv1a64("a"), 0xaf63_dc4c_8601_ec8c);
         let h = fnv1a64("01M50W7HPM0KCFVMQ32HXNTN5S");
         let p = default_pick("01M50W7HPM0KCFVMQ32HXNTN5S");
-        assert_eq!((p.leaf, p.color), ((h % 9) as u8, ((h / 9) % 10) as u8));
+        let leaf = (h % 16) as u8;
+        assert_eq!(
+            (p.leaf, p.color),
+            (leaf, LEAVES[leaf as usize].default_color)
+        );
+    }
+
+    /// Jacob, 2026-10-25: the Create sheets' fallback is the name's initial on a neutral disc,
+    /// stored as `NEUTRAL` so it is told apart from `null` (the automatic leaf every existing
+    /// agent keeps). An older client's `pick_for` must not choke on it.
+    #[test]
+    fn neutral_is_its_own_value_and_old_clients_fall_back_to_the_automatic_leaf() {
+        assert!(is_neutral(Some(NEUTRAL)));
+        assert!(!is_neutral(None));
+        assert!(!is_neutral(Some(0)));
+        assert_eq!(
+            pick_for("01M5X", Some(NEUTRAL), Some(NEUTRAL)),
+            default_pick("01M5X")
+        );
+        assert_eq!(initial("Field notes"), "F");
+        assert_eq!(initial("  @ops-bot"), "O");
+        assert_eq!(initial("élan"), "É");
+        assert_eq!(initial("42 things"), "4");
+        assert_eq!(initial(""), "?");
+        assert_eq!(initial("—"), "?");
     }
 
     #[test]
@@ -721,21 +808,44 @@ mod tests {
                 l.idle_secs
             );
             assert_eq!(
-                j["default_color"]["hex"].as_str().unwrap(),
+                j["default_color"]["index"].as_u64().unwrap(),
+                u64::from(l.default_color)
+            );
+            assert_eq!(
+                j["default_color"]["disc"].as_str().unwrap(),
                 COLORS[l.default_color as usize].rgb.hex()
+            );
+            // The rule: the glyph spans 71 units and is centred on its bbox.
+            let b = j["bbox"].as_array().unwrap();
+            let (x0, y0, x1, y1) = (
+                b[0].as_f64().unwrap(),
+                b[1].as_f64().unwrap(),
+                b[2].as_f64().unwrap(),
+                b[3].as_f64().unwrap(),
+            );
+            assert!(
+                ((x0 + x1) / 2.0 - 50.0).abs() < 0.05,
+                "{} centred x",
+                l.slug
+            );
+            assert!(
+                ((y0 + y1) / 2.0 - 50.0).abs() < 0.05,
+                "{} centred y",
+                l.slug
+            );
+            assert!(
+                ((x1 - x0).max(y1 - y0) - 71.0).abs() < 0.05,
+                "{} spans 71",
+                l.slug
             );
         }
         let palette = m["palette"].as_array().unwrap();
         assert_eq!(palette.len(), COLOR_COUNT as usize);
         for (c, j) in COLORS.iter().zip(palette) {
-            assert_eq!(j["hex"].as_str().unwrap(), c.rgb.hex());
+            assert_eq!(j["disc"].as_str().unwrap(), c.rgb.hex());
+            assert_eq!(j["ink"].as_str().unwrap(), c.ink.hex());
             assert_eq!(j["name"].as_str().unwrap(), c.name);
         }
-        assert_eq!(m["leaf_color"].as_str().unwrap(), LEAF_INK.hex());
-        assert_eq!(
-            m["avatar"]["leaf_fraction_of_circle"].as_f64().unwrap() as f32,
-            LEAF_SCALE
-        );
     }
 
     #[test]
@@ -789,9 +899,10 @@ mod tests {
             pick_for("seed", Some(3), Some(7)),
             LeafPick { leaf: 3, color: 7 }
         );
-        assert_eq!(pick_for("seed", Some(9), Some(10)), auto);
-        assert_eq!(accent(LeafPick { leaf: 0, color: 0 }).dark.hex(), "#BCA368");
-        assert_eq!(COLORS[9].rgb.hex(), "#C17269");
+        assert_eq!(pick_for("seed", Some(16), Some(10)), auto);
+        // The accent is the ink, not the pale disc.
+        assert_eq!(accent(LeafPick { leaf: 0, color: 0 }).dark.hex(), "#E0634F");
+        assert_eq!(COLORS[0].rgb.hex(), "#F9D3C6");
     }
 
     #[test]

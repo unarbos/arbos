@@ -35,6 +35,7 @@ async fn healthz(State(b): State<B>) -> Response {
             "ok": ok,
             "user": w.cfg.run_as.as_ref().map(|r| r.user.clone()),
             "pi": w.agent.pi_ready.load(std::sync::atomic::Ordering::SeqCst),
+            "pi_parked": w.agent.pi_parked.load(std::sync::atomic::Ordering::SeqCst),
             "extension": w.agent.ext_loaded.load(std::sync::atomic::Ordering::SeqCst),
             "mcp_port": w.cfg.mcp_port,
             "started_at": w.started_at,
@@ -232,6 +233,31 @@ async fn workspace_inspect(
     Json(crate::inspect::page(&w, &query).await).into_response()
 }
 
+/// `GET /w/{project}/jobs/{job_id}?after=<seq>` (same bearer): the rollout view's document for
+/// one job — brief, entries (prompt | text | tool | steer | result), state, step (`jobs_view.rs`).
+async fn workspace_job(
+    State(b): State<B>,
+    Path((project, job_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if !box_admin_authed(&b, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(w) = b.get(&project).await else {
+        return (StatusCode::NOT_FOUND, "no such workspace").into_response();
+    };
+    let after = q
+        .get("after")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(0);
+    let name = w.agent.identity.name();
+    match crate::jobs_view::document(&w.store, &project, &name, &job_id, after) {
+        Some(doc) => Json(doc).into_response(),
+        None => (StatusCode::NOT_FOUND, "no such job").into_response(),
+    }
+}
+
 /// `GET /box/state` (same bearer): image, build, uptime, load, memory, disk, workspaces.
 async fn box_state(State(b): State<B>, headers: HeaderMap) -> Response {
     if !box_admin_authed(&b, &headers) {
@@ -259,6 +285,7 @@ pub fn box_router(sup: Arc<Supervisor>) -> Router {
         )
         .route("/w/{project}/metrics", get(metrics))
         .route("/w/{project}/inspect", get(workspace_inspect))
+        .route("/w/{project}/jobs/{job_id}", get(workspace_job))
         .route("/box/state", get(box_state))
         .route("/w/{project}/history/{chat_id}", get(history))
         .route("/w/{project}/t3/search", get(t3_search))

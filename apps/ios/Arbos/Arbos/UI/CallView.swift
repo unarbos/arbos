@@ -15,8 +15,9 @@ struct CallPersonAvatar: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
-        if person.isAgent, let p = model.project(person.id) {
-            AgentAvatar(project: p, theme: theme, size: size, still: true)
+        if person.isAgent {
+            // The same identity the chat draws (#1592): a shared agent on a call is not a person.
+            AgentAvatar(project: model.agent(id: person.id, handle: person.handle, name: person.name), theme: theme, size: size, still: true)
         } else {
             PersonAvatar(url: person.avatarUrl, handle: person.handle, size: size, name: person.name, id: person.id, colorIndex: person.avatarColorIndex)
         }
@@ -29,6 +30,8 @@ struct CallScreen: View {
     @Environment(\.theme) private var theme
     /// Who we expected to talk to (shown before they join). Groups pass every other member + agents.
     var expected: [CallPerson] = []
+    /// Share-screen confirmation: pick how to start (system picker chooses the content).
+    @State private var showShareOptions = false
 
     /// Legacy `kind` still arrives from the API; the UI no longer treats voice and
     /// video as separate call types — every call starts audio-only and the camera
@@ -54,6 +57,8 @@ struct CallScreen: View {
     }
     private var useGroupLayout: Bool { calls.tiles.count + waitingExpected.count >= 2 || (isGroupCall && !waitingExpected.isEmpty && calls.tiles.count <= 1) }
 
+    @State private var errorDetailsOpen = false
+
     var body: some View {
         ZStack {
             theme.bg.ignoresSafeArea()
@@ -66,8 +71,8 @@ struct CallScreen: View {
                     }
                     HStack {
                         Button { collapse() } label: {
-                            GlassCircle(size: 40) {
-                                Image(systemName: "chevron.down").font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.text)
+                            GlassCircle {
+                                Image(systemName: "chevron.down").font(.system(size: Controls.glyph, weight: .semibold)).foregroundStyle(theme.text)
                             }
                         }
                         .buttonStyle(.plain)
@@ -91,11 +96,13 @@ struct CallScreen: View {
                 controls.padding(.bottom, 40)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // The call's note (Jacob 2026-10-26): under the header, never over the controls.
             if let err = calls.error {
                 VStack {
+                    ErrorNote(id: "call-error", error: err, detailsOpen: $errorDetailsOpen)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 64)
                     Spacer()
-                    Text(err).font(theme.font(Theme.tiny)).foregroundStyle(theme.danger)
-                        .multilineTextAlignment(.center).padding(.horizontal, 32).padding(.bottom, 150)
                 }
             }
         }
@@ -139,9 +146,10 @@ struct CallScreen: View {
                 if let line = ringingStatus { return line }
                 return "Ringing…"
             }
+            if calls.screenShareOn { return "Sharing screen" }
             return primary?.micOn == false ? "Muted" : "Connected"
         case .ringing: return "Incoming…"
-        case .idle: return calls.error ?? "Call ended"
+        case .idle: return calls.errorText ?? "Call ended"
         }
     }
 
@@ -173,7 +181,7 @@ struct CallScreen: View {
             ZStack(alignment: .topTrailing) {
                 RoundedRectangle(cornerRadius: 28, style: .continuous)
                     .fill(theme.card)
-                    .overlay(RoundedRectangle(cornerRadius: 28, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                    .overlay(RoundedRectangle(cornerRadius: 28, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1)) // control-size: exception callControls
                     .overlay {
                         if let track = primary?.videoTrack, primary?.cameraOn == true {
                             SwiftUIVideoView(track, layoutMode: .fill)
@@ -184,7 +192,7 @@ struct CallScreen: View {
                                     CallPersonAvatar(person: p, size: 108)
                                         .overlay(speakingRing(primary?.isSpeaking == true, size: 108))
                                 } else {
-                                    GlassCircle(size: 108) { Image(systemName: "person.fill").font(.system(size: 40)).foregroundStyle(theme.muted) }
+                                    GlassCircle(size: 108) { Image(systemName: "person.fill").font(.system(size: 40)).foregroundStyle(theme.muted) } // control-size: exception callControls
                                 }
                                 Image(systemName: primary?.cameraOn == true ? "video.fill" : "waveform")
                                     .font(theme.font(22, weight: .semibold))
@@ -345,43 +353,63 @@ struct CallScreen: View {
     }
 
     private var controls: some View {
-        HStack(spacing: 24) {
-            control(
-                icon: (calls.muted || listenOnly) ? "mic.slash.fill" : "mic.fill",
-                label: listenOnly ? "Listen only" : (calls.muted ? "Unmute" : "Mute"),
-                on: calls.muted || listenOnly
-            ) {
-                guard !listenOnly else { return }
-                Task { await calls.toggleMute() }
-            }
-            control(icon: calls.cameraOn ? "video.fill" : "video.slash.fill", label: calls.cameraOn ? "Camera off" : "Camera on", on: !calls.cameraOn) {
-                Task { await calls.toggleCamera() }
-            }
-            if calls.cameraOn, let agent = visionAgent {
-                // "Let <agent> see" (#1353): the one switch for the agent's vision_enabled,
-                // beside the camera while it is on (the Mac's call screen has the same).
-                VStack(spacing: 8) {
-                    Toggle("", isOn: Binding(get: { agent.visionEnabled }, set: { model.setVision(agent.id, enabled: $0) }))
-                        .labelsHidden()
-                        .tint(theme.online)
-                        .frame(height: 64)
-                    Text("Let \(agent.name) see").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(1)
+        // Share adds a fifth control; allow a short horizontal scroll on narrow phones
+        // so Mute / Camera / Share / Flip|Speaker / Hang up stay tappable.
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 18) {
+                control(
+                    icon: (calls.muted || listenOnly) ? "mic.slash.fill" : "mic.fill",
+                    label: listenOnly ? "Listen only" : (calls.muted ? "Unmute" : "Mute"),
+                    on: calls.muted || listenOnly
+                ) {
+                    guard !listenOnly else { return }
+                    Task { await calls.toggleMute() }
                 }
-                .accessibilityLabel("Let \(agent.name) see your camera")
-            } else if calls.cameraOn {
-                control(icon: "arrow.triangle.2.circlepath.camera", label: "Flip", on: false) { Task { await calls.flipCamera() } }
-            } else {
-                control(icon: calls.speakerOn ? "speaker.wave.3.fill" : "speaker.fill", label: "Speaker", on: calls.speakerOn) { calls.toggleSpeaker() }
-            }
-            Button { Task { await calls.hangUp() } } label: {
-                VStack(spacing: 8) {
-                    Circle().fill(theme.danger).frame(width: 64, height: 64)
-                        .overlay(Image(systemName: "phone.down.fill").font(.system(size: 24, weight: .semibold)).foregroundStyle(.white))
-                    Text("Hang up").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                control(icon: calls.cameraOn ? "video.fill" : "video.slash.fill", label: calls.cameraOn ? "Camera off" : "Camera on", on: !calls.cameraOn) {
+                    Task { await calls.toggleCamera() }
                 }
+                control(
+                    icon: calls.screenShareOn ? "rectangle.on.rectangle.slash" : "rectangle.on.rectangle",
+                    label: calls.screenShareOn ? "Stop share" : "Share",
+                    on: calls.screenShareOn
+                ) {
+                    if calls.screenShareOn {
+                        Task { await calls.toggleScreenShare() }
+                    } else {
+                        showShareOptions = true
+                    }
+                }
+                if calls.cameraOn, let agent = visionAgent {
+                    // "Let <agent> see" (#1353): the one switch for the agent's vision_enabled,
+                    // beside the camera while it is on (the Mac's call screen has the same).
+                    VStack(spacing: 8) {
+                        Toggle("", isOn: Binding(get: { agent.visionEnabled }, set: { model.setVision(agent.id, enabled: $0) }))
+                            .labelsHidden()
+                            .tint(theme.online)
+                            .frame(height: 64)
+                        Text("Let \(agent.name) see").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(1)
+                    }
+                    .accessibilityLabel("Let \(agent.name) see your camera")
+                } else if calls.cameraOn {
+                    control(icon: "arrow.triangle.2.circlepath.camera", label: "Flip", on: false) { Task { await calls.flipCamera() } }
+                } else {
+                    control(icon: calls.speakerOn ? "speaker.wave.3.fill" : "speaker.fill", label: "Speaker", on: calls.speakerOn) { calls.toggleSpeaker() }
+                }
+                Button { Task { await calls.hangUp() } } label: {
+                    VStack(spacing: 8) {
+                        Circle().fill(theme.danger).frame(width: 64, height: 64)
+                            .overlay(Image(systemName: "phone.down.fill").font(.system(size: 24, weight: .semibold)).foregroundStyle(.white))
+                        Text("Hang up").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Hang up")
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Hang up")
+            .padding(.horizontal, 12)
+        }
+        .confirm(ConfirmSpec(title: "Share screen", message: "Pick a screen or app to share with everyone on the call.",
+                             action: "Choose what to share…", destructive: false), isPresented: $showShareOptions) {
+            Task { await calls.toggleScreenShare() }
         }
     }
 
@@ -389,7 +417,7 @@ struct CallScreen: View {
         Button(action: action) {
             VStack(spacing: 8) {
                 ZStack {
-                    if on { Circle().fill(theme.text).frame(width: 64, height: 64) } else { GlassCircle(size: 64) { EmptyView() } }
+                    if on { Circle().fill(theme.text).frame(width: 64, height: 64) } else { GlassCircle(size: 64) { EmptyView() } } // control-size: exception callControls
                     Image(systemName: icon).font(.system(size: 22, weight: .medium)).foregroundStyle(on ? theme.bg : theme.text)
                 }
                 Text(label).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
@@ -422,7 +450,7 @@ struct AgentSeesBadge: View {
     var compact: Bool
 
     var body: some View {
-        if calls.agentSeeing, calls.cameraOn {
+        if calls.agentSeeing, (calls.cameraOn || calls.screenShareOn) {
             HStack(spacing: 4) {
                 Image(systemName: "eye.fill").font(.system(size: compact ? 9 : 10, weight: .bold))
                 Text(compact ? "can see" : "\(calls.seeingAgentName ?? "Agent") can see")
@@ -435,7 +463,7 @@ struct AgentSeesBadge: View {
             .background(Capsule().fill(.black.opacity(0.55)))
             .overlay(Capsule().strokeBorder(.white.opacity(0.25), lineWidth: 0.5))
             .transition(.opacity)
-            .accessibilityLabel("\(calls.seeingAgentName ?? "The agent") can see your camera")
+            .accessibilityLabel("\(calls.seeingAgentName ?? "The agent") can see your \(calls.screenShareOn && !calls.cameraOn ? "screen" : "camera")")
         }
     }
 }
@@ -456,7 +484,7 @@ struct IncomingCallView: View {
                     Spacer()
                     if let p = inc.from ?? inc.call.startedBy {
                         CallPersonAvatar(person: p, size: 128)
-                            .overlay(Circle().strokeBorder(theme.fieldBorder, lineWidth: 1).frame(width: 150, height: 150))
+                            .overlay(Circle().strokeBorder(theme.fieldBorder, lineWidth: 1).frame(width: 150, height: 150)) // control-size: exception callControls
                         Text(p.displayName).font(theme.font(28, weight: .semibold)).foregroundStyle(theme.text).padding(.top, 28)
                         Text("@\(p.handle)").font(theme.font(Theme.body)).foregroundStyle(theme.muted).padding(.top, 4)
                     }
@@ -510,7 +538,7 @@ struct CallBar: View {
             }
             .padding(.horizontal, 14).frame(height: 44)
             .background(Capsule().fill(theme.card))
-            .overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1))
+            .overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1)) // control-size: exception callControls
         }
         .buttonStyle(.plain)
     }

@@ -1,0 +1,30 @@
+{
+  "id": "g3-here-collective-ask",
+  "lane": "a",
+  "category": "group",
+  "title": "@here collective ask in a people group: both agents answer once, nobody answers twice",
+  "turns": [
+    {
+      "prompt": "hey agents — each of you, in one line: what is your name and what is 6 × 7?",
+      "group": true,
+      "wait_s": 150,
+      "expect_other_agent": "lane-b",
+      "reply_regex": "42",
+      "rubric": {
+        "criteria": "Both agents (lane-a and lane-b) answered once each, each giving its own name and 42. A bare name prefix counts as stating the name (\"lane-a, 6 × 7 = 42.\" is a full pass); neither answered for the other or twice; no agent asked which one was meant.",
+        "min": 3
+      },
+      "timeout_s": 300
+    }
+  ],
+  "setup_actions": [
+    {
+      "kind": "group_create",
+      "with": [
+        "lane-b"
+      ],
+      "title": "eval here"
+    }
+  ],
+  "regression": "collective address in a project group (the respond judge's `all agents` verdict, responders.rs); run 12: judge read 'lane-a, 6 × 7 = 42.' as no name — rubric wording fixed, re-graded PASS"
+}

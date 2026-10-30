@@ -1,0 +1,31 @@
+{
+  "id": "py-01-quick-fact",
+  "lane": "a",
+  "category": "parity",
+  "categories": [
+    "parity",
+    "quick-fact"
+  ],
+  "title": "Quick arithmetic fact",
+  "parity": true,
+  "timeout_s": 90,
+  "settle_s": 12,
+  "turns": [
+    {
+      "prompt": "What is 17 × 23?",
+      "shape": {
+        "messages_min": 1,
+        "messages_max": 1,
+        "ack_first": false,
+        "table": false,
+        "links_min": 0,
+        "offer": false,
+        "first_bubble_max_s": 5,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": false
+      },
+      "reply_regex": "391"
+    }
+  ]
+}

@@ -1,0 +1,212 @@
+{
+ "bands": {
+  "speed": 0.062,
+  "ack_first": 0.111,
+  "cadence": 0.139,
+  "formatting": 0.25,
+  "offer": 0.333,
+  "threading": 0.125,
+  "busy_reply": 0.125,
+  "status_line": 0.145,
+  "worker_hidden": 0.138,
+  "stop": 0.5,
+  "when_to_delegate": 0.096,
+  "no_handle": 0.056,
+  "judge": 0.64
+ },
+ "detail": {
+  "speed": {
+   "source": "repeat runs",
+   "runs": 4,
+   "n_per_run": 18,
+   "shares": [
+    0.222,
+    0.056,
+    0.111,
+    0.167
+   ],
+   "sd": 0.062
+  },
+  "ack_first": {
+   "source": "repeat runs",
+   "runs": 4,
+   "n_per_run": 9,
+   "shares": [
+    0.111,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "sd": 0.048
+  },
+  "cadence": {
+   "source": "repeat runs",
+   "runs": 4,
+   "n_per_run": 18,
+   "shares": [
+    0.722,
+    0.556,
+    0.944,
+    0.778
+   ],
+   "sd": 0.139
+  },
+  "formatting": {
+   "source": "repeat runs",
+   "runs": 4,
+   "n_per_run": 6,
+   "shares": [
+    0.167,
+    0.667,
+    0.833,
+    0.667
+   ],
+   "sd": 0.25
+  },
+  "offer": {
+   "source": "repeat runs",
+   "runs": 4,
+   "n_per_run": 3,
+   "shares": [
+    0.0,
+    0.333,
+    0.667,
+    0.333
+   ],
+   "sd": 0.236
+  },
+  "threading": {
+   "source": "repeat runs",
+   "runs": 4,
+   "n_per_run": 8,
+   "shares": [
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "sd": 0.0
+  },
+  "busy_reply": {
+   "source": "repeat runs",
+   "runs": 4,
+   "n_per_run": 8,
+   "shares": [
+    0.25,
+    0.125,
+    0.125,
+    0.25
+   ],
+   "sd": 0.062
+  },
+  "status_line": {
+   "source": "repeat runs",
+   "runs": 4,
+   "n_per_run": 9,
+   "shares": [
+    0.333,
+    0.667,
+    0.667,
+    0.444
+   ],
+   "sd": 0.145
+  },
+  "worker_hidden": {
+   "source": "repeat runs",
+   "runs": 4,
+   "n_per_run": 18,
+   "shares": [
+    0.667,
+    1.0,
+    0.944,
+    1.0
+   ],
+   "sd": 0.138
+  },
+  "stop": {
+   "source": "repeat runs",
+   "runs": 4,
+   "n_per_run": 2,
+   "shares": [
+    1.0,
+    1.0,
+    0.5,
+    0.0
+   ],
+   "sd": 0.415
+  },
+  "when_to_delegate": {
+   "source": "repeat runs",
+   "runs": 4,
+   "n_per_run": 18,
+   "shares": [
+    0.556,
+    0.556,
+    0.556,
+    0.778
+   ],
+   "sd": 0.096
+  },
+  "no_handle": {
+   "source": "repeat runs",
+   "runs": 4,
+   "n_per_run": 18,
+   "shares": [
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "sd": 0.0
+  },
+  "judge": {
+   "coverage": [
+    2.43,
+    2.25,
+    2.67,
+    2.43
+   ],
+   "formatting": [
+    3.57,
+    4.25,
+    3.14,
+    3.57
+   ],
+   "next_step": [
+    2.0,
+    3.25,
+    3.29,
+    3.71
+   ],
+   "shape": [
+    3.0,
+    3.0,
+    3.0,
+    3.29
+   ],
+   "sources": [
+    4.14,
+    3.5,
+    4.14,
+    4.14
+   ],
+   "voice": [
+    3.43,
+    3.0,
+    3.29,
+    3.57
+   ]
+  }
+ },
+ "source": {
+  "kind": "repeat runs",
+  "runs": [
+   "20261024T2330-parity-before",
+   "20261025T0210-parity-after-step1",
+   "20261025T0420-parity-after-steps123",
+   "20261025T1320-parity-after-1710"
+  ]
+ },
+ "built_at": "2026-10-25T16:22:03Z",
+ "rule": "keep a change only if the target trait's share rises by more than its band and no other trait's share falls by more than its band; judge means may not fall by more than max(0.2, judge band)"
+}

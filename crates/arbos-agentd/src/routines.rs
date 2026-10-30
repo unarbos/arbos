@@ -193,6 +193,26 @@ impl Agent {
                     tracing::warn!(error = %e, "routine_run push failed");
                 }
             }
+            // A chat of this project was opened (a new tab, or a person's row landed in a room
+            // this box holds no socket in): open its room now, not at the next listing (#2127,
+            // #2120). Same path as the registry pass; a room already open is left alone.
+            "chat_open" => {
+                let Some(chat_id) = payload.get("chat_id").and_then(Value::as_str) else {
+                    tracing::warn!("chat_open push without chat_id");
+                    return;
+                };
+                let mut chat = payload.clone();
+                chat["id"] = Value::String(chat_id.to_owned());
+                crate::workspace::open_listed_chat(
+                    &self.cfg,
+                    &self.store,
+                    &self.sync,
+                    &self.cfg.project_id,
+                    &chat,
+                )
+                .await;
+                tracing::info!(chat_id, reason = ?payload.get("reason"), "chat_open push: room opened");
+            }
             // F5: the library changed on the relay; refetch the index now rather than at the
             // next 60 s tick.
             "skills_changed" => self.refresh_skills().await,
@@ -210,10 +230,13 @@ impl Agent {
                     tracing::warn!(error = %e, "channel_message push failed");
                 }
             }
-            "people_agent_added" => {
+            // `people_chat_open` (#2120): a person's row landed in a people room this box
+            // holds no socket in — open it now with the relay's joined_at as the line (never a
+            // late-join "now", which would discard the very row that triggered the push).
+            "people_agent_added" | "people_chat_open" => {
                 if let Some(chat_id) = payload.get("chat_id").and_then(Value::as_str) {
                     if let Err(e) = self.join_people_chat(chat_id).await {
-                        tracing::warn!(error = %e, chat_id, "people_agent_added push failed");
+                        tracing::warn!(error = %e, chat_id, kind, "people chat push failed");
                     }
                 }
             }
@@ -252,6 +275,12 @@ impl Agent {
             | "secret_decided"
             | "secret_notice"
             | "secret_scrub" => crate::vault::on_push(self, kind, &payload).await,
+            // #1544: the owner added or revoked a standing shell grant in Settings.
+            "shell_grants_changed" => {
+                if let Err(e) = self.refresh_shell_grants().await {
+                    tracing::warn!(error = %e, "shell grants: refresh after push failed");
+                }
+            }
             // The feedback loop opened the issue for a report the agent filed (`submit_feedback`).
             "feedback_issue" => crate::feedback::on_issue_push(self, &payload).await,
             other => {

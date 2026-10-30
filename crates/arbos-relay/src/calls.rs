@@ -32,11 +32,11 @@ use arbos_core::api::{
 };
 use arbos_core::ids::{now_ms, ulid};
 
-use crate::apns::{Delivery, Outgoing};
 use crate::auth::Principal;
 use crate::db_calls::{CallRow, VoipToken};
 use crate::notify::{self, ChatRef, Sender};
 use crate::people;
+use crate::push::{Outgoing, SendOutcome};
 use crate::signin::api_error;
 use crate::state::AppState;
 
@@ -325,13 +325,13 @@ async fn deliver_voip(state: &AppState, t: &VoipToken, payload: Value) {
         collapse_id: None,
         payload,
     };
-    match state.push.send(out).await {
-        Delivery::Sent => {}
-        Delivery::TokenGone => {
+    match state.push.send_now(out).await {
+        SendOutcome::Accepted => {}
+        SendOutcome::TokenInvalid { .. } => {
             let _ = state.db.delete_voip_token_value(&t.token);
         }
-        Delivery::Failed(e) => {
-            tracing::warn!(device = %t.device_id, error = %e, "VoIP push failed")
+        outcome @ (SendOutcome::Permanent { .. } | SendOutcome::Transient { .. }) => {
+            tracing::warn!(device = %t.device_id, error = %outcome, "VoIP push failed")
         }
     }
 }
@@ -350,21 +350,21 @@ async fn deliver_alert(
         collapse_id: Some(collapse),
         payload,
     };
-    match state.push.send(out).await {
-        Delivery::Sent => {}
-        Delivery::TokenGone => {
+    match state.push.send_now(out).await {
+        SendOutcome::Accepted => {}
+        SendOutcome::TokenInvalid { .. } => {
             let _ = state.db.delete_push_token_value(&t.token);
         }
-        Delivery::Failed(e) => {
-            tracing::warn!(device = %t.device_id, error = %e, "call alert failed")
+        outcome @ (SendOutcome::Permanent { .. } | SendOutcome::Transient { .. }) => {
+            tracing::warn!(device = %t.device_id, error = %outcome, "call alert failed")
         }
     }
 }
 
 /// A call began: `call_started` on `/me/pushes`, a VoIP push (CallKit) and an APNs alert to
-/// every other member's devices.
-async fn announce_started(state: &AppState, call: &CallRow, starter: &Sender) {
-    let chat = chat_ref_of(call);
+/// each callee. `callees` is who to ring (already without the starter); empty means nobody
+/// is notified (a selective start that named only agents).
+async fn announce_started(state: &AppState, call: &CallRow, starter: &Sender, callees: &[String]) {
     let call_d = call_dto(state, call, None, None);
     let starter_d = starter.dto();
     let started = CallStartedPayloadDto {
@@ -394,20 +394,17 @@ async fn announce_started(state: &AppState, call: &CallRow, starter: &Sender) {
     } else {
         "voice call"
     };
-    for user in members(state, &chat) {
-        if user == call.started_by {
-            continue;
-        }
+    for user in callees {
         let _ = state
             .db
-            .push_user_event(&user, &PushEventDto::CallStarted(started.clone()), None);
+            .push_user_event(user, &PushEventDto::CallStarted(started.clone()), None);
         if !state.push.is_on() {
             continue;
         }
-        for t in state.db.voip_tokens_of_user(&user).unwrap_or_default() {
+        for t in state.db.voip_tokens_of_user(user).unwrap_or_default() {
             deliver_voip(state, &t, to_json(&ring)).await;
         }
-        for t in state.db.push_tokens_of_user(&user).unwrap_or_default() {
+        for t in state.db.push_tokens_of_user(user).unwrap_or_default() {
             // content-available wakes a backgrounded (not force-quit) iPhone so
             // it can report CallKit — WhatsApp-style ring without the app open.
             let mut payload = to_json(&alert);
@@ -433,6 +430,7 @@ async fn announce_ended(
     reason: &str,
     writer_device: Option<&str>,
 ) {
+    state.voice_inbox.close_call(&call.id).await;
     let chat = chat_ref_of(call);
     let ended_at = call.ended_at.unwrap_or_else(now_ms);
     let duration_s = ((ended_at - call.started_at) / 1000).max(0);
@@ -599,6 +597,11 @@ pub async fn end_call(
 pub struct StartBody {
     #[serde(default)]
     pub kind: Option<String>,
+    /// When set and non-empty: only these chat members are rung / dispatched.
+    /// Human entries are bare user ids; agents are project ids (same as `ChatMember.id`).
+    /// Omitted or empty = the whole group (current behaviour).
+    #[serde(default)]
+    pub ring: Option<Vec<String>>,
 }
 
 async fn start_or_join(
@@ -665,14 +668,27 @@ async fn start_or_join(
     let starter = Sender::user(state, &me);
     // Reachability before announce: a failed VoIP push may delete the token
     // (TokenGone), and the caller must still see "Ringing …" for this attempt.
-    let callees: Vec<String> = members(state, &chat)
+    let all_humans: Vec<String> = members(state, &chat)
         .into_iter()
         .filter(|u| *u != me)
         .collect();
+    let ring_set: Option<std::collections::HashSet<&str>> = body
+        .ring
+        .as_ref()
+        .filter(|ids| !ids.is_empty())
+        .map(|ids| ids.iter().map(String::as_str).collect());
+    let callees: Vec<String> = match &ring_set {
+        Some(want) => all_humans
+            .into_iter()
+            .filter(|u| want.contains(u.as_str()))
+            .collect(),
+        None => all_humans,
+    };
     let reachable = reachability(state, &callees).await;
-    announce_started(state, &call, &starter).await;
+    announce_started(state, &call, &starter, &callees).await;
     // Phase 2: the chat's project agents join through the voice worker.
-    let dispatched = crate::voice::dispatch_agents(state, &call).await;
+    // A selective start only dispatches agents named in `ring`.
+    let dispatched = crate::voice::dispatch_agents(state, &call, ring_set.as_ref()).await;
     (
         StatusCode::CREATED,
         Json(to_json(StartCallResponseDto {
@@ -1357,6 +1373,7 @@ mod tests {
                 title: Some("Arbonites".into()),
                 avatar_leaf: None,
                 avatar_leaf_color: None,
+                description: None,
             }),
         )
         .await;
@@ -1382,6 +1399,7 @@ mod tests {
             HeaderMap::new(),
             Some(Json(StartBody {
                 kind: Some("voice".into()),
+                ..Default::default()
             })),
         )
         .await;
@@ -1454,6 +1472,82 @@ mod tests {
         assert_eq!(v["call"]["participants"].as_array().unwrap().len(), 2);
     }
 
+    /// Selective start: `ring: [bob]` notifies only Bob; Carol and Dave stay quiet, and the
+    /// group's agent is not dispatched (Bob alone was named — no agent id in `ring`).
+    #[tokio::test]
+    async fn group_call_ring_list_notifies_only_named_members() {
+        let mut state = test_state(AuthMode::Github);
+        with_livekit(&mut state);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let (_carol, carol_dev) = person(&state, 3);
+        let (_dave, dave_dev) = person(&state, 4);
+        let home = project_of(&state, &alice, "Home");
+        let r = crate::people::chats_create_group(
+            State(state.clone()),
+            alice_dev.clone(),
+            Json(crate::people::CreateGroupBody {
+                kind: "group".into(),
+                members: vec!["user2".into(), "user3".into(), "user4".into()],
+                agent_ids: vec![home.clone()],
+                title: Some("Pick some".into()),
+                avatar_leaf: None,
+                avatar_leaf_color: None,
+                description: None,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let chat = state
+            .db
+            .chats_of_member(&format!("user:{alice}"))
+            .unwrap()
+            .into_iter()
+            .find(|cm| cm.chat.kind == "group")
+            .expect("the group")
+            .chat
+            .id;
+        for d in [&bob_dev, &carol_dev, &dave_dev, &alice_dev] {
+            pushes_of(&state, d);
+        }
+
+        let r = start_people_call(
+            State(state.clone()),
+            alice_dev.clone(),
+            Path(chat.clone()),
+            HeaderMap::new(),
+            Some(Json(StartBody {
+                kind: Some("voice".into()),
+                ring: Some(vec![bob.clone()]),
+            })),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::CREATED);
+        let v = body_json(r).await;
+        let call_id = v["call"]["call_id"].as_str().unwrap().to_owned();
+        let rings_bob: Vec<_> = pushes_of(&state, &bob_dev)
+            .into_iter()
+            .filter(|(k, _)| k == "call_started")
+            .collect();
+        assert_eq!(rings_bob.len(), 1, "{rings_bob:?}");
+        assert_eq!(rings_bob[0].1["call"]["call_id"], call_id);
+        for (who, d) in [("carol", &carol_dev), ("dave", &dave_dev)] {
+            let rings: Vec<_> = pushes_of(&state, d)
+                .into_iter()
+                .filter(|(k, _)| k == "call_started")
+                .collect();
+            assert!(rings.is_empty(), "{who} must stay quiet: {rings:?}");
+        }
+        let dispatched = v["agents_dispatched"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            dispatched.is_empty(),
+            "no agent in ring → none dispatched: {dispatched:?}"
+        );
+    }
+
     #[tokio::test]
     async fn members_only_and_join_existing() {
         let mut state = test_state(AuthMode::Github);
@@ -1471,6 +1565,7 @@ mod tests {
             HeaderMap::new(),
             Some(Json(StartBody {
                 kind: Some("video".into()),
+                ..Default::default()
             })),
         )
         .await;
@@ -1483,6 +1578,7 @@ mod tests {
             HeaderMap::new(),
             Some(Json(StartBody {
                 kind: Some("video".into()),
+                ..Default::default()
             })),
         )
         .await;
@@ -1610,6 +1706,7 @@ mod tests {
                 title: Some("Speakers".into()),
                 avatar_leaf: None,
                 avatar_leaf_color: None,
+                description: None,
             }),
         )
         .await;
@@ -1632,6 +1729,7 @@ mod tests {
                 HeaderMap::new(),
                 Some(Json(StartBody {
                     kind: Some("voice".into()),
+                    ..Default::default()
                 })),
             )
             .await,
@@ -1923,6 +2021,7 @@ mod tests {
             headers,
             Some(Json(StartBody {
                 kind: Some("video".into()),
+                ..Default::default()
             })),
         )
         .await;
@@ -1990,6 +2089,7 @@ mod tests {
             );
         }
         // The only APNs token belongs to Bob, who joined: a "started" alert went out, no "missed".
+        state.push.drain().await;
         let alerts = state.push.captured().await;
         assert!(alerts.iter().any(|o| o.payload["event"] == "started"));
         assert!(alerts.iter().all(|o| o.payload["event"] != "missed"));
@@ -2112,6 +2212,7 @@ mod tests {
             image_key: None,
             avatar_leaf: None,
             avatar_leaf_color: None,
+            description: None,
         };
         state.db.insert_people_chat(&chat).unwrap();
         for u in [&alice, &bob] {

@@ -13,13 +13,17 @@ use crate::app::AgentPick;
 use crate::model::{Effort, Id, Project};
 use crate::sync::fixture::MODELS;
 use crate::ui::composer::Composer;
-use crate::ui::icons::icon;
+use crate::ui::highlight::{self, Shape};
 use crate::ui::profiles::kit::{self, Leading};
+use crate::ui::sf_symbols;
 use crate::ui::shell::Shell;
-use crate::ui::theme::{Theme, TEXT_SMALL};
+use crate::ui::theme::{Theme, TEXT_SMALL, TEXT_TINY};
+use crate::ui::voicepicker;
 
 /// How tall the model / voice lists may grow before they scroll.
 const LIST_MAX_HEIGHT: f32 = 260.0;
+/// The dropped-down list's corners; its rows' highlight is concentric.
+pub(crate) const LIST_RADIUS: f32 = 10.0;
 
 /// One info-card row: caption over the current value, a chevron, and —
 /// while `open` — `panel` dropped down under it. A click toggles it open.
@@ -39,19 +43,19 @@ pub fn row(
     };
     // The pane kit's row: label left, the current value right, a chevron that
     // turns up while the list is open.
-    let header = kit::row(
+    let header = kit::row_state(
         ElementId::Name(SharedString::from(format!("{id}-head"))),
         Leading::None,
         caption.to_string(),
         None,
         Some(value.into()),
-        open.then(|| icon("chevron-up", 13.0, theme.text_faint).into_any_element()),
+        open.then(|| sf_symbols::glyph("chevron.up", 13.0, theme.text_faint).into_any_element()),
         !open,
+        open,
         theme,
     )
     .cursor_pointer()
-    .when(open, |el| el.bg(theme.surface_2))
-    .hover(|s| s.bg(theme.surface_2))
+    .group(kit::HOT)
     .on_click(cx.listener(move |this, _, window, cx| {
         if this.state.read(cx).agent_pick == Some(which) {
             this.close_agent_pick(Some(window), cx);
@@ -63,13 +67,20 @@ pub fn row(
     // (popovers, the profile pop-up) must not see them. No hover listener —
     // the list opens only on a click, so moving the pointer across rows does
     // not change what is open.
+    //
+    // The header's hung hairline separates it from the panel while open, and
+    // from the next row while closed. When open, hang one more under the
+    // whole block so the next row still gets a card-style divider (the pane
+    // card no longer interleaves section separators on kit rows).
     div()
         .id(id)
+        .relative()
         .flex()
         .flex_col()
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(header)
         .children(panel)
+        .when(open, |el| el.child(kit::hairline_below(theme)))
 }
 
 impl Shell {
@@ -218,7 +229,7 @@ fn list_frame(id: &'static str, theme: &Theme) -> Stateful<Div> {
         .flex_col()
         .mx(px(10.0))
         .mb(px(10.0))
-        .rounded(px(10.0))
+        .rounded(px(LIST_RADIUS))
         .bg(theme.card())
         .border_1()
         .border_color(theme.border)
@@ -231,7 +242,7 @@ fn item(
     selected: bool,
     theme: &Theme,
 ) -> Stateful<Div> {
-    div()
+    let frame = div()
         .id(id)
         .flex()
         .items_center()
@@ -242,10 +253,12 @@ fn item(
         .text_size(px(TEXT_SMALL))
         .text_color(theme.text)
         .when(selected, |el| el.font_weight(FontWeight::MEDIUM))
-        .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
+        .cursor_pointer();
+    highlight::row(frame, false, Shape::Nested(LIST_RADIUS), theme)
         .child(div().flex_1().min_w_0().truncate().child(label.into()))
-        .when(selected, |el| el.child(icon("check", 14.0, theme.accent)))
+        .when(selected, |el| {
+            el.child(sf_symbols::glyph("checkmark", 14.0, theme.accent))
+        })
 }
 
 /// The Model dropdown: a search field, then the matching models.
@@ -267,7 +280,7 @@ pub fn model_panel(shell: &Shell, project: &Project, cx: &mut Context<Shell>) ->
         .border_b_1()
         .border_color(theme.border)
         .cursor_text()
-        .child(icon("search", 13.0, theme.text_muted))
+        .child(sf_symbols::glyph("magnifyingglass", 13.0, theme.text_muted))
         .child(
             div()
                 .flex_1()
@@ -339,6 +352,35 @@ pub fn reasoning_panel(project: &Project, cx: &mut Context<Shell>) -> AnyElement
         );
     }
     list.into_any_element()
+}
+
+/// The Voice dropdown: the call-voice picker's list (Default first, play
+/// buttons, checkmark), inline — the same list as the voice sheet and the
+/// iPhone's `VoicePickerView`. A pick saves and folds the row.
+pub fn voice_panel(shell: &Shell, project: &Project, cx: &mut Context<Shell>) -> AnyElement {
+    let theme = Theme::of(cx).clone();
+    // 6 pt under the row's hairline so the first voice is never tucked under it.
+    div()
+        .mx(px(10.0))
+        .mt(px(6.0))
+        .mb(px(10.0))
+        .child(voicepicker::list(
+            shell,
+            project,
+            "agent-voice",
+            LIST_MAX_HEIGHT,
+            true,
+            cx,
+        ))
+        .child(
+            div()
+                .pt(px(6.0))
+                .px(px(4.0))
+                .text_size(px(TEXT_TINY))
+                .text_color(theme.text_muted)
+                .child("Press play to hear a sample; a click saves."),
+        )
+        .into_any_element()
 }
 
 #[cfg(test)]

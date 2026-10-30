@@ -64,11 +64,14 @@ final class CoreFixturesTests: XCTestCase {
                 XCTAssertFalse(msg.reactions.isEmpty, "row \(i) reactions", file: file, line: line)
                 for (emoji, people) in reactions {
                     guard let people = people as? [String: Any] else { continue }
-                    let got = msg.reactions.first { $0.emoji == emoji }
-                    XCTAssertNotNil(got, "row \(i) missing emoji \(emoji)", file: file, line: line)
+                    // Core stores the collapsed base (👍); chips must use that key, not a palette tone.
+                    let base = MessageReaction.normalizeEmoji(emoji)
+                    let got = msg.reactions.first { MessageReaction.sameBase($0.emoji, emoji) }
+                    XCTAssertNotNil(got, "row \(i) missing emoji \(base)", file: file, line: line)
+                    XCTAssertEqual(got?.emoji, base, "row \(i) chip key \(base)", file: file, line: line)
                     for (sender, flag) in people {
                         guard (flag as? Bool) == true else { continue }
-                        XCTAssertTrue(got?.senders.contains(sender) == true, "row \(i) \(emoji)/\(sender)", file: file, line: line)
+                        XCTAssertTrue(got?.senders.contains(sender) == true, "row \(i) \(base)/\(sender)", file: file, line: line)
                     }
                 }
             }
@@ -545,6 +548,8 @@ final class CoreFixturesTests: XCTestCase {
             "push_secret_request_secret.json",
             "push_secrets_paused.json",
             "push_secret_expiring.json",
+            "push_profile_updated.json",
+            "push_pins_changed.json",
         ]
         for name in names {
             let item = try XCTUnwrap(PushItem.parse(try apiFixtureJSON(name)), name)
@@ -577,6 +582,23 @@ final class CoreFixturesTests: XCTestCase {
         XCTAssertEqual(s.request_id, "req_secret_fixture")
         XCTAssertEqual(s.host, "api.stripe.com")
         XCTAssertNil(s.vault_id)
+
+        let profile = try XCTUnwrap(PushItem.parse(try apiFixtureJSON("push_profile_updated.json")))
+        guard case .profileUpdated(let p) = profile.event else { return XCTFail("profile_updated") }
+        XCTAssertEqual(p.user_id, "gh_201")
+        XCTAssertEqual(p.avatar_url, "https://relay.example/avatars/gh_201.jpg?v=1700000000000")
+
+        let agentProfile = try XCTUnwrap(PushItem.parse(try apiFixtureJSON("push_agent_profile_updated.json")))
+        guard case .agentProfileUpdated(let a) = agentProfile.event else { return XCTFail("agent_profile_updated") }
+        XCTAssertEqual(a.project_id, "01FIXTUREAGENT")
+        XCTAssertEqual(a.avatar_version, 1_700_000_000_000)
+        XCTAssertEqual(a.image_key, "avatar-1700000000000.jpg")
+
+        let cleared = try XCTUnwrap(PushItem.parse(try apiFixtureJSON("push_notifications_cleared.json")))
+        guard case .notificationsCleared(let n) = cleared.event else { return XCTFail("notifications_cleared") }
+        XCTAssertEqual(n.chat_id, "people_dm")
+        XCTAssertEqual(n.project_id, "people")
+        XCTAssertEqual(n.badge, 2)
 
         XCTAssertNil(PushItem.parse(try apiFixtureJSON("push_unknown_kind.json")))
         XCTAssertNil(PushItem.parse([
@@ -702,6 +724,41 @@ final class CoreFixturesTests: XCTestCase {
         XCTAssertEqual(AppModel.peopleUnreadCount(remote: 0, flagged: false, watching: false), 0)
     }
 
+    /// Clear on read (ARB-444): a `notifications_cleared` push from another device of mine
+    /// takes one chat out of the badge arithmetic — its remote count and its live-row flag —
+    /// and leaves every other chat's count alone; the badge then follows the smaller of the
+    /// relay's total and the local sum, since each can only be stale-high.
+    func testClearOnReadBadgeArithmetic() {
+        let hidden: (String) -> Bool = { $0 == "hidden-plain" }
+        var remote = ["dm": 2, "group": 1, "hidden-plain": 4]
+        var flagged: Set<String> = ["dm", "live-only"]
+        // Before: 2 + 1 (+ 0 for the hidden chat) + 1 for the chat only a live row flagged.
+        XCTAssertEqual(AppModel.badgeTotal(remote: remote, flagged: flagged, hidden: hidden), 4)
+
+        // The Mac read the DM: its count and flag go, nothing else moves.
+        AppModel.clearingChat("dm", remote: &remote, flagged: &flagged)
+        XCTAssertEqual(remote["dm"], 0)
+        XCTAssertEqual(remote["group"], 1)
+        XCTAssertFalse(flagged.contains("dm"))
+        XCTAssertTrue(flagged.contains("live-only"))
+        XCTAssertEqual(AppModel.badgeTotal(remote: remote, flagged: flagged, hidden: hidden), 2)
+
+        // A clear for a chat the relay never counted here only drops its flag.
+        AppModel.clearingChat("live-only", remote: &remote, flagged: &flagged)
+        XCTAssertNil(remote["live-only"])
+        XCTAssertEqual(AppModel.badgeTotal(remote: remote, flagged: flagged, hidden: hidden), 1)
+
+        // Badge after the clear: relay total wins when a local flag is stale …
+        XCTAssertEqual(AppModel.badgeAfterClear(relayTotal: 1, localTotal: 2), 1)
+        // … the local sum wins when this device's own read has not reached the relay yet
+        // (or the relay counts a hidden plain chat the badge never shows) …
+        XCTAssertEqual(AppModel.badgeAfterClear(relayTotal: 5, localTotal: 1), 1)
+        // … they agree when both are current, and nothing goes below zero.
+        XCTAssertEqual(AppModel.badgeAfterClear(relayTotal: 0, localTotal: 0), 0)
+        XCTAssertEqual(AppModel.badgeAfterClear(relayTotal: -1, localTotal: 3), 3)
+        XCTAssertEqual(AppModel.badgeAfterClear(relayTotal: 2, localTotal: -4), 0)
+    }
+
     /// Mark-read PUT: skip same value, send after the window, delay inside it.
     /// With `force`, an unchanged value still sends outside the window / delays inside it.
     func testReadPutPlan() {
@@ -825,5 +882,41 @@ final class CoreFixturesTests: XCTestCase {
             spendTodayUsd: 0,
             spendCapUsd: 0
         )
+    }
+
+    // MARK: Animated image frames (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG /
+    // app-01M61EZD0GJ2XGV1EW4SCVXENK)
+
+    /// GIF and animated WebP fixtures decode to 3 frames; a PNG stays still (`nil`).
+    /// The side helper keeps common reaction GIFs animated within the 48 MB budget;
+    /// only https page URLs become via-caption links.
+    func testAnimatedImageFramesFixtures() throws {
+        let gif = try fixtureData("anim_three.gif")
+        let gifFrames = try XCTUnwrap(AnimatedImageFrames.frames(from: gif))
+        XCTAssertEqual(gifFrames.images.count, 3)
+
+        let webp = try fixtureData("anim_three.webp")
+        let webpFrames = try XCTUnwrap(AnimatedImageFrames.frames(from: webp))
+        XCTAssertEqual(webpFrames.images.count, 3)
+
+        let png = try fixtureData("anim_still.png")
+        XCTAssertNil(AnimatedImageFrames.frames(from: png), "PNG is still")
+
+        XCTAssertEqual(AnimatedImageFrames.animationFrameSide(frameCount: 60, width: 480, height: 270), 480)
+        let side150 = try XCTUnwrap(AnimatedImageFrames.animationFrameSide(frameCount: 150, width: 480, height: 480))
+        XCTAssertGreaterThanOrEqual(side150, AnimatedImageFrames.sideFloor)
+        XCTAssertLessThanOrEqual(side150, AnimatedImageFrames.sideStart)
+        let side300 = try XCTUnwrap(AnimatedImageFrames.animationFrameSide(frameCount: 300, width: 1000, height: 1000))
+        XCTAssertGreaterThanOrEqual(side300, AnimatedImageFrames.sideFloor)
+        let scale = Double(side300) / 1000.0
+        let sw = max(Int((1000.0 * scale).rounded()), 1)
+        let sh = max(Int((1000.0 * scale).rounded()), 1)
+        XCTAssertLessThanOrEqual(300 * sw * sh * 4, AnimatedImageFrames.maxDecodedBytes)
+        XCTAssertNil(AnimatedImageFrames.animationFrameSide(frameCount: 301, width: 480, height: 270))
+
+        XCTAssertNotNil(AttachmentSource.httpsPageURL(from: "https://example.com/g/1"))
+        XCTAssertNil(AttachmentSource.httpsPageURL(from: "http://example.com/g/1"))
+        XCTAssertNil(AttachmentSource.httpsPageURL(from: "file:///tmp/x.gif"))
+        XCTAssertNil(AttachmentSource.httpsPageURL(from: "javascript:alert(1)"))
     }
 }

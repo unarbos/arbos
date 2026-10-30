@@ -1,0 +1,35 @@
+{
+  "id": "pj2-packing-list",
+  "lane": "a",
+  "category": "parity",
+  "categories": [
+    "parity",
+    "one-liner-list"
+  ],
+  "title": "Jacob Q2: 3-day surf trip packing list",
+  "parity": true,
+  "timeout_s": 150,
+  "settle_s": 12,
+  "turns": [
+    {
+      "prompt": "Make me a quick packing list for a 3-day surf trip.",
+      "shape": {
+        "messages_min": 1,
+        "messages_max": 2,
+        "ack_first": false,
+        "table": false,
+        "links_min": 0,
+        "offer": true,
+        "first_bubble_max_s": 8,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": false,
+        "bullets": true
+      },
+      "judge": {
+        "criteria": "Baseline: one message, headed sections (Surf gear, Sun and skin, Clothes, Essentials) with short bullets, ends with one offer ('Want me to tweak it for a specific spot or for flying with boards?'). No greeting by handle, no filler, no apology."
+      }
+    }
+  ],
+  "baseline": "baselines/grok/pj2-packing-list.md"
+}

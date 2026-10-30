@@ -7,7 +7,8 @@ use gpui::{div, prelude::*, px, Context, Div, ElementId, FontWeight, SharedStrin
 
 use crate::model::{Project, Voice};
 use crate::ui::glass;
-use crate::ui::icons::icon;
+use crate::ui::highlight::{self, Shape};
+use crate::ui::sf_symbols;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Appearance, Theme, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 use crate::ui::widgets::CardPalette;
@@ -56,6 +57,8 @@ pub fn sheet(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
 /// Row height: a body title over a tiny one-line description, 10 pt of air
 /// above and below (the pane kit's list rows).
 const ROW_HEIGHT: f32 = 56.0;
+/// The list's corners; each row's highlight pill is concentric with them.
+const LIST_RADIUS: f32 = 14.0;
 
 pub fn list(
     shell: &Shell,
@@ -103,7 +106,7 @@ pub fn list(
             .h(px(ROW_HEIGHT))
             .px(px(14.0))
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .map(|el| highlight::row(el, false, Shape::Nested(LIST_RADIUS), theme))
     };
     let check = |on: bool, theme: &Theme| {
         div()
@@ -112,7 +115,9 @@ pub fn list(
             .flex()
             .items_center()
             .justify_center()
-            .when(on, |el| el.child(icon("check", 16.0, theme.accent)))
+            .when(on, |el| {
+                el.child(sf_symbols::glyph("checkmark", 16.0, theme.accent))
+            })
     };
 
     let eid = |suffix: String| ElementId::Name(SharedString::from(format!("{ids}-{suffix}")));
@@ -120,7 +125,7 @@ pub fn list(
         .id(eid("list".into()))
         .flex()
         .flex_col()
-        .rounded(px(14.0))
+        .rounded(px(LIST_RADIUS))
         .overflow_y_scroll()
         .max_h(px(max_height))
         .bg(list_bg)
@@ -144,8 +149,8 @@ pub fn list(
             })
             .when(!has, |el| el.opacity(0.35))
             .hover(|s| s.opacity(0.85))
-            .child(icon(
-                if playing { "stop" } else { "play" },
+            .child(sf_symbols::glyph(
+                if playing { "stop.fill" } else { "play.fill" },
                 13.0,
                 if playing { theme.bg } else { theme.text },
             ))
@@ -280,4 +285,17 @@ pub fn list(
         list = list.child(row);
     }
     list
+}
+
+/// The current voice's name for the agent pane's Voice row ("Default" when
+/// the agent uses the relay's default; the raw id until the list arrives).
+pub fn current_label(space: &Project, voices: &[Voice]) -> String {
+    match space.voice.as_deref() {
+        None => "Default".into(),
+        Some(id) => voices
+            .iter()
+            .find(|v| v.id == id)
+            .map(|v| v.name.clone())
+            .unwrap_or_else(|| id.to_string()),
+    }
 }

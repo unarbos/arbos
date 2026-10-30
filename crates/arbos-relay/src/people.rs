@@ -27,7 +27,7 @@ use arbos_core::wire;
 
 use crate::auth::Principal;
 use crate::blobs::{no_such_image, not_an_image, stored_image, StoredImage};
-use crate::db_people::{ChatWithMembers, Invite, Membership, PeopleChat};
+use crate::db_people::{ChatWithMembers, GroupInvite, Invite, Membership, PeopleChat};
 use crate::notices;
 use crate::signin::api_error;
 use crate::state::AppState;
@@ -116,6 +116,28 @@ fn rate_limited(retry_s: i64) -> Response {
         retry_s.to_string().parse().expect("retry-after"),
     );
     r
+}
+
+/// May `adder` put `target` into a people group under the target's `group_add` privacy?
+fn may_add_to_group(state: &AppState, adder: &str, target: &str) -> bool {
+    let policy = state
+        .db
+        .group_add_policy(target)
+        .unwrap_or_else(|_| "anyone".into());
+    match policy.as_str() {
+        "nobody" => false,
+        "people_i_know" => state.db.dm_between(adder, target).ok().flatten().is_some(),
+        _ => true, // anyone (default)
+    }
+}
+
+/// Opaque "not available" when a group-add privacy check fails (same as a block).
+fn group_add_forbidden() -> Response {
+    api_error(
+        StatusCode::FORBIDDEN,
+        "not_available",
+        "this person is not available",
+    )
 }
 
 fn normalize_handle(h: &str) -> Option<String> {
@@ -255,6 +277,9 @@ pub(crate) fn member_dto(state: &AppState, m: &Membership) -> ChatMemberDto {
         last_seen_at: None,
         online: None,
         read_receipts: None,
+        silenced: None,
+        silenced_until: None,
+        can_mute_ban: None,
         avatar: None,
         avatar_color: None,
         avatar_color_index: None,
@@ -288,6 +313,14 @@ pub(crate) fn member_dto(state: &AppState, m: &Membership) -> ChatMemberDto {
                 .and_then(Value::as_bool)
                 .unwrap_or(true),
         );
+        let silenced = membership_is_silenced(m);
+        dto.silenced = Some(silenced);
+        if silenced {
+            dto.silenced_until = m.silenced_until;
+        }
+        if m.role == "admin" {
+            dto.can_mute_ban = Some(member_can_mute_ban(m));
+        }
     }
     if let Some(pid) = m.project_id() {
         if let Ok(Some(p)) = state.db.project(pid) {
@@ -326,6 +359,7 @@ pub(crate) fn member_dto(state: &AppState, m: &Membership) -> ChatMemberDto {
                 avatar_leaf_effective: Some(i64::from(leaf.leaf)),
                 avatar_leaf_color_effective: Some(i64::from(leaf.color)),
                 image_key: p.image_key.clone(),
+                avatar_version: Some(p.avatar_version),
                 description: p.description.clone(),
                 model: p
                     .models
@@ -355,13 +389,74 @@ pub(crate) fn member_dto(state: &AppState, m: &Membership) -> ChatMemberDto {
     dto
 }
 
-/// The `@slug` a project agent answers to: its name lower-cased, spaces to hyphens.
+/// The `@slug` a project agent answers to — the shared rule (`arbos_core::avatar::identity`),
+/// so the roster's `handle`, agentd's attribution and both clients' lookups agree (#1592).
 pub fn agent_slug(name: &str) -> String {
-    name.trim()
-        .to_lowercase()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join("-")
+    arbos_core::avatar::identity::agent_slug(name)
+}
+
+/// An agent's `@slug` must not be a person's `@handle`: when Jacob (@unarbos) named an agent
+/// "unarbos", `@unarbos` in the group resolved to him and the agent's mention gate never fired
+/// (#1538). The name that keeps the slug clear of every signed-in user's login: `name` itself,
+/// else `<name> agent`, `<name> 2`, `<name> 3`, … Returns `(name, changed)`.
+pub fn agent_name_clear_of_people(state: &AppState, name: &str) -> (String, bool) {
+    let taken = |candidate: &str| {
+        let slug = agent_slug(candidate);
+        !slug.is_empty() && state.db.user_by_handle(&slug).ok().flatten().is_some()
+    };
+    let name = name.trim();
+    if !taken(name) {
+        return (name.to_owned(), false);
+    }
+    let first = format!("{name} agent");
+    if !taken(&first) {
+        return (first, true);
+    }
+    for n in 2..100 {
+        let c = format!("{name} {n}");
+        if !taken(&c) {
+            return (c, true);
+        }
+    }
+    (format!("{name} agent {}", now_ms() % 1000), true)
+}
+
+/// One-shot at boot (#1538): every live agent whose slug is a person's handle gets the same
+/// suffix a new one would, and its box hears `project_renamed`. Idempotent; logs each rename.
+pub fn rename_agents_that_shadow_people(state: &AppState) {
+    let Ok(projects) = state.db.list_projects() else {
+        return;
+    };
+    for p in projects {
+        let (clear, changed) = agent_name_clear_of_people(state, &p.name);
+        if !changed {
+            continue;
+        }
+        if let Err(e) = state.db.update_project(
+            &p.id,
+            Some(&clear),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ) {
+            tracing::warn!(project = %p.id, error = %e, "handle-collision rename failed");
+            continue;
+        }
+        let _ = state.db.enqueue_push(
+            &p.id,
+            "project_renamed",
+            &json!({ "from": p.name, "to": clear, "at": now_ms(), "reason": "handle_collision" }),
+        );
+        tracing::info!(project = %p.id, from = %p.name, to = %clear, "agent renamed: its @slug was a person's handle");
+    }
 }
 
 /// Soft-deleted agents leave every list at once; do not linger as @mention ghosts that
@@ -441,6 +536,20 @@ pub fn people_chat_dto(
     let has_agent = live.iter().any(|m| m.project_id().is_some());
     let mine = live.iter().find(|m| m.user_id() == Some(me)).copied();
     let archived_at = state.db.chat_archived_at(me, &cm.chat.id).ok().flatten();
+    let can_see_banned =
+        mine.is_some_and(|m| m.role == "owner" || (m.role == "admin" && member_can_mute_ban(m)));
+    let banned = if can_see_banned {
+        state
+            .db
+            .banned_members_of(&cm.chat.id)
+            .unwrap_or_default()
+            .iter()
+            .filter(|m| m.user_id().is_some())
+            .map(|m| member_dto(state, m))
+            .collect()
+    } else {
+        Vec::new()
+    };
     PeopleChatDto {
         id: cm.chat.id.clone(),
         archived_at,
@@ -451,8 +560,16 @@ pub fn people_chat_dto(
         image_key: cm.chat.image_key.clone(),
         avatar_leaf: cm.chat.avatar_leaf,
         avatar_leaf_color: cm.chat.avatar_leaf_color,
+        description: cm
+            .chat
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned),
         pending,
         members,
+        banned,
         room: format!("/room/{PEOPLE_PROJECT}/{}", cm.chat.id),
         head_seq,
         last_activity_at: if last_row_at > 0 {
@@ -462,6 +579,12 @@ pub fn people_chat_dto(
         },
         read_seq,
         unread,
+        // Members this viewer blocked: their rows are theirs to hide (groups), as `user:<id>`.
+        blocked_senders: human_user_ids(cm)
+            .into_iter()
+            .filter(|u| u != me && state.db.blocks(me, u).unwrap_or(false))
+            .map(|u| format!("user:{u}"))
+            .collect(),
         lock_state: if has_agent {
             "visible_to_agents".into()
         } else {
@@ -470,6 +593,10 @@ pub fn people_chat_dto(
         me: ChatMeDto {
             role: Some(mine.map(|m| m.role.clone())),
             muted: Some(mine.is_some_and(|m| m.muted)),
+            silenced: Some(mine.is_some_and(membership_is_silenced)),
+            silenced_until: mine
+                .filter(|m| membership_is_silenced(m))
+                .and_then(|m| m.silenced_until),
             archived_at,
             read_receipts: Some(
                 mine.map(|m| {
@@ -484,7 +611,7 @@ pub fn people_chat_dto(
     }
 }
 
-fn load_chat(state: &AppState, chat_id: &str) -> Result<ChatWithMembers, Box<Response>> {
+pub(crate) fn load_chat(state: &AppState, chat_id: &str) -> Result<ChatWithMembers, Box<Response>> {
     let chat = state
         .db
         .people_chat(chat_id)
@@ -530,7 +657,61 @@ pub(crate) fn member_chat(
     Ok((me, cm))
 }
 
-fn handle_of(state: &AppState, user_id: &str) -> String {
+/// What `PATCH /chats/{id}` and the group's avatar Generate answer to a member who is neither
+/// owner nor admin. One plain sentence: the clients show it as-is.
+pub(crate) const SETTINGS_ADMIN_ONLY: &str =
+    "Only the group's owner and admins can change its name, picture and description.";
+
+/// The chat, if the caller may change its settings (name, picture, description, leaf): the
+/// owner or an admin. Everyone else — plain members, agents' boxes, non-members, the admin
+/// token — gets 403, and every attempt leaves an audit row (`settings_audit`).
+///
+/// Why: until 2026-10-27 any live human member could rename a group or swap its picture
+/// (D72 "fully permissive"); members of Arbonites did exactly that.
+pub(crate) fn settings_chat(
+    state: &AppState,
+    principal: &Principal,
+    chat_id: &str,
+    fields: &[&str],
+) -> Result<(String, ChatWithMembers), Box<Response>> {
+    let slot = format!("{PEOPLE_ACL_PREFIX}{chat_id}");
+    let (me, cm) = match member_chat(state, principal, chat_id) {
+        Ok(v) => v,
+        Err(r) => {
+            let reason = match principal {
+                Principal::Device { .. } => "not_member",
+                Principal::Box { .. } | Principal::Admin => "devices_only",
+            };
+            crate::settings_audit::record(
+                state, &slot, "chat", chat_id, principal, None, fields, false, reason,
+            );
+            return Err(r);
+        }
+    };
+    let role = my_role(&cm, &me);
+    let allowed = matches!(role, Some("owner") | Some("admin"));
+    crate::settings_audit::record(
+        state,
+        &slot,
+        "chat",
+        chat_id,
+        principal,
+        role,
+        fields,
+        allowed,
+        if allowed { "ok" } else { "admin_only" },
+    );
+    if !allowed {
+        return Err(Box::new(api_error(
+            StatusCode::FORBIDDEN,
+            "admin_only",
+            SETTINGS_ADMIN_ONLY,
+        )));
+    }
+    Ok((me, cm))
+}
+
+pub fn handle_of(state: &AppState, user_id: &str) -> String {
     state
         .db
         .user_card(user_id)
@@ -677,6 +858,9 @@ pub struct CreateGroupBody {
     pub avatar_leaf: Option<i64>,
     #[serde(default)]
     pub avatar_leaf_color: Option<i64>,
+    /// Optional about text (≤200 chars).
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 /// `POST /chats {kind: "group", members: [handles…], agent_ids: [project ids…]}` — a new people
@@ -740,6 +924,9 @@ pub async fn chats_create_group(
                 "this person is not available",
             );
         }
+        if !may_add_to_group(&state, &me, &other_id) {
+            return group_add_forbidden();
+        }
         other_ids.push(other_id);
     }
     // Agents are checked before anything is written: a foreign project fails the whole call.
@@ -790,6 +977,12 @@ pub async fn chats_create_group(
         image_key: None,
         avatar_leaf: leaf.map(|l| l.0),
         avatar_leaf_color: leaf.map(|l| l.1),
+        description: b
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(|t| t.chars().take(200).collect()),
     };
     if let Err(e) = state.db.insert_people_chat(&chat) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
@@ -914,6 +1107,7 @@ pub async fn dm_create(
         image_key: None,
         avatar_leaf: None,
         avatar_leaf_color: None,
+        description: None,
     };
     if let Err(e) = state.db.insert_people_chat(&chat) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
@@ -1002,6 +1196,9 @@ pub struct PatchChatBody {
         deserialize_with = "crate::api::deserialize_double_option_i64"
     )]
     pub avatar_leaf_color: Option<Option<i64>>,
+    /// Optional about text. Empty string clears it.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 /// `None` = untouched, `Some(None)` = clear, `Some(Some((leaf, colour)))` = set.
@@ -1033,15 +1230,44 @@ fn safe_image_key(k: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == ':')
 }
 
-/// `PATCH /chats/{id} {"title"?, "image_key"?}` — any human member can name the group
-/// and set an optional picture (uploaded first via `PUT /blob/people:{id}/…`).
+/// The settings fields a `PATCH /chats/{id}` body touches, for the audit row.
+fn patched_fields(b: &PatchChatBody) -> Vec<&'static str> {
+    let mut fields = Vec::new();
+    if b.title.is_some() {
+        fields.push("title");
+    }
+    if b.image_key.is_some() {
+        fields.push("image_key");
+    }
+    if b.avatar_leaf.is_some() || b.avatar_leaf_color.is_some() {
+        fields.push("avatar_leaf");
+    }
+    if b.description.is_some() {
+        fields.push("description");
+    }
+    fields
+}
+
+/// `PATCH /chats/{id} {"title"?, "image_key"?, "description"?}` — the group's owner and
+/// admins name the group, set an optional picture (uploaded first via
+/// `PUT /blob/people:{id}/…`), and set an optional description. Any other member gets 403
+/// (`settings_chat`); an empty body is a read any member may do.
 pub async fn chat_patch(
     State(state): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
     Json(b): Json<PatchChatBody>,
 ) -> Response {
-    let (me, cm) = match member_chat(&state, &principal, &id) {
+    let fields = patched_fields(&b);
+    if fields.is_empty() {
+        return match member_chat(&state, &principal, &id) {
+            Ok((me, cm)) => {
+                Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response()
+            }
+            Err(r) => *r,
+        };
+    }
+    let (me, cm) = match settings_chat(&state, &principal, &id, &fields) {
         Ok(v) => v,
         Err(r) => return *r,
     };
@@ -1049,15 +1275,20 @@ pub async fn chat_patch(
         Ok(l) => l,
         Err((st, msg)) => return api_error(st, "bad_leaf", msg),
     };
-    if b.title.is_none() && b.image_key.is_none() && leaf.is_none() {
-        return Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response();
-    }
     let title = b.title.as_ref().map(|t| {
         let trimmed = t.trim();
         if trimmed.is_empty() {
             None
         } else {
             Some(trimmed.chars().take(80).collect::<String>())
+        }
+    });
+    let description = b.description.as_ref().map(|t| {
+        let trimmed = t.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.chars().take(200).collect::<String>())
         }
     });
     let image_key = match &b.image_key {
@@ -1084,9 +1315,11 @@ pub async fn chat_patch(
     }
     let title_ref = title.as_ref().map(|o| o.as_ref().map(|s| s.as_str()));
     let image_ref = image_key.as_ref().map(|o| o.as_ref().map(|s| s.as_str()));
-    if let Err(e) = state
-        .db
-        .update_people_chat_profile(&id, title_ref, image_ref, leaf)
+    let description_ref = description.as_ref().map(|o| o.as_ref().map(|s| s.as_str()));
+    if let Err(e) =
+        state
+            .db
+            .update_people_chat_profile(&id, title_ref, image_ref, leaf, description_ref)
     {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
@@ -1123,7 +1356,7 @@ pub async fn chat_read(
         Err(r) => return *r,
     };
     let is_people = state.db.people_chat(&id).ok().flatten().is_some();
-    if is_people {
+    let chat_ref = if is_people {
         if let Err(r) = member_chat(&state, &principal, &id) {
             return *r;
         }
@@ -1133,6 +1366,7 @@ pub async fn chat_read(
         {
             return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
         }
+        crate::notify::ChatRef::people(&id)
     } else {
         // A project chat (own or shared): the same call marks it read for unread counts.
         let Ok(Some(project_id)) = state.db.chat_project_id(&id) else {
@@ -1141,7 +1375,8 @@ pub async fn chat_read(
         if !state.allows(&principal, &project_id) {
             return api_error(StatusCode::FORBIDDEN, "not_member", "not your chat");
         }
-    }
+        crate::notify::ChatRef::project(&project_id, &id)
+    };
     if let Err(e) = state
         .db
         .mark_chat_read(&me, &id)
@@ -1150,7 +1385,12 @@ pub async fn chat_read(
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
     state.matrix.read(&state, &id, &me);
-    crate::notify::badge_refresh(&state, &me, &device_of(&principal)).await;
+    // Read here = cleared everywhere else: the other devices drop the chat's banners and
+    // take the new badge (`/me/pushes` now; the APNs badge alert while push is on).
+    let device = device_of(&principal);
+    let read_upto = format!("seq:{}", b.seq.max(0));
+    crate::notify::clear_on_read(&state, &me, &device, &chat_ref, &read_upto).await;
+    crate::notify::badge_refresh(&state, &me, &device).await;
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -1179,7 +1419,7 @@ pub async fn chat_leave(
         Ok(v) => v,
         Err(r) => return *r,
     };
-    if let Err(e) = state.db.remove_member(&id, &format!("user:{me}")) {
+    if let Err(e) = state.db.remove_member(&id, &format!("user:{me}"), false) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
     state.matrix.touch_chat(&state, &id, None);
@@ -1192,12 +1432,18 @@ pub async fn chat_leave(
             user_id: me.clone(),
             handle: handle_of(&state, &me),
             by_handle: handle_of(&state, &me),
+            banned: None,
         }),
     );
     // Only a group keeps a chat for the others to read; a DM just ends.
     if cm.chat.kind == "group" {
         let line = notices::left_line(&notices::person_name(&state, &me));
-        if let Err(e) = notices::post_people_notice(&state, &id, &line).await {
+        let n = notices::Notice {
+            kind: "left",
+            actor: me.clone(),
+            subjects: vec![],
+        };
+        if let Err(e) = notices::post_people_notice(&state, &id, &line, n).await {
             tracing::warn!(chat = %id, error = %e, "membership notice not written");
         }
     }
@@ -1436,17 +1682,26 @@ pub async fn agent_add(
     if cm.chat.kind == "dm" {
         let _ = state.db.set_people_chat_kind(&id, "group");
     }
-    state.matrix.touch_chat(&state, &id, None);
-    agent_joined(&state, &cm, &me, &id, &project).await;
+    // The notice row goes out first (ARB-393): every device in the room sees "<me> added
+    // <agent>" as soon as the membership row exists, before the box wake, the pushes and the
+    // Matrix mirror have had their turn.
+    crate::outside::on_membership(&state, &project.id, &id, true);
     let line = notices::added_line(
         &notices::person_name(&state, &me),
         std::slice::from_ref(&project.name),
     );
     if let Some(line) = line {
-        if let Err(e) = notices::post_people_notice(&state, &id, &line).await {
+        let n = notices::Notice {
+            kind: "added",
+            actor: me.clone(),
+            subjects: vec![notices::subject_agent(&project.id)],
+        };
+        if let Err(e) = notices::post_people_notice(&state, &id, &line, n).await {
             tracing::warn!(chat = %id, error = %e, "membership notice not written");
         }
     }
+    state.matrix.touch_chat(&state, &id, None);
+    agent_joined(&state, &cm, &me, &id, &project).await;
     match load_chat(&state, &id) {
         Ok(cm) => Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response(),
         Err(r) => *r,
@@ -1560,7 +1815,7 @@ pub fn detach_agent_from_people_chats(state: &AppState, project_id: &str, by_use
     let chats = state.db.chats_of_member(&member).unwrap_or_default();
     let by_handle = handle_of(state, by_user);
     for cm in chats {
-        match state.db.remove_member(&cm.chat.id, &member) {
+        match state.db.remove_member(&cm.chat.id, &member, false) {
             Ok(true) => {}
             Ok(false) => continue,
             Err(e) => {
@@ -1605,7 +1860,10 @@ pub async fn agent_remove(
     if let Err(r) = own_project(&state, &me, &project_id) {
         return *r;
     }
-    match state.db.remove_member(&id, &format!("agent:{project_id}")) {
+    match state
+        .db
+        .remove_member(&id, &format!("agent:{project_id}"), false)
+    {
         Ok(true) => {}
         Ok(false) => {
             return api_error(
@@ -1632,12 +1890,18 @@ pub async fn agent_remove(
             by_handle: handle_of(&state, &me),
         }),
     );
+    crate::outside::on_membership(&state, &project_id, &id, false);
     let line = notices::removed_line(
         &notices::person_name(&state, &me),
         &[notices::agent_name(&state, &project_id)],
     );
     if let Some(line) = line {
-        if let Err(e) = notices::post_people_notice(&state, &id, &line).await {
+        let n = notices::Notice {
+            kind: "removed",
+            actor: me.clone(),
+            subjects: vec![notices::subject_agent(&project_id)],
+        };
+        if let Err(e) = notices::post_people_notice(&state, &id, &line, n).await {
             tracing::warn!(chat = %id, error = %e, "membership notice not written");
         }
     }
@@ -1726,6 +1990,9 @@ pub async fn member_add(
                 "this person is not available",
             );
         }
+        if !may_add_to_group(&state, &me, &other_id) {
+            return group_add_forbidden();
+        }
         people.push(other);
     }
     let mut agents: Vec<crate::db::Project> = Vec::new();
@@ -1758,13 +2025,32 @@ pub async fn member_add(
         );
     }
     let mut names: Vec<String> = Vec::new();
+    let mut subjects: Vec<serde_json::Value> = Vec::new();
     for other in &people {
         let other_id = other.id.clone();
+        if state
+            .db
+            .member_is_banned(&id, &format!("user:{other_id}"))
+            .unwrap_or(false)
+        {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "banned",
+                "they were banned from this group",
+            );
+        }
         if let Err(e) =
             state
                 .db
                 .add_member(&id, &format!("user:{other_id}"), "member", &me, &json!({}))
         {
+            if e.to_string().contains("banned") {
+                return api_error(
+                    StatusCode::FORBIDDEN,
+                    "banned",
+                    "they were banned from this group",
+                );
+            }
             return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
         }
         let event = PushEventDto::PeopleMemberAdded(PeopleMemberAddedPayloadDto {
@@ -1777,6 +2063,7 @@ pub async fn member_add(
         notify_members(&state, &cm, &me, &event);
         tracing::info!(chat = %id, user = %other_id, %me, "person added to a people chat");
         names.push(notices::person_name(&state, &other_id));
+        subjects.push(notices::subject_user(&other_id));
     }
     for project in &agents {
         if let Err(e) = state.db.add_member(
@@ -1788,17 +2075,28 @@ pub async fn member_add(
         ) {
             return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
         }
-        agent_joined(&state, &cm, &me, &id, project).await;
         names.push(project.name.clone());
+        subjects.push(notices::subject_agent(&project.id));
+        crate::outside::on_membership(&state, &project.id, &id, true);
     }
     if cm.chat.kind == "dm" {
         let _ = state.db.set_people_chat_kind(&id, "group");
     }
-    state.matrix.touch_chat(&state, &id, None);
+    // Notice row first (ARB-393), then the slower follow-up work: box wakes, agent pushes
+    // and the Matrix mirror.
     if let Some(line) = notices::added_line(&notices::person_name(&state, &me), &names) {
-        if let Err(e) = notices::post_people_notice(&state, &id, &line).await {
+        let n = notices::Notice {
+            kind: "added",
+            actor: me.clone(),
+            subjects,
+        };
+        if let Err(e) = notices::post_people_notice(&state, &id, &line, n).await {
             tracing::warn!(chat = %id, error = %e, "membership notice not written");
         }
+    }
+    state.matrix.touch_chat(&state, &id, None);
+    for project in &agents {
+        agent_joined(&state, &cm, &me, &id, project).await;
     }
     match load_chat(&state, &id) {
         Ok(cm) => Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response(),
@@ -1806,35 +2104,130 @@ pub async fn member_add(
     }
 }
 
-/// `DELETE /chats/{id}/members/{user_id}` — a chat owner removes a person; access ends at once.
+/// Owner or admin of a people group (not a plain member).
+fn can_manage_members(cm: &ChatWithMembers, me: &str) -> bool {
+    cm.members
+        .iter()
+        .any(|m| m.user_id() == Some(me) && (m.role == "owner" || m.role == "admin"))
+}
+
+/// My role in the chat, if I am a live human member.
+fn my_role<'a>(cm: &'a ChatWithMembers, me: &str) -> Option<&'a str> {
+    cm.members
+        .iter()
+        .find(|m| m.user_id() == Some(me))
+        .map(|m| m.role.as_str())
+}
+
+/// True while an admin mute still blocks posting (honours timed `silenced_until`).
+fn membership_is_silenced(m: &Membership) -> bool {
+    if !m.silenced {
+        return false;
+    }
+    !matches!(m.silenced_until, Some(until) if until <= now_ms())
+}
+
+/// Owner always; an admin only when the owner left `can_mute_ban` on (default true).
+fn member_can_mute_ban(m: &Membership) -> bool {
+    if m.role == "owner" {
+        return true;
+    }
+    if m.role != "admin" {
+        return false;
+    }
+    m.settings
+        .get("can_mute_ban")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
+/// May I remove this human target? Owners manage everyone else; admins manage
+/// members only (not the owner or other admins).
+/// Returns `Some(error response)` when refused.
+fn can_moderate_member(cm: &ChatWithMembers, me: &str, target_id: &str) -> Option<Response> {
+    if !can_manage_members(cm, me) {
+        return Some(api_error(
+            StatusCode::FORBIDDEN,
+            "owner_only",
+            "only an owner or admin can manage members",
+        ));
+    }
+    if target_id == me {
+        return Some(api_error(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "use leave to remove yourself",
+        ));
+    }
+    let target = cm.members.iter().find(|m| m.user_id() == Some(target_id));
+    let Some(target) = target else {
+        return Some(api_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "not a member",
+        ));
+    };
+    if target.role == "owner" {
+        return Some(api_error(
+            StatusCode::FORBIDDEN,
+            "owner_stays",
+            "the owner cannot be removed",
+        ));
+    }
+    if my_role(cm, me) == Some("admin") && target.role == "admin" {
+        return Some(api_error(
+            StatusCode::FORBIDDEN,
+            "owner_only",
+            "only the owner manages an admin",
+        ));
+    }
+    None
+}
+
+/// May I mute or ban this human? Same hierarchy as remove, plus the owner can
+/// turn off mute/ban for individual admins (`can_mute_ban`).
+fn can_mute_ban_member(cm: &ChatWithMembers, me: &str, target_id: &str) -> Option<Response> {
+    if let Some(r) = can_moderate_member(cm, me, target_id) {
+        return Some(r);
+    }
+    let Some(actor) = cm.members.iter().find(|m| m.user_id() == Some(me)) else {
+        return Some(api_error(
+            StatusCode::FORBIDDEN,
+            "owner_only",
+            "only an owner or admin can mute or ban",
+        ));
+    };
+    if !member_can_mute_ban(actor) {
+        return Some(api_error(
+            StatusCode::FORBIDDEN,
+            "owner_only",
+            "the owner has not given you mute and ban rights",
+        ));
+    }
+    None
+}
+
+/// `DELETE /chats/{id}/members/{user_id}[?ban=1]` — owner/admin removes (or bans) a person.
 pub async fn member_remove(
     State(state): State<AppState>,
     principal: Principal,
     Path((id, user_id)): Path<(String, String)>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
     let (me, cm) = match member_chat(&state, &principal, &id) {
         Ok(v) => v,
         Err(r) => return *r,
     };
-    if !cm
-        .members
-        .iter()
-        .any(|m| m.user_id() == Some(me.as_str()) && m.role == "owner")
-    {
-        return api_error(
-            StatusCode::FORBIDDEN,
-            "owner_only",
-            "only an owner can remove people",
-        );
+    let ban = q.get("ban").is_some_and(|b| b == "1");
+    // Ban needs mute/ban rights; plain remove is any owner/admin.
+    if ban {
+        if let Some(r) = can_mute_ban_member(&cm, &me, &user_id) {
+            return r;
+        }
+    } else if let Some(r) = can_moderate_member(&cm, &me, &user_id) {
+        return r;
     }
-    if user_id == me {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "bad_request",
-            "use leave to remove yourself",
-        );
-    }
-    match state.db.remove_member(&id, &format!("user:{user_id}")) {
+    match state.db.remove_member(&id, &format!("user:{user_id}"), ban) {
         Ok(true) => {}
         Ok(false) => return api_error(StatusCode::NOT_FOUND, "not_found", "not a member"),
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
@@ -1845,6 +2238,7 @@ pub async fn member_remove(
         user_id: user_id.clone(),
         handle: handle_of(&state, &user_id),
         by_handle: handle_of(&state, &me),
+        banned: Some(ban),
     });
     let _ = state.db.push_user_event(&user_id, &event, None);
     notify_members(&state, &cm, &me, &event);
@@ -1853,11 +2247,238 @@ pub async fn member_remove(
         &[notices::person_name(&state, &user_id)],
     );
     if let Some(line) = line {
-        if let Err(e) = notices::post_people_notice(&state, &id, &line).await {
+        let n = notices::Notice {
+            kind: "removed",
+            actor: me.clone(),
+            subjects: vec![notices::subject_user(&user_id)],
+        };
+        if let Err(e) = notices::post_people_notice(&state, &id, &line, n).await {
             tracing::warn!(chat = %id, error = %e, "membership notice not written");
         }
     }
     StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
+pub struct MemberPatchBody {
+    /// Mute (true) or unmute (false) from posting in this group.
+    pub silenced: Option<bool>,
+    /// When a mute ends (ms). Omit or null with `silenced: true` = until unmuted.
+    #[serde(default)]
+    pub silenced_until: Option<i64>,
+    /// Owner only: set this person's role to `admin` or `member`.
+    pub role: Option<String>,
+    /// Owner only: whether this admin may mute and ban members (default true).
+    pub can_mute_ban: Option<bool>,
+}
+
+/// `PUT /chats/{id}/members/{user_id}` — mute/unmute (with optional duration), or
+/// owner sets role / mute-ban rights for an admin.
+pub async fn member_patch(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((id, user_id)): Path<(String, String)>,
+    Json(b): Json<MemberPatchBody>,
+) -> Response {
+    let (me, cm) = match member_chat(&state, &principal, &id) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    let has_silence = b.silenced.is_some();
+    let has_role = b.role.is_some();
+    let has_rights = b.can_mute_ban.is_some();
+    if !has_silence && !has_role && !has_rights {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "set silenced, role, or can_mute_ban",
+        );
+    }
+
+    // Role / mute-ban rights: owner only, and only for someone else who is not the owner.
+    if has_role || has_rights {
+        if my_role(&cm, &me) != Some("owner") {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "owner_only",
+                "only the owner sets admin roles and mute-ban rights",
+            );
+        }
+        if user_id == me {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                "cannot change your own role or mute-ban rights",
+            );
+        }
+        let target = cm
+            .members
+            .iter()
+            .find(|m| m.user_id() == Some(user_id.as_str()));
+        let Some(target) = target else {
+            return api_error(StatusCode::NOT_FOUND, "not_found", "not a member");
+        };
+        if target.role == "owner" {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "owner_stays",
+                "the owner cannot be demoted",
+            );
+        }
+        if let Some(role) = b.role.as_deref() {
+            if role != "admin" && role != "member" {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "bad_request",
+                    "role is admin or member",
+                );
+            }
+            match state
+                .db
+                .set_member_role(&id, &format!("user:{user_id}"), role)
+            {
+                Ok(true) => {}
+                Ok(false) => return api_error(StatusCode::NOT_FOUND, "not_found", "not a member"),
+                Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+            }
+            // Fresh admins get mute/ban on unless the same request sets it.
+            if role == "admin" && b.can_mute_ban.is_none() {
+                let mut settings = if target.settings.is_object() {
+                    target.settings.clone()
+                } else {
+                    json!({})
+                };
+                settings["can_mute_ban"] = json!(true);
+                let _ = state
+                    .db
+                    .set_member_settings(&id, &format!("user:{user_id}"), &settings);
+            }
+            if role == "member" {
+                let mut settings = if target.settings.is_object() {
+                    target.settings.clone()
+                } else {
+                    json!({})
+                };
+                if settings.get("can_mute_ban").is_some() {
+                    if let Some(obj) = settings.as_object_mut() {
+                        obj.remove("can_mute_ban");
+                    }
+                    let _ =
+                        state
+                            .db
+                            .set_member_settings(&id, &format!("user:{user_id}"), &settings);
+                }
+            }
+        }
+        if let Some(can) = b.can_mute_ban {
+            // Reload role after a possible promotion in this request.
+            let role_now = b.role.as_deref().unwrap_or(target.role.as_str());
+            if role_now != "admin" {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "bad_request",
+                    "mute-ban rights apply to admins only",
+                );
+            }
+            let fresh = state
+                .db
+                .membership(&id, &format!("user:{user_id}"))
+                .ok()
+                .flatten();
+            let mut settings = fresh
+                .as_ref()
+                .map(|m| {
+                    if m.settings.is_object() {
+                        m.settings.clone()
+                    } else {
+                        json!({})
+                    }
+                })
+                .unwrap_or_else(|| json!({}));
+            settings["can_mute_ban"] = json!(can);
+            if let Err(e) = state
+                .db
+                .set_member_settings(&id, &format!("user:{user_id}"), &settings)
+            {
+                return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+            }
+        }
+    }
+
+    if let Some(silenced) = b.silenced {
+        if let Some(r) = can_mute_ban_member(&cm, &me, &user_id) {
+            return r;
+        }
+        let until = if silenced { b.silenced_until } else { None };
+        match state
+            .db
+            .set_member_silenced(&id, &format!("user:{user_id}"), silenced, until)
+        {
+            Ok(true) => {}
+            Ok(false) => return api_error(StatusCode::NOT_FOUND, "not_found", "not a member"),
+            Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+        }
+    }
+
+    state.matrix.touch_chat(&state, &id, None);
+    let event = PushEventDto::PeopleChatUpdated(PeopleChatUpdatedPayloadDto {
+        chat_id: id.clone(),
+    });
+    let _ = state.db.push_user_event(&user_id, &event, None);
+    notify_members(&state, &cm, &me, &event);
+    match load_chat(&state, &id) {
+        Ok(cm) => Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response(),
+        Err(r) => *r,
+    }
+}
+
+/// `POST /chats/{id}/members/{user_id}/unban` — clear a ban so they can be added again.
+pub async fn member_unban(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((id, user_id)): Path<(String, String)>,
+) -> Response {
+    let (me, cm) = match member_chat(&state, &principal, &id) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    let mine = cm.members.iter().find(|m| m.user_id() == Some(me.as_str()));
+    let allowed = match mine {
+        Some(m) if m.role == "owner" => true,
+        Some(m) if m.role == "admin" && member_can_mute_ban(m) => true,
+        _ => false,
+    };
+    if !allowed {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "owner_only",
+            "only an owner or an admin with mute and ban rights can unban",
+        );
+    }
+    match state.db.unban_member(&id, &format!("user:{user_id}")) {
+        Ok(true) => {}
+        Ok(false) => {
+            return api_error(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "that person is not banned",
+            )
+        }
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    }
+    state.matrix.touch_chat(&state, &id, None);
+    notify_members(
+        &state,
+        &cm,
+        &me,
+        &PushEventDto::PeopleChatUpdated(PeopleChatUpdatedPayloadDto {
+            chat_id: id.clone(),
+        }),
+    );
+    match load_chat(&state, &id) {
+        Ok(cm) => Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response(),
+        Err(r) => *r,
+    }
 }
 
 /// `GET /box/people/{chat_id}` — the chat as the owner's box sees it (members and settings).
@@ -1877,7 +2498,7 @@ pub async fn box_people_chat(
         );
     }
     match load_chat(&state, &id) {
-        Ok(cm) => Json(chat_json(&state, &cm, user_id, &device_of(&principal))).into_response(),
+        Ok(cm) => Json(box_chat_json(&state, &cm, user_id, &device_of(&principal))).into_response(),
         Err(r) => *r,
     }
 }
@@ -1889,8 +2510,34 @@ pub fn people_chats_of_project(state: &AppState, project_id: &str, owner: &str) 
         .chats_of_member(&format!("agent:{project_id}"))
         .unwrap_or_default()
         .iter()
-        .map(|cm| chat_json(state, cm, owner, "box"))
+        .map(|cm| box_chat_json(state, cm, owner, "box"))
         .collect()
+}
+
+/// How many device ids a box-facing roster lists per person.
+const MEMBER_DEVICES_MAX: usize = 64;
+
+/// The chat as a box sees it: the apps' roster plus, on every human member, `devices` — the
+/// ids that person's devices write into `deviceId`. A row that carries no `sender: user:<id>`
+/// (an older app, `arbosctl`) is attributed by the box through this list instead of being
+/// guessed as the owner's (#1580). Apps never get it; they have the row's author fields.
+pub fn box_chat_json(state: &AppState, cm: &ChatWithMembers, me: &str, device_id: &str) -> Value {
+    let mut chat = chat_json(state, cm, me, device_id);
+    if let Some(members) = chat.get_mut("members").and_then(Value::as_array_mut) {
+        for m in members {
+            let Some(uid) = m.get("user_id").and_then(Value::as_str).map(str::to_owned) else {
+                continue;
+            };
+            let ids = state
+                .db
+                .device_ids_of_user(&uid, MEMBER_DEVICES_MAX)
+                .unwrap_or_default();
+            if let Some(o) = m.as_object_mut() {
+                o.insert("devices".into(), json!(ids));
+            }
+        }
+    }
+    chat
 }
 
 // ---- projects together (step 3) ----------------------------------------------------------------
@@ -2121,6 +2768,10 @@ pub struct ChatSettingsBody {
     /// Archive (hide) this chat for me on every device; `false` brings it back (D78).
     #[serde(default)]
     pub archived: Option<bool>,
+    /// Notification level for me in this chat: `all` | `mentions` | `none` | `inherit`
+    /// (the account default, `PUT /me/notifications`). Any chat kind.
+    #[serde(default)]
+    pub notifications: Option<String>,
 }
 
 /// Flip the archive state for the caller and tell their other devices (`chat_archived`).
@@ -2155,7 +2806,9 @@ fn apply_archive(
     Ok(at)
 }
 
-/// `PUT /chats/{id}/settings {"read_receipts"?, "muted"?}` — my own settings for this chat.
+/// `PUT /chats/{id}/settings {"read_receipts"?, "muted"?, "archived"?, "notifications"?}` — my
+/// own settings for this chat. The answer carries `notifications` (the level set here, or
+/// `inherit`).
 /// Receipts themselves travel in the room (Presence frames `{seen: <message id>}`); clients of
 /// a member with `read_receipts: false` simply do not send them, and others do not show theirs
 /// to that member.
@@ -2181,7 +2834,7 @@ pub async fn chat_settings(
             return api_error(
                 StatusCode::BAD_REQUEST,
                 "bad_request",
-                "only archived applies to a project chat",
+                "only archived and notifications apply to a project chat",
             );
         }
         if let Some(a) = b.archived {
@@ -2189,8 +2842,15 @@ pub async fn chat_settings(
                 return *r;
             }
         }
+        if let Err(r) = apply_notify_level(&state, &me, &id, b.notifications.as_deref()) {
+            return *r;
+        }
         return match state.db.chat(&project_id, &id) {
-            Ok(Some(c)) => Json(crate::api::chat_json_for(&state, &c, Some(&me))).into_response(),
+            Ok(Some(c)) => {
+                let mut v = crate::api::chat_json_for(&state, &c, Some(&me));
+                v["notifications"] = json!(notify_level_of(&state, &me, &id));
+                Json(v).into_response()
+            }
             Ok(None) => api_error(StatusCode::NOT_FOUND, "not_found", "no such chat"),
             Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
         };
@@ -2223,10 +2883,54 @@ pub async fn chat_settings(
             return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
         }
     }
+    if let Err(r) = apply_notify_level(&state, &me, &id, b.notifications.as_deref()) {
+        return *r;
+    }
     match load_chat(&state, &id) {
-        Ok(cm) => Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response(),
+        Ok(cm) => {
+            let mut v = chat_json(&state, &cm, &me, &device_of(&principal));
+            v["notifications"] = json!(notify_level_of(&state, &me, &id));
+            Json(v).into_response()
+        }
         Err(r) => *r,
     }
+}
+
+/// Store the caller's notification level for a chat when the body names one.
+fn apply_notify_level(
+    state: &AppState,
+    me: &str,
+    chat_id: &str,
+    level: Option<&str>,
+) -> Result<(), Box<Response>> {
+    let Some(word) = level else {
+        return Ok(());
+    };
+    let Some(level) = crate::push::eligibility::Level::parse(word) else {
+        return Err(Box::new(api_error(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "notifications must be all, mentions, none or inherit",
+        )));
+    };
+    state
+        .db
+        .set_chat_notify_level(me, chat_id, level)
+        .map_err(|e| {
+            Box::new(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db",
+                e.to_string(),
+            ))
+        })
+}
+
+fn notify_level_of(state: &AppState, me: &str, chat_id: &str) -> &'static str {
+    state
+        .db
+        .chat_notify_level(me, chat_id)
+        .unwrap_or(crate::push::eligibility::Level::Inherit)
+        .as_str()
 }
 
 // ---- invite links (people who are not on Arbos yet) -----------------------------------------
@@ -2358,6 +3062,7 @@ pub async fn invite_create(
                     image_key: None,
                     avatar_leaf: None,
                     avatar_leaf_color: None,
+                    description: None,
                 };
                 if let Err(e) = state.db.insert_people_chat(&chat) {
                     return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
@@ -2497,69 +3202,649 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+// ---- group chat invite links (join by sharing a link) -------------------------------------------
+
+/// Seven days: the only expiry the apps offer (same as server invites).
+const GROUP_INVITE_EXPIRY_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+/// Group invite links live on the site (`arbos.life/g/<code>` deep-links into the app) when
+/// `ARBOS_SITE_URL` is set; the relay's own `/g/<code>` otherwise.
+fn group_invite_url(state: &AppState, code: &str) -> String {
+    let base = std::env::var("ARBOS_SITE_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| state.cfg.public_url.clone());
+    format!("{}/g/{}", base.trim_end_matches('/'), code)
+}
+
+fn group_invite_json(state: &AppState, i: &GroupInvite) -> Value {
+    json!({
+        "id": i.id, "code": i.code, "url": group_invite_url(state, &i.code),
+        "chat_id": i.chat_id, "created_by": i.created_by,
+        "created_at": i.created_at, "expires_at": i.expires_at, "uses_left": i.uses_left,
+        "usable": i.usable(now_ms()),
+    })
+}
+
+#[derive(Deserialize, Default)]
+pub struct GroupInviteBody {
+    /// Expire after seven days.
+    #[serde(default)]
+    pub expires: bool,
+    /// Number of joins the link allows; absent = unlimited.
+    #[serde(default)]
+    pub max_uses: Option<i64>,
+}
+
+/// `GET /chats/{id}/invites` — invite links for a people group (any human member).
+pub async fn group_invites_list(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+) -> Response {
+    let (_me, cm) = match member_chat(&state, &principal, &id) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    if cm.chat.kind != "group" {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "not_group",
+            "invite links are for group chats",
+        );
+    }
+    let list: Vec<Value> = state
+        .db
+        .invites_of_group(&id)
+        .unwrap_or_default()
+        .iter()
+        .map(|i| group_invite_json(&state, i))
+        .collect();
+    Json(json!({ "invites": list })).into_response()
+}
+
+/// `POST /chats/{id}/invites {expires?, max_uses?}` — any human member mints a link.
+pub async fn group_invites_create(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    body: Option<Json<GroupInviteBody>>,
+) -> Response {
+    let (me, cm) = match member_chat(&state, &principal, &id) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    if cm.chat.kind != "group" {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "not_group",
+            "invite links are for group chats",
+        );
+    }
+    let b = body.map(|b| b.0).unwrap_or_default();
+    let max_uses = b.max_uses.filter(|n| *n > 0).map(|n| n.min(1000));
+    let inv = GroupInvite {
+        id: ulid(),
+        chat_id: id.clone(),
+        code: invite_code(),
+        created_by: me,
+        created_at: now_ms(),
+        expires_at: b.expires.then(|| now_ms() + GROUP_INVITE_EXPIRY_MS),
+        uses_left: max_uses,
+        revoked_at: None,
+    };
+    if let Err(e) = state.db.insert_group_invite(&inv) {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+    }
+    (StatusCode::CREATED, Json(group_invite_json(&state, &inv))).into_response()
+}
+
+/// `DELETE /chats/{id}/invites/{iid}` — any human member revokes a link.
+pub async fn group_invites_revoke(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((id, iid)): Path<(String, String)>,
+) -> Response {
+    let (_me, cm) = match member_chat(&state, &principal, &id) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    if cm.chat.kind != "group" {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "not_group",
+            "invite links are for group chats",
+        );
+    }
+    match state.db.revoke_group_invite(&id, &iid) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => api_error(StatusCode::NOT_FOUND, "not_found", "no such invite"),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct GroupJoinBody {
+    /// Invite link or its code.
+    pub code: String,
+}
+
+/// `POST /chats/join {code}` — join a people group from an invite link.
+pub async fn group_join(
+    State(state): State<AppState>,
+    principal: Principal,
+    Json(b): Json<GroupJoinBody>,
+) -> Response {
+    let me = match user_of(&principal) {
+        Ok(u) => u,
+        Err(r) => return *r,
+    };
+    let code = b
+        .code
+        .trim()
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_owned();
+    if code.is_empty() {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "paste a group invite link",
+        );
+    }
+    let Some(inv) = state
+        .db
+        .group_invite_by_code(&code)
+        .ok()
+        .flatten()
+        .filter(|i| i.usable(now_ms()))
+    else {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "that invite link is not valid any more",
+        );
+    };
+    let cm = match load_chat(&state, &inv.chat_id) {
+        Ok(cm) => cm,
+        Err(r) => return *r,
+    };
+    if cm.chat.kind != "group" {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "that invite link is not valid any more",
+        );
+    }
+    // Already a member: return the chat (re-tapping the link).
+    if cm.members.iter().any(|m| m.user_id() == Some(me.as_str())) {
+        return Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response();
+    }
+    if state
+        .db
+        .blocked_either_way(&me, &cm.chat.created_by)
+        .unwrap_or(false)
+    {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "not_available",
+            "this group is not available",
+        );
+    }
+    let humans = human_user_ids(&cm);
+    if state.db.blocked_by_any(&me, &humans).unwrap_or(false) {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "not_available",
+            "this group is not available",
+        );
+    }
+    if inv.uses_left.is_some() && !state.db.consume_group_invite_use(&inv.id).unwrap_or(false) {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "that invite link has been used up",
+        );
+    }
+    if let Err(e) = state.db.add_member(
+        &inv.chat_id,
+        &format!("user:{me}"),
+        "member",
+        &me,
+        &json!({}),
+    ) {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+    }
+    let event = PushEventDto::PeopleMemberAdded(PeopleMemberAddedPayloadDto {
+        chat_id: inv.chat_id.clone(),
+        user_id: me.clone(),
+        handle: handle_of(&state, &me),
+        by_handle: handle_of(&state, &inv.created_by),
+    });
+    notify_members(&state, &cm, &me, &event);
+    state.matrix.touch_chat(&state, &inv.chat_id, None);
+    let line = format!("{} joined", notices::person_name(&state, &me));
+    let n = notices::Notice {
+        kind: "joined",
+        actor: me.clone(),
+        subjects: vec![],
+    };
+    if let Err(e) = notices::post_people_notice(&state, &inv.chat_id, &line, n).await {
+        tracing::warn!(chat = %inv.chat_id, error = %e, "join notice not written");
+    }
+    match load_chat(&state, &inv.chat_id) {
+        Ok(cm) => Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response(),
+        Err(r) => *r,
+    }
+}
+
+/// `GET /g/{code}` — the group invite link. JSON for the apps; for a browser an HTML page that
+/// opens `arbos://join-group/<code>` and otherwise explains how to join.
+pub async fn group_invite_landing(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let wants_html = headers
+        .get(header::ACCEPT)
+        .and_then(|a| a.to_str().ok())
+        .is_some_and(|a| a.contains("text/html"));
+    let inv = state.db.group_invite_by_code(&code).ok().flatten();
+    let chat = inv
+        .as_ref()
+        .and_then(|i| state.db.people_chat(&i.chat_id).ok().flatten());
+    let (Some(inv), Some(chat)) = (inv, chat) else {
+        return if wants_html {
+            group_invite_page("<p>This invite link is not valid.</p>")
+        } else {
+            api_error(StatusCode::NOT_FOUND, "not_found", "no such invite")
+        };
+    };
+    let usable = inv.usable(now_ms());
+    let members = state
+        .db
+        .members_of(&chat.id)
+        .map(|m| m.iter().filter(|m| m.user_id().is_some()).count())
+        .unwrap_or(0);
+    let title = chat
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .unwrap_or("a group");
+    let download = format!(
+        "{}/download/mac",
+        state.cfg.public_url.trim_end_matches('/')
+    );
+    if !wants_html {
+        return Json(json!({
+            "code": code, "usable": usable, "expires_at": inv.expires_at, "uses_left": inv.uses_left,
+            "chat": { "id": chat.id, "title": title, "member_count": members, "image_key": chat.image_key },
+            "download_url": download,
+        }))
+        .into_response();
+    }
+    if !usable {
+        let why = if inv.revoked_at.is_some() {
+            "was revoked"
+        } else if inv.uses_left == Some(0) {
+            "has been used up"
+        } else {
+            "has expired"
+        };
+        return group_invite_page(&format!(
+            "<p>This invite to <strong>{}</strong> {why}. Ask someone in the group for a new link.</p>",
+            html_escape(title)
+        ));
+    }
+    let safe_code = html_escape(&code);
+    group_invite_page_with_head(
+        &format!("<meta http-equiv=\"refresh\" content=\"0;url=arbos://join-group/{safe_code}\">"),
+        &format!(
+            "<p>You are invited to the group <strong>{name}</strong> on Arbos ({members} members).</p>\
+             <p><a class=\"btn\" href=\"arbos://join-group/{safe_code}\">Open in Arbos</a></p>\
+             <p>No Arbos yet? <a href=\"{download}\">Download for Mac</a>, then open this link again.</p>",
+            name = html_escape(title),
+        ),
+    )
+}
+
+fn group_invite_page(body: &str) -> Response {
+    group_invite_page_with_head("", body)
+}
+
+fn group_invite_page_with_head(head: &str, body: &str) -> Response {
+    let html = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Arbos group invite</title>{head}\
+         <style>body{{font:16px/1.5 -apple-system,system-ui,sans-serif;background:#0b0b0d;color:#e8e8ea;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}}\
+         main{{max-width:28rem;padding:2rem}}h1{{font-size:1.4rem;margin:0 0 1rem}}.btn{{display:inline-block;background:#e8e8ea;color:#0b0b0d;padding:.6rem 1rem;border-radius:.6rem;text-decoration:none;font-weight:600}}</style></head>\
+         <body><main><h1>Arbos</h1>{body}</main></body></html>"
+    );
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
+}
+
 // ---- room hooks ---------------------------------------------------------------------------------
 
-/// Why a row push into a people room was refused (sent back as an `error` frame).
+/// Why a row push into a people room was refused (sent back as an `error` frame). The wire
+/// code stays `rate_limited` / `not_available` — fielded clients keep a room Live only for
+/// those two (`arbos-client::room::on_error`), so a new code would make every old client drop
+/// and redial the room on each retry. A `not_available` frame says *why* in `reason`
+/// ([feedback blocked-state-relay-2026-10-26]): `blocked_by`, `blocks_member`, `silenced`,
+/// `chat_unavailable`; a block also names the other party as `byHandle` / `byName`. New clients
+/// key on `reason`; old clients behave as before.
+#[derive(Debug)]
 pub enum PushRefused {
-    RateLimited,
+    /// Over the message rate limit. `retry_s` is seconds until the oldest counted event leaves
+    /// the 60 s window (carried as `retryS` on the error frame).
+    RateLimited { retry_s: i64 },
+    /// A block stands between the two people of a DM: `blocked_by` = the other person blocked
+    /// the sender; `blocks_member` = the sender blocked them. Groups are never refused for a
+    /// block (the rows are hidden from the blocker alone).
+    Blocked {
+        reason: BlockReason,
+        by_handle: String,
+        by_name: Option<String>,
+    },
+    /// An admin muted the sender in this chat.
+    Silenced,
+    /// No such chat (or nothing else the relay can name).
     NotAvailable,
+}
+
+/// Which way the block runs, from the sender's point of view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockReason {
+    /// Someone in the chat has blocked the sender.
+    BlockedBy,
+    /// The sender has blocked the other person (a DM: nothing to post into).
+    BlocksMember,
+}
+
+impl BlockReason {
+    pub fn code(self) -> &'static str {
+        match self {
+            BlockReason::BlockedBy => "blocked_by",
+            BlockReason::BlocksMember => "blocks_member",
+        }
+    }
 }
 
 impl PushRefused {
     pub fn code(&self) -> &'static str {
         match self {
-            PushRefused::RateLimited => "rate_limited",
-            PushRefused::NotAvailable => "not_available",
+            PushRefused::RateLimited { .. } => "rate_limited",
+            PushRefused::Blocked { .. } | PushRefused::Silenced | PushRefused::NotAvailable => {
+                "not_available"
+            }
         }
     }
 
     pub fn message(&self) -> &'static str {
         match self {
-            PushRefused::RateLimited => "slow down",
+            PushRefused::RateLimited { .. } => "slow down",
+            PushRefused::Blocked {
+                reason: BlockReason::BlockedBy,
+                ..
+            } => "someone in this chat has blocked you",
+            PushRefused::Blocked {
+                reason: BlockReason::BlocksMember,
+                ..
+            } => "you have blocked this person",
+            PushRefused::Silenced => "you are muted in this chat",
             PushRefused::NotAvailable => "this chat is not available",
         }
     }
+
+    pub fn retry_s(&self) -> Option<i64> {
+        match self {
+            PushRefused::RateLimited { retry_s } => Some(*retry_s),
+            PushRefused::Blocked { .. } | PushRefused::Silenced | PushRefused::NotAvailable => None,
+        }
+    }
+
+    /// The `reason` field of a `not_available` frame; `None` on `rate_limited`.
+    pub fn reason(&self) -> Option<&'static str> {
+        match self {
+            PushRefused::RateLimited { .. } => None,
+            PushRefused::Blocked { reason, .. } => Some(reason.code()),
+            PushRefused::Silenced => Some("silenced"),
+            PushRefused::NotAvailable => Some("chat_unavailable"),
+        }
+    }
+
+    /// `(byHandle, byName)` of the other party on a block.
+    pub fn other_party(&self) -> Option<(&str, Option<&str>)> {
+        match self {
+            PushRefused::Blocked {
+                by_handle, by_name, ..
+            } => Some((by_handle.as_str(), by_name.as_deref())),
+            PushRefused::RateLimited { .. } | PushRefused::Silenced | PushRefused::NotAvailable => {
+                None
+            }
+        }
+    }
+}
+
+/// The block that stops `user_id` posting into `cm`, if any — **DMs only** (Jacob,
+/// 2026-10-26 17:28 CR): the other person blocked the sender (`blocked_by`) or the sender
+/// blocked them (`blocks_member`). In a group a block never refuses the room: the blocked
+/// person's rows are hidden from the blocker alone (`blocked_senders` on the chat DTO, the
+/// blocker's pushes / alerts / unread skip them) and everyone else sees them as before.
+fn block_in_the_way(state: &AppState, user_id: &str, cm: &ChatWithMembers) -> Option<PushRefused> {
+    if cm.chat.kind != "dm" {
+        return None;
+    }
+    let humans = human_user_ids(cm);
+    let other_party = |other: &str| {
+        let card = state.db.user_card(other).ok().flatten();
+        let by_handle = card
+            .as_ref()
+            .map(|c| c.handle.clone())
+            .filter(|h| !h.is_empty())
+            .unwrap_or_else(|| other.to_owned());
+        let by_name = card.and_then(|c| c.name).filter(|n| !n.trim().is_empty());
+        (by_handle, by_name)
+    };
+    for other in humans.iter().filter(|o| o.as_str() != user_id) {
+        if state.db.blocks(other, user_id).unwrap_or(false) {
+            let (by_handle, by_name) = other_party(other);
+            return Some(PushRefused::Blocked {
+                reason: BlockReason::BlockedBy,
+                by_handle,
+                by_name,
+            });
+        }
+        if state.db.blocks(user_id, other).unwrap_or(false) {
+            let (by_handle, by_name) = other_party(other);
+            return Some(PushRefused::Blocked {
+                reason: BlockReason::BlocksMember,
+                by_handle,
+                by_name,
+            });
+        }
+    }
+    None
 }
 
 /// Called on every row a device pushes into `people/<chat>`: rate limit, block check, a
 /// coalesced `people_message` push to the other people in the chat. Returns the users whose
 /// boxes host an agent of this chat, so the caller can wake them.
+/// May this person write into this chat at all? A DM partner's block either way, or an admin
+/// silence, says no. Shared by the room push and `/chats/{id}/notify` (#2012), so the
+/// announcement path is never looser than the row path.
+fn sender_allowed(
+    state: &AppState,
+    user_id: &str,
+    cm: &ChatWithMembers,
+) -> Result<(), PushRefused> {
+    if let Some(r) = block_in_the_way(state, user_id, cm) {
+        return Err(r);
+    }
+    // Admin mute from posting: silenced members cannot send into the room.
+    if cm
+        .members
+        .iter()
+        .any(|m| m.user_id() == Some(user_id) && membership_is_silenced(m))
+    {
+        return Err(PushRefused::Silenced);
+    }
+    Ok(())
+}
+
+/// [`sender_allowed`] for a principal: devices are gated as their person, boxes (agents) pass,
+/// a chat that does not load is `NotAvailable`. One `warn!` per refusal, like the room push.
+pub fn sender_gate(
+    state: &AppState,
+    principal: &Principal,
+    chat_id: &str,
+) -> Result<(), PushRefused> {
+    let Principal::Device { user_id, .. } = principal else {
+        return Ok(());
+    };
+    let Ok(cm) = load_chat(state, chat_id) else {
+        return Err(PushRefused::NotAvailable);
+    };
+    sender_allowed(state, user_id, &cm).inspect_err(|r| {
+        tracing::warn!(
+            user = %user_id,
+            chat = %chat_id,
+            code = r.code(),
+            reason = r.reason().unwrap_or("-"),
+            by = r.other_party().map(|(h, _)| h).unwrap_or("-"),
+            "people notify refused"
+        );
+    })
+}
+
+/// The agents in a people chat, with the user whose box serves each (soft-deleted agents are
+/// gone already: `project()` is `None` for them).
+pub fn serving_agents(state: &AppState, cm: &ChatWithMembers) -> Vec<crate::boxes::ServingAgent> {
+    let mut agents: Vec<crate::boxes::ServingAgent> = cm
+        .members
+        .iter()
+        .filter_map(|m| m.project_id())
+        // Outside agents are served by the relay, not by a box (#2140).
+        .filter(|pid| !crate::outside::is_outside(state, pid))
+        .filter_map(|pid| state.db.project(pid).ok().flatten())
+        .map(|p| crate::boxes::ServingAgent {
+            project_id: p.id,
+            owner: p.user_id,
+        })
+        .collect();
+    agents.sort_by(|a, b| a.project_id.cmp(&b.project_id));
+    agents.dedup();
+    agents
+}
+
+/// `@handle` tokens in `text` that name a member of the chat, as the row's `mentions`
+/// (`agent:<project>` by the agent's slug, `user:<id>` by the person's handle) — what the
+/// apps' autocomplete writes, for a message posted through `POST /chats/{id}/messages`.
+pub fn resolve_mentions(state: &AppState, cm: &ChatWithMembers, text: &str) -> Vec<String> {
+    let mut by_handle: Vec<(String, String)> = Vec::new();
+    for m in &cm.members {
+        if let Some(pid) = m.project_id() {
+            if let Ok(Some(p)) = state.db.project(pid) {
+                by_handle.push((agent_slug(&p.name), format!("agent:{pid}")));
+            }
+        } else if let Some(uid) = m.user_id() {
+            if let Ok(Some(card)) = state.db.user_card(uid) {
+                if !card.handle.is_empty() {
+                    by_handle.push((card.handle.to_lowercase(), format!("user:{uid}")));
+                }
+            }
+        }
+    }
+    let mut out: Vec<String> = Vec::new();
+    for token in text.split(|c: char| {
+        c.is_whitespace() || matches!(c, ',' | ':' | ';' | '!' | '?' | '(' | ')' | '"' | '\'')
+    }) {
+        let Some(handle) = token.strip_prefix('@') else {
+            continue;
+        };
+        let handle = handle.trim_end_matches('.').to_lowercase();
+        if let Some((_, member)) = by_handle.iter().find(|(h, _)| *h == handle) {
+            if !out.contains(member) {
+                out.push(member.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Gates a person's row into a people chat and returns the agents whose boxes it must reach.
 pub fn on_room_push(
     state: &AppState,
     principal: &Principal,
     chat_id: &str,
-) -> Result<Vec<String>, PushRefused> {
+) -> Result<Vec<crate::boxes::ServingAgent>, PushRefused> {
     let Principal::Device { user_id, .. } = principal else {
         return Ok(Vec::new()); // boxes (agents) are metered by their owner's credits, not here
     };
+    let refused = |r: PushRefused| {
+        // One line per refusal (#1990): who, where, why — the Arbonites outage had none.
+        tracing::warn!(
+            user = %user_id,
+            chat = %chat_id,
+            code = r.code(),
+            reason = r.reason().unwrap_or("-"),
+            by = r.other_party().map(|(h, _)| h).unwrap_or("-"),
+            "people push refused"
+        );
+        Err(r)
+    };
+    let Ok(cm) = load_chat(state, chat_id) else {
+        return refused(PushRefused::NotAvailable);
+    };
+    let humans = human_user_ids(&cm);
+    if let Err(r) = sender_allowed(state, user_id, &cm) {
+        return refused(r);
+    }
     let limit = if young_account(state, user_id) {
         MSGS_PER_MIN / 2
     } else {
         MSGS_PER_MIN
     };
-    if state
-        .db
-        .rate_event(user_id, "msg", 60_000)
-        .is_ok_and(|n| n > limit)
-    {
-        return Err(PushRefused::RateLimited);
-    }
-    let Ok(cm) = load_chat(state, chat_id) else {
-        return Err(PushRefused::NotAvailable);
-    };
-    let humans = human_user_ids(&cm);
-    if state.db.blocked_by_any(user_id, &humans).unwrap_or(false) {
-        return Err(PushRefused::NotAvailable);
+    // Count first; insert only when this push is allowed. A refused reconnect storm must not
+    // keep the user over the limit forever.
+    match state.db.rate_check_and_note(user_id, "msg", 60_000, limit) {
+        Ok(true) => {}
+        Ok(false) => {
+            let retry_s = state.db.rate_retry_s(user_id, "msg", 60_000).unwrap_or(1);
+            return refused(PushRefused::RateLimited { retry_s });
+        }
+        Err(_) => {
+            return refused(PushRefused::RateLimited { retry_s: 1 });
+        }
     }
     let (head, _) = state.db.room_activity(&room_of(chat_id)).unwrap_or((0, 0));
-    let event = PushEventDto::PeopleMessage(PeopleMessagePayloadDto {
-        chat_id: chat_id.to_owned(),
-        from: format!("user:{user_id}"),
-        from_handle: handle_of(state, user_id),
-        seq: head + 1,
-        sender: crate::notify::Sender::user(state, user_id).dto(),
-    });
+    let sender_dto = crate::notify::Sender::user(state, user_id).dto();
+    let from_handle = handle_of(state, user_id);
+    let chat_ref = crate::notify::ChatRef::people(chat_id);
     for other in humans.iter().filter(|u| *u != user_id) {
+        // Group name per recipient (an untitled group is the *other* members' handles).
+        let meta = crate::notify::chat_meta(state, &chat_ref, other);
+        let event = PushEventDto::PeopleMessage(PeopleMessagePayloadDto {
+            chat_id: chat_id.to_owned(),
+            from: format!("user:{user_id}"),
+            from_handle: from_handle.clone(),
+            seq: head + 1,
+            sender: sender_dto.clone(),
+            project_id: None,
+            text: None,
+            chat_kind: Some(meta.kind.to_owned()),
+            chat_title: meta.title,
+            chat_image_key: meta.image_key,
+        });
+        // A member who blocked the sender hears nothing of this row (hidden for them alone).
+        if state.db.blocks(other, user_id).unwrap_or(false) {
+            continue;
+        }
+        // Level `none` (or the old mute): no in-app banner either. Mentions cannot be judged
+        // here (no text yet); the announcement path handles mentions-only chats.
+        if crate::push::eligibility::silenced_by_level(state, other, &chat_ref) {
+            continue;
+        }
         // Archived for them: hidden on purpose, no notification (D78).
         if state
             .db
@@ -2579,16 +3864,7 @@ pub fn on_room_push(
             }
         }
     }
-    let mut owners: Vec<String> = cm
-        .members
-        .iter()
-        .filter_map(|m| m.project_id())
-        .filter_map(|pid| state.db.project(pid).ok().flatten())
-        .map(|p| p.user_id)
-        .collect();
-    owners.sort();
-    owners.dedup();
-    Ok(owners)
+    Ok(serving_agents(state, &cm))
 }
 
 /// Notify every human member except `skip`.
@@ -2617,6 +3893,319 @@ pub fn notify_agent_renamed(state: &AppState, project_id: &str) {
     }
 }
 
+/// Upper bound on the people told about one agent picture change (an agent in very large
+/// groups would otherwise write thousands of push rows per change).
+const AGENT_PROFILE_FAN_OUT_MAX: usize = 2000;
+
+/// The agents' `profile_updated`: an avatar change (`PATCH /projects/{id}` with `image_key`,
+/// a leaf or a colour pick) reaches every device that draws the agent — the owner's other
+/// devices (`except_device` already has the answer), the project's guests and every human in
+/// a people chat the agent sits on — as one `agent_profile_updated` push each, carrying the
+/// picture now in effect and the stamp every copy must reach. Without it (Jacob, 2026-10-25)
+/// a group's roster kept the old picture until some other event refreshed it, and the chat
+/// flipped between the stale and the current avatar.
+pub fn notify_agent_avatar_changed(
+    state: &AppState,
+    project: &crate::db::Project,
+    except_device: &str,
+) {
+    let event = PushEventDto::AgentProfileUpdated(arbos_core::api::AgentProfileUpdatedPayloadDto {
+        project_id: project.id.clone(),
+        avatar_version: project.avatar_version,
+        image_key: project.image_key.clone().filter(|k| !k.is_empty()),
+    });
+    if except_device.is_empty() {
+        let _ = state.db.push_user_event(&project.user_id, &event, None);
+    } else {
+        let _ = state
+            .db
+            .push_user_except_event(&project.user_id, except_device, &event);
+    }
+    for uid in agent_profile_audience(state, project) {
+        let _ = state.db.push_user_event(&uid, &event, None);
+    }
+}
+
+/// Who else draws the agent: the project's guests and the humans in its people chats, each
+/// once, never the owner, capped at `AGENT_PROFILE_FAN_OUT_MAX`.
+pub fn agent_profile_audience(state: &AppState, project: &crate::db::Project) -> Vec<String> {
+    let mut audience: Vec<String> = state
+        .db
+        .project_members(&project.id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(uid, _, _)| uid)
+        .collect();
+    for cm in state
+        .db
+        .chats_of_member(&format!("agent:{}", project.id))
+        .unwrap_or_default()
+    {
+        audience.extend(human_user_ids(&cm));
+    }
+    audience.sort();
+    audience.dedup();
+    audience.retain(|u| u != &project.user_id);
+    audience.truncate(AGENT_PROFILE_FAN_OUT_MAX);
+    audience
+}
+
+#[cfg(test)]
+mod push_rate_tests {
+    //! Only accepted people pushes insert a rate event (#1570).
+
+    use super::tests_support::{dm, person};
+    use super::*;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    #[test]
+    fn refused_push_adds_no_rate_event_and_push_after_window_is_accepted() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        let limit = 3;
+        for _ in 0..limit {
+            assert!(state
+                .db
+                .rate_check_and_note(&alice, "msg", 60_000, limit)
+                .unwrap());
+        }
+        assert_eq!(state.db.rate_count(&alice, "msg", 60_000).unwrap(), limit);
+
+        // Directly at the gate: over the limit → RateLimited, count unchanged.
+        // on_room_push uses MSGS_PER_MIN (or half); fill that window instead.
+        let real_limit = MSGS_PER_MIN / 2; // young account
+        while state.db.rate_count(&alice, "msg", 60_000).unwrap() < real_limit {
+            assert!(state
+                .db
+                .rate_check_and_note(&alice, "msg", 60_000, real_limit)
+                .unwrap());
+        }
+        let before = state.db.rate_count(&alice, "msg", 60_000).unwrap();
+        let err = on_room_push(&state, &alice_dev, &chat).unwrap_err();
+        assert!(matches!(err, PushRefused::RateLimited { retry_s } if retry_s >= 1));
+        assert_eq!(
+            state.db.rate_count(&alice, "msg", 60_000).unwrap(),
+            before,
+            "refused push must not insert"
+        );
+
+        // Age every event out of the window, then a push is accepted and counted once.
+        state
+            .db
+            .with(|c| {
+                c.execute("UPDATE rate_events SET at = at - 120000", [])?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(state.db.rate_count(&alice, "msg", 60_000).unwrap(), 0);
+        assert!(on_room_push(&state, &alice_dev, &chat).is_ok());
+        assert_eq!(state.db.rate_count(&alice, "msg", 60_000).unwrap(), 1);
+    }
+
+    #[test]
+    fn rate_check_and_note_counts_first() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        assert!(state
+            .db
+            .rate_check_and_note(&alice, "msg", 60_000, 2)
+            .unwrap());
+        assert!(state
+            .db
+            .rate_check_and_note(&alice, "msg", 60_000, 2)
+            .unwrap());
+        assert!(!state
+            .db
+            .rate_check_and_note(&alice, "msg", 60_000, 2)
+            .unwrap());
+        assert_eq!(state.db.rate_count(&alice, "msg", 60_000).unwrap(), 2);
+    }
+}
+
+#[cfg(test)]
+mod block_refusal_tests {
+    //! Blocks and people rooms ([feedback blocked-state-relay-2026-10-26], Jacob 2026-10-26
+    //! 17:28 CR): a DM between the two is refused with a named `reason`; a group is never
+    //! refused — the blocked person's rows are hidden from the blocker alone (no push event,
+    //! no alert, no unread for them; `blocked_senders` on their chat DTO) and the other
+    //! members see and receive them as before.
+
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use axum::Json;
+
+    use arbos_core::ids::ulid;
+
+    use super::tests_support::{dm, group, person};
+    use super::*;
+    use crate::notify::{notify_people_chat, NotifyBody};
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    fn pushes_of(state: &AppState, dev: &Principal) -> Vec<String> {
+        state
+            .db
+            .take_user_pushes(&device_of(dev))
+            .unwrap()
+            .into_iter()
+            .map(|(_, kind, _, _)| kind)
+            .collect()
+    }
+
+    async fn say(state: &AppState, dev: &Principal, chat: &str, text: &str) {
+        let r = notify_people_chat(
+            State(state.clone()),
+            dev.clone(),
+            Path(chat.to_owned()),
+            Json(NotifyBody {
+                message_id: ulid(),
+                text: text.into(),
+                project_id: None,
+                reply_ref: None,
+                kind: None,
+                voice_text: None,
+                mentions: Vec::new(),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn a_group_is_never_refused_and_the_blocked_rows_are_hidden_from_the_blocker_alone() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let (carol, carol_dev) = person(&state, 3);
+        let chat = group(&state, &[&alice, &bob, &carol]);
+        // Bob blocks Alice. Alice still posts; Bob is told nothing, Carol everything.
+        state.db.block(&bob, &alice).unwrap();
+        assert!(
+            on_room_push(&state, &alice_dev, &chat).is_ok(),
+            "a group block never refuses the room"
+        );
+        let _ = pushes_of(&state, &bob_dev);
+        let _ = pushes_of(&state, &carol_dev);
+        assert!(on_room_push(&state, &alice_dev, &chat).is_ok());
+        assert!(
+            pushes_of(&state, &bob_dev)
+                .iter()
+                .all(|k| k != "people_message"),
+            "the blocker gets no push event for the blocked sender's row"
+        );
+        assert!(
+            pushes_of(&state, &carol_dev)
+                .iter()
+                .any(|k| k == "people_message"),
+            "a third member gets it as before"
+        );
+        // Announce (the alert + unread path): Bob's unread stays 0, Carol's counts it.
+        say(&state, &alice_dev, &chat, "hello all").await;
+        assert_eq!(
+            state.db.unread_in_chat(&bob, &chat).unwrap(),
+            0,
+            "no unread for the blocker"
+        );
+        assert_eq!(state.db.unread_in_chat(&carol, &chat).unwrap(), 1);
+        assert_eq!(state.db.unread_total(&bob).unwrap(), 0);
+        // The hint on Bob's DTO names Alice; Carol's and Alice's carry none.
+        let cm = load_chat(&state, &chat).unwrap();
+        let bobs = people_chat_dto(&state, &cm, &bob, &device_of(&bob_dev));
+        assert_eq!(bobs.blocked_senders, vec![format!("user:{alice}")]);
+        assert!(people_chat_dto(&state, &cm, &carol, &device_of(&carol_dev))
+            .blocked_senders
+            .is_empty());
+        assert!(people_chat_dto(&state, &cm, &alice, &device_of(&alice_dev))
+            .blocked_senders
+            .is_empty());
+        // Bob's own posts are not refused by his block, and Alice (who blocked nobody) still
+        // receives them.
+        let _ = pushes_of(&state, &alice_dev);
+        assert!(on_room_push(&state, &bob_dev, &chat).is_ok());
+        assert!(pushes_of(&state, &alice_dev)
+            .iter()
+            .any(|k| k == "people_message"));
+        // Unblock reveals: the hint is gone and Alice's next row counts for Bob.
+        state.db.unblock(&bob, &alice).unwrap();
+        let cm = load_chat(&state, &chat).unwrap();
+        assert!(people_chat_dto(&state, &cm, &bob, &device_of(&bob_dev))
+            .blocked_senders
+            .is_empty());
+        say(&state, &alice_dev, &chat, "again").await;
+        assert_eq!(
+            state.db.unread_in_chat(&bob, &chat).unwrap(),
+            2,
+            "past rows count again too"
+        );
+    }
+
+    #[test]
+    fn in_a_dm_my_own_block_refuses_my_post_as_blocks_member() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        state.db.block(&alice, &bob).unwrap();
+        let mine = on_room_push(&state, &alice_dev, &chat).unwrap_err();
+        assert_eq!(mine.code(), "not_available");
+        assert_eq!(
+            (mine.reason(), mine.other_party()),
+            (Some("blocks_member"), Some(("user2", None))),
+            "Alice blocked Bob and writes to him: {mine:?}"
+        );
+        let theirs = on_room_push(&state, &bob_dev, &chat).unwrap_err();
+        assert_eq!(
+            (theirs.reason(), theirs.other_party()),
+            (Some("blocked_by"), Some(("user1", None))),
+            "Bob writes to Alice, who blocked him: {theirs:?}"
+        );
+        state.db.unblock(&alice, &bob).unwrap();
+        assert!(on_room_push(&state, &alice_dev, &chat).is_ok());
+        assert!(on_room_push(&state, &bob_dev, &chat).is_ok());
+    }
+
+    #[test]
+    fn a_missing_chat_is_still_not_available() {
+        let state = test_state(AuthMode::Github);
+        let (_, alice_dev) = person(&state, 1);
+        let err = on_room_push(&state, &alice_dev, "chat_missing").unwrap_err();
+        assert_eq!(err.code(), "not_available");
+        assert_eq!(err.reason(), Some("chat_unavailable"));
+        assert!(err.other_party().is_none());
+    }
+
+    #[test]
+    fn every_refusal_keeps_a_wire_code_old_clients_know() {
+        let refused = PushRefused::Blocked {
+            reason: BlockReason::BlockedBy,
+            by_handle: "sami".into(),
+            by_name: Some("Sami Kassab".into()),
+        };
+        assert_eq!(refused.code(), "not_available");
+        assert_eq!(refused.reason(), Some("blocked_by"));
+        assert_eq!(refused.other_party(), Some(("sami", Some("Sami Kassab"))));
+        assert_eq!(refused.retry_s(), None);
+        assert_eq!(BlockReason::BlocksMember.code(), "blocks_member");
+        assert_eq!(PushRefused::Silenced.code(), "not_available");
+        assert_eq!(PushRefused::Silenced.reason(), Some("silenced"));
+        assert_eq!(PushRefused::RateLimited { retry_s: 3 }.reason(), None);
+        for r in [
+            PushRefused::RateLimited { retry_s: 1 },
+            PushRefused::Silenced,
+            PushRefused::NotAvailable,
+            refused,
+        ] {
+            assert!(
+                matches!(r.code(), "rate_limited" | "not_available"),
+                "{r:?}: fielded clients only stay Live for these two"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! ACL invariant: only a member's devices (and the box of a project whose agent is in the
@@ -2628,6 +4217,39 @@ mod tests {
     use super::*;
     use crate::state::test_support::test_state;
     use crate::state::AuthMode;
+
+    /// #1538: an agent named after a person ("unarbos" by @unarbos) gets a suffix so `@unarbos`
+    /// keeps meaning the person; the boot sweep fixes existing ones; a free name is untouched.
+    #[test]
+    fn agent_names_stay_clear_of_people_handles() {
+        let state = test_state(AuthMode::Paircode);
+        let (jacob, _) = person(&state, 268993031); // login user268993031
+        assert_eq!(
+            agent_name_clear_of_people(&state, "User268993031"),
+            ("User268993031 agent".to_owned(), true)
+        );
+        assert_eq!(
+            agent_name_clear_of_people(&state, "Research"),
+            ("Research".to_owned(), false)
+        );
+        // An existing collision is renamed at boot and the box is told.
+        let pid = project_of(&state, &jacob, "user268993031");
+        rename_agents_that_shadow_people(&state);
+        let p = state.db.project(&pid).unwrap().unwrap();
+        assert_eq!(p.name, "user268993031 agent");
+        assert_ne!(agent_slug(&p.name), "user268993031");
+        let pushes = state.db.take_pushes(&pid).unwrap_or_default();
+        assert!(
+            pushes.iter().any(|(_, kind, _)| kind == "project_renamed"),
+            "{pushes:?}"
+        );
+        // Idempotent.
+        rename_agents_that_shadow_people(&state);
+        assert_eq!(
+            state.db.project(&pid).unwrap().unwrap().name,
+            "user268993031 agent"
+        );
+    }
 
     #[test]
     fn non_member_cannot_read_a_people_room() {
@@ -2678,9 +4300,66 @@ mod tests {
         // Leaving drops access at once.
         state
             .db
-            .remove_member(&chat, &format!("user:{bob}"))
+            .remove_member(&chat, &format!("user:{bob}"), false)
             .expect("leave");
         assert!(!state.allows(&bob_dev, &key));
+    }
+
+    /// #1580: the box roster lists each person's device ids (revoked ones too) so a row with
+    /// only a `deviceId` is attributed to its author; the apps' roster does not carry them.
+    #[test]
+    fn box_roster_carries_member_devices_and_the_app_roster_does_not() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 11);
+        let (bob, bob_dev) = person(&state, 12);
+        let chat = dm(&state, &alice, &bob);
+        let old = ulid();
+        state
+            .db
+            .insert_device(&old, "old phone", &ulid(), &bob, "github")
+            .expect("device");
+        state.db.revoke_device(&old).expect("revoke");
+        let cm = load_chat(&state, &chat).expect("chat");
+
+        let boxed = box_chat_json(&state, &cm, &alice, "box");
+        let devices_of = |v: &Value, user: &str| -> Vec<String> {
+            v["members"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["member"] == format!("user:{user}"))
+                .and_then(|m| m["devices"].as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|d| d.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let Principal::Device { id: bob_id, .. } = &bob_dev else {
+            panic!("device")
+        };
+        let Principal::Device { id: alice_id, .. } = &alice_dev else {
+            panic!("device")
+        };
+        let bobs = devices_of(&boxed, &bob);
+        assert!(bobs.contains(bob_id), "{bobs:?}");
+        assert!(bobs.contains(&old), "revoked devices still name their rows");
+        assert_eq!(devices_of(&boxed, &alice), vec![alice_id.clone()]);
+        let agent_rows: Vec<&Value> = boxed["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["devices"].is_array())
+            .collect();
+        assert_eq!(agent_rows.len(), 2, "humans only");
+
+        let app = chat_json(&state, &cm, &alice, alice_id);
+        assert!(app["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m.get("devices").is_none()));
     }
 }
 
@@ -2901,10 +4580,12 @@ mod agent_tests {
             .add_member(&chat, &format!("user:{bob}"), "member", &alice, &json!({}))
             .unwrap();
 
+        let no_ban = Query(std::collections::HashMap::new());
         let r = member_remove(
             State(state.clone()),
             bob_dev.clone(),
             Path((chat.clone(), carol.clone())),
+            no_ban.clone(),
         )
         .await;
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
@@ -2919,6 +4600,7 @@ mod agent_tests {
             State(state.clone()),
             bob_dev,
             Path((chat.clone(), bob.clone())),
+            no_ban.clone(),
         )
         .await;
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
@@ -2933,6 +4615,7 @@ mod agent_tests {
             State(state.clone()),
             alice_dev,
             Path((chat.clone(), carol.clone())),
+            no_ban,
         )
         .await;
         assert_eq!(r.status(), StatusCode::NO_CONTENT);
@@ -2949,6 +4632,96 @@ mod agent_tests {
             },
             &format!("{PEOPLE_ACL_PREFIX}{chat}")
         ));
+    }
+
+    #[tokio::test]
+    async fn owner_can_mute_and_ban_a_group_member() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 41);
+        let (bob, bob_dev) = person(&state, 42);
+        let chat = dm(&state, &alice, &bob);
+        // Promote to a group so moderation applies the same as production groups.
+        let _ = state.db.set_people_chat_kind(&chat, "group");
+        state
+            .db
+            .add_member(&chat, &format!("user:{bob}"), "member", &alice, &json!({}))
+            .unwrap();
+
+        // Mute Bob from posting.
+        let r = member_patch(
+            State(state.clone()),
+            alice_dev.clone(),
+            Path((chat.clone(), bob.clone())),
+            Json(MemberPatchBody {
+                silenced: Some(true),
+                silenced_until: None,
+                role: None,
+                can_mute_ban: None,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let m = state
+            .db
+            .membership(&chat, &format!("user:{bob}"))
+            .unwrap()
+            .unwrap();
+        assert!(m.silenced);
+        assert!(
+            on_room_push(&state, &bob_dev, &chat).is_err(),
+            "a muted member cannot post"
+        );
+        assert!(
+            on_room_push(&state, &alice_dev, &chat).is_ok(),
+            "owner still posts"
+        );
+
+        // Ban Bob — removed and cannot rejoin.
+        let mut ban_q = std::collections::HashMap::new();
+        ban_q.insert("ban".into(), "1".into());
+        let r = member_remove(
+            State(state.clone()),
+            alice_dev.clone(),
+            Path((chat.clone(), bob.clone())),
+            Query(ban_q),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        assert!(state
+            .db
+            .membership(&chat, &format!("user:{bob}"))
+            .unwrap()
+            .is_none());
+        assert!(state
+            .db
+            .member_is_banned(&chat, &format!("user:{bob}"))
+            .unwrap());
+        assert!(state
+            .db
+            .add_member(&chat, &format!("user:{bob}"), "member", &alice, &json!({}))
+            .is_err());
+
+        // Unban Bob — they can be added again.
+        let r = member_unban(
+            State(state.clone()),
+            alice_dev.clone(),
+            Path((chat.clone(), bob.clone())),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert!(!state
+            .db
+            .member_is_banned(&chat, &format!("user:{bob}"))
+            .unwrap());
+        state
+            .db
+            .add_member(&chat, &format!("user:{bob}"), "member", &alice, &json!({}))
+            .unwrap();
+        assert!(state
+            .db
+            .membership(&chat, &format!("user:{bob}"))
+            .unwrap()
+            .is_some());
     }
 
     #[tokio::test]
@@ -2969,6 +4742,7 @@ mod agent_tests {
                 title: None,
                 avatar_leaf: None,
                 avatar_leaf_color: None,
+                description: None,
             }),
         )
         .await;
@@ -3016,6 +4790,7 @@ mod agent_tests {
                 title: None,
                 avatar_leaf: None,
                 avatar_leaf_color: None,
+                description: None,
             }),
         )
         .await;
@@ -3072,6 +4847,7 @@ mod membership_notice_tests {
                 title: None,
                 avatar_leaf: None,
                 avatar_leaf_color: None,
+                description: None,
             }),
         )
         .await;
@@ -3129,6 +4905,7 @@ mod membership_notice_tests {
             State(state.clone()),
             alice_dev.clone(),
             Path((chat.clone(), carol_id)),
+            Query(std::collections::HashMap::new()),
         )
         .await;
         assert_eq!(r.status(), StatusCode::NO_CONTENT);
@@ -3203,6 +4980,10 @@ mod read_cursor_tests {
                 message_id: ulid(),
                 text: text.into(),
                 project_id: None,
+                reply_ref: None,
+                kind: None,
+                voice_text: None,
+                mentions: Vec::new(),
             }),
         )
         .await;
@@ -3323,6 +5104,7 @@ mod create_group_tests {
                 title: None,
                 avatar_leaf: None,
                 avatar_leaf_color: None,
+                description: None,
             }),
         )
         .await;
@@ -3374,6 +5156,7 @@ mod create_group_tests {
                 title: None,
                 avatar_leaf: None,
                 avatar_leaf_color: None,
+                description: None,
             }),
         )
         .await;
@@ -3389,6 +5172,7 @@ mod create_group_tests {
                 title: None,
                 avatar_leaf: None,
                 avatar_leaf_color: None,
+                description: None,
             }),
         )
         .await;
@@ -3399,6 +5183,150 @@ mod create_group_tests {
             .unwrap()
             .len();
         assert_eq!(after, before, "a refused create leaves no half-made chat");
+    }
+}
+
+#[cfg(test)]
+mod group_add_privacy_tests {
+    //! A person's `group_add` privacy blocks others from putting them into a new group or
+    //! adding them to an existing one (spam-group guard).
+
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use axum::Json;
+
+    use super::tests_support::person;
+    use super::*;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    #[tokio::test]
+    async fn nobody_refuses_create_and_add() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let bob_handle = state.db.user(&bob).unwrap().unwrap().login.unwrap();
+        state.db.set_group_add_policy(&bob, "nobody").unwrap();
+
+        let r = chats_create_group(
+            State(state.clone()),
+            alice_dev.clone(),
+            Json(CreateGroupBody {
+                kind: "group".into(),
+                members: vec![bob_handle.clone()],
+                agent_ids: vec![],
+                title: Some("Spam".into()),
+                avatar_leaf: None,
+                avatar_leaf_color: None,
+                description: None,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+
+        // A group of Alice alone (plus an agent) so she can try Add members.
+        let alice_proj = {
+            use super::tests_support::project_of;
+            project_of(&state, &alice, "Home")
+        };
+        let r = chats_create_group(
+            State(state.clone()),
+            alice_dev.clone(),
+            Json(CreateGroupBody {
+                kind: "group".into(),
+                members: vec![],
+                agent_ids: vec![alice_proj],
+                title: Some("Alice's".into()),
+                avatar_leaf: None,
+                avatar_leaf_color: None,
+                description: None,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let chat_id = state
+            .db
+            .chats_of_member(&format!("user:{alice}"))
+            .unwrap()
+            .into_iter()
+            .find(|cm| cm.chat.kind == "group")
+            .unwrap()
+            .chat
+            .id;
+
+        let r = member_add(
+            State(state.clone()),
+            alice_dev,
+            Path(chat_id),
+            Json(AddMemberBody {
+                handle: Some(bob_handle),
+                handles: vec![],
+                agent_ids: vec![],
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn people_i_know_allows_only_existing_dm() {
+        let state = test_state(AuthMode::Github);
+        let (_alice, alice_dev) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let (carol, _) = person(&state, 3);
+        let bob_handle = state.db.user(&bob).unwrap().unwrap().login.unwrap();
+        let carol_handle = state.db.user(&carol).unwrap().unwrap().login.unwrap();
+        state
+            .db
+            .set_group_add_policy(&bob, "people_i_know")
+            .unwrap();
+        state
+            .db
+            .set_group_add_policy(&carol, "people_i_know")
+            .unwrap();
+
+        // Open a DM with Bob so Alice "knows" him; Carol stays a stranger.
+        let r = dm_create(
+            State(state.clone()),
+            alice_dev.clone(),
+            Json(DmBody {
+                handle: bob_handle.clone(),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+
+        let r = chats_create_group(
+            State(state.clone()),
+            alice_dev.clone(),
+            Json(CreateGroupBody {
+                kind: "group".into(),
+                members: vec![bob_handle],
+                agent_ids: vec![],
+                title: Some("With Bob".into()),
+                avatar_leaf: None,
+                avatar_leaf_color: None,
+                description: None,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+
+        let r = chats_create_group(
+            State(state.clone()),
+            alice_dev,
+            Json(CreateGroupBody {
+                kind: "group".into(),
+                members: vec![carol_handle],
+                agent_ids: vec![],
+                title: Some("With Carol".into()),
+                avatar_leaf: None,
+                avatar_leaf_color: None,
+                description: None,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
     }
 }
 
@@ -3517,6 +5445,35 @@ pub(crate) mod tests_support {
         )
     }
 
+    /// A people group ("Arbonites") of these humans; the first is the owner.
+    pub fn group(state: &AppState, members: &[&str]) -> String {
+        let chat = PeopleChat {
+            id: ulid(),
+            kind: "group".into(),
+            created_by: members[0].to_owned(),
+            created_at: now_ms(),
+            title: Some("Arbonites".into()),
+            image_key: None,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
+            description: None,
+        };
+        state.db.insert_people_chat(&chat).expect("chat");
+        for u in members {
+            state
+                .db
+                .add_member(
+                    &chat.id,
+                    &format!("user:{u}"),
+                    "owner",
+                    members[0],
+                    &json!({}),
+                )
+                .expect("member");
+        }
+        chat.id
+    }
+
     pub fn dm(state: &AppState, a: &str, b: &str) -> String {
         let chat = PeopleChat {
             id: ulid(),
@@ -3527,6 +5484,7 @@ pub(crate) mod tests_support {
             image_key: None,
             avatar_leaf: None,
             avatar_leaf_color: None,
+            description: None,
         };
         state.db.insert_people_chat(&chat).expect("chat");
         for u in [a, b] {
@@ -3560,6 +5518,7 @@ pub(crate) mod tests_support {
             avatar_leaf: None,
             avatar_leaf_color: None,
             image_key: None,
+            avatar_version: 0,
         };
         state.db.insert_project(&project).expect("project");
         state
@@ -3578,6 +5537,382 @@ pub(crate) mod tests_support {
             })
             .expect("pinned chat");
         project.id
+    }
+}
+
+#[cfg(test)]
+mod settings_permission_tests {
+    //! Who may change a people chat's name, picture, description and leaf (P0 2026-10-27):
+    //! owner and admins yes; plain members, agents' boxes, non-members and the admin token
+    //! no — 403 `admin_only`, the value untouched, one audit row per attempt.
+
+    use axum::extract::{Path, State};
+    use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+    use axum::Json;
+    use bytes::Bytes;
+
+    use super::tests_support::{dm, person, project_of};
+    use super::*;
+    use crate::blobs;
+    use crate::image_sniff::samples;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    /// A group of the owner, one admin, one member and one agent; plus a stranger.
+    struct Cast {
+        chat: String,
+        owner: Principal,
+        admin: Principal,
+        member: Principal,
+        agent: Principal,
+        stranger: Principal,
+    }
+
+    fn cast(state: &AppState, seed: i64) -> Cast {
+        let (owner, owner_dev) = person(state, seed);
+        let (admin, admin_dev) = person(state, seed + 1);
+        let (member, member_dev) = person(state, seed + 2);
+        let (_, stranger_dev) = person(state, seed + 3);
+        let chat = PeopleChat {
+            id: ulid(),
+            kind: "group".into(),
+            created_by: owner.clone(),
+            created_at: now_ms(),
+            title: Some("Arbonites".into()),
+            image_key: None,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
+            description: Some("the original".into()),
+        };
+        state.db.insert_people_chat(&chat).expect("chat");
+        for (uid, role) in [(&owner, "owner"), (&admin, "admin"), (&member, "member")] {
+            state
+                .db
+                .add_member(&chat.id, &format!("user:{uid}"), role, &owner, &json!({}))
+                .expect("member");
+        }
+        let project = project_of(state, &member, "Scout");
+        state
+            .db
+            .add_member(
+                &chat.id,
+                &format!("agent:{project}"),
+                "agent",
+                &owner,
+                &json!({}),
+            )
+            .expect("agent member");
+        Cast {
+            chat: chat.id,
+            owner: owner_dev,
+            admin: admin_dev,
+            member: member_dev,
+            agent: Principal::Box { user_id: member },
+            stranger: stranger_dev,
+        }
+    }
+
+    fn body() -> PatchChatBody {
+        PatchChatBody {
+            title: None,
+            image_key: None,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
+            description: None,
+        }
+    }
+
+    async fn patch(state: &AppState, who: &Principal, chat: &str, b: PatchChatBody) -> StatusCode {
+        chat_patch(
+            State(state.clone()),
+            who.clone(),
+            Path(chat.to_owned()),
+            Json(b),
+        )
+        .await
+        .status()
+    }
+
+    async fn upload(state: &AppState, who: &Principal, chat: &str, key: &str) {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
+        let r = blobs::put(
+            State(state.clone()),
+            who.clone(),
+            Path((format!("{PEOPLE_ACL_PREFIX}{chat}"), key.to_owned())),
+            headers,
+            Bytes::copy_from_slice(samples::PNG),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+    }
+
+    fn chat_row(state: &AppState, chat: &str) -> PeopleChat {
+        state.db.people_chat(chat).unwrap().unwrap()
+    }
+
+    fn audit_rows(state: &AppState, chat: &str) -> Vec<Value> {
+        state
+            .db
+            .audit(&format!("{PEOPLE_ACL_PREFIX}{chat}"), 1000)
+            .unwrap()
+    }
+
+    /// Every field × every principal: only the owner and the admin change anything.
+    #[tokio::test]
+    async fn group_settings_are_owner_and_admin_only_per_field() {
+        let state = test_state(AuthMode::Github);
+        let c = cast(&state, 7100);
+        // Members may upload into the group's slot (attachments live there too); the
+        // picture is the PATCH, and that is what is gated.
+        upload(&state, &c.member, &c.chat, "member.png").await;
+        upload(&state, &c.owner, &c.chat, "owner.png").await;
+
+        type Make = Box<dyn Fn() -> PatchChatBody>;
+        let fields: Vec<(&str, Make)> = vec![
+            (
+                "title",
+                Box::new(|| PatchChatBody {
+                    title: Some("Test".into()),
+                    ..body()
+                }),
+            ),
+            (
+                "image_key",
+                Box::new(|| PatchChatBody {
+                    image_key: Some("member.png".into()),
+                    ..body()
+                }),
+            ),
+            (
+                "description",
+                Box::new(|| PatchChatBody {
+                    description: Some("hijacked".into()),
+                    ..body()
+                }),
+            ),
+            (
+                "avatar_leaf",
+                Box::new(|| PatchChatBody {
+                    avatar_leaf: Some(Some(1)),
+                    avatar_leaf_color: Some(Some(2)),
+                    ..body()
+                }),
+            ),
+        ];
+        let denied: [(&str, &Principal); 4] = [
+            ("member", &c.member),
+            ("agent", &c.agent),
+            ("stranger", &c.stranger),
+            ("admin-token", &Principal::Admin),
+        ];
+        let before = chat_row(&state, &c.chat);
+        for (field, make) in &fields {
+            for (who, principal) in denied {
+                assert_eq!(
+                    patch(&state, principal, &c.chat, make()).await,
+                    StatusCode::FORBIDDEN,
+                    "{who} changing {field}"
+                );
+            }
+            let after = chat_row(&state, &c.chat);
+            assert_eq!(after.title, before.title, "{field}: title untouched");
+            assert_eq!(
+                after.image_key, before.image_key,
+                "{field}: picture untouched"
+            );
+            assert_eq!(
+                after.description, before.description,
+                "{field}: description untouched"
+            );
+            assert_eq!(
+                after.avatar_leaf, before.avatar_leaf,
+                "{field}: leaf untouched"
+            );
+        }
+        // 4 fields × 4 denied principals, every one audited as refused.
+        let rows = audit_rows(&state, &c.chat);
+        assert_eq!(rows.len(), 16);
+        assert!(rows.iter().all(|r| r["allowed"] == false));
+        assert_eq!(
+            rows.iter().filter(|r| r["reason"] == "admin_only").count(),
+            4,
+            "the plain member is the admin_only case"
+        );
+        assert!(rows
+            .iter()
+            .any(|r| r["principal"].as_str().unwrap().starts_with("box:")
+                && r["reason"] == "devices_only"));
+        assert!(rows
+            .iter()
+            .any(|r| r["reason"] == "not_member" && r["fields"][0] == "title"));
+
+        // The admin and the owner succeed, field by field.
+        assert_eq!(
+            patch(
+                &state,
+                &c.admin,
+                &c.chat,
+                PatchChatBody {
+                    title: Some("Arbonites Admin".into()),
+                    ..body()
+                }
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            patch(
+                &state,
+                &c.owner,
+                &c.chat,
+                PatchChatBody {
+                    image_key: Some("owner.png".into()),
+                    description: Some("by the owner".into()),
+                    avatar_leaf: Some(Some(3)),
+                    avatar_leaf_color: Some(Some(4)),
+                    ..body()
+                }
+            )
+            .await,
+            StatusCode::OK
+        );
+        let now = chat_row(&state, &c.chat);
+        assert_eq!(now.title.as_deref(), Some("Arbonites Admin"));
+        assert_eq!(now.image_key.as_deref(), Some("owner.png"));
+        assert_eq!(now.description.as_deref(), Some("by the owner"));
+        assert_eq!((now.avatar_leaf, now.avatar_leaf_color), (Some(3), Some(4)));
+        let rows = audit_rows(&state, &c.chat);
+        assert_eq!(rows.len(), 18);
+        let ok: Vec<&Value> = rows.iter().filter(|r| r["allowed"] == true).collect();
+        assert_eq!(ok.len(), 2);
+        assert_eq!(ok[0]["role"], "admin");
+        assert_eq!(ok[0]["fields"], json!(["title"]));
+        assert_eq!(ok[1]["role"], "owner");
+        assert_eq!(
+            ok[1]["fields"],
+            json!(["image_key", "avatar_leaf", "description"])
+        );
+        assert!(ok[1]["device_id"].is_string());
+    }
+
+    /// The 403 carries the one sentence the clients show.
+    #[tokio::test]
+    async fn the_refusal_is_one_plain_sentence() {
+        let state = test_state(AuthMode::Github);
+        let c = cast(&state, 7200);
+        let r = chat_patch(
+            State(state.clone()),
+            c.member.clone(),
+            Path(c.chat.clone()),
+            Json(PatchChatBody {
+                title: Some("Test".into()),
+                ..body()
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        let bytes = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["error"]["type"], "admin_only");
+        assert_eq!(v["error"]["message"], SETTINGS_ADMIN_ONLY);
+    }
+
+    /// An empty body is a read: any member gets the chat back, nothing is audited; a
+    /// stranger still gets 403.
+    #[tokio::test]
+    async fn an_empty_patch_is_a_read_for_members() {
+        let state = test_state(AuthMode::Github);
+        let c = cast(&state, 7300);
+        assert_eq!(
+            patch(&state, &c.member, &c.chat, body()).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            patch(&state, &c.stranger, &c.chat, body()).await,
+            StatusCode::FORBIDDEN
+        );
+        assert!(audit_rows(&state, &c.chat).is_empty());
+    }
+
+    /// A member promoted to admin may edit; demoted back, may not.
+    #[tokio::test]
+    async fn promotion_opens_and_demotion_closes_the_settings() {
+        let state = test_state(AuthMode::Github);
+        let c = cast(&state, 7400);
+        let member_id = match &c.member {
+            Principal::Device { user_id, .. } => user_id.clone(),
+            _ => unreachable!(),
+        };
+        let rename = || PatchChatBody {
+            title: Some("Renamed".into()),
+            ..body()
+        };
+        assert_eq!(
+            patch(&state, &c.member, &c.chat, rename()).await,
+            StatusCode::FORBIDDEN
+        );
+        state
+            .db
+            .set_member_role(&c.chat, &format!("user:{member_id}"), "admin")
+            .unwrap();
+        assert_eq!(
+            patch(&state, &c.member, &c.chat, rename()).await,
+            StatusCode::OK
+        );
+        state
+            .db
+            .set_member_role(&c.chat, &format!("user:{member_id}"), "member")
+            .unwrap();
+        assert_eq!(
+            patch(&state, &c.member, &c.chat, rename()).await,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    /// A DM has two owners: both may set its fields; a third person and a box may not.
+    #[tokio::test]
+    async fn dm_fields_follow_the_same_rule() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 7500);
+        let (bob, bob_dev) = person(&state, 7501);
+        let (_, carol_dev) = person(&state, 7502);
+        let chat = dm(&state, &alice, &bob);
+        let describe = |t: &str| PatchChatBody {
+            description: Some(t.into()),
+            ..body()
+        };
+        assert_eq!(
+            patch(&state, &alice_dev, &chat, describe("ours")).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            patch(&state, &bob_dev, &chat, describe("ours too")).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            patch(&state, &carol_dev, &chat, describe("mine")).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            patch(
+                &state,
+                &Principal::Box {
+                    user_id: bob.clone()
+                },
+                &chat,
+                describe("the box")
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            chat_row(&state, &chat).description.as_deref(),
+            Some("ours too")
+        );
+        let rows = audit_rows(&state, &chat);
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows.iter().filter(|r| r["allowed"] == true).count(), 2);
     }
 }
 
@@ -3631,6 +5966,7 @@ mod picture_tests {
                 image_key: Some(key.to_owned()),
                 avatar_leaf: None,
                 avatar_leaf_color: None,
+                description: None,
             }),
         )
         .await

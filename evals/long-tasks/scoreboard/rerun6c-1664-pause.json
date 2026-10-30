@@ -1,0 +1,190 @@
+{
+ "meta": {
+  "run_id": "rerun6c-1664-pause",
+  "started_at": "2026-10-25T01:02:04Z",
+  "image": "arbos-agent-0.1.120",
+  "agentd": "arbos-agentd 0.6.223",
+  "provider": "gvisor",
+  "user": "test_01M5JHWC586GYNTC3KCZZKS7NF",
+  "projects": {
+   "a": "01M5JHWMMJ65A7CXQW47G9NCPA"
+  },
+  "tasks": 0,
+  "budget_usd": 8.0,
+  "spent_today_at_start": 0.42772654,
+  "judge_model": "anthropic/claude-haiku-5.5",
+  "ended_at": "2026-10-25T01:06:48Z",
+  "spent_today_at_end": 0.435931137,
+  "run_cost_usd": 0.0082,
+  "judge_cost_usd": 0
+ },
+ "summary": {
+  "tasks": 1,
+  "run": 1,
+  "passed": 1,
+  "failed": 0,
+  "skipped": 0,
+  "pass_pct": 100.0,
+  "ttfr_p50_s": 5.51,
+  "ttfr_all_p50_s": 2.22,
+  "total_p50_s": 282.5,
+  "tool_errors": 0,
+  "stalls": 0,
+  "cost_usd": 0.0077,
+  "run_cost_usd": 0.0082,
+  "judge_cost_usd": 0,
+  "categories": {
+   "managing": {
+    "tasks": 1,
+    "passed": 1,
+    "pass_pct": 100.0
+   }
+  },
+  "parity": null
+ },
+ "results": [
+  {
+   "task": "m7-long-chat-catchup-after-restart",
+   "title": "Long chat survives a box restart: facts from 30 turns ago and the running thread are intact",
+   "category": "managing",
+   "categories": [
+    "managing"
+   ],
+   "lane": "a",
+   "regression": "#1575/#1610 session liveness across a restart; memory survives (D77) \u00b7 regression case for #1648 (doubled reply after restart; fixed main 78a3e6b2, image 0.1.116)",
+   "success": true,
+   "reasons": [],
+   "ttfr_s": 5.51,
+   "first_seen_s": 0.48,
+   "route_t1": "act",
+   "ttfr_all_s": [
+    5.51,
+    2.14,
+    1.77,
+    2.3
+   ],
+   "total_s": 282.5,
+   "tool_errors": 0,
+   "stalls": 0,
+   "cost_usd": 0.007688,
+   "judge_usd": 0,
+   "relay": {
+    "calls": 20,
+    "input": 18388,
+    "output": 4440,
+    "cache_read": 111884,
+    "cache_write": 29097,
+    "usd": 0.007688
+   },
+   "rubric_min": null,
+   "turns": [
+    {
+     "turn": 1,
+     "chat_id": "01M5R98F9Z7GTW6QMKWAKCKE1E",
+     "prompt": "Remember three things for this project: the staging host is stag-07, the release freeze starts 3 December, and the on-call phone is Lena's.",
+     "ok": true,
+     "reasons": [],
+     "ttfr_s": 5.51,
+     "first_status_s": 0.48,
+     "wall_s": 7.3,
+     "timed_out": false,
+     "stalls": 0,
+     "approvals_rejected": [],
+     "routes": [
+      "act"
+     ],
+     "tool_calls": 4,
+     "tool_errors": 0,
+     "model_calls": 3,
+     "compactions": 0,
+     "audit_denied": 0,
+     "rubric": null,
+     "truth": {},
+     "verify_out": "",
+     "reply": "Saved for this project:\n\n- The staging host is stag-07.\n- The release freeze starts 3 December. The year isn't specified; tell me if you want it recorded.\n- The on-call phone is Lena's. No number is recorded.",
+     "excerpt": "**User:** Remember three things for this project: the staging host is stag-07, the release freeze starts 3 December, and the on-call phone is Lena's.\n\n**Assistant** (result, route=act, status=done) tools: remember, remember, remember\n\nSaved for this project:\n\n- The staging host is stag-07.\n- The release freeze starts 3 December. The year isn't specified; tell me if you want it recorded.\n- The on-call phone is Lena's. No number is recorded.\n\nmain-agent tool calls: route, remember, remember, remember (errors 0)"
+    },
+    {
+     "turn": 2,
+     "chat_id": "01M5R98F9Z7GTW6QMKWAKCKE1E",
+     "prompt": "Now a filler task: list the first 12 prime numbers.",
+     "ok": true,
+     "reasons": [],
+     "ttfr_s": 2.14,
+     "first_status_s": 0.69,
+     "wall_s": 3.6,
+     "timed_out": false,
+     "stalls": 0,
+     "approvals_rejected": [],
+     "routes": [
+      "reply"
+     ],
+     "tool_calls": 1,
+     "tool_errors": 0,
+     "model_calls": 1,
+     "compactions": 0,
+     "audit_denied": 0,
+     "rubric": null,
+     "truth": {},
+     "verify_out": "",
+     "reply": "2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37",
+     "excerpt": "**User:** Now a filler task: list the first 12 prime numbers.\n\n**Assistant** (result, route=reply, status=done)\n\n2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37\n\nmain-agent tool calls: route (errors 0)"
+    },
+    {
+     "turn": 3,
+     "chat_id": "01M5R98F9Z7GTW6QMKWAKCKE1E",
+     "prompt": "Another filler: name five European capitals, comma separated.",
+     "ok": true,
+     "reasons": [],
+     "ttfr_s": 1.77,
+     "first_status_s": 0.45,
+     "wall_s": 3.7,
+     "timed_out": false,
+     "stalls": 0,
+     "approvals_rejected": [],
+     "routes": [
+      "reply"
+     ],
+     "tool_calls": 1,
+     "tool_errors": 0,
+     "model_calls": 1,
+     "compactions": 0,
+     "audit_denied": 0,
+     "rubric": null,
+     "truth": {},
+     "verify_out": "",
+     "reply": "Paris, Berlin, Madrid, Rome, Vienna",
+     "excerpt": "**User:** Another filler: name five European capitals, comma separated.\n\n**Assistant** (result, route=reply, status=done)\n\nParis, Berlin, Madrid, Rome, Vienna\n\nmain-agent tool calls: route (errors 0)"
+    },
+    {
+     "turn": 4,
+     "chat_id": "01M5R98F9Z7GTW6QMKWAKCKE1E",
+     "prompt": "We just restarted your machine. Quick check: which staging host, when does the freeze start, and whose phone is on call?",
+     "ok": true,
+     "reasons": [],
+     "ttfr_s": 2.3,
+     "first_status_s": 0.62,
+     "wall_s": 3.3,
+     "timed_out": false,
+     "stalls": 0,
+     "approvals_rejected": [],
+     "routes": [
+      "reply"
+     ],
+     "tool_calls": 1,
+     "tool_errors": 0,
+     "model_calls": 1,
+     "compactions": 0,
+     "audit_denied": 0,
+     "rubric": null,
+     "truth": {},
+     "verify_out": "",
+     "reply": "Staging host: stag-07. The release freeze starts 3 December; the year isn't specified. The on-call phone is Lena's, and no number is recorded.",
+     "excerpt": "**User:** We just restarted your machine. Quick check: which staging host, when does the freeze start, and whose phone is on call?\n\n**Assistant** (result, route=reply, status=done)\n\nStaging host: stag-07. The release freeze starts 3 December; the year isn't specified. The on-call phone is Lena's, and no number is recorded.\n\nmain-agent tool calls: route (errors 0)"
+    }
+   ],
+   "background": null,
+   "dir": "/work/01M5JHWMMJ65A7CXQW47G9NCPA/lt-m7-long-chat-catchup-after-restart-rerun6c-1664-pause"
+  }
+ ]
+}

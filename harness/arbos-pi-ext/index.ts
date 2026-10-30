@@ -31,6 +31,55 @@ const OFFLOAD_CHARS = Number(process.env.ARBOS_OFFLOAD_CHARS ?? 4000);
 const HEAD_LINES = 20;
 const TAIL_LINES = 10;
 const ROUTE_PREFIX = "(Arbos: call `route` first.) ";
+// Mirrors `agent::STEER_PREFIX`: a user steer agentd stamped (#1690). It lands inside a routed
+// turn — as pi's steer, or as the prompt that continues the turn after agentd aborted a long
+// tool call — so it gets no route reminder and the turn keeps its `routed` state.
+const STEER_PREFIX = "[Arbos steer:";
+// Mirrors `agent::RELAY_TURN_MARK`: agentd stamps every relay turn (a job's or subagent's
+// result, an approval outcome, an agent's reply) — turns whose only valid route is `reply`.
+const RELAY_TURN_MARK = "[Arbos relay turn]";
+
+/**
+ * A shell command that would outlive the turn (nohup / setsid / disown / a trailing `&` / tmux /
+ * screen / systemd-run) in the main agent's own turn. That work is a job: `start_job` runs it on a
+ * worker with status, steer_job and stop_job; a detached script has none of that, and a later
+ * change becomes kill + restart (#1778, b9: `kill …; pkill -f 'sleep 45'` raised a destructive
+ * card). Returns the offending fragment, or null.
+ */
+export function detachedShell(toolName: string, input: Record<string, unknown>): string | null {
+  const text =
+    toolName === "bash" ? String(input?.command ?? "")
+    : toolName === "codemode" ? String(input?.code ?? "")
+    : "";
+  if (!text) return null;
+  const patterns: RegExp[] = [
+    /(^|[;&|(`'"]\s*|\bsudo\s+|\bexec\s+)(nohup|setsid)\b/m,
+    /\bdisown\b/,
+    /\b(tmux\s+new(-session)?|screen\s+-[dD]|systemd-run|start-stop-daemon|at\s+now)\b/,
+    // `cmd &` / `(cmd) &` / `cmd & disown` / `cmd &\n…` — not `&&`, not `2>&1`, not `&>`.
+    /(?<![&<>|\d])&(?![&>])\s*(?:$|[;)\n]|\n|disown\b|\\n)/m,
+  ];
+  for (const re of patterns) {
+    const m = re.exec(text);
+    if (m) return text.slice(Math.max(0, m.index - 40), m.index + m[0].length + 40).replace(/\s+/g, " ").trim();
+  }
+  return null;
+}
+
+const DETACHED_SHELL_HINT =
+  "Detached processes are not started from a turn (nohup, setsid, disown, a trailing `&`, tmux, screen): that work is a job. Call start_job(title, brief, kind) with the whole instruction — every step, the waits, the exact file paths, what to report — and end the turn; the worker runs it with a status line, its result arrives as an [Arbos] job notice, and a later change goes through steer_job(job_id, text) (never kill + restart). Run short foreground commands here only.";
+
+/**
+ * A `reply` text that announces more to come ("delivered in parts below", "table follows") is an
+ * introduction, not the answer: the turn must go on with send_message. Mirrors
+ * `agent::promises_parts` (proof run 1, 2026-10-26 01:0x UTC: the result turn routed `reply`
+ * with that sentence, the route tool ended the turn, and no part ever followed).
+ */
+export function promisesMore(text: string): boolean {
+  const t = text.toLowerCase();
+  return /\b(in parts?|parts? (below|follow|to follow|coming)|(details?|table|comparison|list|sources|rest|more)\s+(below|follows?|to follow|coming|next)|below[.:!]?\s*$|coming (up|next|right up)|next message|follows? (shortly|now|below)|here (it|they) (come|are)s?:?\s*$)\b/.test(t)
+    || /\bbelow\b/.test(t) && t.length < 160;
+}
 // Mirrors `arbos_core::approval::SHELL_TOOLS`; the classification itself happens in agentd.
 const SHELL_TOOLS = new Set(["bash", "shell", "run_command", "execute_command"]);
 const APPROVAL_POLL_MS = Number(process.env.ARBOS_APPROVAL_POLL_MS ?? 1500);
@@ -40,7 +89,7 @@ const CODE_MODE = (process.env.ARBOS_CODE_MODE ?? "off").trim().toLowerCase() ==
 // Default deadline of a `codemode` script when the model sets none (code mode on): the turn deadline.
 const SCRIPT_TIMEOUT_MS = Number(process.env.ARBOS_SCRIPT_TIMEOUT_MS ?? 15 * 60 * 1000);
 // Tools that talk to the user or to agentd's turn state: direct calls only, never from a script.
-const DIRECT_ONLY_TOOLS = new Set(["route", "ask_user", "send_message", "mcp__arbos__ask_user"]);
+const DIRECT_ONLY_TOOLS = new Set(["route", "ask_user", "send_message", "start_job", "list_jobs", "steer_job", "stop_job", "mcp__arbos__ask_user"]);
 // pi's built-in tools inside a `codemode` script: these keep their plain `tools.<name>`.
 const PI_BUILTIN_TOOLS = new Set(["read", "bash", "edit", "write", "grep", "find", "ls", "codemode"]);
 // Stable prefix (D87): with it on, the working set, the per-turn skills and project memory are
@@ -105,6 +154,11 @@ export default function arbosPiExt(pi: ExtensionAPI) {
   // Per-turn state. Reset at every run start.
   let routeAttempts = 0;
   let routed = false;
+  // A relay turn (a job's or subagent's result, an approval outcome, an agent's reply): its only
+  // valid route is `reply`, so a `send_message` that comes first is that route (sweep 2026-10-25:
+  // the result turn's two send_message calls were blocked "route-first"; the model then routed
+  // `reply` with "Delivering the update now." and the user read only that).
+  let relayTurn = false;
   let routeCorrections = 0;
   let correcting = false;
   let sessionId = "";
@@ -146,7 +200,12 @@ export default function arbosPiExt(pi: ExtensionAPI) {
   // ---- 4b. working-set section, refreshed every run and after compaction -----------------
   pi.on("before_agent_start", async (event) => {
     routeAttempts = 0;
-    routed = false;
+    // #1704: a run whose prompt is a stamped steer continues the turn agentd interrupted (#1690);
+    // that turn already routed, so the route-first guard does not apply again. Read from the
+    // prompt itself: state carried from the `input` hook can miss when the hooks run apart.
+    routed = event.messageType === "user" && event.prompt.startsWith(STEER_PREFIX);
+    // The `input` hook prefixed the prompt (route reminder, turn context): the mark is inside.
+    relayTurn = event.messageType === "user" && event.prompt.includes(RELAY_TURN_MARK);
     routeCorrections = 0;
     correcting = false;
     if (STABLE_PREFIX) return; // D87: the context rides in the user turn (see the `input` hook)
@@ -213,7 +272,20 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     if (directOnly) {
       return { block: true, reason: `${event.toolName} cannot be called from a script: call it directly, after the script.` };
     }
-    if (beforeRoute) {
+    if (SESSION_ROLE === "main" && parent === null) {
+      const detached = detachedShell(event.toolName, event.input as Record<string, unknown>);
+      if (detached) {
+        audit({ kind: "detached_shell_refused", session: sessionId, tool: event.toolName, fragment: detached.slice(0, 160) });
+        return { block: true, reason: `Refused (\`${detached.slice(0, 80)}\`): ${DETACHED_SHELL_HINT}` };
+      }
+    }
+    if (beforeRoute && relayTurn && event.toolName === "send_message") {
+      // Speaking first in a relay turn is routing `reply`: record it and let the message out.
+      routeAttempts += 1;
+      const res = await hook("/hook/route", { session_id: sessionId, role: SESSION_ROLE, attempt: routeAttempts, args: { action: "reply" } });
+      routed = true;
+      audit({ kind: "route_implicit", session: sessionId, role: SESSION_ROLE, ok: !res || res.ok !== false });
+    } else if (beforeRoute) {
       return {
         block: true,
         reason:
@@ -314,7 +386,7 @@ export default function arbosPiExt(pi: ExtensionAPI) {
       case "pending":
         return {
           block: true,
-          reason: `The approval for this action (${approvalId}) was not decided in time. Nothing ran; tell the user it needs their approval.`,
+          reason: `The approval for this action (${approvalId}) was not decided in time. Nothing ran and nothing will run or "confirm" later: whatever it was meant to post, send or change is NOT done. Tell the user it needs their approval; never say it was posted or sent.`,
         };
       default: {
         const _exhaustive: never = state;
@@ -393,17 +465,24 @@ export default function arbosPiExt(pi: ExtensionAPI) {
       switch (action) {
         case "reply":
           if (args.reply && args.reply.trim()) {
+            if (relayTurn || promisesMore(args.reply)) {
+              // An opening line, not the answer: the turn goes on until the parts are posted.
+              return {
+                content: [{ type: "text", text: "Your first line is in the chat. It is not the answer: now post the rest with send_message — each part its own call (conclusion, linked table, details + sources, one next-step offer) — then end the turn. Words outside send_message are not shown." }],
+                details: { action },
+              };
+            }
             return { content: [{ type: "text", text: "Reply delivered to the user." }], details: { action }, terminate: true };
           }
-          return { content: [{ type: "text", text: "Route accepted: reply. Write only the answer the user should see — no thinking aloud." }], details: { action } };
+          return { content: [{ type: "text", text: "Route accepted: reply. Post the answer with send_message (one call for a short answer; parts for a comparison); words outside send_message are not shown." }], details: { action } };
         case "act":
           return {
             content: [
               {
                 type: "text",
                 text: acked
-                  ? "Route accepted: act. Your acknowledgement is already in the chat. Do the work (send_message only at real milestones), then write only the conversational result — no thinking aloud, no process narration."
-                  : "Route accepted: act. Arbos posted a short acknowledgement for you. Follow your plan, then write only the conversational result — no thinking aloud, no process narration.",
+                  ? "Route accepted: act. Your acknowledgement is on the working line. If this needs the web, several pages, a build, or more than three tool calls: post that acknowledgement with send_message, call start_job now and end the turn — do not do long work here. Otherwise do the work, then post the result with send_message (a comparison as conclusion, linked table, details + sources, one next-step offer — each its own call); words outside send_message are not shown. No thinking aloud, no process narration. A destructive step (deleting files you did not create, sending, paying) still needs the user's yes through ask_user before you run it."
+                  : "Route accepted: act. If this needs the web, several pages, a build, or more than three tool calls: post a one-line acknowledgement with send_message, call start_job now and end the turn. Otherwise follow your plan, then post the result with send_message (several calls when the answer has parts); words outside send_message are not shown. No thinking aloud, no process narration. A destructive step (deleting files you did not create, sending, paying) still needs the user's yes through ask_user before you run it.",
               },
             ],
             details: { action },
@@ -436,25 +515,129 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     },
   });
 
-  // ---- 2b. send_message: a progress bubble at a real milestone (agent-flow contract §1) ------
+  // ---- 2b. send_message: progress bubble (no `to`) or cross-subnet agent message (`to`) ------
   if (SESSION_ROLE === "main") pi.registerTool({
     name: "send_message",
     label: "Send message",
     description:
-      "Post a short progress message to the user now, as its own chat bubble, while you keep working. Only at a real milestone of longer work (something finished, something unexpected), never for each command. Optional `activity`: 2–5 plain words for the working line (\"Running tests\").",
-    promptSnippet: "send_message: post a short progress note to the user mid-task (real milestones only)",
+      "Two uses. (1) Without `to`: post a message to the user in this chat — the only way your words reach them (an acknowledgement before longer work, a progress note at a real milestone, each part of a result, or the whole answer). Markdown is fine: tables, lists, links. (2) With `to` (agent name, @handle or id): message that agent — the text lands in their own chat and their reply comes back here; never write `@name …` as a chat bubble to reach them. Optional `activity`: 2–5 plain words for the working line (\"Running tests\"). Optional `reply_to`: the id of the message this answers (default: the message that started this turn).",
+    promptSnippet: "send_message: post to the user (the only way your words are shown); with `to` = message another agent",
     parameters: Type.Object({
-      text: Type.String({ description: "One or two plain sentences" }),
+      text: Type.String({ description: "The message for the user (markdown allowed), or the words for the other agent" }),
+      to: Type.Optional(Type.Union([Type.String(), Type.Null()], { description: "Agent name, @handle or id — set this to message another agent" })),
       activity: Type.Optional(Type.Union([Type.String(), Type.Null()], { description: "What you are doing next, 2-5 words, present tense" })),
+      reply_to: Type.Optional(Type.Union([Type.String(), Type.Null()], { description: "Message id this answers, when not the message that started the turn" })),
     }),
     exposure: "model-only",
     executionMode: "sequential",
     async execute(_toolCallId, params) {
-      const res = await hook("/hook/send_message", { session_id: sessionId, text: params.text, activity: params.activity ?? null });
+      const res = await hook("/hook/send_message", {
+        session_id: sessionId,
+        text: params.text,
+        to: params.to ?? null,
+        activity: params.activity ?? null,
+        reply_to: params.reply_to ?? null,
+      });
       if (res && !res.ok) {
         return { content: [{ type: "text", text: `Not sent (${res.error ?? "unknown"}). Keep working; say it in your final result instead.` }], details: undefined };
       }
-      return { content: [{ type: "text", text: "Sent. Keep working; do not repeat it in your final result." }], details: undefined };
+      if (typeof res?.note === "string" && res.note.trim()) {
+        return { content: [{ type: "text", text: res.note }], details: undefined };
+      }
+      return { content: [{ type: "text", text: "Posted. Do not repeat it; anything you write outside send_message is not shown." }], details: undefined };
+    },
+  });
+
+  // ---- 2c. jobs (duplex step 2): start_job returns at once; the result comes back as an [Arbos] job notice
+  if (SESSION_ROLE === "main") pi.registerTool({
+    name: "start_job",
+    label: "Start job",
+    description:
+      "Start a background job for work that takes more than a few seconds (research, a comparison, a build, a long script). Returns at once with a job id; the job's title is the status line the user watches, and its result reaches you later as an `[Arbos] Job … finished` message to deliver with send_message. Post a one-line acknowledgement with send_message first, then call this and end the turn.",
+    promptSnippet: "start_job: run longer work beside the chat; its result arrives later as an [Arbos] job notice",
+    parameters: Type.Object({
+      title: Type.String({ description: "2-5 words, present tense, what the user sees while it runs (\"Searching for surf schools\")" }),
+      brief: Type.String({ description: "The exact instruction for the worker: what to find or build, for whom, the acceptance criterion, what to return (URLs and sources for research)" }),
+      kind: Type.Union([Type.Literal("research"), Type.Literal("code"), Type.Literal("ops"), Type.Literal("other")]),
+      touches: Type.Optional(Type.Union([Type.Array(Type.String()), Type.Null()], { description: "Resources the job changes: paths, 'git', 'routines', 'secret:<name>' (none for research)" })),
+    }),
+    exposure: "model-only",
+    executionMode: "sequential",
+    async execute(_toolCallId, params) {
+      const res = await hook("/hook/start_job", {
+        session_id: sessionId,
+        title: params.title,
+        brief: params.brief,
+        kind: params.kind,
+        touches: params.touches ?? [],
+      });
+      if (res && !res.ok) {
+        return { content: [{ type: "text", text: `Job not started (${res.error ?? "unknown"}). Tell the user in one line what you will do instead.` }], details: undefined };
+      }
+      const job = (res as { job?: { job_id?: string; state?: string } } | undefined)?.job;
+      return {
+        content: [{ type: "text", text: `Job ${job?.job_id ?? "?"} ${job?.state ?? "running"}. End the turn now with nothing more; its result arrives later as an [Arbos] job notice.` }],
+        details: undefined,
+      };
+    },
+  });
+
+  if (SESSION_ROLE === "main") pi.registerTool({
+    name: "list_jobs",
+    label: "List jobs",
+    description: "The jobs of this chat: id, title, state (queued | running | done | failed | cancelled | interrupted), current step and elapsed seconds. Use it to answer \"how is it going?\" and before starting work that may already be running.",
+    promptSnippet: "list_jobs: the jobs of this chat with their live step",
+    parameters: Type.Object({}),
+    exposure: "model-only",
+    executionMode: "sequential",
+    async execute() {
+      const res = await hook("/hook/list_jobs", { session_id: sessionId });
+      if (res && !res.ok) {
+        return { content: [{ type: "text", text: `No job list (${res.error ?? "unknown"}).` }], details: undefined };
+      }
+      const jobs = (res as { jobs?: unknown[] } | undefined)?.jobs ?? [];
+      return { content: [{ type: "text", text: jobs.length ? JSON.stringify(jobs) : "No jobs in this chat." }], details: undefined };
+    },
+  });
+
+  if (SESSION_ROLE === "main") pi.registerTool({
+    name: "steer_job",
+    label: "Steer job",
+    description: "Send a correction into a running job (\"only group lessons under $70\"). `job_id` from list_jobs, or \"latest\" for the newest running job. Ack to the user yourself in one line.",
+    promptSnippet: "steer_job: a mid-flight correction to a running job",
+    parameters: Type.Object({
+      job_id: Type.String({ description: "Job id, or \"latest\"" }),
+      text: Type.String({ description: "The correction, as an instruction to the worker" }),
+    }),
+    exposure: "model-only",
+    executionMode: "sequential",
+    async execute(_toolCallId, params) {
+      const res = await hook("/hook/steer_job", { session_id: sessionId, job_id: params.job_id, text: params.text });
+      if (res && !res.ok) {
+        return { content: [{ type: "text", text: `Not steered (${res.error ?? "unknown"}). Start a new job for it, or tell the user.` }], details: undefined };
+      }
+      const job = (res as { job?: { job_id?: string; title?: string } } | undefined)?.job;
+      return { content: [{ type: "text", text: `Steered job ${job?.job_id ?? "?"} (${job?.title ?? ""}). Tell the user in one line what changed, then end the turn.` }], details: undefined };
+    },
+  });
+
+  if (SESSION_ROLE === "main") pi.registerTool({
+    name: "stop_job",
+    label: "Stop job",
+    description: "Stop a running job: `job_id` from list_jobs, \"latest\" for the newest running job, or \"all\" for every job of this chat. Confirm to the user yourself in one line; no result will follow.",
+    promptSnippet: "stop_job: stop one job (id | latest) or all",
+    parameters: Type.Object({
+      job_id: Type.String({ description: "Job id, \"latest\" or \"all\"" }),
+    }),
+    exposure: "model-only",
+    executionMode: "sequential",
+    async execute(_toolCallId, params) {
+      const res = await hook("/hook/stop_job", { session_id: sessionId, job_id: params.job_id });
+      if (res && !res.ok) {
+        return { content: [{ type: "text", text: `Nothing stopped (${res.error ?? "unknown"}).` }], details: undefined };
+      }
+      const stopped = ((res as { result?: { stopped?: string[] } } | undefined)?.result?.stopped) ?? [];
+      return { content: [{ type: "text", text: `Stopped: ${stopped.join(", ") || "nothing"}. Confirm to the user in one line.` }], details: undefined };
     },
   });
 
@@ -563,6 +746,9 @@ export default function arbosPiExt(pi: ExtensionAPI) {
   pi.on("input", async (event) => {
     if (SESSION_ROLE !== "main" || event.source === "extension" || event.text.startsWith("/")) return { action: "continue" };
     if (event.text.startsWith(ROUTE_PREFIX)) return { action: "continue" };
+    // A stamped steer (#1690): pi's steer inside a routed run, or the prompt that continues the
+    // turn after an abort (`before_agent_start` keeps that run routed). No route reminder.
+    if (event.text.startsWith(STEER_PREFIX)) return { action: "continue" };
     // D87: the per-turn context goes here, after the stable prefix, instead of into the system prompt.
     const context = STABLE_PREFIX ? await turnContextBlock() : "";
     return { action: "transform", text: `${ROUTE_PREFIX}${context}${event.text}`, images: event.images };

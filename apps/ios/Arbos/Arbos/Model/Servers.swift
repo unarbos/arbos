@@ -129,13 +129,15 @@ struct Server: Identifiable, Equatable {
     var generalChannelId: String?
     /// D79 `avatar_color_index_effective` (nil → derived from `id`).
     var avatarColorIndex: Int?
-    /// D92 amendment: the server's leaf picture from the Create screen; nil → initials.
+    /// D92 amendment: the server's leaf picture from the Create screen; nil → initials (or the
+    /// neutral initial when `isNeutralAvatar`, Jacob 2026-10-25).
     var avatarLeaf: Int? = nil
     var avatarLeafColor: Int? = nil
     var leafPick: LeafPick? {
-        guard let l = avatarLeaf, let c = avatarLeafColor else { return nil }
+        guard let l = avatarLeaf, let c = avatarLeafColor, !LeafArt.isNeutral(l) else { return nil }
         return LeafPick(leaf: UInt8(clamping: l), color: UInt8(clamping: c))
     }
+    var isNeutralAvatar: Bool { LeafArt.isNeutral(avatarLeaf) }
     /// Anyone on Arbos can search and join without an invite link.
     var isOpen: Bool
     /// Only for owner/admin.
@@ -144,6 +146,8 @@ struct Server: Identifiable, Equatable {
     var invites: [ServerInviteLink] = []
     /// Only from `GET /servers/{id}` / `POST /servers`.
     var members: [ServerMember]
+    /// Per-user sidebar archive (`archived_at` on `GET /servers`); nil = in the list.
+    var archivedAt: Int64? = nil
 
     var isOwner: Bool { myRole == "owner" }
     var isAdmin: Bool { myRole == "owner" || myRole == "admin" }
@@ -181,7 +185,8 @@ struct Server: Identifiable, Equatable {
             isOpen: (d["open"] as? Bool) ?? (d["open"] as? NSNumber)?.boolValue ?? false,
             invite: ServerInvite.parse(d["invite"]),
             invites: ((d["invites"] as? [Any]) ?? []).compactMap(ServerInviteLink.parse),
-            members: ((d["members"] as? [Any]) ?? []).compactMap(ServerMember.parse)
+            members: ((d["members"] as? [Any]) ?? []).compactMap(ServerMember.parse),
+            archivedAt: (d["archived_at"] as? NSNumber)?.int64Value
         )
     }
 }

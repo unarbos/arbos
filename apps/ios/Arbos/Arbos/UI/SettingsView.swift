@@ -14,7 +14,6 @@
 // Page #FCFCFC / #141414, cards = the assistant-bubble grey, our circular back
 // button, 17 pt labels, muted monochrome icon tiles, hairlines inset past the tile.
 
-import PhotosUI
 import SwiftUI
 import UIKit
 import UserNotifications
@@ -27,26 +26,52 @@ struct SettingsView: View {
     @ObservedObject private var push = PushManager.shared
     @State private var confirmUnpair = false
     /// Connector errors — the root `notice` alert sits under this sheet and looks like a silent fail.
-    @State private var connectorError: String?
-    @State private var avatarItem: PhotosPickerItem?
-    @State private var avatarBusy = false
-    /// Image waiting in Move and Scale before `PUT /me/avatar`.
-    @State private var avatarCrop: AvatarCropPayload?
+    @State private var connectorError: UserError?
+    /// The avatar picker (Generate | Upload, Reset) over my picture — the agents' sheet
+    /// (Jacob, 2026-10-25); `ARBOS_SETTINGS_PAGE=avatar[-generate|-upload]` opens it (rig).
+    @State private var showAvatarPicker: AvatarPickerTab?
     @State private var showProfileEdit = false
     /// Profile | Settings — the same pill as the person and group panes.
-    /// Settings is the landing tab; `ARBOS_SETTINGS_PAGE=profile` lands on Profile.
-    @State private var tab = DebugHooks.settingsPage == "profile" ? "Profile" : "Settings"
-    /// `ARBOS_SETTINGS_PAGE=appearance` lands on that page (screenshot rig).
-    @State private var showAppearancePage = DebugHooks.settingsPage == "appearance"
-    @State private var showTextSizePage = DebugHooks.settingsPage == "textsize"
-    @State private var showConnectorsPage = DebugHooks.settingsPage == "connectors"
-    // Rig: ARBOS_SETTINGS_PAGE=machine | credits | notifications | about | relay (Debug only).
-    @State private var showMachinePage = DebugHooks.settingsPage == "machine"
-    @State private var showCreditsPage = DebugHooks.settingsPage == "credits"
-    @State private var showNotificationsPage = DebugHooks.settingsPage == "notifications"
-    @State private var showAboutPage = DebugHooks.settingsPage == "about"
-    @State private var showRelayPage = DebugHooks.settingsPage == "relay"
-    @State private var showSecretsPage = ["secrets", "vault", "connect", "new-secret"].contains(DebugHooks.settingsPage ?? "") || DebugHooks.settingsPage?.hasPrefix("secret:") == true
+    /// Settings is the landing tab; a `landing` of `profile` lands on Profile.
+    @State private var tab: String
+    /// The page the sheet lands on: a search result's page ([feedback
+    /// search-settings-ios-2026-10-26]) or the rig's `ARBOS_SETTINGS_PAGE`
+    /// (appearance · textsize · connectors · machine | machine-expanded · credits · notifications ·
+    /// privacy · about · devices · relay · secrets | vault | connect | new-secret | secret:<ENV>).
+    private let landing: String?
+    @State private var showAppearancePage: Bool
+    @State private var showTextSizePage: Bool
+    @State private var showConnectorsPage: Bool
+    @State private var showMachinePage: Bool
+    @State private var showCreditsPage: Bool
+    @State private var showNotificationsPage: Bool
+    @State private var showPrivacyPage: Bool
+    @State private var showAboutPage: Bool
+    @State private var showDevicesPage: Bool
+    @State private var showRelayPage: Bool
+    @State private var showSecretsPage: Bool
+
+    /// The pages the Settings list shows (`settingsSections`), as search routes;
+    /// the structure test checks the shared index finds each of them.
+    static let listedPages: [GlobalSearch.SettingsPageRoute] = [
+        .credits, .connectedApps, .secrets, .devices, .machine, .notifications, .privacy, .appearance, .textSize, .about,
+    ]
+
+    init(landing: String? = DebugHooks.settingsPage) {
+        self.landing = landing
+        _tab = State(initialValue: landing == "profile" ? "Profile" : "Settings")
+        _showAppearancePage = State(initialValue: landing == "appearance")
+        _showTextSizePage = State(initialValue: landing == "textsize")
+        _showConnectorsPage = State(initialValue: landing == "connectors")
+        _showMachinePage = State(initialValue: landing == "machine" || landing == "machine-expanded")
+        _showCreditsPage = State(initialValue: landing == "credits")
+        _showNotificationsPage = State(initialValue: landing == "notifications")
+        _showPrivacyPage = State(initialValue: landing == "privacy")
+        _showAboutPage = State(initialValue: landing == "about")
+        _showDevicesPage = State(initialValue: landing == "devices")
+        _showRelayPage = State(initialValue: landing == "relay")
+        _showSecretsPage = State(initialValue: ["secrets", "vault", "connect", "new-secret"].contains(landing ?? "") || landing?.hasPrefix("secret:") == true)
+    }
 
     var body: some View {
         NavigationStack {
@@ -57,7 +82,7 @@ struct SettingsView: View {
                 theme.bg.ignoresSafeArea()
                 ScrollView {
                     VStack(spacing: 18) {
-                        Color.clear.frame(height: 80)
+                        Color.clear.frame(height: PaneKit.pageTop)
                         ProfilePane(
                             hero: PaneHero(
                                 picture: .image(AnyView(profilePicture)),
@@ -72,23 +97,31 @@ struct SettingsView: View {
                         Color.clear.frame(height: 40)
                     }
                 }
-                ProfileTopBar { EmptyView() }
+                .scrollIndicators(.visible)
+                // Settings is a sheet (from Home's account circle): back closes it.
+                ProfileTopBar(onBack: { dismiss() }, screen: .ownProfile) { EmptyView() }
             }
             .toolbar(.hidden, for: .navigationBar)
             .navigationBarBackButtonHidden(true)
-            .confirmationDialog("Sign out?", isPresented: $confirmUnpair, titleVisibility: .visible) {
-                Button("Sign out", role: .destructive) {
-                    if model.tokens != nil { model.signOut() } else { model.unpair() }
-                    dismiss()
-                }
-            } message: {
-                Text(model.tokens != nil ? "This device is signed out of the relay; sign in with GitHub to come back." : "You will need a new pairing code to connect again.")
+            .confirm(ConfirmSpec(
+                title: "Sign out?",
+                message: model.tokens != nil ? "This device is signed out of the relay; sign in with GitHub to come back." : "You will need a new pairing code to connect again.",
+                action: "Sign out"
+            ), isPresented: $confirmUnpair) {
+                if model.tokens != nil { model.signOut() } else { model.unpair() }
+                dismiss()
             }
             .onAppear {
                 model.refreshConnectors()
                 Task { await push.refreshStatus() }
                 Task { await model.refreshSecrets() }
+                Task { await model.refreshDevices() }
                 Task { await model.refreshGoals() }
+                if let page = landing, page.hasPrefix("avatar") {
+                    tab = "Profile"
+                    let initial: AvatarPickerTab = page.hasSuffix("upload") ? .upload : .generate
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { showAvatarPicker = initial }
+                }
             }
             // After Google OAuth in Safari, refresh so "Needs sign-in" flips to Connected.
             .onChange(of: scenePhase) { _, phase in
@@ -97,51 +130,26 @@ struct SettingsView: View {
                     Task { await push.refreshStatus() }
                 }
             }
-            // Steal connector notices so they appear above this sheet, not under it.
-            .onChange(of: model.notice) { _, n in
-                guard let text = n?.text else { return }
-                let isConnector = text.hasPrefix("Connect ")
-                    || text.hasPrefix("Connectors:")
-                    || text.hasPrefix("Disconnect:")
-                    || text.hasPrefix("Could not update profile picture:")
-                guard isConnector else { return }
-                connectorError = text
-                model.notice = nil
+            // The sheet's own toast layer (Jacob 2026-10-26): a failure while Settings is up —
+            // Connect, a picture save, a secret — is the shared note at the top of this sheet,
+            // not an alert and not a toast hidden under it.
+            .overlay(alignment: .top) {
+                ToastHost()
+                    .environmentObject(model)
+                    .environment(\.theme, theme)
             }
-            .alert("Arbos", isPresented: Binding(
-                get: { connectorError != nil },
-                set: { if !$0 { connectorError = nil } }
-            )) {
-                Button("OK", role: .cancel) { connectorError = nil }
-            } message: {
-                Text(connectorError ?? "")
-            }
-            .onChange(of: avatarItem) { _, item in
-                guard let item else { return }
-                Task { await beginAvatarCrop(item) }
-            }
-            .sheet(item: $avatarCrop) { payload in
-                AvatarCropSheet(
-                    image: payload.image,
-                    onCancel: { avatarCrop = nil },
-                    onUse: { cropped in
-                        avatarCrop = nil
-                        Task { await uploadAvatar(cropped) }
-                    }
-                )
-                .environment(\.theme, theme)
-                .presentationDetents([.large])
-                .presentationDragIndicator(.visible)
-                .presentationBackground(theme.bg)
-                .preferredColorScheme(theme.isDark ? .dark : .light)
+            .sheet(item: $showAvatarPicker) { initial in
+                AvatarPickerSheet(target: .me, initialTab: initial).environmentObject(model).environment(\.theme, theme)
             }
             .navigationDestination(isPresented: $showAppearancePage) { AppearancePage() }
             .navigationDestination(isPresented: $showTextSizePage) { TextSizePage() }
             .navigationDestination(isPresented: $showConnectorsPage) { ConnectorsPage(connectorError: $connectorError) }
-            .navigationDestination(isPresented: $showMachinePage) { MachinePage() }
+            .navigationDestination(isPresented: $showMachinePage) { MachinePage(openAgent: openAgentFromSettings) }
             .navigationDestination(isPresented: $showCreditsPage) { CreditsPage() }
             .navigationDestination(isPresented: $showNotificationsPage) { NotificationsPage() }
+            .navigationDestination(isPresented: $showPrivacyPage) { PrivacyPage() }
             .navigationDestination(isPresented: $showAboutPage) { AboutPage() }
+            .navigationDestination(isPresented: $showDevicesPage) { DevicesPage() }
             .navigationDestination(isPresented: $showRelayPage) {
                 // RelayPage only exists in Debug; the Release (TestFlight) build has no such type.
                 #if DEBUG
@@ -150,7 +158,7 @@ struct SettingsView: View {
                 EmptyView()
                 #endif
             }
-            .navigationDestination(isPresented: $showSecretsPage) { SecretsPage() }
+            .navigationDestination(isPresented: $showSecretsPage) { SecretsPage(landing: landing) }
             .sheet(isPresented: $showProfileEdit) {
                 NavigationStack {
                     ProfileEditView()
@@ -192,13 +200,19 @@ struct SettingsView: View {
                             valueTint: model.secrets?.paused == true ? theme.danger : nil)
             }))
         }
+        if model.credentials != nil || model.isFixture {
+            // Devices (Oct 23): every GitHub sign-in is one; sign another out here.
+            account.append(AnyView(NavigationLink { DevicesPage() } label: {
+                SettingsRow(icon: "laptopcomputer", title: "Devices", value: devicesSummary)
+            }))
+        }
         if !model.isFixture {
             account.append(AnyView(SettingsRow(icon: "iphone", title: "On this iPhone", value: storageLine, chevron: false)))
         }
         out.append(.card(account, separatorInset: inset))
         out.append(.card([
-            AnyView(NavigationLink { MachinePage() } label: {
-                SettingsRow(icon: "desktopcomputer", title: "Machine", value: machineSummary, dot: machineDotColor(model.machine.state, theme: theme))
+            AnyView(NavigationLink { MachinePage(openAgent: openAgentFromSettings) } label: {
+                SettingsRow(icon: "desktopcomputer", title: "Machine", value: machineSummary, mark: machineMark(model.machine.state))
             }),
         ], separatorInset: inset))
         out.append(.footnote(model.machine.alwaysOn
@@ -207,6 +221,9 @@ struct SettingsView: View {
         out.append(.card([
             AnyView(NavigationLink { NotificationsPage() } label: {
                 SettingsRow(icon: "bell.badge.fill", title: "Notifications", value: notificationsSummary)
+            }),
+            AnyView(NavigationLink { PrivacyPage() } label: {
+                SettingsRow(icon: "hand.raised.fill", title: "Privacy", value: privacySummary)
             }),
             AnyView(NavigationLink { AppearancePage() } label: {
                 SettingsRow(icon: "circle.lefthalf.filled", title: "Appearance", value: appearanceSummary)
@@ -237,6 +254,13 @@ struct SettingsView: View {
     }
 
     /// Pinned under Settings: Sign out.
+    /// Settings › Machine › "Ask X to free space": close the sheet, then land in that
+    /// agent's chat (the Send-feedback row's timing).
+    private func openAgentFromSettings(_ project: Project) {
+        dismiss()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { model.open(project: project) }
+    }
+
     private var settingsFooter: [PaneSection] {
         [.card([AnyView(PaneDangerRow(title: model.tokens != nil ? "Sign out" : "Sign out this device") { confirmUnpair = true })])]
     }
@@ -245,7 +269,7 @@ struct SettingsView: View {
     /// Remove picture when one was uploaded; the Mac me pane's Profile tab.
     private var profileSections: [PaneSection] {
         let canEdit = model.user != nil && !model.isFixture
-        var rows: [AnyView] = [
+        let rows: [AnyView] = [
             AnyView(Button { editProfile() } label: {
                 PaneRow(title: "Name", value: model.user?.name ?? model.user?.login ?? "Arbos", valueTint: theme.text)
             }
@@ -257,13 +281,6 @@ struct SettingsView: View {
             .buttonStyle(.plain)
             .disabled(!canEdit)),
         ]
-        if model.hasCustomAvatar {
-            rows.append(AnyView(PaneDangerRow(title: "Remove picture") {
-                avatarBusy = true
-                Task { _ = await model.removeUserAvatar(); avatarBusy = false }
-            }
-            .disabled(avatarBusy)))
-        }
         return [
             .card(rows),
             .footnote("Your name, handle and picture are what other people and their agents see, here and on the Mac. Signed in with GitHub."),
@@ -277,36 +294,29 @@ struct SettingsView: View {
 
     // MARK: Profile picture
 
-    /// The hero picture with the crayon: tap to pick a new one.
+    /// The hero picture with the crayon: tap → the avatar picker (Generate | Upload, Reset),
+    /// the same sheet an agent's picture opens.
     private var profilePicture: some View {
-        PhotosPicker(selection: $avatarItem, matching: .images) {
+        Button { showAvatarPicker = .generate } label: {
             PersonAvatar(url: model.user?.avatarUrl, handle: model.user?.login ?? "?", size: PaneKit.heroAvatar,
                          name: model.user?.name, id: model.user?.id,
                          colorIndex: model.user?.avatarColorIndexEffective)
-                .opacity(avatarBusy ? 0.55 : 1)
-                .paneCrayon(model.user != nil && !model.isFixture)
+                .paneCrayon(model.user != nil)
         }
         .buttonStyle(.plain)
-        .disabled(model.user == nil || avatarBusy || model.isFixture)
+        .disabled(model.user == nil)
         .accessibilityLabel("Change profile picture")
     }
 
-    /// Load the pick, then open Move and Scale so the user frames the circle.
-    private func beginAvatarCrop(_ item: PhotosPickerItem) async {
-        defer { avatarItem = nil }
-        guard let data = try? await item.loadTransferable(type: Data.self),
-              let img = UIImage(data: data) else { return }
-        avatarCrop = AvatarCropPayload(image: img)
-    }
-
-    private func uploadAvatar(_ image: UIImage) async {
-        avatarBusy = true
-        defer { avatarBusy = false }
-        guard let jpeg = image.jpegData(compressionQuality: 0.85) else { return }
-        _ = await model.setUserAvatar(jpeg: jpeg)
-    }
-
     // MARK: Row summaries
+
+    private var devicesSummary: String? {
+        switch AuthDevice.visible(model.devices).count {
+        case 0: return nil
+        case 1: return "1 device"
+        case let n: return "\(n) devices"
+        }
+    }
 
     private var creditsSummary: String? {
         guard let c = model.credits else { return nil }
@@ -337,6 +347,10 @@ struct SettingsView: View {
         return "\(model.appearance.label) · \(model.surface.label)"
     }
 
+    private var privacySummary: String {
+        (GroupAddPolicy(rawValue: model.groupAddPolicy) ?? .anyone).summary
+    }
+
     /// "12.4 MB · 23 chats" from the on-device store (#929).
     private var storageLine: String {
         let u = model.storeUsage
@@ -359,149 +373,6 @@ struct SettingsView: View {
     }
 }
 
-/// One picked photo waiting for Move and Scale (sheet `item:` needs `Identifiable`).
-private struct AvatarCropPayload: Identifiable {
-    let id = UUID()
-    let image: UIImage
-}
-
-/// Pinch and drag to frame the picture in the profile circle, then Use.
-private struct AvatarCropSheet: View {
-    let image: UIImage
-    let onCancel: () -> Void
-    let onUse: (UIImage) -> Void
-    @Environment(\.theme) private var theme
-
-    @State private var scale: CGFloat = 1
-    @State private var baseScale: CGFloat = 1
-    @State private var offset: CGSize = .zero
-    @State private var baseOffset: CGSize = .zero
-    @State private var hole: CGFloat = 280
-
-    private let outputSide: CGFloat = 512
-
-    var body: some View {
-        NavigationStack {
-            GeometryReader { geo in
-                let nextHole = min(min(geo.size.width, geo.size.height) - 48, 300)
-                let base = fittedSize(for: hole)
-                ZStack {
-                    theme.bg.ignoresSafeArea()
-                    Image(uiImage: image)
-                        .resizable()
-                        .frame(width: base.width * scale, height: base.height * scale)
-                        .offset(offset)
-                        .frame(width: geo.size.width, height: geo.size.height)
-                        .contentShape(Rectangle())
-                        .gesture(panGesture.simultaneously(with: magnifyGesture))
-                        .clipped()
-                    // Dim outside the circle so the profile crop is obvious.
-                    Rectangle()
-                        .fill(Color.black.opacity(0.55))
-                        .frame(width: geo.size.width, height: geo.size.height)
-                        .overlay {
-                            Circle()
-                                .frame(width: hole, height: hole)
-                                .blendMode(.destinationOut)
-                        }
-                        .compositingGroup()
-                        .allowsHitTesting(false)
-                    Circle()
-                        .strokeBorder(Color.white.opacity(0.85), lineWidth: 1)
-                        .frame(width: hole, height: hole)
-                        .allowsHitTesting(false)
-                }
-                .onAppear { hole = nextHole }
-                .onChange(of: nextHole) { _, value in hole = value }
-            }
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel", action: onCancel).foregroundStyle(theme.text)
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Use") { onUse(render()) }
-                        .font(theme.font(Theme.small, weight: .semibold))
-                        .foregroundStyle(theme.text)
-                }
-            }
-            .navigationTitle("Move and Scale")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(theme.bg, for: .navigationBar)
-            .toolbarBackground(.visible, for: .navigationBar)
-        }
-    }
-
-    /// At scale 1 the shorter side fills the hole (cover the circle).
-    private func fittedSize(for hole: CGFloat) -> CGSize {
-        let s = image.size
-        guard s.width > 0, s.height > 0 else { return CGSize(width: hole, height: hole) }
-        if s.width >= s.height {
-            return CGSize(width: hole * (s.width / s.height), height: hole)
-        }
-        return CGSize(width: hole, height: hole * (s.height / s.width))
-    }
-
-    private var magnifyGesture: some Gesture {
-        MagnifyGesture()
-            .onChanged { value in
-                scale = max(1, baseScale * value.magnification)
-            }
-            .onEnded { _ in
-                baseScale = scale
-                clampOffset()
-                baseOffset = offset
-            }
-    }
-
-    private var panGesture: some Gesture {
-        DragGesture()
-            .onChanged { value in
-                offset = CGSize(
-                    width: baseOffset.width + value.translation.width,
-                    height: baseOffset.height + value.translation.height
-                )
-            }
-            .onEnded { _ in
-                clampOffset()
-                baseOffset = offset
-            }
-    }
-
-    /// Keep the circle covered: no empty edges inside the hole.
-    private func clampOffset() {
-        let base = fittedSize(for: hole)
-        let w = base.width * scale
-        let h = base.height * scale
-        let maxX = max(0, (w - hole) / 2)
-        let maxY = max(0, (h - hole) / 2)
-        offset.width = min(max(offset.width, -maxX), maxX)
-        offset.height = min(max(offset.height, -maxY), maxY)
-    }
-
-    /// Rasterise the circle's square into a 512×512 upload image.
-    private func render() -> UIImage {
-        let base = fittedSize(for: hole)
-        let display = CGSize(width: base.width * scale, height: base.height * scale)
-        // Crop square centred in the view; image centre sits at `offset` from that centre.
-        let origin = CGPoint(
-            x: display.width / 2 - offset.width - hole / 2,
-            y: display.height / 2 - offset.height - hole / 2
-        )
-        let sx = image.size.width / max(display.width, 1)
-        let sy = image.size.height / max(display.height, 1)
-        let crop = CGRect(x: origin.x * sx, y: origin.y * sy, width: hole * sx, height: hole * sy)
-        let renderer = UIGraphicsImageRenderer(size: CGSize(width: outputSide, height: outputSide))
-        return renderer.image { _ in
-            let dest = CGRect(
-                x: -crop.origin.x / max(crop.width, 1) * outputSide,
-                y: -crop.origin.y / max(crop.height, 1) * outputSide,
-                width: image.size.width / max(crop.width, 1) * outputSide,
-                height: image.size.height / max(crop.height, 1) * outputSide
-            )
-            image.draw(in: dest)
-        }
-    }
-}
 
 // MARK: - Building blocks (Apple structure, Arbos skin)
 
@@ -533,6 +404,7 @@ struct SettingsPage<Content: View>: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { proxy.scrollTo(anchor, anchor: .top) }
                 }
             }
+            .scrollIndicators(.visible)
             // Apple Account pull-down: frosted fade under the title so the
             // avatar softens as it scrolls / rubber-bands into the header.
             headerBlur
@@ -613,8 +485,8 @@ struct SettingsRow: View {
     let title: String
     var value: String? = nil
     var chevron: Bool = true
-    /// Small status dot drawn on the tile (machine state).
-    var dot: Color? = nil
+    /// The machine mark on the tile (spinner / fault / nothing — never a dot).
+    var mark: StatusMark? = nil
     /// Colour for the trailing value (red `Paused`).
     var valueTint: Color? = nil
 
@@ -623,7 +495,7 @@ struct SettingsRow: View {
     static let separatorInset: CGFloat = PaneKit.separatorInset(.tile(""))
 
     var body: some View {
-        PaneRow(leading: .tile(icon, dot: dot), title: title, value: value, valueTint: valueTint, chevron: chevron)
+        PaneRow(leading: .tile(icon, mark: mark), title: title, value: value, valueTint: valueTint, chevron: chevron)
     }
 }
 
@@ -743,77 +615,329 @@ struct CreditsPage: View {
     }
 }
 
+/// Settings › Machine ([feedback machine-page-ios-2026-10-26]): the plan is pure
+/// (`MachineMetrics.plan`, the Mac's `machine::plan`); every row here is one of its entries. The
+/// box report is polled every `MachineMetrics.pollSeconds` through `.task`, which SwiftUI cancels
+/// the moment the page leaves the screen — the poll's whole lifecycle (`MachineMetrics.pollSeconds`).
 struct MachinePage: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
+    /// Settings passes this to close the sheet and land in the agent's chat ("Ask X to free space").
+    var openAgent: ((Project) -> Void)? = nil
+    /// Rig: `ARBOS_SETTINGS_PAGE=machine-expanded` lands with the breakdown unfolded.
+    @State private var breakdownOpen = DebugHooks.settingsPage == "machine-expanded"
+    @State private var showBiggerMachineFeedback = false
+
+    private var report: BoxReport? { model.boxReport }
+    private var live: BoxReport? { report.flatMap { $0.reachable ? $0 : nil } }
 
     var body: some View {
+        let m = model.machine
+        let plan = MachineMetrics.plan(machine: m, waitlisted: model.waitlistPosition != nil, report: report, breakdownOpen: breakdownOpen)
         SettingsPage(title: "Machine") {
-            SettingsGroup {
-                SettingsValueRow("Where it runs", value: model.machine.whereItRuns)
-                if let n = model.waitlistPosition {
-                    SettingsValueRow("In line", value: "Number \(n) · we'll let you know")
-                }
-                SettingsValueRow("State") {
-                    HStack(spacing: 7) {
-                        if model.machine.alwaysOn, !model.machine.held, model.machineBusy {
-                            ProgressView().controlSize(.mini).tint(theme.muted)
-                            Text("Restarting…")
-                        } else {
-                            Circle().fill(machineDotColor(model.machine.state, theme: theme)).frame(width: 8, height: 8)
-                            Text(model.machine.label)
-                        }
-                    }
-                }
-                if let since = model.machine.since, since > 0 {
-                    SettingsValueRow("Since", value: SettingsView.relative(since))
-                }
-                SettingsValueRow("Spec", value: model.machine.spec.isEmpty ? (model.machineError ?? "Not reported yet") : model.machine.spec)
-                if model.machine.reported {
-                    if model.machine.alwaysOn {
-                        SettingsValueRow("Machine time today") {
-                            VStack(alignment: .trailing, spacing: 2) {
-                                Text(String(format: "$%.2f", model.machine.machineTodayUsd))
-                                Text("Not taken from credits").font(theme.font(Theme.tiny))
+            if let r = live, let w = MachineMetrics.warning(r), !plan.warning.isEmpty {
+                SettingsGroup {
+                    ForEach(Array(plan.warning.enumerated()), id: \.offset) { _, row in
+                        switch row {
+                        case .warning:
+                            MachineWarningRow(warning: w)
+                        case .askToFreeSpace:
+                            if let ws = MachineMetrics.biggestDiskUser(r), let project = model.project(ws.projectId) {
+                                SettingsActionRow(title: "Ask \(ws.name) to free space") { askToFreeSpace(project) }
                             }
-                        }
-                    } else {
-                        SettingsValueRow("Spend today", value: String(format: "$%.2f of $%.0f", model.machine.spendTodayUsd, model.machine.spendCapUsd))
-                    }
-                    SettingsValueRow("Workspaces", value: "\(model.machine.workspaces.values.filter { $0 == .active }.count) running · \(model.machine.workspaces.count) total")
-                    if let id = model.machine.sandboxId, !id.isEmpty {
-                        SettingsValueRow("Sandbox") {
-                            Text(id).font(theme.font(12, design: .monospaced)).lineLimit(1).truncationMode(.middle)
+                        case .requestBiggerMachineInWarning:
+                            SettingsActionRow(title: "Request a bigger machine") { requestBiggerMachine() }
+                        default:
+                            EmptyView()
                         }
                     }
                 }
             }
-            SettingsGroup(footer: model.machine.alwaysOn
+            SettingsGroup {
+                ForEach(Array(plan.machine.enumerated()), id: \.offset) { _, row in
+                    switch row {
+                    case .whereItRuns:
+                        SettingsValueRow("Where it runs", value: m.whereItRuns)
+                    case .inLine:
+                        SettingsValueRow("In line", value: "Number \(model.waitlistPosition ?? 0) · we'll let you know")
+                    case .state:
+                        SettingsValueRow("State") {
+                            HStack(spacing: 7) {
+                                if m.alwaysOn, !m.held, model.machineBusy {
+                                    ProgressView().controlSize(.mini).tint(theme.muted)
+                                    Text("Restarting…")
+                                } else {
+                                    // Spinner while it wakes, fault glyph on error, nothing at rest.
+                                    if let mark = machineMark(m.state) { StatusMarkView(mark: mark, size: 9) }
+                                    Text(stateText(m))
+                                }
+                            }
+                        }
+                    case .spec:
+                        SettingsValueRow("Spec", value: m.spec.isEmpty ? "Not reported yet" : m.spec)
+                    case .machineTime:
+                        if m.alwaysOn {
+                            SettingsValueRow("Machine time today") {
+                                VStack(alignment: .trailing, spacing: 2) {
+                                    Text(String(format: "$%.2f", m.machineTodayUsd))
+                                    Text("Not taken from credits").font(theme.font(Theme.tiny))
+                                }
+                            }
+                        } else {
+                            SettingsValueRow("Spend today", value: String(format: "$%.2f of $%.0f", m.spendTodayUsd, m.spendCapUsd))
+                        }
+                    case .workspaces:
+                        SettingsValueRow("Workspaces", value: "\(m.workspaces.values.filter { $0 == .active }.count) running · \(m.workspaces.count) total")
+                    case .sandbox:
+                        SettingsValueRow("Sandbox") {
+                            Text(m.sandboxId ?? "").font(theme.font(12, design: .monospaced)).lineLimit(1).truncationMode(.middle)
+                        }
+                    default:
+                        EmptyView()
+                    }
+                }
+            }
+            if !plan.resources.isEmpty {
+                SettingsGroup(header: "Resources") {
+                    ForEach(Array(plan.resources.enumerated()), id: \.offset) { _, row in
+                        switch row {
+                        case .disk:
+                            if let r = live, let g = MachineMetrics.diskGauge(r) { MachineGaugeRow(title: "Disk", gauge: g) }
+                        case .memory:
+                            if let r = live, let g = MachineMetrics.memGauge(r) { MachineGaugeRow(title: "Memory", gauge: g) }
+                        case .cpu:
+                            if let r = live, let g = MachineMetrics.cpuGauge(r) { MachineGaugeRow(title: "CPU", gauge: g) }
+                        case .network:
+                            if let r = live, let net = MachineMetrics.netValue(r) {
+                                SettingsValueRow("Network") {
+                                    VStack(alignment: .trailing, spacing: 2) {
+                                        Text(net.0)
+                                        if let today = net.1 { Text(today).font(theme.font(Theme.tiny)) }
+                                    }
+                                }
+                            }
+                        case .notAnswering:
+                            PaneRow(title: "The machine did not answer",
+                                    subtitle: report?.unreachableReason ?? "Trying again in a few seconds",
+                                    titleTint: theme.muted)
+                        default:
+                            EmptyView()
+                        }
+                    }
+                }
+            }
+            if let r = live, !plan.agents.isEmpty {
+                // `ARBOS_SETTINGS_SCROLL=agents` lands here (rig).
+                SettingsGroup(header: "Agents") {
+                    ForEach(Array(plan.agents.enumerated()), id: \.offset) { _, row in
+                        switch row {
+                        case .runningNow:
+                            SettingsValueRow("Running now", value: MachineMetrics.runningNow(r))
+                        case .jobs:
+                            SettingsValueRow("Background jobs", value: MachineMetrics.jobsValue(r.jobsRunning ?? 0))
+                        case .breakdown:
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.2)) { breakdownOpen.toggle() }
+                            } label: {
+                                HStack(spacing: 12) {
+                                    Text("Per-agent usage").font(theme.font(Theme.body)).foregroundStyle(theme.text)
+                                    Spacer(minLength: 8)
+                                    Image(systemName: breakdownOpen ? "chevron.up" : "chevron.right")
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundStyle(theme.placeholder)
+                                }
+                                .padding(.horizontal, 16)
+                                .frame(minHeight: SettingsRow.height)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("machine-breakdown")
+                        case .agent(let id):
+                            if let ws = r.workspaces.first(where: { $0.projectId == id }) {
+                                MachineAgentRow(workspace: ws, project: model.project(id))
+                            }
+                        default:
+                            EmptyView()
+                        }
+                    }
+                }
+                .id("agents")
+            }
+            SettingsGroup(footer: m.alwaysOn
                           ? "Your one cloud computer, always on. Agents are workspaces on it. Machine time is billed separately from your credits."
                           : "Your one cloud computer. Agents are workspaces on it; a message to any agent wakes it.") {
-                if model.machine.alwaysOn {
-                    if model.machine.held {
-                        SettingsActionRow(title: "Start machine", disabled: model.machineBusy) { model.startMachine() }
-                    } else {
+                ForEach(Array(plan.actions.enumerated()), id: \.offset) { _, row in
+                    switch row {
+                    case .requestBiggerMachine:
+                        SettingsActionRow(title: "Request a bigger machine") { requestBiggerMachine() }
+                    case .restart:
                         SettingsActionRow(title: "Restart machine", disabled: model.machineBusy) { model.restartMachine() }
-                    }
-                } else {
-                    switch model.machine.state {
-                    case .awake, .waking:
-                        SettingsActionRow(title: "Stop machine", destructive: true, disabled: model.machineBusy) { model.stopMachine() }
-                    case .hibernatedLight, .hibernatedDeep, .stoppedByUser, .error:
+                    case .start:
                         SettingsActionRow(title: "Start machine", disabled: model.machineBusy) { model.startMachine() }
+                    case .stop:
+                        SettingsActionRow(title: "Stop machine", destructive: true, disabled: model.machineBusy) { model.stopMachine() }
+                    default:
+                        EmptyView()
                     }
                 }
             }
         }
+        .task {
+            // The poll: fetch now, then every `pollSeconds` until the page leaves the screen
+            // (SwiftUI cancels this task on disappear).
+            while !Task.isCancelled {
+                await model.refreshBoxReport()
+                await model.refreshMachine()
+                try? await Task.sleep(nanoseconds: UInt64(MachineMetrics.pollSeconds * 1_000_000_000))
+            }
+        }
+        .sheet(isPresented: $showBiggerMachineFeedback) {
+            FeedbackSheet()
+                .environmentObject(model)
+                .environment(\.theme, theme)
+        }
+    }
+
+    /// "Awake · 42 m": the uptime folded into the state (Jacob 2026-10-26), as a duration
+    /// (the Computer tab's), not "1 hr. ago".
+    private func stateText(_ m: Machine) -> String {
+        if m.state == .awake, let since = m.since, since > 0 {
+            return "\(m.label) · \(AgentPane.durationS(max(0, (nowMs() - since) / 1000)))"
+        }
+        return m.label
+    }
+
+    /// A request to Jacob through the feedback sheet, as the Credits page's top-up (a Daytona
+    /// snapshot carries a fixed spec; the resize is manual).
+    private func requestBiggerMachine() {
+        FeedbackCenter.shared.context = FeedbackCenter.Context(screen: "machine")
+        FeedbackCenter.shared.screenshot = FeedbackCenter.captureScreen()
+        showBiggerMachineFeedback = true
+    }
+
+    /// That agent's chat with the ask drafted in the composer (agentd's disk gate answers
+    /// "free space" itself, #1641).
+    private func askToFreeSpace(_ project: Project) {
+        if let chat = model.singleChat(of: project.id), model.composerDraft(for: chat.id).isEmpty {
+            model.setComposerDraft(MachineMetrics.freeSpaceAsk, for: chat.id)
+        }
+        if let openAgent { openAgent(project) } else { model.open(project: project) }
+    }
+}
+
+/// Title left, value right (coloured past the thresholds), a 3 pt bar under both, an optional
+/// muted line under the bar — the Mac's `machine::gauge_row`.
+struct MachineGaugeRow: View {
+    @Environment(\.theme) private var theme
+    let title: String
+    let gauge: MachineMetrics.Gauge
+
+    static let barHeight: CGFloat = 3
+
+    private var color: Color {
+        switch gauge.level {
+        case .ok: return theme.placeholder
+        case .warn: return theme.warn
+        case .crit: return theme.danger
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text(title).font(theme.font(Theme.body)).foregroundStyle(theme.text)
+                Spacer(minLength: 8)
+                Text(gauge.value).font(theme.font(Theme.body)).foregroundStyle(gauge.level == .ok ? theme.muted : color)
+            }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(theme.text.opacity(0.09))
+                    Capsule().fill(color).frame(width: max(0, geo.size.width * CGFloat(gauge.pct) / 100))
+                }
+            }
+            .frame(height: Self.barHeight)
+            if let sub = gauge.sub {
+                Text(sub).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(1)
+                    .padding(.top, -3)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 11)
+        .frame(minHeight: SettingsRow.height)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title) \(gauge.value)")
+    }
+}
+
+/// The warning row at the top of the page: amber glyph, bold title, one plain sentence.
+struct MachineWarningRow: View {
+    @Environment(\.theme) private var theme
+    let warning: MachineMetrics.Warning
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 22, weight: .regular))
+                .foregroundStyle(theme.warn)
+                .padding(.top, 1)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(warning.title).font(theme.font(Theme.body, weight: .semibold)).foregroundStyle(theme.text)
+                Text(warning.body).font(theme.font(Theme.small)).foregroundStyle(theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+    }
+}
+
+/// One workspace in the breakdown: picture, name over its status, CPU over memory · disk.
+struct MachineAgentRow: View {
+    @Environment(\.theme) private var theme
+    let workspace: BoxWorkspace
+    let project: Project?
+
+    var body: some View {
+        HStack(spacing: PaneKit.gap) {
+            if let project {
+                AgentAvatar(project: project, theme: theme, size: PaneKit.avatar, still: true)
+            } else {
+                NeutralAvatar(name: workspace.name, size: PaneKit.avatar)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(workspace.name).font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
+                // A running workspace leads its status with the working spinner (the
+                // home rows' one, [feedback working-braille-spinner-ios-2026-10-27]).
+                HStack(spacing: 4) {
+                    if workspace.running { WorkingSpinner() }
+                    Text(MachineMetrics.agentStatus(workspace)).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(1)
+                }
+            }
+            Spacer(minLength: 8)
+            // The numbers never wrap; the name column gives way (truncates) instead.
+            VStack(alignment: .trailing, spacing: 2) {
+                if let cpu = MachineMetrics.agentCpu(workspace) {
+                    Text(cpu).font(theme.font(Theme.small)).foregroundStyle(theme.muted)
+                }
+                if let md = MachineMetrics.agentMemDisk(workspace) {
+                    Text(md).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                }
+            }
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+        }
+        .padding(.horizontal, PaneKit.inset)
+        .padding(.vertical, 8)
+        .frame(minHeight: SettingsRow.height)
     }
 }
 
 struct ConnectorsPage: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
-    @Binding var connectorError: String?
+    @Binding var connectorError: UserError?
+    @State private var connectorErrorDetailsOpen = false
     /// Provider whose token paste field is open (`nil` = none).
     @State private var tokenFor: String?
     @State private var tokenDraft = ""
@@ -822,6 +946,10 @@ struct ConnectorsPage: View {
 
     var body: some View {
         SettingsPage(title: "Connected apps") {
+            // The page's note: under the page header, before the first card.
+            if let connectorError {
+                ErrorNote(id: "connector-error", error: connectorError, detailsOpen: $connectorErrorDetailsOpen)
+            }
             SettingsGroup(footer: "Connect Gmail, Calendar, Slack, GitHub, or Harness Comms so your agents can use them. Tokens stay on the relay; the agent asks before it sends.") {
                 ForEach(catalogProviders) { p in
                     connectorRow(p)
@@ -917,7 +1045,7 @@ struct ConnectorsPage: View {
                         .background(theme.field, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                         .overlay(
                             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .strokeBorder(theme.fieldBorder, lineWidth: 1)
+                                .strokeBorder(theme.fieldBorder, lineWidth: 1) // control-size: exception inlineChips
                         )
                     Button("Save") { saveToken(p) }
                         .font(theme.font(Theme.small, weight: .semibold))
@@ -931,7 +1059,8 @@ struct ConnectorsPage: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 9)
         .frame(minHeight: 56)
-        .confirmationDialog(
+        // On the connector's own row: anchored to the control, so it stays a dialog.
+        .confirmationDialog( // confirm: anchored
             "Disconnect \(disconnecting?.1 ?? "")?",
             isPresented: Binding(get: { disconnecting != nil && disconnecting?.1 == p.label },
                                  set: { if !$0 { disconnecting = nil } }),
@@ -994,14 +1123,14 @@ struct ConnectorsPage: View {
         if !model.connectors.mock {
             if !model.connectors.loaded {
                 model.refreshConnectors()
-                connectorError = "Still loading connected apps. Try Connect again in a moment."
+                connectorError = UserError.refused("connect \(p.label)", "Still loading connected apps. Try Connect again in a moment.")
                 return
             }
             // Prefer the live catalog row (oauthConfigured) over a stale stand-in.
             let live = model.connectors.providers.first(where: { $0.provider == p.provider }) ?? p
             if !live.oauthConfigured {
-                connectorError = "Connect \(live.label): OAuth client not configured on the relay."
-                    + (live.acceptsToken ? " Use Token… with an API key or personal access token instead." : "")
+                connectorError = UserError.refused("connect \(live.label)", "The OAuth client is not configured on the relay."
+                    + (live.acceptsToken ? " Use Token… with an API key or personal access token instead." : ""))
                 return
             }
             model.connectConnector(provider: live.provider)
@@ -1043,6 +1172,82 @@ struct ConnectorsPage: View {
     }
 }
 
+/// Settings → Devices (Oct 23): one card, a row per signed-in device — glyph,
+/// name, kind tag, "Active now · added Oct 11" — this iPhone first and marked;
+/// every other row has Sign out, which asks first and then revokes on the relay.
+/// The current device signs out from the Settings tab, so you are never stranded.
+struct DevicesPage: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    @State private var pending: AuthDevice?
+    @State private var errorDetailsOpen = false
+
+    private var rows: [AuthDevice] {
+        AuthDevice.visible(model.devices)
+    }
+
+    var body: some View {
+        SettingsPage(title: "Devices") {
+            if let why = model.devicesError, model.devices.isEmpty {
+                // The page's note: under the page header, before the first card.
+                ErrorNote(id: "devices-error", error: why, detailsOpen: $errorDetailsOpen,
+                          onTryAgain: { Task { await model.refreshDevices() } })
+            } else if !model.devicesLoaded && model.devices.isEmpty {
+                Text("Loading…").font(theme.font(Theme.small)).foregroundStyle(theme.muted)
+                    .frame(maxWidth: .infinity).padding(.top, 36)
+            } else if model.devices.isEmpty {
+                Text("No devices yet").font(theme.font(Theme.small)).foregroundStyle(theme.muted)
+                    .frame(maxWidth: .infinity).padding(.top, 36)
+            } else {
+                SettingsGroup(footer: "Every GitHub sign-in is a device. Reinstalls of the same phone or Mac keep one row. Signing one out ends its session at once; it can sign in again. This iPhone signs out from the Settings tab.") {
+                    ForEach(rows) { d in
+                        PaneRow(
+                            leading: .tile(d.glyph),
+                            title: d.displayName,
+                            subtitle: d.subtitle(),
+                            trailing: AnyView(trailing(d))
+                        )
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel(d.current ? "\(d.displayName), this iPhone" : d.displayName)
+                    }
+                }
+            }
+        }
+        .task { await model.refreshDevices() }
+        .confirm(item: $pending, spec: { d in
+            ConfirmSpec(title: AuthDevice.confirmQuestion(d.displayName), message: nil, action: "Sign out")
+        }) { d in
+            model.revokeDevice(d.id)
+        }
+    }
+
+    @ViewBuilder private func trailing(_ d: AuthDevice) -> some View {
+        // Tag and control on one line, never wrapping (the gate build broke
+        // "Sign out" over two lines next to the "read-only" tag).
+        HStack(spacing: 8) {
+            if let tag = d.kindTag {
+                Text(tag)
+                    .font(theme.font(Theme.tiny))
+                    .foregroundStyle(theme.muted)
+                    .lineLimit(1).fixedSize()
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Capsule().fill(theme.field)) // control-size: exception inlineChips
+            }
+            if d.current {
+                Text("This iPhone").font(theme.font(Theme.small)).foregroundStyle(theme.muted).lineLimit(1).fixedSize()
+            } else {
+                Button { pending = d } label: {
+                    // error-ui: exception destructive-action
+                    Text("Sign out").font(theme.font(Theme.small)).foregroundStyle(theme.danger).lineLimit(1).fixedSize()
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Sign out \(d.displayName)")
+            }
+        }
+        .fixedSize()
+    }
+}
+
 struct NotificationsPage: View {
     @Environment(\.theme) private var theme
     @ObservedObject private var push = PushManager.shared
@@ -1075,6 +1280,38 @@ struct NotificationsPage: View {
     }
 }
 
+/// Who may add me to people groups — stops random spam-group adds.
+struct PrivacyPage: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var error: UserError?
+    @State private var errorDetailsOpen = false
+
+    var body: some View {
+        SettingsPage(title: "Privacy") {
+            if let error {
+                ErrorNote(id: "privacy-error", error: error, detailsOpen: $errorDetailsOpen)
+            }
+            SettingsGroup(
+                header: "Groups",
+                footer: "Controls who can put you in a group without asking. “People I message” means anyone you already have a direct chat with."
+            ) {
+                ForEach(GroupAddPolicy.allCases) { policy in
+                    SettingsChoiceRow(
+                        title: policy.label,
+                        selected: model.groupAddPolicy == policy.rawValue
+                    ) {
+                        Task {
+                            if let err = await model.updateGroupAddPolicy(policy) {
+                                error = UserError.refused("save the privacy setting", err)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 struct AppearancePage: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -1094,6 +1331,12 @@ struct AppearancePage: View {
                         model.surfaceSetting = s.rawValue
                     }
                 }
+            }
+            // Link previews ([feedback link-embeds-ios-2026-10-27]): the cards under links in
+            // chat, on or off on this iPhone; off leaves every link plain.
+            SettingsGroup(header: "Link previews", footer: "A card with the title and picture under links in chat. Previews are fetched by Arbos, never by your phone.") {
+                SettingsChoiceRow(title: "On", selected: model.linkPreviews) { model.linkPreviews = true }
+                SettingsChoiceRow(title: "Off", selected: !model.linkPreviews) { model.linkPreviews = false }
             }
         }
     }
@@ -1178,6 +1421,7 @@ struct TextSizePage: View {
 struct AboutPage: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
+    @State private var perfDiagnostics = PerfDiagnostics.enabled
 
     private var protocolValue: String {
         let st = model.sharedRoomStats
@@ -1207,8 +1451,16 @@ struct AboutPage: View {
                     SettingsValueRow("Updates", value: "Up to date")
                 }
             }
+            // Opt-in MetricKit forwarding (`PerfDiagnostics`): off by default; anonymous.
+            SettingsGroup(footer: "Sends the scroll smoothness, hang, launch and memory numbers iOS collects for Arbos on this phone to the Arbos team. No account, device or message data goes with them.") {
+                SettingsValueRow("Share performance diagnostics") {
+                    Toggle("", isOn: $perfDiagnostics).labelsHidden().tint(theme.online)
+                        .accessibilityIdentifier("about-perf-diagnostics")
+                }
+            }
         }
         .task { await model.checkForUpdate() }
+        .onChange(of: perfDiagnostics) { _, on in PerfDiagnostics.enabled = on }
     }
 }
 
@@ -1227,7 +1479,8 @@ struct ProfileEditView: View {
     @State private var name: String = ""
     @State private var handle: String = ""
     @State private var busy = false
-    @State private var error: String?
+    @State private var error: UserError?
+    @State private var errorDetailsOpen = false
     @FocusState private var focus: Field?
 
     private enum Field { case name, handle }
@@ -1252,14 +1505,14 @@ struct ProfileEditView: View {
                             .frame(maxWidth: .infinity)
                     }
 
+                    // The form's note: above the fields (the shared element).
+                    if let error {
+                        ErrorNote(id: "profile-error", error: error, detailsOpen: $errorDetailsOpen,
+                                  onTryAgain: { Task { await save() } })
+                    }
+
                     nameField
                     handleField
-
-                    if let error {
-                        Text(error)
-                            .font(theme.font(Theme.small))
-                            .foregroundStyle(theme.danger)
-                    }
 
                     Text("Handle: letters, numbers, and hyphens · up to 39 characters.")
                         .font(theme.font(Theme.tiny))
@@ -1332,10 +1585,7 @@ struct ProfileEditView: View {
                 .focused($focus, equals: .name)
                 .submitLabel(.next)
                 .onSubmit { focus = .handle }
-                .padding(.horizontal, 14)
-                .frame(height: Theme.fieldHeight)
-                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
-                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                .controlField()
         }
     }
 
@@ -1357,10 +1607,7 @@ struct ProfileEditView: View {
                         if cleaned != new { handle = cleaned }
                     }
             }
-            .padding(.horizontal, 14)
-            .frame(height: Theme.fieldHeight)
-            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+            .controlField()
         }
     }
 
@@ -1370,7 +1617,7 @@ struct ProfileEditView: View {
         error = nil
         defer { busy = false }
         if let msg = await model.updateProfile(name: name, handle: handle) {
-            error = msg
+            error = UserError.refused("save your profile", msg)
             return
         }
         dismiss()
@@ -1658,6 +1905,7 @@ struct GoalDetailPage: View {
                         Button(role: .destructive) { model.deleteGoal(goal) } label: {
                             Text("Delete goal")
                                 .font(theme.font(Theme.body))
+                                // error-ui: exception destructive-action
                                 .foregroundStyle(theme.danger)
                                 .frame(maxWidth: .infinity, minHeight: SettingsRow.height)
                                 .contentShape(Rectangle())

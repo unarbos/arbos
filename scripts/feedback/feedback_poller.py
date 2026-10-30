@@ -68,6 +68,7 @@ CLI:  feedback_poller.py [run] | status | testers | set-cursor <ISO-8601>
       | leadtime [since-ISO] | memtree-cost [YYYY-MM-DD]   (audit numbers; memtree-cost asks GET /admin/usage/memory-tree, else relay.db as root)
       | gate-tree <sha-or-branch> <fid>…   (gate a hand-prepared integration tree as one run and land it whole)
       | gate-abort   (drop the active gate run without verdicts; every ready branch re-batches at its current head)
+      | park <id> <note…>   (hand a gating item back to its owner at the head the red run judged; a newer push re-gates by itself)
       | gate-next <fid>… [--then <fid>…] [--abort]   (pin: these items gate next and alone; while a pinned item is with its owner nothing else merges)
       | gate-unpin <fid>…   | unfail <fid>…   (a failed item whose fix is on main goes back to pushed)
 """
@@ -91,6 +92,7 @@ import struct
 import sys
 import tempfile
 import time
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -107,12 +109,16 @@ CURSOR_API = "https://api.cursor.com/v1"
 GITHUB_API = "https://api.github.com"
 ASSET_RELEASE_TAG = "feedback-screenshots"
 RELAY_DEPLOYED_SHA_FILE = "/etc/arbos/relay.deployed-sha"  # written by scripts/deploy/relay-server.sh
+# Written by the deploy worker when an image has rolled to every real box it does not skip; the skip list names
+# the boxes left on their old image (box|reason|since). World-readable, root-owned.
+AGENTD_DEPLOYED_SHA_FILE = "/var/lib/arbos-deploy/agentd.deployed-sha"
+AGENTD_SKIP_FILE = "/var/lib/arbos-deploy/agentd.skip"
 INSTALL_SIGNAL_SINCE = "2026-10-19T22:00:00Z"  # relay records X-Arbos-Client versions since then (D85)
 DEPLOY_HOOK = "/usr/local/bin/arbos-deploy-hook"  # CD worker's hook: `<relay|agentd|voice> <sha>`, idempotent, debounced; called directly (no sudo)
 DEPLOY_QUEUE = os.environ.get("ARBOS_DEPLOY_QUEUE", "/var/lib/arbos-feedback/deploy-requests")  # the hook's queue: one file per kind
 USER_AGENT = "arbos-feedback-poller/1 (+https://github.com/unarbos/arbos)"
 
-TERMINAL = {"shipped", "failed", "ignored", "rejected", "duplicate", "no_change", "handed_off", "deferred"}
+TERMINAL = {"shipped", "failed", "ignored", "rejected", "duplicate", "no_change", "handed_off", "deferred", "declined", "closed_externally"}
 
 # Fixes in these areas only count as shipped with device-level evidence (a real phone, the
 # tester's confirmation, or Jacob's OK): the simulator cannot show a silent ringback, a missing
@@ -139,6 +145,21 @@ def utcnow() -> dt.datetime:
 
 def iso(t: dt.datetime | None = None) -> str:
     return (t or utcnow()).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# Files that make the iPhone build (the gate's iOS half) relevant. `packages/ArbosFFI/**` is the typeshare-generated
+# Swift package every iOS and Mac target compiles: 2026-10-27 04:23 an agentd branch regenerated RelayTypes.swift
+# (PushEvent.messageRedacted) with the iOS half skipped, and every iOS half after it failed on an inexhaustive
+# switch in AppModel.swift until the handler branch landed. The client-core crates feed the same package.
+IOS_PATH_PREFIXES = ("apps/ios/", "packages/ArbosFFI/", "crates/arbos-core/", "crates/arbos-client/", "crates/arbos-ffi/")
+
+
+def head_or(st: dict) -> str:
+    return st.get("branch_head") or st.get("gated_head") or ""
+
+
+def touches_ios(files: list[str] | None) -> bool:
+    return any(f.startswith(IOS_PATH_PREFIXES) or f == ".github/workflows/ios.yml" for f in files or [])
 
 
 def parse_iso(s: str) -> dt.datetime:
@@ -176,6 +197,9 @@ class Config:
     github_repo: str
     priority: set[str]
     blocklist: set[str]
+    # Priority testers who nevertheless keep the malicious-intent screen (owner decision 2026-10-23 23:47 for
+    # @dawizzaa: first in line and no daily cap, screen unchanged).
+    screen_always: set[str]
     relay_url: str
     relay_admin_token: str
     openrouter_key: str
@@ -193,6 +217,7 @@ class Config:
     public_group_id: str
     agent_timeout_min: int
     ship_timeout_min: int
+    operator: str  # the one identity whose gate-next pins stand (FEEDBACK_OPERATOR); other pins need [hotfix] + P0
     ios_gate_ssh: str
     ios_gate_key: str
     ios_gate_timeout_s: int
@@ -218,6 +243,7 @@ class Config:
         priority = listed("FEEDBACK_PRIORITY", "FEEDBACK_PRIORITY_FILE", "/etc/arbos/feedback-priority.txt")
         priority |= listed("FEEDBACK_ALLOWLIST", "FEEDBACK_ALLOWLIST_FILE", "/etc/arbos/feedback-allowlist.txt")
         blocklist = listed("FEEDBACK_BLOCKLIST", "FEEDBACK_BLOCKLIST_FILE", "/etc/arbos/feedback-blocklist.txt")
+        screen_always = listed("FEEDBACK_SCREEN_ALWAYS", "FEEDBACK_SCREEN_ALWAYS_FILE", "/etc/arbos/feedback-screen-always.txt")
         # Internal testers (owner decision 2026-10-21: Jacob, Ken, Robert, Etienne) get a higher daily launch cap.
         internal = listed("FEEDBACK_INTERNAL", "FEEDBACK_INTERNAL_FILE", "/etc/arbos/feedback-internal.txt")
         # Deferred product areas: "<regex> :: <comment>" per line; matching feedback gets its issue,
@@ -261,6 +287,7 @@ class Config:
             github_repo=env.get("GITHUB_REPO", "unarbos/arbos"),
             priority=priority,
             blocklist=blocklist,
+            screen_always=screen_always,
             relay_url=env.get("ARBOS_RELAY_URL", "").rstrip("/"),
             relay_admin_token=env.get("ARBOS_RELAY_ADMIN_TOKEN", ""),
             openrouter_key=env.get("OPENROUTER_API_KEY", ""),
@@ -283,6 +310,7 @@ class Config:
             rust_gate_ssh=env.get("RUST_GATE_SSH", env.get("IOS_GATE_SSH", "")),
             rust_gate_timeout_s=int(env.get("RUST_GATE_TIMEOUT_S", "3600")),
             ship_timeout_min=int(env.get("FEEDBACK_SHIP_TIMEOUT_MIN", "90")),
+            operator=env.get("FEEDBACK_OPERATOR", "bc-7eefe9bf"),
         )
 
 
@@ -290,10 +318,11 @@ class Config:
 
 
 class HttpError(Exception):
-    def __init__(self, status: int, body: str, url: str):
+    def __init__(self, status: int, body: str, url: str, headers: dict[str, str] | None = None):
         super().__init__(f"HTTP {status} for {url}: {body[:300]}")
         self.status = status
         self.body = body
+        self.headers = headers or {}
 
 
 def http(method: str, url: str, headers: dict[str, str] | None = None, data: bytes | None = None,
@@ -310,7 +339,7 @@ def http(method: str, url: str, headers: dict[str, str] | None = None, data: byt
             return resp.status, {k.lower(): v for k, v in resp.headers.items()}, resp.read()
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace")
-        raise HttpError(e.code, body, url) from None
+        raise HttpError(e.code, body, url, {k.lower(): v for k, v in e.headers.items()}) from None
 
 
 def http_json(method: str, url: str, **kw: Any) -> Any:
@@ -428,6 +457,10 @@ class GitHub:
         # Per-tick ledger: calls billed / answered 304, by endpoint shape — logged at the end of the tick.
         self.ledger: dict[str, list[int]] = {}
         self.rate_remaining: int | None = None
+        self._feedback_refs: dict[str, str] | None = None
+        self._releases: list[dict] | None = None
+        self._contains: dict[tuple[str, str], bool] = {}
+        self._login: str | None = None
 
     @staticmethod
     def endpoint_shape(url: str) -> str:
@@ -437,13 +470,37 @@ class GitHub:
         p = re.sub(r"/heads/[^/]+$", "/heads/<branch>", p)
         return p
 
+    # Budget guard (2026-10-25 15:1x, the shared PAT at 0/5000 with Jacob's P0 gating): below BUDGET_FLOOR
+    # remaining, only merges and the gate's branch writes go out; reads and comments wait for the reset. The
+    # remaining count is logged per call while low so the consumer of the budget is visible.
+    BUDGET_FLOOR = 500
+    ESSENTIAL = ("/merges", "/git/refs", "/git/commits", "/actions/workflows/ci.yml/dispatches")
+
     def api(self, method: str, path: str, **kw: Any) -> Any:
         url = path if path.startswith("http") else f"{GITHUB_API}{path}"
         shape = f"{method} {self.endpoint_shape(url)}"
         row = self.ledger.setdefault(shape, [0, 0])
+        low = self.rate_remaining is not None and self.rate_remaining < self.BUDGET_FLOOR
+        essential = method != "GET" and any(seg in url for seg in self.ESSENTIAL)
+        if low and not essential:
+            if not self.ledger.get("_budget_refusals"):
+                self.ledger["_budget_refusals"] = [0, 0]
+                log(f"GitHub budget guard: {self.rate_remaining} remaining < {self.BUDGET_FLOOR}; refusing non-essential calls until the reset (merges and gate writes still go out)")
+            self.ledger["_budget_refusals"][0] += 1
+            raise HttpError(429, f"budget guard: {self.rate_remaining} remaining", url)
         if method != "GET":
             row[0] += 1
-            return http_json(method, url, headers=self.h, **kw)
+            try:
+                status, headers, body = http(method, url, headers=self.h, **kw)
+            except HttpError as e:
+                self.note_remaining(e.headers)
+                raise
+            self.note_remaining(headers)
+            if low:
+                log(f"GitHub call while low: {shape} → remaining {self.rate_remaining}")
+            if status == 204 or not body:
+                return None
+            return json.loads(body)
         cached = self.etags.get(url)
         hdrs = dict(self.h)
         if cached and time.time() - cached.get("at", 0) < self.ETAG_TTL_S:
@@ -456,10 +513,15 @@ class GitHub:
                 cached["at"] = time.time()
                 self.etags_dirty = True
                 return cached["body"]
+            # A 404 (missing branch) or 422 is billed like a 200 and has no ETag: it must show in the ledger.
+            # 17:5x Oct 25: ~200 unlisted 404 branch probes per tick were the "external" PAT drain.
+            row[0] += 1
+            self.note_remaining(e.headers)
             raise
         row[0] += 1
-        with contextlib.suppress(ValueError, TypeError):
-            self.rate_remaining = int(headers.get("x-ratelimit-remaining", ""))
+        self.note_remaining(headers)
+        if self.rate_remaining is not None and self.rate_remaining < self.BUDGET_FLOOR * 2:
+            log(f"GitHub call: {shape} → remaining {self.rate_remaining}")
         if status == 204 or not body:
             return None
         data = json.loads(body)
@@ -471,6 +533,10 @@ class GitHub:
             self.etags.pop(url, None)
             self.etags_dirty = True
         return data
+
+    def note_remaining(self, headers: dict[str, str]) -> None:
+        with contextlib.suppress(ValueError, TypeError):
+            self.rate_remaining = int(headers.get("x-ratelimit-remaining", ""))
 
     def save_etags(self) -> None:
         if not self.etags_dirty:
@@ -566,6 +632,27 @@ class GitHub:
                 return None
             raise
 
+    def login(self) -> str:
+        """The account the token posts as (one ETag-cached GET per process); the repo owner if that fails."""
+        if self._login is None:
+            try:
+                self._login = self.api("GET", "/user")["login"]
+            except (HttpError, KeyError, TypeError):
+                self._login = self.repo.split("/")[0]
+        return self._login
+
+    def feedback_refs(self) -> dict[str, str]:
+        """Every `feedback/*` branch head in one listing, cached for this process (one tick).
+        The watches used to probe `/branches/feedback/<id>` per item; a deleted branch answers 404, which is
+        billed and never a 304 — ~200 such probes per tick (17:5x Oct 25) were the token's biggest consumer.
+        `matching-refs` is NOT paginated: it returns every match and ignores `page`/`per_page`. The earlier
+        "pages of 100, stop under 100" loop never ended once the 101st feedback/* branch existed (15:53 Oct 26:
+        103 branches, a tick looped on the same 103-row answer at ~1 call/s until killed)."""
+        if self._feedback_refs is None:
+            batch = self.repo_api("GET", "/git/matching-refs/heads/feedback/") or []
+            self._feedback_refs = {r["ref"].removeprefix("refs/heads/"): r["object"]["sha"] for r in batch}
+        return self._feedback_refs
+
     def compare(self, base: str, head: str) -> dict:
         return self.repo_api("GET", f"/compare/{base}...{head}")
 
@@ -605,11 +692,15 @@ class GitHub:
         return stable[0] if stable else None
 
     def contains(self, ref: str, sha: str) -> bool:
-        """True when `ref` (tag/branch/sha) already contains commit `sha`."""
-        try:
-            return self.compare(ref, sha).get("status") in ("identical", "behind")
-        except HttpError:
-            return False
+        """True when `ref` (tag/branch/sha) already contains commit `sha`. Memoised per process (one tick):
+        check_ship and fixed_in ask the same (tag, sha) pairs several times per item."""
+        key = (ref, sha)
+        if key not in self._contains:
+            try:
+                self._contains[key] = self.compare(ref, sha).get("status") in ("identical", "behind")
+            except HttpError:
+                self._contains[key] = False
+        return self._contains[key]
 
     def dispatch_ci(self, branch: str) -> bool:
         """workflow_dispatch ci.yml on `branch`; False when the ref's workflow file has no dispatch trigger (422)."""
@@ -647,13 +738,50 @@ class GitHub:
             except HttpError:
                 continue
             text = body.decode(errors="replace")
+            # The failed step's name first: a step that fails without the word "error" (the typeshare freshness
+            # check prints a diff — #2028 09:33, #2032 19:44 Oct 27 — showed as "no error lines" and the item was
+            # restored as if the runner had hiccuped) is named here and its diff lines are kept.
+            for step in job.get("steps") or []:
+                if step.get("conclusion") == "failure":
+                    lines.append(f"step failed: {step.get('name')}")
+            in_diff = False
             for line in text.splitlines():
                 line = re.sub(r"^\S+\s", "", line)  # strip the timestamp column
-                if re.search(r"\berror\b|\*\* (ARCHIVE|EXPORT|BUILD) FAILED", line, re.I) and line not in lines:
+                if line.startswith("diff --git "):
+                    in_diff = True
+                if in_diff and re.match(r"(diff --git|---|\+\+\+|@@|[+-][^+-])", line) and line not in lines:
+                    lines.append(line.rstrip()[:400])
+                elif re.search(r"\berror\b|\*\* (ARCHIVE|EXPORT|BUILD) FAILED", line, re.I) and line not in lines:
                     lines.append(line.strip()[:400])
                 if len(lines) >= limit:
                     return lines
         return lines
+
+    def run_failed_tests(self, run_id: int) -> tuple[set[str], bool]:
+        """(names of the cargo tests that FAILED in the run's failed jobs, whether anything failed to COMPILE).
+        A run whose failures are all on the operator's known-red list and whose compile is clean is not the
+        branch's fault (#1852)."""
+        jobs = self.repo_api("GET", f"/actions/runs/{run_id}/jobs").get("jobs", [])
+        failed: set[str] = set()
+        compile_error = False
+        for job in jobs:
+            if job.get("conclusion") != "failure":
+                continue
+            try:
+                _status, _hdrs, body = http("GET", f"{GITHUB_API}/repos/{self.repo}/actions/jobs/{job['id']}/logs",
+                                            headers=self.h, timeout=120)
+            except HttpError:
+                return set(), True  # unreadable: never wave it through
+            for line in body.decode(errors="replace").splitlines():
+                line = re.sub(r"\x1b\[[0-9;]*m", "", re.sub(r"^\S+\s", "", line))  # timestamp column, ANSI colour
+                m = re.match(r"test (\S+) \.\.\. FAILED", line)
+                if m:
+                    failed.add(m.group(1))
+                elif re.match(r"error(\[E\d+\])?: ", line) and "test failed, to rerun" not in line and "could not compile" not in line:
+                    compile_error = True
+                elif "could not compile" in line:
+                    compile_error = True
+        return failed, compile_error
 
     def pending_run_containing(self, workflow: str, sha: str, since_iso: str) -> dict | None:
         """A queued / in-progress run of `workflow` on main (started after `since_iso`) whose commit contains `sha`:
@@ -701,7 +829,31 @@ class GitHub:
         return None
 
     def releases(self) -> list[dict]:
-        return self.repo_api("GET", "/releases?per_page=60")
+        """The 60 newest releases, fetched once per process (one tick)."""
+        if self._releases is None:
+            self._releases = self.repo_api("GET", "/releases?per_page=60") or []
+        return self._releases
+
+    def release_carrying(self, sha: str, since: str, kind: str = "stable") -> dict | None:
+        """The newest published release whose tag contains `sha`: `stable` = vX.Y.Z, `edge` = edge-*.
+        Only releases published at or after `since` (the commit's own time) are compared — an older one cannot
+        carry the commit — so a fix that is in no release yet costs a handful of compares, not sixty. 16:28–16:35
+        Oct 26: three freshly merged non-Mac items × ~60 `compare` calls each (two passes) held one tick for
+        7 min while a P0's green gate waited to settle."""
+        stable = re.compile(r"v\d+\.\d+\.\d+")
+        for r in sorted(self.releases(), key=lambda r: r.get("published_at") or "", reverse=True):
+            if r.get("draft"):
+                continue
+            tag = r.get("tag_name") or ""
+            if kind == "stable" and (not stable.fullmatch(tag) or r.get("prerelease")):
+                continue
+            if kind == "edge" and not tag.startswith("edge-"):
+                continue
+            if since and (r.get("published_at") or "") < since:
+                return None
+            if self.contains(tag, sha):
+                return r
+        return None
 
 
 # ---------------------------------------------------------------- Cursor
@@ -1236,8 +1388,305 @@ class Loop:
             except Exception as e:  # noqa: BLE001
                 log(f"[{fid}] step failed: {e}")
 
+    # ---- feedback freeze (owner switch, 2026-10-24 00:23) -------------------------------------------
+    # `arbos-feedback freeze --allow unarbos,arbos,const` / `unfreeze`. While frozen, only items whose reporter is
+    # on the allow list (or Jacob's own) move: everyone else's queued items are not launched, gating items are
+    # pulled from batching, finished agent runs are parked instead of gated — all as `parked` with the previous
+    # status kept, so `unfreeze` restores them in their original order. Merged items keep shipping. Gate, kill
+    # switch and intent screen are untouched.
+    FREEZE_FILE = "freeze.json"
+
+    def freeze_state(self) -> dict | None:
+        p = self.cfg.state_dir / self.FREEZE_FILE
+        if not p.is_file():
+            return None
+        with contextlib.suppress(Exception):
+            return json.loads(p.read_text())
+        return None
+
+    # ---- release-approval gate (owner rule, 2026-10-24 00:38) --------------------------------------
+    # `arbos-feedback approval-gate on --allow unarbos,arbos,const` / `approval-gate off`. While on, a fix whose
+    # reporter is not on the allow list and that is not coordinator-owned is NOT merged when its gate goes green:
+    # it waits as `awaiting_jacob` (label awaiting-jacob), kept current with main (main is merged into the branch
+    # when main moves; re-gated when main's new commits touch its files), listed in awaiting-jacob.md, until
+    # `approve <item>` (merges + ships as usual) or `decline <item> "<note>"` (closes the issue, keeps the branch).
+    APPROVAL_FILE = "approval-gate.json"
+    APPROVAL_LIFTED_FILE = "approval-gate-lifted.json"
+    AWAITING_DOC = "awaiting-jacob.md"
+    # Standing rule (Jacob, 2026-10-24 13:55 UTC, permanent): outside feedback never merges without his per-item
+    # approval. The gate is ON by default with this allow list; approval-gate.json may only widen the list. The
+    # only way off is `approval-gate lift --i-am-jacob --reason "<why>"`, which is logged and shown in status.
+    APPROVAL_DEFAULT_ALLOW = ["unarbos", "arbos", "const"]
+
+    def approval_state(self) -> dict | None:
+        lifted = self.cfg.state_dir / self.APPROVAL_LIFTED_FILE
+        if lifted.is_file():
+            return None
+        p = self.cfg.state_dir / self.APPROVAL_FILE
+        state = {"allow": list(self.APPROVAL_DEFAULT_ALLOW), "since": "2026-10-24T13:55:00Z", "by": "Jacob (standing rule)"}
+        if p.is_file():
+            with contextlib.suppress(Exception):
+                extra = json.loads(p.read_text())
+                state["allow"] = sorted(set(state["allow"]) | {a for a in extra.get("allow", []) if a})
+                state["since"] = extra.get("since") or state["since"]
+                state["by"] = extra.get("by") or state["by"]
+        return state
+
+    def needs_approval(self, fid: str, st: dict) -> bool:
+        gate = self.approval_state()
+        if not gate or st.get("approved_by_jacob"):
+            return False
+        return not self.freeze_allows(fid, st, gate)
+
+    @staticmethod
+    def image_links(text: str) -> list[str]:
+        return re.findall(r"https?://\S+?\.(?:png|jpe?g|gif|webp|mp4|mov)(?=[\s)\]>\"']|$)", text or "", flags=re.I)
+
+    def hold_for_approval(self, fid: str, st: dict) -> None:
+        main_head = self.gh.branch_head("main") or ""
+        # The hold attaches to the ITEM, not to one green head: a re-gate after main moved returns here with
+        # `awaiting` already set — same listing, same ready_since, no second "held" comment (#1551 was
+        # announced three times on 2026-10-24 while nothing about it had changed for Jacob).
+        first = not st.get("awaiting")
+        aw = st.get("awaiting") or {}
+        aw.update(ready=True, ready_head=st.get("branch_head"), main_head=main_head, ready_since=aw.get("ready_since") or iso(), conflict=False)
+        aw.setdefault("since", iso())
+        st.update(status="awaiting_jacob", awaiting=aw)
+        self.store.save_state(fid, st)
+        self.store.event(fid, "awaiting_jacob", head=st.get("branch_head"), main=main_head[:8], first=first)
+        log(f"[{fid}] green; held for Jacob's approval (awaiting-jacob) at {str(st.get('branch_head'))[:8]} on main {main_head[:8]}")
+        if st.get("issue") and first:
+            with contextlib.suppress(HttpError):
+                self.gh.ensure_label("awaiting-jacob", "0E8A16", "Gate green; merges and ships when Jacob approves (release-approval gate)")
+                self.gh.set_labels(st["issue"], ["awaiting-jacob"], ["in-progress", "frozen"])
+                self.gh.comment(st["issue"], f"Gate green at `{str(st.get('branch_head'))[:8]}` — **held for Jacob's approval** (release-approval gate, owner rule 2026-10-24). "
+                                "The branch is kept current with main meanwhile. `arbos-feedback approve <item>` merges and ships it; `decline` closes it with a note.")
+
+    def keep_current(self, fid: str, st: dict) -> None:
+        """An `awaiting_jacob` item: when main moved, merge main into the branch (a merge, never a rebase); if main's
+        new commits touch the branch's files, re-gate (status gating; the pool batches it and a green run holds it
+        again). A conflict goes to the agent / owner as a merge-main follow-up."""
+        aw = st.get("awaiting") or {}
+        if st.get("do_not_merge"):
+            # An operator hold above approval (#2098/#2100, presence dot): the decision is Jacob's, the branch may be
+            # gone (the revert flow deleted it) and there is nothing to keep current — 504 billed 404s on POST /merges
+            # between 04:41 and 13:22 Oct 28. The branch is recreated by hand when the hold is lifted.
+            return
+        if aw.get("conflict"):
+            # "conflict — owner merging main": the owner's resolving push is the way out. Pick it up without waiting
+            # for main to move again, and re-gate it (the resolved tree is new) — still held for Jacob.
+            live = self.gh.branch_head(st["branch"])
+            if live and live != st.get("branch_head"):
+                st["branch_head"] = live
+                aw.update(conflict=False, ready=False, regate_due=True)
+                aw.pop("conflict_noted", None)
+                st["awaiting"] = aw
+                self.store.save_state(fid, st)
+                self.store.event(fid, "awaiting_conflict_resolved", head=live[:8])
+                log(f"[{fid}] held item: owner pushed {live[:8]} after the conflict; re-gates when idle, still awaiting Jacob")
+        main_head = self.gh.branch_head("main") or ""
+        if not main_head or main_head == aw.get("main_head"):
+            self.regate_awaiting_if_idle(fid, st)
+            return
+        cmp = self.gh.compare(aw.get("main_head") or main_head, main_head)
+        moved_files = {f["filename"] for f in cmp.get("files", [])}
+        if not self.gh.branch_head(st["branch"]):
+            # No live branch (deleted after a merge or by hand): nothing to merge main into; note it once.
+            if aw.get("branch_missing_noted") != main_head:
+                aw["branch_missing_noted"] = main_head; st["awaiting"] = aw; self.store.save_state(fid, st)
+                log(f"[{fid}] held item has no live branch {st['branch']}; keep-current skipped")
+            return
+        res = self.gh.merge_into(st["branch"], main_head, f"merge main into {st['branch']} (kept current while awaiting approval) [feedback {fid}]")
+        if res is None:
+            aw.update(ready=False, conflict=True, main_head=main_head)
+            st["awaiting"] = aw
+            self.store.save_state(fid, st)
+            self.store.event(fid, "awaiting_conflict", main=main_head[:8])
+            self.conflict_followup(fid, st, "main moved while the fix was awaiting approval; merge origin/main into the branch")
+            return
+        if res:
+            st["branch_head"] = res.get("sha") or self.gh.branch_head(st["branch"]) or st["branch_head"]
+        aw.update(main_head=main_head, conflict=False)
+        touched = moved_files & set(st.get("files") or [])
+        if touched:
+            aw["ready"] = False
+            aw["regate_due"] = True
+            st["awaiting"] = aw
+            self.store.save_state(fid, st)
+            self.store.event(fid, "awaiting_stale", main=main_head[:8], touched=sorted(touched)[:20])
+            log(f"[{fid}] main moved onto {len(touched)} of its files; marked stale — re-gates when the pool has no Jacob-tier work (≤ 1 per 2 h)")
+        else:
+            aw["ready"] = True
+            aw["ready_head"] = st["branch_head"]
+            st["awaiting"] = aw
+            self.store.save_state(fid, st)
+        self.regate_awaiting_if_idle(fid, st)
+
+    # Held items only need to be green at approval time (coordinator, 2026-10-25 23:37): re-gating #1654 on every
+    # main move took solo gate slots while 23 Jacob-tier items waited. A stale held item re-gates only when no
+    # Jacob-tier / coordinator item is queued or gating, at most once per AWAITING_REGATE_EVERY_S, and once more
+    # on `approve` (which clears the timer). Hotfix pins are not affected.
+    AWAITING_REGATE_EVERY_S = 2 * 3600
+
+    def jacob_tier_waiting(self) -> int:
+        n = 0
+        for other in self.store.items():
+            o = self.store.state(other)
+            if o.get("status") in ("queued", "gating") and not o.get("awaiting") \
+                    and self.freeze_allows(other, o, {"allow": self.APPROVAL_DEFAULT_ALLOW}):
+                n += 1
+        return n
+
+    def regate_awaiting_if_idle(self, fid: str, st: dict, force: bool = False) -> bool:
+        aw = st.get("awaiting") or {}
+        if st.get("status") != "awaiting_jacob" or not aw.get("regate_due") or aw.get("conflict"):
+            return False
+        last = aw.get("last_regate") or ""
+        if not force:
+            if last and (utcnow() - parse_iso(last)).total_seconds() < self.AWAITING_REGATE_EVERY_S:
+                return False
+            waiting = self.jacob_tier_waiting()
+            if waiting:
+                return False
+        aw.update(regate_due=False, last_regate=iso())
+        st.update(status="gating", awaiting=aw)
+        self.store.save_state(fid, st)
+        self.store.event(fid, "awaiting_regate", main=(aw.get("main_head") or "")[:8], forced=force)
+        log(f"[{fid}] held item re-gating ({'approve' if force else 'pool idle of Jacob-tier work'})")
+        return True
+
+    def write_awaiting_doc(self) -> None:
+        gate = self.approval_state()
+        rows = []
+        for fid in self.store.items():
+            st = self.store.state(fid)
+            if st.get("status") not in ("awaiting_jacob",) and not (st.get("awaiting") and st.get("status") == "gating" and not st.get("approved_by_jacob")):
+                continue
+            aw = st.get("awaiting") or {}
+            info: dict = {}
+            with contextlib.suppress(Exception):
+                info = self.store.submission(fid)
+            what = re.sub(r"\s+", " ", (st.get("agent_summary") or info.get("comment") or "")).strip()[:140]
+            before = st.get("screenshot_urls") or []
+            after = self.image_links(st.get("agent_summary") or "") + self.image_links(st.get("agent_report") or "")
+            state = ("conflict — owner merging main" if aw.get("conflict") else "re-gating after main moved" if st.get("status") == "gating"
+                     else "stale: main moved onto its files — re-gates when the pool is idle of Jacob-tier work, or on approve" if aw.get("regate_due")
+                     else "ready: current with main + green")
+            rows.append((aw.get("ready_since") or aw.get("since") or "", fid, st, what, before, after, state))
+        rows.sort()
+        lines = ["---", "cursor:", '  subagentId: "bc-7eefe9bf-713a-5b12-b1f3-e23bd1fdfe11"', "---", "",
+                 "# Awaiting Jacob — tester fixes that are green and held for release approval", "",
+                 f"Regenerated by the feedback poller at {iso()} (release-approval gate "
+                 + (f"ON — standing rule, allow: {', '.join(gate.get('allow', []))}" if gate else "LIFTED WHOLESALE by an operator; see the loop log") + "). "
+                 "`sudo arbos-feedback approve <item>` merges + ships; `sudo arbos-feedback decline <item> \"<note>\"` closes the issue and keeps the branch. "
+                 "A follow-up inherits its source item's reporter: outside-reporter follow-ups wait here for a per-item approve (no timer); silence is not a yes.", "",
+                 f"{len(rows)} item(s).", "",
+                 "| Issue | Reporter | What / why | Platform | Before | After | Ready since | State | Item |",
+                 "|---|---|---|---|---|---|---|---|---|"]
+        for since, fid, st, what, before, after, state in rows:
+            issue = f"[#{st['issue']}]({st['issue_url']})" if st.get("issue") else "—"
+            b = " ".join(f"[{i+1}]({u})" for i, u in enumerate(before)) or "—"
+            a = " ".join(f"[{i+1}]({u})" for i, u in enumerate(after)) or f"see the agent's report on #{st.get('issue')}"
+            lines.append(f"| {issue} | {st.get('tester') or st.get('tester_key') or '?'} | {what.replace('|', '/')} | {st.get('target') or '?'} | {b} | {a} | {since[:16]} | {state} | `{fid}` |")
+        (self.cfg.state_dir / self.AWAITING_DOC).write_text("\n".join(lines) + "\n")
+
+    def freeze_allows(self, fid: str, st: dict, fz: dict) -> bool:
+        allow = {a.lower().lstrip("@") for a in fz.get("allow", []) if a}
+        # `approval_required` beats every exemption: set on follow-ups whose SOURCE item's reporter is outside
+        # (2026-10-25 13:40 — "silence is not a yes": an auto follow-up of a tester item must not inherit the
+        # coordinator-owner exemption through its owner id).
+        if st.get("approval_required"):
+            return False
+        # Structural exemptions (owner scope, 2026-10-24 00:35): the freeze is for tester-filed reports whose
+        # reporter is not on the allow list. Anything owned by a coordinator worker (`handed_off_to` bc-…; loop
+        # agents are `agent_id`, not owners), anything tracked/registered by the coordinator (`track_commit`,
+        # inbox / track submissions) and anything labelled "Jacob (owner)" is Jacob's and keeps moving.
+        # `freeze_exempt` is the by-hand switch for an item the owner adopted during a freeze (#1510).
+        if st.get("freeze_exempt") or (st.get("tester") or "") == "Jacob (owner)":
+            return True
+        if str(st.get("handed_off_to") or "").startswith("bc-") or st.get("track_commit"):
+            return True
+        with contextlib.suppress(Exception):
+            if self.store.submission(fid).get("source") in ("inbox", "track"):
+                return True
+        keys = {(st.get("tester_key") or "").lower().lstrip("@")}
+        info: dict = {}
+        with contextlib.suppress(Exception):
+            info = self.store.submission(fid)
+        for k in ("handle", "login", "github_login", "user", "reporter", "submitted_by_handle"):
+            if info.get(k):
+                keys.add(str(info[k]).lower().lstrip("@"))
+        if info.get("email"):
+            keys.add(info["email"].lower())
+        keys.discard("")
+        return bool(keys & allow) or "jake@bittensor.com" in keys
+
+    def freeze_park(self, fid: str, st: dict, fz: dict) -> None:
+        st["parked_from"] = st["status"]
+        st["parked_at"] = iso()
+        st["status"] = "parked"
+        self.store.save_state(fid, st)
+        self.store.event(fid, "parked", was=st["parked_from"], freeze_since=fz.get("since"))
+        log(f"[{fid}] parked by the feedback freeze (was {st['parked_from']}; reporter {st.get('tester') or st.get('tester_key') or '?'})")
+        if st.get("issue"):
+            with contextlib.suppress(HttpError):
+                self.gh.ensure_label("frozen", "BFD4F2", "Held by the feedback freeze (owner decision); resumes when the freeze is lifted")
+                self.gh.set_labels(st["issue"], ["frozen"], [])
+
+    def apply_freeze(self) -> int:
+        """Park every queued / gating item of a non-allowed reporter. Runs after the agent checks (a run that
+        just finished and became `gating` is parked here before the batcher sees it) and before the batcher."""
+        fz = self.freeze_state()
+        if not fz:
+            return 0
+        n = 0
+        for fid in self.store.items():
+            st = self.store.state(fid)
+            allowed = self.freeze_allows(fid, st, fz)
+            if st.get("status") in ("queued", "gating") and not allowed:
+                self.freeze_park(fid, st, fz)
+                n += 1
+            elif st.get("status") == "parked" and allowed:
+                # The scope changed (allow list edited, item adopted, owner rule): back to where it was.
+                st["status"] = st.pop("parked_from", "queued")
+                st.pop("parked_at", None)
+                self.store.save_state(fid, st)
+                self.store.event(fid, "unparked", to=st["status"], why="now within the freeze's allow scope")
+                log(f"[{fid}] unparked: within the freeze's allow scope now ({st['status']})")
+                if st.get("issue"):
+                    with contextlib.suppress(HttpError):
+                        self.gh.set_labels(st["issue"], [], ["frozen"])
+        return n
+
+    def lift_freeze(self) -> int:
+        n = 0
+        for fid in self.store.items():
+            st = self.store.state(fid)
+            if st.get("status") != "parked":
+                continue
+            st["status"] = st.pop("parked_from", "queued")
+            st.pop("parked_at", None)
+            self.store.save_state(fid, st)
+            self.store.event(fid, "unparked", to=st["status"])
+            if st.get("issue"):
+                with contextlib.suppress(HttpError):
+                    self.gh.set_labels(st["issue"], [], ["frozen"])
+            n += 1
+        (self.cfg.state_dir / self.FREEZE_FILE).unlink(missing_ok=True)
+        return n
+
     def advance(self, fid: str, st: dict) -> None:
         status = st["status"]
+        if status == "parked":
+            return
+        if status == "awaiting_jacob":
+            self.keep_current(fid, st)
+            return
+        if status in ("queued", "gating"):
+            fz = self.freeze_state()
+            if fz and not self.freeze_allows(fid, st, fz):
+                self.freeze_park(fid, st, fz)
+                return
         if status == "queued":
             self.launch(fid, st)
         elif status == "running":
@@ -1268,7 +1717,12 @@ class Loop:
         2026-10-22 07:18 CR after the word filter had caught three of Ken's long technical reports (#1175,
         #1178, #1300), each costing a resubmission; their intent is not in question. Everyone else: the
         pattern check, then the model."""
-        if tier == "priority":
+        keys = {self.tester_key(info)}
+        if info.get("handle"):
+            keys.add("@" + info["handle"].lower())
+        if info.get("email"):
+            keys.add(info["email"].lower())
+        if tier == "priority" and not keys & self.cfg.screen_always:
             return "ok", "priority tester — intent screen exempt (owner decision 2026-10-22)"
         text = (info.get("comment") or "").strip()
         # The submit_feedback tool appends "— filed by the user's agent <name> …": boilerplate, not the user's
@@ -1581,7 +2035,7 @@ class Loop:
                                     seen.append(f["filename"])
                     files = seen
                 st.update(status="gating", branch=branch, branch_head=head, files=files,
-                          expects_ios=any(f.startswith(("apps/ios/", "crates/arbos-core/", "crates/arbos-client/", "crates/arbos-ffi/")) or f == ".github/workflows/ios.yml" for f in files),
+                          expects_ios=touches_ios(files),
                           expects_rust=bool(self.rust_crates(files)),
                           expects_ci=any(not f.startswith("apps/ios/") for f in files),
                           agent_summary=self.summary_line(result))
@@ -1607,7 +2061,7 @@ class Loop:
         files = [f["filename"] for f in self.gh.commit(commit["sha"]).get("files", [])]
         st.update(status="pushed", commit=commit["sha"], commit_url=commit["html_url"],
                   commit_message=commit["commit"]["message"].splitlines()[0], pushed_at=iso(), files=files,
-                  expects_ios=any(f.startswith("apps/ios/") or f == ".github/workflows/ios.yml" for f in files),
+                  expects_ios=touches_ios(files),
                   expects_ci=any(not f.startswith("apps/ios/") for f in files))
         self.store.save_state(fid, st)
         self.store.event(fid, "pushed", commit=commit["sha"], files=files)
@@ -1631,6 +2085,18 @@ class Loop:
             if m and m.group(1) not in names:
                 names.append(m.group(1))
         return names
+
+    def note_priority_merge(self, fid: str, st: dict, merge_sha: str) -> None:
+        """A gate-pinned item's merge is a hotfix for the deploy worker: it skips the relay coalescing window. The
+        worker's marker scan reads this file (deploy-requests/priority-merges) besides [hotfix] in the merged range
+        (#1966: the first-parent scan never saw a branch commit's marker; #2093 was held 20 min on 2026-10-27)."""
+        if not st.get("gate_pinned"):
+            return
+        with contextlib.suppress(OSError):
+            Path(DEPLOY_QUEUE).mkdir(parents=True, exist_ok=True)
+            with Path(DEPLOY_QUEUE, "priority-merges").open("a") as f:
+                f.write(f"{merge_sha} {fid} {iso()}\n")
+            self.store.event(fid, "priority_merge_noted", merge=merge_sha)
 
     def gate(self, fid: str, st: dict) -> None:
         """`gating`: a Rust-touching branch is built on the Mac (merged with current main: cargo fmt --check,
@@ -1726,7 +2192,7 @@ class Loop:
             return recorded
         files = self.branch_files(fid, cmp) or st.get("files") or []
         st.update(branch_head=head, files=files,
-                  expects_ios=any(f.startswith(("apps/ios/", "crates/arbos-core/", "crates/arbos-client/", "crates/arbos-ffi/")) or f == ".github/workflows/ios.yml" for f in files),
+                  expects_ios=touches_ios(files),
                   expects_rust=bool(self.rust_crates(files)),
                   expects_ci=any(not f.startswith("apps/ios/") for f in files))
         self.store.save_state(fid, st)
@@ -1784,11 +2250,42 @@ class Loop:
         head = st["branch_head"]
         st["gated_head"] = head
         retries = st.get("gate_retries", 0)
+        st["main_conflicts"] = st.get("main_conflicts", 0) + 1
+        self.arm_solo_slot(fid, st)
+        if st.get("awaiting") and st.get("status") in ("awaiting_jacob", "gating") and not st.get("approved_by_jacob"):
+            # A held item (release-approval gate) never fails for a conflict: Jacob's per-item yes is still pending and
+            # the branch is his to approve or decline. It stays `awaiting_jacob` as "conflict — owner merging main";
+            # the owner is told once (agent follow-up while retries remain, then the issue), and the next push on the
+            # branch re-gates. 13:37 Oct 27: #1551/#1853/#1888/#1948 fell to `failed` here minutes after being restored.
+            aw = st["awaiting"]
+            aw.update(conflict=True, ready=False)
+            st.update(status="awaiting_jacob", awaiting=aw)
+            self.store.save_state(fid, st)
+            if not aw.get("conflict_noted"):
+                aw["conflict_noted"] = iso()
+                self.store.save_state(fid, st)
+                self.store.event(fid, "awaiting_conflict_held", head=head[:8], retries=retries)
+                who = st.get("handed_off_to") or "owner"
+                self.gh.comment(st["issue"], f"Conflict — owner merging main. `{st['branch']}`@{head[:8]} no longer merges with `main`. {who}: merge "
+                                "`origin/main` into the branch (a merge, never a rebase), resolve, push; the loop re-gates. The branch is kept and "
+                                "the item stays held for Jacob's approval." + (f"\n\n```\n{detail[-2000:]}\n```" if detail else ""))
+                if st.get("agent_id") and not st.get("handed_off_to") and retries < 2:
+                    with contextlib.suppress(HttpError):
+                        self.cursor.followup(st["agent_id"], (
+                            f"Your branch `{st['branch']}` no longer merges cleanly into `main`. Run `git fetch origin main && "
+                            f"git merge origin/main` on the branch, resolve the conflicts with the smallest change, run the checks, "
+                            "and push the merge (no rebase, no force-push). End with the SUMMARY:/PUSHED: lines again."))
+                        st["gate_retries"] = retries + 1
+                        self.store.save_state(fid, st)
+            log(f"[{fid}] held item conflicts with main at {head[:8]}; stays awaiting_jacob (conflict — owner merging main)")
+            return
         if st.get("handed_off_to"):
             st["status"] = "handed_off"
             self.store.save_state(fid, st)
+            solo = (" Your next push runs ALONE in the slot right after the current gate run (ahead of the pool), and this issue "
+                    "gets a note each time main moves so the merge can land right after a settle." if st.get("solo_next") else "")
             self.gh.comment(st["issue"], f"`{st['branch']}`@{head[:8]} conflicts with `main` — not merged. {st['handed_off_to']}: "
-                            "merge `origin/main` into the branch (a merge, never a rebase), resolve, push; the loop re-gates."
+                            "merge `origin/main` into the branch (a merge, never a rebase), resolve, push; the loop re-gates." + solo
                             + (f"\n\n```\n{detail[-2000:]}\n```" if detail else ""))
             return
         if retries >= 2:
@@ -1837,18 +2334,86 @@ class Loop:
                 out.append(fid)
         return out
 
+    # Lane hold (#1899, live-regression P0 on the Mac 2026-10-26 15:27): `arbos-feedback lane-hold mac on|off`
+    # keeps every unpinned item that touches crates/arbos-mac (or the workspace manifest) out of the gate, so
+    # the Mac release lane carries nothing but the pinned hotfix until it is published; iOS / relay / agentd
+    # items flow as usual. The hold is the cursor's `lane_hold` ("mac"); `status` shows it.
+    MAC_LANE_PATHS = ("crates/arbos-mac/", "Cargo.toml", "Cargo.lock")
+
+    def touches_mac_lane(self, st: dict) -> bool:
+        return any(f.startswith(self.MAC_LANE_PATHS[0]) or f in self.MAC_LANE_PATHS[1:] for f in (st.get("files") or []))
+
     def rust_gate_ready(self) -> list[tuple[str, dict]]:
         """Gating items that need a Rust verdict for their current head, oldest first."""
         out = []
+        hold = (self.store.cursor().get("lane_hold") or {}).get("mac")
         for fid in self.store.items():
             st = self.store.state(fid)
             if st.get("status") != "gating" or not (st.get("expects_rust") or st.get("expects_ios")) or not st.get("branch_head"):
                 continue
+            if hold and not st.get("gate_pinned") and self.touches_mac_lane(st):
+                continue  # Mac lane held for a hotfix; this item waits (it is not bumped, not bounced)
             done = st.get("rust_gate") or {}
             if done.get("head") == st["branch_head"] and done.get("ok"):
                 continue
             out.append((fid, st))
         return out
+
+    def pin_allowed(self, fid: str, st: dict) -> bool:
+        """The operator's pins stand. Any other pin stands only for a [hotfix] head on a P0-labelled issue; the
+        answer is cached per head so the check costs two API calls once, not every tick."""
+        if st.get("pinned_by") == self.cfg.operator:
+            return True
+        head = st.get("branch_head") or ""
+        cache = st.get("pin_check") or {}
+        if cache.get("head") == head:
+            return bool(cache.get("ok"))
+        ok = False
+        try:
+            msg = self.gh.commit(head)["commit"]["message"] if head else ""
+            labels = {l["name"] for l in self.gh.issue(st["issue"]).get("labels", [])} if st.get("issue") else set()
+            ok = "[hotfix]" in msg.lower() and "P0" in labels
+        except (HttpError, KeyError):
+            ok = False
+        st["pin_check"] = {"head": head, "ok": ok, "at": iso()}
+        self.store.save_state(fid, st)
+        return ok
+
+    POOL_BATCH_MAX = 20  # one red on 57 items costs an hour of bisect; 20s cost less on average on the single runner
+
+    def pool_batches(self, candidates: list, cur: dict, plan: list) -> dict[str, str]:
+        """The pool batch to run now, with the rest of the pool queued as tagged pool batches right behind it
+        (coordinator 2026-10-27 22:41). Grouped by footprint so a red stays in its lane: Mac-only (crates/arbos-mac
+        without iOS or server crates), then server (relay / agentd / core / ctl, no iOS), then iOS-touching; each
+        group chunked to POOL_BATCH_MAX. Chunks after the first go to the front of the plan, tagged `pool_plan`, so
+        under pool-first they run one after another without ending pool-first."""
+        def group(st: dict) -> int:
+            files = st.get("files") or []
+            if touches_ios(files) or st.get("expects_ios"):
+                return 2
+            if files and all(f.startswith(("crates/arbos-mac/", "crates/arbos-update/", "docs/", "scripts/runner/")) for f in files):
+                return 0
+            return 1
+        ordered = sorted(candidates, key=lambda fs: (group(fs[1]), fs[1].get("created") or ""))
+        chunks: list[dict] = []
+        for g in (0, 1, 2):
+            items = [fs for fs in ordered if group(fs[1]) == g]
+            while items:
+                batch = self.compatible_batch(items[: self.POOL_BATCH_MAX])
+                items = [fs for fs in items if fs[0] not in batch]
+                if not batch:
+                    break
+                chunks.append(batch)
+        if not chunks:
+            return {}
+        if len(chunks) > 1:
+            tags = cur.get("pool_plan_batches") or []
+            for c in chunks:   # the first one too: pool-first stays armed until the chain is done
+                tags.append(sorted(c))
+            cur["pool_plan_batches"] = tags
+            plan[0:0] = chunks[1:]
+            log(f"Gate: pool batch split by footprint into {len(chunks)} batches of {', '.join(str(len(c)) for c in chunks)} (≤ {self.POOL_BATCH_MAX}); the rest follow as pool batches")
+        return chunks[0]
 
     def rust_gate_tick(self) -> None:
         """Batch mode for the Rust gate, split in two halves that run at the same time:
@@ -1921,43 +2486,199 @@ class Loop:
             cur.pop("rust_gate_tree", None)
             tfiles = [f["filename"] for c in self.gh.compare(tree["base"], tree["tree"]).get("commits", []) for f in self.gh.commit(c["sha"]).get("files", [])]
             tree.update(started=iso(), warm=False, needs_mac=True, linux="pending", mac="pending", mac_started=None, land_tree=True,
-                        needs_ios=any(f.startswith("apps/ios/") for f in tfiles), ios="pending" if any(f.startswith("apps/ios/") for f in tfiles) else "skipped")
+                        needs_ios=touches_ios(tfiles), ios="pending" if touches_ios(tfiles) else "skipped")
             cur["rust_gate"] = tree
             self.store.save_cursor(cur)
             log(f"Rust gate {tree['id']}: integration tree {tree['tree'][:8]} with {len(tree['members'])} fixes (CI on {tree['branch']}; Mac release build)")
             self.rust_gate_mac_start(cur)
             return
         plan = cur.get("rust_gate_plan") or []
+        # Leading plan halves with no ready member left (merged, parked, pinned-and-landed) are stale: drop them first,
+        # or a tagged collapsed batch behind them is not seen and pool-first would run the whole pool instead.
+        ready_ids = {f for f, _ in ready}
+        while plan and not (set(plan[0]) & ready_ids):
+            plan.pop(0)
         # Pinned items (operator gate-next, owner priority) always form the next batch, on their own, ahead of the
         # pool AND ahead of bisect / conflict-retry plan halves — the pin survives a conflict → owner-merges-main
         # → re-push cycle (00:58 Oct 22: #1241 was merged third behind a retry half and hit a sibling conflict).
+        # Pins are the operator's (coordinator 2026-10-27 18:00: a worker pinned two ordinary Jacob-owner items). The CLI
+        # runs under the shared host account, so identity cannot be enforced there; a pin whose `pinned_by` is not the
+        # operator stands only when the head commit carries [hotfix] AND the issue is labelled P0 — otherwise it is
+        # logged and cleared here, and the item keeps gating at normal priority.
+        for fid, st in ready:
+            if st.get("gate_pinned") and not self.pin_allowed(fid, st):
+                st["gate_pinned"] = False
+                self.store.save_state(fid, st)
+                plan = [h for h in plan if set(h) != {fid}]
+                cur["rust_gate_plan"] = plan
+                self.store.save_cursor(cur)
+                self.store.event(fid, "pin_cleared", by="scheduler", pinned_by=st.get("pinned_by"), reason="not the operator's pin and not a [hotfix] + P0 item")
+                log(f"[{fid}] gate-next pin by {st.get('pinned_by') or 'unknown'} cleared — pins are the operator's unless the head is [hotfix] and the issue is P0")
+                with contextlib.suppress(HttpError):
+                    if st.get("issue"):
+                        self.gh.comment(st["issue"], f"Gate pin cleared: `gate-next` is the operator's call (pinned by {st.get('pinned_by') or 'a worker'}); a worker's pin stands only for a `[hotfix]` commit on a P0-labelled issue. The item keeps its normal place in the pool.")
         members: dict[str, str] = {fid: st["branch_head"] for fid, st in ready if st.get("gate_pinned")}
+        if members and plan and set(plan[0]) <= set(members):
+            # A red pinned batch bisects like any other: its halves sit at the front of the plan and run one at a time
+            # (22:32 Oct 27, coordinator: the 8-item owner batch must bisect on its own). Without this every pinned
+            # item re-formed the same batch and the same red repeated.
+            half = plan.pop(0)
+            members = self.compatible_batch([(f, st) for f, st in ready if f in half])
+            log(f"Gate: pinned batch bisect — half of {len(half)} runs: " + ", ".join(members))
         if not members:
             bounced = self.release_bounced_pins()
             if bounced:
                 log(f"Gate: pinned item(s) {', '.join(bounced)} are back with their owner; pin released, the pool runs on")
+        # Anti-starvation (coordinator 2026-10-28 19:00: 35 unpinned items, no pool batch for ~3 h because operator pins
+        # ran back to back): whatever the pins, the pool gets a batch at least every POOL_MAX_GAP_MIN. When the last
+        # SETTLED pool batch is older than that and the pool has items, one pool batch runs ahead of the pinned set;
+        # the pins run right after it. A pinned bisect in progress (plan[0] ⊆ pins) is never pre-empted.
+        pool_unpinned = [(f, st) for f, st in ready if not st.get("gate_pinned") and not st.get("awaiting") and not st.get("do_not_merge")]
+        last_settled = cur.get("last_pool_batch_at") or ""
+        pool_overdue = bool(pool_unpinned) and bool(last_settled) and minutes_between(last_settled, iso()) >= self.POOL_MAX_GAP_MIN
+        if members and pool_overdue and not (plan and set(plan[0]) <= set(members)):
+            pool_members = self.pool_batches(pool_unpinned, cur, plan)
+            if pool_members:
+                log(f"Gate: pool anti-starvation — a pool batch of {len(pool_members)} runs ahead of {len(members)} pinned item(s); "
+                    f"the last pool batch settled {int(minutes_between(last_settled, iso()))} min ago (limit {self.POOL_MAX_GAP_MIN})")
+                self.store.event("_loop", "pool_anti_starvation", pinned_waiting=sorted(members), pool=sorted(pool_members),
+                                 gap_min=int(minutes_between(last_settled, iso())))
+                cur["rust_gate_plan"] = plan
+                self.store.save_cursor(cur)
+                self.rust_gate_start(pool_members)
+                cur = self.store.cursor()
+                if cur.get("rust_gate"):
+                    cur["rust_gate"]["pool_batch"] = True
+                    self.store.save_cursor(cur)
+                return
+        # Pool-first (coordinator 2026-10-26 02:50: no pool batch had completed since 22:49 — pins, aborts, solo
+        # slots and deferred-fairness batches pre-empted it for 4 h): while `pool_first` is set, solo slots and
+        # the deferred-fairness batch do NOT jump the pool; bisect / plan halves still finish first; pins (Jacob
+        # P0 / live regression only) stay ahead. Cleared by itself once a pool batch merges something.
+        pool_first = bool(cur.get("pool_first"))
+        # Pool starvation arms pool-first by itself (coordinator 2026-10-27 02:17: no pool batch since 22:15 —
+        # pins, then two plan halves that went red and bisected, then a re-gate push, took every slot for 4 h).
+        # Before: pool-first was an operator switch and still let plan halves go first, so even when armed it
+        # did not help against a long bisect chain. Now: when the pool has items and no pool batch has merged
+        # for POOL_STARVED_MIN, pool-first arms itself; and while it is set the full pool batch runs AHEAD of
+        # bisect / plan halves too (pins stay ahead of everything). It clears when a pool batch settles green.
+        pool_has_items = any(not st.get("gate_pinned") and not st.get("solo_next") for _, st in ready)
+        # The starvation clock is the last SETTLED pool batch (green or red). Solo slots alone starve the pool as
+        # well (08:02–09:19 Oct 27: five solo slots and a deferred batch back to back, no plan half in between),
+        # so the arm no longer waits for a plan half to exist.
+        last_pool = cur.get("last_pool_batch_at") or cur.get("pool_first_armed_from") or ""
+        # Pins do not block the arm and do not reset the clock (20:22 Oct 27: two P0 pins sat on the gate from 19:59 and
+        # the arm, due 20:03, never fired — the pool was 33 deep). Pins still run first; the pool follows them.
+        if not pool_first and pool_has_items:
+            if not last_pool:
+                cur["pool_first_armed_from"] = iso()
+            elif minutes_between(last_pool, iso()) >= self.POOL_STARVED_MIN:
+                cur["pool_first"] = iso()
+                pool_first = True
+                self.store.event("_loop", "pool_first_on", by="scheduler", starved_min=int(minutes_between(last_pool, iso())))
+                log(f"Gate: pool-first armed by the scheduler — no pool batch settled since {last_pool[:16]}; the pool runs ahead of solo slots, deferred-fairness and {len(plan)} plan half(ves)")
+        deferred_batch = False
+
+        # A held item re-gating (awaiting_jacob with a green run, re-gated because main moved onto its files) is
+        # only keeping itself fresh: it ends awaiting_jacob again whatever the verdict. It must not take a solo
+        # slot or a deferred-fairness batch away from items that can merge (02:54 Oct 29: #2230, green and held
+        # since 02:13, ran alone a second time ahead of the pinned #2247 the moment a bounce released that pin).
+        # It still gates with the pool, where its re-gate costs nothing extra. An approved item is no longer held.
+        def held_green(st: dict) -> bool:
+            return bool((st.get("awaiting") or {}).get("ready")) and not st.get("approved_by_jacob")
+
+        if not members and not pool_first:
+            solo = sorted(((f, st) for f, st in ready if st.get("solo_next") and not held_green(st)),
+                          key=lambda fs: fs[1].get("created") or "")
+            if solo:
+                fid, st = solo[0]
+                members = {fid: st["branch_head"]}
+                log(f"Gate: solo slot for {fid} (bumped {st.get('sibling_conflicts') or 0}× / {st.get('main_conflicts') or 0} main conflicts; runs alone)")
+        if not members and not pool_first:
+            # Fairness (2026-10-23 22:2x): a branch bumped twice for sibling conflicts gets a batch of the
+            # deferred items only, right after the current run — ahead of bisect / plan halves AND the pool
+            # (23:10: a leftover bisect half of 15 went first and the 14 deferred items waited another round).
+            # Oldest-deferred first, so inside that batch the older one merges and the newer one is bumped.
+            # Without it #1532/#1534/#1543 sat behind older siblings that touch the same files (sidebar.rs,
+            # HomeView.swift) for three rounds while the pool kept re-merging the same conflicts.
+            deferred = sorted(((f, st) for f, st in ready
+                               if (st.get("sibling_conflicts") or 0) >= self.DEFER_AFTER and not held_green(st)),
+                              key=lambda fs: (-(fs[1].get("sibling_conflicts") or 0), fs[1].get("created") or ""))
+            # Mirror of #2019 for this lane: a red deferred batch hands over to its own bisect halves. Its members lose
+            # the deferred flag at the red (see the red path), and while the next plan half is a half of a red deferred
+            # batch, no deferred batch forms ahead of it (14:46–15:37 Oct 27: the same batch of 3 re-ran four times,
+            # red each time on one member's old head, and planned eight halves it never let run).
+            own_deferred = any(v.get("deferred") and any(set(h) == set(half) for h in v.get("halves", []))
+                               for v in (cur.get("rust_gate_bisects") or {}).values() for half in plan[:1])
+            if deferred and own_deferred:
+                log("Gate: deferred-fairness stands aside — the next plan half is a red deferred batch's own bisect")
+            elif deferred:
+                members = self.compatible_batch(deferred)
+                deferred_batch = len(members) > 1
+                log(f"Gate: deferred-fairness batch of {len(members)} (bumped ≥ {self.DEFER_AFTER}× for sibling conflicts): " + ", ".join(members))
+        pool_batch = False
+        pool_plan = False
+        if not members and pool_first and plan and sorted(plan[0]) in (cur.get("pool_plan_batches") or []):
+            # A planned batch tagged as the pool's (the leftovers a culprit collapse re-merged, #2119): under pool-first
+            # it runs as a pool batch — it settles the clock — but does not end pool-first, so the rest of the pool
+            # runs right after it instead of waiting for the next arm.
+            half = plan.pop(0)
+            cur["pool_plan_batches"] = [b for b in cur.get("pool_plan_batches") or [] if b != sorted(half)]
+            members = self.compatible_batch([(f, st) for f, st in ready if f in half])
+            pool_batch = pool_plan = bool(members)
+            log(f"Gate: pool-first — the collapsed pool batch of {len(members)} runs now; the rest of the pool follows")
+        if not members and pool_first and plan:
+            # A plan half that came from a red pool batch is the pool's own bisect: never pre-empt it.
+            own = any(set(h) == set(half) for v in (cur.get("rust_gate_bisects") or {}).values() for h in v.get("halves", []) for half in plan[:1])
+            if own:
+                pool_first = False
+                log("Gate: pool-first stands aside — the next plan half is the pool's own bisect")
+        # Jacob's items keep priority over tester items (Jacob 22:28 Oct 27, "fix them all" opened the gate to 20–30
+        # outside items): a pool batch is built from the owner-tier items first when there are any; tester items form
+        # the following pool batch. Smaller owner batches also mean fewer reds on his side.
+        def pool_candidates() -> list:
+            own = [(f, st) for f, st in ready if st.get("tier") == "priority" and not st.get("awaiting")]
+            rest = [(f, st) for f, st in ready if (f, st) not in own]
+            # alternate: after an owner-only pool batch, the testers' batch runs before the next owner one
+            if own and rest and cur.get("last_pool_tier") == "priority":
+                cur["last_pool_tier"] = "tester"
+                return rest
+            cur["last_pool_tier"] = "priority" if own else "tester"
+            return own or list(ready)
+        if not members and pool_first:
+            # Pool-first: the pool (plan-half members included — they are pool items too) runs now.
+            members = self.pool_batches(pool_candidates(), cur, plan)
+            pool_batch = bool(members)
+            if members and sorted(members) in (cur.get("pool_plan_batches") or []):
+                pool_plan = True
+                cur["pool_plan_batches"] = [b for b in cur["pool_plan_batches"] if b != sorted(members)]
         while plan and not members:
             half = plan.pop(0)
             # Match by item, gate at its CURRENT head: a bisected item whose owner pushed a repair meanwhile keeps
             # its place in the queue instead of dropping to the back.
             members = self.compatible_batch([(f, st) for f, st in ready if f in half])
         if not members:
-            # Fairness (2026-10-23 22:2x): a branch bumped twice for sibling conflicts gets a batch of the
-            # deferred items only, ahead of the pool — oldest-deferred first, so inside that batch the older
-            # one merges and the newer one is bumped. Without it #1532/#1534/#1543 sat behind older siblings
-            # that touch the same files (sidebar.rs, HomeView.swift) for three rounds while the pool kept
-            # re-merging the same conflicts.
-            deferred = sorted(((f, st) for f, st in ready if (st.get("sibling_conflicts") or 0) >= self.DEFER_AFTER),
-                              key=lambda fs: (-(fs[1].get("sibling_conflicts") or 0), fs[1].get("created") or ""))
-            if deferred:
-                members = self.compatible_batch(deferred)
-                log(f"Gate: deferred-fairness batch of {len(members)} (bumped ≥ {self.DEFER_AFTER}× for sibling conflicts): " + ", ".join(members))
-        if not members:
-            members = self.compatible_batch(list(ready))
+            members = self.pool_batches(pool_candidates(), cur, plan)
+            pool_batch = bool(members)
+            if members and sorted(members) in (cur.get("pool_plan_batches") or []):
+                pool_plan = True
+                cur["pool_plan_batches"] = [b for b in cur["pool_plan_batches"] if b != sorted(members)]
         cur["rust_gate_plan"] = plan
         self.store.save_cursor(cur)
         if members:
             self.rust_gate_start(members)
+            if pool_batch or deferred_batch:
+                cur = self.store.cursor()
+                if cur.get("rust_gate"):
+                    if pool_batch:
+                        cur["rust_gate"]["pool_batch"] = True
+                    if pool_plan:
+                        cur["rust_gate"]["pool_plan"] = True
+                    if deferred_batch:
+                        cur["rust_gate"]["deferred_batch"] = True
+                    self.store.save_cursor(cur)
+                if pool_first:
+                    log(f"Gate: pool-first — the full pool batch of {len(members)} runs now, ahead of plan halves, solo slots and deferred-fairness")
             return
         main_head = self.gh.branch_head("main")
         if main_head and cur.get("rust_gate_warm") != main_head and self.rust_gate_mac("start-batch", f"warm-{main_head[:8]}", main_head, "1") is not None:
@@ -1993,6 +2714,165 @@ class Loop:
             log(f"Rust gate Mac unreachable: {str(e)[-200:]}")
             return None
 
+    def carried_probe(self, fid: str, head: str) -> bool:
+        """A gating branch whose tagged fix commits are already ancestors of main has nothing left to gate: its
+        work reached main inside another item's merge (#2086's bd499bee1 rode #2117's 0a4848d67 — same owner,
+        shared lineage — and the item sat `gating` for 5 h while Mac v0.6.310 already carried it). Checked once
+        per head. True → the item is marked landed on its carrier and tracked to the builds like any merge;
+        the caller leaves it out of the integration tree."""
+        st = self.store.state(fid)
+        if st.get("carried_checked") == head:
+            return False
+        st["carried_checked"] = head
+        self.store.save_state(fid, st)
+        try:
+            cmp = self.gh.compare("main", head)
+        except HttpError:
+            return False
+        tag = f"[feedback {fid}]"
+        ahead = cmp.get("commits") or []
+        if any(tag in c["commit"]["message"] for c in ahead):
+            return False  # the fix itself is still ahead of main — gate as usual
+        if cmp.get("status") in ("ahead", "diverged") and any(len(c.get("parents") or []) < 2 for c in ahead):
+            return False  # untagged non-merge work ahead of main: a real change, let the gate judge it
+        # Every commit ahead of main (if any) is a merge of main: find the branch's tagged fix on main.
+        try:
+            own = self.gh.repo_api("GET", f"/commits?sha={head}&per_page=50")
+        except HttpError:
+            return False
+        fix = next((c for c in own if tag in c["commit"]["message"] and len(c.get("parents") or []) < 2), None)
+        if not fix:
+            return False
+        try:
+            if self.gh.compare("main", fix["sha"]).get("status") not in ("behind", "identical"):
+                return False
+        except HttpError:
+            return False
+        files = [f["filename"] for f in self.gh.commit(fix["sha"]).get("files", [])]
+        carrier = next((c for c in self.gh.commits_since((utcnow() - dt.timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+                        if any(p["sha"] == fix["sha"] for p in c.get("parents", []))), None)
+        st.update(status="pushed", commit=fix["sha"], commit_url=fix["html_url"], commit_message=fix["commit"]["message"].splitlines()[0],
+                  pushed_at=iso(), files=files, commit_date=fix["commit"]["committer"]["date"],
+                  expects_ios=touches_ios(files), expects_ci=any(not f.startswith("apps/ios/") for f in files))
+        for k in ("gated_head", "rust_gate", "gate_pinned", "solo_next", "sibling_conflicts"):
+            st.pop(k, None)
+        self.store.save_state(fid, st)
+        via = f"carried to main by {carrier['sha'][:9]}" if carrier else "already an ancestor of main"
+        self.store.event(fid, "handoff_landed", commit=fix["sha"], files=files, via=via)
+        log(f"[{fid}] fix {fix['sha'][:8]} is already on main ({via}); landed, not gated")
+        if st.get("issue"):
+            with contextlib.suppress(HttpError):
+                self.gh.comment(st["issue"], f"Already on `main`: the fix {fix['html_url']} — `{st['commit_message']}` — reached main "
+                                f"{'inside ' + carrier['html_url'] if carrier else 'earlier'}; the branch only carries a merge of main on top. "
+                                "Nothing left to gate; the loop now tracks it to the builds.")
+                self.gh.set_labels(st["issue"], [], ["in-progress"])
+                self.note_fixed_on_main(st)
+        return True
+
+    def merge_revert_probe(self, fid: str, head: str) -> list[str]:
+        """Cheap pre-integration check (2026-10-23 23:3x, #1532's be8ab46): the branch's diff against main must
+        only touch files its own non-merge commits touch. A file that differs from main although no commit of
+        the branch edited it was changed by a MERGE commit — i.e. the merge resolution reverted main's version
+        (12 agentd files came back stale that way; the gate would have carried them into main). Such a branch
+        goes back to its owner with the file list instead of into the integration tree."""
+        st = self.store.state(fid)
+        if st.get("merge_revert_checked") == head:
+            return []
+        try:
+            cmp = self.gh.compare("main", head)
+        except HttpError:
+            return []
+        files = {f["filename"] for f in cmp.get("files", [])}
+        commits = cmp.get("commits", [])
+        if not files or not commits or not any(len(c.get("parents") or []) > 1 for c in commits):
+            return []  # no merge commit on the branch: nothing a merge could have reverted
+        own: set[str] = set()
+        for c in commits:
+            if len(c.get("parents") or []) > 1:
+                continue
+            try:
+                own |= {f["filename"] for f in self.gh.commit(c["sha"]).get("files", [])}
+            except HttpError:
+                return []
+        stray = sorted(files - own)
+        # A merge commit may legitimately edit a file the branch never touched: main added a struct literal
+        # and the branch added the field, so the merge had to write `reply_ref: None` into voice.rs
+        # (reply-in-dm-context, 04:51 Oct 26 — a false positive, #1882). A REVERT puts main's file back to
+        # the pre-merge content (or deletes main's lines); a resolution only ADDS. Keep a stray file only
+        # when the merge deleted something from main's version or returned the file to the merge base.
+        if stray:
+            per_file = {f["filename"]: f for f in cmp.get("files", [])}
+            base_sha = (cmp.get("merge_base_commit") or {}).get("sha")
+            kept: list[str] = []
+            for name in stray:
+                info = per_file.get(name) or {}
+                if (info.get("deletions") or 0) == 0 and (info.get("additions") or 0) > 0:
+                    log(f"[{fid}] merge-revert probe: {name} only gains lines in the merge (+{info.get('additions')}); a resolution, not a revert")
+                    continue
+                if base_sha:
+                    try:
+                        at_head = self.gh.repo_api("GET", f"/contents/{urllib.parse.quote(name)}?ref={head}").get("sha")
+                        at_base = self.gh.repo_api("GET", f"/contents/{urllib.parse.quote(name)}?ref={base_sha}").get("sha")
+                    except HttpError:
+                        at_head, at_base = None, "?"
+                    if at_head and at_head == at_base:
+                        kept.append(f"{name} (back to the pre-merge content)")
+                        continue
+                kept.append(f"{name} (−{info.get('deletions') or 0} of main's lines)")
+            stray = kept
+        st["merge_revert_checked"] = head
+        self.store.save_state(fid, st)
+        if not stray:
+            return []
+        log(f"[{fid}] merge-revert probe: {len(stray)} file(s) differ from main that no commit of the branch edited; not integrated")
+        self.store.event(fid, "merge_revert", head=head, files=stray[:50])
+        self.gate_followup(fid, st, "rust",
+                           "Pre-integration probe: these files differ from `main` on your branch although no commit of the branch edits them — "
+                           "a merge commit on the branch resolved them to a stale copy, i.e. it reverts main's changes. Redo the merge of "
+                           "`origin/main` taking main's side for them (or `git checkout origin/main -- <files>` and commit), then push.\n\n"
+                           + "\n".join(stray[:60]) + ("\n…" if len(stray) > 60 else ""))
+        return stray
+
+    DOCS_DELETION_MAX = 0.30
+
+    def docs_deletion_probe(self, fid: str, head: str) -> list[str]:
+        """A merge that deletes more than DOCS_DELETION_MAX of a docs/*.md file is bounced for review (#1817's
+        merge 93db39b2 took one side of docs/mac-design-rules.md wholesale: 602 → 379 lines, eight sections gone).
+        Counts the branch's deletions against main's line count; a file the branch removes on purpose shows
+        up here too and the owner says so in the follow-up."""
+        st = self.store.state(fid)
+        if st.get("docs_deletion_checked") == head:
+            return []
+        try:
+            cmp = self.gh.compare("main", head)
+        except HttpError:
+            return []
+        hits: list[str] = []
+        for f in cmp.get("files", []):
+            name = f.get("filename", "")
+            if not (name.startswith("docs/") and name.endswith(".md")) or (f.get("deletions") or 0) < 20:
+                continue
+            try:
+                blob = self.gh.repo_api("GET", f"/contents/{urllib.parse.quote(name)}?ref=main")
+                total = base64.b64decode(blob.get("content") or b"").count(b"\n") or 1
+            except (HttpError, KeyError, TypeError, ValueError):
+                continue
+            share = (f.get("deletions") or 0) / total
+            if share > self.DOCS_DELETION_MAX:
+                hits.append(f"{name}: −{f['deletions']} of {total} lines ({share:.0%}), +{f.get('additions') or 0}")
+        st["docs_deletion_checked"] = head
+        self.store.save_state(fid, st)
+        if not hits:
+            return []
+        log(f"[{fid}] docs-deletion probe: {len(hits)} docs file(s) lose > {self.DOCS_DELETION_MAX:.0%} of their lines; not integrated")
+        self.store.event(fid, "docs_deletion", head=head, files=hits)
+        self.gate_followup(fid, st, "rust",
+                           f"Pre-integration probe: this branch deletes more than {self.DOCS_DELETION_MAX:.0%} of a docs file — usually a merge "
+                           "of `origin/main` that took the branch's side wholesale (93db39b2 dropped eight sections of docs/mac-design-rules.md). "
+                           "Restore main's text (`git checkout origin/main -- <file>`, re-apply your edit) and push; if the deletion is intended, "
+                           "say so on the issue and the operator requeues it.\n\n" + "\n".join(hits))
+        return hits
+
     def rust_gate_start(self, members: dict[str, str]) -> None:
         """Build the integration branch gate/<run> on GitHub (main + every member, in order); CI starts on the
         push; the Mac release build starts if the Mac answers (else it is started on a later tick)."""
@@ -2003,6 +2883,15 @@ class Loop:
         merged: list[str] = []
         conflicts: dict[str, str] = {}
         for n, (fid, head) in enumerate(members.items()):
+            if self.carried_probe(fid, head):
+                continue  # landed on its carrier; nothing to integrate
+            stray = self.merge_revert_probe(fid, head)
+            if stray:
+                conflicts[fid] = "merge-revert"
+                continue
+            if self.docs_deletion_probe(fid, head):
+                conflicts[fid] = "docs-deletion"
+                continue
             res = self.gh.merge_into(branch, head, f"gate: merge feedback/{fid} [gate {run_id}]")
             if res is None:
                 # A conflict after a sibling merged may still be a conflict with MAIN (the branch is stale): probe
@@ -2028,7 +2917,7 @@ class Loop:
             files += self.store.state(fid).get("files") or []
         crates = self.rust_crates(files)
         mac = "arbos-mac" in crates or crates == ["workspace"]
-        ios = any(f.startswith("apps/ios/") or f == ".github/workflows/ios.yml" for f in files)
+        ios = touches_ios(files)
         linux = any(not f.startswith("apps/ios/") for f in files)  # ci.yml ignores apps/ios-only pushes
         cur = self.store.cursor()
         cur["rust_gate"] = {"id": run_id, "branch": branch, "base": base, "tree": tree, "members": {fid: members[fid] for fid in merged},
@@ -2037,6 +2926,8 @@ class Loop:
                             "ios": "pending" if ios else "skipped", "mac_started": None}
         self.store.save_cursor(cur)
         for fid, kind in conflicts.items():
+            if kind in ("merge-revert", "docs-deletion"):
+                continue  # already sent back by the probe
             self.rust_gate_conflict(fid, members[fid], kind, run_id)
         if not merged:
             self.gh.delete_branch(branch)
@@ -2049,12 +2940,88 @@ class Loop:
         if mac:
             self.rust_gate_mac_start(cur)
 
+    def note_main_tests_broken(self, active: dict, body: str) -> None:
+        """The iOS half compiles the unit-test target too (#1621); when it fails the same way on main the half is
+        green ('reported, not blamed') — but a report nobody reads is no report (16:4x Oct 24: MentionDraftTests
+        broke main at 15:15 and was found by a worker by hand). Surface it: loop log, `status` (cursor field) and
+        one note per main head in the journal; the operator routes the fix to the test's owner."""
+        m = re.search(r"== tests: the same failure exists on main \(([0-9a-f]+)\)", body)
+        cur = self.store.cursor()
+        if not m:
+            if cur.get("main_ios_tests_broken") and "== tests: compile" in body:
+                cur.pop("main_ios_tests_broken", None)
+                self.store.save_cursor(cur)
+                log(f"Gate {active['id']}: main's iOS unit-test target compiles again")
+            return
+        errors = [l.strip() for l in body.splitlines() if "error:" in l][:12]
+        rec = cur.get("main_ios_tests_broken") or {}
+        if rec.get("main") != m.group(1):
+            rec = {"main": m.group(1), "since": iso(), "run": active["id"], "errors": errors}
+            cur["main_ios_tests_broken"] = rec
+            self.store.save_cursor(cur)
+            log(f"ALERT main's iOS unit-test target does not compile at {m.group(1)} (seen by gate {active['id']}); branches are not blamed — "
+                f"route the fix to the test's owner: " + " | ".join(errors[:3]))
+
+    def gate_priority(self, active: dict) -> str:
+        """A batch with a pinned member (hotfix / operator gate-next) tells the Mac's heavy-job cap it has
+        priority: it may take the extra slot instead of queueing behind a pool gate and the TF lane."""
+        return "priority" if any(self.store.state(f).get("gate_pinned") for f in (active.get("members") or {})) else "normal"
+
     def rust_gate_mac_start(self, cur: dict) -> None:
         active = cur["rust_gate"]
-        if self.rust_gate_mac("start-batch", active["id"], active["tree"], "1") is not None:
+        if self.rust_gate_mac("start-batch", active["id"], active["tree"], "1", "mac", self.gate_priority(active)) is not None:
             active["mac_started"] = iso()
             self.store.save_cursor(cur)
             log(f"Rust gate {active['id']}: Mac release build started for {active['tree'][:8]}")
+
+    # Known-red tests on main (#1852, coordinator 2026-10-26 00:58): a test the operator knows is red on main
+    # (the clock-dependent Library render test, 2026-10-26 00:xx) must not fail every pool batch and bisect
+    # it. The Linux half ignores a red CI run only when EVERY failed test is on the list and nothing failed
+    # to compile. Entries are written by the operator (`arbos-feedback known-red add <test> [note]`), expire
+    # after 24 h, and are dropped when main's own CI is green with them. The list is the operator's, never a
+    # branch owner's.
+    KNOWN_RED_FILE = "ci-known-red.json"
+    KNOWN_RED_TTL_S = 24 * 3600
+
+    def known_red(self) -> dict[str, dict]:
+        p = self.cfg.state_dir / self.KNOWN_RED_FILE
+        try:
+            data = json.loads(p.read_text()) if p.is_file() else {}
+        except (OSError, ValueError):
+            data = {}
+        now = utcnow()
+        live = {t: e for t, e in data.items() if (now - parse_iso(e.get("added") or iso())).total_seconds() < self.KNOWN_RED_TTL_S}
+        if live != data:
+            self.save_known_red(live)
+        return live
+
+    def save_known_red(self, data: dict[str, dict]) -> None:
+        Store._write(self.cfg.state_dir / self.KNOWN_RED_FILE, data)
+
+    def linux_red_is_known(self, run_id: int) -> tuple[bool, set[str]]:
+        """True when the failed CI run has only known-red test failures and no compile error."""
+        known = self.known_red()
+        if not known:
+            return False, set()
+        failed, compile_error = self.gh.run_failed_tests(run_id)
+        if compile_error or not failed:
+            return False, failed
+        return failed <= set(known), failed
+
+    def known_red_main_check(self, cur: dict) -> None:
+        """Drop known-red entries once main's own CI is green on a commit newer than the entry."""
+        known = self.known_red()
+        if not known:
+            return
+        head = self.gh.branch_head("main") or ""
+        if not head or head == cur.get("known_red_checked_head"):
+            return
+        runs = [r for r in self.gh.runs_for_sha(head) if r.get("name") == "CI" and r.get("status") == "completed"]
+        if runs and runs[0].get("conclusion") == "success":
+            self.save_known_red({})
+            self.store.event("_loop", "known_red_cleared", tests=sorted(known), main=head[:8])
+            log(f"known-red list cleared: main {head[:8]} is green ({', '.join(sorted(known))})")
+        cur["known_red_checked_head"] = head
 
     def rust_gate_poll(self, active: dict) -> bool:
         """Advance a running batch. True = still running (nothing more to do this tick)."""
@@ -2079,7 +3046,15 @@ class Loop:
                 active["linux"] = "ok" if run["conclusion"] == "success" else "fail"
                 active["linux_run"] = run["html_url"]
                 if active["linux"] == "fail":
-                    active["linux_errors"] = self.gh.run_error_lines(run["id"], limit=60)
+                    known, failed = self.linux_red_is_known(run["id"])
+                    if known:
+                        active["linux"] = "ok"
+                        active["linux_known_red"] = sorted(failed)
+                        log(f"Rust gate {active['id']}: Linux half red only on known-red test(s) {', '.join(sorted(failed))}; counted as ok")
+                        for fid in active.get("members") or {}:
+                            self.store.event(fid, "linux_known_red", run=run["html_url"], tests=sorted(failed))
+                    else:
+                        active["linux_errors"] = self.gh.run_error_lines(run["id"], limit=60)
                 self.store.save_cursor(cur)
                 log(f"Rust gate {active['id']}: Linux half {active['linux']} ({run['html_url']})")
             elif not run and minutes_between(active["started"], iso()) > 10:
@@ -2122,7 +3097,7 @@ class Loop:
         if active.get("ios", "skipped") == "pending" and active["linux"] != "fail" and active["mac"] != "fail":
             ios_id = f"{active['id']}-ios"
             if not active.get("ios_started"):
-                if self.rust_gate_mac("start-ios", ios_id, active["branch"], active["tree"]) is not None:
+                if self.rust_gate_mac("start-ios", ios_id, active["branch"], active["tree"], self.gate_priority(active)) is not None:
                     active["ios_started"] = iso()
                     self.store.save_cursor(cur)
                     log(f"Gate {active['id']}: iOS half started for {active['tree'][:8]}")
@@ -2146,6 +3121,7 @@ class Loop:
                         active["ios_tail"] = body[-5000:]
                         self.store.save_cursor(cur)
                         log(f"Gate {active['id']}: iOS half {active['ios']}")
+                        self.note_main_tests_broken(active, body)
         if active["linux"] == "pending" or active["mac"] == "pending" or active.get("ios", "skipped") == "pending":
             if active["linux"] == "fail" or active["mac"] == "fail" or active.get("ios") == "fail":
                 # One half is already red: settle now; a Mac build still running is for a dead tree.
@@ -2204,9 +3180,10 @@ class Loop:
                 log(f"[{fid}] not in the integration tree or not landable ({st.get('status')}); untouched")
                 continue
             files = [f["filename"] for f in self.gh.commit(fix["sha"]).get("files", [])]
+            self.note_priority_merge(fid, st, merged["sha"])
             st.update(status="pushed", commit=fix["sha"], commit_url=fix["html_url"], commit_message=fix["commit"]["message"].splitlines()[0],
                       pushed_at=iso(), merge_sha=merged["sha"], merge_url=merged["html_url"], commit_date=merged["commit"]["committer"]["date"],
-                      files=files, expects_ios=any(f.startswith("apps/ios/") for f in files), expects_ci=any(not f.startswith("apps/ios/") for f in files),
+                      files=files, expects_ios=touches_ios(files), expects_ci=any(not f.startswith("apps/ios/") for f in files),
                       rust_gate={"head": members.get(fid), "ok": True, "verdict": "ok", "at": iso(), "run": active["id"], "batch": len(members),
                                  "linux_run": active.get("linux_run"), "mac": active["mac"], "tree": tree})
             for k in ("branch_head", "gated_head"):
@@ -2227,7 +3204,39 @@ class Loop:
     # Sibling-conflict policy: bumped DEFER_AFTER times → next batches are deferred items only (oldest-deferred
     # first); bumped SIBLING_LIMIT times (so at least two rounds among deferred items) → treated as a main conflict.
     DEFER_AFTER = 2
+    SHIP_CARRIER_GAP_MIN = 15  # a carrying run that did not fail is replaced by its successor within this; the ship clock stays paused
+    POOL_STARVED_MIN = 120  # no pool batch merged for this long while plan halves run → pool-first arms itself
+    POOL_MAX_GAP_MIN = 60  # whatever the pins: a pool batch runs ahead of them when the last settled pool batch is this old
     SIBLING_LIMIT = 4
+    # Solo slot (operator rule, 2026-10-23 23:34): an item bumped 3× by siblings, or sent to its owner twice for a
+    # main conflict caused by pool landings, runs ALONE in the slot right after the current run once its owner
+    # pushes again — ahead of the deferred batch and the pool. While it waits with its owner, every landing on
+    # main is announced on its issue so the merge-main can follow a settle immediately.
+    SOLO_AFTER_SIBLING = 3
+    SOLO_AFTER_MAIN = 2
+
+    def arm_solo_slot(self, fid: str, st: dict) -> None:
+        if st.get("solo_next"):
+            return
+        if (st.get("sibling_conflicts") or 0) >= self.SOLO_AFTER_SIBLING or (st.get("main_conflicts") or 0) >= self.SOLO_AFTER_MAIN:
+            st["solo_next"] = True
+            self.store.event(fid, "solo_slot_armed", sibling=st.get("sibling_conflicts") or 0, main=st.get("main_conflicts") or 0)
+            log(f"[{fid}] solo slot armed (sibling bumps {st.get('sibling_conflicts') or 0}, main conflicts {st.get('main_conflicts') or 0}); runs alone after its next push")
+
+    def announce_main_moved(self, landed: str) -> None:
+        """A gate run landed on main: tell every owner holding a solo-slot item (conflict → with owner) once per
+        landing, so the merge-main lands right after this settle and the branch runs alone next."""
+        for fid in self.store.items():
+            st = self.store.state(fid)
+            if not (st.get("solo_next") and st.get("status") == "handed_off" and st.get("handed_off_to") and st.get("issue")):
+                continue
+            if st.get("main_moved_noted") == landed:
+                continue
+            st["main_moved_noted"] = landed
+            self.store.save_state(fid, st)
+            with contextlib.suppress(HttpError):
+                self.gh.comment(st["issue"], f"{st['handed_off_to']}: main just moved (gate run landed as `{landed[:8]}`). Merge `origin/main` into "
+                                f"`{st.get('branch') or 'feedback/' + fid}` now and push — your branch runs ALONE in the next gate slot, ahead of the pool.")
 
     def rust_gate_conflict(self, fid: str, head: str, kind: str, run_id: str) -> None:
         st = self.store.state(fid)
@@ -2236,6 +3245,7 @@ class Loop:
         if kind == "conflict-sibling":
             st["sibling_conflicts"] = st.get("sibling_conflicts", 0) + 1
             if st["sibling_conflicts"] < self.SIBLING_LIMIT:
+                self.arm_solo_slot(fid, st)
                 self.store.save_state(fid, st)
                 log(f"[{fid}] conflicts with a sibling branch in gate {run_id}; retried in the next batch"
                     + (" (deferred-fairness batch next)" if st["sibling_conflicts"] >= self.DEFER_AFTER else ""))
@@ -2246,6 +3256,43 @@ class Loop:
         st["rust_gate"] = {"head": head, "ok": False, "verdict": "conflict", "at": iso(), "run": run_id}
         self.store.event(fid, "rust_gate", head=head, verdict="conflict", run=run_id)
         self.conflict_followup(fid, st, detail)
+
+    def collapse_after_culprit(self, culprit: str) -> None:
+        """A single-item red named the culprit (coordinator 2026-10-27 19:40). Every untested half left in the plan
+        from the same bisect lineage was green together with the rest before the culprit was pulled out: run them
+        as ONE batch again instead of one half per 25-min run. The lineage's bisect records are dropped (their
+        both-halves-green pairing would be meaningless now)."""
+        cur = self.store.cursor()
+        bisects = cur.get("rust_gate_bisects") or {}
+        # climb from the culprit's own split to the root of its lineage
+        members = [culprit]
+        lineage = []
+        while True:
+            parent = next((run for run, rec in bisects.items() if sorted(members) in (rec.get("halves") or [])), None)
+            if not parent:
+                break
+            lineage.append(parent)
+            members = sorted(bisects[parent]["halves"][0] + bisects[parent]["halves"][1])
+        if not lineage:
+            return
+        root = set(members) - {culprit}
+        plan = cur.get("rust_gate_plan") or []
+        leftovers = [h for h in plan if h and set(h) <= root]
+        if len(leftovers) < 2:
+            return
+        merged: dict = {}
+        for h in leftovers:
+            merged.update(h)
+        first_at = plan.index(leftovers[0])
+        new_plan = [h for h in plan if h not in leftovers]
+        new_plan.insert(first_at, merged)
+        cur["rust_gate_plan"] = new_plan
+        cur["pool_plan_batches"] = (cur.get("pool_plan_batches") or []) + [sorted(merged)]
+        for run in lineage:
+            bisects.pop(run, None)
+        self.store.save_cursor(cur)
+        self.store.event("_loop", "bisect_collapsed", culprit=culprit, halves=len(leftovers), members=len(merged), root_run=lineage[-1])
+        log(f"Gate: culprit {culprit} identified — {len(leftovers)} leftover halves of {lineage[-1]} collapse into one batch of {len(merged)}")
 
     def note_green_half(self, active: dict) -> None:
         """A green run whose members are one half of a bisected red run: when the other half is green too, the
@@ -2274,6 +3321,23 @@ class Loop:
                         self.store.event(fid, "incompatible_with", others=sorted(other), parent=parent)
                 log(f"Gate {parent}: both bisect halves green on their own → semantic conflict between them; "
                     f"{', '.join(a)} and {', '.join(b)} are not batched together again")
+                # Integration red (coordinator 2026-10-27 22:01): neither owner can see it on their branch — e.g. two
+                # branches each add a case to the same Swift enum and only the merged tree fails exhaustiveness. Tell
+                # both sides what the merged tree said; one rebases on the other's merge and the pair gates again.
+                diag = rec.get("diag") or ""
+                for side, other in ((a, b), (b, a)):
+                    for fid in side:
+                        st = self.store.state(fid)
+                        if not st or not st.get("issue"):
+                            continue
+                        others = ", ".join(f"#{self.store.state(o).get('issue')} (`{o}`)" for o in other if self.store.state(o))
+                        with contextlib.suppress(HttpError):
+                            self.gh.comment(st["issue"], f"Integration red in gate `{parent}`: this branch is green alone and so is {others}, but merged "
+                                            "together they fail — an integration conflict neither branch shows (typically two branches adding a case to the same "
+                                            "enum, or one removing a field the other constructs). Merged-tree diagnostics:\n\n```\n" + diag[-1200:] + "\n```\n\n"
+                                            "The loop keeps you apart until one side rebases on the other's merge; whoever lands first, the other merges "
+                                            "`origin/main` and the pair gates again.")
+                        self.store.event(fid, "integration_red_noted", parent=parent, others=sorted(other))
                 bisects.pop(parent, None)
             self.store.save_cursor(cur)
             return
@@ -2317,9 +3381,55 @@ class Loop:
                     log(f"[{fid}] merge after the Rust gate failed: {e}")
             cur = self.store.cursor()
             cur["rust_gate_warm"] = active["tree"] if active["mac"] == "ok" else None
+            if active.get("pool_batch"):
+                cur["last_pool_batch_at"] = iso()
+                cur.pop("pool_first_armed_from", None)
+            if active.get("pool_batch") and cur.get("pool_first") and not active.get("pool_plan"):
+                cur.pop("pool_first", None)
+                self.store.event("_loop", "pool_first_cleared", run=active["id"], members=len(order))
+                log(f"Gate: pool-first satisfied by {active['id']} ({len(order)} member(s) green); normal ordering resumes")
+            elif active.get("pool_plan") and cur.get("pool_first"):
+                log(f"Gate: collapsed pool batch {active['id']} green; pool-first stays armed for the rest of the pool")
             self.store.save_cursor(cur)
             self.note_green_half(active)
+            with contextlib.suppress(Exception):
+                self.announce_main_moved(self.gh.branch_head("main") or active["tree"])
             return
+        # Per-item, per-half verdict (coordinator 2026-10-27 22:01, the #2031 spirit): a member whose footprint does not
+        # reach the half that failed was proven by the halves that passed — it lands now instead of riding the bisect
+        # of a sibling's red. iOS red with Linux+Mac green: members with no iOS footprint (no apps/ios, no FFI /
+        # client-core crates) land. Mac red with Linux+iOS green: apps/ios-only members land. A Linux red (fmt /
+        # clippy / tests / typeshare) can come from anything, so nothing lands on it. #2053/#2082, Mac-only, had
+        # sat 6 h behind iOS siblings' reds (ChatView switch, PerfCounters).
+        ios_only_red = active.get("ios") == "fail" and active["linux"] in ("ok", "skipped") and active["mac"] in ("ok", "skipped")
+        mac_only_red = active["mac"] == "fail" and active["linux"] in ("ok", "skipped") and active.get("ios", "skipped") in ("ok", "skipped")
+        if ios_only_red or mac_only_red:
+            innocent = []
+            for fid in order:
+                st = self.store.state(fid)
+                if st.get("status") != "gating" or st.get("branch_head") != members[fid]:
+                    continue
+                files = st.get("files") or []
+                if ios_only_red and not touches_ios(files) and not st.get("expects_ios"):
+                    innocent.append(fid)
+                elif mac_only_red and files and all(f.startswith("apps/ios/") for f in files):
+                    innocent.append(fid)
+            for fid in innocent:
+                st = self.store.state(fid)
+                st["rust_gate"] = {"head": members[fid], "ok": True, "verdict": "ok", "at": iso(), "run": active["id"], "batch": len(order),
+                                   "linux_run": active.get("linux_run"), "mac": active["mac"], "ios": active.get("ios", "skipped"),
+                                   "note": "landed on the halves its footprint reaches; the red half was a sibling's"}
+                self.store.save_state(fid, st)
+                self.store.event(fid, "rust_gate", head=members[fid], verdict="ok", run=active["id"], batch=len(order), half_verdict=True)
+                log(f"[{fid}] {'iOS' if ios_only_red else 'Mac'} half red is a sibling's — this item's footprint stays out of it; landing on the green halves")
+                try:
+                    self.gate(fid, st)
+                except Exception as e:  # noqa: BLE001
+                    log(f"[{fid}] merge after the Rust gate failed: {e}")
+            if innocent:
+                order = [f for f in order if f not in innocent]
+                if not order:
+                    return
         diagnostics = ""
         if active["linux"] == "fail":
             diagnostics += f"Linux (CI on the integration tree, {active.get('linux_run') or 'no run'}):\n" + "\n".join(active.get("linux_errors") or []) + "\n"
@@ -2334,24 +3444,72 @@ class Loop:
                 st["rust_gate"] = {"head": members[fid], "ok": False, "verdict": "fail", "at": iso(), "tail": diagnostics[-3000:], "run": active["id"]}
                 self.store.event(fid, "rust_gate", head=members[fid], verdict="fail", run=active["id"])
                 self.gate_followup(fid, st, "rust", diagnostics)
+            self.collapse_after_culprit(fid)
             return
         half = len(order) // 2
         first = {fid: members[fid] for fid in order[:half]}
         rest = {fid: members[fid] for fid in order[half:]}
         cur = self.store.cursor()
-        cur["rust_gate_plan"] = [first, rest] + (cur.get("rust_gate_plan") or [])
+        # Complement first (coordinator 2026-10-27 19:40): the parent's other half has not run and carries no
+        # known red, so it goes before the two new halves of this red one; depth-first on the red lineage ran
+        # the morning pool down to single items at ~25 min each while the untested complement waited.
+        plan = cur.get("rust_gate_plan") or []
+        sibling = None
+        for rec in (cur.get("rust_gate_bisects") or {}).values():
+            hs = rec.get("halves") or []
+            if sorted(order) in hs:
+                other = hs[1 - hs.index(sorted(order))]
+                sibling = next((i for i, h in enumerate(plan) if sorted(h) == other), None)
+                break
+        if sibling is None:
+            cur["rust_gate_plan"] = [first, rest] + plan
+        else:
+            cur["rust_gate_plan"] = plan[:sibling + 1] + [first, rest] + plan[sibling + 1:]
+            log(f"Rust gate {active['id']}: its untested complement half runs first, then the two new halves")
         # Remember the split: when BOTH halves pass on their own the red was a semantic conflict between the
         # halves (each compiles alone, not together — E0063 on a struct literal one branch adds a field to,
         # 2026-10-23 21:09/22:10/22:14, three batches in a row); then no item of one half is batched with an
         # item of the other again. Keyed by the half's members; cleared when a half settles.
         bisects = cur.setdefault("rust_gate_bisects", {})
-        bisects[active["id"]] = {"halves": [sorted(first), sorted(rest)], "green": [], "at": iso()}
+        bisects[active["id"]] = {"halves": [sorted(first), sorted(rest)], "green": [], "at": iso(), "deferred": bool(active.get("deferred_batch")),
+                                 "diag": diagnostics[-1500:]}
+        if active.get("deferred_batch"):
+            # The deferred items had their fair turn and it was red: drop the deferred flag so the same batch does not
+            # re-form ahead of the halves this red just planned (#2019's rule, for the deferred lane).
+            for fid in order:
+                st = self.store.state(fid)
+                if (st.get("sibling_conflicts") or 0) >= self.DEFER_AFTER:
+                    st["sibling_conflicts_before_red"] = st.get("sibling_conflicts")
+                    st["sibling_conflicts"] = 0
+                    self.store.save_state(fid, st)
+                    self.store.event(fid, "deferred_flag_dropped", run=active["id"], reason="deferred batch red; its bisect halves run next")
+            log(f"Gate: deferred-fairness batch {active['id']} was red; its members' deferred flag is dropped and its bisect halves run next")
+        if active.get("pool_batch"):
+            # A settled pool batch, red or green, restarts the starvation clock. Only a POOL batch does: at 08:02
+            # Oct 27 a red plan half (20261027T073846-12, the pool's own bisect that pool-first had stood aside
+            # for) cleared the arm and reset the clock here, so solo slots and a deferred batch took every run
+            # until 09:19 and the pool waited 3.5 h for a turn it had been promised after 2 h.
+            cur["last_pool_batch_at"] = iso()
+            if cur.get("pool_first"):
+                # #2014 regression (03:04–03:35 Oct 27): pool-first re-assembled the full pool every tick and the
+                # halves it had just planned never ran (five identical red runs). A red pool batch hands over to
+                # its own bisect: pool-first is cleared here; it re-arms by itself if the pool starves again.
+                cur.pop("pool_first", None)
+                self.store.event("_loop", "pool_first_cleared", run=active["id"], members=len(order), reason="red; bisecting")
+                log(f"Gate: pool-first cleared — pool batch {active['id']} was red; its bisect halves run next")
         for old_id in [k for k, v in bisects.items() if minutes_between(v.get("at") or iso(), iso()) > 24 * 60]:
             bisects.pop(old_id, None)
         self.store.save_cursor(cur)
         log(f"Rust gate {active['id']} red with {len(order)} branches: bisecting into {len(first)} + {len(rest)}")
         for fid in order:
             self.store.event(fid, "rust_gate_bisect", run=active["id"], members=len(order))
+            # The head this red run judged, per member: a park (operator) must point gated_head at THIS head, not at
+            # whatever the branch shows when the park lands — a push in between is otherwise swallowed (#1995
+            # 08:32 push / 08:35 park; #1962/#1963 09:01 push / 09:55 park, 2026-10-27).
+            st = self.store.state(fid)
+            if st.get("branch_head") == members[fid] or st.get("status") == "gating":
+                st["last_red"] = {"head": members[fid], "run": active["id"], "at": iso()}
+                self.store.save_state(fid, st)
 
     def ios_gate(self, branch: str, head: str) -> tuple[bool, str]:
         """ssh to the gate Mac and run ios-gate.sh <branch> <sha>; (ok, output)."""
@@ -2369,7 +3527,35 @@ class Loop:
         return r.returncode == 0, out
 
     def merge_branch(self, fid: str, st: dict) -> None:
+        if st.get("do_not_merge"):
+            # Operator hold above approval (coordinator 2026-10-27 22:28: #2047 conflicts with Jacob's hour-stamp rule and
+            # must not land even if `approve` is run by mistake). Green stays green; nothing merges until the flag is
+            # removed by hand.
+            if st.get("do_not_merge_noted") != head_or(st):
+                st["do_not_merge_noted"] = head_or(st)
+                self.store.save_state(fid, st)
+                self.store.event(fid, "merge_refused", reason=str(st["do_not_merge"])[:200])
+                log(f"[{fid}] green but do_not_merge is set ({st['do_not_merge']}); holding")
+            return
+        if self.needs_approval(fid, st):
+            self.hold_for_approval(fid, st)
+            return
         head = st["branch_head"]
+        # Merge-time probe (2026-10-25, #1656/#1659/#1707 and the re-landed tails #1684/#1721): the commit that
+        # merges must be the branch's LIVE head. If the author pushed after the gate run started, the gated head
+        # is stale — re-gate the new head instead of merging the old one and orphaning the tail.
+        live = self.gh.branch_head(st["branch"]) if st.get("branch") else None
+        if live and live != head:
+            st.update(branch_head=live, gated_head=None)
+            st.pop("rust_gate", None)
+            self.store.save_state(fid, st)
+            self.store.event(fid, "branch_moved_at_merge", gated=head, live=live)
+            log(f"[{fid}] branch moved {head[:8]} → {live[:8]} after the gate started; not merging the gated head — re-gating the new one")
+            if st.get("issue"):
+                with contextlib.suppress(HttpError):
+                    self.gh.comment(st["issue"], f"`{st['branch']}` moved to `{live[:8]}` after the gate run started on `{head[:8]}`; the gated head was NOT merged. "
+                                    "The new head re-gates and merges on green. (Nothing is orphaned: the loop always merges the live head, never an older one.)")
+            return
         summary = re.sub(r"\s+", " ", st.get("agent_summary") or "").strip()[:80]
         merged = self.gh.merge_into_main(head, f"Merge {st['branch']}: {summary or 'feedback fix'} [feedback {fid}]")
         if merged is None:
@@ -2386,6 +3572,7 @@ class Loop:
         tagged = [c for c in self.gh.compare(base, head).get("commits", []) if f"[feedback {fid}]" in c["commit"]["message"]]
         fix = tagged[-1] if tagged else {"sha": head, "html_url": f"https://github.com/{self.cfg.github_repo}/commit/{head}",
                                          "commit": {"message": st.get("agent_summary") or ""}}
+        self.note_priority_merge(fid, st, merged["sha"])
         st.update(status="pushed", commit=fix["sha"], commit_url=fix["html_url"],
                   commit_message=fix["commit"]["message"].splitlines()[0], pushed_at=iso(), merge_sha=merged["sha"],
                   merge_url=merged["html_url"], commit_date=merged["commit"]["committer"]["date"])
@@ -2482,7 +3669,7 @@ class Loop:
         if not st.get("expects_ios") and not st.get("expects_ci"):
             # Nothing to wait for would mean a silent 90-min timeout; derive the expectations from the commit.
             files = st.get("files") or [f["filename"] for f in self.gh.commit(sha).get("files", [])]
-            st.update(files=files, expects_ios=any(f.startswith("apps/ios/") for f in files),
+            st.update(files=files, expects_ios=touches_ios(files),
                       expects_ci=any(not f.startswith("apps/ios/") for f in files))
             self.store.save_state(fid, st)
         if not st.get("commit_date"):
@@ -2490,6 +3677,9 @@ class Loop:
             with contextlib.suppress(HttpError, KeyError):
                 st["commit_date"] = self.gh.commit(sha)["commit"]["committer"]["date"]
         since = st.get("commit_date") or st["pushed_at"]
+        # Release cut-off: the earlier of the commit's own date and the loop's clock when it saw the push (a
+        # committer clock running ahead must never hide every release from the item).
+        rel_since = min(filter(None, [st.get("commit_date"), st.get("pushed_at")]), default="")
         runs = self.gh.runs_for_sha(sha)
         # The same commit may head other branches too (a worker's `cursor/**` mirror of its feedback branch); only
         # runs on main or the item's own branch say anything about what shipped (06:00 Oct 22: a red ios.yml run
@@ -2628,8 +3818,7 @@ class Loop:
                 # lets main move), so the run's head_sha may not contain the fix although the published tag does
                 # (#1241: merged 01:19, run head 76222502 from 01:13, tag v0.6.103 at 02:29). The release itself is
                 # the evidence: the newest published stable tag that carries the commit.
-                tag_rel = next((r for r in self.gh.releases() if not r.get("draft") and re.fullmatch(r"v\d+\.\d+\.\d+", r.get("tag_name") or "")
-                                and (r.get("published_at") or "") >= since and self.gh.contains(r["tag_name"], sha)), None)
+                tag_rel = self.gh.release_carrying(sha, rel_since, "stable")
                 if tag_rel:
                     later = {"head_sha": tag_rel["tag_name"], "html_url": tag_rel["html_url"], "status": "completed",
                              "conclusion": "success", "updated_at": tag_rel["published_at"]}
@@ -2643,13 +3832,15 @@ class Loop:
                 rels = [r for r in self.gh.releases() if not r.get("draft")]
                 # Auto-stable (D85): one vX.Y.Z per green batch, the bump commit sits on top of main (maybe only under the
                 # tag) — so match by "the release's commit contains the fix", stable first; edge-per-push is the fallback.
-                edge = next((r["tag_name"] for r in rels if re.fullmatch(r"v\d+\.\d+\.\d+", r["tag_name"]) and self.gh.contains(r["tag_name"], sha)), None) \
+                carrying = self.gh.release_carrying(sha, rel_since, "stable")
+                edge = (carrying["tag_name"] if carrying else None) \
                     or next((r["tag_name"] for r in rels if r["tag_name"].startswith("edge-") and r.get("target_commitish", "").startswith(built[:7])), None)
                 if not edge and any(f.startswith(("crates/arbos-mac/", "crates/arbos-update/")) for f in st.get("files") or []):
                     # A green Release run is not a release: with per-fix auto-stable tags the published release
                     # may lag or fail to publish. Find any release (stable or edge, newest first) whose commit
                     # contains the fix; until one exists the item stays `pushed` / fixed-on-main (#1079, 23:07).
-                    edge = next((r["tag_name"] for r in rels if r["tag_name"].startswith("edge-") and self.gh.contains(r["tag_name"], sha)), None)
+                    carrying = self.gh.release_carrying(sha, rel_since, "edge")
+                    edge = carrying["tag_name"] if carrying else None
                     if not edge:
                         if st.get("release_wait_noted") != rel["html_url"]:
                             st["release_wait_noted"] = rel["html_url"]
@@ -2702,21 +3893,76 @@ class Loop:
         if ios_ok and mac_ok and (st.get("expects_ios") or st.get("expects_ci")):
             self.ship(fid, st)
             return
-        if waited > self.cfg.ship_timeout_min:
-            # The budget is for builds that never happen, not for GitHub's macos runner queue: when the iOS /
-            # Release run that will carry the fix is queued or running, keep waiting (02:55 Oct 22: #1252's iOS run
-            # sat 96 min in the queue and the item was failed although its code was on main and in v0.6.104).
+        # The ship clock pauses while a carrying run exists (coordinator, 2026-10-27 17:32): the budget is for builds
+        # that never happen, not for the single Mac runner's queue. `ship_paused_min` is the time already spent
+        # under a carrier; `ship_pause_started` marks a pause in progress. The clock resumes only when the last
+        # carrier ended in FAILURE — a run cancelled by a newer push is replaced by that push's run, and the gap
+        # before the replacement appears is bridged (13:25 Oct 27: #1978 failed "nothing shipped" four minutes
+        # before the run that carried it to TestFlight 202610271329463223 was created).
+        paused = (st.get("ship_paused_min") or 0) + (minutes_between(st["ship_pause_started"], iso()) if st.get("ship_pause_started") else 0)
+        waited_eff = waited - paused
+        if waited_eff > self.cfg.ship_timeout_min and st.get("expects_ios") and not st.get("ios_done"):
+            # The iOS lane on main is red (watch_main_red: ios.yml failing on main, a `main-red` issue open) — e.g.
+            # Apple's "PLA Update available" / no iOS Distribution certificate on 2026-10-29 00:05–, which no fix
+            # can pass. Like a red Release lane, that is not this item's failure: the clock stays paused and the
+            # first green iOS build after the lane recovers adopts the item (#2239 and its follow-up were failed
+            # "nothing shipped within 90 min" at 02:21 for exactly this).
+            lane = (self.store.cursor().get("main_red") or {}).get("iOS")
+            if lane:
+                st.setdefault("ship_pause_started", iso())
+                if st.get("ios_lane_red") != lane.get("sha"):
+                    st["ios_lane_red"] = lane.get("sha")
+                    self.store.event(fid, "ios_lane_red", sha=lane.get("sha"), issue=lane.get("issue"))
+                    log(f"[{fid}] the iOS lane on main is red (#{lane.get('issue')}); not this fix's failure, ship clock stays paused")
+                self.store.save_state(fid, st)
+                return
+        if waited_eff > self.cfg.ship_timeout_min:
             pending = None
             if st.get("expects_ios") and not st.get("ios_done"):
                 pending = self.gh.pending_run_containing("ios.yml", sha, since)
             if pending is None and st.get("expects_ci") and not st.get("release_done"):
                 pending = self.gh.pending_run_containing("release.yml", sha, since) or self.gh.pending_run_containing("ci.yml", sha, since)
             if pending:
+                st["ship_carrier"] = {"id": pending.get("id"), "url": pending["html_url"], "status": pending.get("status"), "seen": iso()}
+                st.setdefault("ship_pause_started", iso())
                 if st.get("ship_wait_noted") != pending["html_url"]:
                     st["ship_wait_noted"] = pending["html_url"]
-                    log(f"[{fid}] ship budget passed but the carrying run is still {pending['status']}: {pending['html_url']}; waiting")
+                    log(f"[{fid}] ship budget passed but the carrying run is still {pending['status']}: {pending['html_url']}; clock paused")
                 self.store.save_state(fid, st)
                 return
+            last = st.get("ship_carrier")
+            if last and st.get("ship_pause_started"):
+                conclusion = None
+                run_path = ""
+                if last.get("id"):
+                    with contextlib.suppress(HttpError):
+                        run = self.gh.repo_api("GET", f"/actions/runs/{last['id']}")
+                        conclusion = run.get("conclusion")
+                        run_path = run.get("path") or ""
+                if conclusion == "failure" and run_path.endswith("release.yml") and st.get("expects_ci") and not st.get("release_done"):
+                    # The Release lane itself is red (its Mac smoke, signing, notarization…) while the item's own CI is
+                    # green: that is an infra/lane failure, not this fix's — four items were failed "nothing shipped"
+                    # at 07:52 Oct 28 because two Release runs died in the composer paste smoke. The item stays
+                    # `pushed` with the clock paused; the lane failure is logged once and the next Release run (a
+                    # newer main, or the lane fixed) picks it up.
+                    if st.get("release_lane_red") != last.get("url"):
+                        st["release_lane_red"] = last.get("url")
+                        self.store.event(fid, "release_lane_red", run=last.get("url"))
+                        log(f"[{fid}] the Release run {last.get('url')} FAILED while this fix's CI is green: lane failure, ship clock stays paused")
+                    self.store.save_state(fid, st)
+                    return
+                if conclusion != "failure" and minutes_between(last.get("seen") or iso(), iso()) < self.SHIP_CARRIER_GAP_MIN:
+                    # cancelled / superseded / just finished: its replacement (or the adoption) is seconds away
+                    self.store.save_state(fid, st)
+                    return
+                st["ship_paused_min"] = (st.get("ship_paused_min") or 0) + minutes_between(st["ship_pause_started"], iso())
+                st.pop("ship_pause_started", None)
+                self.store.event(fid, "ship_clock_resumed", carrier=last.get("url"), conclusion=conclusion, paused_min=int(st["ship_paused_min"]))
+                log(f"[{fid}] carrying run {last.get('url')} ended ({conclusion}); ship clock resumes with {int(st['ship_paused_min'])} min paused")
+                waited_eff = waited - st["ship_paused_min"]
+                if waited_eff <= self.cfg.ship_timeout_min:
+                    self.store.save_state(fid, st)
+                    return
             if st.get("expects_ios") and st.get("ios_done") and not st.get("testflight_ready_at") and self.adopt_later_testflight(fid, st, sha, since):
                 if mac_ok:
                     self.ship(fid, st)
@@ -2730,7 +3976,9 @@ class Loop:
                 carried = self.gh.later_ios_build(sha, since)
             if carried is None and st.get("expects_ci") and not st.get("release_done"):
                 carried = self.gh.later_release(sha, since)
-            if carried and waited <= self.cfg.ship_timeout_min + 45:
+            if carried and waited_eff <= self.cfg.ship_timeout_min + 45:
+                st["ship_carrier"] = {"id": carried.get("id"), "url": carried["html_url"], "status": "success", "seen": iso()}
+                st.setdefault("ship_pause_started", iso())
                 if st.get("ship_wait_noted") != carried["html_url"]:
                     st["ship_wait_noted"] = carried["html_url"]
                     log(f"[{fid}] ship budget passed but a green carrying run exists: {carried['html_url']}; waiting for the build to be adopted")
@@ -2753,17 +4001,86 @@ class Loop:
             return True
         return any(DEVICE_ONLY_FILES.search(f or "") for f in st.get("files") or [])
 
-    @staticmethod
-    def deploy_kinds(files: list[str]) -> list[str]:
-        """Every service outside the app builds that must be redeployed before this fix is live:
-        the voice pod (`voice/**`), the sandbox image (agentd), the relay."""
+    # Non-Rust inputs of each deployable, by path prefix. The Rust inputs are the workspace crates its binary is
+    # built from, read from the Cargo manifests (`deploy_crate_dirs`).
+    DEPLOY_PATH_PREFIXES = {"voice": ("voice/",), "agentd": ("image/", "harness/"), "relay": ()}
+    DEPLOY_ROOT_CRATES = {"agentd": "arbos-agentd", "relay": "arbos-relay"}
+    DEPLOY_GRAPH_TTL_MIN = 6 * 60
+
+    def manifest(self, path: str) -> dict:
+        blob = self.gh.repo_api("GET", f"/contents/{urllib.parse.quote(path)}?ref=main")
+        return tomllib.loads(base64.b64decode(blob["content"]).decode())
+
+    def read_workspace_graph(self) -> dict[str, list[str]]:
+        """kind → directory prefixes of the root crate and every workspace crate it depends on, transitively —
+        normal and build dependencies, not dev — the set `cargo metadata` resolves for that binary. Read from
+        main's manifests through the API: the relay host has no cargo and the poller has no checkout."""
+        root = self.manifest("Cargo.toml")
+        members = [m for m in (root.get("workspace") or {}).get("members") or [] if "*" not in m]
+        manifests = {m: self.manifest(f"{m}/Cargo.toml") for m in members}
+        dir_of = {(man.get("package") or {}).get("name"): m for m, man in manifests.items()}
+        dir_of.pop(None, None)
+        deps_of: dict[str, set[str]] = {}
+        for m, man in manifests.items():
+            name = (man.get("package") or {}).get("name")
+            if not name:
+                continue
+            tables = [man.get(s) or {} for s in ("dependencies", "build-dependencies")]
+            tables += [t.get(s) or {} for t in (man.get("target") or {}).values() for s in ("dependencies", "build-dependencies")]
+            found: set[str] = set()
+            for table in tables:
+                for dep, spec in table.items():
+                    crate = spec.get("package", dep) if isinstance(spec, dict) else dep  # `core = { package = "arbos-core" }`
+                    if crate in dir_of:
+                        found.add(crate)
+            deps_of[name] = found
+        out: dict[str, list[str]] = {}
+        for kind, root_crate in self.DEPLOY_ROOT_CRATES.items():
+            if root_crate not in dir_of:
+                raise RuntimeError(f"{root_crate} is not a workspace member")
+            seen, todo = {root_crate}, [root_crate]
+            while todo:
+                for d in deps_of.get(todo.pop(), ()):
+                    if d not in seen:
+                        seen.add(d)
+                        todo.append(d)
+            out[kind] = sorted(f"{dir_of[c]}/" for c in seen)
+        return out
+
+    def deploy_crate_dirs(self, refresh: bool = False) -> dict[str, list[str]]:
+        """The workspace graph, cached in the cursor for DEPLOY_GRAPH_TTL_MIN and re-read early when a landed
+        item touched a Cargo.toml. Until 2026-10-27 the agentd list was three fixed prefixes (`crates/arbos-agentd/
+        image/ harness/`), so a fix in arbos-core — compiled into agentd and the relay — was called shipped with no
+        image roll: 56 such items in the week before, 35 of them live on no box when their issue was closed (#2031).
+        Unreadable manifests keep the cached graph, or fall back to the root crates alone."""
+        cur = self.store.cursor()
+        cached = cur.get("deploy_graph") or {}
+        if not refresh and cached.get("dirs") and minutes_between(cached.get("at") or "", iso()) < self.DEPLOY_GRAPH_TTL_MIN:
+            return cached["dirs"]
+        try:
+            dirs = self.read_workspace_graph()
+        except Exception as e:  # noqa: BLE001
+            log(f"deploy graph: manifests unreadable ({str(e)[:160]}); " + ("keeping the cached graph" if cached.get("dirs") else "root crates only"))
+            return cached.get("dirs") or {k: [f"crates/{v}/"] for k, v in self.DEPLOY_ROOT_CRATES.items()}
+        if dirs != cached.get("dirs"):
+            self.store.event("_loop", "deploy_graph", dirs=dirs)
+            log("deploy graph: " + "; ".join(f"{k} ← {' '.join(v)}" for k, v in dirs.items()))
+        cur = self.store.cursor()
+        cur["deploy_graph"] = {"at": iso(), "dirs": dirs}
+        self.store.save_cursor(cur)
+        return dirs
+
+    def deploy_kinds(self, files: list[str]) -> list[str]:
+        """Every service outside the app builds that must be redeployed before this fix is live: the voice pod
+        (`voice/**`), the sandbox image (agentd: its crates, `image/`, `harness/`), the relay (its crates).
+        "Shipped" means the fix is in the running artifact, so a change to any crate a binary is built from
+        counts for that binary (coordinator, 2026-10-27 09:57)."""
+        dirs = self.deploy_crate_dirs(refresh=any(f.endswith("Cargo.toml") for f in files))
         kinds = []
-        if any(f.startswith("voice/") for f in files):
-            kinds.append("voice")
-        if any(f.startswith(("crates/arbos-agentd/", "image/", "harness/")) for f in files):
-            kinds.append("agentd")  # anything baked into the sandbox image rolls with it
-        if any(f.startswith("crates/arbos-relay/") for f in files):
-            kinds.append("relay")
+        for kind in ("voice", "agentd", "relay"):
+            prefixes = tuple(self.DEPLOY_PATH_PREFIXES.get(kind, ())) + tuple(dirs.get(kind) or ())
+            if prefixes and any(f.startswith(prefixes) for f in files):
+                kinds.append(kind)
         return kinds
 
     DEPLOY_WHERE = {"voice": "the voice pod (voice-calls worker deploys it)", "agentd": "the sandbox image (next image roll)",
@@ -2787,11 +4104,8 @@ class Loop:
         if mac_files or (st.get("edge_release") or "").startswith("edge-"):
             tag = None
             if commit:
-                for r in self.gh.releases():
-                    if not r.get("prerelease") and not r.get("draft") and re.fullmatch(r"v\d+\.\d+\.\d+", r.get("tag_name") or "") \
-                            and self.gh.contains(r["tag_name"], commit):
-                        tag = r["tag_name"]  # newest stable release that carries the fix
-                        break
+                carrying = self.gh.release_carrying(commit, min(filter(None, [st.get("commit_date"), st.get("pushed_at")]), default=""), "stable")
+                tag = carrying["tag_name"] if carrying else None  # newest stable release that carries the fix
             edge = st.get("edge_release")
             if tag and edge and edge != tag and edge.startswith("edge-"):
                 parts.append(f"Mac {tag} ({edge})")
@@ -3020,6 +4334,10 @@ class Loop:
         self.intake()
         self.advance_all()
         try:
+            self.apply_freeze()
+        except Exception as e:  # noqa: BLE001
+            log(f"freeze sweep failed: {e}")
+        try:
             self.rust_gate_tick()
         except Exception as e:  # noqa: BLE001
             log(f"Rust gate scheduler failed: {e}")
@@ -3042,6 +4360,7 @@ class Loop:
             log(f"main-red watch failed: {e}")
         try:
             self.watch_deploys()
+            self.note_canary_failure()
         except Exception as e:  # noqa: BLE001
             log(f"deploy watch failed: {e}")
         try:
@@ -3052,6 +4371,18 @@ class Loop:
             self.watch_handoffs()
         except Exception as e:  # noqa: BLE001
             log(f"handoff watch failed: {e}")
+        try:
+            cur = self.store.cursor()
+            self.known_red_main_check(cur)
+            self.store.save_cursor(cur)
+        except Exception as e:  # noqa: BLE001
+            log(f"known-red check failed: {e}")
+        try:
+            self.watch_late_pushes()
+        except Exception as e:  # noqa: BLE001
+            log(f"late-push watch failed: {e}")
+        with contextlib.suppress(Exception):
+            self.write_awaiting_doc()
         with contextlib.suppress(Exception):
             self.gh.save_etags()
         log(self.gh.ledger_line())
@@ -3083,6 +4414,38 @@ class Loop:
         self.store.event(fid, "tracked", issue=number, owner=owner)
         return st
 
+    DEPLOY_RESTART_BEFORE_S = 240  # a relay comes up ~10 s before its "deployed" event; the build+swap window before it
+    DEPLOY_RESTART_AFTER_S = 60
+
+    def relay_deploy_near(self, started_iso: str) -> str | None:
+        """The sha of a CD relay deploy whose `deployed` event (deploy-events.jsonl, written by the deploy worker)
+        sits within [-DEPLOY_RESTART_BEFORE_S, +DEPLOY_RESTART_AFTER_S] of a relay start time; None = no deploy
+        explains that restart. Reads the tail of the file only."""
+        path = self.cfg.state_dir / "deploy-events.jsonl"
+        try:
+            with open(path, "rb") as f:
+                f.seek(0, 2)
+                f.seek(max(0, f.tell() - 65536))
+                tail = f.read().decode(errors="replace")
+        except OSError:
+            return None
+        started = parse_iso(started_iso)
+        for line in reversed(tail.splitlines()):
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if ev.get("deploy") != "relay" or ev.get("event") != "deployed":
+                continue
+            try:
+                at = parse_iso(ev["at"])
+            except (KeyError, ValueError):
+                continue
+            delta = (at - started).total_seconds()
+            if -self.DEPLOY_RESTART_AFTER_S <= delta <= self.DEPLOY_RESTART_BEFORE_S:
+                return str(ev.get("sha") or "deploy")
+        return None
+
     def watch_relay_restarts(self) -> None:
         """Every relay restart drops every client's websocket; a burst of them leaves the apps on
         "Reconnecting…" for minutes (2026-10-22 18:5x: four restarts in 95 min — three CD relay deploys and an
@@ -3105,8 +4468,17 @@ class Loop:
         last = watch.get("last_uptime")
         if last is not None and uptime < last:
             started = (now - dt.timedelta(seconds=int(uptime))).strftime("%Y-%m-%dT%H:%M:%SZ")
-            watch["restarts"].append(started)
-            log(f"relay-restarts: the relay restarted at {started} (uptime {uptime}s)")
+            deploy = self.relay_deploy_near(started)
+            if deploy:
+                # A CD relay deploy restarts the relay on purpose (one per coalescing window, hotfixes aside);
+                # it is in the deploy log, so it is not a crash and does not count (#1964: three deploys in an
+                # hour — 19:57, 20:33, 20:40 Oct 26, two of them P0 hotfixes — filed as "relay restarted 3×").
+                watch.setdefault("deploy_restarts", []).append(started)
+                watch["deploy_restarts"] = watch["deploy_restarts"][-20:]
+                log(f"relay-restarts: the relay restarted at {started} for the CD deploy of {deploy[:8]} (not counted)")
+            else:
+                watch["restarts"].append(started)
+                log(f"relay-restarts: the relay restarted at {started} (uptime {uptime}s) — no deploy near it: counted as a crash")
         watch["last_uptime"] = uptime
         cutoff = (now - dt.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
         recent = [t for t in watch["restarts"] if t >= cutoff]
@@ -3115,7 +4487,7 @@ class Loop:
             self.gh.ensure_label("relay-restarts", "D93F0B", "The relay restarted repeatedly; every restart drops every client's websocket")
             body = ("The relay restarted **" + str(len(recent)) + " times in the last hour** (healthz `uptime_s` resets): " + ", ".join(recent) +
                     ".\n\nEvery restart closes every client's websocket; the apps show \"Reconnecting…\" and their backoff grows with each "
-                    "drop. Sources: CD relay deploys (`deploy-events.jsonl`) and, before the hot snapshot switch, image rolls. "
+                    "drop. Restarts that match a CD relay deploy in `deploy-events.jsonl` are not counted — these are crashes or restarts nothing in the deploy log explains. "
                     "This issue closes itself after a quiet hour. Runbook: docs/feedback-loop.md → relay restarts.")
             issue = self.gh.create_issue(f"relay restarted {len(recent)}× in the last hour — clients reconnecting", body, ["relay-restarts"])
             watch["issue"] = issue["number"]
@@ -3258,10 +4630,17 @@ class Loop:
                 body = c.get("body") or ""
                 if "scripts/feedback/feedback_poller.py" in body or body.startswith(("Cursor agent started", "Merged to", "Handed off", "Pushed to")):
                     continue
+                # The loop's own comments are never claims: its "comment `take over bc-…` if <owner> should have
+                # it" reply was read back as a take-over one tick later and bounced #1804 (Jacob P0) out of a
+                # green gate at 21:17 Oct 25. Operator notes posted with the same token count as the loop's.
+                if (c.get("user") or {}).get("login", "").lower() == self.gh.login().lower():
+                    continue
                 m = self.CLAIM_RE.search(body)
                 if not m:
                     continue
                 owner = m.group(4)
+                if st.get("handed_off_to", "").startswith(owner) or owner.startswith(st.get("handed_off_to") or "\0"):
+                    continue  # the current owner re-stating ownership changes nothing, mid-gate least of all
                 mid_fix = st.get("status") in ("running", "gating")
                 if mid_fix and not re.search(r"\btak(e|ing) ?over\b", body, re.I):
                     self.gh.comment(st["issue"], f"The loop's own agent is mid-fix on this one ({st.get('agent_url') or 'running'}, state `{st['status']}`); "
@@ -3295,17 +4674,158 @@ class Loop:
                             "push a new commit to re-gate. A commit tagged `[feedback <id>]` that reaches `main` directly is tracked too.")
             self.gh.set_labels(st["issue"], [label, "in-progress"], ["shipped", "needs-human", "no-change"])
 
+    def watch_late_pushes(self) -> None:
+        """A push to `feedback/<fid>` AFTER the item merged (the loop deleted the branch; the author's next push
+        recreated it with the tail) used to be invisible — authors re-landed tails as new issues (#1684, #1721).
+        For items merged in the last 3 days: a branch with commits not on main becomes `<fid>-followupN`, same
+        issue and owner, gated and shipped like any item; the issue gets one note. Cheap: the live `feedback/*`
+        heads come from one listing per tick (a per-item probe of a deleted branch is a billed 404, never a 304)."""
+        cutoff = (utcnow() - dt.timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        refs = self.gh.feedback_refs()
+        for fid in self.store.items():
+            st = self.store.state(fid)
+            if st.get("status") not in ("pushed", "shipped") or not st.get("commit") or (st.get("pushed_at") or "") < cutoff:
+                continue
+            if "-followup" in fid or st.get("late_push_followup"):
+                continue
+            branch = f"feedback/{fid}"
+            head = refs.get(branch)
+            if not head or head == st.get("commit"):
+                continue
+            try:
+                cmp = self.gh.compare("main", head)
+            except HttpError:
+                continue
+            if cmp.get("status") not in ("ahead", "diverged") or not cmp.get("commits"):
+                continue
+            n = 1
+            while self.store.item_dir(f"{fid}-followup{'' if n == 1 else n}").exists():
+                n += 1
+            nfid = f"{fid}-followup{'' if n == 1 else n}"
+            nbranch = f"feedback/{nfid}"
+            try:
+                self.gh.create_branch(nbranch, head)
+                c = self.gh.api("GET", f"/repos/{self.cfg.github_repo}/git/commits/{head}")
+                marker = self.gh.repo_api("POST", "/git/commits", json_body={
+                    "message": f"follow-up to {fid}: later push on {branch} after the merge [feedback {nfid}]",
+                    "tree": c["tree"]["sha"], "parents": [head]})
+                self.gh.repo_api("PATCH", f"/git/refs/heads/{nbranch}", json_body={"sha": marker["sha"], "force": False})
+            except HttpError as e:
+                log(f"[{fid}] late push on {branch} ({head[:8]}) but the follow-up branch could not be made: {e}")
+                continue
+            info = {}
+            with contextlib.suppress(Exception):
+                info = self.store.submission(fid)
+            owner = st.get("handed_off_to") or st.get("agent_id") or "operator"
+            self.register_tracked(nfid, st.get("issue") or 0, f"follow-up to {fid}: later push on {branch} after the merge ({head[:8]})",
+                                  owner, handle=(info.get("handle") or ""), target=st.get("target"))
+            st["late_push_followup"] = nfid
+            self.store.save_state(fid, st)
+            self.store.event(fid, "late_push_followup", head=head, followup=nfid)
+            # The follow-up inherits the SOURCE item's reporter and tier. Outside source (reporter not Jacob,
+            # not a coordinator-owned item) → the follow-up needs Jacob's per-item approve like any outside fix:
+            # it waits as awaiting_jacob, no timer, no owner-confirm shortcut. Jacob/coordinator source → the
+            # one-hour owner-confirm hold, then the pool.
+            nst = self.store.state(nfid)
+            if nst:
+                for k in ("tester", "tester_key", "tier", "target"):
+                    if st.get(k) is not None:
+                        nst[k] = st[k]
+                outside = not self.freeze_allows(fid, st, {"allow": self.APPROVAL_DEFAULT_ALLOW})
+                nst["source_item"] = fid
+                if outside:
+                    nst.update(approval_required=True, status="awaiting_jacob", branch=nbranch, branch_head=marker["sha"], gated_head=marker["sha"],
+                               awaiting={"since": iso(), "ready": False, "main_head": self.gh.branch_head("main") or "", "conflict": False, "needs_gate": True})
+                else:
+                    nst["follow_after"] = (utcnow() + dt.timedelta(minutes=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    nst["gated_head"] = head
+                self.store.save_state(nfid, nst)
+                self.store.event(nfid, "followup_registered", source=fid, outside=outside)
+            else:
+                outside = False
+            log(f"[{fid}] late push on {branch} ({head[:8]}, {len(cmp.get('commits', []))} commit(s) not on main) → following it as {nfid} "
+                + ("(outside reporter: awaiting Jacob's per-item approve)" if outside else "(after a 60-min owner-confirm hold)"))
+            if st.get("issue"):
+                with contextlib.suppress(HttpError):
+                    if outside:
+                        self.gh.ensure_label("awaiting-jacob", "0E8A16", "Gate green; merges and ships when Jacob approves (release-approval gate)")
+                        self.gh.set_labels(st["issue"], ["awaiting-jacob"], [])
+                        self.gh.comment(st["issue"], f"A push landed on `{branch}` after this item merged ({head[:8]}, {len(cmp.get('commits', []))} commit(s) not on main). "
+                                        f"The loop follows it as `{nfid}` (branch `{nbranch}`). Reporter is outside Jacob's own asks, so it waits for **Jacob's per-item approve** "
+                                        f"(`arbos-feedback approve {nfid}`) before it gates and merges — no timer.")
+                    else:
+                        self.gh.comment(st["issue"], f"{owner}: a push landed on `{branch}` after this item merged ({head[:8]}, {len(cmp.get('commits', []))} commit(s) not on main). "
+                                        f"The loop will follow it as `{nfid}` (branch `{nbranch}`) and gate/ship it in **one hour** unless you say it was abandoned or already landed elsewhere "
+                                        f"— reply here (or ask the loop operator to `decline {nfid}`).")
+
+    def retire_closed_handoffs(self, cur: dict) -> None:
+        """A handed-off item whose GitHub issue was closed by a human leaves `handed_off` (status
+        `closed_externally`, terminal) so the loop stops probing for its commit: run 6 auto-filed 37 eval issues
+        that were closed on GitHub while the loop kept asking main for each one every 2 min. One listing call."""
+        since = cur.get("closed_checked") or (utcnow() - dt.timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        q = urllib.parse.urlencode({"state": "closed", "since": since, "per_page": 100, "sort": "updated", "direction": "asc"})
+        try:
+            closed = self.gh.repo_api("GET", f"/issues?{q}") or []
+        except HttpError:
+            return
+        numbers = {i["number"] for i in closed if "pull_request" not in i}
+        # A full page means more may follow: resume from the last update seen, not from now.
+        cur["closed_checked"] = closed[-1]["updated_at"] if len(closed) >= 100 else iso()
+        if not numbers:
+            return
+        # An issue the LOOP closed (its item shipped) is not a human's verdict: a late-push follow-up shares
+        # the source item's issue and must keep waiting for its gate (18:01 Oct 25: #1783's own follow-up
+        # was retired a minute after the source shipped and its second commit never reached main).
+        states = {fid: self.store.state(fid) for fid in self.store.items()}
+        loop_closed = {st.get("issue") for st in states.values() if st.get("status") in ("pushed", "shipped", "pending_deploy")}
+        for fid, st in states.items():
+            if "-followup" in fid or st.get("issue") in loop_closed:
+                continue
+            if st.get("status") == "handed_off" and st.get("issue") in numbers and not st.get("commit"):
+                st.update(status="closed_externally", closed={"reason": "closed on GitHub by a human", "at": iso()})
+                self.store.save_state(fid, st)
+                self.store.event(fid, "closed_externally", issue=st["issue"])
+                log(f"[{fid}] issue #{st['issue']} was closed on GitHub; leaving handed_off (no more commit probes)")
+
     def watch_handoffs(self) -> None:
         """A handed-off item is picked up two ways: its owner pushes `feedback/<id>` (the loop gates and merges it
         like one of its own, diagnostics go to the issue instead of an agent), or tags a commit `[feedback <id>]`
         that reaches main. Either way the item becomes shipped-or-landed like a loop fix (iOS/Mac parts
         through the builds, voice/agentd/relay parts through watch_deploys), so the audit follows it."""
-        for fid in self.store.items():
-            st = self.store.state(fid)
-            if st.get("status") != "handed_off" or st.get("commit") or not st.get("track_commit"):
+        # Budget (2026-10-25 17:10, auditor): this watch billed one `GET /commits?since=<per item>` per handed-off
+        # item per tick — 66–69 calls every 2 min, a third of them for closed eval issues. Now: (a) items whose
+        # GitHub issue is closed leave handed_off (one closed-issues listing per tick); (b) main's commit list is
+        # fetched ONCE per tick, only when main moved since the last scan, and every item is matched in memory.
+        cur = self.store.cursor()
+        self.retire_closed_handoffs(cur)
+        refs = self.gh.feedback_refs()
+        main_head = self.gh.branch_head("main") or ""
+        main_moved = main_head != cur.get("handoff_main_head")
+        main_commits: list[dict] | None = None
+        pending = [(fid, self.store.state(fid)) for fid in self.store.items()]
+        pending = [(f, st) for f, st in pending if st.get("status") == "handed_off" and not st.get("commit") and (st.get("track_commit") or st.get("follow_pushes"))]
+        if main_moved and pending:
+            oldest = min(max(st.get("created") or "", st.get("handed_off_at") or "") or iso() for _, st in pending)
+            since = (parse_iso(oldest) - dt.timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            # Up to 100 commits per page; main gained ~60 merges in the busiest 12 h, one page covers a day of items.
+            with contextlib.suppress(HttpError):
+                main_commits = self.gh.commits_since(since)
+                cur["handoff_main_head"] = main_head
+        self.store.save_cursor(cur)
+        for fid, st in pending:
+            # A confirmation hold (auto follow-ups, 2026-10-25): the owner has until `follow_after` to decline a
+            # tail the loop found on a merged branch; until then the branch is not followed into the pool.
+            if st.get("follow_after") and iso() < st["follow_after"]:
                 continue
-            head = self.gh.branch_head(f"feedback/{fid}")
-            if head and head != st.get("gated_head"):
+            if st.get("follow_after"):
+                st.pop("follow_after", None); st.pop("gated_head", None)
+                self.store.save_state(fid, st)
+                self.store.event(fid, "confirmation_hold_over")
+            head = refs.get(f"feedback/{fid}")
+            # A parked item compares against the head the gate judged (`parked_head`, set by the park from
+            # `last_red`), not against the head the park happened to see: a push recorded before the park is a new
+            # head too and re-registers (2026-10-27: #1995, #1962/#1963 sat handed_off with their fix pushed).
+            if head and head != (st.get("parked_head") or st.get("gated_head")):
                 cmp = self.gh.compare("main", head)
                 tagged = any(f"[feedback {fid}]" in c["commit"]["message"] for c in cmp.get("commits", []))
                 if cmp.get("status") in ("ahead", "diverged") and tagged:
@@ -3318,24 +4838,30 @@ class Loop:
                                     if f["filename"] not in seen:
                                         seen.append(f["filename"])
                         files = seen
+                    st.pop("parked_head", None)
                     st.update(status="gating", branch=f"feedback/{fid}", branch_head=head, files=files,
-                              expects_ios=any(f.startswith("apps/ios/") or f == ".github/workflows/ios.yml" for f in files),
+                              expects_ios=touches_ios(files),
                               expects_rust=bool(self.rust_crates(files)),
                               expects_ci=any(not f.startswith("apps/ios/") for f in files),
-                              agent_summary=f"handed-off fix by {st.get('handed_off_to')}")
+                              agent_summary=f"handed-off fix by {st.get('handed_off_to') or st.get('agent_id') or 'owner'}")
                     self.store.save_state(fid, st)
                     self.store.event(fid, "branch_pushed", branch=st["branch"], head=head, files=files, by=st.get("handed_off_to"))
                     continue
             # Only commits newer than the hand-off count: an earlier loop merge that was reverted (#1058,
-            # 51ec9524) still carries the tag and must not be taken for the owner's landing.
-            commit = self.find_commit(fid, max(st.get("created") or "", st.get("handed_off_at") or "") or iso())
+            # 51ec9524) still carries the tag and must not be taken for the owner's landing. Matched against the
+            # one commit list fetched above (no per-item API call); nothing to do when main did not move.
+            if main_commits is None:
+                continue
+            floor = max(st.get("created") or "", st.get("handed_off_at") or "") or iso()
+            tag = f"[feedback {fid}]"
+            commit = next((c for c in main_commits if tag in c["commit"]["message"] and c["commit"]["committer"]["date"] >= floor[:19]), None)
             if not commit or commit["sha"] in (st.get("reverted") or []):
                 continue
             files = [f["filename"] for f in self.gh.commit(commit["sha"]).get("files", [])]
             st.update(status="pushed", commit=commit["sha"], commit_url=commit["html_url"],
                       commit_message=commit["commit"]["message"].splitlines()[0], pushed_at=iso(), files=files,
                       commit_date=commit["commit"]["committer"]["date"],
-                      expects_ios=any(f.startswith("apps/ios/") for f in files),
+                      expects_ios=touches_ios(files),
                       expects_ci=any(not f.startswith("apps/ios/") for f in files))
             self.store.save_state(fid, st)
             self.store.event(fid, "handoff_landed", commit=commit["sha"], files=files)
@@ -3346,6 +4872,77 @@ class Loop:
                 self.note_fixed_on_main(st)
 
     # ---- landed-not-shipped: code that is on main but runs somewhere no build carries ------------
+
+    DEPLOY_STATE = Path("/var/lib/arbos-deploy")
+
+    def deploy_lane(self) -> dict:
+        """What the CD lane says about agentd image rolls: hold file, last smoke failure (image, reason, log
+        excerpt), items landed on main but not in any rolled image (pending_deploy agentd)."""
+        out: dict = {"held": None, "last_fail": None, "waiting": []}
+        hold = self.DEPLOY_STATE / "agentd.hold"
+        if hold.is_file():
+            with contextlib.suppress(Exception):
+                out["held"] = dict(l.split("=", 1) for l in hold.read_text().splitlines() if "=" in l)
+        fails = []
+        with contextlib.suppress(Exception):
+            for f in (self.DEPLOY_STATE / "failed").glob("agentd-*"):
+                rec = dict(l.split("=", 1) for l in f.read_text().splitlines() if "=" in l)
+                rec["sha"] = f.name.split("-", 1)[1]
+                fails.append(rec)
+        if fails:
+            last = max(fails, key=lambda r: int(r.get("at") or 0))
+            m = re.search(r"image (\d+\.\d+\.\d+)", last.get("reason") or "")
+            version = m.group(1) if m else None
+            excerpt = ""
+            if version:
+                logf = self.DEPLOY_STATE / "runs" / f"agentd-{version}-smoke.log"
+                with contextlib.suppress(Exception):
+                    excerpt = "\n".join(logf.read_text().splitlines()[-25:])
+            out["last_fail"] = {**last, "image": version, "excerpt": excerpt}
+        for fid in self.store.items():
+            st = self.store.state(fid)
+            if st.get("status") in ("pushed", "shipped") and "agentd" in (st.get("pending_deploy") or []):
+                out["waiting"].append(fid)
+        return out
+
+    def print_deploy_lane(self) -> None:
+        lane = self.deploy_lane()
+        if not (lane["held"] or lane["last_fail"] or lane["waiting"]):
+            return
+        print("deploy lane (agentd image):")
+        if lane["held"]:
+            h = lane["held"]
+            print(f"  HELD since {h.get('at')} — {h.get('reason')} (sha {str(h.get('sha'))[:8]}, image {h.get('image')}); lifts on a [canary-fix] commit or `arbos-deploy-worker hold-agentd off`")
+        if lane["last_fail"]:
+            f = lane["last_fail"]
+            print(f"  last failure: image {f.get('image')} @ {f['sha'][:8]} attempt {f.get('attempts')} — {f.get('reason')}")
+        if lane["waiting"]:
+            print(f"  landed on main, not in a rolled image ({len(lane['waiting'])}): "
+                  + ", ".join(f"{fid} #{self.store.state(fid).get('issue')}" for fid in lane["waiting"]))
+
+    def note_canary_failure(self) -> None:
+        """Once per failed image: post the canary log excerpt on every issue whose fix is landed-not-shipped
+        because of it, so owners see why their fix is not live."""
+        lane = self.deploy_lane()
+        f = lane.get("last_fail")
+        if not f or not f.get("image") or not lane["waiting"]:
+            return
+        cur = self.store.cursor()
+        noted = cur.setdefault("canary_noted", [])
+        if f["image"] in noted:
+            return
+        body = (f"Not live yet: the sandbox image **{f['image']}** (agentd @ `{f['sha'][:8]}`) failed the busy-reply canary — "
+                f"{f.get('reason')}. Boxes stay on the previous image; agentd rolls are held until a `[canary-fix]` commit lands "
+                f"(bisect in progress).\n\nCanary log tail:\n```\n{(f.get('excerpt') or '(no log excerpt)')[-2500:]}\n```")
+        for fid in lane["waiting"]:
+            st = self.store.state(fid)
+            if st.get("issue"):
+                with contextlib.suppress(HttpError):
+                    self.gh.comment(st["issue"], body)
+                self.store.event(fid, "canary_failure_noted", image=f["image"])
+        noted.append(f["image"])
+        self.store.save_cursor(cur)
+        log(f"deploy lane: canary failure of image {f['image']} noted on {len(lane['waiting'])} issue(s)")
 
     def watch_deploys(self) -> None:
         """Items whose fix runs on the voice pod (`voice/**`) or in the sandbox image (`crates/arbos-agentd`)
@@ -3376,6 +4973,21 @@ class Loop:
         else:
             agentd_shas = sorted({b["sha"] for b in agentd.get("boxes") or [] if b.get("sha") and b.get("state", "awake") == "awake"}
                                  or set(agentd.get("shas") or []))
+        # The deploy worker's record wins when it exists: it is written once the image has rolled to every real
+        # box the worker does not skip. A skipped box (uncarryable through the relay, #1941 — Jacob's
+        # gh_268993031 since 2026-10-26 17:27) stays on its old image on purpose and must not hold every fix
+        # at landed-not-shipped (ten items sat there 06:48–10:xx Oct 27); it is named on the issue instead.
+        fleet_sha, skipped = "", []
+        with contextlib.suppress(OSError):
+            fleet_sha = Path(AGENTD_DEPLOYED_SHA_FILE).read_text().strip()
+        with contextlib.suppress(OSError):
+            skipped = [line.split("|") for line in Path(AGENTD_SKIP_FILE).read_text().splitlines() if line.strip()]
+        if fleet_sha:
+            agentd_shas = [fleet_sha]
+        skipped_note = ""
+        if skipped:
+            names = ", ".join(f"{s[0]} ({s[1].split(';')[0].strip()})" if len(s) > 1 else s[0] for s in skipped)
+            skipped_note = f" — except the box(es) the deploy worker skips, still on their old image until carried by hand: {names}"
         relay_sha = ""
         with contextlib.suppress(OSError):
             relay_sha = Path(RELAY_DEPLOYED_SHA_FILE).read_text().strip()
@@ -3398,11 +5010,14 @@ class Loop:
                 if shas and contained and all(contained):
                     real = agentd.get("real_min_sha") is not None
                     awake_boxes = [b for b in agentd.get("boxes") or [] if b.get("state", "awake") == "awake" and not (real and b.get("test"))]
-                    images = sorted({b.get("image", "?") for b in awake_boxes}) or ["?"]
+                    images = sorted({b.get("image", "?") for b in awake_boxes if not fleet_sha or b.get("sha") == fleet_sha}
+                                    or {b.get("image", "?") for b in awake_boxes}) or ["?"]
+                    on_fleet = sum(1 for b in awake_boxes if b.get("sha") == fleet_sha) if fleet_sha else 0
                     where = ("the voice pod" if kind == "voice" else "the relay" if kind == "relay"
-                             else f"all {(agentd.get('real_awake') if real else agentd.get('awake')) or len(shas)} awake "
+                             else f"all {on_fleet or (agentd.get('real_awake') if real else agentd.get('awake')) or len(shas)} awake "
                                   f"{'real-user ' if real else ''}boxes (image {'/'.join(images)})")
-                    done_notes.append(f"{where} runs {shas[0][:8]}" + ("" if len(shas) == 1 else f" (+{len(shas) - 1} sha)"))
+                    done_notes.append(f"{where} runs {shas[0][:8]}" + ("" if len(shas) == 1 else f" (+{len(shas) - 1} sha)")
+                                      + (skipped_note if kind == "agentd" and fleet_sha else ""))
                 else:
                     still.append(kind)
             if still != kinds:
@@ -3497,19 +5112,31 @@ class Loop:
             if members:
                 print(f"  pinned batch {i}: " + ", ".join(tag(f) for f in members))
                 queued |= set(members)
+        solo = [fid for fid, st in ready if fid not in queued and st.get("solo_next")]
+        if solo:
+            print(f"  solo slots (one per run, right after the current run, {len(solo)}): " + ", ".join(tag(f) for f in solo))
+            queued |= set(solo)
+        solo_waiting = [fid for fid in self.store.items() if self.store.state(fid).get("solo_next") and self.store.state(fid).get("status") == "handed_off"]
+        if solo_waiting:
+            print(f"  solo slot reserved, waiting for the owner's push ({len(solo_waiting)}): " + ", ".join(tag(f) for f in solo_waiting))
+        deferred = [fid for fid, st in ready if fid not in queued and (st.get("sibling_conflicts") or 0) >= self.DEFER_AFTER]
+        if deferred:
+            print(f"  deferred-fairness batch (bumped ≥{self.DEFER_AFTER}× by sibling conflicts; next after the pins, {len(deferred)}): " + ", ".join(tag(f) for f in deferred))
+            queued |= set(deferred)
         planned = [b for b in (cur.get("rust_gate_plan") or []) if b not in pinned_batches]
         for b in planned:
             members = [f for f in b if f in gating and f not in queued]
             if members:
                 print("  planned batch (bisect half / operator plan): " + ", ".join(tag(f) for f in members))
                 queued |= set(members)
-        deferred = [fid for fid, st in ready if fid not in queued and (st.get("sibling_conflicts") or 0) >= self.DEFER_AFTER]
-        if deferred:
-            print(f"  deferred-fairness batch (bumped ≥{self.DEFER_AFTER}× by sibling conflicts; runs before the pool, {len(deferred)}): " + ", ".join(tag(f) for f in deferred))
-            queued |= set(deferred)
         pool = [fid for fid, _ in ready if fid not in queued]
         if pool:
             print(f"  pool (next batch after the pins, oldest first, {len(pool)}): " + ", ".join(tag(f) for f in pool))
+            if cur.get("pool_first"):
+                print(f"  POOL-FIRST since {cur['pool_first']}: solo slots and deferred-fairness wait behind the pool batch until it merges once")
+            for lane, h in (cur.get("lane_hold") or {}).items():
+                held = [f for f in self.store.items() if self.store.state(f).get("status") == "gating" and not self.store.state(f).get("gate_pinned") and self.touches_mac_lane(self.store.state(f))]
+                print(f"  LANE HOLD {lane} since {h.get('since')} ({h.get('reason')}): {len(held)} unpinned {lane} item(s) wait: " + ", ".join(tag(f) for f in held))
         with_owner = [fid for fid in self.store.items() if self.store.state(fid).get("status") == "handed_off" and self.store.state(fid).get("branch_head")]
         if with_owner:
             print(f"  with owner (red/conflict; a new commit on the branch re-enters the pool, {len(with_owner)}): " + ", ".join(tag(f) for f in with_owner))
@@ -3519,7 +5146,33 @@ class Loop:
         print(f"cursor since={cur.get('since')} checked={cur.get('checked')} seen={len(cur.get('seen', []))}")
         print(f"launches today={self.store.launches_today()}/{self.cfg.max_per_day} last={self.store.last_launch()}")
         print(f"kill file: {'PRESENT' if self.cfg.kill_file.exists() else 'absent'} ({self.cfg.kill_file})")
+        gate = self.approval_state()
+        held = [self.store.state(f) for f in self.store.items()]
+        held = [h for h in held if h.get("status") == "awaiting_jacob" or (h.get("awaiting") and h.get("status") == "gating" and not h.get("approved_by_jacob"))]
+        n = len(held)
+        regating = sum(1 for h in held if h.get("status") == "gating")
+        if gate:
+            print(f"RELEASE-APPROVAL GATE on (standing rule; allow: {', '.join(gate.get('allow', []))}); awaiting Jacob: {n}"
+                  + (f" ({regating} re-gating after main moved — still awaiting, approve/decline any time)" if regating else "") + " — "
+                  f"list: {self.cfg.state_dir / self.AWAITING_DOC}; `arbos-feedback approve <item>` / `decline <item> \"<note>\"`")
+        else:
+            print(f"RELEASE-APPROVAL GATE *** LIFTED WHOLESALE *** {(self.cfg.state_dir / self.APPROVAL_LIFTED_FILE).read_text().strip()} — "
+                  f"awaiting Jacob: {n}; `arbos-feedback approval-gate restore` re-arms it")
+        fz = self.freeze_state()
+        if fz:
+            parked = [self.store.state(f) for f in self.store.items()]
+            parked = [p for p in parked if p.get("status") == "parked"]
+            by = {}
+            for p in parked:
+                by[p.get("parked_from", "?")] = by.get(p.get("parked_from", "?"), 0) + 1
+            print(f"FEEDBACK FREEZE since {fz.get('since')} (allow: {', '.join(fz.get('allow', []))}); parked {len(parked)}: "
+                  + ", ".join(f"{k} {v}" for k, v in sorted(by.items())) + " — `arbos-feedback unfreeze` lifts it")
         self.print_gate_queue(cur)
+        self.print_deploy_lane()
+        broken = cur.get("main_ios_tests_broken")
+        if broken:
+            print(f"MAIN iOS UNIT TESTS BROKEN at {broken.get('main')} since {broken.get('since')} (gate {broken.get('run')}); branches are not blamed — route the fix: "
+                  + " | ".join((broken.get("errors") or [])[:2]))
         for fid in self.store.items():
             st = self.store.state(fid)
             bits = [st.get("status", "?"), st.get("target", ""), st.get("tier", ""), st.get("tester", "")]
@@ -3954,6 +5607,9 @@ def main(argv: list[str]) -> int:
         # Jacob's servers UI #1241/#1242 ahead of the queue). --abort drops the active run first so they start
         # on the next tick instead of after it settles. Other ready items follow in later batches.
         args = argv[2:]
+        by_arg = ""
+        if "--by" in args and args.index("--by") + 1 < len(args):
+            i = args.index("--by"); by_arg = args[i + 1]; args = args[:i] + args[i + 2:]
         then_ids = args[args.index("--then") + 1:] if "--then" in args else []
         ids = [a for a in (args[:args.index("--then")] if "--then" in args else args) if not a.startswith("--")]
         then_ids = [a for a in then_ids if not a.startswith("--")]
@@ -3966,7 +5622,11 @@ def main(argv: list[str]) -> int:
                 return 2
             into[fid] = st["branch_head"]
             st["gate_pinned"] = True  # stays ahead of the pool until it merges, through conflict/re-push cycles
+            st["pinned_by"] = os.environ.get("ARBOS_OPERATOR") or by_arg or "unknown"
+            st["pinned_at"] = iso()
             loop.store.save_state(fid, st)
+            if st["pinned_by"] != cfg.operator:
+                print(f"{fid}: note — pins are the operator's ({cfg.operator}); this pin by {st['pinned_by']} stands only if the head carries [hotfix] and the issue is P0, else the scheduler clears it")
         batches = [heads] + ([then_heads] if then_heads else [])
         with (cfg.state_dir / ".lock").open("w") as lock:
             try:
@@ -4009,6 +5669,190 @@ def main(argv: list[str]) -> int:
                     loop.gh.comment(st["issue"], f"Not a failure after all: the fix `{st['commit'][:8]}` is on `main`; the build that carries it was still in the runner queue ({why.rstrip('.')}). Back to tracking the builds.")
                     loop.gh.set_labels(st["issue"], [], ["needs-human"])
             print(f"{fid}: back to pushed")
+        return 0
+    if cmd == "park":
+        # `park <id> <note…>`: hand a gating item back to its owner after a red the gate pinned on it. gated_head and
+        # parked_head are the head the RED run judged (`last_red`, or the item's own failing verdict) — never the
+        # live head: a push recorded between the red and the park stayed invisible when the park copied branch_head
+        # (#1995 08:32/08:35, #1962/#1963 09:01/09:55, 2026-10-27). The follower re-registers any other head, so a
+        # push already made re-gates on the next tick; a pin is released. The follower only walks items with
+        # `track_commit` or `follow_pushes`: a parked loop-agent item (app-…, owner = `agent_id`, never handed off) has
+        # neither, so its owner's push went unseen (#2049). `follow_pushes` is the right flag: `track_commit` also
+        # means "coordinator-registered" to the approval gate (`freeze_allows`), and setting it on a tester item let
+        # #2049 (class-b, awaiting Jacob) merge from an operator batch at 06:17 Oct 28 without his per-item approve.
+        # The push itself went unseen on 2026-10-27 (#2049: pushed 21:27, found by hand 23:36). `handed_off_to` stays
+        # unset on purpose — that is what keeps the Cursor follow-up channel to the agent on a conflict.
+        if len(argv) < 4:
+            print("park <id> <note…>")
+            return 2
+        fid, note = argv[2], " ".join(argv[3:])
+        st = loop.store.state(fid)
+        if not st or st.get("status") != "gating":
+            print(f"{fid}: not gating ({(st or {}).get('status')})")
+            return 2
+        rg = st.get("rust_gate") or {}
+        red = (st.get("last_red") or {}).get("head") or (rg.get("head") if rg.get("verdict") in ("fail", "conflict") else None) or st.get("branch_head")
+        st.update(status="handed_off", gated_head=red, parked_head=red, gate_pinned=False, follow_pushes=True)
+        loop.store.save_state(fid, st)
+        loop.store.event(fid, "parked_by_operator", head=red, live_head=st.get("branch_head"), note=note[:400])
+        later = st.get("branch_head") != red
+        print(f"{fid}: parked at the red head {red[:9]}" + (f"; live head {st['branch_head'][:9]} is newer and re-registers on the next tick" if later else ""))
+        return 0
+    if cmd == "approval-gate":
+        # Standing rule: the gate is always on. `approval-gate on [--allow a,b]` widens the allow list;
+        # `approval-gate lift --i-am-jacob --reason "<why>"` is the only way off (logged, shown in status);
+        # `approval-gate restore` puts it back; `approval-gate` prints the state.
+        args = argv[2:]
+        if args[:1] == ["off"]:
+            print("refused: the release-approval gate is a standing rule (Jacob, 2026-10-24 13:55 UTC). Per-item: `approve <item>` / "
+                  "`decline <item> \"<note>\"`. A wholesale lift needs `approval-gate lift --i-am-jacob --reason \"<why>\"`.")
+            return 2
+        if args[:1] == ["lift"]:
+            if "--i-am-jacob" not in args or "--reason" not in args:
+                print("refused: `approval-gate lift` needs --i-am-jacob and --reason \"<why>\" (logged)"); return 2
+            reason = args[args.index("--reason") + 1] if args.index("--reason") + 1 < len(args) else ""
+            if len(reason.strip()) < 10:
+                print("refused: give a real reason (10+ characters)"); return 2
+            rec = {"at": iso(), "reason": reason.strip()[:300], "by": "operator asserting Jacob's authority (--i-am-jacob)"}
+            (cfg.state_dir / Loop.APPROVAL_LIFTED_FILE).write_text(json.dumps(rec))
+            log(f"RELEASE-APPROVAL GATE LIFTED WHOLESALE by operator: {rec['reason']}")
+            with (cfg.state_dir / "log.jsonl").open("a") as f:
+                f.write(json.dumps({"time": iso(), "id": "-", "event": "approval_gate_lifted", **rec}) + "\n")
+            print(f"release-approval gate LIFTED (logged): {rec['reason']} — awaiting items still need `approve` to merge; `approval-gate restore` re-arms it")
+            return 0
+        if args[:1] == ["restore"]:
+            (cfg.state_dir / Loop.APPROVAL_LIFTED_FILE).unlink(missing_ok=True)
+            with (cfg.state_dir / "log.jsonl").open("a") as f:
+                f.write(json.dumps({"time": iso(), "id": "-", "event": "approval_gate_restored"}) + "\n")
+            print("release-approval gate restored (standing rule)"); return 0
+        if args[:1] == ["on"]:
+            allow = [a.strip() for a in (args[args.index("--allow") + 1] if "--allow" in args else "").split(",") if a.strip()]
+            by = args[args.index("--by") + 1] if "--by" in args else "operator"
+            (cfg.state_dir / Loop.APPROVAL_FILE).write_text(json.dumps({"allow": allow, "since": iso(), "by": by}))
+            (cfg.state_dir / Loop.APPROVAL_LIFTED_FILE).unlink(missing_ok=True)
+        gate = loop.approval_state()
+        print("release-approval gate: " + (f"ON (allow: {', '.join(gate['allow'])}; since {gate['since']}, {gate['by']})" if gate else
+              f"LIFTED — {(cfg.state_dir / Loop.APPROVAL_LIFTED_FILE).read_text()}"))
+        return 0
+    if cmd == "approve":
+        fid = argv[2] if len(argv) > 2 else ""
+        st = loop.store.state(fid)
+        if not st:
+            print(f"{fid}: unknown"); return 2
+        with (cfg.state_dir / ".lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            st = loop.store.state(fid)
+            st["approved_by_jacob"] = iso()
+            if st.get("status") == "awaiting_jacob":
+                # Approval re-gates once more when main moved onto its files since the last green (gate() below
+                # merges at once when the head still has a fresh verdict); the 2-hour re-gate timer is cleared.
+                aw = st.get("awaiting") or {}
+                aw.update(regate_due=False, last_regate=None)
+                st.update(status="gating", awaiting=aw)
+            loop.store.save_state(fid, st)
+            loop.store.event(fid, "approved", by="Jacob")
+            if st.get("issue"):
+                with contextlib.suppress(HttpError):
+                    loop.gh.set_labels(st["issue"], ["in-progress"], ["awaiting-jacob"])
+                    loop.gh.comment(st["issue"], "Approved by Jacob — merging and shipping through the normal release.")
+            if st.get("status") == "gating":
+                loop.gate(fid, st)  # fresh verdict at this head → merges now; else the next batch gates and merges it
+            st = loop.store.state(fid)
+        print(f"{fid}: approved → {st.get('status')}")
+        return 0
+    if cmd == "decline":
+        fid = argv[2] if len(argv) > 2 else ""
+        note = " ".join(argv[3:]).strip() or "declined by Jacob"
+        st = loop.store.state(fid)
+        if not st:
+            print(f"{fid}: unknown"); return 2
+        with (cfg.state_dir / ".lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            st = loop.store.state(fid)
+            st.update(status="declined", declined={"at": iso(), "note": note[:300]})
+            loop.store.save_state(fid, st)
+            loop.store.event(fid, "declined", note=note[:300])
+            if st.get("issue"):
+                with contextlib.suppress(HttpError):
+                    loop.gh.set_labels(st["issue"], ["declined"], ["awaiting-jacob", "in-progress"])
+                    loop.gh.close_issue(st["issue"], "not_planned", f"Declined by Jacob: {note.rstrip('.')}. The branch `{st.get('branch') or 'feedback/' + fid}` is kept.")
+        print(f"{fid}: declined ({note[:80]}); branch kept")
+        return 0
+    if cmd == "awaiting":
+        p = cfg.state_dir / Loop.AWAITING_DOC
+        print(p.read_text() if p.is_file() else "no awaiting-jacob list yet (the next tick writes it)")
+        return 0
+    if cmd == "freeze":
+        # `freeze --allow unarbos,arbos,const [--by <who>]`: owner switch — only the listed reporters' items move;
+        # everything else is parked (see apply_freeze). Idempotent; re-running updates the allow list.
+        args = argv[2:]
+        allow = [a.strip() for a in (args[args.index("--allow") + 1] if "--allow" in args else "").split(",") if a.strip()]
+        if not allow:
+            print("freeze needs --allow <reporter,...>"); return 2
+        by = args[args.index("--by") + 1] if "--by" in args else "operator"
+        fz = {"allow": allow, "since": iso(), "by": by}
+        (cfg.state_dir / Loop.FREEZE_FILE).write_text(json.dumps(fz))
+        with (cfg.state_dir / ".lock").open("w") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                print(f"freeze on (allow: {', '.join(allow)}); a tick is in flight — it parks the rest at its next step"); return 0
+            n = loop.apply_freeze()
+        print(f"freeze on (allow: {', '.join(allow)}); parked {n} item(s) now; new reports from other reporters park on intake")
+        return 0
+    if cmd == "unfreeze":
+        with (cfg.state_dir / ".lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            n = loop.lift_freeze()
+        print(f"freeze lifted; {n} item(s) restored to their previous state and order")
+        return 0
+    if cmd == "lane-hold":
+        # `lane-hold mac on [reason] | off | status`: hold unpinned items touching crates/arbos-mac out of the gate.
+        store = Store(cfg)
+        with (cfg.state_dir / ".lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            cur = store.cursor()
+            lane, sub = (argv[2] if len(argv) > 2 else "mac"), (argv[3] if len(argv) > 3 else "status")
+            holds = cur.get("lane_hold") or {}
+            if sub == "on":
+                holds[lane] = {"since": iso(), "reason": " ".join(argv[4:]) or "operator"}
+                store.event("_loop", "lane_hold_on", lane=lane, reason=holds[lane]["reason"])
+            elif sub == "off":
+                holds.pop(lane, None); store.event("_loop", "lane_hold_off", lane=lane)
+            cur["lane_hold"] = holds; store.save_cursor(cur)
+            print(f"lane-hold {lane}: " + (f"ON since {holds[lane]['since']} — {holds[lane]['reason']}" if holds.get(lane) else "off"))
+        return 0
+    if cmd == "pool-first":
+        # `pool-first on|off|status`: until the next pool batch merges, solo slots and the deferred-fairness batch
+        # wait behind the pool (bisect halves and pins still go first).
+        store = Store(cfg)
+        with (cfg.state_dir / ".lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            cur = store.cursor()
+            sub = argv[2] if len(argv) > 2 else "status"
+            if sub == "on":
+                cur["pool_first"] = iso(); store.save_cursor(cur); store.event("_loop", "pool_first_on", by="operator")
+            elif sub == "off":
+                cur.pop("pool_first", None); store.save_cursor(cur); store.event("_loop", "pool_first_off", by="operator")
+            print(f"pool-first: {'on since ' + cur['pool_first'] if cur.get('pool_first') else 'off'}")
+        return 0
+    if cmd == "known-red":
+        # `known-red add <test> [note…]` | `known-red remove <test>` | `known-red list`: the operator's list of
+        # tests known red on main; the Linux half ignores a red CI run whose failures are all on it (#1852).
+        loop = Loop(cfg)
+        sub = argv[2] if len(argv) > 2 else "list"
+        data = loop.known_red()
+        if sub == "add" and len(argv) > 3:
+            data[argv[3]] = {"added": iso(), "by": "operator", "note": " ".join(argv[4:])}
+            loop.save_known_red(data)
+            loop.store.event("_loop", "known_red_added", test=argv[3], note=" ".join(argv[4:]))
+            print(f"known-red: {argv[3]} (expires in 24 h or when main is green)")
+            return 0
+        if sub == "remove" and len(argv) > 3:
+            data.pop(argv[3], None); loop.save_known_red(data); print(f"known-red: removed {argv[3]}"); return 0
+        for t, e in sorted(data.items()):
+            print(f"{t}\tadded {e.get('added')}\t{e.get('note') or ''}")
+        print(f"{len(data)} known-red test(s)")
         return 0
     if cmd == "gate-note":
         # `gate-note <text>` / `gate-note --clear`: one operator line shown on top of `status`'s gate queue

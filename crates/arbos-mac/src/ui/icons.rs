@@ -1,6 +1,13 @@
 //! SF-Symbol-like glyphs, embedded as tiny SVGs and painted through GPUI's
 //! `svg()` element in the current text colour. Hand-drawn strokes on a 24 pt
 //! grid (round caps, 2 pt weight) to match the iPhone app's header controls.
+//!
+//! **Frozen since [feedback menu-sf-symbols-2026-10-27]** (Jacob: "use standard
+//! versions instead of making them"): menus draw the real system symbols
+//! through `ui::sf_symbols`, and this pack is (a) the fallback for a symbol the
+//! running macOS lacks or a non-mac build, and (b) the surfaces the follow-up
+//! release converts. No new hand-drawn path lands without a
+//! `// icon: custom <why>` line above it — `tests::no_new_hand_drawn_glyph_without_a_custom_marker`.
 
 use std::borrow::Cow;
 
@@ -63,6 +70,21 @@ const ICONS: &[(&str, &str)] = &[
         "<path d=\"M7 3h10M7 21h10M8 3c0 5 4 6 4 9s-4 4-4 9M16 3c0 5-4 6-4 9s4 4 4 9\"/>"
     ),
     icon!("xmark", "<path d=\"M6 6l12 12M18 6L6 18\"/>"),
+    // icon: custom — Grok Bot's activity spinner (the Coding row while the bot
+    // works): eight spokes fading round the dial, stepped by
+    // `cards::activity_spinner`; SF Symbols has no fading-spoke dial.
+    icon!(
+        "spinner",
+        "<path d=\"M12.00 5.50L12.00 1.50\" stroke-width=\"2.4\" stroke-opacity=\"1.0\"/><path d=\"M16.60 7.40L19.42 4.58\" stroke-width=\"2.4\" stroke-opacity=\"0.85\"/><path d=\"M18.50 12.00L22.50 12.00\" stroke-width=\"2.4\" stroke-opacity=\"0.7\"/><path d=\"M16.60 16.60L19.42 19.42\" stroke-width=\"2.4\" stroke-opacity=\"0.55\"/><path d=\"M12.00 18.50L12.00 22.50\" stroke-width=\"2.4\" stroke-opacity=\"0.42\"/><path d=\"M7.40 16.60L4.58 19.42\" stroke-width=\"2.4\" stroke-opacity=\"0.3\"/><path d=\"M5.50 12.00L1.50 12.00\" stroke-width=\"2.4\" stroke-opacity=\"0.2\"/><path d=\"M7.40 7.40L4.58 4.58\" stroke-width=\"2.4\" stroke-opacity=\"0.12\"/>"
+    ),
+    // Grok Bot's share disc glyph (SF `square.and.arrow.up`): an open-topped
+    // box with the arrow rising out of it. Measured 14 × 14 pt in the 36 pt
+    // disc on `grok-right-pane-details.png` (2 px/pt); the mark spans 16 of
+    // the 24 grid, so `glass::PANE_SHARE_GLYPH` 21 paints 14 pt.
+    icon!(
+        "share",
+        "<path d=\"M8 10H6a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6a2 2 0 0 0-2-2h-2\" stroke-width=\"1.8\"/><path d=\"M12 15V4M8.5 7.5L12 4l3.5 3.5\" stroke-width=\"1.8\"/>"
+    ),
     icon!(
         "archivebox",
         "<rect x=\"3\" y=\"4\" width=\"18\" height=\"4\" rx=\"1\"/><path d=\"M5 8v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8M10 12h4\"/>"
@@ -99,6 +121,22 @@ const ICONS: &[(&str, &str)] = &[
     icon!("check", "<path d=\"M5 12.5l4.5 4.5L19 7\" stroke-width=\"2.6\"/>"),
     icon!("globe", "<circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18\"/>"),
     icon!("doc", "<path d=\"M7 3h7l5 5v13H7z\"/><path d=\"M14 3v5h5\"/>"),
+    // Group pane's Description row (SF `text.alignleft`): three left-aligned lines.
+    icon!("text-align-left", "<path d=\"M4 7h16M4 12h11M4 17h14\"/>"),
+    // Sidebar pins (fallbacks for SF `pin` / `pin.slash` / `pin.fill`): an upright
+    // pushpin — head, flange, needle — and the same with a slash / filled.
+    icon!(
+        "pin",
+        "<path d=\"M9 3.5h6v5.2l2.6 3.1a.6.6 0 0 1-.46 1H6.86a.6.6 0 0 1-.46-1L9 8.7z\"/><path d=\"M12 12.8V21\"/>"
+    ),
+    icon!(
+        "pin-slash",
+        "<path d=\"M9 3.5h6v5.2l2.6 3.1a.6.6 0 0 1-.46 1H6.86a.6.6 0 0 1-.46-1L9 8.7z\"/><path d=\"M12 12.8V21\"/><path d=\"M4.5 4.5l15 15\"/>"
+    ),
+    icon!(
+        "pin-fill",
+        "<path d=\"M9 3.5h6v5.2l2.6 3.1a.6.6 0 0 1-.46 1H6.86a.6.6 0 0 1-.46-1L9 8.7z\" fill=\"#000\"/><path d=\"M12 12.8V21\"/>"
+    ),
     // Settings → Secrets (D83): key tile, pause switch, vault.
     icon!("key", "<circle cx=\"8\" cy=\"15\" r=\"4\"/><path d=\"M11 12l9-9M16 6l2 2M13 9l2 2\"/>"),
     icon!("pause", "<rect x=\"6\" y=\"5\" width=\"4\" height=\"14\" rx=\"1\" fill=\"#000\"/><rect x=\"14\" y=\"5\" width=\"4\" height=\"14\" rx=\"1\" fill=\"#000\"/>"),
@@ -112,6 +150,8 @@ const ICONS: &[(&str, &str)] = &[
         "<path d=\"M4 14v5a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-5\"/><path d=\"M4 14h4l1.5 2h5l1.5-2h4\"/><path d=\"M12 11V4M9 7l3-3 3 3\"/>"
     ),
     icon!("lock", "<rect x=\"5\" y=\"11\" width=\"14\" height=\"10\" rx=\"2\"/><path d=\"M8 11V8a4 4 0 0 1 8 0v3\"/>"),
+    // The Blocked state ([feedback blocked-state-mac-2026-10-26]): a circle with a slash.
+    icon!("nosign", "<circle cx=\"12\" cy=\"12\" r=\"8.5\"/><path d=\"M6 6l12 12\"/>"),
     // A secret whose real value is in the agent's environment (D83 decision 2).
     icon!("terminal", "<rect x=\"3\" y=\"5\" width=\"18\" height=\"14\" rx=\"2\"/><path d=\"M7 9l3 3-3 3M12 15h5\"/>"),
     // Profile pages (Telegram-style action rows).
@@ -134,14 +174,35 @@ const ICONS: &[(&str, &str)] = &[
         "forward",
         "<path d=\"M15 14l5-5-5-5\"/><path d=\"M20 9h-9a6 6 0 0 0-6 6v4\"/>"
     ),
-    // Speech bubble (iPhone `bubble.left`): the quote header of a reply bubble.
+    // Speech bubble (iPhone `bubble.left`): the reply quote header, the message
+    // menu's Reply in DM and the person pane's Message pill. One ellipse (centre
+    // 12,10.5 · radii 8.5 × 6.5: top → right → the tail's root at the lower
+    // left) with the tail's tip at 4.5,20, closed by the arc back up to the top,
+    // so the outline meets itself — the earlier hand-drawn curves ended 1 pt
+    // short of their start and `z` drew a stub there
+    // ([feedback reply-in-dm-icon-2026-10-27]; `tests::no_glyph_closes_with_a_stub`).
     icon!(
         "bubble",
-        "<path d=\"M12 3.5c5 0 9 3.2 9 7.2s-4 7.2-9 7.2c-.9 0-1.8-.1-2.6-.3L5 20v-3.6c-1.3-1.3-2-2.9-2-4.7 0-4 4-7.2 9-7.2z\"/>"
+        "<path d=\"M12 4a8.5 6.5 0 0 1 8.5 6.5 8.5 6.5 0 0 1-11.4 6.1L4.5 20l-.5-7.3A8.5 6.5 0 0 1 12 4z\"/>"
     ),
     icon!("crown", "<path d=\"M4 17h16l1-9-5 3.5L12 5l-4 6.5L3 8z\" fill=\"#000\"/>"),
     icon!("photo", "<rect x=\"3\" y=\"5\" width=\"18\" height=\"14\" rx=\"2\"/><circle cx=\"9\" cy=\"10\" r=\"1.5\" fill=\"#000\"/><path d=\"M21 16l-5-5-8 8\"/>"),
     icon!("arrow-down", "<path d=\"M12 5v14M5 12l7 7 7-7\" stroke-width=\"2.6\"/>"),
+    // Chart cards: Save PNG (arrow into a tray) and Expand (arrows out of the corners).
+    icon!(
+        "download",
+        "<path d=\"M12 4v11M7.5 10.5L12 15l4.5-4.5\"/><path d=\"M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2\"/>"
+    ),
+    icon!("expand", "<path d=\"M14 4h6v6M10 20H4v-6M20 4l-7 7M4 20l7-7\"/>"),
+    // Grok Bot's update disc glyph (SF `icloud.and.arrow.down`): a cloud open
+    // at the bottom — 8 pt dome, 3 pt lobes, straight sides — with the arrow
+    // coming out of it. Traced pixel for pixel from the 72 px disc in Jacob's
+    // Oct-2026 ref (glyph box 26 × 28 px, 2.5 px stroke): 15.6 × 16.2 on the
+    // 24 grid at a 1.5 stroke, so `size` 20 paints Grok's 13 × 14 pt mark.
+    icon!(
+        "cloud-download",
+        "<path d=\"M4.95 13.8V11.4A3 3 0 0 1 7.95 8.4A4.05 4.05 0 0 1 16.05 8.4A3 3 0 0 1 19.05 11.4V13.8\" stroke-width=\"1.5\"/><path d=\"M12 11.4V19M8.4 15.6L12 19L15.6 15.6\" stroke-width=\"1.5\"/>"
+    ),
     icon!("cpu", "<rect x=\"6\" y=\"6\" width=\"12\" height=\"12\" rx=\"2\"/><rect x=\"10\" y=\"10\" width=\"4\" height=\"4\" fill=\"#000\" stroke=\"none\"/><path d=\"M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4\"/>"),
     icon!("window", "<rect x=\"3\" y=\"4\" width=\"18\" height=\"16\" rx=\"2\"/><path d=\"M3 9h18\"/>"),
     // Settings root rows (D80 / iPhone parity): Credits, Machine, Appearance, About.
@@ -153,11 +214,28 @@ const ICONS: &[(&str, &str)] = &[
         "desktop",
         "<rect x=\"3\" y=\"4\" width=\"18\" height=\"12\" rx=\"2\"/><path d=\"M8 20h8M12 16v4\"/>"
     ),
+    // Settings → Devices tiles (Oct 23).
+    icon!(
+        "laptop",
+        "<rect x=\"3\" y=\"5\" width=\"18\" height=\"12\" rx=\"2\"/><path d=\"M2 19h20\"/>"
+    ),
+    icon!(
+        "smartphone",
+        "<rect x=\"7\" y=\"2\" width=\"10\" height=\"20\" rx=\"2\"/><path d=\"M11 18h2\"/>"
+    ),
+    icon!(
+        "bot",
+        "<rect x=\"4\" y=\"8\" width=\"16\" height=\"12\" rx=\"3\"/><path d=\"M12 4v4M9 14h.01M15 14h.01\"/>"
+    ),
     icon!(
         "circle-half",
         "<circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M12 3a9 9 0 0 0 0 18z\" fill=\"#000\"/>"
     ),
     icon!("info", "<circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M12 11v6M12 8h.01\"/>"),
+    icon!(
+        "exclamation",
+        "<circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M12 7v6M12 16.5h.01\" stroke-width=\"2.4\"/>"
+    ),
     icon!("minus", "<path d=\"M5 12h14\"/>"),
     icon!(
         "envelope",
@@ -194,6 +272,10 @@ impl AssetSource for Assets {
         if let Some(bytes) = crate::ui::avatars::leaf_asset_bytes(path) {
             return Ok(Some(Cow::Borrowed(bytes)));
         }
+        // The link tiles' bundled brand marks (`brands/<slug>.svg`).
+        if let Some(bytes) = crate::ui::link_tile::brand_asset_bytes(path) {
+            return Ok(Some(Cow::Borrowed(bytes)));
+        }
         Ok(ICONS
             .iter()
             .find(|(p, _)| *p == path)
@@ -216,4 +298,655 @@ pub fn icon(name: &str, size: f32, color: Hsla) -> Svg {
         .size(px(size))
         .flex_shrink_0()
         .text_color(color)
+}
+
+/// The icon pack's stroke weight on the 24 grid (the `icon!` header).
+#[cfg(test)]
+pub const STROKE: f32 = 2.0;
+
+/// The drawn body of the glyph `name` — what sits inside the `icon!` header
+/// and `</svg>` — for the lints below.
+#[cfg(test)]
+pub fn body(name: &str) -> Option<&'static str> {
+    let path = format!("icons/{name}.svg");
+    ICONS
+        .iter()
+        .find(|(p, _)| *p == path)
+        .map(|(_, svg)| inner(svg))
+}
+
+#[cfg(test)]
+fn inner(svg: &str) -> &str {
+    let start = svg.find('>').map_or(0, |i| i + 1);
+    let end = svg.rfind("</svg>").unwrap_or(svg.len());
+    &svg[start..end]
+}
+
+/// Icon-pack lint ([feedback reply-in-dm-icon-2026-10-27]): the shape checks
+/// that keep a hand-drawn glyph honest, run over every icon by the tests.
+#[cfg(test)]
+pub mod lint {
+    /// One drawn subpath, walked from its `d` attribute.
+    #[derive(Debug, Default, Clone, PartialEq)]
+    pub struct Walk {
+        /// Every anchor (end point) the path visits, in order.
+        pub anchors: Vec<(f32, f32)>,
+        /// For every `z`: the distance between the pen and the subpath's start
+        /// when it closed. `0` = the curves met; a long gap = a real straight
+        /// closing edge (a triangle's base); a short one = a stub.
+        pub closing_gaps: Vec<f32>,
+    }
+
+    /// Walk an SVG path `d` string (M L H V C S Q T A Z, absolute and
+    /// relative, implicit repeats) and report its anchors and closing gaps.
+    pub fn walk(d: &str) -> Walk {
+        let mut tokens: Vec<String> = Vec::new();
+        let mut number = String::new();
+        let flush = |number: &mut String, tokens: &mut Vec<String>| {
+            if !number.is_empty() {
+                tokens.push(std::mem::take(number));
+            }
+        };
+        for ch in d.chars() {
+            match ch {
+                'a'..='z' | 'A'..='Z' => {
+                    flush(&mut number, &mut tokens);
+                    tokens.push(ch.to_string());
+                }
+                '-' => {
+                    flush(&mut number, &mut tokens);
+                    number.push(ch);
+                }
+                '.' if number.contains('.') => {
+                    flush(&mut number, &mut tokens);
+                    number.push(ch);
+                }
+                '0'..='9' | '.' => number.push(ch),
+                _ => flush(&mut number, &mut tokens),
+            }
+        }
+        flush(&mut number, &mut tokens);
+
+        let mut out = Walk::default();
+        let (mut cur, mut start) = ((0.0f32, 0.0f32), (0.0f32, 0.0f32));
+        let mut cmd = 'M';
+        let mut i = 0;
+        let num = |tokens: &[String], i: &mut usize| -> f32 {
+            let v = tokens.get(*i).and_then(|t| t.parse::<f32>().ok());
+            *i += 1;
+            v.unwrap_or_else(|| panic!("bad path token {:?} in {d:?}", tokens.get(*i - 1)))
+        };
+        while i < tokens.len() {
+            if tokens[i]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic())
+            {
+                cmd = tokens[i].chars().next().unwrap();
+                i += 1;
+            } else if cmd == 'M' {
+                cmd = 'L';
+            } else if cmd == 'm' {
+                cmd = 'l';
+            }
+            let rel = cmd.is_ascii_lowercase();
+            let at = |cur: (f32, f32), x: f32, y: f32| {
+                if rel {
+                    (cur.0 + x, cur.1 + y)
+                } else {
+                    (x, y)
+                }
+            };
+            match cmd.to_ascii_uppercase() {
+                'M' => {
+                    let (x, y) = (num(&tokens, &mut i), num(&tokens, &mut i));
+                    cur = at(cur, x, y);
+                    start = cur;
+                    out.anchors.push(cur);
+                }
+                'L' | 'T' => {
+                    let (x, y) = (num(&tokens, &mut i), num(&tokens, &mut i));
+                    cur = at(cur, x, y);
+                    out.anchors.push(cur);
+                }
+                'H' => {
+                    let x = num(&tokens, &mut i);
+                    cur = (if rel { cur.0 + x } else { x }, cur.1);
+                    out.anchors.push(cur);
+                }
+                'V' => {
+                    let y = num(&tokens, &mut i);
+                    cur = (cur.0, if rel { cur.1 + y } else { y });
+                    out.anchors.push(cur);
+                }
+                'C' | 'S' | 'Q' | 'A' => {
+                    let skip = match cmd.to_ascii_uppercase() {
+                        'C' => 4,
+                        'S' | 'Q' => 2,
+                        _ => 5,
+                    };
+                    for _ in 0..skip {
+                        num(&tokens, &mut i);
+                    }
+                    let (x, y) = (num(&tokens, &mut i), num(&tokens, &mut i));
+                    cur = at(cur, x, y);
+                    out.anchors.push(cur);
+                }
+                'Z' => {
+                    out.closing_gaps
+                        .push(((cur.0 - start.0).powi(2) + (cur.1 - start.1).powi(2)).sqrt());
+                    cur = start;
+                }
+                other => panic!("unknown path command {other:?} in {d:?}"),
+            }
+        }
+        out
+    }
+
+    /// Every `d="…"` attribute in an icon body.
+    pub fn paths(body: &str) -> Vec<&str> {
+        body.split(" d=\"")
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .collect()
+    }
+
+    /// A `z` that lands within `stroke / 2` of its start but not on it draws
+    /// a stub shorter than the line is wide: the curves were meant to meet
+    /// and missed. That is the bubble's old defect, and what this guards.
+    pub fn stubs(body: &str, stroke: f32) -> Vec<f32> {
+        paths(body)
+            .into_iter()
+            .flat_map(|d| walk(d).closing_gaps)
+            .filter(|gap| *gap > 0.05 && *gap < stroke)
+            .collect()
+    }
+
+    /// Bounding box of every anchor in the body's paths, rects and circles:
+    /// `(min_x, min_y, max_x, max_y)`.
+    pub fn anchor_box(body: &str) -> (f32, f32, f32, f32) {
+        let mut b = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        let mut take = |x: f32, y: f32| {
+            b = (b.0.min(x), b.1.min(y), b.2.max(x), b.3.max(y));
+        };
+        for d in paths(body) {
+            for (x, y) in walk(d).anchors {
+                take(x, y);
+            }
+        }
+        let attr = |tag: &str, name: &str| -> Option<f32> {
+            tag.split(&format!(" {name}=\""))
+                .nth(1)?
+                .split('"')
+                .next()?
+                .parse()
+                .ok()
+        };
+        for tag in body.split('<').skip(1) {
+            if tag.starts_with("rect") {
+                if let (Some(x), Some(y), Some(w), Some(h)) = (
+                    attr(tag, "x"),
+                    attr(tag, "y"),
+                    attr(tag, "width"),
+                    attr(tag, "height"),
+                ) {
+                    take(x, y);
+                    take(x + w, y + h);
+                }
+            } else if tag.starts_with("circle") {
+                if let (Some(cx), Some(cy), Some(r)) =
+                    (attr(tag, "cx"), attr(tag, "cy"), attr(tag, "r"))
+                {
+                    take(cx - r, cy - r);
+                    take(cx + r, cy + r);
+                }
+            }
+        }
+        b
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn glyph(name: &str) -> &'static str {
+        body(name).unwrap_or_else(|| panic!("no glyph {name:?} in the pack"))
+    }
+
+    /// A closing `z` that lands within a stroke of its start but not on it is
+    /// a stub (the old `bubble` ended 1 pt under where it began). Walks the
+    /// whole pack, so the next hand-drawn glyph with a missed join fails here.
+    #[test]
+    fn no_glyph_closes_with_a_stub() {
+        let broken: Vec<_> = ICONS
+            .iter()
+            .map(|(p, svg)| (*p, lint::stubs(inner(svg), STROKE)))
+            .filter(|(_, stubs)| !stubs.is_empty())
+            .collect();
+        assert!(broken.is_empty(), "stubs in {broken:?}");
+    }
+
+    /// Every menu row draws a **system SF Symbol** registered in
+    /// `sf_symbols::FALLBACKS` — the names the iPhone passes to
+    /// `Image(systemName:)` — never a pack glyph ([feedback
+    /// menu-sf-symbols-2026-10-27]). Enum-driven menus are read from their
+    /// `glyph()`; literal `menu_row(id, "…", …)` calls are read from the
+    /// source, so a new menu row with a hand-drawn glyph fails here.
+    #[test]
+    fn menus_draw_system_symbols_only() {
+        use crate::ui::sf_symbols::{is_registered, FALLBACKS};
+        let mut names: Vec<(&'static str, String)> = Vec::new();
+        for item in crate::ui::message_menu::ITEMS {
+            names.push((item.glyph(), format!("message menu {}", item.label())));
+        }
+        for item in [
+            crate::ui::member_menu::MemberMenuItem::ViewProfile,
+            crate::ui::member_menu::MemberMenuItem::MakeAdmin,
+            crate::ui::member_menu::MemberMenuItem::RemoveAdmin,
+            crate::ui::member_menu::MemberMenuItem::Remove,
+        ] {
+            names.push((item.glyph(), format!("member menu {}", item.label())));
+        }
+        for item in [
+            crate::ui::profiles::library::MenuItem::Open,
+            crate::ui::profiles::library::MenuItem::Copy,
+            crate::ui::profiles::library::MenuItem::Forward,
+            crate::ui::profiles::library::MenuItem::Download,
+            crate::ui::profiles::library::MenuItem::OpenLink,
+            crate::ui::profiles::library::MenuItem::CopyLink,
+        ] {
+            names.push((item.glyph(), format!("library menu {}", item.label())));
+        }
+        for (file, src) in [
+            ("sidebar.rs", include_str!("sidebar.rs")),
+            ("header.rs", include_str!("header.rs")),
+            ("connectors.rs", include_str!("connectors.rs")),
+            ("message_menu.rs", include_str!("message_menu.rs")),
+            ("member_menu.rs", include_str!("member_menu.rs")),
+            ("profiles/library.rs", include_str!("profiles/library.rs")),
+        ] {
+            for (line, literal) in menu_row_literals(src) {
+                names.push((
+                    Box::leak(literal.into_boxed_str()),
+                    format!("{file}:{line} menu_row"),
+                ));
+            }
+        }
+        assert!(
+            names.len() >= 20,
+            "the scan found too few menu glyphs: {names:?}"
+        );
+        let offenders: Vec<_> = names
+            .iter()
+            .filter(|(name, _)| !is_registered(name))
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "menu glyphs that are not registered system symbols: {offenders:?}"
+        );
+        // Every fallback the table names is a real pack glyph, and the table
+        // has no duplicates.
+        for (sf, glyph) in FALLBACKS {
+            assert!(
+                body(glyph).is_some(),
+                "{sf}: fallback {glyph:?} is not in the pack"
+            );
+            assert!(
+                sf.is_ascii() && !sf.contains(' '),
+                "{sf:?} is not a symbol name"
+            );
+            assert_eq!(
+                FALLBACKS.iter().filter(|(s, _)| s == sf).count(),
+                1,
+                "{sf} registered twice"
+            );
+        }
+    }
+
+    /// The second argument of every `menu_row(` call in `src` that is a string
+    /// literal (or an `if … { "a" } else { "b" }` of literals), with its line.
+    fn menu_row_literals(src: &str) -> Vec<(usize, String)> {
+        let mut out = Vec::new();
+        for (ix, _) in src.match_indices("menu_row(") {
+            let line = src[..ix].matches('\n').count() + 1;
+            let rest = &src[ix + "menu_row(".len()..];
+            // Split the arguments at top-level commas.
+            let (mut depth, mut in_str, mut args, mut cur) =
+                (0i32, false, Vec::new(), String::new());
+            for ch in rest.chars() {
+                match ch {
+                    '"' => in_str = !in_str,
+                    '(' | '[' | '{' if !in_str => depth += 1,
+                    ')' | ']' | '}' if !in_str => {
+                        if depth == 0 {
+                            break;
+                        }
+                        depth -= 1;
+                    }
+                    ',' if !in_str && depth == 0 => {
+                        args.push(std::mem::take(&mut cur));
+                        if args.len() == 2 {
+                            break;
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+                cur.push(ch);
+            }
+            let Some(second) = args.get(1) else { continue };
+            let second = second.trim();
+            if second.starts_with('"') || second.starts_with("if ") {
+                let mut parts = second.split('"');
+                parts.next();
+                while let (Some(literal), Some(_)) = (parts.next(), parts.next()) {
+                    out.push((line, literal.to_owned()));
+                }
+            }
+        }
+        out
+    }
+
+    /// Every surface draws system symbols ([feedback
+    /// sf-symbols-everywhere-mac-2026-10-28]): no `icons::icon(` call survives
+    /// outside this module and `sf_symbols` unless a `// icon: custom <why>`
+    /// line sits right above it (the activity spinner), and every string
+    /// literal handed to `sf_symbols::glyph(` / `symbol(` is a registered
+    /// symbol. Read from the source tree, so a new site fails here.
+    #[test]
+    fn every_surface_draws_system_symbols() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("src dir") {
+                let path = entry.expect("entry").path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        walk(&root, &mut files);
+        assert!(files.len() > 50, "the walk found {} files", files.len());
+        let mut pack_calls = Vec::new();
+        let mut unregistered = Vec::new();
+        let mut stale_names = Vec::new();
+        let mut literals = 0;
+        // The pack names that are not also SF names and cannot be mistaken for
+        // a word or an element id: any string literal equal to one of these is
+        // a glyph table that was never repointed (palette.rs's settings table
+        // kept "circle-half" past the conversion and its row drew nothing).
+        let hyphenated: Vec<&str> = ICONS
+            .iter()
+            .map(|(p, _)| p.trim_start_matches("icons/").trim_end_matches(".svg"))
+            .filter(|n| n.contains('-'))
+            .collect();
+        for path in files {
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if name == "icons.rs" || name == "sf_symbols.rs" {
+                continue;
+            }
+            let src = std::fs::read_to_string(&path).expect("read");
+            let lines: Vec<&str> = src.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                let code = line.split("//").next().unwrap_or("");
+                let mut from = 0;
+                while let Some(ix) = code[from..].find("icon(") {
+                    let at = from + ix;
+                    let before = code[..at].chars().last();
+                    let is_call = !matches!(before, Some(c) if c.is_alphanumeric() || c == '_')
+                        && !code[..at].ends_with("fn ")
+                        && !code[..at].ends_with("link_");
+                    if is_call {
+                        let marked = lines[i.saturating_sub(3)..i]
+                            .iter()
+                            .any(|l| l.contains("// icon: custom "));
+                        if !marked {
+                            pack_calls.push(format!("{name}:{}", i + 1));
+                        }
+                    }
+                    from = at + 5;
+                }
+                for stale in &hyphenated {
+                    if code.contains(&format!("\"{stale}\"")) {
+                        stale_names.push(format!("{name}:{} {stale:?}", i + 1));
+                    }
+                }
+                for call in ["sf_symbols::glyph(\"", "sf_symbols::symbol(\""] {
+                    let mut from = 0;
+                    while let Some(ix) = code[from..].find(call) {
+                        let start = from + ix + call.len();
+                        let literal: String =
+                            code[start..].chars().take_while(|c| *c != '"').collect();
+                        literals += 1;
+                        if !crate::ui::sf_symbols::is_registered(&literal) {
+                            unregistered.push(format!("{name}:{} {literal:?}", i + 1));
+                        }
+                        from = start;
+                    }
+                }
+            }
+        }
+        assert!(
+            pack_calls.is_empty(),
+            "pack glyphs drawn outside sf_symbols without `// icon: custom <why>`: {pack_calls:?}"
+        );
+        assert!(
+            stale_names.is_empty(),
+            "hyphenated pack names used as string literals (a glyph table that still names the pack — use the SF name): {stale_names:?}"
+        );
+        assert!(
+            literals >= 80,
+            "the scan found only {literals} symbol literals"
+        );
+        assert!(
+            unregistered.is_empty(),
+            "symbol names not registered in sf_symbols::FALLBACKS: {unregistered:?}"
+        );
+    }
+
+    /// The pack is frozen ([feedback menu-sf-symbols-2026-10-27]): a glyph is
+    /// either one of the names below (drawn by a surface the SF-Symbols
+    /// follow-up converts), a fallback of a registered system symbol, or
+    /// carries a `// icon: custom <why>` line right above its `icon!(` —
+    /// the only way to add a hand-drawn path from here on.
+    #[test]
+    fn no_new_hand_drawn_glyph_without_a_custom_marker() {
+        const FROZEN: &[&str] = &[
+            "plus",
+            "search",
+            "person",
+            "ellipsis",
+            "pencil",
+            "sidebar-left",
+            "chevron-left",
+            "chevron-right",
+            "chevron-down",
+            "chevron-up",
+            "eye",
+            "mic",
+            "waveform",
+            "arrow-up",
+            "hourglass",
+            "xmark",
+            "spinner",
+            "share",
+            "archivebox",
+            "square-pencil",
+            "person-plus",
+            "people",
+            "stop",
+            "play",
+            "paperclip",
+            "gear",
+            "sparkles",
+            "bell",
+            "phone",
+            "check",
+            "globe",
+            "doc",
+            "key",
+            "pause",
+            "archive",
+            "tray-up",
+            "lock",
+            "nosign",
+            "terminal",
+            "video",
+            "bell-slash",
+            "link",
+            "leave",
+            "block",
+            "copy",
+            "reply",
+            "forward",
+            "bubble",
+            "crown",
+            "photo",
+            "arrow-down",
+            "download",
+            "expand",
+            "cloud-download",
+            "cpu",
+            "window",
+            "creditcard",
+            "desktop",
+            "laptop",
+            "smartphone",
+            "bot",
+            "circle-half",
+            "info",
+            "exclamation",
+            "minus",
+            "envelope",
+            "hash",
+            "code",
+            "antenna",
+            "puzzle",
+            "face-smile",
+            "camera",
+            "camera-off",
+            "mic-off",
+            "phone-down",
+            "trash",
+            "branch",
+            // Landed on main while this freeze was gating (group pane's Description row).
+            "text-align-left",
+        ];
+        let src = include_str!("icons.rs");
+        let lines: Vec<&str> = src.lines().collect();
+        let mut seen = 0;
+        for (i, line) in lines.iter().enumerate() {
+            let Some(rest) = line.trim_start().strip_prefix("icon!(") else {
+                continue;
+            };
+            // `icon!("name", …)` on one line, or `icon!(` with the name on the next.
+            let name_line = if rest.trim_start().starts_with('"') {
+                rest
+            } else {
+                lines.get(i + 1).copied().unwrap_or("")
+            };
+            let Some(name) = name_line.split('"').nth(1) else {
+                continue;
+            };
+            seen += 1;
+            let frozen = FROZEN.contains(&name);
+            let fallback = crate::ui::sf_symbols::FALLBACKS
+                .iter()
+                .any(|(_, g)| *g == name);
+            let marked = lines[i.saturating_sub(4)..i]
+                .iter()
+                .any(|l| l.contains("// icon: custom "));
+            assert!(
+                frozen || fallback || marked,
+                "{name:?} is a new hand-drawn glyph: use a system symbol (sf_symbols) or add `// icon: custom <why>` above it"
+            );
+        }
+        assert_eq!(seen, ICONS.len(), "the source scan missed icon! entries");
+        for name in FROZEN {
+            assert!(
+                body(name).is_some(),
+                "frozen name {name:?} left the pack: drop it from FROZEN"
+            );
+        }
+    }
+
+    /// The bubble: one ellipse plus a tail, meeting at the top — the pen
+    /// returns exactly to its start before `z`, the tail's tip is the lowest
+    /// point and sits left of centre.
+    #[test]
+    fn the_bubble_outline_closes_on_itself_with_a_lower_left_tail() {
+        let b = glyph("bubble");
+        let d = lint::paths(b);
+        assert_eq!(d.len(), 1, "one outline, not several strokes");
+        let walk = lint::walk(d[0]);
+        assert_eq!(walk.closing_gaps, [0.0]);
+        let first = walk.anchors[0];
+        assert_eq!(*walk.anchors.last().unwrap(), first);
+        let tip = walk
+            .anchors
+            .iter()
+            .copied()
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .unwrap();
+        assert!(tip.0 < 12.0 && tip.1 >= 19.0, "tail tip {tip:?}");
+        assert_eq!(first, (12.0, 4.0), "the join is at the top centre");
+        // Every anchor sits on the ellipse or is the tail's tip.
+        for (x, y) in walk.anchors.iter().copied().filter(|a| *a != tip) {
+            let on = ((x - 12.0) / 8.5).powi(2) + ((y - 10.5) / 6.5).powi(2);
+            assert!(
+                (on - 1.0).abs() < 0.02,
+                "({x}, {y}) is off the ellipse: {on}"
+            );
+        }
+    }
+
+    fn near(a: &[(f32, f32)], b: &[(f32, f32)]) -> bool {
+        a.len() == b.len()
+            && a.iter()
+                .zip(b)
+                .all(|(p, q)| (p.0 - q.0).abs() < 1e-4 && (p.1 - q.1).abs() < 1e-4)
+    }
+
+    #[test]
+    fn the_walker_reads_every_command_form() {
+        let w = lint::walk("M1 1h2v2H1V1zm5 5l1 1-1 1Z");
+        assert!(near(
+            &w.anchors,
+            &[
+                (1.0, 1.0),
+                (3.0, 1.0),
+                (3.0, 3.0),
+                (1.0, 3.0),
+                (1.0, 1.0),
+                (6.0, 6.0),
+                (7.0, 7.0),
+                (6.0, 8.0)
+            ]
+        ));
+        // The square returns home; the open chevron closes with a 2-long edge.
+        assert_eq!(w.closing_gaps, [0.0, 2.0]);
+        let arcs = lint::walk("M12 4a8.5 6.5 0 1 1-2.9 12.6A8.5 6.5 0 0 1 12 4z");
+        assert!(near(
+            &arcs.anchors,
+            &[(12.0, 4.0), (9.1, 16.6), (12.0, 4.0)]
+        ));
+        let curves = lint::walk("M0 0c1 1 2 2 3 3s1 1 2 2q1 1 2 2t1 1");
+        assert!(near(
+            &curves.anchors[1..],
+            &[(3.0, 3.0), (5.0, 5.0), (7.0, 7.0), (8.0, 8.0)]
+        ));
+        // `.5.5` is two numbers, as in the pack's hand-written paths.
+        assert!(near(
+            &lint::walk("M.5.5l.5.5").anchors,
+            &[(0.5, 0.5), (1.0, 1.0)]
+        ));
+        // Rects and circles count toward the box.
+        assert_eq!(
+            lint::anchor_box("<rect x=\"9\" y=\"9\" width=\"11\" height=\"11\" rx=\"2\"/><circle cx=\"5\" cy=\"5\" r=\"2\"/>"),
+            (3.0, 3.0, 20.0, 20.0)
+        );
+    }
 }

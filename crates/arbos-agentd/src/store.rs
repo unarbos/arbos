@@ -99,7 +99,52 @@ CREATE TABLE IF NOT EXISTS outbox (
   id TEXT PRIMARY KEY, approval_id TEXT NOT NULL, channel TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT,
   body TEXT NOT NULL, created_at INTEGER NOT NULL
 );
+
+-- Background jobs the main agent starts with `start_job` (duplex design §2.3): one row per job, from
+-- the ask to its delivery. `subagent_id` names the harness session that runs it.
+CREATE TABLE IF NOT EXISTS jobs (
+  id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, ask_message_id TEXT NOT NULL, subagent_id TEXT,
+  title TEXT NOT NULL, kind TEXT NOT NULL, brief TEXT NOT NULL, touches TEXT NOT NULL DEFAULT '[]',
+  state TEXT NOT NULL, last_step TEXT NOT NULL DEFAULT '', last_step_at INTEGER,
+  created_at INTEGER NOT NULL, started_at INTEGER, ended_at INTEGER, error TEXT,
+  delivered_key TEXT, restarts INTEGER NOT NULL DEFAULT 0
+);
 "#;
+
+/// One background job (duplex design §2.3). States: `queued` (waiting for a slot), `running`,
+/// `done`, `failed`, `cancelled`, `interrupted` (the box restarted under it).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobRow {
+    pub id: String,
+    pub chat_id: String,
+    pub ask_message_id: String,
+    pub subagent_id: Option<String>,
+    pub title: String,
+    pub kind: String,
+    pub brief: String,
+    pub touches: Vec<String>,
+    pub state: String,
+    pub last_step: String,
+    pub last_step_at: Option<i64>,
+    pub created_at: i64,
+    pub started_at: Option<i64>,
+    pub ended_at: Option<i64>,
+    pub error: Option<String>,
+    pub delivered_key: Option<String>,
+    pub restarts: i64,
+}
+
+impl JobRow {
+    pub fn is_open(&self) -> bool {
+        matches!(self.state.as_str(), "queued" | "running")
+    }
+
+    /// Seconds since the job started (or was created while queued).
+    pub fn elapsed_s(&self) -> i64 {
+        let from = self.started_at.unwrap_or(self.created_at);
+        (now_ms() - from).max(0) / 1000
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatRow {
@@ -214,7 +259,11 @@ impl Store {
             std::fs::create_dir_all(p)?;
         }
         let c = Connection::open(path)?;
-        c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+        // secure_delete: overwritten and deleted content is zeroed in the page, so a scrubbed
+        // T3 row or a re-saved room snapshot leaves no old bytes behind in the file.
+        c.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA secure_delete=ON;",
+        )?;
         c.execute_batch(SCHEMA)?;
         // Additive migration for stores created before demo-review item 2.
         let has_last_status: bool = c
@@ -387,6 +436,18 @@ impl Store {
         })
     }
 
+    /// The model a session was started with (`upsert_session`), for a resume on the same model.
+    pub fn session_model(&self, id: &str) -> Result<Option<String>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT model FROM sessions WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+    }
+
     pub fn session_cursor(&self, id: &str) -> Result<Option<String>> {
         self.with(|c| {
             c.query_row(
@@ -520,6 +581,143 @@ impl Store {
                 Self::row_to_subagent,
             )
             .optional()
+        })
+    }
+
+    // ---- jobs (duplex design §2.3) ------------------------------------------------------------
+
+    const JOB_COLS: &'static str = "id, chat_id, ask_message_id, subagent_id, title, kind, brief, touches, state, last_step, last_step_at, created_at, started_at, ended_at, error, delivered_key, restarts";
+
+    fn row_to_job(r: &rusqlite::Row<'_>) -> rusqlite::Result<JobRow> {
+        Ok(JobRow {
+            id: r.get(0)?,
+            chat_id: r.get(1)?,
+            ask_message_id: r.get(2)?,
+            subagent_id: r.get(3)?,
+            title: r.get(4)?,
+            kind: r.get(5)?,
+            brief: r.get(6)?,
+            touches: serde_json::from_str(&r.get::<_, String>(7)?).unwrap_or_default(),
+            state: r.get(8)?,
+            last_step: r.get(9)?,
+            last_step_at: r.get(10)?,
+            created_at: r.get(11)?,
+            started_at: r.get(12)?,
+            ended_at: r.get(13)?,
+            error: r.get(14)?,
+            delivered_key: r.get(15)?,
+            restarts: r.get(16)?,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_job(
+        &self,
+        id: &str,
+        chat_id: &str,
+        ask_message_id: &str,
+        title: &str,
+        kind: &str,
+        brief: &str,
+        touches: &[String],
+    ) -> Result<()> {
+        let touches = serde_json::to_string(touches).unwrap_or_else(|_| "[]".into());
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO jobs(id, chat_id, ask_message_id, title, kind, brief, touches, state, created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,'queued',?8)",
+                params![id, chat_id, ask_message_id, title, kind, brief, touches, now_ms()],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn set_job_subagent(&self, id: &str, subagent_id: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE jobs SET subagent_id = ?2 WHERE id = ?1",
+                params![id, subagent_id],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Move a job to `state`; `running` stamps `started_at`, a final state stamps `ended_at`.
+    pub fn set_job_state(&self, id: &str, state: &str, error: Option<&str>) -> Result<()> {
+        let now = now_ms();
+        self.with(|c| {
+            c.execute(
+                "UPDATE jobs SET state = ?2, error = COALESCE(?3, error),
+                    started_at = CASE WHEN ?2 = 'running' AND started_at IS NULL THEN ?4 ELSE started_at END,
+                    ended_at = CASE WHEN ?2 IN ('done','failed','cancelled','interrupted') THEN ?4 ELSE ended_at END
+                 WHERE id = ?1",
+                params![id, state, error, now],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn set_job_step(&self, id: &str, step: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE jobs SET last_step = ?2, last_step_at = ?3 WHERE id = ?1",
+                params![id, step, now_ms()],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn set_job_delivered(&self, id: &str, key: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE jobs SET delivered_key = ?2 WHERE id = ?1",
+                params![id, key],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn bump_job_restarts(&self, id: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE jobs SET restarts = restarts + 1 WHERE id = ?1",
+                params![id],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn job(&self, id: &str) -> Result<Option<JobRow>> {
+        self.with(|c| {
+            c.query_row(
+                &format!("SELECT {} FROM jobs WHERE id = ?1", Self::JOB_COLS),
+                params![id],
+                Self::row_to_job,
+            )
+            .optional()
+        })
+    }
+
+    /// Jobs of one chat, newest first.
+    pub fn jobs_for_chat(&self, chat_id: &str) -> Result<Vec<JobRow>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {} FROM jobs WHERE chat_id = ?1 ORDER BY created_at DESC",
+                Self::JOB_COLS
+            ))?;
+            let rows = st.query_map(params![chat_id], Self::row_to_job)?;
+            rows.collect()
+        })
+    }
+
+    /// Every job still `queued` or `running`, oldest first.
+    pub fn open_jobs(&self) -> Result<Vec<JobRow>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {} FROM jobs WHERE state IN ('queued','running') ORDER BY created_at ASC",
+                Self::JOB_COLS
+            ))?;
+            let rows = st.query_map([], Self::row_to_job)?;
+            rows.collect()
         })
     }
 
@@ -684,6 +882,40 @@ impl Store {
         })
     }
 
+    /// Every row of one thread in insertion order (rowid), oldest first, with its source meta —
+    /// the rollout view's feed (`jobs_view.rs`). Insertion order, not `at`, because a worker
+    /// writes several rows within one millisecond and their ids are not ordered within it.
+    pub fn t3_thread_in_order(
+        &self,
+        thread_id: &str,
+        limit: i64,
+    ) -> Result<Vec<(T3Row, Option<Value>)>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT id, thread_id, subagent_id, session_id, kind, role, at, text, size, source FROM t3
+                 WHERE thread_id = ?1 ORDER BY rowid ASC LIMIT ?2",
+            )?;
+            let rows = st.query_map(params![thread_id, limit], |r| {
+                let source: Option<String> = r.get(9)?;
+                Ok((
+                    T3Row {
+                        id: r.get(0)?,
+                        thread_id: r.get(1)?,
+                        subagent_id: r.get(2)?,
+                        session_id: r.get(3)?,
+                        kind: r.get(4)?,
+                        role: r.get(5)?,
+                        at: r.get(6)?,
+                        text: r.get(7)?,
+                        size: r.get(8)?,
+                    },
+                    source.and_then(|s| serde_json::from_str::<Value>(&s).ok()),
+                ))
+            })?;
+            rows.collect()
+        })
+    }
+
     /// Rows written after `after_ms` (exclusive), every thread or one chat, oldest first, at
     /// most `limit` — the inspect window (`inspect.rs`). Both shapes hit an index
     /// (`t3_at`, `t3_thread_at`), so a call never scans the table.
@@ -721,6 +953,16 @@ impl Store {
 
     /// Replace every occurrence of `values` in T3 text (and its FTS index). Returns how many
     /// rows changed. Used by Scrub from context.
+    /// After a scrub: fold the WAL into the main file and truncate it, so the pages that held
+    /// the old text are gone from disk too (with `secure_delete` on, the freed content inside
+    /// the main file is already zeroed).
+    pub fn flush_after_scrub(&self) -> Result<()> {
+        self.with(|c| {
+            c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+            Ok(())
+        })
+    }
+
     pub fn t3_scrub(&self, values: &[String]) -> Result<usize> {
         let needles: Vec<&str> = values
             .iter()
@@ -826,6 +1068,23 @@ impl Store {
             Ok(())
         })?;
         Ok(id)
+    }
+
+    /// Rewrite a record's text in place (FTS kept in step); the id, tier and provenance stay.
+    pub fn memory_set_text(&self, id: &str, text: &str) -> Result<()> {
+        let text = redact(text);
+        self.with(|c| {
+            c.execute(
+                "UPDATE memory SET text = ?2 WHERE id = ?1",
+                params![id, text],
+            )?;
+            c.execute("DELETE FROM memory_fts WHERE id = ?1", params![id])?;
+            c.execute(
+                "INSERT INTO memory_fts(text, id, tier) SELECT text, id, tier FROM memory WHERE id = ?1",
+                params![id],
+            )?;
+            Ok(())
+        })
     }
 
     /// INVALIDATE: set `invalid_at` and `expired_at`; the row stays (D7).

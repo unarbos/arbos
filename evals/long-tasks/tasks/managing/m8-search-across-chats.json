@@ -1,0 +1,34 @@
+{
+  "id": "m8-search-across-chats",
+  "lane": "a",
+  "category": "managing",
+  "title": "Asked to search across its chats, the agent finds facts planted in three different earlier chats",
+  "turns": [
+    {
+      "prompt": "Note: the Kestrel project's budget code is KB-4471.",
+      "timeout_s": 120
+    },
+    {
+      "prompt": "Note: the Zephyr launch is on 12 November.",
+      "new_chat": true,
+      "timeout_s": 120
+    },
+    {
+      "prompt": "Note: Priya owns the TLS renewal.",
+      "new_chat": true,
+      "timeout_s": 120
+    },
+    {
+      "prompt": "Search across all our chats and list every project fact I have given you today: budget codes, dates and owners. One line each, with which chat it came from if you can.",
+      "new_chat": true,
+      "pre_wait_s": 45,
+      "reply_regex": "KB-4471[\\s\\S]*12 November[\\s\\S]*Priya|KB-4471[\\s\\S]*Priya[\\s\\S]*12 November|12 November[\\s\\S]*KB-4471[\\s\\S]*Priya|Priya[\\s\\S]*KB-4471[\\s\\S]*12 November|12 November[\\s\\S]*Priya[\\s\\S]*KB-4471|Priya[\\s\\S]*12 November[\\s\\S]*KB-4471",
+      "rubric": {
+        "criteria": "All three facts (KB-4471, 12 November, Priya/TLS) are listed, nothing invented, ideally with their source chats. Missing one fact: 2.",
+        "min": 3
+      },
+      "timeout_s": 300
+    }
+  ],
+  "regression": "cross-chat search (history_search / context_search tools)"
+}

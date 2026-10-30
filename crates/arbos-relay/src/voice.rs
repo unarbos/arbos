@@ -25,7 +25,7 @@
 //! within the same caps as a second `voice` ledger line with `ref = call:<id>#vision`. A `look`
 //! handed to the agent carries `attachments` (blobs the worker uploaded) through `voice_tool`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
@@ -37,7 +37,7 @@ use axum::Json;
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 use arbos_core::api::{VoiceCatalogDto, VoiceDto};
 use arbos_core::ids::{now_ms, ulid};
@@ -231,6 +231,224 @@ pub async fn voice_sample(State(state): State<AppState>, Path(id): Path<String>)
             "no sample for this voice",
         ),
     }
+}
+
+// ---- call inbox: the chat, live, for the call (#1832) -----------------------------------------------
+//
+// Jacob, 2026-10-25: on a call with Bubble he asked for pizza delivery; the agent's long turn
+// posted the answer in the chat 45 s later, and the call never heard of it — the voice session
+// only got the first finished bubble back from `POST …/tool`, and nothing carried later bubbles
+// (or anything else landing in the chat) to the call, so the voice model answered "still
+// running" from memory. Now every finished bubble and every message that `notify::announce`
+// sees for a chat with a live agent call is queued here per (call, agent); the worker long-polls
+// `GET /voice/calls/{id}/inbox` and feeds it into the model's context. The main voice agent is
+// the only speaker: nothing here is spoken by anyone else.
+
+/// One queued chat update for a live call.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CallUpdate {
+    pub seq: u64,
+    pub at: i64,
+    /// `result` (a turn's answer), `job` (a background job's outcome), `quick` (a status line),
+    /// `message` (a person wrote in the chat).
+    pub kind: String,
+    pub sender: Value,
+    pub message_id: String,
+    pub text: String,
+}
+
+#[derive(Default)]
+struct InboxQueue {
+    seq: u64,
+    items: VecDeque<CallUpdate>,
+    notify: Arc<Notify>,
+}
+
+/// The queued updates of every live (call, agent), keyed `call:project`. At most
+/// `INBOX_KEEP` items are kept per key; a call that ended is dropped.
+#[derive(Clone, Default)]
+pub struct VoiceInbox {
+    queues: Arc<Mutex<HashMap<String, InboxQueue>>>,
+}
+
+const INBOX_KEEP: usize = 40;
+const INBOX_TEXT_MAX: usize = 2_000;
+const INBOX_WAIT_MAX_S: u64 = 25;
+
+impl VoiceInbox {
+    fn key(call_id: &str, project_id: &str) -> String {
+        format!("{call_id}:{project_id}")
+    }
+
+    /// Queue `update` for (call, agent); wakes a waiting long-poll.
+    pub async fn push(&self, call_id: &str, project_id: &str, mut update: CallUpdate) -> u64 {
+        let mut queues = self.queues.lock().await;
+        let q = queues.entry(Self::key(call_id, project_id)).or_default();
+        q.seq += 1;
+        update.seq = q.seq;
+        update.text = update.text.chars().take(INBOX_TEXT_MAX).collect();
+        q.items.push_back(update);
+        while q.items.len() > INBOX_KEEP {
+            q.items.pop_front();
+        }
+        q.notify.notify_waiters();
+        q.seq
+    }
+
+    /// Items newer than `after` (and the latest seq), without waiting.
+    pub async fn take(
+        &self,
+        call_id: &str,
+        project_id: &str,
+        after: u64,
+    ) -> (Vec<CallUpdate>, u64) {
+        let queues = self.queues.lock().await;
+        match queues.get(&Self::key(call_id, project_id)) {
+            Some(q) => (
+                q.items.iter().filter(|u| u.seq > after).cloned().collect(),
+                q.seq,
+            ),
+            None => (Vec::new(), after),
+        }
+    }
+
+    /// `take`, waiting up to `wait` for something newer than `after`.
+    pub async fn wait(
+        &self,
+        call_id: &str,
+        project_id: &str,
+        after: u64,
+        wait: Duration,
+    ) -> (Vec<CallUpdate>, u64) {
+        let notify = {
+            let mut queues = self.queues.lock().await;
+            queues
+                .entry(Self::key(call_id, project_id))
+                .or_default()
+                .notify
+                .clone()
+        };
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            let (items, seq) = self.take(call_id, project_id, after).await;
+            if !items.is_empty() {
+                return (items, seq);
+            }
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                return (items, seq);
+            }
+            let _ = tokio::time::timeout(left, notify.notified()).await;
+        }
+    }
+
+    /// The call ended: drop its queues (every agent of it).
+    pub async fn close_call(&self, call_id: &str) {
+        let mut queues = self.queues.lock().await;
+        let prefix = format!("{call_id}:");
+        let gone: Vec<String> = queues
+            .keys()
+            .filter(|k| k.starts_with(&prefix))
+            .cloned()
+            .collect();
+        for k in gone {
+            if let Some(q) = queues.remove(&k) {
+                q.notify.notify_waiters();
+            }
+        }
+    }
+}
+
+/// `notify::announce` saw a message in `chat`: queue it for every live agent call there.
+/// Transcript lines of the call itself never come this way (agentd writes them as rows, no
+/// notify), so a call does not hear its own words back.
+pub async fn call_update(
+    state: &AppState,
+    chat: &ChatRef,
+    sender: &Sender,
+    b: &crate::notify::NotifyBody,
+) {
+    let text = b
+        .voice_text
+        .as_deref()
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or(&b.text);
+    if text.trim().is_empty() {
+        return;
+    }
+    let kind = match (sender.kind, b.kind.as_deref()) {
+        ("agent", Some(k)) if matches!(k, "result" | "job" | "quick") => k.to_owned(),
+        ("agent", _) => "result".to_owned(),
+        _ => "message".to_owned(),
+    };
+    let Ok(Some(call)) = state.db.active_call_in_chat(&chat.chat_id) else {
+        return;
+    };
+    {
+        for project_id in state.db.call_agents_live(&call.id).unwrap_or_default() {
+            let seq = state
+                .voice_inbox
+                .push(
+                    &call.id,
+                    &project_id,
+                    CallUpdate {
+                        seq: 0,
+                        at: now_ms(),
+                        kind: kind.clone(),
+                        sender: sender.json(),
+                        message_id: b.message_id.clone(),
+                        text: text.to_owned(),
+                    },
+                )
+                .await;
+            tracing::info!(call = %call.id, project = %project_id, kind = %kind, seq, message = %b.message_id, "voice: call update queued");
+        }
+    }
+}
+
+#[derive(Deserialize, Default)]
+pub struct InboxQuery {
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// Last seq the worker has seen (0 at join).
+    #[serde(default)]
+    pub after: u64,
+    /// Long-poll seconds (≤ 25).
+    #[serde(default)]
+    pub wait: u64,
+}
+
+/// `GET /voice/calls/{id}/inbox?project_id=&after=&wait=` (worker) → `{ items: [{seq, at, kind,
+/// sender, message_id, text}], seq, live }`. Holds up to `wait` s for something new; `live` is
+/// false once the call ended (the worker stops polling).
+pub async fn call_inbox(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Query(q): Query<InboxQuery>,
+) -> Response {
+    if let Err(r) = worker_only(&principal) {
+        return *r;
+    }
+    let (call, project, _) = match load(&state, &id, q.project_id.as_deref()) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    if !call.active() {
+        return Json(json!({ "items": [], "seq": q.after, "live": false })).into_response();
+    }
+    let wait = Duration::from_secs(q.wait.min(INBOX_WAIT_MAX_S));
+    let (items, seq) = state
+        .voice_inbox
+        .wait(&call.id, &project.id, q.after, wait)
+        .await;
+    let live = state
+        .db
+        .call(&call.id)
+        .ok()
+        .flatten()
+        .is_some_and(|c| c.active());
+    Json(json!({ "items": items, "seq": seq, "live": live })).into_response()
 }
 
 // ---- box link ------------------------------------------------------------------------------------
@@ -530,20 +748,29 @@ pub fn agent_participants_json(state: &AppState, call_id: &str) -> Vec<Value> {
 const DISPATCH_FRESH_MS: i64 = 30_000;
 
 /// A call began in a chat with agents: ask LiveKit to send the voice worker for each of them.
-/// Returns the agents dispatched (as `sender{}`), for the start response.
-pub async fn dispatch_agents(state: &AppState, call: &CallRow) -> Vec<Value> {
-    dispatch_missing(state, call).await
+/// `ring` — when `Some`, only agents whose project id is in the set are dispatched (a selective
+/// group start). `None` = every agent in the chat. Returns the agents dispatched (as `sender{}`).
+pub async fn dispatch_agents(
+    state: &AppState,
+    call: &CallRow,
+    ring: Option<&std::collections::HashSet<&str>>,
+) -> Vec<Value> {
+    dispatch_missing(state, call, ring).await
 }
 
 /// Someone joined a live call: any agent of the chat that is not in the room (it left when it
 /// was alone, or its job died) is dispatched again.
 pub async fn ensure_agents(state: &AppState, call: &CallRow) {
     if call.active() {
-        let _ = dispatch_missing(state, call).await;
+        let _ = dispatch_missing(state, call, None).await;
     }
 }
 
-async fn dispatch_missing(state: &AppState, call: &CallRow) -> Vec<Value> {
+async fn dispatch_missing(
+    state: &AppState,
+    call: &CallRow,
+    ring: Option<&std::collections::HashSet<&str>>,
+) -> Vec<Value> {
     let (Some(lk), true) = (&state.livekit, state.voice.enabled) else {
         return Vec::new();
     };
@@ -552,6 +779,11 @@ async fn dispatch_missing(state: &AppState, call: &CallRow) -> Vec<Value> {
     let now = now_ms();
     let mut out = Vec::new();
     for project in agents_in_chat(state, &chat) {
+        if let Some(want) = ring {
+            if !want.contains(project.id.as_str()) {
+                continue;
+            }
+        }
         if live.contains(&project.id) {
             continue;
         }
@@ -1400,5 +1632,213 @@ mod chat_row_tests {
             2,
         );
         assert!(rows.is_empty(), "the goodbye is call audio: {rows:?}");
+    }
+}
+
+#[cfg(test)]
+mod inbox_tests {
+    //! #1860: what lands in a chat with a live agent call reaches the call. A turn's answer
+    //! (`result`), a job's outcome (`job`), a status line (`quick`) and a person's message
+    //! (`message`) are queued per (call, agent) from `notify::announce`; the worker's long-poll
+    //! gets them in order; the queue goes with the call.
+
+    use std::time::Duration;
+
+    use axum::extract::{Path, Query, State};
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::Json;
+    use serde_json::{json, Value};
+
+    use super::*;
+    use crate::calls::{start_people_call, StartBody};
+    use crate::notify::NotifyBody;
+    use crate::people::tests_support::{person, project_of};
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    async fn body_json(r: Response) -> Value {
+        let bytes = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    }
+
+    /// A box's announcement: never a cross-chat reply (`reply_ref` is a person's, #1834).
+    fn notify(
+        message_id: &str,
+        text: &str,
+        kind: Option<&str>,
+        voice_text: Option<&str>,
+    ) -> NotifyBody {
+        NotifyBody {
+            message_id: message_id.into(),
+            text: text.into(),
+            project_id: None,
+            reply_ref: None,
+            kind: kind.map(str::to_owned),
+            voice_text: voice_text.map(str::to_owned),
+            mentions: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_job_result_in_the_chat_reaches_the_live_call_and_only_that_call() {
+        let mut state = test_state(AuthMode::Github);
+        state.livekit = Some(crate::livekit::LiveKit::new(
+            "wss://lk.test",
+            "APIkey",
+            "secret123",
+            None,
+        ));
+        let (alice, alice_dev) = person(&state, 1);
+        let (_bob, _) = person(&state, 2);
+        let bubble = project_of(&state, &alice, "Bubble");
+        let r = crate::people::chats_create_group(
+            State(state.clone()),
+            alice_dev.clone(),
+            Json(crate::people::CreateGroupBody {
+                kind: "group".into(),
+                members: vec!["user2".into()],
+                agent_ids: vec![bubble.clone()],
+                title: Some("Pizza".into()),
+                avatar_leaf: None,
+                avatar_leaf_color: None,
+                description: None,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let chat = state
+            .db
+            .chats_of_member(&format!("user:{alice}"))
+            .unwrap()
+            .into_iter()
+            .find(|cm| cm.chat.kind == "group")
+            .expect("the group")
+            .chat
+            .id;
+        let chat_ref = ChatRef::people(&chat);
+        let agent = Sender::agent(&state, &state.db.project(&bubble).unwrap().unwrap());
+
+        // Before the call: a bubble is nobody's business here.
+        call_update(
+            &state,
+            &chat_ref,
+            &agent,
+            &notify("m0", "earlier", Some("result"), None),
+        )
+        .await;
+
+        let r = start_people_call(
+            State(state.clone()),
+            alice_dev.clone(),
+            Path(chat.clone()),
+            HeaderMap::new(),
+            Some(Json(StartBody {
+                kind: Some("voice".into()),
+                ring: None,
+            })),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::CREATED);
+        let call_id = body_json(r).await["call"]["call_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        // The worker joined (its `joined` event).
+        state.db.call_agent_join(&call_id, &bubble).unwrap();
+
+        // The ask ran as a long turn: a status line, then the job's outcome, then a person types.
+        call_update(
+            &state,
+            &chat_ref,
+            &agent,
+            &notify("q1", "Still checking Santa Teresa.", Some("quick"), None),
+        )
+        .await;
+        call_update(
+            &state,
+            &chat_ref,
+            &agent,
+            &notify("j1", "Most of the numbers come from Onda Teresa's guide.", Some("job"), Some("| Place | Order |\n| Pizza Tomate | WhatsApp |\n\nMost of the numbers come from Onda Teresa's guide.")),
+        )
+        .await;
+        let alice_sender = Sender::user(&state, &alice);
+        call_update(
+            &state,
+            &chat_ref,
+            &alice_sender,
+            &notify("h1", "thanks!", None, None),
+        )
+        .await;
+
+        let (items, seq) = state.voice_inbox.take(&call_id, &bubble, 0).await;
+        assert_eq!(seq, 3);
+        let kinds: Vec<&str> = items.iter().map(|u| u.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["quick", "job", "message"]);
+        assert_eq!(items[1].message_id, "j1");
+        assert!(
+            items[1].text.starts_with("| Place |"),
+            "the call gets the whole prose, not the push body: {}",
+            items[1].text
+        );
+        assert_eq!(items[2].sender["kind"], "user");
+        assert!(
+            items.iter().all(|u| u.message_id != "m0"),
+            "nothing from before the call"
+        );
+
+        // The worker's long-poll: after=2 → the person's line only; after=3 with a short wait → empty.
+        let r = call_inbox(
+            State(state.clone()),
+            Principal::Admin,
+            Path(call_id.clone()),
+            Query(InboxQuery {
+                project_id: Some(bubble.clone()),
+                after: 2,
+                wait: 0,
+            }),
+        )
+        .await;
+        let v = body_json(r).await;
+        assert_eq!(v["items"].as_array().unwrap().len(), 1);
+        assert_eq!(v["items"][0]["kind"], "message");
+        assert_eq!(v["seq"], 3);
+        assert_eq!(v["live"], true);
+        let t0 = std::time::Instant::now();
+        let (none, _) = state
+            .voice_inbox
+            .wait(&call_id, &bubble, 3, Duration::from_millis(60))
+            .await;
+        assert!(none.is_empty() && t0.elapsed() >= Duration::from_millis(50));
+
+        // A push wakes a waiter.
+        let inbox = state.voice_inbox.clone();
+        let (c, p) = (call_id.clone(), bubble.clone());
+        let waiter =
+            tokio::spawn(async move { inbox.wait(&c, &p, 3, Duration::from_secs(5)).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        call_update(
+            &state,
+            &chat_ref,
+            &agent,
+            &notify("r2", "Done: three options.", Some("result"), None),
+        )
+        .await;
+        let (woken, seq) = tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(seq, 4);
+        assert_eq!(woken.len(), 1);
+        assert_eq!(woken[0].kind, "result");
+
+        // The call ends: the queue goes with it, and the poll says so.
+        state.voice_inbox.close_call(&call_id).await;
+        assert!(state
+            .voice_inbox
+            .take(&call_id, &bubble, 0)
+            .await
+            .0
+            .is_empty());
+        let _ = json!({});
     }
 }

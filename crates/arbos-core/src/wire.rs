@@ -202,6 +202,22 @@ pub struct WakeHeader {
 pub struct ErrorHeader {
     pub code: String,
     pub message: String,
+    /// Present on people-push refusals (`rate_limited` / `not_available`).
+    #[serde(rename = "batchId", default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<String>,
+    /// Seconds to wait before retrying a `rate_limited` push.
+    #[serde(rename = "retryS", default, skip_serializing_if = "Option::is_none")]
+    pub retry_s: Option<i64>,
+    /// Why a `not_available` push was refused ([feedback blocked-state-relay-2026-10-26]):
+    /// `blocked_by` (someone in the chat blocked the sender), `blocks_member` (the sender
+    /// blocked the other person of a DM), `silenced`, `chat_unavailable`; a block also names
+    /// the other party. The code itself never changes (old clients key on it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(rename = "byHandle", default, skip_serializing_if = "Option::is_none")]
+    pub by_handle: Option<String>,
+    #[serde(rename = "byName", default, skip_serializing_if = "Option::is_none")]
+    pub by_name: Option<String>,
 }
 
 /// Room name for a chat doc: `{projectId}/{chatId}`. The project doc uses chat id `project`.

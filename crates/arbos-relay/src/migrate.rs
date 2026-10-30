@@ -36,7 +36,7 @@ pub async fn migrate_user(
     let legacy = state.db.legacy_sandboxes()?;
     let mut reports = Vec::new();
     // The target box must exist and run before any copy.
-    let provider_default = boxes::default_provider(state);
+    let provider_default = boxes::provider_for_user(state, user_id);
     let target = boxes::ensure_user_box(state, user_id, provider_default).await?;
     let target_provider =
         Provider::parse(&target.provider).ok_or_else(|| anyhow!("bad target provider"))?;
@@ -307,18 +307,15 @@ async fn hold_workspace(
         return Err(anyhow!("user box has no url yet"));
     };
     let verb = if hold { "hold" } else { "release" };
-    let mut req = state
-        .http
-        .post(format!("{url}/w/{project_id}/{verb}"))
-        .bearer_auth(&target.mcp_token)
-        .timeout(Duration::from_secs(60));
-    if let Some(t) = &target.preview_token {
-        req = req.header("x-daytona-preview-token", t);
-    }
-    let r = req
-        .send()
-        .await
-        .with_context(|| format!("{verb} workspace"))?;
+    let r = boxes::send_to_box(state, target, || {
+        state
+            .http
+            .post(format!("{url}/w/{project_id}/{verb}"))
+            .bearer_auth(&target.mcp_token)
+            .timeout(Duration::from_secs(60))
+    })
+    .await
+    .with_context(|| format!("{verb} workspace"))?;
     if !r.status().is_success() {
         return Err(anyhow!("{verb} workspace: HTTP {}", r.status()));
     }

@@ -1,0 +1,163 @@
+{
+ "conversations": {
+  "pj1-time-difference": {
+   "source": "baseline",
+   "file": "corpus/grok/pj1-time-difference.jsonl",
+   "task": "pj1-time-difference",
+   "captured_at": "2026-10-24",
+   "messages": 2,
+   "with_ts": 0,
+   "prompts": [
+    {
+     "prompt": "What's the time difference between Costa Rica and London right now?",
+     "msg_id": "m1",
+     "bubbles": 1,
+     "delegated": false,
+     "is_stop": false,
+     "table": false,
+     "bullets": false,
+     "links": 0,
+     "offer": false,
+     "no_handle": true,
+     "worker_hidden": true,
+     "status_line_texts": [],
+     "attachments": [],
+     "speed_s": null,
+     "speed": null,
+     "ack_first": null,
+     "threaded": false,
+     "status_line": null,
+     "status_changes": 0,
+     "busy": false,
+     "busy_reply": null,
+     "stop": null,
+     "when_to_delegate": false,
+     "class": "quick-fact"
+    }
+   ],
+   "ingested_at": "2026-10-25T16:15:25Z"
+  },
+  "pj2-packing-list": {
+   "source": "baseline",
+   "file": "corpus/grok/pj2-packing-list.jsonl",
+   "task": "pj2-packing-list",
+   "captured_at": "2026-10-24",
+   "messages": 2,
+   "with_ts": 0,
+   "prompts": [
+    {
+     "prompt": "Make me a quick packing list for a 3-day surf trip.",
+     "msg_id": "m1",
+     "bubbles": 1,
+     "delegated": false,
+     "is_stop": false,
+     "table": false,
+     "bullets": true,
+     "links": 0,
+     "offer": true,
+     "no_handle": true,
+     "worker_hidden": true,
+     "status_line_texts": [],
+     "attachments": [],
+     "speed_s": null,
+     "speed": null,
+     "ack_first": null,
+     "threaded": false,
+     "status_line": null,
+     "status_changes": 0,
+     "busy": false,
+     "busy_reply": null,
+     "stop": null,
+     "when_to_delegate": false,
+     "class": "one-liner-list"
+    }
+   ],
+   "ingested_at": "2026-10-25T16:15:25Z"
+  },
+  "pj3-surf-schools": {
+   "source": "baseline",
+   "file": "corpus/grok/pj3-surf-schools.jsonl",
+   "task": "pj3-surf-schools",
+   "captured_at": "2026-10-24",
+   "messages": 6,
+   "with_ts": 0,
+   "prompts": [
+    {
+     "prompt": "Find me the 3 best-reviewed surf schools near Santa Teresa and compare their prices.",
+     "msg_id": "m1",
+     "bubbles": 5,
+     "delegated": true,
+     "is_stop": false,
+     "table": true,
+     "bullets": true,
+     "links": 3,
+     "offer": true,
+     "no_handle": true,
+     "worker_hidden": true,
+     "status_line_texts": [
+      "Searching for surf schools"
+     ],
+     "attachments": [],
+     "speed_s": null,
+     "speed": null,
+     "ack_first": true,
+     "threaded": false,
+     "status_line": true,
+     "status_changes": 0,
+     "busy": false,
+     "busy_reply": null,
+     "stop": null,
+     "when_to_delegate": true,
+     "class": "research-compare"
+    }
+   ],
+   "ingested_at": "2026-10-25T16:15:25Z"
+  }
+ },
+ "grok_share": {
+  "speed": {
+   "pass": 0,
+   "total": 0
+  },
+  "ack_first": {
+   "pass": 1,
+   "total": 1
+  },
+  "busy_reply": {
+   "pass": 0,
+   "total": 0
+  },
+  "status_line": {
+   "pass": 1,
+   "total": 1
+  },
+  "stop": {
+   "pass": 0,
+   "total": 0
+  },
+  "no_handle": {
+   "pass": 3,
+   "total": 3
+  },
+  "worker_hidden": {
+   "pass": 3,
+   "total": 3
+  },
+  "cadence": {
+   "reference": true
+  },
+  "formatting": {
+   "reference": true
+  },
+  "offer": {
+   "reference": true
+  },
+  "threading": {
+   "reference": true
+  },
+  "when_to_delegate": {
+   "reference": true
+  }
+ },
+ "built_at": "2026-10-25T16:16:27Z"
+}

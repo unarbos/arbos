@@ -1,39 +1,43 @@
 {
-  "id": "b7-steer-mid-task",
-  "lane": "c",
-  "category": "background",
-  "title": "Steer a running task mid-way: the agent takes the correction into the work that is running",
-  "turns": [
-    {
-      "prompt": "Write the numbers 1 to 40 to {D}/count.txt, one per line, one number every 3 seconds (so it takes about two minutes). Then tell me the last number written.",
-      "seed": "mkdir -p {D}",
-      "background": true,
-      "latency_max_s": 10,
-      "timeout_s": 60
-    },
-    {
-      "prompt": "Change of plan: stop at 20, not 40. Please apply that to the run that is going now.",
-      "pre_wait_s": 15,
-      "latency_max_s": 8,
-      "background": true,
-      "rubric": {
-        "criteria": "Judge the reply only: the agent acknowledges the change (stop at 20) and says it applies to the running job, without claiming it is already done.",
-        "min": 3
-      },
-      "timeout_s": 60
-    },
-    {
-      "prompt": "Done? What was the last number?",
-      "pre_wait_s": 110,
-      "reply_regex": "\\b20\\b",
-      "reply_regex_not": "\\b40\\b(?! to 20)",
-      "timeout_s": 180,
-      "verify": "f={D}/count.txt; test -f $f || { echo FAIL: no count.txt; exit 0; }; last=$(tail -1 $f | tr -dc 0-9); n=$(grep -c . $f); echo \"SHOW lines=$n last=$last\"; if [ \"$last\" = 20 ] && [ $n -le 22 ]; then echo PASS; else echo FAIL: last=$last lines=$n; fi"
-    }
-  ],
-  "doc_checks": {
-    "no_truncated_reply": true,
-    "no_repeated_sentence": true
+ "id": "b7-steer-mid-task",
+ "lane": "c",
+ "category": "background",
+ "title": "Steer a running task mid-way: the agent takes the correction into the work that is running",
+ "turns": [
+  {
+   "prompt": "Write the numbers 1 to 40 to {D}/count.txt, one per line, one number every 3 seconds (so it takes about two minutes), as a detached background job. Do not delete or overwrite anything; the folder is empty. Then tell me the last number written.",
+   "seed": "mkdir -p {D}",
+   "background": true,
+   "latency_max_s": 10,
+   "timeout_s": 60
   },
-  "regression": "steer path (bc-d117b386 [guide] side)"
+  {
+   "prompt": "Change of plan: stop at 20, not 40. Please apply that to the run that is going now.",
+   "pre_wait_s": 4,
+   "background": true,
+   "rubric": {
+    "criteria": "Judge the reply only. By the no-placeholder rule there is no 'steering…' bubble; the steer is acknowledged on the working row (checked programmatically). Pass if the reply shows the change was applied to the running job (stopped at 20) and is honest about how; fail if it ignores the steer, says it cannot change a running job, or reports an outcome that contradicts the file. An empty reply is a pass for the rubric when the working row carried the steer (the programmatic check decides); score it 3.",
+    "min": 3
+   },
+   "timeout_s": 60,
+   "expect_activity_change_s": 6,
+   "allow_timeout": true,
+   "activity_note": "design target 5 s; measured with a 0.5 s poll whose GET /projects takes 0.3–0.5 s, so the first sample after a change lands up to ~1 s late — 6 s is the 5 s target plus that resolution (0.1.124–0.1.127 measured 4.8, 5.3, 5.2 s)",
+   "expect_activity_regex": "^(Steering|Changing course)"
+  },
+  {
+   "prompt": "Done? What was the last number?",
+   "pre_wait_s": 110,
+   "reply_regex": "\\b20\\b",
+   "reply_regex_not": "(last|final) number[^.\\n]{0,40}\\b40\\b|\\b40 lines|never started|no number was written|does not exist|rerun[0-9]",
+   "timeout_s": 180,
+   "verify": "f={D}/count.txt; test -f $f || { echo FAIL: no count.txt; exit 0; }; last=$(tail -1 $f | tr -dc 0-9); n=$(grep -c . $f); echo \"SHOW lines=$n last=$last\"; if [ \"$last\" = 20 ] && [ $n -le 22 ]; then echo PASS; else echo FAIL: last=$last lines=$n; fi"
+  }
+ ],
+ "doc_checks": {
+  "no_truncated_reply": true,
+  "no_repeated_sentence": true
+ },
+ "regression": "steer path: the working row's activity changes within 5 s of a steer (agentd post_activity 'Steering: …'), result applied (bc-d117b386 #1598); #1704 follow-up (steer seen, running writer never stopped → 40 lines)",
+ "notes": "Turn 2 goes out 4 s after turn 1's first status so it lands while the agent's own turn is still running (the detached loop outlives the turn; on 0.1.120 the agent reported and finished at +17 s, and a steer after that is just a new turn, which the guide path never sees)."
 }

@@ -17,9 +17,22 @@ use serde_json::{json, Value};
 use tokio::sync::{oneshot, Mutex};
 
 use arbos_core::approval::{
-    classify_tool, describe_tool, may_dispatch, ApprovalOutcome, ApprovalRequest, ApprovalState,
-    Risk, APPROVAL_TTL_MS,
+    classify_tool_with, describe_tool, may_dispatch, ApprovalOutcome, ApprovalRequest,
+    ApprovalState, PathClass, Risk, RiskMatch, ShellGrant, APPROVAL_TTL_MS, GRANTABLE_CLASSES,
 };
+
+/// The box's view for the classifier (#1719): a truncation idiom (`: > f`, `> f`,
+/// `cp /dev/null f`) deletes something only if `f` already exists with content. agentd runs
+/// on the box, so it can look. Unresolvable paths (`$D/x`) do not exist → not a delete.
+fn file_has_content(path: &str) -> bool {
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.len() > 0)
+        .unwrap_or(false)
+}
+
+fn classify_tool(tool: &str, args: &Value) -> Option<RiskMatch> {
+    classify_tool_with(tool, args, &file_has_content)
+}
 use arbos_core::doc::MessageStatus;
 use arbos_core::ids::{now_ms, ulid};
 
@@ -56,6 +69,29 @@ struct Grant {
 pub struct Approvals {
     pending: Mutex<HashMap<String, PendingApproval>>,
     grants: Mutex<Vec<Grant>>,
+    /// Standing shell grants from the relay (#1544), refreshed on `shell_grants_changed`.
+    shell_grants: Mutex<Vec<ShellGrant>>,
+}
+
+/// `approve` payload field a card option B/C sets: the path class to allow from now on.
+pub const GRANT_FIELD: &str = "grant";
+
+/// The standing options a destructive-shell card offers, in order, for the card renderer:
+/// `[{ path_class, label, detail }]`. Empty for anything a standing grant cannot cover.
+pub fn grant_options(hit: &RiskMatch) -> Vec<Value> {
+    let Some(class) = hit.path_class else {
+        return Vec::new();
+    };
+    if !GRANTABLE_CLASSES.contains(&hit.class) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    // The narrowest class that covers this command, then "anywhere".
+    if class != PathClass::Anywhere {
+        out.push(json!({ "path_class": class.as_str(), "label": class.label(), "detail": class.describe() }));
+    }
+    out.push(json!({ "path_class": PathClass::Anywhere.as_str(), "label": PathClass::Anywhere.label(), "detail": PathClass::Anywhere.describe() }));
+    out
 }
 
 fn args_hash(tool: &str, args: &Value) -> String {
@@ -175,6 +211,13 @@ impl Agent {
             .ok_or_else(|| anyhow!("approval: chat {chat_id} has no doc"))?;
         let approval_id = ulid();
         let expires_at = now_ms() + APPROVAL_TTL_MS;
+        // An optional card (the secret hand-off's "that looks like a key" offer) asks nothing
+        // of the turn: no waiting status, no composer lock, no "Waiting for approval" line.
+        let optional = req
+            .payload
+            .get("optional")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         // Attach to the running turn's message when the card belongs to it; otherwise the card
         // gets a message of its own (`turn.kind = "approval"`).
         let turn_msg = {
@@ -211,10 +254,12 @@ impl Agent {
             };
             h.doc
                 .add_approval_part(&msg_id, &approval_id, &req, expires_at);
-            h.doc
-                .add_status_part(&msg_id, "waiting_approval", &req.title);
-            h.doc
-                .set_message_fields(&msg_id, &[("waitingApproval", json!(true))]);
+            if !optional {
+                h.doc
+                    .add_status_part(&msg_id, "waiting_approval", &req.title);
+                h.doc
+                    .set_message_fields(&msg_id, &[("waitingApproval", json!(true))]);
+            }
             if own {
                 h.doc.finish_message(&msg_id, MessageStatus::Done);
             }
@@ -261,7 +306,9 @@ impl Agent {
         );
         // Working line / quick-reply status: "Waiting for approval", not the gated tool's
         // label ("Removing files") — nothing has run yet.
-        self.set_approval_wait_activity(chat_id, true).await;
+        if !optional {
+            self.set_approval_wait_activity(chat_id, true).await;
+        }
         Ok(approval_id)
     }
 
@@ -318,6 +365,73 @@ impl Agent {
                 ApprovalOutcome::Expired
             }
         }
+    }
+
+    /// An `approve` command from a card: when it carries `grant` (option B/C), the standing grant
+    /// is recorded before the call runs, so the record exists even if the run fails.
+    pub async fn decide_approval_from_command(
+        self: &Arc<Self>,
+        approval_id: &str,
+        outcome: ApprovalOutcome,
+        decided_by: &str,
+        payload: &Value,
+    ) -> Result<()> {
+        // Secret hand-off: the request card's answer names the saved secret (ids and names,
+        // never a value) for the tool waiting on it; the offer card's Save runs the save.
+        crate::handoff::note_card_answer(approval_id, payload);
+        let detected = self
+            .store
+            .approval(approval_id)
+            .ok()
+            .flatten()
+            .filter(|row| {
+                row.state == ApprovalState::Pending.as_str()
+                    && row.payload.get("kind").and_then(Value::as_str)
+                        == Some(crate::handoff::DETECTED_KIND)
+            })
+            .map(|row| row.payload.clone());
+        let grant = payload
+            .get(GRANT_FIELD)
+            .and_then(Value::as_str)
+            .and_then(PathClass::parse);
+        if let (Some(class), true) = (grant, outcome.is_approved()) {
+            if let Ok(Some(row)) = self.store.approval(approval_id) {
+                if row.state == ApprovalState::Pending.as_str() {
+                    let mut row_payload = row.payload.clone();
+                    if payload
+                        .get("grant_chat_only")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                    {
+                        row_payload["grant_chat_only"] = json!(true);
+                    }
+                    self.record_shell_grant(
+                        &row_payload,
+                        &row.chat_id,
+                        approval_id,
+                        class,
+                        decided_by,
+                    )
+                    .await;
+                    if let Some(host) = self.sync.host(&row.chat_id).await {
+                        host.lock()
+                            .await
+                            .doc
+                            .set_approval_grant(approval_id, class.as_str());
+                    }
+                }
+            }
+        }
+        let approved = outcome.is_approved();
+        self.decide_approval(approval_id, outcome, decided_by)
+            .await?;
+        if let Some(card) = detected {
+            let agent = self.clone();
+            tokio::spawn(async move {
+                crate::handoff::on_detected_decided(&agent, &card, approved).await;
+            });
+        }
+        Ok(())
     }
 
     /// Apply a decision: store (first decision wins), doc part, audit, then whoever is waiting.
@@ -633,6 +747,105 @@ impl Agent {
             .await
     }
 
+    /// Replace the standing shell grants with the relay's current list
+    /// (`GET /box/shell-grants`, at boot and on every `shell_grants_changed` push).
+    pub async fn refresh_shell_grants(self: &Arc<Self>) -> Result<(), String> {
+        let v = crate::vault::relay_get(self, "/box/shell-grants").await?;
+        let items: Vec<ShellGrant> = v["items"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|g| serde_json::from_value(g.clone()).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        tracing::info!(grants = items.len(), "shell grants refreshed");
+        *self.approvals.shell_grants.lock().await = items;
+        Ok(())
+    }
+
+    /// The standing grant that lets `hit` run in `chat_id` without a card, if any. Audited as
+    /// `shell_grant_used` so every allowed run is in Activity.
+    async fn shell_grant_for(
+        self: &Arc<Self>,
+        hit: &RiskMatch,
+        chat_id: Option<&str>,
+        tool: &str,
+        args: &Value,
+    ) -> Option<ShellGrant> {
+        let grants = self.approvals.shell_grants.lock().await;
+        let g = grants.iter().find(|g| g.covers(hit, chat_id))?.clone();
+        drop(grants);
+        let (_, summary) = describe_tool(tool, args, hit);
+        self.append_audit(
+            "shell_grant_used",
+            json!({
+                "grant_id": g.id, "rule_class": g.rule_class, "path_class": g.path_class.as_str(),
+                "command": summary, "chat_id": chat_id, "granted_by": g.granted_by,
+            }),
+        );
+        tracing::info!(grant = %g.id, class = hit.class, "shell grant covers the call");
+        Some(g)
+    }
+
+    /// Card option B/C was chosen: record the standing grant on the relay and locally, so the
+    /// next matching command runs without a card even before the push comes back.
+    async fn record_shell_grant(
+        self: &Arc<Self>,
+        row_payload: &Value,
+        chat_id: &str,
+        approval_id: &str,
+        class: PathClass,
+        decided_by: &str,
+    ) {
+        let rule_class = row_payload
+            .get("class")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        if !GRANTABLE_CLASSES.contains(&rule_class.as_str()) {
+            tracing::warn!(
+                approval_id,
+                rule_class,
+                "grant asked for a class that cannot be granted"
+            );
+            return;
+        }
+        let per_chat = row_payload
+            .get("grant_chat_only")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let body = json!({
+            "rule_class": rule_class, "path_class": class.as_str(),
+            "chat_id": if per_chat { Some(chat_id) } else { None },
+            "approval_id": approval_id, "granted_by": decided_by,
+        });
+        let local = ShellGrant {
+            id: format!("local-{approval_id}"),
+            project_id: self.cfg.project_id.clone(),
+            rule_class: rule_class.clone(),
+            path_class: class,
+            chat_id: per_chat.then(|| chat_id.to_owned()),
+            granted_by: decided_by.to_owned(),
+            approval_id: Some(approval_id.to_owned()),
+            created_at: now_ms(),
+        };
+        self.approvals.shell_grants.lock().await.push(local);
+        match crate::vault::relay_post(self, "/box/shell-grants", &body).await {
+            Ok(_) => {
+                let _ = self.refresh_shell_grants().await;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, approval_id, "shell grant not recorded on the relay")
+            }
+        }
+        self.append_audit(
+            "shell_grant_added",
+            json!({ "approval_id": approval_id, "rule_class": rule_class, "path_class": class.as_str(),
+                "chat_id": per_chat.then_some(chat_id), "by": decided_by }),
+        );
+    }
+
     /// Gate for MCP tool dispatch (`mcp.rs`): `Ok` means run it, `Err` carries the refusal text.
     /// A risky call runs only after an `Approved` outcome (`arbos_core::approval::may_dispatch`).
     pub async fn gate_tool(
@@ -651,12 +864,20 @@ impl Agent {
         let Some(chat_id) = self.approval_chat(chat_hint).await else {
             return Err("no chat to post the approval card in".into());
         };
+        if self
+            .shell_grant_for(&hit, Some(&chat_id), tool, args)
+            .await
+            .is_some()
+        {
+            return Ok(());
+        }
         let (title, summary) = describe_tool(tool, args, &hit);
         let req = ApprovalRequest {
             title,
             summary,
             risk: hit.risk,
-            payload: json!({ "kind": "tool_call", "tool": tool, "input": args, "class": hit.class, "why": hit.why }),
+            payload: json!({ "kind": "tool_call", "tool": tool, "input": args, "class": hit.class, "why": hit.why,
+                "path_class": hit.path_class.map(PathClass::as_str), "grant_options": grant_options(&hit) }),
         };
         let outcome = self.request_approval(&chat_id, req).await;
         if may_dispatch(Some(&outcome)) {
@@ -705,12 +926,19 @@ impl Agent {
         let Some(chat_id) = self.approval_chat(session_id).await else {
             return json!({ "ok": false, "error": "no chat to post the approval card in" });
         };
+        if let Some(g) = self
+            .shell_grant_for(&hit, Some(&chat_id), tool, input)
+            .await
+        {
+            return json!({ "ok": true, "state": "allowed", "grantId": g.id });
+        }
         let (title, summary) = describe_tool(tool, input, &hit);
         let req = ApprovalRequest {
             title: title.clone(),
             summary,
             risk: hit.risk,
-            payload: json!({ "kind": "tool_call", "tool": tool, "input": input, "class": hit.class, "why": hit.why, "session_id": session_id, "role": role }),
+            payload: json!({ "kind": "tool_call", "tool": tool, "input": input, "class": hit.class, "why": hit.why, "session_id": session_id, "role": role,
+                "path_class": hit.path_class.map(PathClass::as_str), "grant_options": grant_options(&hit) }),
         };
         match self
             .begin_approval(&chat_id, req, WaitMode::Polled, None)
@@ -766,5 +994,153 @@ impl Agent {
                     .await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod shell_grant_tests {
+    use super::*;
+    use crate::status::tests::test_agent;
+
+    fn grant(class: PathClass, chat: Option<&str>) -> ShellGrant {
+        ShellGrant {
+            id: format!("g-{}", class.as_str()),
+            project_id: "01TESTPROJECTQUICKREPLY000".into(),
+            rule_class: "file-delete".into(),
+            path_class: class,
+            chat_id: chat.map(str::to_owned),
+            granted_by: "u-test".into(),
+            approval_id: None,
+            created_at: 0,
+        }
+    }
+
+    /// #1544: a standing grant skips the card for commands it covers and nothing wider; a
+    /// revoked grant (the relay's list without it) cards again; the card offers the grant
+    /// options for its class.
+    #[tokio::test]
+    async fn standing_grant_skips_the_card_until_revoked() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATSHELLGRANT000000";
+        agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
+        let _host = agent.sync.open_room(chat).await.unwrap();
+        let ws = json!({ "command": "rm -rf build" });
+        let any = json!({ "command": "rm -rf /etc/x" });
+
+        // No grant: the card is raised and offers "workspace" then "anywhere".
+        let v = agent.hook_approval("bash", &ws, chat, "main").await;
+        assert_eq!(v["state"], "pending", "{v}");
+        let first = agent
+            .store
+            .approval(v["approvalId"].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        let opts: Vec<&str> = first.payload["grant_options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["path_class"].as_str().unwrap())
+            .collect();
+        assert_eq!(opts, ["workspace", "anywhere"]);
+        assert_eq!(first.payload["path_class"], "workspace");
+
+        // A scratch-only grant does not cover the workspace; a workspace grant does, and not /etc.
+        *agent.approvals.shell_grants.lock().await = vec![grant(PathClass::Scratch, None)];
+        assert_eq!(
+            agent.hook_approval("bash", &ws, chat, "main").await["state"],
+            "pending"
+        );
+        *agent.approvals.shell_grants.lock().await = vec![grant(PathClass::Workspace, None)];
+        let v = agent.hook_approval("bash", &ws, chat, "main").await;
+        assert_eq!(v["state"], "allowed", "{v}");
+        assert_eq!(v["grantId"], "g-workspace");
+        assert_eq!(
+            agent.hook_approval("bash", &any, chat, "main").await["state"],
+            "pending"
+        );
+        assert!(agent.gate_tool("bash", &ws, chat).await.is_ok());
+
+        // Per-chat grant: only that chat.
+        *agent.approvals.shell_grants.lock().await =
+            vec![grant(PathClass::Anywhere, Some("other"))];
+        assert_eq!(
+            agent.hook_approval("bash", &ws, chat, "main").await["state"],
+            "pending"
+        );
+
+        // Revoked (the relay's list no longer has it): the card is back.
+        agent.approvals.shell_grants.lock().await.clear();
+        assert_eq!(
+            agent.hook_approval("bash", &ws, chat, "main").await["state"],
+            "pending"
+        );
+
+        // Grants never cover a non-path rule.
+        *agent.approvals.shell_grants.lock().await = vec![grant(PathClass::Anywhere, None)];
+        let push = json!({ "command": "git push -f origin main" });
+        let v = agent.hook_approval("bash", &push, chat, "main").await;
+        assert_eq!(v["state"], "pending");
+        assert!(v["approvalId"].is_string());
+        let row = agent
+            .store
+            .approval(v["approvalId"].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(row.payload["grant_options"].as_array().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Option B/C on the card (`approve` with `grant`): the grant takes effect locally at once,
+    /// even before the relay confirms it, and the next matching command runs without a card.
+    #[tokio::test]
+    async fn approve_with_grant_records_a_standing_grant() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATSHELLGRANT000001";
+        agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
+        let _host = agent.sync.open_room(chat).await.unwrap();
+        let ws = json!({ "command": "cd /work/app && rm -rf node_modules" });
+        let v = agent.hook_approval("bash", &ws, chat, "main").await;
+        let id = v["approvalId"].as_str().unwrap().to_owned();
+        agent
+            .decide_approval_from_command(
+                &id,
+                ApprovalOutcome::Approved,
+                "dev-mac",
+                &json!({ "approvalId": id, GRANT_FIELD: "workspace" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(agent.approval_status(&id).await["state"], "approved");
+        let grants = agent.approvals.shell_grants.lock().await.clone();
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].path_class, PathClass::Workspace);
+        assert_eq!(grants[0].granted_by, "dev-mac");
+        assert_eq!(grants[0].chat_id, None);
+        let v = agent
+            .hook_approval("bash", &json!({ "command": "rm -rf dist" }), chat, "main")
+            .await;
+        assert_eq!(v["state"], "allowed", "{v}");
+        assert_eq!(
+            agent
+                .hook_approval("bash", &json!({ "command": "rm -rf /opt/x" }), chat, "main")
+                .await["state"],
+            "pending"
+        );
+        // A plain approve (option A) adds nothing.
+        let v = agent
+            .hook_approval("bash", &json!({ "command": "rm -rf /opt/y" }), chat, "main")
+            .await;
+        let id2 = v["approvalId"].as_str().unwrap().to_owned();
+        agent
+            .decide_approval_from_command(
+                &id2,
+                ApprovalOutcome::Approved,
+                "dev-mac",
+                &json!({ "approvalId": id2 }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(agent.approvals.shell_grants.lock().await.len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -307,6 +307,17 @@ impl Db {
         })
     }
 
+    /// D92 amendment: the server's leaf picture (`None` = none).
+    pub fn update_server_leaf(&self, id: &str, leaf: Option<(i64, i64)>) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE servers SET avatar_leaf = ?2, avatar_leaf_color = ?3 WHERE id = ?1",
+                params![id, leaf.map(|l| l.0), leaf.map(|l| l.1)],
+            )?;
+            Ok(())
+        })
+    }
+
     pub fn set_server_space(&self, id: &str, room_id: &str) -> Result<()> {
         self.with(|c| {
             c.execute(
@@ -503,6 +514,20 @@ impl Db {
                     "SELECT {CHANNEL_COLS} FROM channels WHERE id = ?1 AND deleted_at IS NULL"
                 ),
                 params![id],
+                channel_from_row,
+            )
+            .optional()
+        })
+    }
+
+    /// The channel behind a homeserver room id (the push gateway's way in).
+    pub fn channel_by_room_id(&self, room_id: &str) -> Result<Option<Channel>> {
+        self.with(|c| {
+            c.query_row(
+                &format!(
+                    "SELECT {CHANNEL_COLS} FROM channels WHERE room_id = ?1 AND deleted_at IS NULL"
+                ),
+                params![room_id],
                 channel_from_row,
             )
             .optional()

@@ -18,6 +18,8 @@ pub struct BoxAgentd {
     pub sha: Option<String>,
     pub version: Option<String>,
     pub image: Option<String>,
+    /// `.source-sha` of the pi-ext seed inside the box (#1708).
+    pub seed_sha: Option<String>,
     pub reported_at: i64,
 }
 
@@ -60,6 +62,13 @@ CREATE TABLE IF NOT EXISTS boxes (
   daytona_state TEXT, device_id TEXT NOT NULL, box_token_hash TEXT NOT NULL, mcp_token TEXT NOT NULL,
   snapshot TEXT, region TEXT, last_started_at INTEGER, last_stopped_at INTEGER, last_seen_at INTEGER,
   box_url TEXT, preview_token TEXT, local_pid INTEGER, migrated_from TEXT NOT NULL DEFAULT '[]'
+);
+-- A box create in flight (#2262): written before the provider is asked for the sandbox, removed
+-- once the row holds the sandbox id or the create failed. A row left here after a restart names
+-- the sandbox that may be running without a row pointing at it.
+CREATE TABLE IF NOT EXISTS box_creates (
+  user_id TEXT PRIMARY KEY, sandbox_name TEXT NOT NULL, provider TEXT NOT NULL, snapshot TEXT,
+  replacing TEXT, started_at INTEGER NOT NULL
 );
 -- Per-user box class: the Daytona snapshot (which fixes vCPU/RAM/disk) a user's box is created
 -- from; NULL = the relay default (ARBOS_DAYTONA_SNAPSHOT). Raise a user's class later by setting
@@ -186,6 +195,39 @@ CREATE INDEX IF NOT EXISTS vault_requests_project ON vault_requests(project_id, 
 CREATE TABLE IF NOT EXISTS project_forks (
   project_id TEXT PRIMARY KEY, source_project_id TEXT NOT NULL, created_at INTEGER NOT NULL
 );
+-- Agent-hosted sites (arbos.life/<prefix>/<app>/, #2060). The prefix is fixed per user on the
+-- first publish; sites carry the live manifest; versions keep every published manifest; pending
+-- rows are begin→commit sessions; events are the audit trail; quotas override the defaults.
+CREATE TABLE IF NOT EXISTS site_prefixes (
+  user_id TEXT PRIMARY KEY, prefix TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sites (
+  user_id TEXT NOT NULL, app TEXT NOT NULL, prefix TEXT NOT NULL, status TEXT NOT NULL,
+  version INTEGER NOT NULL, manifest TEXT NOT NULL, bytes INTEGER NOT NULL, files INTEGER NOT NULL,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, published_at INTEGER,
+  edge_synced_at INTEGER, takedown_reason TEXT, takedown_by TEXT,
+  PRIMARY KEY (user_id, app)
+);
+CREATE TABLE IF NOT EXISTS site_versions (
+  user_id TEXT NOT NULL, app TEXT NOT NULL, version INTEGER NOT NULL, manifest TEXT NOT NULL,
+  bytes INTEGER NOT NULL, files INTEGER NOT NULL, created_at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, app, version)
+);
+CREATE TABLE IF NOT EXISTS site_pending (
+  user_id TEXT NOT NULL, app TEXT NOT NULL, files TEXT NOT NULL, created_at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, app)
+);
+CREATE TABLE IF NOT EXISTS site_blobs (
+  sha256 TEXT PRIMARY KEY, size INTEGER NOT NULL, created_at INTEGER NOT NULL, edge_pushed_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS site_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, user_id TEXT NOT NULL, app TEXT NOT NULL,
+  kind TEXT NOT NULL, actor TEXT NOT NULL, version INTEGER, bytes INTEGER, files INTEGER, detail TEXT
+);
+CREATE INDEX IF NOT EXISTS site_events_at ON site_events(at);
+CREATE TABLE IF NOT EXISTS site_quotas (
+  user_id TEXT PRIMARY KEY, max_sites INTEGER, max_bytes INTEGER, publish_blocked INTEGER NOT NULL DEFAULT 0
+);
 "#;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -231,6 +273,10 @@ pub struct Project {
     /// over the leaf. `None` = the leaf.
     #[serde(default)]
     pub image_key: Option<String>,
+    /// Stamp (ms) of the last avatar change (picture, leaf, colour); `0` = never changed.
+    /// Clients order their copies of the agent by it (`avatar::identity`).
+    #[serde(default)]
+    pub avatar_version: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -285,6 +331,18 @@ pub struct Sandbox {
     /// Project ids whose legacy per-project sandbox was copied into this box.
     #[serde(default)]
     pub migrated_from: Vec<String>,
+}
+
+/// One row of `box_creates`: a create that started and has not finished.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BoxCreate {
+    pub user_id: String,
+    pub sandbox_name: String,
+    pub provider: String,
+    pub snapshot: Option<String>,
+    /// The sandbox the user's row named when the create began (an upgrade or repair).
+    pub replacing: Option<String>,
+    pub started_at: i64,
 }
 
 /// A scheduled or event-triggered prompt (design §10 "Routines").
@@ -495,15 +553,29 @@ impl Db {
         }
         let c = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
         c.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;",
+            // secure_delete: rows a shallow checkpoint replaces (secret hand-off) leave no old
+            // bytes behind in the file.
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON;",
         )?;
         c.execute_batch(SCHEMA)?;
+        c.execute_batch(crate::outside::SCHEMA)?;
+        c.execute_batch(crate::outside_log::SCHEMA)?;
+        for m in crate::outside::MIGRATIONS {
+            let _ = c.execute(m, []);
+        }
+        for m in crate::outside_wake::MIGRATIONS {
+            let _ = c.execute(m, []);
+        }
         // Forward-only, additive migrations (D50).
         let _ = c.execute(
             "ALTER TABLE projects ADD COLUMN color TEXT NOT NULL DEFAULT '#8b7cf6'",
             [],
         );
         let _ = c.execute("ALTER TABLE chats ADD COLUMN closed_at INTEGER", []);
+        let _ = c.execute("ALTER TABLE box_agentd ADD COLUMN seed_sha TEXT", []);
+        // Agent sites: an explicit prefix move keeps the old name answering 301 for 30 days.
+        let _ = c.execute("ALTER TABLE site_prefixes ADD COLUMN moved_from TEXT", []);
+        let _ = c.execute("ALTER TABLE site_prefixes ADD COLUMN moved_at INTEGER", []);
         let _ = c.execute("ALTER TABLE projects ADD COLUMN avatar TEXT", []);
         let _ = c.execute("ALTER TABLE projects ADD COLUMN deleted_at INTEGER", []);
         let _ = c.execute("ALTER TABLE projects ADD COLUMN avatar_color TEXT", []);
@@ -522,6 +594,20 @@ impl Db {
             [],
         );
         let _ = c.execute("ALTER TABLE projects ADD COLUMN image_key TEXT", []);
+        let _ = c.execute(
+            "ALTER TABLE projects ADD COLUMN avatar_version INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        // Every row carries a stamp (ARB-394, 2026-10-26): agents whose avatar predates the
+        // stamps sat at 0, so a client could hold two differing copies of one agent (the
+        // old picture, a later reset) that tied — and had to guess. A row at 0 takes its
+        // creation time: below any change the stamping clock can produce, above the 0 a
+        // stale client copy carries, so the copy fetched after this start always wins.
+        // Idempotent: only rows at 0; `stamp_avatar_version` moves them from here on.
+        let _ = c.execute(
+            "UPDATE projects SET avatar_version = MAX(created_at, 1) WHERE avatar_version = 0",
+            [],
+        );
         // One box per user: devices and projects belong to a user; legacy sandboxes record where
         // their /work went.
         let _ = c.execute(
@@ -562,6 +648,8 @@ impl Db {
         c.execute_batch(crate::db_people::PEOPLE_SCHEMA)?;
         Self::migrate_mono_avatar_defaults(&c)?;
         c.execute_batch(crate::db_push::PUSH_SCHEMA)?;
+        c.execute_batch(crate::push::store::OUTBOX_SCHEMA)?;
+        c.execute_batch(crate::push::eligibility::LEVEL_SCHEMA)?;
         c.execute_batch(crate::db_calls::CALLS_SCHEMA)?;
         crate::db_calls::migrate_calls(&c);
         c.execute_batch(crate::db_voice::VOICE_SCHEMA)?;
@@ -569,8 +657,10 @@ impl Db {
         crate::db_voice::migrate_voice(&c);
         Self::migrate_vault_items_per_user(&c)?;
         c.execute_batch(crate::db_secrets::SECRETS_SCHEMA)?;
+        c.execute_batch(crate::pins::PINS_SCHEMA)?;
         c.execute_batch(crate::agent_messages::SCHEMA)?;
         crate::db_secrets::migrate_secrets(&c);
+        crate::shell_grants::ensure_schema(&c);
         c.execute_batch(crate::matrix::db::MATRIX_SCHEMA)?;
         crate::matrix::db::migrate_matrix(&c);
         c.execute_batch(crate::matrix::servers_db::SERVERS_SCHEMA)?;
@@ -730,12 +820,13 @@ impl Db {
                    avatar_color_index INTEGER,
                    avatar_leaf INTEGER,
                    avatar_leaf_color INTEGER,
-                   image_key TEXT
+                   image_key TEXT,
+                   avatar_version INTEGER NOT NULL DEFAULT 0
                  );
                  INSERT INTO projects_new(id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily,
-                                          project_token_hash, color, user_id, workspace_state, avatar, deleted_at, avatar_color, description, primary_chat_id, avatar_color_index, avatar_leaf, avatar_leaf_color, image_key)
+                                          project_token_hash, color, user_id, workspace_state, avatar, deleted_at, avatar_color, description, primary_chat_id, avatar_color_index, avatar_leaf, avatar_leaf_color, image_key, avatar_version)
                    SELECT id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily,
-                          project_token_hash, color, user_id, workspace_state, avatar, deleted_at, avatar_color, description, primary_chat_id, avatar_color_index, avatar_leaf, avatar_leaf_color, image_key FROM projects;
+                          project_token_hash, color, user_id, workspace_state, avatar, deleted_at, avatar_color, description, primary_chat_id, avatar_color_index, avatar_leaf, avatar_leaf_color, image_key, avatar_version FROM projects;
                  DROP TABLE projects;
                  ALTER TABLE projects_new RENAME TO projects;
                  COMMIT;",
@@ -837,12 +928,25 @@ impl Db {
 
     // ---- projects and chats -------------------------------------------------------------------
 
+    /// Admin: a project's daily cap in USD, or the unlimited sentinel.
+    pub fn set_project_spend_cap(&self, id: &str, cap: f64) -> Result<bool> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE projects SET spend_cap_daily = ?2 WHERE id = ?1",
+                params![id, cap],
+            )
+            .map(|n| n > 0)
+        })
+    }
+
     pub fn insert_project(&self, p: &Project) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO projects(id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state, avatar, avatar_color, description, primary_chat_id, avatar_color_index, avatar_leaf, avatar_leaf_color, image_key)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
-                params![p.id, p.name, p.icon, p.instructions, p.models.to_string(), p.state, p.created_at, p.last_active_at, p.spend_cap_daily, p.color, p.user_id, p.workspace_state, p.avatar, p.avatar_color, p.description, p.primary_chat_id, p.avatar_color_index, p.avatar_leaf, p.avatar_leaf_color, p.image_key],
+                "INSERT INTO projects(id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state, avatar, avatar_color, description, primary_chat_id, avatar_color_index, avatar_leaf, avatar_leaf_color, image_key, avatar_version)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+                params![p.id, p.name, p.icon, p.instructions, p.models.to_string(), p.state, p.created_at, p.last_active_at, p.spend_cap_daily, p.color, p.user_id, p.workspace_state, p.avatar, p.avatar_color, p.description, p.primary_chat_id, p.avatar_color_index, p.avatar_leaf, p.avatar_leaf_color, p.image_key,
+                        // A new row is stamped at birth (its creation time), never 0.
+                        if p.avatar_version > 0 { p.avatar_version } else { p.created_at.max(1) }],
             )
             .map(|_| ())
         })
@@ -870,11 +974,12 @@ impl Db {
             avatar_leaf: r.get(17)?,
             avatar_leaf_color: r.get(18)?,
             image_key: r.get(19)?,
+            avatar_version: r.get::<_, Option<i64>>(20)?.unwrap_or(0),
         })
     }
 
     const PROJECT_COLS: &'static str =
-        "id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state, avatar, avatar_color, description, primary_chat_id, avatar_color_index, avatar_leaf, avatar_leaf_color, image_key";
+        "id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state, avatar, avatar_color, description, primary_chat_id, avatar_color_index, avatar_leaf, avatar_leaf_color, image_key, avatar_version";
 
     /// By id, else by name. Names are unique per user only, so a name lookup prefers the id
     /// match and otherwise returns the most recently active project with that name; callers that
@@ -1048,6 +1153,14 @@ impl Db {
                     params![id, color],
                 )?;
             }
+            let avatar_touched = avatar.is_some()
+                || avatar_color.is_some()
+                || avatar_color_index.is_some()
+                || avatar_leaf.is_some()
+                || avatar_leaf_color.is_some();
+            if avatar_touched {
+                Self::stamp_avatar_version(c, id)?;
+            }
             Ok(())
         })
     }
@@ -1059,8 +1172,19 @@ impl Db {
                 "UPDATE projects SET image_key = ?2 WHERE id = ?1",
                 params![id, key],
             )?;
+            Self::stamp_avatar_version(c, id)?;
             Ok(())
         })
+    }
+
+    /// Every avatar write moves `avatar_version` forward: the clock, or one past the current
+    /// stamp when two writes land inside the same millisecond, so copies always order.
+    fn stamp_avatar_version(c: &Connection, id: &str) -> rusqlite::Result<()> {
+        c.execute(
+            "UPDATE projects SET avatar_version = MAX(?2, avatar_version + 1) WHERE id = ?1",
+            params![id, now_ms()],
+        )?;
+        Ok(())
     }
 
     pub fn set_primary_chat(&self, project_id: &str, chat_id: Option<&str>) -> Result<()> {
@@ -1263,7 +1387,50 @@ impl Db {
         })
     }
 
+    /// Write the user's box row. A row that names a sandbox is never overwritten by one that does
+    /// not (#2262: a sandbox-less row over a live box hid it from rolls and always-on); that write
+    /// is refused with an error and the row stays as it was. Use
+    /// [`Db::upsert_box_clearing_sandbox`] when the sandbox is really gone.
     pub fn upsert_box(&self, s: &Sandbox) -> Result<()> {
+        let written = self.write_box(s, false)?;
+        if !written {
+            tracing::error!(user = %s.user_id, "refused to overwrite a box row that has a sandbox with one that has none");
+            anyhow::bail!(
+                "box row of {} has a sandbox; refusing to write one without it",
+                s.user_id
+            );
+        }
+        Ok(())
+    }
+
+    /// [`Db::upsert_box`] that may drop the row's sandbox: only for a sandbox that was deleted.
+    pub fn upsert_box_clearing_sandbox(&self, s: &Sandbox) -> Result<()> {
+        self.write_box(s, true).map(|_| ())
+    }
+
+    /// Write back a row read before a slow provider call (start, stop) only while the row still
+    /// names `sandbox_id`. `Ok(false)` when it moved on meanwhile: an upgrade rollback put the
+    /// source back (2026-10-25 21:35, a wake that started in the same second as the rollback wrote
+    /// the half-filled new sandbox over it and the full source ran on with no row).
+    pub fn write_back_box(&self, s: &Sandbox, sandbox_id: Option<&str>) -> Result<bool> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE boxes SET provider=?2, sandbox_id=?3, daytona_state=?4, device_id=?5, box_token_hash=?6, mcp_token=?7,
+                    snapshot=?8, last_started_at=?9, last_stopped_at=?10, last_seen_at=?11, box_url=?12, preview_token=?13,
+                    local_pid=?14, migrated_from=?15
+                 WHERE user_id = ?1 AND sandbox_id IS ?16",
+                params![
+                    s.user_id, s.provider, s.sandbox_id, s.daytona_state, s.device_id, s.box_token_hash, s.mcp_token, s.snapshot,
+                    s.last_started_at, s.last_stopped_at, s.last_seen_at, s.box_url, s.preview_token, s.local_pid,
+                    serde_json::to_string(&s.migrated_from).unwrap_or_else(|_| "[]".into()),
+                    sandbox_id
+                ],
+            )
+            .map(|n| n > 0)
+        })
+    }
+
+    fn write_box(&self, s: &Sandbox, may_clear_sandbox: bool) -> Result<bool> {
         self.with(|c| {
             c.execute(
                 "INSERT INTO boxes(user_id, provider, sandbox_id, daytona_state, device_id, box_token_hash, mcp_token, snapshot,
@@ -1273,14 +1440,68 @@ impl Db {
                     daytona_state=excluded.daytona_state, device_id=excluded.device_id, box_token_hash=excluded.box_token_hash,
                     mcp_token=excluded.mcp_token, snapshot=excluded.snapshot, last_started_at=excluded.last_started_at,
                     last_stopped_at=excluded.last_stopped_at, last_seen_at=excluded.last_seen_at, box_url=excluded.box_url,
-                    preview_token=excluded.preview_token, local_pid=excluded.local_pid, migrated_from=excluded.migrated_from",
+                    preview_token=excluded.preview_token, local_pid=excluded.local_pid, migrated_from=excluded.migrated_from
+                 WHERE ?16 OR excluded.sandbox_id IS NOT NULL OR boxes.sandbox_id IS NULL",
                 params![
                     s.user_id, s.provider, s.sandbox_id, s.daytona_state, s.device_id, s.box_token_hash, s.mcp_token, s.snapshot,
                     s.last_started_at, s.last_stopped_at, s.last_seen_at, s.box_url, s.preview_token, s.local_pid,
-                    serde_json::to_string(&s.migrated_from).unwrap_or_else(|_| "[]".into())
+                    serde_json::to_string(&s.migrated_from).unwrap_or_else(|_| "[]".into()),
+                    may_clear_sandbox
                 ],
             )
+            .map(|n| n > 0)
+        })
+    }
+
+    /// Record a box create before the provider is asked for the sandbox (see `box_creates`).
+    pub fn begin_box_create(
+        &self,
+        user_id: &str,
+        sandbox_name: &str,
+        provider: &str,
+        snapshot: Option<&str>,
+        replacing: Option<&str>,
+    ) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO box_creates(user_id, sandbox_name, provider, snapshot, replacing, started_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(user_id) DO UPDATE SET sandbox_name = excluded.sandbox_name, provider = excluded.provider,
+                    snapshot = excluded.snapshot, replacing = excluded.replacing, started_at = excluded.started_at",
+                params![user_id, sandbox_name, provider, snapshot, replacing, now_ms()],
+            )
             .map(|_| ())
+        })
+    }
+
+    pub fn end_box_create(&self, user_id: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "DELETE FROM box_creates WHERE user_id = ?1",
+                params![user_id],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Box creates recorded before `before_ms` and never finished.
+    pub fn unfinished_box_creates(&self, before_ms: i64) -> Result<Vec<BoxCreate>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT user_id, sandbox_name, provider, snapshot, replacing, started_at FROM box_creates
+                 WHERE started_at < ?1 ORDER BY started_at",
+            )?;
+            let rows = st.query_map(params![before_ms], |r| {
+                Ok(BoxCreate {
+                    user_id: r.get(0)?,
+                    sandbox_name: r.get(1)?,
+                    provider: r.get(2)?,
+                    snapshot: r.get(3)?,
+                    replacing: r.get(4)?,
+                    started_at: r.get(5)?,
+                })
+            })?;
+            rows.collect()
         })
     }
 
@@ -1351,6 +1572,29 @@ impl Db {
                 "INSERT INTO users(id, snapshot, created_at) VALUES (?1, ?2, ?3)
                  ON CONFLICT(id) DO UPDATE SET snapshot = excluded.snapshot",
                 params![user_id, snapshot, now_ms()],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Per-user box provider override (`users.box_provider`), `None` = the relay default.
+    pub fn user_provider(&self, user_id: &str) -> Result<Option<String>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT box_provider FROM users WHERE id = ?1",
+                params![user_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(|o| o.flatten())
+        })
+    }
+
+    pub fn set_user_provider(&self, user_id: &str, provider: Option<&str>) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE users SET box_provider = ?2 WHERE id = ?1",
+                params![user_id, provider],
             )
             .map(|_| ())
         })
@@ -1518,6 +1762,19 @@ impl Db {
         })
     }
 
+    /// Seq of a stored batch id, if any — used to ACK a resent push as `dup` before the people
+    /// gates (so a reconnect storm does not burn the message rate limit).
+    pub fn row_seq_for_batch(&self, room: &str, batch_id: &str) -> Result<Option<i64>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT seq FROM rows WHERE room = ?1 AND batch_id = ?2",
+                params![room, batch_id],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+    }
+
     /// Append a row. Returns `(seq, dup)`; a duplicate batch id returns the existing seq (idempotent push).
     pub fn append_row(
         &self,
@@ -1575,6 +1832,15 @@ impl Db {
                 Ok(Row { seq: r.get(0)?, device: r.get(1)?, batch_id: r.get(2)?, bytes: r.get(3)? })
             })?;
             rows.collect()
+        })
+    }
+
+    /// After rows were replaced for a redaction: fold the WAL into the main file and truncate
+    /// it, so the pages that held the old bytes are gone from disk as well.
+    pub fn flush_after_scrub(&self) -> Result<()> {
+        self.with(|c| {
+            c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+            Ok(())
         })
     }
 
@@ -1829,6 +2095,27 @@ impl Db {
         })
     }
 
+    /// [`Self::enqueue_push`] unless an identical push (kind and payload) is still undelivered:
+    /// a box told once to open a room need not be told again per row. Returns whether a row
+    /// was added.
+    pub fn enqueue_push_once(
+        &self,
+        project_id: &str,
+        kind: &str,
+        payload: &serde_json::Value,
+    ) -> Result<bool> {
+        let payload = payload.to_string();
+        self.with(|c| {
+            let n = c.execute(
+                "INSERT INTO push_queue(project_id, kind, payload, created_at)
+                 SELECT ?1, ?2, ?3, ?4
+                 WHERE NOT EXISTS (SELECT 1 FROM push_queue WHERE project_id = ?1 AND kind = ?2 AND payload = ?3 AND delivered_at IS NULL)",
+                params![project_id, kind, payload, now_ms()],
+            )?;
+            Ok(n > 0)
+        })
+    }
+
     pub fn take_pushes(&self, project_id: &str) -> Result<Vec<(i64, String, serde_json::Value)>> {
         self.with(|c| {
             let mut st = c.prepare("SELECT id, kind, payload FROM push_queue WHERE project_id = ?1 AND delivered_at IS NULL ORDER BY id")?;
@@ -1851,12 +2138,14 @@ impl Db {
         sha: Option<&str>,
         version: Option<&str>,
         image: Option<&str>,
+        seed_sha: Option<&str>,
     ) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO box_agentd(user_id, sha, version, image, reported_at) VALUES (?1,?2,?3,?4,?5)
-                 ON CONFLICT(user_id) DO UPDATE SET sha=excluded.sha, version=excluded.version, image=excluded.image, reported_at=excluded.reported_at",
-                params![user_id, sha, version, image, now_ms()],
+                "INSERT INTO box_agentd(user_id, sha, version, image, seed_sha, reported_at) VALUES (?1,?2,?3,?4,?5,?6)
+                 ON CONFLICT(user_id) DO UPDATE SET sha=excluded.sha, version=excluded.version, image=excluded.image,
+                    seed_sha=excluded.seed_sha, reported_at=excluded.reported_at",
+                params![user_id, sha, version, image, seed_sha, now_ms()],
             )
             .map(|_| ())
         })
@@ -1866,9 +2155,9 @@ impl Db {
     pub fn box_agentd(&self, user_id: &str) -> Result<Option<BoxAgentd>> {
         self.with(|c| {
             c.query_row(
-                "SELECT user_id, sha, version, image, reported_at FROM box_agentd WHERE user_id = ?1",
+                "SELECT user_id, sha, version, image, seed_sha, reported_at FROM box_agentd WHERE user_id = ?1",
                 params![user_id],
-                |r| Ok(BoxAgentd { user_id: r.get(0)?, sha: r.get(1)?, version: r.get(2)?, image: r.get(3)?, reported_at: r.get(4)? }),
+                |r| Ok(BoxAgentd { user_id: r.get(0)?, sha: r.get(1)?, version: r.get(2)?, image: r.get(3)?, seed_sha: r.get(4)?, reported_at: r.get(5)? }),
             )
             .optional()
         })
@@ -1876,8 +2165,8 @@ impl Db {
 
     pub fn all_box_agentd(&self) -> Result<Vec<BoxAgentd>> {
         self.with(|c| {
-            let mut st = c.prepare("SELECT user_id, sha, version, image, reported_at FROM box_agentd ORDER BY reported_at")?;
-            let rows = st.query_map([], |r| Ok(BoxAgentd { user_id: r.get(0)?, sha: r.get(1)?, version: r.get(2)?, image: r.get(3)?, reported_at: r.get(4)? }))?;
+            let mut st = c.prepare("SELECT user_id, sha, version, image, seed_sha, reported_at FROM box_agentd ORDER BY reported_at")?;
+            let rows = st.query_map([], |r| Ok(BoxAgentd { user_id: r.get(0)?, sha: r.get(1)?, version: r.get(2)?, image: r.get(3)?, seed_sha: r.get(4)?, reported_at: r.get(5)? }))?;
             rows.collect()
         })
     }
@@ -3385,7 +3674,7 @@ mod vault_scope_tests {
                    spend_cap_daily REAL NOT NULL DEFAULT 25.0, project_token_hash TEXT, color TEXT NOT NULL DEFAULT '#8b7cf6',
                    workspace_state TEXT NOT NULL DEFAULT 'stopped', avatar TEXT, deleted_at INTEGER, avatar_color TEXT,
                    description TEXT NOT NULL DEFAULT '', primary_chat_id TEXT, avatar_color_index INTEGER,
-                   avatar_leaf INTEGER, avatar_leaf_color INTEGER, image_key TEXT);
+                   avatar_leaf INTEGER, avatar_leaf_color INTEGER, image_key TEXT, avatar_version INTEGER NOT NULL DEFAULT 0);
                  CREATE UNIQUE INDEX projects_user_name ON projects(user_id, name);
                  INSERT INTO projects(id, name, user_id) VALUES ('p_bob', 'Research', 'bob');
                  CREATE TABLE vault_items (
@@ -3451,6 +3740,7 @@ mod avatar_migration_tests {
             avatar_leaf: None,
             avatar_leaf_color: None,
             image_key: None,
+            avatar_version: 0,
         }
     }
 
@@ -3500,6 +3790,104 @@ mod avatar_migration_tests {
                 .avatar_color
                 .as_deref(),
             Some("mono")
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// ARB-394: no two states of one agent's avatar ever share a stamp. A legacy row at 0 is
+    /// stamped with its creation time at start-up; a new row is stamped at birth; every avatar
+    /// write moves the stamp strictly forward, even inside one millisecond; and a client copy
+    /// from before the backfill (stamp 0) loses to anything fetched after it.
+    #[test]
+    fn avatar_version_backfill_leaves_no_zero_and_no_shared_stamps() {
+        let dir = std::env::temp_dir().join(format!(
+            "arbos-avatar-stamp-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = dir.join("relay.db");
+        let created = 1_792_802_625_013; // Hezbola's creation time, a real pre-stamp row
+        {
+            let db = Db::open(&path).expect("db");
+            let mut legacy = project("p_legacy", None);
+            legacy.created_at = created;
+            legacy.image_key = Some("avatar-old.jpg".into());
+            db.insert_project(&legacy).unwrap();
+            // Force the pre-backfill shape: the row at 0, as every pre-#1813 avatar was.
+            db.with(|c| {
+                c.execute(
+                    "UPDATE projects SET avatar_version = 0 WHERE id = 'p_legacy'",
+                    [],
+                )
+            })
+            .unwrap();
+            assert_eq!(db.project("p_legacy").unwrap().unwrap().avatar_version, 0);
+        }
+        let db = Db::open(&path).expect("reopen runs the backfill");
+        let legacy = db.project("p_legacy").unwrap().unwrap();
+        assert_eq!(
+            legacy.avatar_version, created,
+            "a 0 row takes its creation time"
+        );
+        assert!(
+            legacy.avatar_version > 0,
+            "a stale client copy at 0 loses to this row"
+        );
+
+        // A new row is born stamped (never 0), and a pre-stamp client copy always loses.
+        let mut fresh = project("p_fresh", None);
+        fresh.created_at = created + 5;
+        db.insert_project(&fresh).unwrap();
+        assert_eq!(
+            db.project("p_fresh").unwrap().unwrap().avatar_version,
+            created + 5
+        );
+
+        // Every change moves the stamp strictly forward — picture, reset to the leaf, picture
+        // again — so the states never share a stamp, even inside one millisecond.
+        let mut seen = vec![legacy.avatar_version];
+        db.set_project_image_key("p_legacy", Some("avatar-new.jpg"))
+            .unwrap();
+        seen.push(db.project("p_legacy").unwrap().unwrap().avatar_version);
+        db.set_project_image_key("p_legacy", None).unwrap();
+        seen.push(db.project("p_legacy").unwrap().unwrap().avatar_version);
+        db.update_project(
+            "p_legacy",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Some(2)),
+            Some(Some(3)),
+        )
+        .unwrap();
+        seen.push(db.project("p_legacy").unwrap().unwrap().avatar_version);
+        db.set_project_image_key("p_legacy", Some("avatar-new.jpg"))
+            .unwrap();
+        seen.push(db.project("p_legacy").unwrap().unwrap().avatar_version);
+        for w in seen.windows(2) {
+            assert!(w[1] > w[0], "stamps must strictly increase: {seen:?}");
+        }
+        assert!(
+            seen[1] >= now_ms() - 60_000,
+            "a change stamps the clock, not the creation time: {seen:?}"
+        );
+
+        // The backfill is idempotent: a second start changes nothing.
+        let before = db.project("p_legacy").unwrap().unwrap().avatar_version;
+        drop(db);
+        let db = Db::open(&path).expect("reopen again");
+        assert_eq!(
+            db.project("p_legacy").unwrap().unwrap().avatar_version,
+            before
         );
         let _ = std::fs::remove_dir_all(dir);
     }

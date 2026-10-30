@@ -1,0 +1,45 @@
+{
+  "id": "py-12-reminder",
+  "lane": "a",
+  "category": "parity",
+  "categories": [
+    "parity",
+    "one-shot-reminder"
+  ],
+  "title": "A reminder in two minutes lands as its own bubble",
+  "parity": true,
+  "timeout_s": 240,
+  "settle_s": 12,
+  "turns": [
+    {
+      "prompt": "Remind me in 2 minutes to call Ana.",
+      "shape": {
+        "messages_min": 1,
+        "messages_max": 2,
+        "ack_first": false,
+        "table": false,
+        "links_min": 0,
+        "offer": false,
+        "first_bubble_max_s": 8,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": false
+      },
+      "routine": {
+        "count": 1
+      },
+      "judge": {
+        "criteria": "Confirms the reminder in one sentence. A second short message about two minutes later is the reminder itself and is expected (score shape 5 when it arrives)."
+      }
+    },
+    {
+      "kind": "wait",
+      "at_s": 150,
+      "shape": {
+        "expect_new_bubble_regex": "(?i)ana",
+        "label": "reminder fired"
+      }
+    }
+  ],
+  "cleanup_routines": true
+}

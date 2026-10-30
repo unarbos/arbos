@@ -11,7 +11,7 @@
       "expect_other_agent": "lane-b",
       "reply_regex": "8106ef383a52f7a9",
       "rubric": {
-        "criteria": "Both agents took part: lane-b posted a SHA-256 (8106ef383a52…), lane-a confirmed the match (or a mismatch, honestly). No agent claims to be the other.",
+        "criteria": "Judge the whole group transcript (host lines and the other project's lines). Pass if lane-b posted a SHA-256 for 'acacia' and lane-a either confirmed the match or correctly noted lane-b had not posted yet at the time it spoke (lane-b may answer after lane-a's line); the digest 8106ef38… must appear from at least one agent. Nobody claims to be the other agent.",
         "min": 3
       },
       "timeout_s": 400
@@ -26,5 +26,8 @@
       "title": "eval handoff"
     }
   ],
-  "regression": "F6 group chats: cross-agent handoff"
+  "regression": "F6 group chats: cross-agent handoff",
+  "doc_checks": {
+    "agent_replies_carry_reply_to": true
+  }
 }

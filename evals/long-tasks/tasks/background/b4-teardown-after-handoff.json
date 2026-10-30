@@ -15,12 +15,12 @@
       "prompt": "Quick check before I decide anything: what exactly is running right now — is the loop still appending, and does the scheduled job exist?",
       "pre_wait_s": 75,
       "latency_max_s": 10,
-      "verify": "n=$(test -f {D}/loop.log && grep -c . {D}/loop.log || echo 0); p=$(pgrep -af 'lt-b4-teardown' | grep -vE 'prime-agent|rlm.repl|pgrep' | wc -l); echo \"SHOW loop_lines=$n loop_procs=$p\"; if [ $n -ge 2 ]; then echo PASS; else echo FAIL: loop never ran; fi",
+      "verify": "n=$(test -f {D}/loop.log && grep -c . {D}/loop.log || echo 0); p=$(pgrep -af 'loop.sh|lt-b4-teardown' | grep -vE 'prime-agent|rlm.repl|pgrep' | wc -l); echo \"SHOW loop_lines=$n loop_procs=$p\"; if [ $n -ge 2 ]; then echo PASS; else echo FAIL: loop never ran; fi",
       "routine": {
         "count": 1
       },
       "rubric": {
-        "criteria": "The reply gives a real status (loop running / how many lines, schedule exists) and does not stall or ask the user what to do.",
+        "criteria": "Judge the reply text only (the loop and the routine are verified programmatically). The reply gives a real status: loop running / how far, schedule exists; it does not stall or ask the user what to do.",
         "min": 3
       },
       "timeout_s": 120
@@ -57,6 +57,6 @@
     "background",
     "recovery"
   ],
-  "regression": "Doug teardown incident 2026-10-22 13:44 CR (owner bc-d117b386)",
+  "regression": "Doug teardown incident 2026-10-22 13:44 CR (owner bc-d117b386); #2258 (run 12: the teardown's follow-on job ended 'interrupted / box restart' at 00:58:24 and the turn never confirmed, though the routine was deleted and the loop killed)",
   "cleanup_routines": true
 }

@@ -17,7 +17,12 @@ use serde_json::Value;
 uniffi::setup_scaffolding!();
 
 pub mod avatar;
+pub mod chart;
+pub mod highlight;
+pub mod markdown;
 pub mod matrix;
+pub mod search;
+pub mod settings_search;
 
 /// Frame decode, doc import, or writer failure. Sans-IO session has no transport errors.
 #[derive(Debug, Clone, thiserror::Error, uniffi::Error)]
@@ -87,7 +92,8 @@ pub enum RoomAction {
         poll_machine: bool,
     },
     LinkLive,
-    /// Export the doc's updates since `relay_vv` and hand them to `on_heal` (history heal).
+    /// Export the doc's updates since `relay_vv` and always hand them to `on_heal`
+    /// (empty when nothing is missing) so the held pending resend can proceed.
     HealCheck {
         relay_vv: Vec<u8>,
     },
@@ -97,6 +103,16 @@ pub enum RoomAction {
     SessionError {
         code: String,
         message: String,
+    },
+    /// A `not_available` push refusal on this connection (`batchId` from the error) with the
+    /// relay's `reason` (`blocked_by` / `blocks_member` / `silenced` / `chat_unavailable`)
+    /// and, on a block, the other party.
+    PushRefused {
+        batch_id: Option<String>,
+        code: String,
+        reason: Option<String>,
+        by_handle: Option<String>,
+        by_name: Option<String>,
     },
     Presence {
         device: Option<String>,
@@ -152,6 +168,19 @@ impl From<ClientAction> for RoomAction {
                 after_ms: after.as_millis() as u64,
             },
             ClientAction::SessionError { code, message } => Self::SessionError { code, message },
+            ClientAction::PushRefused {
+                batch_id,
+                code,
+                reason,
+                by_handle,
+                by_name,
+            } => Self::PushRefused {
+                batch_id,
+                code,
+                reason,
+                by_handle,
+                by_name,
+            },
             ClientAction::Presence {
                 device,
                 handle,
@@ -332,6 +361,19 @@ impl RoomSession {
         self.lock().is_closed()
     }
 
+    /// This connection stands refused (`not_available`); local commits queue until an ACK,
+    /// a reconnect or `retry_refused` clears it.
+    pub fn push_refused(&self) -> bool {
+        self.lock().push_refused()
+    }
+
+    /// The condition behind a refusal may have changed (a people-chat event for this room,
+    /// the user unblocked someone): resend every pending batch now with the same ids and
+    /// drop the refusal. True when a resend went out ([feedback 2005]).
+    pub fn retry_refused(&self, now_ms: u64) -> bool {
+        self.lock().retry_refused(now_ms)
+    }
+
     pub fn drain_actions(&self) -> Vec<RoomAction> {
         self.lock()
             .drain_actions()
@@ -352,7 +394,8 @@ impl RoomSession {
         self.lock().on_local_commit(bytes);
     }
 
-    /// Answer to `RoomAction::HealCheck`: the doc's updates the relay lacked (empty = none).
+    /// Answer to `RoomAction::HealCheck`: the doc's updates the relay lacked.
+    /// Call even when empty so the session can release the held pending resend.
     pub fn on_heal(&self, bytes: Vec<u8>) {
         self.lock().on_heal(bytes);
     }
@@ -378,6 +421,12 @@ impl RoomSession {
     }
 
     /// Host failed to import row bytes; reconnect from the last good cursor.
+    /// The import of the last `ApplyBytes` was parked by Loro (dependencies missing): the
+    /// persisted cursor stays below that row; a corrective `Cursor` action follows.
+    pub fn apply_pending(&self) {
+        self.lock().apply_pending();
+    }
+
     pub fn apply_failed(&self) {
         self.lock().apply_failed();
     }
@@ -418,6 +467,14 @@ pub struct Touched {
     pub other: bool,
 }
 
+/// Where a picked GIF / sticker came from (maps to core `AttachmentSource`).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AttachmentSourceRecord {
+    pub provider: String,
+    pub id: String,
+    pub page_url: String,
+}
+
 /// One attachment on a client user message (maps to core `UserAttachment`).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct UserAttachmentRecord {
@@ -425,6 +482,12 @@ pub struct UserAttachmentRecord {
     pub mime: String,
     pub kind: Option<String>,
     pub blob_ref: Option<String>,
+    /// Provider-hosted picture (a picked GIF): loaded through the relay, never copied.
+    #[uniffi(default = None)]
+    pub url: Option<String>,
+    /// Picker attribution ("via KLIPY", the sticker pack's credit line).
+    #[uniffi(default = None)]
+    pub source: Option<AttachmentSourceRecord>,
 }
 
 impl From<UserAttachmentRecord> for doc::UserAttachment {
@@ -434,6 +497,12 @@ impl From<UserAttachmentRecord> for doc::UserAttachment {
             mime: r.mime,
             kind: r.kind,
             blob_ref: r.blob_ref,
+            url: r.url,
+            source: r.source.map(|s| doc::AttachmentSource {
+                provider: s.provider,
+                id: s.id,
+                page_url: s.page_url,
+            }),
         }
     }
 }
@@ -448,6 +517,44 @@ pub struct UserMessageOptsRecord {
     pub sender_handle: Option<String>,
     pub sender_name: Option<String>,
     pub sender_avatar: Option<String>,
+    /// Bubble menu → Forward: the original sender's display name, stored on the
+    /// row as `forwardedFrom` (the "Forwarded from <name>" header).
+    #[uniffi(default = None)]
+    pub forwarded_from: Option<String>,
+    /// Bubble menu → Reply in DM: where the quoted message lives plus its
+    /// snapshot, stored on the row as `replyRef` (core `ReplyRef`).
+    #[uniffi(default = None)]
+    pub reply_ref: Option<ReplyRefRecord>,
+}
+
+/// A cross-chat reply reference (maps to core `doc::ReplyRef`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, uniffi::Record)]
+pub struct ReplyRefRecord {
+    pub chat_id: String,
+    /// `"people"` for DMs / people groups, else the project id.
+    pub project_id: String,
+    pub message_id: String,
+    pub chat_title: String,
+    pub sender: String,
+    pub sender_name: String,
+    pub sender_handle: String,
+    /// The quoted prose; the Rust side cuts it to the snapshot length.
+    pub text: String,
+}
+
+impl From<ReplyRefRecord> for doc::ReplyRef {
+    fn from(r: ReplyRefRecord) -> Self {
+        Self {
+            chat_id: r.chat_id,
+            project_id: r.project_id,
+            message_id: r.message_id,
+            chat_title: r.chat_title,
+            sender: r.sender,
+            sender_name: r.sender_name,
+            sender_handle: r.sender_handle,
+            text: doc::ReplyRef::snapshot_text(&r.text),
+        }
+    }
 }
 
 impl From<UserMessageOptsRecord> for doc::UserMessageOpts {
@@ -461,19 +568,23 @@ impl From<UserMessageOptsRecord> for doc::UserMessageOpts {
             sender_name: r.sender_name,
             sender_avatar: r.sender_avatar,
             answers_question_id: None,
+            // The phone's zone, found on the Rust side so the Swift record is unchanged.
+            tz: doc::device_time_zone(),
         }
     }
 }
 
 /// Whether `sender` currently holds `emoji` on a message (flat key or legacy bucket).
+/// Skin-tone variants of the same base count as the same hold.
 fn reaction_is_on(doc: &CoreChatDoc, message_id: &str, emoji: &str, sender: &str) -> bool {
     let Some(map) = doc.find_message(message_id) else {
         return false;
     };
     let mut json = serde_json::to_value(map.get_deep_value()).unwrap_or(Value::Null);
     doc::project_reactions(&mut json);
+    let base = doc::normalize_reaction_emoji(emoji);
     json.get("reactions")
-        .and_then(|r| r.get(emoji))
+        .and_then(|r| r.get(base.as_str()))
         .and_then(|bucket| bucket.get(sender))
         .and_then(Value::as_bool)
         .unwrap_or(false)
@@ -591,6 +702,19 @@ impl ChatDoc {
     }
 
     /// Import update or snapshot bytes.
+    /// Import an update; `true` when Loro parked it as pending (its dependencies are not in
+    /// the doc yet), `false` when it applied. Hosts report `true` with `RoomSession.apply_pending`.
+    pub fn apply_update(&self, bytes: Vec<u8>) -> Result<bool, FfiError> {
+        let result = {
+            self.lock_doc()
+                .import(&bytes)
+                .map(|status| status.pending.is_some())
+                .map_err(|e| FfiError::Import(e.to_string()))
+        };
+        self.flush_pending();
+        result
+    }
+
     pub fn apply(&self, bytes: Vec<u8>) -> Result<(), FfiError> {
         let result = {
             self.lock_doc()
@@ -678,10 +802,19 @@ impl ChatDoc {
         device_id: String,
         opts: UserMessageOptsRecord,
     ) -> Result<(), FfiError> {
+        let forwarded_from = opts.forwarded_from.clone();
+        let reply_ref = opts.reply_ref.clone().map(doc::ReplyRef::from);
         let core_opts = doc::UserMessageOpts::from(opts);
-        self.lock_doc()
-            .append_user_message(&id, &text, &device_id, &core_opts)
-            .map_err(write_err)
+        let doc = self.lock_doc();
+        doc.append_user_message(&id, &text, &device_id, &core_opts)
+            .map_err(write_err)?;
+        if let Some(by) = forwarded_from.as_deref().filter(|b| !b.trim().is_empty()) {
+            doc.set_message_fields(&id, &[("forwardedFrom", Value::String(by.to_owned()))]);
+        }
+        if let Some(r) = reply_ref.filter(|r| !r.chat_id.is_empty() && !r.message_id.is_empty()) {
+            doc.set_reply_ref(&id, &r);
+        }
+        Ok(())
     }
 
     /// Append a system line. Does not commit. `link_id` is core's optional `callId`.
@@ -736,6 +869,14 @@ impl ChatDoc {
             .map_err(write_err)
     }
 
+    /// Replace the text of an existing message (edit). Does not commit. Sets
+    /// `editedAt`. No-op when the message or its text part is missing.
+    pub fn edit_message(&self, message_id: String, text: String) -> Result<(), FfiError> {
+        self.lock_doc()
+            .edit_message_text(&message_id, &text)
+            .map_err(write_err)
+    }
+
     /// Append a `commands` row. Does not commit. Returns the new command id.
     /// `payload_json` must be a JSON object.
     pub fn add_command(
@@ -749,6 +890,20 @@ impl ChatDoc {
             return Err(FfiError::Write("payload_json must be a JSON object".into()));
         }
         Ok(self.lock_doc().push_command(&kind, payload, &device_id))
+    }
+
+    /// Append one part to a message from its JSON object (`kind` + fields, a string
+    /// `id` kept, else minted) — core's `add_part_from_json`. Forward writes a chart
+    /// part and its fallback picture after the row's text and attachments with it
+    /// ([feedback forward-attachments-ios-2026-10-27]). Returns the part id.
+    pub fn add_part_json(&self, message_id: String, part_json: String) -> Result<String, FfiError> {
+        let part: Value = serde_json::from_str(&part_json).map_err(write_err)?;
+        if !part.is_object() {
+            return Err(FfiError::Write("part_json must be a JSON object".into()));
+        }
+        self.lock_doc()
+            .add_part_from_json(&message_id, &part)
+            .ok_or_else(|| FfiError::Write(format!("no message {message_id} to add a part to")))
     }
 
     /// Mirror the model picker into project `settings`. Does not commit.
@@ -957,6 +1112,8 @@ mod tests {
                     mime: "image/jpeg".into(),
                     kind: Some("image".into()),
                     blob_ref: Some("blob:1".into()),
+                    url: None,
+                    source: None,
                 }],
                 mentions: vec!["user:a".into(), "user:b".into()],
                 reply_to: Some("m0".into()),
@@ -964,12 +1121,28 @@ mod tests {
                 sender_handle: Some("me".into()),
                 sender_name: Some("Me".into()),
                 sender_avatar: None,
+                forwarded_from: Some("Sam Rivera".into()),
+                reply_ref: Some(ReplyRefRecord {
+                    chat_id: "01SRC".into(),
+                    project_id: "people".into(),
+                    message_id: "01ORIG".into(),
+                    chat_title: "Arbonites".into(),
+                    sender: "user:gh_1".into(),
+                    sender_name: "Jacob".into(),
+                    sender_handle: "unconst".into(),
+                    text: "Testing reply in dm".into(),
+                }),
             },
         )
         .unwrap();
         doc.commit();
         assert_eq!(doc.message_count(), 1);
         let row: Value = serde_json::from_str(&doc.read_message_json(0).unwrap()).unwrap();
+        assert_eq!(row["forwardedFrom"], "Sam Rivera");
+        assert_eq!(row["replyRef"]["chatId"], "01SRC");
+        assert_eq!(row["replyRef"]["messageId"], "01ORIG");
+        assert_eq!(row["replyRef"]["chatTitle"], "Arbonites");
+        assert_eq!(row["replyRef"]["text"], "Testing reply in dm");
         assert_eq!(row["role"], "user");
         assert_eq!(row["sender"], "user:me");
         assert_eq!(row["senderHandle"], "me");
@@ -1012,6 +1185,24 @@ mod tests {
         doc.delete_message("gone".into()).unwrap();
         doc.commit();
         assert_eq!(doc.message_count(), 1);
+    }
+
+    #[test]
+    fn edit_message_replaces_text() {
+        let doc = ChatDoc::open();
+        doc.insert_user_message(
+            "m1".into(),
+            "hello".into(),
+            "dev".into(),
+            UserMessageOptsRecord::default(),
+        )
+        .unwrap();
+        doc.edit_message("m1".into(), "hello edited".into())
+            .unwrap();
+        doc.commit();
+        let row: Value = serde_json::from_str(&doc.read_message_json(0).unwrap()).unwrap();
+        assert_eq!(row["parts"][0]["text"], "hello edited");
+        assert!(row["editedAt"].as_i64().unwrap_or(0) > 0);
     }
 
     #[test]

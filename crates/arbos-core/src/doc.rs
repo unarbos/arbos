@@ -5,11 +5,13 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use loro::event::DiffEvent;
+pub use loro::VersionVector;
 use loro::{
-    Container, ExportMode, Index, LoroDoc, LoroList, LoroMap, LoroText, LoroValue,
-    ValueOrContainer, VersionVector,
+    Container, ExportMode, Index, LoroDoc, LoroList, LoroMap, LoroText, LoroValue, ValueOrContainer,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -120,9 +122,61 @@ pub fn project_hidden_parts(json: &mut Value) {
 /// Separator in flat reaction keys: `"emoji|sender"` under `reactions`.
 pub const REACTION_KEY_SEP: char = '|';
 
+/// Fitzpatrick skin-tone modifiers (U+1F3FB … U+1F3FF). Stripped so
+/// `👍🏽` and `👍🏿` count as the same reaction on a message.
+const SKIN_TONE_LO: u32 = 0x1F3FB;
+const SKIN_TONE_HI: u32 = 0x1F3FF;
+
+/// Drop skin-tone modifiers from an emoji. Other combining marks (ZWJ,
+/// variation selectors, hair/gender) stay. Empty input stays empty; if
+/// stripping would leave nothing, the original string is kept.
+pub fn normalize_reaction_emoji(emoji: &str) -> String {
+    if emoji.is_empty() {
+        return String::new();
+    }
+    let stripped: String = emoji
+        .chars()
+        .filter(|c| !(SKIN_TONE_LO..=SKIN_TONE_HI).contains(&(*c as u32)))
+        .collect();
+    if stripped.is_empty() {
+        emoji.to_string()
+    } else {
+        stripped
+    }
+}
+
 /// Build the CRDT key for one sender's hold of an emoji.
+/// The emoji side is skin-tone-normalized so tone variants share one key.
 pub fn reaction_key(emoji: &str, sender: &str) -> String {
-    format!("{emoji}{REACTION_KEY_SEP}{sender}")
+    let base = normalize_reaction_emoji(emoji);
+    format!("{base}{REACTION_KEY_SEP}{sender}")
+}
+
+/// Remove flat keys and legacy buckets that are skin-tone variants of `base`
+/// for `sender`, so a message keeps one entry per base emoji per person.
+fn clear_skin_tone_reaction_variants(reactions: &LoroMap, base: &str, sender: &str) {
+    let raw = serde_json::to_value(reactions.get_deep_value()).unwrap_or(Value::Null);
+    let Some(obj) = raw.as_object() else {
+        return;
+    };
+    for key in obj.keys() {
+        if let Some((emoji, sid)) = key.split_once(REACTION_KEY_SEP) {
+            if sid == sender && emoji != base && normalize_reaction_emoji(emoji) == base {
+                let _ = reactions.delete(key.as_str());
+            }
+            continue;
+        }
+        if key.contains(REACTION_KEY_SEP) {
+            continue;
+        }
+        if key != base && normalize_reaction_emoji(key) == base {
+            if let Some(ValueOrContainer::Container(Container::Map(bucket))) =
+                reactions.get(key.as_str())
+            {
+                let _ = bucket.delete(sender);
+            }
+        }
+    }
 }
 
 /// Concatenate text parts of a projected (or raw) message row JSON.
@@ -142,8 +196,9 @@ pub fn message_text(row: &Value) -> String {
 
 /// Reader projection: expand flat `reactions` keys (`"emoji|sender" → true`)
 /// into `emoji → { sender → true }` for UI / serde. Also folds legacy nested
-/// emoji-bucket maps so both shapes read the same. Call before deserializing
-/// a message row.
+/// emoji-bucket maps so both shapes read the same. Skin-tone variants of the
+/// same base emoji merge under one bucket. Call before deserializing a
+/// message row.
 pub fn project_reactions(json: &mut Value) {
     let Some(obj) = json.as_object_mut() else {
         return;
@@ -158,8 +213,12 @@ pub fn project_reactions(json: &mut Value) {
             if key.contains(REACTION_KEY_SEP) {
                 continue;
             }
+            let base = normalize_reaction_emoji(&key);
+            if base.is_empty() {
+                continue;
+            }
             let entry = nested
-                .entry(key)
+                .entry(base)
                 .or_insert_with(|| Value::Object(serde_json::Map::new()));
             if let Value::Object(dst) = entry {
                 for (sender, flag) in bucket {
@@ -179,8 +238,12 @@ pub fn project_reactions(json: &mut Value) {
         if emoji.is_empty() || sender.is_empty() {
             continue;
         }
+        let base = normalize_reaction_emoji(emoji);
+        if base.is_empty() {
+            continue;
+        }
         let entry = nested
-            .entry(emoji.to_string())
+            .entry(base)
             .or_insert_with(|| Value::Object(serde_json::Map::new()));
         if let Value::Object(dst) = entry {
             dst.insert(sender.to_string(), Value::Bool(true));
@@ -265,6 +328,17 @@ impl MessageView {
             .collect::<Vec<_>>()
             .join("")
     }
+
+    /// Words or a visible attachment: what a reader of the chat can see on this row. A
+    /// hand-off row, a background job's host row or a stream that never got text has
+    /// neither and is a blank, sender-less line to anyone reading the transcript as text.
+    pub fn has_visible_content(&self) -> bool {
+        !self.text().trim().is_empty()
+            || self.parts.iter().any(|p| {
+                p.get("kind").and_then(Value::as_str) == Some("attachment")
+                    && p.get("hidden").and_then(Value::as_bool) != Some(true)
+            })
+    }
 }
 
 /// A chat doc with handles cached for the streaming hot path.
@@ -273,6 +347,25 @@ pub struct ChatDoc {
     live_text: RefCell<HashMap<(String, String), LoroText>>,
     /// Nesting depth for [`Self::transact`]. Only the outermost call commits.
     txn_depth: Cell<u32>,
+    /// Set when a value was removed from this doc's state (a secret redaction or scrub, made
+    /// here or imported): the holder persists at once. Cleared by [`Self::take_history_dirty`].
+    history_dirty: Cell<bool>,
+    /// Sticky twin of `history_dirty`: once a value was removed, every [`Self::snapshot`] this
+    /// doc exports is shallow (state at the frontier, no older ops), so no persisted copy —
+    /// box, relay checkpoint, device store — carries the old text again.
+    shallow_mode: Cell<bool>,
+    /// Set from inside Loro's diff callback when an import (or a local write) stamps a
+    /// message `redactedAt`; folded into the two cells above by [`Self::sync_redaction_flag`].
+    redaction_seen: Arc<AtomicBool>,
+    _redaction_sub: loro::Subscription,
+}
+
+/// Does a diff touch a message's `redactedAt` (a secret redaction arriving)?
+fn diff_marks_redaction(event: &DiffEvent<'_>) -> bool {
+    event.events.iter().any(|d| match &d.diff {
+        loro::event::Diff::Map(m) => m.updated.keys().any(|k| &**k == "redactedAt"),
+        _ => false,
+    })
 }
 
 /// Optional fields for a client user-message write (crdt-sync §6.2).
@@ -289,15 +382,116 @@ pub struct UserMessageOpts {
     pub sender_name: Option<String>,
     pub sender_avatar: Option<String>,
     pub answers_question_id: Option<String>,
+    /// The sender's IANA time zone (`"Europe/London"`), written as `tz` so the
+    /// agent can answer for the user's moment ("4:28 PM where you are") —
+    /// Grok parity trait 1 (agentd reads `tz` / `timeZone` / `timezone`).
+    /// Clients pass [`device_time_zone`]; fixtures and tests leave it unset.
+    pub tz: Option<String>,
 }
 
-/// One attachment part on a client user message (`name` / `mime` / optional `kind` / `ref`).
-#[derive(Debug, Clone)]
+/// Reply-to across chats ("Reply in DM", crdt-sync §6.2 `replyRef`): where the
+/// quoted message lives plus a snapshot of it, so a reader who is not in the
+/// source chat still sees the quote (and nobody has to open another doc to
+/// draw the header). `replyTo` stays the in-chat reply link.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplyRef {
+    /// The chat the quoted message is in.
+    pub chat_id: String,
+    /// `"people"` for DMs and people groups, else the project id.
+    pub project_id: String,
+    pub message_id: String,
+    /// Where the quote came from, as the header says it: "in Arbonites".
+    #[serde(default)]
+    pub chat_title: String,
+    /// `user:<id>` / `agent:<project>` / `agent` of the quoted row.
+    #[serde(default)]
+    pub sender: String,
+    #[serde(default)]
+    pub sender_name: String,
+    #[serde(default)]
+    pub sender_handle: String,
+    /// The quoted prose, one line, cut to [`REPLY_REF_TEXT_CHARS`].
+    #[serde(default)]
+    pub text: String,
+}
+
+/// Row field that carries a [`ReplyRef`].
+pub const REPLY_REF_FIELD: &str = "replyRef";
+/// The snapshot keeps this much of the quoted message.
+pub const REPLY_REF_TEXT_CHARS: usize = 240;
+
+impl ReplyRef {
+    /// Whitespace-collapsed first `REPLY_REF_TEXT_CHARS` characters of `text`,
+    /// cut on a word boundary with an ellipsis.
+    pub fn snapshot_text(text: &str) -> String {
+        let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if flat.chars().count() <= REPLY_REF_TEXT_CHARS {
+            return flat;
+        }
+        let mut cut: String = flat.chars().take(REPLY_REF_TEXT_CHARS).collect();
+        if let Some(ix) = cut.rfind(' ') {
+            if ix > REPLY_REF_TEXT_CHARS / 2 {
+                cut.truncate(ix);
+            }
+        }
+        format!("{}…", cut.trim_end_matches([',', ';', ':', '.']))
+    }
+
+    /// The `replyRef` of a row, when it carries a well-formed one.
+    pub fn from_row(row: &Value) -> Option<Self> {
+        let r: Self = serde_json::from_value(row.get(REPLY_REF_FIELD)?.clone()).ok()?;
+        (!r.chat_id.is_empty() && !r.message_id.is_empty()).then_some(r)
+    }
+
+    /// Who the quote is from, for "Replying to <who> in <chat>".
+    pub fn who(&self) -> String {
+        if !self.sender_name.trim().is_empty() {
+            return self.sender_name.trim().to_owned();
+        }
+        if !self.sender_handle.trim().is_empty() {
+            return format!("@{}", self.sender_handle.trim());
+        }
+        "a message".to_owned()
+    }
+}
+
+/// The device's IANA time zone, if the platform names one (macOS and iOS via
+/// CoreFoundation, Linux via /etc/localtime).
+pub fn device_time_zone() -> Option<String> {
+    iana_time_zone::get_timezone()
+        .ok()
+        .map(|z| z.trim().to_string())
+        .filter(|z| !z.is_empty())
+}
+
+/// Where a GIF / sticker came from (a later picker fills this in). Old messages
+/// and pasted images have none. Written as an optional `source` map on the
+/// attachment: `{ provider, id, pageUrl }`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentSource {
+    pub provider: String,
+    pub id: String,
+    pub page_url: String,
+}
+
+/// One attachment part on a client user message (`name` / `mime` / optional `kind` / `ref`
+/// / optional `url` / optional `source`).
+///
+/// `kind` is a free string the clients agree on: `image`, `audio`, `video`, `file`,
+/// and `sticker` (a picker sticker: drawn at a fixed size with no bubble).
+#[derive(Debug, Clone, Default)]
 pub struct UserAttachment {
     pub name: String,
     pub mime: String,
     pub kind: Option<String>,
     pub blob_ref: Option<String>,
+    /// A picture that lives with its provider, not in the chat slot (a GIF picked from
+    /// KLIPY: the provider's terms allow no stored copy). Clients load it through the
+    /// relay's pass-through (`GET /gif/media?u=`). Never set together with `blob_ref`.
+    pub url: Option<String>,
+    /// Attribution for a GIF / sticker picker result; omitted when absent.
+    pub source: Option<AttachmentSource>,
 }
 
 fn lv_to_json(v: &LoroValue) -> Value {
@@ -409,10 +603,29 @@ impl ChatDoc {
             doc.set_peer_id(peer).expect("peer id");
         }
         doc.set_record_timestamp(record_timestamps);
+        let redaction_seen = Arc::new(AtomicBool::new(false));
+        let seen = redaction_seen.clone();
+        let sub = doc.subscribe_root(Arc::new(move |e: DiffEvent<'_>| {
+            if diff_marks_redaction(&e) {
+                seen.store(true, Ordering::Relaxed);
+            }
+        }));
         Self {
             doc,
             live_text: RefCell::new(HashMap::new()),
             txn_depth: Cell::new(0),
+            history_dirty: Cell::new(false),
+            shallow_mode: Cell::new(false),
+            redaction_seen,
+            _redaction_sub: sub,
+        }
+    }
+
+    /// Fold what the diff callback saw into the flags (called by every reader of them).
+    fn sync_redaction_flag(&self) {
+        if self.redaction_seen.swap(false, Ordering::Relaxed) {
+            self.history_dirty.set(true);
+            self.shallow_mode.set(true);
         }
     }
 
@@ -484,7 +697,9 @@ impl ChatDoc {
             .unwrap_or_default()
     }
 
-    /// Full snapshot after committing pending edits.
+    /// Full snapshot after committing pending edits — or, once a secret was removed from this
+    /// doc ([`Self::redact_message_as_secret`], [`Self::scrub_values`], an imported redaction
+    /// noted through [`Self::note_redactions_in`]), the [`Self::shallow_snapshot`] instead.
     ///
     /// While a [`Self::transact`] is open this returns empty and does not call
     /// Loro `export` (export is a commit barrier and would flush the batch).
@@ -492,8 +707,18 @@ impl ChatDoc {
         if self.txn_depth.get() > 0 {
             return Vec::new();
         }
+        self.sync_redaction_flag();
+        if self.shallow_mode.get() {
+            return self.shallow_snapshot();
+        }
         self.doc.commit();
         self.doc.export(ExportMode::Snapshot).unwrap_or_default()
+    }
+
+    /// Does every snapshot this doc exports drop history (a value was removed)?
+    pub fn is_shallow_mode(&self) -> bool {
+        self.sync_redaction_flag();
+        self.shallow_mode.get()
     }
 
     /// Ops this doc holds that `theirs` (a peer's version vector, e.g. the relay's in
@@ -509,6 +734,16 @@ impl ChatDoc {
             return Vec::new();
         }
         self.export_updates_since(theirs)
+    }
+
+    /// True when every op in `update` is already covered by `vv` (e.g. the room's stored doc).
+    /// Uses Loro's import-blob metadata so the relay can ACK a resent push without storing or
+    /// gating it. Undecodable bytes are not covered.
+    pub fn update_covered_by(update: &[u8], vv: &VersionVector) -> bool {
+        match LoroDoc::decode_import_blob_meta(update, true) {
+            Ok(meta) => vv.includes_vv(&meta.partial_end_vv),
+            Err(_) => false,
+        }
     }
 
     /// True when every op in `vv` is already in this doc (checkpoint containment check, crdt-sync §7.3).
@@ -623,6 +858,9 @@ impl ChatDoc {
         if let Some(q) = opts.answers_question_id.as_deref() {
             loro_err(m.insert("answersQuestionId", q))?;
         }
+        if let Some(tz) = opts.tz.as_deref().map(str::trim).filter(|z| !z.is_empty()) {
+            loro_err(m.insert("tz", tz))?;
+        }
         loro_err(m.insert("status", MessageStatus::Done.as_str()))?;
         loro_err(m.insert("deviceId", device_id))?;
         loro_err(m.insert("createdAt", now))?;
@@ -640,6 +878,15 @@ impl ChatDoc {
             }
             if let Some(r) = att.blob_ref.as_deref() {
                 loro_err(a.insert("ref", r))?;
+            }
+            if let Some(u) = att.url.as_deref() {
+                loro_err(a.insert("url", u))?;
+            }
+            if let Some(src) = &att.source {
+                let s = loro_err(a.insert_container("source", LoroMap::new()))?;
+                loro_err(s.insert("provider", src.provider.as_str()))?;
+                loro_err(s.insert("id", src.id.as_str()))?;
+                loro_err(s.insert("pageUrl", src.page_url.as_str()))?;
             }
         }
         let part = loro_err(parts.push_container(LoroMap::new()))?;
@@ -737,10 +984,11 @@ impl ChatDoc {
     ///
     /// CRDT shape: flat keys under `reactions` — `"emoji|sender" → true` — so
     /// concurrent first reacts on the same emoji merge as map-key inserts
-    /// instead of racing on nested emoji-bucket creation. Readers call
-    /// [`project_reactions`] to view `emoji → { sender → true }`. Does not
-    /// commit. Turning a reaction off is a no-op when the reactions map is
-    /// missing (does not create containers).
+    /// instead of racing on nested emoji-bucket creation. The emoji side is
+    /// skin-tone-normalized (`👍🏽` ≡ `👍`). Readers call [`project_reactions`]
+    /// to view `emoji → { sender → true }`. Does not commit. Turning a
+    /// reaction off is a no-op when the reactions map is missing (does not
+    /// create containers).
     pub fn set_reaction(
         &self,
         msg_id: &str,
@@ -751,6 +999,10 @@ impl ChatDoc {
         if emoji.is_empty() || sender.is_empty() {
             return Ok(());
         }
+        let base = normalize_reaction_emoji(emoji);
+        if base.is_empty() {
+            return Ok(());
+        }
         let Some(map) = self.find_message(msg_id) else {
             return Ok(());
         };
@@ -759,14 +1011,18 @@ impl ChatDoc {
             _ if on => loro_err(map.insert_container("reactions", LoroMap::new()))?,
             _ => return Ok(()),
         };
-        let key = reaction_key(emoji, sender);
+        // Drop any older skin-tone variant keys / legacy buckets for this
+        // sender so only the normalized base remains.
+        clear_skin_tone_reaction_variants(&reactions, &base, sender);
+        let key = reaction_key(&base, sender);
         if on {
             loro_err(reactions.insert(key.as_str(), true))?;
         } else {
             // Flat key (current shape). Also clear a legacy nested bucket entry
             // if one is still present from older writers.
             let _ = reactions.delete(key.as_str());
-            if let Some(ValueOrContainer::Container(Container::Map(bucket))) = reactions.get(emoji)
+            if let Some(ValueOrContainer::Container(Container::Map(bucket))) =
+                reactions.get(base.as_str())
             {
                 let _ = bucket.delete(sender);
             }
@@ -797,9 +1053,64 @@ impl ChatDoc {
         Ok(())
     }
 
+    /// Client write: replace the body of a message's last `text` part and set
+    /// `editedAt`. Does not commit. No-op when the id is missing or there is no
+    /// text part (attachment-only rows). User rows keep one text part after any
+    /// attachments; that is the part this updates.
+    pub fn edit_message_text(&self, msg_id: &str, text: &str) -> CoreResult<()> {
+        if msg_id.is_empty() {
+            return Ok(());
+        }
+        let Some(map) = self.find_message(msg_id) else {
+            return Ok(());
+        };
+        let Some(parts) = self.parts_of(msg_id) else {
+            return Ok(());
+        };
+        let mut text_part: Option<(String, LoroMap)> = None;
+        for i in 0..parts.len() {
+            let Some(ValueOrContainer::Container(Container::Map(p))) = parts.get(i) else {
+                continue;
+            };
+            let kind = match p.get("kind") {
+                Some(ValueOrContainer::Value(LoroValue::String(s))) => s.to_string(),
+                _ => continue,
+            };
+            if kind != "text" {
+                continue;
+            }
+            let id = match p.get("id") {
+                Some(ValueOrContainer::Value(LoroValue::String(s))) => s.to_string(),
+                _ => continue,
+            };
+            text_part = Some((id, p));
+        }
+        let Some((part_id, part)) = text_part else {
+            return Ok(());
+        };
+        let t = loro_err(part.insert_container("text", LoroText::new()))?;
+        loro_err(t.insert(0, text))?;
+        self.live_text
+            .borrow_mut()
+            .insert((msg_id.to_owned(), part_id), t);
+        loro_err(map.insert("editedAt", now_ms()))?;
+        Ok(())
+    }
+
     /// Client write: append a `commands` row. Does not commit. Returns the command id.
     /// Object payloads become a nested `LoroMap` (arrays → `LoroList`).
     pub fn push_command(&self, kind: &str, payload: Value, device_id: &str) -> String {
+        self.push_command_at(kind, payload, device_id, now_ms())
+    }
+
+    /// `push_command` with an explicit `issuedAt` (replaying history, tests of catch-up order).
+    pub fn push_command_at(
+        &self,
+        kind: &str,
+        payload: Value,
+        device_id: &str,
+        issued_at: i64,
+    ) -> String {
         let cmds = self.commands_list();
         let c = cmds.push_container(LoroMap::new()).expect("push command");
         let id = ulid();
@@ -807,7 +1118,7 @@ impl ChatDoc {
         c.insert("kind", kind).ok();
         insert_json_map(&c, "payload", payload).expect("payload");
         c.insert("issuedBy", device_id).ok();
-        c.insert("issuedAt", now_ms()).ok();
+        c.insert("issuedAt", issued_at).ok();
         c.insert("status", CommandStatus::Pending.as_str()).ok();
         id
     }
@@ -1236,6 +1547,34 @@ impl ChatDoc {
         true
     }
 
+    /// Remove every part of `kind` from message `msg_id` (the relay dropping a link preview
+    /// the sender removed). Returns how many went. Commits like the other part writers.
+    pub fn remove_parts_of_kind(&self, msg_id: &str, kind: &str) -> usize {
+        let Some(parts) = self.parts_of(msg_id) else {
+            return 0;
+        };
+        let mut removed = 0;
+        let mut i = 0;
+        while i < parts.len() {
+            let is_kind = match parts.get(i) {
+                Some(ValueOrContainer::Container(Container::Map(p))) => matches!(
+                    p.get("kind"),
+                    Some(ValueOrContainer::Value(LoroValue::String(s))) if s.as_str() == kind
+                ),
+                _ => false,
+            };
+            if is_kind && parts.delete(i, 1).is_ok() {
+                removed += 1;
+            } else {
+                i += 1;
+            }
+        }
+        if removed > 0 {
+            self.commit_now();
+        }
+        removed
+    }
+
     /// Id of the part at index `pix` in message `msg_id`.
     pub fn part_id_at(&self, msg_id: &str, pix: usize) -> Option<String> {
         let parts = self.parts_of(msg_id)?;
@@ -1438,6 +1777,15 @@ impl ChatDoc {
         Some(msg_id)
     }
 
+    /// The standing choice made on a destructive-shell card (#1544): `grant` = the path class
+    /// the owner allowed from now on, so an answered card shows which row was picked.
+    pub fn set_approval_grant(&self, approval_id: &str, path_class: &str) -> Option<String> {
+        let (msg_id, p) = self.approval_part(approval_id)?;
+        p.insert("grant", path_class).ok();
+        self.commit_now();
+        Some(msg_id)
+    }
+
     /// Plain JSON of one approval part, if present.
     pub fn approval(&self, approval_id: &str) -> Option<Value> {
         self.approval_part(approval_id)
@@ -1580,6 +1928,14 @@ impl ChatDoc {
         }
     }
 
+    /// Cross-chat reply: write `replyRef` on a row (a plain value map, so
+    /// every reader sees the whole snapshot at once).
+    pub fn set_reply_ref(&self, msg_id: &str, reply_ref: &ReplyRef) {
+        if let Ok(v) = serde_json::to_value(reply_ref) {
+            self.set_message_fields(msg_id, &[(REPLY_REF_FIELD, v)]);
+        }
+    }
+
     pub fn finish_message(&self, msg_id: &str, status: MessageStatus) {
         self.set_message_fields(
             msg_id,
@@ -1672,9 +2028,121 @@ impl ChatDoc {
             }
         }
         if hits > 0 {
+            self.history_dirty.set(true);
+            self.shallow_mode.set(true);
             self.commit_now();
         }
         hits
+    }
+}
+
+/// The part kind a message becomes when its value was moved into the vault: the "Secret
+/// saved as NAME" ghost row. Carries names only — `name`, `env`, `secretId`, `savedBy`
+/// (`user:<id>`), `agent` (project id that saved it) — never a value field.
+pub const SECRET_REDACTED_KIND: &str = "secret_redacted";
+
+/// What a message's parts are replaced with by [`ChatDoc::redact_message_as_secret`].
+#[derive(Debug, Clone, Default)]
+pub struct SecretRedaction {
+    pub secret_id: String,
+    pub name: String,
+    pub env: String,
+    /// `user:<id>` of the person whose message held the value.
+    pub saved_by: String,
+    /// Project id of the agent that saved it, when an agent did.
+    pub agent: Option<String>,
+}
+
+impl ChatDoc {
+    /// Relay write: replace **every** part of a message with one `secret_redacted` part and
+    /// mark the row `redactedAt`. The old text is gone from the live state; the oplog still
+    /// holds it until the holder exports a [`Self::shallow_snapshot`] (the relay does so at
+    /// once; clients and the box do on receipt). Returns false when the id is unknown.
+    pub fn redact_message_as_secret(&self, msg_id: &str, r: &SecretRedaction) -> bool {
+        let Some(map) = self.find_message(msg_id) else {
+            return false;
+        };
+        let Some(parts) = self.parts_of(msg_id) else {
+            return false;
+        };
+        let n = parts.len();
+        if n > 0 && parts.delete(0, n).is_err() {
+            return false;
+        }
+        let Ok(part) = parts.push_container(LoroMap::new()) else {
+            return false;
+        };
+        let _ = part.insert("id", ulid().as_str());
+        let _ = part.insert("kind", SECRET_REDACTED_KIND);
+        let _ = part.insert("name", r.name.as_str());
+        let _ = part.insert("env", r.env.as_str());
+        let _ = part.insert("secretId", r.secret_id.as_str());
+        let _ = part.insert("savedBy", r.saved_by.as_str());
+        if let Some(a) = &r.agent {
+            let _ = part.insert("agent", a.as_str());
+        }
+        let _ = map.insert("redactedAt", now_ms());
+        // Anything cached for streaming on this message is stale now.
+        self.live_text.borrow_mut().retain(|(m, _), _| m != msg_id);
+        self.history_dirty.set(true);
+        self.shallow_mode.set(true);
+        self.commit_now();
+        true
+    }
+
+    /// Importers call this with the message indexes an import touched: a `secret_redacted`
+    /// part among them means the oplog now holds text the state no longer shows.
+    pub fn note_redactions_in(&self, touched: &[usize]) {
+        if self.history_dirty.get() {
+            return;
+        }
+        let msgs = self.messages_list();
+        for &ix in touched {
+            let Some(ValueOrContainer::Container(Container::Map(m))) = msgs.get(ix) else {
+                continue;
+            };
+            if m.get("redactedAt").is_some() {
+                self.history_dirty.set(true);
+                self.shallow_mode.set(true);
+                return;
+            }
+        }
+    }
+
+    /// Was a value removed since the last call? The holder persists a shallow snapshot then.
+    pub fn take_history_dirty(&self) -> bool {
+        self.sync_redaction_flag();
+        self.history_dirty.replace(false)
+    }
+
+    pub fn mark_history_dirty(&self) {
+        self.history_dirty.set(true);
+        self.shallow_mode.set(true);
+    }
+
+    /// Does any message carry a `secret_redacted` part? Holders use this to decide whether
+    /// their persisted snapshot must drop history ([`Self::shallow_snapshot`]).
+    pub fn has_secret_redaction(&self) -> bool {
+        self.messages().iter().any(|m| {
+            m.parts
+                .iter()
+                .any(|p| p.get("kind").and_then(Value::as_str) == Some(SECRET_REDACTED_KIND))
+        })
+    }
+
+    /// Snapshot **without** history before the current frontier: the state as it is now plus
+    /// nothing older. After a redaction this is the only export that no longer contains the
+    /// removed text (a plain [`Self::snapshot`] keeps every past op). Peers import it like any
+    /// snapshot; updates made after this frontier merge as usual. Empty while a transact is open.
+    pub fn shallow_snapshot(&self) -> Vec<u8> {
+        if self.txn_depth.get() > 0 {
+            return Vec::new();
+        }
+        self.doc.commit();
+        let f = self.doc.oplog_frontiers();
+        self.doc
+            .export(ExportMode::shallow_snapshot(&f))
+            .unwrap_or_default()
     }
 }
 
@@ -1715,9 +2183,190 @@ pub fn decode_vv(bytes: &[u8]) -> Option<VersionVector> {
     VersionVector::decode(bytes).ok()
 }
 
+/// True when every op in `update` is already covered by `vv`. See [`ChatDoc::update_covered_by`].
+pub fn update_covered_by(update: &[u8], vv: &VersionVector) -> bool {
+    ChatDoc::update_covered_by(update, vv)
+}
+
+#[cfg(test)]
+mod secret_redaction_tests {
+    use super::*;
+
+    const KEY: &str = concat!(
+        "sk_",
+        "live_51HxQ9mT3vK2pLnR8wZ4eYc7bD1fG6hJ0kM9nP5qS2tU8vW3xA1"
+    );
+
+    fn holds(bytes: &[u8]) -> bool {
+        let needle = KEY.as_bytes();
+        bytes.windows(needle.len()).any(|w| w == needle)
+    }
+
+    #[test]
+    fn redaction_replaces_every_part_and_the_shallow_snapshot_forgets_the_value() {
+        let doc = ChatDoc::new(Some(7), false);
+        doc.append_user_message(
+            "m1",
+            &format!("{KEY} save this"),
+            "dev",
+            &UserMessageOpts::default(),
+        )
+        .unwrap();
+        doc.append_user_message(
+            "m2",
+            "and run the report",
+            "dev",
+            &UserMessageOpts::default(),
+        )
+        .unwrap();
+        assert!(holds(&doc.snapshot()));
+        let ok = doc.redact_message_as_secret(
+            "m1",
+            &SecretRedaction {
+                secret_id: "s1".into(),
+                name: "STRIPE_KEY".into(),
+                env: "STRIPE_KEY".into(),
+                saved_by: "user:u1".into(),
+                agent: Some("p1".into()),
+            },
+        );
+        assert!(ok);
+        assert!(!doc.redact_message_as_secret("nope", &SecretRedaction::default()));
+        let m = doc.message("m1").unwrap();
+        assert_eq!(m.parts.len(), 1);
+        assert_eq!(m.parts[0]["kind"], SECRET_REDACTED_KIND);
+        assert_eq!(m.parts[0]["name"], "STRIPE_KEY");
+        assert_eq!(m.parts[0]["savedBy"], "user:u1");
+        assert!(m.parts[0].get("value").is_none());
+        assert!(m.rest.get("redactedAt").is_some());
+        assert_eq!(m.text(), "");
+        assert_eq!(doc.message("m2").unwrap().text(), "and run the report");
+        assert!(doc.has_secret_redaction());
+        assert!(doc.take_history_dirty());
+        assert!(!doc.take_history_dirty());
+
+        // a plain export still carries the old op; the doc's own snapshot() is shallow from
+        // now on, and a peer loading it sees the ghost row and can keep editing
+        assert!(holds(&doc.doc.export(ExportMode::Snapshot).unwrap()));
+        assert!(doc.is_shallow_mode());
+        assert!(!holds(&doc.snapshot()));
+        let shallow = doc.shallow_snapshot();
+        assert!(!shallow.is_empty() && !holds(&shallow));
+        let peer = ChatDoc::from_snapshot(Some(9), false, &shallow).unwrap();
+        assert_eq!(
+            peer.message("m1").unwrap().parts[0]["kind"],
+            SECRET_REDACTED_KIND
+        );
+        peer.append_user_message("m3", "later", "dev2", &UserMessageOpts::default())
+            .unwrap();
+        assert_eq!(peer.messages().len(), 3);
+    }
+
+    #[test]
+    fn an_importer_notices_a_redaction_in_touched_rows() {
+        let a = ChatDoc::new(Some(1), false);
+        a.append_user_message("m1", KEY, "dev", &UserMessageOpts::default())
+            .unwrap();
+        let mut b = ChatDoc::from_snapshot(Some(2), false, &a.snapshot()).unwrap();
+        a.redact_message_as_secret(
+            "m1",
+            &SecretRedaction {
+                name: "K".into(),
+                ..Default::default()
+            },
+        );
+        let upd = a.export_updates_since(&b.oplog_vv());
+        b.import(&upd).unwrap();
+        assert!(
+            b.take_history_dirty(),
+            "the import itself flagged the redaction"
+        );
+        assert!(b.is_shallow_mode());
+        assert!(
+            !holds(&b.snapshot()),
+            "the importer's own snapshot is shallow too"
+        );
+        // a doc loaded from a snapshot with a ghost row in it exports shallow too: a ghost
+        // anywhere means this room's history must never be re-exported in full
+        let c = ChatDoc::from_snapshot(Some(3), false, &b.snapshot()).unwrap();
+        assert!(c.is_shallow_mode());
+        // the explicit note stays for holders that track touched rows themselves
+        let d = ChatDoc::new(Some(4), false);
+        d.append_user_message("x", "plain", "dev", &UserMessageOpts::default())
+            .unwrap();
+        assert!(!d.is_shallow_mode());
+        d.note_redactions_in(&[0]);
+        assert!(!d.take_history_dirty(), "no redactedAt on that row");
+        d.mark_history_dirty();
+        assert!(d.take_history_dirty() && d.is_shallow_mode());
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn remove_parts_of_kind_drops_only_that_kind_and_leaves_the_rest() {
+        use super::*;
+        let doc = ChatDoc::new(Some(1), false);
+        doc.append_user_message("m", "look https://a.test/x", "dev", &Default::default())
+            .unwrap();
+        doc.add_part_from_json(
+            "m",
+            &serde_json::json!({ "kind": "link_preview", "title": "A", "url": "https://a.test/x" }),
+        )
+        .unwrap();
+        doc.add_part_from_json(
+            "m",
+            &serde_json::json!({ "kind": "link_preview", "title": "B", "url": "https://a.test/y" }),
+        )
+        .unwrap();
+        assert_eq!(doc.message("m").unwrap().parts.len(), 3);
+        assert_eq!(doc.remove_parts_of_kind("m", "link_preview"), 2);
+        let m = doc.message("m").unwrap();
+        assert_eq!(m.parts.len(), 1);
+        assert_eq!(m.parts[0]["kind"], "text");
+        assert_eq!(m.text(), "look https://a.test/x");
+        assert_eq!(doc.remove_parts_of_kind("m", "link_preview"), 0);
+        assert_eq!(doc.remove_parts_of_kind("nope", "link_preview"), 0);
+    }
+
     use super::*;
+
+    #[test]
+    fn update_covered_by_when_vv_includes_the_blob() {
+        let doc = ChatDoc::new(Some(1), false);
+        let base = doc.oplog_vv();
+        doc.append_user_message("m1", "hi", "dev", &UserMessageOpts::default())
+            .unwrap();
+        let update = doc.export_updates_since(&base);
+        let vv = doc.oplog_vv();
+        assert!(
+            ChatDoc::update_covered_by(&update, &vv),
+            "the doc's own vv covers the update it just exported"
+        );
+    }
+
+    #[test]
+    fn update_covered_by_false_when_vv_lacks_ops() {
+        let doc = ChatDoc::new(Some(2), false);
+        let empty = doc.oplog_vv();
+        doc.append_user_message("m1", "hi", "dev", &UserMessageOpts::default())
+            .unwrap();
+        let update = doc.export_updates_since(&empty);
+        assert!(
+            !ChatDoc::update_covered_by(&update, &empty),
+            "an empty vv does not cover new ops"
+        );
+    }
+
+    #[test]
+    fn update_covered_by_false_when_undecodable() {
+        let vv = ChatDoc::new(Some(3), false).oplog_vv();
+        assert!(
+            !ChatDoc::update_covered_by(b"not-a-loro-blob", &vv),
+            "garbage bytes are not covered"
+        );
+    }
 
     /// Two replicas behind ONE device id (the busy-reply smoke, 2026-10-23): the second replica
     /// never receives the first one's rows (own-device rows are excluded on the way back), so the
@@ -1844,6 +2493,90 @@ mod tests {
         assert!(!msgs[1].text().contains("sk-live-"));
     }
 
+    /// Grok parity trait 1 ([feedback hide-worker-rows-and-tz-2026-10-24]): a
+    /// client writes the device's IANA zone as `tz` on its user rows so the
+    /// agent can answer for the user's moment; nothing is written when the
+    /// client has none (fixtures, tests), and a blank zone is not a zone.
+    #[test]
+    fn user_rows_carry_the_senders_time_zone_when_known() {
+        let doc = ChatDoc::new(None, false);
+        doc.transact(|d| {
+            d.append_user_message(
+                "m1",
+                "what time is it there?",
+                "dev:mac",
+                &UserMessageOpts {
+                    tz: Some("Europe/London".into()),
+                    ..UserMessageOpts::default()
+                },
+            )
+            .unwrap();
+            d.append_user_message("m2", "and now?", "dev:fixture", &UserMessageOpts::default())
+                .unwrap();
+            d.append_user_message(
+                "m3",
+                "blank",
+                "dev:odd",
+                &UserMessageOpts {
+                    tz: Some("  ".into()),
+                    ..UserMessageOpts::default()
+                },
+            )
+            .unwrap();
+        });
+        let rows = &doc.to_json()["messages"];
+        assert_eq!(rows[0]["tz"], "Europe/London");
+        assert!(rows[1].get("tz").is_none(), "no zone, no field");
+        assert!(rows[2].get("tz").is_none(), "a blank zone is not written");
+        // The helper answers something IANA-shaped or nothing — never a blank.
+        if let Some(zone) = device_time_zone() {
+            assert!(!zone.trim().is_empty() && !zone.contains(' '), "{zone}");
+        }
+    }
+
+    /// Reply in DM (feedback reply-in-dm-context-2026-10-25): a row's `replyRef`
+    /// round-trips as one value map — address + snapshot — so a reader who is
+    /// not in the source chat still has the quote; a bare `replyTo` is untouched.
+    #[test]
+    fn reply_ref_round_trips_on_a_user_row() {
+        let doc = ChatDoc::new(None, false);
+        doc.transact(|d| {
+            d.append_user_message("m1", "Works", "dev:ios", &UserMessageOpts::default())
+                .unwrap();
+            d.set_reply_ref(
+                "m1",
+                &ReplyRef {
+                    chat_id: "01CHAT".into(),
+                    project_id: "people".into(),
+                    message_id: "01MSG".into(),
+                    chat_title: "Arbonites".into(),
+                    sender: "user:gh_1".into(),
+                    sender_name: "Jacob".into(),
+                    sender_handle: "unconst".into(),
+                    text: ReplyRef::snapshot_text("Testing  reply\nin dm"),
+                },
+            );
+        });
+        let row = &doc.to_json()["messages"][0];
+        let r = ReplyRef::from_row(row).expect("replyRef");
+        assert_eq!(r.chat_id, "01CHAT");
+        assert_eq!(r.message_id, "01MSG");
+        assert_eq!(r.chat_title, "Arbonites");
+        assert_eq!(r.text, "Testing reply in dm");
+        assert_eq!(r.who(), "Jacob");
+        assert!(
+            row.get("replyTo").is_none(),
+            "a cross-chat reply is not an in-chat reply"
+        );
+        // A malformed ref (no message id) reads as none, never as a broken header.
+        assert!(
+            ReplyRef::from_row(&serde_json::json!({ "replyRef": { "chatId": "x" } })).is_none()
+        );
+        // Long originals are cut on a word with an ellipsis.
+        let long = ReplyRef::snapshot_text(&"word ".repeat(100));
+        assert!(long.ends_with('…') && long.chars().count() <= REPLY_REF_TEXT_CHARS + 1);
+    }
+
     #[test]
     fn client_writers_omit_placeholders_and_converge() {
         let a = ChatDoc::new(None, false);
@@ -1866,6 +2599,8 @@ mod tests {
                         mime: "image/png".into(),
                         kind: Some("image".into()),
                         blob_ref: Some("blob-1".into()),
+                        url: None,
+                        source: None,
                     }],
                     ..UserMessageOpts::default()
                 },
@@ -1888,6 +2623,8 @@ mod tests {
         assert!(row.get("reactions").is_some());
         assert_eq!(row["replyTo"], "prev");
         assert_eq!(row["senderHandle"], "ken");
+        // Pasted / ordinary attachments omit `source`.
+        assert!(row["parts"][0]["attachment"].get("source").is_none());
         let sys = &a.to_json()["messages"][1];
         assert_eq!(sys["callId"], "c1");
         assert!(sys.get("call_id").is_none());
@@ -2021,6 +2758,32 @@ mod tests {
     }
 
     #[test]
+    fn skin_tone_variants_collapse_to_one_reaction() {
+        let doc = ChatDoc::new(None, false);
+        doc.transact(|d| {
+            d.append_user_message("m", "hi", "dev:a", &UserMessageOpts::default())
+                .unwrap();
+            d.set_reaction("m", "👍🏽", "user:a", true).unwrap();
+            d.set_reaction("m", "👍🏿", "user:b", true).unwrap();
+        });
+        let mut row = doc.to_json()["messages"][0].clone();
+        project_reactions(&mut row);
+        assert_eq!(row["reactions"]["👍"]["user:a"], true);
+        assert_eq!(row["reactions"]["👍"]["user:b"], true);
+        assert!(row["reactions"].get("👍🏽").is_none());
+        assert!(row["reactions"].get("👍🏿").is_none());
+        // Same sender toggling a different tone flips the shared base off.
+        doc.transact(|d| d.set_reaction("m", "👍🏻", "user:a", false).unwrap());
+        let mut row = doc.to_json()["messages"][0].clone();
+        project_reactions(&mut row);
+        assert!(row["reactions"]
+            .get("👍")
+            .and_then(|b| b.get("user:a"))
+            .is_none());
+        assert_eq!(row["reactions"]["👍"]["user:b"], true);
+    }
+
+    #[test]
     fn set_reaction_off_is_noop_when_reactions_missing() {
         let doc = ChatDoc::new(None, false);
         // Legacy-shaped row with no reactions map.
@@ -2072,6 +2835,29 @@ mod tests {
         b.import(&a.export_updates_since(&base)).unwrap();
         assert_eq!(b.messages_list().len(), 1);
         assert_eq!(b.messages()[0].id, "keep");
+    }
+
+    #[test]
+    fn edit_message_text_replaces_body_and_syncs() {
+        let a = ChatDoc::new(None, false);
+        let mut b = ChatDoc::new(None, false);
+        a.transact(|d| {
+            d.append_user_message("m1", "hello", "dev:a", &UserMessageOpts::default())
+                .unwrap();
+        });
+        b.import(&a.snapshot()).unwrap();
+        assert_eq!(message_text(&a.to_json()["messages"][0]), "hello");
+
+        let base = a.oplog_vv();
+        a.transact(|d| d.edit_message_text("m1", "hello edited").unwrap());
+        let row = &a.to_json()["messages"][0];
+        assert_eq!(message_text(row), "hello edited");
+        assert!(row.get("editedAt").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
+        a.edit_message_text("missing", "x").unwrap(); // missing id is a no-op
+        a.edit_message_text("", "x").unwrap();
+
+        b.import(&a.export_updates_since(&base)).unwrap();
+        assert_eq!(message_text(&b.to_json()["messages"][0]), "hello edited");
     }
 
     #[test]
@@ -2287,5 +3073,121 @@ mod tests {
         assert_eq!(json["parts"][0]["kind"], "text");
         assert_eq!(json["hiddenParts"].as_array().unwrap().len(), 1);
         assert_eq!(json["hiddenParts"][0]["kind"], "tool");
+    }
+
+    /// The two blank Arbonites rows of 2026-10-28 (an agent-to-agent hand-off row and a job's
+    /// host row) have no words and no visible attachment; a reply, a picture, and a row whose
+    /// only attachment is hidden are told apart.
+    #[test]
+    fn has_visible_content_tells_blank_rows_apart() {
+        use super::*;
+        use serde_json::json;
+        let d = ChatDoc::new(None, false);
+        d.start_assistant_message("handoff", "ask", "box:1");
+        d.set_message_fields(
+            "handoff",
+            &[
+                ("turn", json!({ "kind": "spawn" })),
+                ("subagentName", json!("Bob")),
+            ],
+        );
+        d.add_hidden_part("handoff", "agent_message_sent", "Hey Bob", &json!({}));
+        d.finish_message("handoff", MessageStatus::Done);
+        let part = d.start_assistant_message("reply", "ask", "box:1");
+        d.append_text("reply", &part, "Bob's here.");
+        d.finish_message("reply", MessageStatus::Done);
+        d.transact(|d| {
+            d.append_user_message(
+                "photo",
+                "",
+                "dev",
+                &UserMessageOpts {
+                    attachments: vec![UserAttachment {
+                        name: "a.jpg".into(),
+                        mime: "image/jpeg".into(),
+                        kind: Some("image".into()),
+                        blob_ref: Some("k".into()),
+                        url: None,
+                        source: None,
+                    }],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        });
+        let by_id = |id: &str| d.message(id).unwrap();
+        assert!(!by_id("handoff").has_visible_content());
+        assert!(by_id("reply").has_visible_content());
+        assert!(by_id("photo").has_visible_content());
+        let hidden_card = MessageView {
+            id: "h".into(),
+            role: "assistant".into(),
+            status: "done".into(),
+            parts: vec![
+                json!({ "kind": "text", "text": "  " }),
+                json!({ "kind": "attachment", "hidden": true, "attachment": { "ref": "k" } }),
+            ],
+            rest: json!({}),
+        };
+        assert!(!hidden_card.has_visible_content());
+    }
+
+    /// An attachment with and without `source` round-trips through the doc
+    /// (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG): the picker attribution map
+    /// is optional and omitted when absent.
+    #[test]
+    fn attachment_source_round_trips_through_the_doc() {
+        let with = ChatDoc::new(None, false);
+        with.transact(|d| {
+            d.append_user_message(
+                "m-src",
+                "gif",
+                "dev:a",
+                &UserMessageOpts {
+                    attachments: vec![UserAttachment {
+                        name: "dance.gif".into(),
+                        mime: "image/gif".into(),
+                        kind: Some("image".into()),
+                        blob_ref: Some("blob-gif".into()),
+                        url: None,
+                        source: Some(AttachmentSource {
+                            provider: "giphy".into(),
+                            id: "abc".into(),
+                            page_url: "https://giphy.com/gifs/abc".into(),
+                        }),
+                    }],
+                    ..UserMessageOpts::default()
+                },
+            )
+            .unwrap();
+        });
+        let att = &with.to_json()["messages"][0]["parts"][0]["attachment"];
+        assert_eq!(att["source"]["provider"], "giphy");
+        assert_eq!(att["source"]["id"], "abc");
+        assert_eq!(att["source"]["pageUrl"], "https://giphy.com/gifs/abc");
+
+        let without = ChatDoc::new(None, false);
+        without.transact(|d| {
+            d.append_user_message(
+                "m-plain",
+                "pic",
+                "dev:a",
+                &UserMessageOpts {
+                    attachments: vec![UserAttachment {
+                        name: "shot.png".into(),
+                        mime: "image/png".into(),
+                        kind: Some("image".into()),
+                        blob_ref: Some("blob-png".into()),
+                        url: None,
+                        source: None,
+                    }],
+                    ..UserMessageOpts::default()
+                },
+            )
+            .unwrap();
+        });
+        let plain = &without.to_json()["messages"][0]["parts"][0]["attachment"];
+        assert!(plain.get("source").is_none());
+        assert_eq!(plain["name"], "shot.png");
     }
 }

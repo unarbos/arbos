@@ -41,6 +41,9 @@
     "waitlist_position": null,
     "waitlisted": false
   },
+  "privacy": {
+    "group_add": "anyone"
+  },
   "user": {
     "avatar_url": null,
     "created_at": 1700000000000,

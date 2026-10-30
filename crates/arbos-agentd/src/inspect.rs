@@ -528,6 +528,7 @@ pub async fn page(w: &Workspace, q: &Query) -> Value {
         "count": events.len(),
         "identity": identity_json(&w.agent).await,
         "turn": turn_json(&w.agent).await,
+        "links": w.sync.link_summary().await,
         "events": events.iter().map(Event::to_json).collect::<Vec<_>>(),
     })
 }
@@ -557,7 +558,8 @@ fn disk_json(path: &std::path::Path) -> Value {
 }
 
 /// `GET /box/state`: image, agentd build, uptime, load, memory and disk headroom, every
-/// workspace with its turn-lock state.
+/// workspace with its turn-lock state, jobs and resource share; `resources` is the sampler's
+/// cgroup-aware view (`resources.rs`) for Settings → Machine.
 pub async fn box_state(sup: &Supervisor) -> Value {
     let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
     let loadavg = std::fs::read_to_string("/proc/loadavg").unwrap_or_default();
@@ -566,6 +568,8 @@ pub async fn box_state(sup: &Supervisor) -> Value {
         .take(3)
         .filter_map(|v| v.parse().ok())
         .collect();
+    // The sampler's view (cgroup caps inside Daytona; /proc is the host's there).
+    let resources = crate::resources::snapshot();
     let mut workspaces = Vec::new();
     for w in sup.list().await {
         workspaces.push(json!({
@@ -576,10 +580,25 @@ pub async fn box_state(sup: &Supervisor) -> Value {
             "started_at": w.started_at,
             "run_as": w.cfg.run_as.as_ref().map(|r| r.user.clone()),
             "turn": turn_json(&w.agent).await,
+            "jobs_running": w.agent.jobs_running.load(std::sync::atomic::Ordering::SeqCst),
+            "usage": resources.workspace(&w.project_id),
+            "links": w.sync.link_summary().await,
         }));
     }
     let now = now_ms();
     let warnings = warn_ring().lock().map(|r| r.len()).unwrap_or(0);
+    // `memory_mb` keeps its shape for older readers but carries the box's own cap once the
+    // sampler has it (inside Daytona /proc/meminfo is the 755 GiB host).
+    let memory_mb = match &resources.memory {
+        Some(m) => {
+            json!({ "total": m.total_mb, "available": m.total_mb.saturating_sub(m.used_mb), "source": m.source })
+        }
+        None => json!({
+            "total": meminfo_kb("MemTotal:", &meminfo).map(|k| k / 1024),
+            "available": meminfo_kb("MemAvailable:", &meminfo).map(|k| k / 1024),
+            "source": "proc",
+        }),
+    };
     json!({
         "device_id": sup.cfg.device_id,
         "user_id": sup.cfg.user_id,
@@ -591,11 +610,10 @@ pub async fn box_state(sup: &Supervisor) -> Value {
         "local_box": sup.cfg.local_box,
         "isolation": { "enforced": sup.isolation.enabled, "cross_read_blocked": *sup.cross_read_blocked.read().await },
         "load": load,
-        "memory_mb": {
-            "total": meminfo_kb("MemTotal:", &meminfo).map(|k| k / 1024),
-            "available": meminfo_kb("MemAvailable:", &meminfo).map(|k| k / 1024),
-        },
+        "load_scope": resources.load_scope,
+        "memory_mb": memory_mb,
         "disk": disk_json(&sup.cfg.work_root),
+        "resources": resources,
         "held": sup.held.read().await.iter().cloned().collect::<Vec<_>>(),
         "warnings_in_ring": warnings,
         "workspaces": workspaces,

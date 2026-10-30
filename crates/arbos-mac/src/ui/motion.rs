@@ -47,13 +47,19 @@ impl PulseClock {
 
     /// 0..1 triangle wave with the given period.
     pub fn phase(cx: &App, period_ms: u64) -> f32 {
-        let elapsed = cx.global::<PulseClock>().started.elapsed().as_millis() as u64;
-        let t = (elapsed % period_ms) as f32 / period_ms as f32;
+        let t = Self::ramp(cx, period_ms);
         if t < 0.5 {
             t * 2.0
         } else {
             2.0 - t * 2.0
         }
+    }
+
+    /// 0 → 1 over `period_ms`, then round again (a sawtooth: for things that
+    /// turn, not breathe — the activity spinner).
+    pub fn ramp(cx: &App, period_ms: u64) -> f32 {
+        let elapsed = cx.global::<PulseClock>().started.elapsed().as_millis() as u64;
+        (elapsed % period_ms) as f32 / period_ms as f32
     }
 }
 

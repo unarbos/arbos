@@ -36,6 +36,20 @@ pub struct Isolation {
 const SHARED_GROUP: &str = "arbos";
 const CGROUP_PARENT: &str = "arbos-ws";
 
+/// Create `dir` for a harness child and hand it to the workspace user. agentd runs as root and
+/// the children do not: a directory root made and never re-owned is unwritable to them. The
+/// pi worker's `subagent-sessions` was one (2026-10-25, Jacob's San José ask): every job worker
+/// died on its first session write, 400 ms in, with an empty result and no error.
+pub fn ensure_worker_dir(dir: &Path, run_as: Option<&RunAs>) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    if let Some(ra) = run_as {
+        if let Err(e) = std::os::unix::fs::chown(dir, Some(ra.uid), Some(ra.gid)) {
+            tracing::warn!(dir = %dir.display(), uid = ra.uid, error = %e, "worker dir not re-owned");
+        }
+    }
+    Ok(())
+}
+
 impl Isolation {
     /// Enabled only when agentd is root and users can be created; `ARBOS_ISOLATION=off` disables.
     pub fn detect(local_box: bool) -> Self {
@@ -355,6 +369,19 @@ pub fn reexec_as_root_if_needed(local_box: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The harness children's directories exist after the call (the re-own needs root and is
+    /// exercised by the box: `subagent-sessions` writable by the workspace user).
+    #[test]
+    fn ensure_worker_dir_creates_nested_dirs() {
+        let root = std::env::temp_dir().join(format!("arbos-worker-dir-{}", std::process::id()));
+        let dir = root.join("pi").join("subagent-sessions");
+        ensure_worker_dir(&dir, None).unwrap();
+        assert!(dir.is_dir());
+        // Idempotent on an existing dir.
+        ensure_worker_dir(&dir, None).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// D70 invariant: workspace A cannot read workspace B's folder. Needs root and `useradd`
     /// (run inside the image: `sudo ARBOS_ISOLATION_TEST=1 arbos-agentd-test --ignored`); the

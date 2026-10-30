@@ -77,13 +77,16 @@ impl Diagnostics {
     }
 }
 
-/// Brief network failures (timeout, reset, DNS, send, TLS, empty/truncated body) are not product
-/// bugs — log them, do not file a weekly feedback item. Real HTTP answers (4xx/5xx) and unexpected
-/// client errors still report. Reqwest's top-level "error sending request for url …" means the
-/// request never got an HTTP response (connect/TLS/send); the cause may be omitted when the caller
-/// formats with `{err}` instead of `{err:#}`. Explicit rustls decrypt/handshake strings still
-/// match when only the cause is present. A 200 with no body (serde "EOF while parsing … column 0")
-/// or a cut-off JSON frame is the same class of blip as a closed connection.
+/// Brief network failures (timeout, reset, DNS, send, TLS, empty/truncated body, gateway blips)
+/// are not product bugs — log them, do not file a weekly feedback item. Real HTTP answers (4xx
+/// and non-gateway 5xx such as 500) and unexpected client errors still report. Reqwest's
+/// top-level "error sending request for url …" means the request never got an HTTP response
+/// (connect/TLS/send); the cause may be omitted when the caller formats with `{err}` instead of
+/// `{err:#}`. Explicit rustls decrypt/handshake strings still match when only the cause is
+/// present. A 200 with no body (serde "EOF while parsing … column 0") or a cut-off JSON frame is
+/// the same class of blip as a closed connection. HTTP 502/503/504 (and "bad gateway" /
+/// "gateway timeout" wording) are the proxy in front of the relay, not the Mac app — e.g.
+/// `GET /me/unread` during a brief upstream miss (`mac:me-unread:http 502`).
 pub fn is_transient(detail: &str) -> bool {
     let d = detail.to_ascii_lowercase();
     d.contains("error sending request")
@@ -109,6 +112,12 @@ pub fn is_transient(detail: &str) -> bool {
         // Empty or truncated response body after HTTP success (e.g. GET /chats on a flaky link).
         || d.contains("eof while parsing")
         || d.contains("empty body")
+        // Load-balancer / reverse-proxy blips in front of the relay (not app bugs).
+        || d.contains("http 502")
+        || d.contains("http 503")
+        || d.contains("http 504")
+        || d.contains("bad gateway")
+        || d.contains("gateway timeout")
 }
 
 /// `mac:<kind>:<normalized error>` — stable across launches, files and users: ids, hashes,

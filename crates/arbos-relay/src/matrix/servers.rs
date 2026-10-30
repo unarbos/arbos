@@ -24,7 +24,7 @@ use std::collections::HashMap;
 
 use arbos_core::api::{
     PushEventDto, ServerDeletedPayloadDto, ServerMemberJoinedPayloadDto,
-    ServerMemberRemovedPayloadDto, ServerUpdatedPayloadDto,
+    ServerMemberRemovedPayloadDto, ServerUpdatedPayloadDto, SpaceArchivedPayloadDto,
 };
 use arbos_core::ids::{now_ms, ulid};
 
@@ -203,6 +203,7 @@ fn server_json(state: &AppState, s: &Server, me: &ServerMember, detail: bool) ->
         "avatar_color_index_effective": crate::avatar::effective_color_index(&s.id, None),
         "avatar_leaf": s.avatar_leaf,
         "avatar_leaf_color": s.avatar_leaf_color,
+        "archived_at": state.db.space_archived_at(&me.user_id, &s.id).ok().flatten(),
     });
     // Invite links are the owner's fallback (Jacob 2026-10-22: demoted; Add members by name is
     // the main way in). Admins no longer see them.
@@ -246,6 +247,16 @@ fn load(state: &AppState, me: &str, id: &str) -> Result<(Server, ServerMember), 
     }
 }
 
+/// The caller as a non-banned owner / admin of the server (the avatar generate route).
+pub(crate) fn admin_of(
+    state: &AppState,
+    principal: &Principal,
+    id: &str,
+) -> Result<(String, Server), Box<Response>> {
+    let (me, s, _) = settings_server(state, principal, id, "server", &["avatar_generate"])?;
+    Ok((me, s))
+}
+
 fn admin_required(m: &ServerMember) -> Result<(), Box<Response>> {
     if m.can_admin() {
         Ok(())
@@ -256,6 +267,67 @@ fn admin_required(m: &ServerMember) -> Result<(), Box<Response>> {
             "owners and admins only",
         )))
     }
+}
+
+/// The server, if the caller may change its settings (name, picture, join rule, channels):
+/// the owner or an admin. Every attempt — allowed, plain member, non-member, box, admin
+/// token — leaves an audit row under `servers:{id}` (`settings_audit`).
+fn settings_server(
+    state: &AppState,
+    principal: &Principal,
+    id: &str,
+    target: &str,
+    fields: &[&str],
+) -> Result<(String, Server, ServerMember), Box<Response>> {
+    let slot = format!("{SERVER_BLOB_PREFIX}{id}");
+    let me = match user_of(principal) {
+        Ok(u) => u,
+        Err(r) => {
+            crate::settings_audit::record(
+                state,
+                &slot,
+                target,
+                id,
+                principal,
+                None,
+                fields,
+                false,
+                "devices_only",
+            );
+            return Err(r);
+        }
+    };
+    let (s, m) = match load(state, &me, id) {
+        Ok(v) => v,
+        Err(r) => {
+            crate::settings_audit::record(
+                state,
+                &slot,
+                target,
+                id,
+                principal,
+                None,
+                fields,
+                false,
+                "not_member",
+            );
+            return Err(r);
+        }
+    };
+    let allowed = m.can_admin();
+    crate::settings_audit::record(
+        state,
+        &slot,
+        target,
+        id,
+        principal,
+        Some(&m.role),
+        fields,
+        allowed,
+        if allowed { "ok" } else { "admin_only" },
+    );
+    admin_required(&m)?;
+    Ok((me, s, m))
 }
 
 fn notify_server_members(state: &AppState, server_id: &str, except: &str, event: &PushEventDto) {
@@ -403,6 +475,42 @@ pub async fn get(
 }
 
 #[derive(Deserialize)]
+pub struct SpaceArchiveBody {
+    pub archived: bool,
+}
+
+/// `PUT /servers/{id}/archive {"archived": bool}` — hide (or show again) this server's sidebar
+/// row for me on every device; membership is untouched.
+pub async fn archive(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Json(b): Json<SpaceArchiveBody>,
+) -> Response {
+    let me = match user_of(&principal) {
+        Ok(u) => u,
+        Err(r) => return *r,
+    };
+    if let Err(r) = load(&state, &me, &id) {
+        return *r;
+    }
+    let at = match state.db.set_space_archived(&me, &id, "server", b.archived) {
+        Ok(at) => at,
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    };
+    let _ = state.db.push_user_except_event(
+        &me,
+        &device_of(&principal).unwrap_or_default(),
+        &PushEventDto::SpaceArchived(SpaceArchivedPayloadDto {
+            space_id: id.clone(),
+            kind: "server".into(),
+            archived_at: at,
+        }),
+    );
+    Json(json!({ "id": id, "archived_at": at })).into_response()
+}
+
+#[derive(Deserialize)]
 pub struct PatchBody {
     #[serde(default)]
     pub name: Option<String>,
@@ -412,6 +520,17 @@ pub struct PatchBody {
     /// `true` = anyone on Arbos can search and join without an invite link.
     #[serde(default)]
     pub open: Option<bool>,
+    /// D92 amendment: the server's leaf picture (`null` = none); set together.
+    #[serde(
+        default,
+        deserialize_with = "crate::api::deserialize_double_option_i64"
+    )]
+    pub avatar_leaf: Option<Option<i64>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::api::deserialize_double_option_i64"
+    )]
+    pub avatar_leaf_color: Option<Option<i64>>,
 }
 
 /// `PATCH /servers/{id} {name?, image_key?, open?}` — owner/admins.
@@ -421,17 +540,23 @@ pub async fn patch(
     Path(id): Path<String>,
     Json(b): Json<PatchBody>,
 ) -> Response {
-    let me = match user_of(&principal) {
-        Ok(u) => u,
-        Err(r) => return *r,
-    };
-    let (_, m) = match load(&state, &me, &id) {
+    let mut fields = Vec::new();
+    if b.name.is_some() {
+        fields.push("name");
+    }
+    if b.image_key.is_some() {
+        fields.push("image_key");
+    }
+    if b.open.is_some() {
+        fields.push("open");
+    }
+    if b.avatar_leaf.is_some() || b.avatar_leaf_color.is_some() {
+        fields.push("avatar_leaf");
+    }
+    let (me, _, _) = match settings_server(&state, &principal, &id, "server", &fields) {
         Ok(v) => v,
         Err(r) => return *r,
     };
-    if let Err(r) = admin_required(&m) {
-        return *r;
-    }
     let name = match b.name.as_deref().map(server_name) {
         Some(None) => {
             return api_error(
@@ -478,6 +603,27 @@ pub async fn patch(
         b.open,
     ) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+    }
+    if b.avatar_leaf.is_some() || b.avatar_leaf_color.is_some() {
+        let leaf = match (b.avatar_leaf, b.avatar_leaf_color) {
+            (Some(Some(l)), Some(Some(c))) => {
+                if let Err((st, msg)) = crate::avatar::check_leaf_pick(Some(l), Some(c)) {
+                    return api_error(st, "bad_leaf", msg);
+                }
+                Some((l, c))
+            }
+            (Some(Some(_)), _) | (_, Some(Some(_))) => {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "bad_leaf",
+                    "avatar_leaf and avatar_leaf_color go together",
+                )
+            }
+            _ => None,
+        };
+        if let Err(e) = state.db.update_server_leaf(&id, leaf) {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+        }
     }
     state.matrix.touch_server(&state, &id);
     notify_server_members(
@@ -556,17 +702,11 @@ pub async fn channel_create(
     Path(id): Path<String>,
     Json(b): Json<ChannelBody>,
 ) -> Response {
-    let me = match user_of(&principal) {
-        Ok(u) => u,
-        Err(r) => return *r,
-    };
-    let (_, m) = match load(&state, &me, &id) {
+    let (me, _, _) = match settings_server(&state, &principal, &id, "channel", &["channel_create"])
+    {
         Ok(v) => v,
         Err(r) => return *r,
     };
-    if let Err(r) = admin_required(&m) {
-        return *r;
-    }
     let Some(name) = b.name.as_deref().and_then(channel_slug) else {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -629,17 +769,20 @@ pub async fn channel_patch(
     Path((id, cid)): Path<(String, String)>,
     Json(b): Json<ChannelBody>,
 ) -> Response {
-    let me = match user_of(&principal) {
-        Ok(u) => u,
-        Err(r) => return *r,
-    };
-    let (_, m) = match load(&state, &me, &id) {
+    let mut fields = Vec::new();
+    if b.name.is_some() {
+        fields.push("name");
+    }
+    if b.topic.is_some() {
+        fields.push("topic");
+    }
+    if b.restricted.is_some() {
+        fields.push("restricted");
+    }
+    let (me, _, _) = match settings_server(&state, &principal, &id, "channel", &fields) {
         Ok(v) => v,
         Err(r) => return *r,
     };
-    if let Err(r) = admin_required(&m) {
-        return *r;
-    }
     let Some(ch) = state
         .db
         .channel(&cid)
@@ -740,17 +883,11 @@ pub async fn channel_delete(
     principal: Principal,
     Path((id, cid)): Path<(String, String)>,
 ) -> Response {
-    let me = match user_of(&principal) {
-        Ok(u) => u,
-        Err(r) => return *r,
-    };
-    let (_, m) = match load(&state, &me, &id) {
+    let (me, _, _) = match settings_server(&state, &principal, &id, "channel", &["channel_delete"])
+    {
         Ok(v) => v,
         Err(r) => return *r,
     };
-    if let Err(r) = admin_required(&m) {
-        return *r;
-    }
     let Some(ch) = state
         .db
         .channel(&cid)
@@ -1503,6 +1640,9 @@ pub async fn me_matrix(State(state): State<AppState>, principal: Principal) -> R
     {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
+    // A device that can read channels can be told about them: the relay becomes this user's
+    // push gateway (every live device; reads.rs `on_notify` fans channel messages out).
+    state.matrix.pushers(&state, &me, true);
     Json(json!({ "homeserver": homeserver, "user_id": mxid, "access_token": token, "device_id": mx_device }))
         .into_response()
 }
@@ -1593,6 +1733,304 @@ mod tests {
 }
 
 #[cfg(test)]
+mod settings_permission_tests {
+    //! Server and channel settings (name, picture, join rule; channel create / rename /
+    //! topic / restricted / delete) are the owner's and the admins'. Plain members, boxes,
+    //! strangers and the admin token get 403; every attempt is audited under `servers:{id}`.
+
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use axum::Json;
+
+    use super::*;
+    use crate::people::tests_support::person;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    struct Cast {
+        server: String,
+        channel: String,
+        owner: Principal,
+        admin: Principal,
+        member: Principal,
+        agent: Principal,
+        stranger: Principal,
+    }
+
+    fn cast(state: &AppState, seed: i64) -> Cast {
+        let (owner, owner_dev) = person(state, seed);
+        let (admin, admin_dev) = person(state, seed + 1);
+        let (member, member_dev) = person(state, seed + 2);
+        let (_, stranger_dev) = person(state, seed + 3);
+        let server = Server {
+            id: ulid(),
+            name: "Launch Crew".into(),
+            owner_user_id: owner.clone(),
+            image_key: None,
+            invite_code: format!("crew{seed}"),
+            space_room_id: None,
+            created_at: now_ms(),
+            is_open: false,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
+        };
+        state.db.insert_server(&server).unwrap();
+        state
+            .db
+            .add_server_member(&server.id, &admin, &owner)
+            .unwrap();
+        state
+            .db
+            .set_server_role(&server.id, &admin, "admin")
+            .unwrap();
+        state
+            .db
+            .add_server_member(&server.id, &member, &owner)
+            .unwrap();
+        let channel = Channel {
+            id: ulid(),
+            server_id: server.id.clone(),
+            name: "dev".into(),
+            topic: "builds".into(),
+            restricted: false,
+            position: 1,
+            room_id: None,
+            created_at: now_ms(),
+        };
+        state.db.insert_channel(&channel).unwrap();
+        Cast {
+            server: server.id,
+            channel: channel.id,
+            owner: owner_dev,
+            admin: admin_dev,
+            member: member_dev,
+            agent: Principal::Box { user_id: member },
+            stranger: stranger_dev,
+        }
+    }
+
+    fn patch_body() -> PatchBody {
+        PatchBody {
+            name: None,
+            image_key: None,
+            open: None,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
+        }
+    }
+
+    fn channel_body() -> ChannelBody {
+        ChannelBody {
+            name: None,
+            topic: None,
+            restricted: None,
+        }
+    }
+
+    async fn server_patch(state: &AppState, who: &Principal, id: &str, b: PatchBody) -> StatusCode {
+        patch(
+            State(state.clone()),
+            who.clone(),
+            Path(id.to_owned()),
+            Json(b),
+        )
+        .await
+        .status()
+    }
+
+    async fn ch_create(state: &AppState, who: &Principal, id: &str, name: &str) -> StatusCode {
+        channel_create(
+            State(state.clone()),
+            who.clone(),
+            Path(id.to_owned()),
+            Json(ChannelBody {
+                name: Some(name.into()),
+                ..channel_body()
+            }),
+        )
+        .await
+        .status()
+    }
+
+    async fn ch_patch(state: &AppState, who: &Principal, c: &Cast, b: ChannelBody) -> StatusCode {
+        channel_patch(
+            State(state.clone()),
+            who.clone(),
+            Path((c.server.clone(), c.channel.clone())),
+            Json(b),
+        )
+        .await
+        .status()
+    }
+
+    async fn ch_delete(state: &AppState, who: &Principal, c: &Cast) -> StatusCode {
+        channel_delete(
+            State(state.clone()),
+            who.clone(),
+            Path((c.server.clone(), c.channel.clone())),
+        )
+        .await
+        .status()
+    }
+
+    #[tokio::test]
+    async fn server_and_channel_settings_are_owner_and_admin_only() {
+        let state = test_state(AuthMode::Github);
+        let c = cast(&state, 8100);
+        let denied: [(&str, &Principal); 4] = [
+            ("member", &c.member),
+            ("agent", &c.agent),
+            ("stranger", &c.stranger),
+            ("admin-token", &Principal::Admin),
+        ];
+        for (who, p) in denied {
+            for (field, b) in [
+                (
+                    "name",
+                    PatchBody {
+                        name: Some("Hijacked".into()),
+                        ..patch_body()
+                    },
+                ),
+                (
+                    "open",
+                    PatchBody {
+                        open: Some(true),
+                        ..patch_body()
+                    },
+                ),
+                (
+                    "avatar_leaf",
+                    PatchBody {
+                        avatar_leaf: Some(Some(1)),
+                        avatar_leaf_color: Some(Some(2)),
+                        ..patch_body()
+                    },
+                ),
+            ] {
+                assert_eq!(
+                    server_patch(&state, p, &c.server, b).await,
+                    StatusCode::FORBIDDEN,
+                    "{who} changing server {field}"
+                );
+            }
+            assert_eq!(
+                ch_create(&state, p, &c.server, "spam").await,
+                StatusCode::FORBIDDEN,
+                "{who} creating a channel"
+            );
+            for (field, b) in [
+                (
+                    "name",
+                    ChannelBody {
+                        name: Some("renamed".into()),
+                        ..channel_body()
+                    },
+                ),
+                (
+                    "topic",
+                    ChannelBody {
+                        topic: Some("hijacked".into()),
+                        ..channel_body()
+                    },
+                ),
+                (
+                    "restricted",
+                    ChannelBody {
+                        restricted: Some(true),
+                        ..channel_body()
+                    },
+                ),
+            ] {
+                assert_eq!(
+                    ch_patch(&state, p, &c, b).await,
+                    StatusCode::FORBIDDEN,
+                    "{who} changing channel {field}"
+                );
+            }
+            assert_eq!(
+                ch_delete(&state, p, &c).await,
+                StatusCode::FORBIDDEN,
+                "{who} deleting a channel"
+            );
+        }
+        let s = state.db.server(&c.server).unwrap().unwrap();
+        assert_eq!(s.name, "Launch Crew");
+        assert!(!s.is_open);
+        let ch = state.db.channel(&c.channel).unwrap().unwrap();
+        assert_eq!(
+            (ch.name.as_str(), ch.topic.as_str(), ch.restricted),
+            ("dev", "builds", false)
+        );
+        assert_eq!(state.db.channels_of_server(&c.server).unwrap().len(), 1);
+        let slot = format!("{SERVER_BLOB_PREFIX}{}", c.server);
+        let rows = state.db.audit(&slot, 1000).unwrap();
+        assert_eq!(rows.len(), 4 * 8);
+        assert!(rows.iter().all(|r| r["allowed"] == false));
+        assert_eq!(
+            rows.iter().filter(|r| r["reason"] == "admin_only").count(),
+            8
+        );
+
+        // Admin and owner: every one of those goes through.
+        assert_eq!(
+            server_patch(
+                &state,
+                &c.admin,
+                &c.server,
+                PatchBody {
+                    name: Some("Launch Crew II".into()),
+                    ..patch_body()
+                }
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            server_patch(
+                &state,
+                &c.owner,
+                &c.server,
+                PatchBody {
+                    open: Some(true),
+                    ..patch_body()
+                }
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            ch_create(&state, &c.admin, &c.server, "ops").await,
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            ch_patch(
+                &state,
+                &c.owner,
+                &c,
+                ChannelBody {
+                    topic: Some("nightly builds".into()),
+                    ..channel_body()
+                }
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            ch_delete(&state, &c.admin, &c).await,
+            StatusCode::NO_CONTENT
+        );
+        let s = state.db.server(&c.server).unwrap().unwrap();
+        assert_eq!((s.name.as_str(), s.is_open), ("Launch Crew II", true));
+        let rows = state.db.audit(&slot, 1000).unwrap();
+        assert_eq!(rows.iter().filter(|r| r["allowed"] == true).count(), 5);
+        assert!(rows
+            .iter()
+            .any(|r| r["allowed"] == true && r["fields"] == json!(["channel_delete"])));
+    }
+}
+
+#[cfg(test)]
 mod picture_tests {
     //! `PATCH /servers/{id} {image_key}` runs the same picture gate as groups.
 
@@ -1635,6 +2073,8 @@ mod picture_tests {
                 name: None,
                 image_key: Some(key),
                 open: None,
+                avatar_leaf: None,
+                avatar_leaf_color: None,
             }),
         )
         .await

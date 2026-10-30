@@ -45,7 +45,16 @@ final class SessionRoom {
     var onPresence: (([String: Any]) -> Void)?
     /// Relay rejected this room (HTTP 403/404); caller should refresh membership.
     var onUnavailable: (() -> Void)?
+    /// A push was refused with `not_available` on this connection; stay connected.
+    var onPushRefused: (() -> Void)?
+    /// Why the last push was refused ([feedback blocked-state-ios-2026-10-26]): the relay's
+    /// `reason` (`blocked_by` / `blocks_member` / `silenced` / `chat_unavailable`) and, on a
+    /// block, the other party. Read by `onPushRefused`; nil from a relay that predates it.
+    private(set) var lastRefusal: PushRefusalWhy?
     var presenceUser: () -> (id: String, handle: String)? = { nil }
+    /// Read receipt (Mac `presence_header` `seen`): the newest message id of this people chat,
+    /// sent while it is focused so peers can lift their own bubbles to full opacity.
+    var newestMessageId: () -> String? = { nil }
     var inCall: String? {
         didSet {
             guard inCall != oldValue else { return }
@@ -166,6 +175,11 @@ final class SessionRoom {
         )
         doc.onLocalUpdate { [weak self] bytes in
             Task { @MainActor in
+                #if DEBUG
+                if let self, SendTrace.traces(self.key) {
+                    SendTrace.mark("push-queued", detail: "bytes=\(bytes.count) live=\(self.session.isLive())")
+                }
+                #endif
                 self?.session.onLocalCommit(bytes: bytes)
                 self?.drain()
             }
@@ -195,6 +209,26 @@ final class SessionRoom {
     func wake(reason: String) {
         session.wake(reason: reason)
         drain()
+    }
+
+    /// This connection stands refused (`not_available`): sends queue until an ACK, a reconnect
+    /// or `retryRefused()` clears it.
+    var isPushRefused: Bool { session.pushRefused() }
+
+    /// The unACKed batches this room still has to deliver (test surface).
+    var pendingBatches: [(String, Data)] { session.pending().map { ($0.batchId, $0.bytes) } }
+
+    /// The condition behind a refusal may have changed — a people-chat event for this room
+    /// (members, settings, a lifted mute) or the user unblocked someone. The session resends
+    /// every pending batch now with its original batch id (the relay answers `dup` for what
+    /// it already holds) and drops the refusal; the next ACK clears the notice. Nothing is sent
+    /// while the room is not refused, and nudges inside two seconds collapse ([feedback 2005]).
+    @discardableResult
+    func retryRefused() -> Bool {
+        guard !stopped else { return false }
+        let sent = session.retryRefused(nowMs: sessionNowMs())
+        drain()
+        return sent
     }
 
     /// Scene returned from `.background` (lock unlock). iOS often leaves
@@ -371,7 +405,15 @@ final class SessionRoom {
             applyFetchCheckpoint(room: room, frontier: frontier)
         case .applyBytes(let bytes):
             do {
-                try doc.importUpdate(bytes)
+                // Parked (dependencies missing): the session keeps the persisted cursor
+                // below this row so a relaunch re-requests it (#1540 follow-up).
+                #if DEBUG
+                let t0 = Date()
+                defer { PerfCounters.time("import.room", ms: Date().timeIntervalSince(t0) * 1000) }
+                #endif
+                if try doc.importUpdateReportingPending(bytes) {
+                    session.applyPending()
+                }
             } catch {
                 NSLog("relay room \(roomChat): import failed: \(error.localizedDescription)")
                 // Skip the Cursor that follows in this drain; reconnect from the
@@ -393,27 +435,44 @@ final class SessionRoom {
         case .healCheck(let relayVv):
             // The relay told us what it holds; if this replica has more (a lost checkpoint,
             // #1518), push the difference back once so the room heals from this device.
+            // Always answer (even empty) so the session can release the held pending resend.
             let missing = doc.updatesBeyond(relayVv)
             if !missing.isEmpty {
                 NSLog("relay room \(roomChat): history heal, pushing \(missing.count) bytes the relay lacked")
-                session.onHeal(bytes: missing)
             }
+            session.onHeal(bytes: missing)
         case .scheduleReconnect(let afterMs):
             applyScheduleReconnect(afterMs: afterMs)
         case .sessionError(let code, let message):
             if code == "state_timeout" { stateTimeouts += 1 }
             // The relay restarts in a few seconds (#1340): the pill says so; the clean close that follows redials.
             if code == "restart_soon" { onLinkState?(.restartSoon); return }
+            // Push refused for this connection — stay connected; `pushRefused` carries the notice.
+            if code == "not_available" {
+                lastError = "\(roomChat): not_available"
+                NSLog("relay room \(roomChat): error \(code): \(message)")
+                return
+            }
             NSLog("relay room \(roomChat): error \(code): \(message)")
-        case .presence(_, _, _, _, let mine, let headerJson):
+        case .pushRefused(_, let code, let reason, let byHandle, let byName):
+            lastError = "\(roomChat): \(code)" + (reason.map { " (\($0))" } ?? "")
+            lastRefusal = PushRefusalWhy(code: code, reason: reason, byHandle: byHandle, byName: byName)
+            onPushRefused?()
+        case .presence(_, _, let typing, _, let mine, let headerJson):
             guard !mine else { return }
             if let data = headerJson.data(using: .utf8),
-               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+               var obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                // RoomAction carries a real Bool; JSONSerialization would leave
+                // `typing` as NSNumber and `as? Bool` in noteTyping would miss it.
+                if let typing { obj["typing"] = typing }
                 onPresence?(obj)
             }
         case .droppedOversize(let bytes):
             NSLog("relay room \(roomChat): local update \(bytes) bytes exceeds row cap; dropped")
-        case .ack(_, _):
+        case .ack(_, let seq):
+            #if DEBUG
+            if SendTrace.traces(key) { SendTrace.mark("relay-ack", detail: "seq=\(seq)") }
+            #endif
             onAcked?()
             onCursorMoved?()
         }
@@ -505,15 +564,32 @@ final class SessionRoom {
         }
     }
 
-    private func sendPresence() {
+    /// Presence header JSON shared by the 15 s tick and typing pings (Mac `presence_header`).
+    private func presenceHeaderJSON() -> String? {
         var header: [String: Any] = ["device": deviceId(), "at": nowMs()]
         if let u = presenceUser() { header["user"] = u.id; header["handle"] = u.handle }
-        if focused { header["focused_chat"] = roomChat }
-        if let inCall { header["in_call"] = inCall }
-        if let data = try? JSONSerialization.data(withJSONObject: header),
-           let json = String(data: data, encoding: .utf8) {
-            session.presence(presenceHeader: json)
+        if focused {
+            header["focused_chat"] = roomChat
+            if let seen = newestMessageId(), !seen.isEmpty { header["seen"] = seen }
         }
+        if let inCall { header["in_call"] = inCall }
+        guard let data = try? JSONSerialization.data(withJSONObject: header),
+              let json = String(data: data, encoding: .utf8) else { return nil }
+        return json
+    }
+
+    private func sendPresence() {
+        guard let json = presenceHeaderJSON() else { return }
+        session.presence(presenceHeader: json)
+        drain()
+    }
+
+    /// Composer keystroke in a people chat: set / clear the `typing` field on a
+    /// presence frame so peers show "<name> is typing…" ([feedback
+    /// app-01M5N7WSA1VCYHE9BE3CX4V0R6], Mac `RoomCmd::Typing`).
+    func setTyping(_ active: Bool) {
+        guard let json = presenceHeaderJSON() else { return }
+        session.typing(presenceHeader: json, active: active)
         drain()
     }
 
@@ -609,5 +685,38 @@ private final class URLSessionRoomSocket: RoomSocket {
 
     func cancel() {
         task.cancel(with: .goingAway, reason: nil)
+    }
+}
+
+
+/// The relay's reason for a refused push, carried on the `not_available` error frame since
+/// [feedback blocked-state-relay-2026-10-26]; the code itself never changes.
+struct PushRefusalWhy: Equatable {
+    var code: String
+    var reason: String?
+    var byHandle: String?
+    var byName: String?
+
+    /// The plain sentence the chat shows. Pass `silencedUntilMs` when `reason` is `silenced`.
+    func sentence(silencedUntilMs: Int64? = nil) -> String {
+        BlockedState.refusalSentence(
+            reason: reason, name: byName, handle: byHandle, silencedUntilMs: silencedUntilMs
+        )
+    }
+}
+
+/// Which pushes nudge a refused room to resend ([feedback 2005]): the ones that change who may
+/// post into the chat (its settings, a lifted mute, a member who left or joined). A plain
+/// message carries no such change, and nothing else names a chat the sender can post into.
+enum RefusedSendRetry {
+    static func chatToRetry(_ event: PushEventDto) -> String? {
+        let id: String?
+        switch event {
+        case .peopleChatUpdated(let p): id = p.chat_id
+        case .peopleMemberAdded(let p): id = p.chat_id
+        case .peopleMemberRemoved(let p): id = p.chat_id
+        default: id = nil
+        }
+        return id.flatMap { $0.isEmpty ? nil : $0 }
     }
 }

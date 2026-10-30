@@ -15,9 +15,10 @@ use gpui::{
 use crate::app::AppState;
 use crate::onboarding::{Onboarding, Stage};
 use crate::ui::motion::PulseClock;
+use crate::ui::sf_symbols;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, BUBBLE_RADIUS, COLUMN_MARGIN, HEADER_HEIGHT, TEXT_BODY, TEXT_SMALL};
-use crate::ui::transcript::{ASSISTANT_RIGHT_GAP, COLUMN_MAX_WIDTH};
+use crate::ui::transcript::{assistant_cap, COLUMN_MAX_WIDTH};
 
 const CARD_W: f32 = 256.0;
 const CARD_H: f32 = 172.0;
@@ -92,7 +93,7 @@ fn alpha(c: Hsla, a: f32) -> Hsla {
 
 /// The greeting bubble as the transcript lays it out: the transcript is
 /// bottom-anchored, so the only message sits just above the composer, left
-/// in the chat column (the composer's own: 16 pt margins, 876 cap — on a
+/// in the chat column (the composer's own: 16 pt margins, 960 cap — on a
 /// 1180×780 window left 312; bottom 74.5 above the window edge, 42.5 tall
 /// for one line).
 fn bubble_target(viewport: gpui::Size<Pixels>, sidebar_width: f32, text_px: f32) -> Bounds<Pixels> {
@@ -100,7 +101,7 @@ fn bubble_target(viewport: gpui::Size<Pixels>, sidebar_width: f32, text_px: f32)
     let center_w = f32::from(viewport.width) - left;
     let column_w = (center_w - 2.0 * COLUMN_MARGIN).min(COLUMN_MAX_WIDTH);
     let column_x = left + (center_w - column_w) / 2.0;
-    let bubble_cap = column_w - ASSISTANT_RIGHT_GAP;
+    let bubble_cap = assistant_cap(column_w);
     let width = (text_px + 28.0).min(bubble_cap);
     let lines = (text_px / (bubble_cap - 28.0)).ceil().max(1.0);
     let height = 22.0 + 21.0 * lines;
@@ -284,7 +285,7 @@ pub fn render(
                         .text_size(px(TEXT_BODY))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme.text)
-                        .child(crate::ui::icons::icon("window", 14.0, theme.text))
+                        .child(sf_symbols::glyph("macwindow", 14.0, theme.text))
                         .child(o.stage.title()),
                 )
                 .when_some(o.error.clone(), |el, err| {

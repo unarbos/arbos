@@ -99,25 +99,32 @@ pub fn effective_leaf(p: &crate::db::Project) -> leaf::LeafPick {
     )
 }
 
-/// Validate `avatar_leaf` / `avatar_leaf_color` from a request body.
+/// Validate `avatar_leaf` / `avatar_leaf_color` from a request body. Besides the leaf and
+/// hue indices, both accept [`leaf::NEUTRAL`] (255) — "no leaf": the Create sheets store it
+/// when nothing was uploaded or generated, and the clients draw the name's initial on a
+/// neutral disc (Jacob, 2026-10-25). `null` stays the automatic leaf.
 pub fn check_leaf_pick(
     leaf_idx: Option<i64>,
     color_idx: Option<i64>,
 ) -> Result<(), (axum::http::StatusCode, String)> {
+    let neutral = i64::from(leaf::NEUTRAL);
     if let Some(l) = leaf_idx {
-        if !(0..i64::from(leaf::LEAF_COUNT)).contains(&l) {
+        if !(0..i64::from(leaf::LEAF_COUNT)).contains(&l) && l != neutral {
             return Err((
                 axum::http::StatusCode::BAD_REQUEST,
-                format!("avatar_leaf must be 0–{} or null", leaf::LEAF_COUNT - 1),
+                format!(
+                    "avatar_leaf must be 0–{}, {neutral} (no leaf) or null",
+                    leaf::LEAF_COUNT - 1
+                ),
             ));
         }
     }
     if let Some(c) = color_idx {
-        if !(0..i64::from(leaf::COLOR_COUNT)).contains(&c) {
+        if !(0..i64::from(leaf::COLOR_COUNT)).contains(&c) && c != neutral {
             return Err((
                 axum::http::StatusCode::BAD_REQUEST,
                 format!(
-                    "avatar_leaf_color must be 0–{} or null",
+                    "avatar_leaf_color must be 0–{}, {neutral} (no leaf) or null",
                     leaf::COLOR_COUNT - 1
                 ),
             ));
@@ -126,18 +133,19 @@ pub fn check_leaf_pick(
     Ok(())
 }
 
-/// `GET /avatar-leaves` body: the D92 shapes, colours, ink and index rule, so a site or a
-/// third client can draw the same leaf.
+/// `GET /avatar-leaves` body: the D92 (v2) shapes, hues and index rule, so a site or a third
+/// client can draw the same leaf — a pastel disc (`hex`) with the darker same-hue leaf (`ink`).
 pub fn leaves_json() -> Value {
     json!({
         "rule": {
             "version": leaf::LEAF_RULE_VERSION,
             "hash": "fnv1a64(project_id)",
-            "leaf": "hash mod 9",
-            "color": "(hash div 9) mod 10",
-            "override": "avatar_leaf 0–8, avatar_leaf_color 0–9 on PATCH /projects/{id}; null = automatic",
+            "leaf": "hash mod 16",
+            "color": "the leaf's default_color",
+            "render": "disc = colors[color].hex; leaf = colors[color].ink, path drawn edge to edge (it spans 71 of 100 units, centred), even-odd fill",
+            "override": "avatar_leaf 0–15, avatar_leaf_color 0–9 on PATCH /projects/{id}; null = automatic",
+            "neutral": "avatar_leaf = avatar_leaf_color = 255: no leaf — draw the name's first letter on a neutral disc (dark #3A3A3A / #E5E5E5, light #E6E6E6 / #4A4A4A); never an automatic leaf",
         },
-        "ink": leaf::LEAF_INK.hex(),
         "scale": leaf::LEAF_SCALE,
         "leaves": leaf::LEAVES.iter().enumerate().map(|(i, l)| json!({
             "index": i, "slug": l.slug, "name": l.name, "path": leaf::path_data(i as u8),
@@ -145,7 +153,7 @@ pub fn leaves_json() -> Value {
             "default_color": l.default_color,
         })).collect::<Vec<_>>(),
         "colors": leaf::COLORS.iter().enumerate().map(|(i, c)| json!({
-            "index": i, "name": c.name, "hex": c.rgb.hex(),
+            "index": i, "name": c.name, "hex": c.rgb.hex(), "ink": c.ink.hex(),
         })).collect::<Vec<_>>(),
     })
 }
@@ -354,6 +362,35 @@ mod initials_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Create sheets' "nothing picked" value (Jacob, 2026-10-25) is accepted on both
+    /// fields; the ranges and `null` are unchanged, and anything else is still a 400.
+    #[test]
+    fn neutral_pick_is_accepted_and_the_rest_still_validates() {
+        let n = i64::from(leaf::NEUTRAL);
+        assert!(check_leaf_pick(Some(n), Some(n)).is_ok());
+        assert!(check_leaf_pick(Some(n), None).is_ok());
+        assert!(check_leaf_pick(None, None).is_ok());
+        assert!(check_leaf_pick(Some(15), Some(9)).is_ok());
+        assert!(check_leaf_pick(Some(16), None).is_err());
+        assert!(check_leaf_pick(None, Some(10)).is_err());
+        assert!(check_leaf_pick(Some(254), None).is_err());
+        assert!(check_leaf_pick(Some(-1), None).is_err());
+        // The effective (automatic) leaf an older client falls back to stays in range.
+        let p: crate::db::Project = serde_json::from_value(json!({
+            "id": "01M5NEUTRAL", "name": "Field notes", "icon": "", "instructions": "",
+            "models": {}, "state": "ready", "created_at": 0, "last_active_at": 0,
+            "spend_cap_daily": 1.0, "color": "", "user_id": "u", "workspace_state": "stopped",
+            "avatar_leaf": n, "avatar_leaf_color": n,
+        }))
+        .unwrap();
+        let e = effective_leaf(&p);
+        assert!(e.leaf < leaf::LEAF_COUNT && e.color < leaf::COLOR_COUNT);
+        assert!(leaves_json()["rule"]["neutral"]
+            .as_str()
+            .unwrap()
+            .contains("255"));
+    }
 
     #[test]
     fn default_pair_dedupes_on_color_first() {

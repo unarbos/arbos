@@ -1,10 +1,10 @@
 {
-  "version": "1.0.0",
+  "version": "2.0.0",
   "name": "arbos-leaf-avatars",
-  "leaf_color": "#F6F0E8",
+  "rule": "a soft pastel disc and a darker same-hue flat leaf centred on it; glyph spans 71 of the 100-unit box (v1 + 15 %), centred on its opaque bbox; even-odd fill, veins are cut-outs",
   "avatar": {
     "viewBox": "0 0 100 100",
-    "leaf_fraction_of_circle": 1.0,
+    "leaf_span": 71.0,
     "circle_drawn_by_app": true
   },
   "lottie": {
@@ -17,13 +17,77 @@
     "fill_name": "leaf",
     "recolor_keypath": "**.leaf.Color",
     "idle": "seamless loop, starts and ends at rest pose",
-    "gust": "one-shot ~1 s hover gust, starts and ends at rest pose (frame 0 of idle)"
+    "gust": "one-shot 1 s hover gust, starts and ends at rest pose",
+    "generated_by": "tools/make_v2.py"
   },
-  "on_circle_png_pattern": "png/leaf-{NN}-{name}-on-{palette-slug}-{HEX}-512.png",
+  "palette": [
+    {
+      "index": 0,
+      "name": "Coral",
+      "disc": "#F9D3C6",
+      "ink": "#E0634F"
+    },
+    {
+      "index": 1,
+      "name": "Royal blue",
+      "disc": "#CFDFF8",
+      "ink": "#2F5BC7"
+    },
+    {
+      "index": 2,
+      "name": "Green",
+      "disc": "#D3EBD2",
+      "ink": "#3E9A5A"
+    },
+    {
+      "index": 3,
+      "name": "Violet",
+      "disc": "#E3D9F6",
+      "ink": "#7B57C9"
+    },
+    {
+      "index": 4,
+      "name": "Teal",
+      "disc": "#CDEEE6",
+      "ink": "#2A9C8C"
+    },
+    {
+      "index": 5,
+      "name": "Pink",
+      "disc": "#FAD5E3",
+      "ink": "#D9558A"
+    },
+    {
+      "index": 6,
+      "name": "Yellow",
+      "disc": "#FBEFC2",
+      "ink": "#D9A41E"
+    },
+    {
+      "index": 7,
+      "name": "Orange",
+      "disc": "#FBDDC0",
+      "ink": "#E4802B"
+    },
+    {
+      "index": 8,
+      "name": "Lime",
+      "disc": "#E4F2C3",
+      "ink": "#88B425"
+    },
+    {
+      "index": 9,
+      "name": "Deep purple",
+      "disc": "#DDD2EE",
+      "ink": "#5E3E9E"
+    }
+  ],
+  "default_rule": "h = fnv1a64(id); leaf = h mod 16; colour = the leaf's default_color (an owner's pick overrides both)",
   "leaves": [
     {
       "id": 1,
-      "name": "maple",
+      "name": "Maple",
+      "slug": "leaf-01-maple",
       "svg": "svg/leaf-01-maple.svg",
       "lottie": {
         "idle": "lottie/leaf-01-maple-idle.json",
@@ -32,227 +96,441 @@
       "idle_frames": 150,
       "gust_frames": 60,
       "pivot": [
-        48.626,
-        80.443
+        50.0,
+        85.5
       ],
-      "png_cream_1024": "png/leaf-01-maple-cream-transparent-1024.png",
+      "bbox": [
+        19.54,
+        14.5,
+        80.46,
+        85.5
+      ],
       "default_color": {
-        "name": "Terracotta",
-        "hex": "#C17269"
+        "index": 0,
+        "name": "Coral",
+        "disc": "#F9D3C6",
+        "ink": "#E0634F"
       }
     },
     {
       "id": 2,
-      "name": "teardrop",
-      "svg": "svg/leaf-02-teardrop.svg",
+      "name": "Veined",
+      "slug": "leaf-02-veined",
+      "svg": "svg/leaf-02-veined.svg",
       "lottie": {
-        "idle": "lottie/leaf-02-teardrop-idle.json",
-        "gust": "lottie/leaf-02-teardrop-gust.json"
+        "idle": "lottie/leaf-02-veined-idle.json",
+        "gust": "lottie/leaf-02-veined-gust.json"
       },
       "idle_frames": 160,
       "gust_frames": 60,
       "pivot": [
-        32.663,
-        80.985
+        50.0,
+        85.5
       ],
-      "png_cream_1024": "png/leaf-02-teardrop-cream-transparent-1024.png",
+      "bbox": [
+        27.28,
+        14.5,
+        72.72,
+        85.5
+      ],
       "default_color": {
-        "name": "Sage",
-        "hex": "#608F80"
+        "index": 1,
+        "name": "Royal blue",
+        "disc": "#CFDFF8",
+        "ink": "#2F5BC7"
       }
     },
     {
       "id": 3,
-      "name": "poplar",
-      "svg": "svg/leaf-03-poplar.svg",
+      "name": "Pair",
+      "slug": "leaf-03-pair",
+      "svg": "svg/leaf-03-pair.svg",
       "lottie": {
-        "idle": "lottie/leaf-03-poplar-idle.json",
-        "gust": "lottie/leaf-03-poplar-gust.json"
+        "idle": "lottie/leaf-03-pair-idle.json",
+        "gust": "lottie/leaf-03-pair-gust.json"
       },
       "idle_frames": 140,
       "gust_frames": 60,
       "pivot": [
-        47.492,
-        80.993
+        50.0,
+        85.5
       ],
-      "png_cream_1024": "png/leaf-03-poplar-cream-transparent-1024.png",
+      "bbox": [
+        22.15,
+        14.5,
+        77.85,
+        85.5
+      ],
       "default_color": {
-        "name": "Mustard",
-        "hex": "#BCA368"
+        "index": 2,
+        "name": "Green",
+        "disc": "#D3EBD2",
+        "ink": "#3E9A5A"
       }
     },
     {
       "id": 4,
-      "name": "split",
-      "svg": "svg/leaf-04-split.svg",
+      "name": "Spear",
+      "slug": "leaf-04-spear",
+      "svg": "svg/leaf-04-spear.svg",
       "lottie": {
-        "idle": "lottie/leaf-04-split-idle.json",
-        "gust": "lottie/leaf-04-split-gust.json"
+        "idle": "lottie/leaf-04-spear-idle.json",
+        "gust": "lottie/leaf-04-spear-gust.json"
       },
       "idle_frames": 170,
       "gust_frames": 60,
       "pivot": [
-        39.268,
-        81.005
+        50.0,
+        85.5
       ],
-      "png_cream_1024": "png/leaf-04-split-cream-transparent-1024.png",
+      "bbox": [
+        32.4,
+        14.5,
+        67.6,
+        85.5
+      ],
       "default_color": {
-        "name": "Pine",
-        "hex": "#416A5B"
+        "index": 3,
+        "name": "Violet",
+        "disc": "#E3D9F6",
+        "ink": "#7B57C9"
       }
     },
     {
       "id": 5,
-      "name": "cloud-tree",
-      "svg": "svg/leaf-05-cloud-tree.svg",
+      "name": "Sprig",
+      "slug": "leaf-05-sprig",
+      "svg": "svg/leaf-05-sprig.svg",
       "lottie": {
-        "idle": "lottie/leaf-05-cloud-tree-idle.json",
-        "gust": "lottie/leaf-05-cloud-tree-gust.json"
+        "idle": "lottie/leaf-05-sprig-idle.json",
+        "gust": "lottie/leaf-05-sprig-gust.json"
       },
       "idle_frames": 150,
       "gust_frames": 60,
       "pivot": [
-        49.156,
-        81.0
+        50.0,
+        85.5
       ],
-      "png_cream_1024": "png/leaf-05-cloud-tree-cream-transparent-1024.png",
+      "bbox": [
+        20.89,
+        14.5,
+        79.11,
+        85.5
+      ],
       "default_color": {
-        "name": "Olive",
-        "hex": "#8D9659"
+        "index": 4,
+        "name": "Teal",
+        "disc": "#CDEEE6",
+        "ink": "#2A9C8C"
       }
     },
     {
       "id": 6,
-      "name": "feather",
-      "svg": "svg/leaf-06-feather.svg",
+      "name": "Twin",
+      "slug": "leaf-06-twin",
+      "svg": "svg/leaf-06-twin.svg",
       "lottie": {
-        "idle": "lottie/leaf-06-feather-idle.json",
-        "gust": "lottie/leaf-06-feather-gust.json"
+        "idle": "lottie/leaf-06-twin-idle.json",
+        "gust": "lottie/leaf-06-twin-gust.json"
       },
       "idle_frames": 144,
       "gust_frames": 60,
       "pivot": [
-        42.027,
-        80.963
+        50.0,
+        85.5
       ],
-      "png_cream_1024": "png/leaf-06-feather-cream-transparent-1024.png",
+      "bbox": [
+        15.55,
+        14.5,
+        84.45,
+        85.5
+      ],
       "default_color": {
-        "name": "Mauve",
-        "hex": "#A56489"
+        "index": 5,
+        "name": "Pink",
+        "disc": "#FAD5E3",
+        "ink": "#D9558A"
       }
     },
     {
       "id": 7,
-      "name": "curl",
-      "svg": "svg/leaf-07-curl.svg",
+      "name": "Oak",
+      "slug": "leaf-07-oak",
+      "svg": "svg/leaf-07-oak.svg",
       "lottie": {
-        "idle": "lottie/leaf-07-curl-idle.json",
-        "gust": "lottie/leaf-07-curl-gust.json"
+        "idle": "lottie/leaf-07-oak-idle.json",
+        "gust": "lottie/leaf-07-oak-gust.json"
       },
       "idle_frames": 156,
       "gust_frames": 60,
       "pivot": [
-        42.141,
-        80.961
+        50.0,
+        85.5
       ],
-      "png_cream_1024": "png/leaf-07-curl-cream-transparent-1024.png",
+      "bbox": [
+        18.89,
+        14.5,
+        81.11,
+        85.5
+      ],
       "default_color": {
-        "name": "Dusty blue",
-        "hex": "#396788"
+        "index": 9,
+        "name": "Deep purple",
+        "disc": "#DDD2EE",
+        "ink": "#5E3E9E"
       }
     },
     {
       "id": 8,
-      "name": "sweetgum",
-      "svg": "svg/leaf-08-sweetgum.svg",
+      "name": "Ginkgo",
+      "slug": "leaf-08-ginkgo",
+      "svg": "svg/leaf-08-ginkgo.svg",
       "lottie": {
-        "idle": "lottie/leaf-08-sweetgum-idle.json",
-        "gust": "lottie/leaf-08-sweetgum-gust.json"
+        "idle": "lottie/leaf-08-ginkgo-idle.json",
+        "gust": "lottie/leaf-08-ginkgo-gust.json"
       },
       "idle_frames": 166,
       "gust_frames": 60,
       "pivot": [
-        49.914,
-        79.021
+        50.0,
+        80.545
       ],
-      "png_cream_1024": "png/leaf-08-sweetgum-cream-transparent-1024.png",
+      "bbox": [
+        14.5,
+        19.46,
+        85.5,
+        80.54
+      ],
       "default_color": {
-        "name": "Rose",
-        "hex": "#B24E61"
+        "index": 6,
+        "name": "Yellow",
+        "disc": "#FBEFC2",
+        "ink": "#D9A41E"
       }
     },
     {
       "id": 9,
-      "name": "grass",
-      "svg": "svg/leaf-09-grass.svg",
+      "name": "Heart",
+      "slug": "leaf-09-heart",
+      "svg": "svg/leaf-09-heart.svg",
       "lottie": {
-        "idle": "lottie/leaf-09-grass-idle.json",
-        "gust": "lottie/leaf-09-grass-gust.json"
+        "idle": "lottie/leaf-09-heart-idle.json",
+        "gust": "lottie/leaf-09-heart-gust.json"
       },
       "idle_frames": 136,
       "gust_frames": 60,
       "pivot": [
-        48.196,
-        80.974
+        50.0,
+        85.433
       ],
-      "png_cream_1024": "png/leaf-09-grass-cream-transparent-1024.png",
+      "bbox": [
+        14.5,
+        14.57,
+        85.5,
+        85.43
+      ],
       "default_color": {
-        "name": "Moss",
-        "hex": "#606440"
+        "index": 7,
+        "name": "Orange",
+        "disc": "#FBDDC0",
+        "ink": "#E4802B"
+      }
+    },
+    {
+      "id": 10,
+      "name": "Fern",
+      "slug": "leaf-10-fern",
+      "svg": "svg/leaf-10-fern.svg",
+      "lottie": {
+        "idle": "lottie/leaf-10-fern-idle.json",
+        "gust": "lottie/leaf-10-fern-gust.json"
+      },
+      "idle_frames": 148,
+      "gust_frames": 60,
+      "pivot": [
+        50.0,
+        85.5
+      ],
+      "bbox": [
+        36.86,
+        14.5,
+        63.14,
+        85.5
+      ],
+      "default_color": {
+        "index": 8,
+        "name": "Lime",
+        "disc": "#E4F2C3",
+        "ink": "#88B425"
+      }
+    },
+    {
+      "id": 11,
+      "name": "Willow",
+      "slug": "leaf-11-willow",
+      "svg": "svg/leaf-11-willow.svg",
+      "lottie": {
+        "idle": "lottie/leaf-11-willow-idle.json",
+        "gust": "lottie/leaf-11-willow-gust.json"
+      },
+      "idle_frames": 154,
+      "gust_frames": 60,
+      "pivot": [
+        50.0,
+        85.5
+      ],
+      "bbox": [
+        41.09,
+        14.5,
+        58.91,
+        85.5
+      ],
+      "default_color": {
+        "index": 2,
+        "name": "Green",
+        "disc": "#D3EBD2",
+        "ink": "#3E9A5A"
+      }
+    },
+    {
+      "id": 12,
+      "name": "Clover",
+      "slug": "leaf-12-clover",
+      "svg": "svg/leaf-12-clover.svg",
+      "lottie": {
+        "idle": "lottie/leaf-12-clover-idle.json",
+        "gust": "lottie/leaf-12-clover-gust.json"
+      },
+      "idle_frames": 162,
+      "gust_frames": 60,
+      "pivot": [
+        50.0,
+        85.5
+      ],
+      "bbox": [
+        20.89,
+        14.5,
+        79.11,
+        85.5
+      ],
+      "default_color": {
+        "index": 4,
+        "name": "Teal",
+        "disc": "#CDEEE6",
+        "ink": "#2A9C8C"
+      }
+    },
+    {
+      "id": 13,
+      "name": "Aspen",
+      "slug": "leaf-13-aspen",
+      "svg": "svg/leaf-13-aspen.svg",
+      "lottie": {
+        "idle": "lottie/leaf-13-aspen-idle.json",
+        "gust": "lottie/leaf-13-aspen-gust.json"
+      },
+      "idle_frames": 142,
+      "gust_frames": 60,
+      "pivot": [
+        50.0,
+        85.5
+      ],
+      "bbox": [
+        22.13,
+        14.5,
+        77.87,
+        85.5
+      ],
+      "default_color": {
+        "index": 6,
+        "name": "Yellow",
+        "disc": "#FBEFC2",
+        "ink": "#D9A41E"
+      }
+    },
+    {
+      "id": 14,
+      "name": "Holly",
+      "slug": "leaf-14-holly",
+      "svg": "svg/leaf-14-holly.svg",
+      "lottie": {
+        "idle": "lottie/leaf-14-holly-idle.json",
+        "gust": "lottie/leaf-14-holly-gust.json"
+      },
+      "idle_frames": 158,
+      "gust_frames": 60,
+      "pivot": [
+        50.0,
+        85.5
+      ],
+      "bbox": [
+        23.28,
+        14.5,
+        76.72,
+        85.5
+      ],
+      "default_color": {
+        "index": 2,
+        "name": "Green",
+        "disc": "#D3EBD2",
+        "ink": "#3E9A5A"
+      }
+    },
+    {
+      "id": 15,
+      "name": "Palm",
+      "slug": "leaf-15-palm",
+      "svg": "svg/leaf-15-palm.svg",
+      "lottie": {
+        "idle": "lottie/leaf-15-palm-idle.json",
+        "gust": "lottie/leaf-15-palm-gust.json"
+      },
+      "idle_frames": 146,
+      "gust_frames": 60,
+      "pivot": [
+        50.0,
+        85.232
+      ],
+      "bbox": [
+        14.5,
+        14.77,
+        85.5,
+        85.23
+      ],
+      "default_color": {
+        "index": 1,
+        "name": "Royal blue",
+        "disc": "#CFDFF8",
+        "ink": "#2F5BC7"
+      }
+    },
+    {
+      "id": 16,
+      "name": "Birch",
+      "slug": "leaf-16-birch",
+      "svg": "svg/leaf-16-birch.svg",
+      "lottie": {
+        "idle": "lottie/leaf-16-birch-idle.json",
+        "gust": "lottie/leaf-16-birch-gust.json"
+      },
+      "idle_frames": 164,
+      "gust_frames": 60,
+      "pivot": [
+        50.0,
+        85.5
+      ],
+      "bbox": [
+        19.92,
+        14.5,
+        80.08,
+        85.5
+      ],
+      "default_color": {
+        "index": 7,
+        "name": "Orange",
+        "disc": "#FBDDC0",
+        "ink": "#E4802B"
       }
     }
-  ],
-  "palette": [
-    {
-      "name": "Mustard",
-      "slug": "mustard",
-      "hex": "#BCA368"
-    },
-    {
-      "name": "Olive",
-      "slug": "olive",
-      "hex": "#8D9659"
-    },
-    {
-      "name": "Moss",
-      "slug": "moss",
-      "hex": "#606440"
-    },
-    {
-      "name": "Sage",
-      "slug": "sage",
-      "hex": "#608F80"
-    },
-    {
-      "name": "Pine",
-      "slug": "pine",
-      "hex": "#416A5B"
-    },
-    {
-      "name": "Dusty blue",
-      "slug": "dusty-blue",
-      "hex": "#396788"
-    },
-    {
-      "name": "Mauve",
-      "slug": "mauve",
-      "hex": "#A56489"
-    },
-    {
-      "name": "Rose",
-      "slug": "rose",
-      "hex": "#B24E61"
-    },
-    {
-      "name": "Coral",
-      "slug": "coral",
-      "hex": "#CC6B6D"
-    },
-    {
-      "name": "Terracotta",
-      "slug": "terracotta",
-      "hex": "#C17269"
-    }
-  ],
-  "default_assignment": "deterministic from agent id on the app side (see README)"
+  ]
 }

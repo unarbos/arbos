@@ -40,9 +40,73 @@ enum Surface: String, CaseIterable, Identifiable {
     }
 }
 
+/// Who may add me to a people group (`PATCH /me {group_add}` / `GET /me` → `privacy`).
+enum GroupAddPolicy: String, CaseIterable, Identifiable {
+    case anyone
+    case peopleIKnow = "people_i_know"
+    case nobody
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .anyone: return "Anyone"
+        case .peopleIKnow: return "People I message"
+        case .nobody: return "Nobody"
+        }
+    }
+    var summary: String {
+        switch self {
+        case .anyone: return "Anyone"
+        case .peopleIKnow: return "People I message"
+        case .nobody: return "Nobody"
+        }
+    }
+}
+
 struct Notice: Identifiable, Equatable {
     let id = UUID()
     var text: String
+}
+
+/// A toast at the top of the screen (Jacob 2026-10-26, [feedback error-messages-ios-2026-10-26]):
+/// an info notice (`error` nil: "Forwarded to Studio", 6 s) or a failure drawn by `ErrorNote`
+/// (10 s; a touch holds it; × dismisses; Try again re-runs the action). `ToastHost` draws them.
+struct Toast: Identifiable, Equatable {
+    let id: UUID
+    var text: String
+    var error: UserError?
+    var detailsOpen = false
+    var held = false
+    /// Since when a touch holds it (the hold has a cap).
+    var heldSince: Date? = nil
+    var hasRetry = false
+    var at: Date
+    /// How many times this same failure arrived while the toast stood (1 = once); 2 and up
+    /// is a "×N" on the note instead of a second toast ([feedback toast-stack-ios-2026-10-27]).
+    var count: Int = 1
+
+    static let infoTTL: TimeInterval = 6
+    static let errorTTL: TimeInterval = 10
+    /// A held toast (touch on it, Details closed) is let go after this long.
+    static let holdMax: TimeInterval = 60
+    /// How many the slot shows at once; older ones fold into one "N more" line.
+    static let visibleMax = 3
+    var ttl: TimeInterval { error == nil ? Toast.infoTTL : Toast.errorTTL }
+
+    /// Two toasts are the same failure when they read the same sentence.
+    func sameAs(_ other: UserError) -> Bool { error?.sentence == other.sentence }
+}
+
+/// What the slot draws: the newest toasts, oldest first, and how many older ones are folded.
+struct ToastStack: Equatable {
+    var visible: [Toast]
+    var folded: Int
+}
+
+/// Which surface owns which failures while it is up (a sheet with a form open): a failure for
+/// one of its verbs is kept for that surface (`AppModel.claimedFailure`) instead of a toast.
+struct FailureClaim: Equatable {
+    var surface: String
+    var verbs: [String]
 }
 
 /// Last successful home registry, kept in the on-device store so reopening the
@@ -76,6 +140,14 @@ final class AppModel: ObservableObject {
     @Published var appearanceSetting: String = UserDefaults.standard.string(forKey: "appearance") ?? Appearance.default.rawValue {
         didSet { UserDefaults.standard.set(appearanceSetting, forKey: "appearance") }
     }
+    /// Settings → Appearance → Link previews ([feedback link-embeds-ios-2026-10-27]): on unless
+    /// switched off; off leaves every link plain. Mirrored into the row builder's static.
+    @Published var linkPreviews: Bool = (UserDefaults.standard.object(forKey: "linkPreviews") as? Bool) ?? true {
+        didSet {
+            UserDefaults.standard.set(linkPreviews, forKey: "linkPreviews")
+            Transcript.linkPreviewsEnabled = linkPreviews
+        }
+    }
     /// Sum of SessionRoom reconnect / state_timeout counters (About page),
     /// plus the most recent non-nil room `lastError`.
     var sharedRoomStats: (reconnects: Int, timeouts: Int, lastError: String?) {
@@ -105,6 +177,10 @@ final class AppModel: ObservableObject {
         didSet { UserDefaults.standard.set(surfaceSetting, forKey: "surface") }
     }
 
+    /// Who may add me to people groups (`anyone` | `people_i_know` | `nobody`).
+    /// Synced from `GET /me` → `privacy.group_add`; written with `PATCH /me`.
+    @Published var groupAddPolicy: String = GroupAddPolicy.anyone.rawValue
+
     @Published private(set) var credentials: DeviceCredentials?
     /// Self-serve sign-in (GitHub). `tokens` is the JWT pair; `credentials`
     /// mirrors its access token so every existing call path keeps working.
@@ -122,7 +198,13 @@ final class AppModel: ObservableObject {
     /// `machine.waitlisted` / `machine.waitlist_position`). nil = not waitlisted.
     @Published var waitlistPosition: Int?
     /// People chats (D72): DMs I am a member of, newest activity first.
-    @Published var peopleChats: [PeopleChat] = []
+    @Published var peopleChats: [PeopleChat] = [] {
+        didSet {
+            #if DEBUG
+            PerfCounters.bump("pub.peopleChats")
+            #endif
+        }
+    }
     /// Chat ids with unread rows: the relay's per-user `unread` flag plus live rows from
     /// others that landed while the chat was off screen (never `head_seq > read_seq`, #1438).
     @Published var peopleUnread: Set<String> = []
@@ -210,18 +292,89 @@ final class AppModel: ObservableObject {
     private var notifiedPushIds: Set<String> = []
     @Published private(set) var authMode: AuthMode = .github
     @Published private(set) var signingIn = false
-    @Published private(set) var signInError: String?
+    @Published private(set) var signInError: UserError?
+    @Published var signInErrorDetailsOpen = false
     /// After a fresh GitHub sign-in, ask for display name + handle once (Settings can edit later).
     @Published var needsProfileSetup = false
     private let webAuth = WebAuth()
     private var refreshTask: Task<Bool, Never>?
+    /// Outside agents (#2142): the connection per project, for the agent pane and the reveal.
+    @Published var outsideInfo: [Id: OutsideAgentInfo] = [:]
+    /// Connected agents' session logs (`GET /outside-agents/{id}/log`, #2224), oldest first,
+    /// for the Details pane's Session log card and its View all page.
+    @Published var outsideLogs: [Id: [OutsideLogEntry]] = [:]
     @Published var projects: [Project] = [] {
         didSet {
         }
     }
-    @Published var chats: [Id: [Chat]] = [:]
-    @Published var messages: [Id: [Message]] = [:]
-    @Published var caughtUp: Set<Id> = []
+    @Published var chats: [Id: [Chat]] = [:] {
+        didSet {
+            #if DEBUG
+            PerfCounters.bump("pub.chats")
+            #endif
+        }
+    }
+    @Published var messages: [Id: [Message]] = [:] {
+        didSet { bumpVersions(from: oldValue, to: messages) }
+    }
+    /// Membership notices this device shows ahead of the relay's row (ARB-393), per chat.
+    private(set) var optimisticNotices: [Id: [OptimisticNotice]] = [:]
+    /// Bumped whenever a chat's list (`messages` or `channelRows`) is replaced; views
+    /// watch this instead of comparing the whole message array on every body.
+    @Published private(set) var messagesVersion: [Id: Int] = [:]
+    /// One pass over a chat's list, kept until that list changes.
+    private var activityCache: [Id: ChatActivity] = [:]
+
+    /// A chat's scan results (streaming / open hand-off / awaiting) and the view's
+    /// change detection must not cost a pass over the list per screen body: both key
+    /// off the version. Arrays are COW, so unchanged chats share storage with the old
+    /// dictionary and keep their version (arbonites-chat-lag, 2026-10-24).
+    private func bumpVersions(from old: [Id: [Message]], to new: [Id: [Message]]) {
+        #if DEBUG
+        PerfCounters.bump("pub.messages")
+        #endif
+        for (id, list) in new where !Self.sameStorage(list, old[id]) {
+            messagesVersion[id, default: 0] &+= 1
+            activityCache[id] = nil
+        }
+        for id in old.keys where new[id] == nil {
+            messagesVersion[id, default: 0] &+= 1
+            activityCache[id] = nil
+        }
+    }
+
+    /// Same array buffer (an unchanged value carried over by copy-on-write).
+    private static func sameStorage(_ a: [Message], _ b: [Message]?) -> Bool {
+        guard let b, a.count == b.count else { return false }
+        if a.isEmpty { return true }
+        return a.withUnsafeBufferPointer { pa in b.withUnsafeBufferPointer { pb in pa.baseAddress == pb.baseAddress } }
+    }
+    /// The agent's open background jobs per project, as the relay's activity record last
+    /// listed them (duplex §2.4) — the tasks chip and sheet. No entry = no open job.
+    @Published var jobs: [Id: [Job]] = [:]
+    private var jobsPolledAt: [Id: Int64] = [:]
+    private var jobsPolling: Set<Id> = []
+    /// Job tabs per agent project (`JobTabs`): one `job:<id>` chat per job the agent started,
+    /// kept until the user closes it; never on the relay.
+    @Published var jobTabs: [Id: [Chat]] = [:]
+    /// Job tabs the user closed: not re-opened by the next listing (a link re-opens them).
+    var closedJobTabs: Set<String> = []
+    /// Each job's exchange as last fetched; the tab's transcript is synthesised from it.
+    @Published var rollouts: [String: JobRollout] = [:]
+    /// Steers typed in a job tab the box has not echoed yet, by job id.
+    var pendingSteers: [String: [Message]] = [:]
+    private var rolloutPolledAt: [String: Int64] = [:]
+    private var rolloutPolling: Set<String> = []
+    /// How often the open chat's jobs are polled while one is live (the design's "chip
+    /// updates on the next poll"; stop ≤ 3 s).
+    static let jobsPollMs: Int64 = 1_500
+    @Published var caughtUp: Set<Id> = [] {
+        didSet {
+            #if DEBUG
+            PerfCounters.bump("pub.caughtUp")
+            #endif
+        }
+    }
     @Published var link: Link = .connecting
     /// Per-room link, for the chat header's connection pill. The pill must not
     /// use the global `link`: any other room's brief reconnect was painting
@@ -250,17 +403,27 @@ final class AppModel: ObservableObject {
     var openServerHookDone = false
     /// Rig: the tab the channel page opens on (`ARBOS_OPEN_SERVER=…:page-settings`).
     var openServerHookTab: String?
+    /// Rig: `ARBOS_SHOW` ran once for this launch. A chat's `onAppear` fires again when a
+    /// screen pushed over it is popped; without this a `jobtab` hook re-pushed the tab the
+    /// moment a back swipe popped it.
+    var showHookDone = false
     /// `machine.always_on` as last reported by `GET /me` (nil = field absent).
     private var meAlwaysOn: Bool?
     /// Navigation: home → chat. Shared so menus anywhere can open a chat.
     @Published var path: [Route] = [] {
         didSet {
+            dropDraftDMIfLeft()
             // The open chat is loaded first next launch and evicted last.
             if case .chat(let chatId, let pid)? = path.last, pid != channelSlot, let store {
                 store.touchDoc(chatId)
                 store.put(StoreKey.lastChat, Data(chatId.utf8))
             }
         }
+    }
+    /// A chat screen is on top of the stack: the toast slot is its header's, not the root's.
+    var chatIsUp: Bool {
+        if case .chat? = path.last { return true }
+        return false
     }
     /// True when the Debug fixture replaced the relay (screenshots).
     var isFixture = false
@@ -286,6 +449,11 @@ final class AppModel: ObservableObject {
     @Published var mutedChannelIds: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "mutedChannelIds") ?? []) {
         didSet { UserDefaults.standard.set(Array(mutedChannelIds), forKey: "mutedChannelIds") }
     }
+    /// People group chats muted on this phone until the given date (`distantFuture` = until unmuted).
+    /// Timed mutes live here; the relay's `me.muted` stays true while muted so other devices match.
+    @Published var peopleMutedUntil: [String: Date] = AppModel.loadPeopleMutedUntil() {
+        didSet { AppModel.savePeopleMutedUntil(peopleMutedUntil) }
+    }
     /// The shared Matrix client (crates/arbos-matrix through ArbosFFI): the rooms' data plane.
     var matrixClient: ArbosFFI.MatrixClient?
     /// Retains the UniFFI foreign listener for the client's lifetime.
@@ -297,17 +465,22 @@ final class AppModel: ObservableObject {
     @Published var matrixConnected = true
     var matrixDisconnectedSince: Date?
     /// Decoded channel timelines by relay channel id — the rows ChatView renders for a channel.
-    @Published var channelRows: [Id: [Message]] = [:]
+    @Published var channelRows: [Id: [Message]] = [:] {
+        didSet { bumpVersions(from: oldValue, to: channelRows) }
+    }
     /// Channels whose room reached the beginning of its history (`loadOlder` → nil).
     var channelAtStart: Set<Id> = []
     /// Channels with an `openRoom` / `loadOlder` in flight.
     var channelLoading: Set<Id> = []
+    /// Servers whose member list was asked for this session (`wantServerRosters`).
+    var serverRostersRequested: Set<Id> = []
     /// `matrixStart` in flight (one at a time).
     var matrixStarting = false
 
     /// Who the call screen shows before anyone joins: the DM peer, or (for a
     /// people group) every other human plus the agents in that chat; for a
-    /// project chat the project's agent (Calls Phase 2).
+    /// project chat the project's agent (Calls Phase 2). A selective group
+    /// start (`CallManager.ringIds`) narrows the group list to the people we named.
     func expectedCallPeople(_ c: Call) -> [CallPerson] {
         guard let chat = peopleChat(c.chatId) else {
             if !c.agents.isEmpty { return c.agents }
@@ -317,7 +490,11 @@ final class AppModel: ObservableObject {
         }
         let me = user?.id
         if chat.isGroup {
-            return chat.members.filter { $0.id != me }.map(CallPerson.from(member:))
+            let others = chat.members.filter { $0.id != me }
+            if let ring = CallManager.shared.ringIds, c.callId == CallManager.shared.call?.callId {
+                return others.filter { ring.contains($0.id) }.map(CallPerson.from(member:))
+            }
+            return others.map(CallPerson.from(member:))
         }
         guard let other = chat.counterpart(me: me) else { return [] }
         return [CallPerson.from(member: other)]
@@ -329,14 +506,14 @@ final class AppModel: ObservableObject {
         return false
     }
 
+    /// Opening only views: an archived row stays in Hidden chats until Unarchive or a new
+    /// message from someone else (`unarchiveOnActivity`) brings it back.
     func open(chat: Chat) {
-        unarchive(chat.projectId)
         path = [.chat(chatId: chat.id, projectId: chat.projectId)]
     }
 
     /// Tapping an agent opens its one chat (D78).
     func open(project: Project) {
-        unarchive(project.id)
         if let chat = singleChat(of: project.id) {
             open(chat: chat)
         } else {
@@ -345,103 +522,347 @@ final class AppModel: ObservableObject {
         }
     }
 
-    // MARK: Home archive (device-local)
+    // MARK: Home archive (per user on the relay; UserDefaults keeps the offline copy)
 
-    /// Agents hidden from the home list until found in search (or opened).
+    /// Agents hidden from the home list (Hidden chats) until unarchived or new activity.
     @Published private(set) var archivedProjectIds: Set<Id> = {
         Set(UserDefaults.standard.stringArray(forKey: "archivedProjects") ?? [])
     }()
 
-    /// People DMs/groups hidden from home until found in search (or opened).
+    /// People DMs/groups hidden from home until unarchived or new activity.
     @Published private(set) var archivedPeopleChatIds: Set<Id> = {
         Set(UserDefaults.standard.stringArray(forKey: "archivedPeopleChats") ?? [])
     }()
+
+    /// Servers hidden from home until unarchived.
+    @Published private(set) var archivedServerIds: Set<Id> = {
+        Set(UserDefaults.standard.stringArray(forKey: "archivedServers") ?? [])
+    }()
+
+    /// Rows this device just (un)archived: the relay list may still say the old state for
+    /// a poll or two, so the reconcile skips them until the deadline.
+    private var archiveLocalUntil: [String: Date] = [:]
+    private static let archiveLocalGraceSeconds: TimeInterval = 20
 
     func isArchived(_ projectId: Id) -> Bool { archivedProjectIds.contains(projectId) }
 
     func isArchived(peopleChatId: Id) -> Bool { archivedPeopleChatIds.contains(peopleChatId) }
 
-    func archive(_ projectId: Id) {
-        guard !archivedProjectIds.contains(projectId) else { return }
-        archivedProjectIds.insert(projectId)
+    func isArchived(serverId: Id) -> Bool { archivedServerIds.contains(serverId) }
+
+    func archive(_ projectId: Id) { setArchived(projectId: projectId, true) }
+    func unarchive(_ projectId: Id) { setArchived(projectId: projectId, false) }
+    func archive(peopleChatId: Id) { setArchived(peopleChatId: peopleChatId, true) }
+    func unarchive(peopleChatId: Id) { setArchived(peopleChatId: peopleChatId, false) }
+    func archive(serverId: Id) { setArchived(serverId: serverId, true) }
+    func unarchive(serverId: Id) { setArchived(serverId: serverId, false) }
+
+    private func setArchived(projectId: Id, _ archived: Bool) {
+        guard archivedProjectIds.contains(projectId) != archived else { return }
+        if archived { archivedProjectIds.insert(projectId) } else { archivedProjectIds.remove(projectId) }
         UserDefaults.standard.set(Array(archivedProjectIds), forKey: "archivedProjects")
-        // Archive clears a home pin — the row is hidden until search/open.
-        unpinHome(projectId: projectId)
+        // Archive clears a home pin — the row is hidden until unarchived.
+        if archived { unpinHome(projectId: projectId) }
+        archiveLocalUntil["p:" + projectId] = Date().addingTimeInterval(Self.archiveLocalGraceSeconds)
+        guard credentials != nil, !isFixture else { return }
+        Task {
+            do { try await api.setProjectArchived(projectId, archived: archived) } catch let e as RelayError where e.status == 404 {
+                // Older relay: the archive stays on this device.
+            } catch { fail(archived ? "archive the chat" : "unarchive the chat", error) }
+        }
     }
 
-    func archive(peopleChatId: Id) {
-        guard !archivedPeopleChatIds.contains(peopleChatId) else { return }
-        archivedPeopleChatIds.insert(peopleChatId)
+    private func setArchived(peopleChatId: Id, _ archived: Bool) {
+        guard archivedPeopleChatIds.contains(peopleChatId) != archived else { return }
+        if archived { archivedPeopleChatIds.insert(peopleChatId) } else { archivedPeopleChatIds.remove(peopleChatId) }
         UserDefaults.standard.set(Array(archivedPeopleChatIds), forKey: "archivedPeopleChats")
-        unpinHome(peopleChatId: peopleChatId)
+        if archived { unpinHome(peopleChatId: peopleChatId) }
+        if let i = peopleChats.firstIndex(where: { $0.id == peopleChatId }) {
+            peopleChats[i].archivedAt = archived ? nowMs() : nil
+        }
+        archiveLocalUntil["c:" + peopleChatId] = Date().addingTimeInterval(Self.archiveLocalGraceSeconds)
+        guard credentials != nil, !isFixture else { return }
+        Task {
+            do { try await api.chatSettings(chatId: peopleChatId, archived: archived) } catch let e as RelayError where e.status == 404 {
+                // Older relay: the archive stays on this device.
+            } catch { fail(archived ? "archive the chat" : "unarchive the chat", error) }
+        }
     }
 
-    func unarchive(_ projectId: Id) {
-        guard archivedProjectIds.contains(projectId) else { return }
-        archivedProjectIds.remove(projectId)
-        UserDefaults.standard.set(Array(archivedProjectIds), forKey: "archivedProjects")
+    private func setArchived(serverId: Id, _ archived: Bool) {
+        guard archivedServerIds.contains(serverId) != archived else { return }
+        if archived { archivedServerIds.insert(serverId) } else { archivedServerIds.remove(serverId) }
+        UserDefaults.standard.set(Array(archivedServerIds), forKey: "archivedServers")
+        if archived { unpinHome(serverId: serverId) }
+        archiveLocalUntil["s:" + serverId] = Date().addingTimeInterval(Self.archiveLocalGraceSeconds)
+        guard credentials != nil, !isFixture else { return }
+        Task {
+            do { try await api.setServerArchived(serverId, archived: archived) } catch let e as RelayError where e.status == 404 {
+                // Older relay: the archive stays on this device.
+            } catch { fail(archived ? "archive the chat" : "unarchive the chat", error) }
+        }
     }
 
-    func unarchive(peopleChatId: Id) {
-        guard archivedPeopleChatIds.contains(peopleChatId) else { return }
-        archivedPeopleChatIds.remove(peopleChatId)
-        UserDefaults.standard.set(Array(archivedPeopleChatIds), forKey: "archivedPeopleChats")
+    /// The relay's per-user flags win over the offline copy, except for rows this device
+    /// changed in the last few seconds (`archiveLocalUntil`).
+    private func reconcileArchive(key prefix: String, relay: [(Id, Bool)], into set: inout Set<Id>, defaultsKey: String) {
+        let now = Date()
+        var next = set
+        for (id, archived) in relay {
+            if let until = archiveLocalUntil[prefix + id], until > now { continue }
+            if archived { next.insert(id) } else { next.remove(id) }
+        }
+        guard next != set else { return }
+        set = next
+        UserDefaults.standard.set(Array(set), forKey: defaultsKey)
     }
 
-    // MARK: Home pins (device-local)
+    func reconcileArchivedProjects(_ list: [Project]) {
+        guard !isFixture else { return }
+        reconcileArchive(key: "p:", relay: list.map { ($0.id, $0.archivedAt != nil) }, into: &archivedProjectIds, defaultsKey: "archivedProjects")
+    }
 
-    /// How many home rows may sit pinned at once (agents + people chats).
+    func reconcileArchivedPeople(_ list: [PeopleChat]) {
+        guard !isFixture else { return }
+        reconcileArchive(key: "c:", relay: list.map { ($0.id, $0.archivedAt != nil) }, into: &archivedPeopleChatIds, defaultsKey: "archivedPeopleChats")
+    }
+
+    func reconcileArchivedServers(_ list: [Server]) {
+        guard !isFixture else { return }
+        reconcileArchive(key: "s:", relay: list.map { ($0.id, $0.archivedAt != nil) }, into: &archivedServerIds, defaultsKey: "archivedServers")
+    }
+
+    /// Another device of mine flipped a row (`space_archived` / `chat_archived` push).
+    func applyRemoteArchive(spaceId: Id, kind: String, archived: Bool) {
+        archiveLocalUntil.removeValue(forKey: (kind == "server" ? "s:" : "p:") + spaceId)
+        if kind == "server" {
+            reconcileArchive(key: "s:", relay: [(spaceId, archived)], into: &archivedServerIds, defaultsKey: "archivedServers")
+            if archived { unpinHome(serverId: spaceId) }
+        } else {
+            reconcileArchive(key: "p:", relay: [(spaceId, archived)], into: &archivedProjectIds, defaultsKey: "archivedProjects")
+            if archived { unpinHome(projectId: spaceId) }
+        }
+    }
+
+    func applyRemoteArchive(peopleChatId: Id, archived: Bool) {
+        archiveLocalUntil.removeValue(forKey: "c:" + peopleChatId)
+        reconcileArchive(key: "c:", relay: [(peopleChatId, archived)], into: &archivedPeopleChatIds, defaultsKey: "archivedPeopleChats")
+        if archived { unpinHome(peopleChatId: peopleChatId) }
+    }
+
+    /// An archived chat got a new inbound message: the row comes back to the list.
+    func unarchiveOnActivity(chatId: Id) {
+        if peopleChat(chatId) != nil {
+            if archivedPeopleChatIds.contains(chatId) { unarchive(peopleChatId: chatId) }
+            return
+        }
+        for (pid, list) in chats where list.contains(where: { $0.id == chatId }) {
+            if archivedProjectIds.contains(pid) { unarchive(pid) }
+            return
+        }
+    }
+
+    // MARK: Home pins (synced through the relay)
+
+    /// The relay's cap until `GET /me/pins` says otherwise (Jacob 2026-10-28: 5, no tiers).
     static let maxHomePins = 5
 
-    /// Home-list keys (`p:<projectId>` / `c:<peopleChatId>`) kept at the top.
-    @Published private(set) var pinnedHomeIds: Set<String> = {
-        Set(UserDefaults.standard.stringArray(forKey: "pinnedHome") ?? [])
-    }()
+    /// How many rows may sit pinned at once — the relay's number.
+    @Published private(set) var pinCap = AppModel.maxHomePins
 
-    func isHomePinned(projectId: Id) -> Bool { pinnedHomeIds.contains("p:" + projectId) }
-    func isHomePinned(peopleChatId: Id) -> Bool { pinnedHomeIds.contains("c:" + peopleChatId) }
+    /// My pins as the relay keeps them, top first — row keys `agent:<project>` /
+    /// `chat:<people chat>` / `server:<server>`, one list for every device
+    /// ([feedback sidebar-pinning-ios-2026-10-28]; `GET` / `PUT /me/pins`, `pins_changed`
+    /// push). Cached in `UserDefaults[HomePins.cacheKey]` so the section is there at launch.
+    /// Before the synced list this device kept `p:` / `c:` keys under `pinnedHome`; the
+    /// first launch with the relay list empty uploads them once (`HomePins.migrateLegacy`).
+    @Published private(set) var pinnedHomeIds: [String] = HomePins.cached()
+
+    func isHomePinned(projectId: Id) -> Bool { pinnedHomeIds.contains(HomePins.key(projectId: projectId)) }
+    func isHomePinned(peopleChatId: Id) -> Bool { pinnedHomeIds.contains(HomePins.key(peopleChatId: peopleChatId)) }
+    func isHomePinned(serverId: Id) -> Bool { pinnedHomeIds.contains(HomePins.key(serverId: serverId)) }
+
+    /// Position in the Pinned section (0 = top), or `nil` when not pinned.
+    func homePinIndex(projectId: Id) -> Int? { pinnedHomeIds.firstIndex(of: HomePins.key(projectId: projectId)) }
+    func homePinIndex(peopleChatId: Id) -> Int? { pinnedHomeIds.firstIndex(of: HomePins.key(peopleChatId: peopleChatId)) }
+    func homePinIndex(serverId: Id) -> Int? { pinnedHomeIds.firstIndex(of: HomePins.key(serverId: serverId)) }
 
     func pinHome(projectId: Id) {
         unarchive(projectId)
-        setHomePinned("p:" + projectId, true)
+        setHomePinned(HomePins.key(projectId: projectId), true)
     }
 
-    func unpinHome(projectId: Id) { setHomePinned("p:" + projectId, false) }
+    func unpinHome(projectId: Id) { setHomePinned(HomePins.key(projectId: projectId), false) }
 
     func pinHome(peopleChatId: Id) {
         unarchive(peopleChatId: peopleChatId)
-        setHomePinned("c:" + peopleChatId, true)
+        setHomePinned(HomePins.key(peopleChatId: peopleChatId), true)
     }
-    func unpinHome(peopleChatId: Id) { setHomePinned("c:" + peopleChatId, false) }
+    func unpinHome(peopleChatId: Id) { setHomePinned(HomePins.key(peopleChatId: peopleChatId), false) }
+
+    func pinHome(serverId: Id) {
+        unarchive(serverId: serverId)
+        setHomePinned(HomePins.key(serverId: serverId), true)
+    }
+    func unpinHome(serverId: Id) { setHomePinned(HomePins.key(serverId: serverId), false) }
+
+    /// Put a pinned home row first in the section (long-press → Move to top).
+    func moveHomePinToTop(projectId: Id) { moveHomePinToTop(key: HomePins.key(projectId: projectId)) }
+    func moveHomePinToTop(peopleChatId: Id) { moveHomePinToTop(key: HomePins.key(peopleChatId: peopleChatId)) }
+    func moveHomePinToTop(serverId: Id) { moveHomePinToTop(key: HomePins.key(serverId: serverId)) }
+
+    /// Move a pinned home row one step toward the top of the section.
+    func moveHomePinUp(projectId: Id) { moveHomePin(key: HomePins.key(projectId: projectId), delta: -1) }
+    func moveHomePinUp(peopleChatId: Id) { moveHomePin(key: HomePins.key(peopleChatId: peopleChatId), delta: -1) }
+    func moveHomePinUp(serverId: Id) { moveHomePin(key: HomePins.key(serverId: serverId), delta: -1) }
+
+    /// Move a pinned home row one step toward the bottom of the section.
+    func moveHomePinDown(projectId: Id) { moveHomePin(key: HomePins.key(projectId: projectId), delta: 1) }
+    func moveHomePinDown(peopleChatId: Id) { moveHomePin(key: HomePins.key(peopleChatId: peopleChatId), delta: 1) }
+    func moveHomePinDown(serverId: Id) { moveHomePin(key: HomePins.key(serverId: serverId), delta: 1) }
 
     private func setHomePinned(_ key: String, _ pinned: Bool) {
+        var next = pinnedHomeIds
         if pinned {
-            guard !pinnedHomeIds.contains(key) else { return }
-            // Cap at five so the top of Home stays a short favourites strip.
-            guard pinnedHomeIds.count < Self.maxHomePins else {
-                notice = Notice(text: "You can pin up to five chats.")
+            guard !next.contains(key) else { return }
+            // The relay's cap, mirrored here so the refusal is instant and worded once.
+            guard next.count < pinCap else {
+                failRefused("pin the chat", "You can pin up to \(pinCap) chats.")
                 return
             }
-            pinnedHomeIds.insert(key)
+            // New pins land at the top; Move to top / up / down adjusts the order.
+            next.insert(key, at: 0)
         } else {
-            guard pinnedHomeIds.contains(key) else { return }
-            pinnedHomeIds.remove(key)
+            guard let i = next.firstIndex(of: key) else { return }
+            next.remove(at: i)
         }
-        UserDefaults.standard.set(Array(pinnedHomeIds), forKey: "pinnedHome")
+        storePins(next)
     }
 
+    private func moveHomePinToTop(key: String) {
+        guard let i = pinnedHomeIds.firstIndex(of: key), i > 0 else { return }
+        var next = pinnedHomeIds
+        next.remove(at: i)
+        next.insert(key, at: 0)
+        storePins(next)
+    }
+
+    private func moveHomePin(key: String, delta: Int) {
+        guard let i = pinnedHomeIds.firstIndex(of: key) else { return }
+        let j = i + delta
+        guard pinnedHomeIds.indices.contains(j) else { return }
+        var next = pinnedHomeIds
+        next.swapAt(i, j)
+        storePins(next)
+    }
+
+    /// The new list, shown and cached at once, then sent to the relay — whose answer (the
+    /// list it kept, cleaned and capped) is the truth. A refusal re-reads the relay's list;
+    /// an older relay without the endpoint keeps the local list.
+    private func storePins(_ pins: [String]) {
+        guard pins != pinnedHomeIds else { return }
+        pinnedHomeIds = pins
+        HomePins.cache(pins)
+        guard credentials != nil, !isFixture else { return }
+        Task {
+            do {
+                applyPins(try await api.setPins(pins))
+            } catch let e as RelayError where e.status == 404 {
+                // Older relay: the pins stay on this device.
+            } catch let e as RelayError where e.status == 409 {
+                failRefused("pin the chat", e.message.isEmpty ? "You can pin up to \(pinCap) chats." : e.message)
+                await refreshPins()
+            } catch {
+                fail("save your pins", error)
+                await refreshPins()
+            }
+        }
+    }
+
+    /// `GET /me/pins`: the relay's list replaces the cached one. On the first launch with the
+    /// synced list — the relay has nothing and this device still holds `pinnedHome` — the old
+    /// local pins go up once, in their order (Jacob's option A, 2026-10-28); the local list
+    /// stands until the relay confirms.
+    func refreshPins() async {
+        guard credentials != nil, !isFixture else { return }
+        do {
+            let dto = try await api.pins()
+            let legacy = HomePins.legacyLocal()
+            if dto.pins.isEmpty, !legacy.isEmpty, !HomePins.migrated() {
+                let migrated = HomePins.migrateLegacy(legacy, cap: Int(dto.cap))
+                let kept = try await api.setPins(migrated)
+                HomePins.markMigrated()
+                applyPins(kept)
+            } else {
+                if !legacy.isEmpty { HomePins.markMigrated() }
+                applyPins(dto)
+            }
+        } catch let e as RelayError where e.status == 404 {
+            // Older relay: the cached list stands, quietly.
+        } catch {
+            NSLog("pins: \(error)")
+        }
+    }
+
+    /// Another device of mine replaced the list (`pins_changed` push).
+    func applyRemotePins(_ pins: [String]) {
+        pinnedHomeIds = pins
+        HomePins.cache(pins)
+    }
+
+    private func applyPins(_ dto: PinsDto) {
+        pinCap = max(1, Int(dto.cap))
+        pinnedHomeIds = dto.pins
+        HomePins.cache(dto.pins)
+    }
+
+    /// `refreshPins()` ran once this launch (the loop re-reads only on a push or a refusal).
+    private var pinsLoaded = false
+
     @Published private(set) var machineError: String?
-    @Published var notice: Notice?
+    /// Compatibility shim: setting it posts an **info** toast (something that worked or a plain
+    /// status). A failure is `fail(_:_:)` — `ErrorUILintTests` keeps raw errors out of here.
+    @Published var notice: Notice? {
+        didSet {
+            guard let n = notice else { return }
+            notice = nil
+            notify(n.text)
+        }
+    }
+    /// The toast stack, newest last (`ToastHost`).
+    @Published private(set) var toasts: [Toast] = []
+    private var toastRetries: [UUID: () -> Void] = [:]
+    private var toastTimers: [UUID: Task<Void, Never>] = [:]
+    /// A surface with a form up takes its verbs' failures; the note it draws.
+    @Published var failureClaim: FailureClaim? {
+        didSet { if failureClaim != oldValue { claimedFailure = nil } }
+    }
+    @Published var claimedFailure: UserError?
+    @Published var claimedFailureDetailsOpen = false
+    /// Per chat: the last send / attachment / recording failure, drawn above the composer until
+    /// Try again, a new send, or the next successful send.
+    @Published private(set) var sendErrors: [Id: UserError] = [:]
+    @Published var sendErrorDetailsOpen: Set<Id> = []
     @Published private(set) var pairingBusy = false
-    @Published private(set) var pairingError: String?
-    @Published private(set) var registryError: String?
+    @Published private(set) var pairingError: UserError?
+    @Published var pairingErrorDetailsOpen = false
+    @Published private(set) var registryError: UserError?
+    @Published var registryErrorDetailsOpen = false
     /// Settings → Connectors (Google Gmail/Calendar, …). Empty until first refresh.
     @Published private(set) var connectors = ConnectorsView()
     @Published private(set) var connectorsBusy = false
     /// Settings → Secrets (D83). `nil` until the first `GET /secrets`.
     @Published var secrets: SecretsOverview?
+    /// Settings → Devices (`GET /auth/devices`, Oct 23).
+    @Published var devices: [AuthDevice] = []
+    @Published var devicesLoaded = false
+    @Published var devicesError: UserError?
     /// Agent profile → Secrets, per project.
     @Published var projectSecrets: [Id: ProjectSecrets] = [:]
+    /// Standing shell approvals per agent (#1544), loaded when the agent pane opens.
+    @Published var shellGrants: [Id: [ShellGrant]] = [:]
+    /// Secret hand-off request cards: approval id → saving / saved(env) / failed(sentence).
+    @Published var handoff: [String: HandoffState] = [:]
     /// Fixture only: the Vault page's item list (the relay answers this live).
     var fixtureVaultItems: [[String: Any]] = []
     @Published var secretsBusy = false
@@ -460,6 +881,15 @@ final class AppModel: ObservableObject {
     /// Client-minted message ids whose push the relay has not `ACK`ed (S3),
     /// keyed by chat id so one room's ACK cannot leave another chat's bubble faint.
     private var unacked: [Id: Set<Id>] = [:]
+    /// Rooms whose pushes were refused with `not_available` on the live connection.
+    /// Cleared by that room's next ACK (not by another room's ACK).
+    @Published private(set) var pushRefused: Set<Id> = []
+    /// The relay's reason for each refused room, in plain words ([feedback blocked-state-ios-2026-10-26]);
+    /// the chat-level note under the header draws it. Cleared with the room's next ACK.
+    @Published private(set) var pushRefusalText: [Id: String] = [:]
+    /// The relay's `reason` next to `pushRefusalText` (so a timed mute can clear only a
+    /// `silenced` entry once the end passes — [feedback app-01M61GZ5B66VCSKF40458KH3DP]).
+    @Published private(set) var pushRefusalReason: [Id: String] = [:]
     /// Rooms with a full re-read scheduled by `requestSnapshot` (one per coalesce window).
     private var snapshotPending: Set<Id> = []
     /// When each room's transcript was last re-read from its doc (`Date` seconds).
@@ -468,6 +898,20 @@ final class AppModel: ObservableObject {
     /// Re-reading the transcript at most this often keeps the paint moving and the
     /// decode cost linear in the backfill, not quadratic.
     static let snapshotCoalesceMs = 80
+    /// While a room catches up (not yet `caughtUp`) every doc change — list or message
+    /// touch — folds into one re-read per this window, and the home list's activity bump
+    /// happens with that re-read, not per row. 72 rows replayed per row cost 11 s of
+    /// blocked main thread on a 1 500-message group (iphone-open-scroll-block, 2026-10-24).
+    static let catchUpCoalesceMs = 600
+    /// Live rows: the first lands at once, the rest of a burst fold into one read per window.
+    static let liveCoalesceMs = 150
+    /// Lists at or above this size are decoded off the main actor (`emitSnapshot`).
+    static let asyncSnapshotMinRows = 300
+    /// Per-chat generation of the last requested snapshot; a slower background decode
+    /// that finishes after a newer one is dropped.
+    private var snapshotGeneration: [Id: Int] = [:]
+    /// Rooms whose home-list activity bump waits for the next snapshot (catch-up).
+    private var activityPending: Set<Id> = []
     private var registryTask: Task<Void, Never>?
 
     // MARK: On-device store (#929)
@@ -513,7 +957,14 @@ final class AppModel: ObservableObject {
     var isPaired: Bool { credentials != nil }
     var relayUrl: String { api.endpoint.httpUrl }
 
+    /// The model the avatar views resolve through (`AgentAvatar.shown`): the app has one; a
+    /// test's model becomes current while it exists.
+    private(set) weak static var current: AppModel?
+
     init() {
+        // The row builder's switch mirrors the saved setting from the first row on (no `self`
+        // here: stored properties are still initialising).
+        Transcript.linkPreviewsEnabled = (UserDefaults.standard.object(forKey: "linkPreviews") as? Bool) ?? true
         LaunchClock.mark("app-init")
         // Drop the retired SessionRoom TestFlight switch so it does not linger.
         UserDefaults.standard.removeObject(forKey: "sharedRoomSession")
@@ -539,6 +990,7 @@ final class AppModel: ObservableObject {
         if env["ARBOS_FIXTURE"] == "1" {
             api = RelayAPI(endpoint: RelayEndpoint("http://fixture.invalid")) { "" }
             credentials = DeviceCredentials(relayUrl: "http://fixture.invalid", deviceId: "ios:fixture", deviceToken: "fixture")
+            LinkIcons.shared.fetch = { host in LinkIcons.fixtureIcon(host: host) }
             loadFixture()
             return
         }
@@ -548,6 +1000,8 @@ final class AppModel: ObservableObject {
             UserDefaults.standard.set(endpoint.httpUrl, forKey: "relayUrl")
         }
         api = RelayAPI(endpoint: endpoint) { "" }
+        // Site icons for the bubbles' named links come from whichever relay is current.
+        LinkIcons.shared.fetch = { [weak self] host in await self?.api.linkIcon(host: host) }
         if creds == nil, let saved = Keychain.loadAuth(relayUrl: endpoint.httpUrl) {
             tokens = saved
             creds = DeviceCredentials(relayUrl: saved.relayUrl, deviceId: saved.deviceId, deviceToken: saved.accessToken)
@@ -570,12 +1024,14 @@ final class AppModel: ObservableObject {
             adopt(tokens: toks, user: who, persist: false)
         }
         #endif
+        AppModel.current = self
         Task { await probeAuthMode() }
         PushManager.shared.visibleChatId = { [weak self] in
             guard let self, self.appActive else { return nil }
             return self.visibleChatId
         }
         PushManager.shared.isHiddenChat = { [weak self] id in self?.isHiddenChat(id) ?? false }
+        PushManager.shared.isMutedChat = { [weak self] id in self?.isPeopleChatMuted(id) ?? false }
         NotificationCenter.default.addObserver(forName: PushManager.openChat, object: nil, queue: .main) { [weak self] n in
             guard let self, let cid = n.userInfo?["chat_id"] as? String else { return }
             let pid = (n.userInfo?["project_id"] as? String) ?? peopleSlot
@@ -591,6 +1047,13 @@ final class AppModel: ObservableObject {
                 let event = info["event"] as? String
                 if category == PushManager.callCategory || event == "started" || event == "ended" || event == "missed" {
                     CallManager.shared.handleCallAlert(info)
+                }
+                // Silent clear-on-read push (`type: clear`, the APNs form of
+                // `notifications_cleared`): same effect as the /me/pushes row, but it also
+                // reaches a backgrounded phone.
+                if (info["type"] as? String) == "clear", let cid = info["chat_id"] as? String, !cid.isEmpty {
+                    let badge = (info["badge"] as? NSNumber)?.int64Value ?? -1
+                    self?.applyRemoteClear(chatId: cid, relayTotal: badge)
                 }
                 await self?.refreshPeople(); await self?.refreshUnread()
             }
@@ -628,6 +1091,11 @@ final class AppModel: ObservableObject {
             }
             path = [.chat(chatId: chatId, projectId: projectId)]
             pendingOpen = deferRoom ? (chatId, projectId) : nil
+        } else if projectId == channelSlot,
+                  let server = servers.first(where: { $0.channels.contains { $0.id == chatId } }) {
+            // A server channel banner: land in the server, then the channel.
+            path = [.server(serverId: server.id), .chat(chatId: chatId, projectId: channelSlot)]
+            pendingOpen = nil
         } else {
             pendingOpen = (chatId, projectId)
         }
@@ -714,6 +1182,12 @@ final class AppModel: ObservableObject {
                                           appVersion: FeedbackCenter.appVersion, os: "iOS \(UIDevice.current.systemVersion)", projectId: projectId)
     }
 
+    /// Opt-in MetricKit payload → the relay (`PerfDiagnostics`). The fixture never posts.
+    func sendPerfReport(_ envelope: [String: Any]) async throws {
+        if isFixture { return }
+        try await api.sendPerfReport(envelope)
+    }
+
     // MARK: Calls v1
 
     private func hookCalls() {
@@ -766,7 +1240,7 @@ final class AppModel: ObservableObject {
             try doc.insertSystemLine(id: newId(), text: text, deviceId: deviceId, callId: callId)
             doc.commit()
         } catch {
-            notice = Notice(text: "Could not write the call line: \(error.localizedDescription)")
+            fail("write the call line", error)
         }
     }
 
@@ -785,7 +1259,7 @@ final class AppModel: ObservableObject {
 
     /// Opening a chat: is a call on there? (GET /chats/{id}/call)
     func refreshActiveCall(chatId: Id, projectId: Id?) async {
-        guard credentials != nil, !isFixture else { return }
+        guard credentials != nil, !isFixture, !Self.isDraftDM(chatId) else { return }
         if let c = try? await api.activeCall(chatId: chatId, projectId: projectId) {
             CallManager.shared.noteActive(c, chatId: chatId)
         } else {
@@ -844,21 +1318,39 @@ final class AppModel: ObservableObject {
     var unreadTotal: Int {
         // Hidden plain chats (D78: not the agent's one chat) never badge.
         if !unreadCounts.isEmpty {
-            var total = unreadCounts.reduce(0) { $0 + (isHiddenChat($1.key) ? 0 : $1.value) }
-            // Live Loro rows can mark unread before /me/unread has the event.
-            for id in peopleUnread where !isHiddenChat(id) && (unreadCounts[id] ?? 0) == 0 {
-                total += 1
-            }
-            for list in chats.values {
-                for c in list where c.unread && !isHiddenChat(c.id) && (unreadCounts[c.id] ?? 0) == 0 {
-                    total += 1
-                }
-            }
-            return total
+            let flagged = peopleUnread.union(chats.values.flatMap { $0 }.filter { $0.unread }.map(\.id))
+            return Self.badgeTotal(remote: unreadCounts, flagged: flagged, hidden: { self.isHiddenChat($0) })
         }
         let people = peopleChats.reduce(0) { $0 + unreadCount(for: $1) }
         let projects = chats.values.flatMap { $0 }.filter { $0.unread && !isHiddenChat($0.id) }.count
         return people + projects
+    }
+
+    /// The app badge from the relay's per-chat counts (`GET /me/unread`) plus one for every
+    /// chat a live row flagged before `/me/unread` caught up; hidden chats never count.
+    nonisolated static func badgeTotal(remote: [String: Int], flagged: Set<String>, hidden: (String) -> Bool) -> Int {
+        var total = remote.reduce(0) { $0 + (hidden($1.key) ? 0 : $1.value) }
+        for id in flagged where !hidden(id) && (remote[id] ?? 0) == 0 {
+            total += 1
+        }
+        return total
+    }
+
+    /// A clear from another device (`notifications_cleared`) applied to the local unread
+    /// picture: the chat's remote count and local flag go, every other chat keeps its count.
+    nonisolated static func clearingChat(_ chatId: String, remote: inout [String: Int], flagged: inout Set<String>) {
+        if remote[chatId] != nil { remote[chatId] = 0 }
+        flagged.remove(chatId)
+    }
+
+    /// The badge right after a clear: the smaller of the relay's total (every chat, the read
+    /// one at 0 — what its `/me/unread` would say) and the local sum. Each side can only be
+    /// too high: the local sum when a live row lit a flag `/me/unread` has not confirmed, the
+    /// relay's when this device read a chat moments ago and its throttled `PUT /read` is
+    /// still pending, or for hidden plain chats (D78) the relay counts and the badge never
+    /// shows. A total the relay did not send (negative) falls back to the local sum.
+    nonisolated static func badgeAfterClear(relayTotal: Int64, localTotal: Int) -> Int {
+        relayTotal >= 0 ? Int(min(relayTotal, Int64(max(0, localTotal)))) : max(0, localTotal)
     }
 
     /// Unread rows of one agent chat for its dot: none for a hidden plain chat.
@@ -868,6 +1360,15 @@ final class AppModel: ObservableObject {
         if chat.id == visibleChatId { return false }
         if chat.unread { return true }
         return (unreadCounts[chat.id] ?? 0) > 0
+    }
+
+    /// Missed messages across an agent's chats — the home row's count pill; 1 per chat
+    /// whose flag is lit without a relay count.
+    func unreadCount(project projectId: Id) -> Int {
+        chats(of: projectId).reduce(0) { sum, chat in
+            guard chatHasUnread(chat) else { return sum }
+            return sum + max(1, unreadCounts[chat.id] ?? 0)
+        }
     }
 
     func unreadCount(for chat: PeopleChat) -> Int {
@@ -918,7 +1419,7 @@ final class AppModel: ObservableObject {
                 adopt(tokens: toks, user: who)
                 needsProfileSetup = true
             } catch {
-                signInError = error.localizedDescription
+                signInError = UserError.classify("sign in", error)
             }
         }
     }
@@ -939,7 +1440,25 @@ final class AppModel: ObservableObject {
         } catch let e as RelayError {
             return AuthError.humanize(e.type ?? "", e.message.isEmpty ? "Could not update profile" : e.message)
         } catch {
-            return error.localizedDescription
+            return UserError.classify("save your profile", error).sentence
+        }
+    }
+
+    /// Settings → Privacy: who may add me to groups (`PATCH /me {group_add}`).
+    @discardableResult
+    func updateGroupAddPolicy(_ policy: GroupAddPolicy) async -> String? {
+        let previous = groupAddPolicy
+        groupAddPolicy = policy.rawValue
+        guard !isFixture else { return nil }
+        do {
+            _ = try await api.patchMe(groupAdd: policy.rawValue)
+            return nil
+        } catch let e as RelayError {
+            groupAddPolicy = previous
+            return AuthError.humanize(e.type ?? "", e.message.isEmpty ? "Could not update privacy" : e.message)
+        } catch {
+            groupAddPolicy = previous
+            return UserError.classify("save the privacy setting", error).sentence
         }
     }
 
@@ -948,14 +1467,16 @@ final class AppModel: ObservableObject {
         if let who { user = who }
         if persist {
             do { try Keychain.storeAuth(toks) } catch {
-                notice = Notice(text: "Session kept in memory only: \(error.localizedDescription)")
+                fail("save your sign-in to the keychain", error)
             }
         }
         let wasPaired = credentials != nil
         credentials = DeviceCredentials(relayUrl: toks.relayUrl, deviceId: toks.deviceId, deviceToken: toks.accessToken)
         if !wasPaired {
             // A sign-in through the browser (not a token refresh): a possible first login.
-            if who != nil { beginFirstLogin() }
+            // Rig (Debug): `ARBOS_SKIP_FIRST_LOGIN=1` lands on the lists at once — a shot of an
+            // existing account on a simulator whose test box has no agentd to greet it.
+            if who != nil, !DebugHooks.skipFirstLogin { beginFirstLogin() }
             startAfterPairing()
         }
     }
@@ -974,7 +1495,7 @@ final class AppModel: ObservableObject {
             } catch {
                 if let e = error as? RelayError, e.status == 401 || e.status == 403 {
                     signOut(remote: false)
-                    signInError = "Your session ended. Sign in again."
+                    signInError = UserError.of("stay signed in", .authExpired, "token refresh refused")
                 }
                 return false
             }
@@ -989,7 +1510,7 @@ final class AppModel: ObservableObject {
     func refreshAccount() async {
         guard credentials != nil, !isFixture else { return }
         if tokens?.isExpiringSoon == true { _ = await refreshTokens() }
-        if let (who, cr, summary, features) = try? await api.me() {
+        if let (who, cr, summary, features, privacy) = try? await api.me() {
             user = who
             credits = cr
             saveAccountCache()
@@ -998,6 +1519,10 @@ final class AppModel: ObservableObject {
             LeafAvatarsFlag.shared.setLottie(features?.leaf_lottie ?? true)
             // Voice mode kill switch (absent on an older relay = off).
             VoiceModeFlag.shared.set(features?.voice_mode ?? false)
+            // Who may add me to groups (absent on an older relay = anyone).
+            if let policy = privacy?.group_add, GroupAddPolicy(rawValue: policy) != nil {
+                groupAddPolicy = policy
+            }
             let position = summary.waitlisted ? Int(summary.waitlist_position ?? 1) : nil
             if position != waitlistPosition { waitlistPosition = position }
             meAlwaysOn = summary.always_on
@@ -1032,6 +1557,15 @@ final class AppModel: ObservableObject {
     var deviceId: String { credentials?.deviceId ?? "ios:unpaired" }
 
     // MARK: Pairing
+
+    #if DEBUG
+    /// Unit tests: talk to a loopback relay with a fixed token — no keychain, no auth probe,
+    /// no rooms. Used by `AddMembersActionTests` to drive `addMembers` end to end.
+    func installRelayForTests(url: String, token: String) {
+        api = RelayAPI(endpoint: RelayEndpoint(url)) { token }
+        credentials = DeviceCredentials(relayUrl: url, deviceId: "ios:test", deviceToken: token)
+    }
+    #endif
 
     func setRelayUrl(_ raw: String) {
         let endpoint = RelayEndpoint(raw)
@@ -1070,6 +1604,147 @@ final class AppModel: ObservableObject {
         startAfterPairing()
     }
 
+
+    // MARK: - toasts and failures (one element, one place — Jacob 2026-10-26)
+
+    /// An info toast: something that worked or a plain status. Never a failure. The same text
+    /// again while its toast stands restarts that toast instead of adding one.
+    func notify(_ text: String) {
+        if let i = toasts.firstIndex(where: { $0.error == nil && $0.text == text }) {
+            toasts[i].count += 1
+            toasts[i].at = Date()
+            armToast(toasts[i].id, after: toasts[i].ttl)
+            return
+        }
+        pushToast(Toast(id: UUID(), text: text, error: nil, at: Date()))
+    }
+
+    /// The newest `Toast.visibleMax` toasts (oldest first) and how many older ones are folded
+    /// away above them (Jacob 2026-10-27: at most three visible, the rest a count).
+    var toastStack: ToastStack {
+        let folded = max(0, toasts.count - Toast.visibleMax)
+        return ToastStack(visible: Array(toasts.dropFirst(folded)), folded: folded)
+    }
+
+    /// The "N more" line's ×: the whole slot goes.
+    func dismissAllToasts() {
+        for t in toasts { toastTimers[t.id]?.cancel(); toastTimers[t.id] = nil; toastRetries[t.id] = nil }
+        toasts.removeAll()
+    }
+
+    /// Something the user asked for did not happen: `verb` is what they tried ("save the
+    /// secret"), `error` whatever was thrown. Classified by `UserError`, drawn by `ErrorNote`
+    /// — inline by the surface that claimed the verb, else as an error toast.
+    func fail(_ verb: String, _ error: Error, retry: (() -> Void)? = nil) {
+        fail(UserError.classify(verb, error), retry: retry)
+    }
+
+    /// A failure already classified. The same failure again while its toast stands (same
+    /// sentence) bumps that toast's count and restarts its clock — one note per failure,
+    /// however often it repeats (eight "Couldn't load your secrets. You're offline." toasts
+    /// on the Mac, 2026-10-27, are the reason).
+    func fail(_ error: UserError, retry: (() -> Void)? = nil) {
+        if let claim = failureClaim, claim.verbs.contains(where: { error.verb.hasPrefix($0) }) {
+            claimedFailure = error
+            claimedFailureDetailsOpen = false
+            return
+        }
+        if let i = toasts.firstIndex(where: { $0.sameAs(error) }) {
+            toasts[i].count += 1
+            toasts[i].error = error
+            toasts[i].at = Date()
+            if let retry { toastRetries[toasts[i].id] = retry; toasts[i].hasRetry = true }
+            armToast(toasts[i].id, after: toasts[i].ttl)
+            return
+        }
+        let toast = Toast(id: UUID(), text: error.sentence, error: error, hasRetry: retry != nil, at: Date())
+        if let retry { toastRetries[toast.id] = retry }
+        pushToast(toast)
+    }
+
+    /// A local refusal (the form is not complete): the words as the why.
+    func failRefused(_ verb: String, _ why: String) {
+        fail(UserError.refused(verb, why))
+    }
+
+    private func pushToast(_ toast: Toast) {
+        toasts.append(toast)
+        armToast(toast.id, after: toast.ttl)
+    }
+
+    private func armToast(_ id: UUID, after ttl: TimeInterval) {
+        toastTimers[id]?.cancel()
+        toastTimers[id] = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(ttl * 1_000_000_000))
+            guard let self, !Task.isCancelled else { return }
+            if let t = self.toasts.first(where: { $0.id == id }), t.held {
+                // Details open: stays. A plain hold ends at the cap (a finger parked on the
+                // slot, or a release that never arrived, cannot pin a toast forever).
+                let since = t.heldSince ?? Date()
+                let left = Toast.holdMax - Date().timeIntervalSince(since)
+                if t.detailsOpen || left > 0 {
+                    self.armToast(id, after: t.detailsOpen ? ttl : max(left, 0.5))
+                    return
+                }
+            }
+            self.dismissToast(id)
+        }
+    }
+
+    func dismissToast(_ id: UUID) {
+        toasts.removeAll { $0.id == id }
+        toastRetries[id] = nil
+        toastTimers[id]?.cancel()
+        toastTimers[id] = nil
+    }
+
+    /// A touch on a toast holds it; letting go restarts its clock.
+    func holdToast(_ id: UUID, held: Bool) {
+        guard let i = toasts.firstIndex(where: { $0.id == id }) else { return }
+        if held, !toasts[i].held { toasts[i].heldSince = Date() }
+        toasts[i].held = held
+        if !held { toasts[i].heldSince = nil; armToast(id, after: toasts[i].ttl) }
+    }
+
+    func setToastDetails(_ id: UUID, open: Bool) {
+        guard let i = toasts.firstIndex(where: { $0.id == id }) else { return }
+        toasts[i].detailsOpen = open
+        if !toasts[i].held { toasts[i].heldSince = Date() }
+        toasts[i].held = true
+    }
+
+    /// Try again on an error toast: re-run its action and drop the toast.
+    func retryToast(_ id: UUID) {
+        let retry = toastRetries[id]
+        dismissToast(id)
+        retry?()
+    }
+
+    /// 401 / 403 on a toast's Sign in: back to the sign-in screen.
+    func signOutForReauth() {
+        unpair(forget: true)
+    }
+
+    /// The composer's note for `chatId`.
+    func setSendError(_ chatId: Id, _ error: UserError) {
+        sendErrors[chatId] = error
+        sendErrorDetailsOpen.remove(chatId)
+    }
+
+    func clearSendError(_ chatId: Id) {
+        sendErrors[chatId] = nil
+        sendErrorDetailsOpen.remove(chatId)
+    }
+
+    /// Try again on the composer's note: re-send the newest failed message in that chat (the
+    /// note clears either way).
+    func retrySendError(_ chatId: Id) {
+        clearSendError(chatId)
+        if let failed = messages[chatId]?.last(where: { $0.status == .error }) {
+            resendFailed(chatId: chatId, messageId: failed.id)
+        }
+    }
+
     func pair(code: String) {
         guard !pairingBusy else { return }
         pairingBusy = true
@@ -1081,15 +1756,15 @@ final class AppModel: ObservableObject {
                 do {
                     try Keychain.store(creds)
                 } catch {
-                    notice = Notice(text: "Token kept in memory only: \(error.localizedDescription)")
+                    fail("save your sign-in to the keychain", error)
                 }
                 credentials = creds
                 beginFirstLogin()
                 startAfterPairing()
             } catch {
                 pairingError = (error as? RelayError)?.isUnauthorized == true
-                    ? "That code was not accepted. Codes expire after 10 minutes."
-                    : error.localizedDescription
+                    ? UserError.refused("pair this iPhone", "That code was not accepted. Codes expire after 10 minutes.")
+                    : UserError.classify("pair this iPhone", error)
             }
         }
     }
@@ -1177,6 +1852,10 @@ final class AppModel: ObservableObject {
                 // The New Message sheet's list, ahead of the first "+" (TTL-gated, off this loop).
                 Task { await self.loadDirectory() }
                 await self.refreshServers()
+                if !self.pinsLoaded {
+                    await self.refreshPins()
+                    self.pinsLoaded = true
+                }
                 await self.startMatrixIfNeeded()
                 await self.drainPushes()
                 await self.refreshUnread()
@@ -1240,6 +1919,8 @@ final class AppModel: ObservableObject {
             }
             projects = newProjects.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
             chats = newChats
+            reconcileAgentAvatars()
+            reconcileArchivedProjects(newProjects)
             saveRegistryCache()
             setRelayLink(.live)
             await refreshMachine()
@@ -1278,10 +1959,10 @@ final class AppModel: ObservableObject {
             if (error as? RelayError)?.isUnauthorized == true {
                 // Token revoked or relay re-initialised: pair again.
                 unpair(forget: true)
-                pairingError = "This device was signed out by the relay. Pair again."
+                pairingError = UserError.of("stay signed in", .authExpired, "This device was signed out by the relay. Pair again.")
                 return
             }
-            registryError = error.localizedDescription
+            registryError = UserError.classify("load your chats", error)
             link = .reconnecting
             // Only a verdict about reachability goes to the pill; an odd error
             // (bad JSON, a 404) says nothing about the link.
@@ -1329,6 +2010,12 @@ final class AppModel: ObservableObject {
         if let data = store.get(StoreKey.unread), let counts = try? JSONDecoder().decode([String: Int].self, from: data) {
             unreadCounts = counts
         }
+        // One copy of each agent's avatar everywhere, before the first frame: the record and
+        // the roster copies came back from two caches written at different times; the
+        // newest wins and every picture URL is rebuilt on the public versioned route (a
+        // pre-#1813 cache held the owner-only blob URL — Jacob's relaunch leaf, 2026-10-26).
+        reconcileAgentAvatars()
+        AvatarImageCache.shared.warm(urls: projects.compactMap(\.imageURL))
         if !projects.isEmpty || !peopleChats.isEmpty { contentOrigin = "store" }
         LaunchClock.mark("kv-loaded", detail: "projects=\(projects.count) people=\(peopleChats.count)")
     }
@@ -1352,6 +2039,12 @@ final class AppModel: ObservableObject {
                     return nil
                 }
                 let messages: [Message]? = s.roomChat == projectDocChatId ? nil : doc.readAll()
+                if let messages, AppModel.storedCopyIsBlank(rows: messages.count, docCount: doc.count, cursor: s.cursor) {
+                    // Resuming at the saved cursor would fetch nothing and leave the chat
+                    // blank for good; start the room from scratch instead.
+                    NSLog("store: \(s.key) reads \(messages.count) of \(doc.count) rows at cursor \(s.cursor); refetching")
+                    return nil
+                }
                 return (s, doc, messages)
             }
         }.value
@@ -1525,6 +2218,90 @@ final class AppModel: ObservableObject {
 
     /// `restored`: a doc imported from the on-device store with the relay
     /// cursor it was saved at and the pushes the relay never ACKed.
+    #if DEBUG
+    /// Perf rig (iphone-open-scroll-block): the fixture group as a real room restored from
+    /// an exported checkpoint, then the exported rows imported on the main actor one by
+    /// one — the same `onChange` → `requestSnapshot` → `emitSnapshot` path a live socket
+    /// drives. `rooms` > 1 adds clones under other ids so several chats catch up at once.
+    func perfReplay(checkpointPath: String, rowsPath: String, rooms: Int, gapMs: Int, afterMs: Int) {
+        guard let ckpt = FileManager.default.contents(atPath: checkpointPath),
+              let rowsText = try? String(contentsOfFile: rowsPath, encoding: .utf8) else {
+            NSLog("perf replay: missing files")
+            return
+        }
+        let rowBytes: [Data] = rowsText.split(separator: "\n").compactMap { line in
+            guard let bar = line.firstIndex(of: "|") else { return nil }
+            return Data(hexString: String(line[line.index(after: bar)...]))
+        }
+        var keys: [Id] = ["fx-group-launch"]
+        for i in 1..<max(1, rooms) { keys.append("fx-replay-\(i)") }
+        var docs: [(Id, CoreChatDoc)] = []
+        for key in keys {
+            guard let doc = try? CoreChatDoc(key: key, snapshot: ckpt) else { continue }
+            if key != "fx-group-launch", let group = peopleChats.first(where: { $0.id == "fx-group-launch" }) {
+                var clone = group
+                clone.id = key
+                clone.title = "Replay \(key)"
+                peopleChats.append(clone)
+            }
+            // Store-restore shape: the doc and its decoded list land before the room starts.
+            ensureRoom(projectId: peopleSlot, key: key, roomChat: key, restored: (doc, 0, [], doc.readAll()))
+            // No relay in the rig: the socket would redial forever and flap the link
+            // (each flap publishes `caughtUp`). The doc's change handler stays.
+            self.rooms[key]?.stop()
+            caughtUp.remove(key)
+            docs.append((key, doc))
+        }
+        LaunchClock.mark("replay-restored", detail: "rooms=\(docs.count) rows=\(rowBytes.count) ckpt=\(ckpt.count)B")
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(afterMs))
+            // `ARBOS_PERF_REPLAY_LIVE=1`: the rooms count as live (rows arriving while the
+            // reader scrolls) instead of catching up.
+            for (key, _) in docs { if DebugHooks.perfReplayLive { caughtUp.insert(key) } else { caughtUp.remove(key) } }
+            PerfLog.mark("phase replay begin", ms: 0)
+            let started = Date()
+            for (ix, bytes) in rowBytes.enumerated() {
+                for (_, doc) in docs {
+                    let t0 = Date()
+                    _ = try? doc.importUpdateReportingPending(bytes)
+                    PerfCounters.time("import", ms: Date().timeIntervalSince(t0) * 1000)
+                }
+                if gapMs > 0 { try? await Task.sleep(for: .milliseconds(gapMs)) } else { await Task.yield() }
+                if ix == rowBytes.count - 1 {
+                    for (key, _) in docs {
+                        caughtUp.insert(key)
+                        #if DEBUG
+                        PerfCounters.bump("emit.L1838")
+                        #endif
+                        emitSnapshot(key)
+                    }
+                }
+            }
+            PerfLog.mark("phase replay end", ms: Date().timeIntervalSince(started) * 1000)
+        }
+    }
+
+    /// Test seam (iphone-group-send-instant): a fixture people chat gets a real chat doc
+    /// seeded with its fixture lines and a room that is stopped at once, so `sendPeople`
+    /// writes the way a live chat does — doc, push queue, change events — with no relay.
+    func fixtureAttachDoc(chatId: Id) {
+        guard docs[chatId] == nil else { return }
+        let doc = CoreChatDoc(key: chatId)
+        for m in messages[chatId] ?? [] where m.role == .user || m.role == .system {
+            let author = CoreChatDoc.Author(sender: m.sender, handle: m.senderHandle, name: m.senderName, avatar: m.senderAvatar)
+            if m.role == .system {
+                try? doc.insertSystemLine(id: m.id, text: m.plainText, deviceId: "ios:fixture")
+            } else {
+                try? doc.insertUserMessage(id: m.id, text: m.plainText, deviceId: "ios:fixture", author: author, replyTo: m.replyTo)
+            }
+        }
+        doc.commit()
+        ensureRoom(projectId: peopleSlot, key: chatId, roomChat: chatId, restored: (doc, 0, [], doc.readAll()))
+        rooms[chatId]?.stop()
+        caughtUp.insert(chatId)
+    }
+    #endif
+
     private func ensureRoom(projectId: Id, key: Id, roomChat: String,
                             restored: (doc: CoreChatDoc, cursor: Int64, pending: [(String, Data)], messages: [Message]?)? = nil) {
         guard rooms[key] == nil else { return }
@@ -1551,22 +2328,26 @@ final class AppModel: ObservableObject {
         doc.onChange { [weak self] touched in
             Task { @MainActor in
                 guard let self else { return }
+                #if DEBUG
+                if SendTrace.traces(key) {
+                    SendTrace.mark("doc-change", detail: "list=\(touched.listChanged) msgs=\(touched.messages.count) caughtUp=\(self.caughtUp.contains(key))")
+                }
+                #endif
                 self.markDirty(key)
                 if isProjectDoc {
                     self.applyProjectDoc(projectId)
+                } else if !self.caughtUp.contains(key), touched.listChanged || !touched.messages.isEmpty {
+                    // Catching up: the relay streams one row per frame. One re-read per
+                    // window for all of them (list or message touches alike), and the
+                    // home-list bump rides along instead of re-sorting per row.
+                    self.activityPending.insert(key)
+                    self.requestSnapshot(key, windowMs: Self.catchUpCoalesceMs, deferAlways: true)
                 } else if touched.listChanged {
-                    if self.caughtUp.contains(key) {
-                        self.emitSnapshot(key)
-                        self.markActivity(chatId: key)
-                        // Loro is live; /me/pushes and /me/unread can lag — light the
-                        // blue circle and drain the push queue as soon as a new row lands.
-                        self.noteLiveUnread(chatId: key)
-                    } else {
-                        // Catching up: the relay sends one row per frame; re-read the
-                        // transcript once per window, not once per row.
-                        self.requestSnapshot(key)
-                        self.markActivity(chatId: key)
-                    }
+                    // Live: a burst of rows (agents answering each other) folds into one
+                    // re-read per short window too; the home-list bump and the unread
+                    // light ride with that read (`applySnapshot`) instead of per row.
+                    self.activityPending.insert(key)
+                    self.requestSnapshot(key, windowMs: Self.liveCoalesceMs)
                 } else if !touched.messages.isEmpty {
                     self.emitMessages(key, indexes: touched.messages)
                     // Same kick project chats get via `chats` in markActivity — people
@@ -1576,6 +2357,9 @@ final class AppModel: ObservableObject {
                 } else if self.messages[key] == nil, let doc = self.docs[key], doc.count > 0 {
                     // Checkpoint / bulk import sometimes reports no list path —
                     // still paint so home search can see the transcript.
+                    #if DEBUG
+                    PerfCounters.bump("emit.L1897")
+                    #endif
                     self.emitSnapshot(key)
                 }
             }
@@ -1605,6 +2389,9 @@ final class AppModel: ObservableObject {
         }
         room.onDocPaint = { [weak self] in
             guard let self, !isProjectDoc else { return }
+            #if DEBUG
+            PerfCounters.bump("emit.L1926")
+            #endif
             self.emitSnapshot(key)
         }
         room.onCaughtUp = { [weak self] in
@@ -1612,8 +2399,12 @@ final class AppModel: ObservableObject {
             if isProjectDoc {
                 self.applyProjectDoc(projectId)
             } else {
-                self.emitSnapshot(key)
+                // Live before the final read, so that read also bumps the home list.
                 self.caughtUp.insert(key)
+                #if DEBUG
+                PerfCounters.bump("emit.L1935")
+                #endif
+                self.emitSnapshot(key)
                 self.firstLoginChatSynced(key)
             }
         }
@@ -1621,11 +2412,19 @@ final class AppModel: ObservableObject {
             // Project-doc writes are not user bubbles; clearing a global set here
             // used to leave people-chat messages stuck at pending opacity.
             guard let self, !isProjectDoc else { return }
+            if self.pushRefused.remove(key) != nil {
+                self.pushRefusalText.removeValue(forKey: key)
+                self.pushRefusalReason.removeValue(forKey: key)
+            }
             guard self.unacked[key] != nil else { return }
             self.unacked[key] = nil
+            #if DEBUG
+            PerfCounters.bump("emit.L1945")
+            #endif
             self.emitSnapshot(key)
         }
         if !isProjectDoc {
+            room.newestMessageId = { [weak self] in self?.messages[key]?.last?.id }
             room.onPresence = { [weak self] header in
                 self?.notePresence(header)
                 self?.noteTyping(header, chatId: key)
@@ -1634,6 +2433,27 @@ final class AppModel: ObservableObject {
         }
         room.onUnavailable = { [weak self] in
             Task { @MainActor in self?.handleRoomUnavailable(key: key) }
+        }
+        room.onPushRefused = { [weak self, weak room] in
+            guard let self, !isProjectDoc else { return }
+            // The relay's reason, in plain words ([feedback blocked-state-ios-2026-10-26]):
+            // "<name> has blocked you in this chat." / "Couldn't post: you've blocked <name>…" /
+            // the mute line / the generic delivery line. A refusal that names a reason is taken
+            // even while the room already stood refused, so the words follow the relay's. The
+            // chat-level note under the header draws it (`ChatView.chatNote`), not a toast.
+            let why = room?.lastRefusal
+            let fresh = self.pushRefused.insert(key).inserted
+            if fresh || why?.reason != nil {
+                let until = why?.reason == "silenced" ? self.peopleChat(key)?.silencedUntil : nil
+                let text = why?.sentence(silencedUntilMs: until)
+                    ?? BlockedState.refusalSentence(reason: nil, name: nil, handle: nil)
+                self.pushRefusalText[key] = text
+                if let reason = why?.reason {
+                    self.pushRefusalReason[key] = reason
+                } else {
+                    self.pushRefusalReason.removeValue(forKey: key)
+                }
+            }
         }
         rooms[key] = room
         roomCreatedAt[key] = Date()
@@ -1644,6 +2464,9 @@ final class AppModel: ObservableObject {
             } else if let list = effective.messages {
                 messages[key] = list
             } else {
+                #if DEBUG
+                PerfCounters.bump("emit.L1966")
+                #endif
                 emitSnapshot(key)
             }
         }
@@ -1685,6 +2508,9 @@ final class AppModel: ObservableObject {
         roomLinks[key] = nil
         roomLinkSince[key] = nil
         unacked[key] = nil
+        pushRefused.remove(key)
+        pushRefusalText[key] = nil
+        pushRefusalReason[key] = nil
         roomCreatedAt[key] = nil
         roomRestoredCursors[key] = nil
         roomUnavailableFailures[key] = nil
@@ -1710,19 +2536,34 @@ final class AppModel: ObservableObject {
     /// A list change from the doc: re-read now when the room was quiet, else once
     /// at the end of the coalesce window. Direct `emitSnapshot` callers (catch-up,
     /// checkpoint paint, ACK) still read at once and clear a pending request.
-    private func requestSnapshot(_ chatId: Id) {
+    /// `deferAlways`: never read at once (a catch-up's first row must not cost a
+    /// full re-read when the next 70 arrive within the window); the paint the
+    /// reader sees meanwhile is the store / checkpoint one.
+    private func requestSnapshot(_ chatId: Id, windowMs: Int = AppModel.snapshotCoalesceMs, deferAlways: Bool = false) {
+        #if DEBUG
+        if SendTrace.traces(chatId) {
+            let since = Date().timeIntervalSince1970 - (snapshotLastAt[chatId] ?? 0)
+            SendTrace.mark("snapshot-request", detail: "window=\(windowMs) deferAlways=\(deferAlways) alreadyPending=\(snapshotPending.contains(chatId)) sinceLast=\(Int(since * 1000))ms")
+        }
+        #endif
         guard !snapshotPending.contains(chatId) else { return }
-        let window = Double(Self.snapshotCoalesceMs) / 1000
+        let window = Double(windowMs) / 1000
         let since = Date().timeIntervalSince1970 - (snapshotLastAt[chatId] ?? 0)
-        guard since < window else {
+        guard since < window || deferAlways else {
+            #if DEBUG
+            PerfCounters.bump("emit.L2040")
+            #endif
             emitSnapshot(chatId)
             return
         }
         snapshotPending.insert(chatId)
-        let delayMs = max(1, Int((window - since) * 1000))
+        let delayMs = deferAlways ? windowMs : max(1, Int((window - since) * 1000))
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(delayMs))
             guard let self, self.snapshotPending.contains(chatId) else { return }
+            #if DEBUG
+            PerfCounters.bump("emit.L2048")
+            #endif
             self.emitSnapshot(chatId)
         }
     }
@@ -1731,17 +2572,72 @@ final class AppModel: ObservableObject {
         snapshotPending.remove(chatId)
         snapshotLastAt[chatId] = Date().timeIntervalSince1970
         guard let doc = docs[chatId] else { return }
-        var list = doc.readAll()
+        let gen = (snapshotGeneration[chatId] ?? 0) &+ 1
+        snapshotGeneration[chatId] = gen
+        #if DEBUG
+        if SendTrace.traces(chatId) {
+            SendTrace.mark("snapshot-read", detail: "rows=\(doc.count) async=\(doc.count >= Self.asyncSnapshotMinRows)", once: false)
+        }
+        #endif
+        // Short lists decode inline (tests and the fixture read `messages` right after);
+        // a long group's 1 MB of rows is read and parsed off the main actor — the FFI doc
+        // is thread-safe — and applied when it is back, unless a newer read superseded it.
+        if doc.count < Self.asyncSnapshotMinRows {
+            applySnapshot(chatId, list: doc.readAll())
+            return
+        }
+        Task.detached(priority: .userInitiated) { [weak self] in
+            #if DEBUG
+            let t0 = Date()
+            #endif
+            let list = doc.readAll()
+            #if DEBUG
+            PerfCounters.time("readAll.bg", ms: Date().timeIntervalSince(t0) * 1000)
+            #endif
+            await MainActor.run {
+                // A superseded read still paints a chat that shows nothing yet: rows arriving
+                // faster than one read finishes must not keep the transcript blank.
+                guard let self, self.snapshotGeneration[chatId] == gen || (self.messages[chatId]?.isEmpty ?? true) else { return }
+                self.applySnapshot(chatId, list: list)
+            }
+        }
+    }
+
+    private func applySnapshot(_ chatId: Id, list: [Message]) {
+        #if DEBUG
+        let t0 = Date()
+        defer { PerfCounters.time("applySnapshot", ms: Date().timeIntervalSince(t0) * 1000) }
+        #endif
+        if let doc = docs[chatId], !Self.shouldPublishSnapshot(rows: list.count, docCount: doc.count) {
+            // [feedback arbonites-blank-chat-ios-2026-10-28]: an empty read over a doc with rows
+            // is a failed read, not an empty chat. Keep what is on screen (or the spinner).
+            NSLog("snapshot \(chatId): read 0 of \(doc.count) rows; not publishing an empty transcript")
+            return
+        }
+        var list = list
         let pendingIds = unacked[chatId] ?? []
         for i in list.indices where list[i].role == .user {
             list[i].pending = pendingIds.contains(list[i].id)
         }
+        foldOptimisticNotices(chatId: chatId, into: &list)
         // Reassign the whole dictionary so `@Published` always fires. Subscript
         // writes alone have left ChatView's `@State` rows stale for live inbound
         // agent replies in an open people chat (desktop had the line; iPhone did not).
         var next = messages
         next[chatId] = list
         messages = next
+        #if DEBUG
+        if SendTrace.traces(chatId) {
+            SendTrace.markIfPresent("messages-has-row", ids: list.map(\.id), detail: "via=snapshot rows=\(list.count)")
+        }
+        #endif
+        // The home list re-sorts once the room is live, not per catch-up snapshot.
+        if caughtUp.contains(chatId), activityPending.remove(chatId) != nil {
+            markActivity(chatId: chatId)
+            // Loro is live; /me/pushes and /me/unread can lag — light the
+            // blue circle and drain the push queue as soon as a new row lands.
+            noteLiveUnread(chatId: chatId)
+        }
     }
 
     private func emitMessages(_ chatId: Id, indexes: Set<Int>) {
@@ -1761,11 +2657,19 @@ final class AppModel: ObservableObject {
             }
         }
         if needSnapshot {
+            #if DEBUG
+            PerfCounters.bump("emit.L2119")
+            #endif
             emitSnapshot(chatId)
         } else {
             var next = messages
             next[chatId] = list
             messages = next
+            #if DEBUG
+            if SendTrace.traces(chatId) {
+                SendTrace.markIfPresent("messages-has-row", ids: list.map(\.id), detail: "via=indexes rows=\(list.count)")
+            }
+            #endif
         }
     }
 
@@ -1811,6 +2715,8 @@ final class AppModel: ObservableObject {
             if last.pending { return }
             if last.role == .system { return }
             if let me = myUserId, last.sender == me { return }
+            // Hidden for me (someone I blocked): no dot, no banner.
+            if hidesMessage(last, chatId: chatId) { return }
             // Project-chat echoes from this device use sender "user".
             if peopleChat(chatId) == nil, last.role == .user, last.sender == "user" || last.sender.isEmpty {
                 return
@@ -1844,7 +2750,11 @@ final class AppModel: ObservableObject {
                 }
             }
         }
-        if changed { applyBadge() }
+        if changed {
+            applyBadge()
+            // An archived row comes back when someone writes in it.
+            unarchiveOnActivity(chatId: chatId)
+        }
         Task { await drainPushes() }
     }
 
@@ -1896,7 +2806,7 @@ final class AppModel: ObservableObject {
             if (error as? RelayError)?.status == 404 {
                 machineError = "This relay has no machine API yet"
             } else {
-                machineError = error.localizedDescription
+                machineError = UserError.classify("reach your machine", error).sentence
             }
         }
     }
@@ -1921,9 +2831,9 @@ final class AppModel: ObservableObject {
             do {
                 try await api.startMachine()
             } catch {
-                notice = Notice(text: "Start failed: \(error.localizedDescription)")
+                fail("start the machine", error)
                 machine.state = .error
-                machineError = error.localizedDescription
+                machineError = UserError.classify("start the machine", error).sentence
             }
             await refreshMachine()
         }
@@ -1939,7 +2849,7 @@ final class AppModel: ObservableObject {
                 machine.state = .stoppedByUser
                 machine.since = nowMs()
             } catch {
-                notice = Notice(text: "Stop failed: \(error.localizedDescription)")
+                fail("stop the machine", error)
             }
             await refreshMachine()
         }
@@ -1956,9 +2866,9 @@ final class AppModel: ObservableObject {
                 try await api.restartMachine()
                 machine.since = nowMs()
             } catch {
-                notice = Notice(text: "Restart failed: \(error.localizedDescription)")
+                fail("restart the machine", error)
                 machine.state = .error
-                machineError = error.localizedDescription
+                machineError = UserError.classify("restart the machine", error).sentence
             }
             await refreshMachine()
         }
@@ -1999,14 +2909,14 @@ final class AppModel: ObservableObject {
                     await refreshConnectorsOnce()
                     if connectors.connector(for: provider)?.status != .connected {
                         let err = connectors.connector(for: provider)?.lastError ?? ""
-                        notice = Notice(text: "Connect \(provider): \(err.isEmpty ? "token was not accepted" : err)")
+                        fail(UserError.refused("connect \(provider)", err.isEmpty ? "The token was not accepted." : err))
                     }
                     return
                 }
                 guard let urlStr = try await api.connectConnector(provider: provider),
                       let url = URL(string: urlStr) else {
                     connectorsBusy = false
-                    notice = Notice(text: "Connect \(provider): the relay sent no sign-in URL")
+                    fail(UserError.fromText("connect \(provider)", "the relay sent no sign-in URL"))
                     await refreshConnectorsOnce()
                     return
                 }
@@ -2020,7 +2930,7 @@ final class AppModel: ObservableObject {
                     if connectors.connector(for: provider)?.status == .connected { return }
                     if !ok {
                         let err = connectors.connector(for: provider)?.lastError ?? ""
-                        notice = Notice(text: "Connect \(provider): \(err.isEmpty ? "sign-in did not finish" : err)")
+                        fail(UserError.refused("connect \(provider)", err.isEmpty ? "The sign-in did not finish." : err))
                         return
                     }
                     // Token write can lag the redirect by a beat.
@@ -2037,7 +2947,7 @@ final class AppModel: ObservableObject {
                     let opened = await UIApplication.shared.open(url)
                     connectorsBusy = false
                     guard opened else {
-                        notice = Notice(text: "Connect \(provider): could not open the sign-in page")
+                        fail(UserError.fromText("connect \(provider)", "could not open the sign-in page"))
                         return
                     }
                     for wait in [0, 4, 8, 15, 30, 60] as [UInt64] {
@@ -2049,24 +2959,24 @@ final class AppModel: ObservableObject {
                     }
                 } catch {
                     connectorsBusy = false
-                    notice = Notice(text: Self.connectErrorText(provider: provider, error: error))
+                    fail(Self.connectError(provider: provider, error: error))
                     await refreshConnectorsOnce()
                 }
             } catch {
                 connectorsBusy = false
-                notice = Notice(text: Self.connectErrorText(provider: provider, error: error))
+                fail(Self.connectError(provider: provider, error: error))
                 await refreshConnectorsOnce()
             }
         }
     }
 
     /// Drop relay env-var names from the Settings alert when Google OAuth is missing.
-    private static func connectErrorText(provider: String, error: Error) -> String {
+    private static func connectError(provider: String, error: Error) -> UserError {
         let raw = error.localizedDescription
         if raw.localizedCaseInsensitiveContains("OAuth client not configured") {
-            return "Connect \(provider): OAuth client not configured on the relay."
+            return UserError.refused("connect \(provider)", "The OAuth client is not configured on the relay.")
         }
-        return "Connect \(provider): \(raw)"
+        return UserError.classify("connect \(provider)", error)
     }
 
     func disconnectConnector(id: Id) {
@@ -2080,7 +2990,7 @@ final class AppModel: ObservableObject {
             do {
                 try await api.disconnectConnector(id: id)
             } catch {
-                notice = Notice(text: "Disconnect: \(error.localizedDescription)")
+                fail("disconnect it", error)
             }
             await refreshConnectorsOnce()
         }
@@ -2099,9 +3009,31 @@ final class AppModel: ObservableObject {
 
     var myUserId: String? { user.map { "user:\($0.id)" } }
 
-    func peopleChat(_ id: String) -> PeopleChat? { peopleChats.first { $0.id == id } }
+    func peopleChat(_ id: String) -> PeopleChat? {
+        peopleChats.first { $0.id == id } ?? draftDM.flatMap { $0.id == id ? $0 : nil }
+    }
 
     func isPeopleChat(_ id: String) -> Bool { peopleChat(id) != nil }
+
+    /// Timed admin mute ended: clear local `silenced` on the chat and drop a silenced
+    /// refusal note. Messages refused while muted stay as they are (no resend).
+    func clearExpiredSilence(chatId: Id) {
+        if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+            let chat = peopleChats[i]
+            if chat.silenced, let until = chat.silencedUntil {
+                let now = Int64(Date().timeIntervalSince1970 * 1000)
+                if until <= now {
+                    peopleChats[i].silenced = false
+                    peopleChats[i].silencedUntil = nil
+                }
+            }
+        }
+        if pushRefusalReason[chatId] == "silenced" {
+            pushRefused.remove(chatId)
+            pushRefusalText.removeValue(forKey: chatId)
+            pushRefusalReason.removeValue(forKey: chatId)
+        }
+    }
 
     func refreshPeople() async {
         guard credentials != nil, !isFixture else { return }
@@ -2109,6 +3041,8 @@ final class AppModel: ObservableObject {
             let raw = try await api.peopleChatsJSON()
             let list = raw.compactMap(PeopleChat.parse)
             peopleChats = list
+            reconcileAgentAvatars()
+            reconcileArchivedPeople(list)
             for c in list where c.unread { peopleUnread.insert(c.id) }
             for c in list where !c.unread && visibleChatId != c.id {
                 // Loro can mark unread before the people list's head_seq catches up;
@@ -2139,11 +3073,13 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Search handles (prefix) for the new-chat sheet.
+    /// The relay's people search (a handle-prefix lookup) for the new-chat sheet;
+    /// the sheet itself lists the directory through the shared matcher
+    /// (`PeoplePicker.people`) and adds these on top. The fixture answers from
+    /// the directory through the same matcher.
     func searchPeople(_ q: String) async -> [Person] {
         if isFixture {
-            let needle = q.lowercased()
-            return directory.filter { $0.handle.lowercased().contains(needle) || ($0.name ?? "").lowercased().contains(needle) }
+            return PeoplePicker.people(directory: directory, remote: [], me: nil, query: q)
         }
         return (try? await api.searchUsers(q)) ?? []
     }
@@ -2201,12 +3137,12 @@ final class AppModel: ObservableObject {
     /// People, agents, or both — never nobody. Agents ride in the create body
     /// (`agent_ids`); whatever the relay did not add (an older relay) is added
     /// one by one afterwards.
-    func createGroup(handles: [String], agentIds: [Id] = [], title: String? = nil, leaf: LeafPick? = nil) async -> Bool {
+    func createGroup(handles: [String], agentIds: [Id] = [], title: String? = nil, leaf: LeafPick? = nil, picture: DraftPicture? = nil) async -> Bool {
         let cleaned = handles
             .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "@ ")) }
             .filter { !$0.isEmpty }
         guard !cleaned.isEmpty || !agentIds.isEmpty else {
-            notice = Notice(text: "Pick at least one person or agent")
+            failRefused("create the group", "Pick at least one person or agent.")
             return false
         }
         do {
@@ -2216,11 +3152,18 @@ final class AppModel: ObservableObject {
             } catch let e as RelayError where !cleaned.isEmpty && (e.status == 404 || e.status == 405 || e.status == 501) {
                 chat = try await createGroupViaDm(handles: cleaned)
             }
+            if let picture, let jpeg = await draftJpeg(picture) {
+                let key = "group-avatar-\(Int(Date().timeIntervalSince1970 * 1000)).\(PictureMaster.ext(jpeg))"
+                if (try? await api.putBlob(projectId: "\(peopleSlot):\(chat.id)", key: key, mime: PictureMaster.mime(jpeg), data: jpeg)) != nil,
+                   let patched = try? await api.patchPeopleChat(chat.id, imageKey: key) {
+                    chat = patched
+                }
+            }
             for pid in agentIds where !chat.hasAgent(pid) {
                 do {
                     chat = try await api.addAgent(chatId: chat.id, projectId: pid)
                 } catch {
-                    notice = Notice(text: "Group created, but adding an agent failed: \(error.localizedDescription)")
+                    fail("add the agent to the new group", error)
                 }
             }
             if let i = peopleChats.firstIndex(where: { $0.id == chat.id }) {
@@ -2232,7 +3175,7 @@ final class AppModel: ObservableObject {
             path = [.chat(chatId: chat.id, projectId: peopleSlot)]
             return true
         } catch {
-            notice = Notice(text: "Could not create the group: \(error.localizedDescription)")
+            fail("create the group", error)
             return false
         }
     }
@@ -2257,7 +3200,7 @@ final class AppModel: ObservableObject {
                 if let kept = try await api.setProjectVision(projectId, enabled: enabled),
                    let i = projects.firstIndex(where: { $0.id == projectId }) { projects[i].visionEnabled = kept }
             } catch {
-                notice = Notice(text: "Camera vision: \(error.localizedDescription)")
+                fail("save the camera setting", error)
                 await refreshRegistry()
             }
         }
@@ -2269,10 +3212,30 @@ final class AppModel: ObservableObject {
 
     /// `GET /voices` once per launch (the relay caches it for an hour anyway). Nothing is
     /// fetched while voice mode is switched off on the relay (no picker to feed).
+    /// The call-voice catalog for the agent's Voice row and `VoicePickerView`. It is
+    /// independent of the voice-mode kill switch (spoken replies): the row picks the
+    /// voice used in calls, so the list must load while voice mode is off.
     func loadVoices() async {
-        guard voiceCatalog == nil, !isFixture, VoiceModeFlag.shared.on else { return }
+        guard voiceCatalog == nil else { return }
+        if isFixture {
+            voiceCatalog = AppModel.fixtureVoiceCatalog
+            return
+        }
         voiceCatalog = try? await api.voices()
     }
+
+    /// The Mac fixture's five voices (`fixture_voices` in arbos-mac), so the rig's picker
+    /// shows rows instead of the relay error.
+    static let fixtureVoiceCatalog = VoiceCatalog(
+        defaultId: "ara",
+        voices: [
+            Voice(id: "ara", name: "Ara", description: "Warm and clear, a touch of gravel. The current default."),
+            Voice(id: "rex", name: "Rex", description: "Low, steady, unhurried."),
+            Voice(id: "sol", name: "Sol", description: "Bright and quick; good for short answers."),
+            Voice(id: "ivy", name: "Ivy", description: "Soft, close to the mic."),
+            Voice(id: "ode", name: "Ode", description: "Even and neutral, reads long text well."),
+        ]
+    )
 
     /// Save on tap: show it at once, PATCH, then read back what the relay kept.
     func setVoice(_ projectId: Id, _ voice: String?) {
@@ -2283,9 +3246,68 @@ final class AppModel: ObservableObject {
                 let kept = try await api.setProjectVoice(projectId, voice: voice)
                 if let i = projects.firstIndex(where: { $0.id == projectId }) { projects[i].voice = kept }
             } catch {
-                notice = Notice(text: "Voice: \(error.localizedDescription)")
+                fail("save the voice", error)
                 await refreshRegistry()
             }
+        }
+    }
+
+    // MARK: Agent pane — routines and the box report ([feedback iphone-agent-pane-tabs-2026-10-25])
+
+    /// Each owned agent's routines, as last listed (the Details tab's Routines card).
+    @Published private(set) var routines: [Id: [Routine]] = [:]
+    /// The box as `GET /machine/debug` last reported it (the Computer tab, the Coding row).
+    @Published private(set) var boxReport: BoxReport?
+
+    /// `GET /projects/{id}/routines` when an owned agent's pane opens.
+    func refreshRoutines(_ projectId: Id) async {
+        if isFixture {
+            #if DEBUG
+            routines[projectId] = fixtureRoutines(projectId)
+            #endif
+            return
+        }
+        guard let list = try? await api.routines(projectId) else { return }
+        routines[projectId] = list
+    }
+
+    /// The row's switch: flip at once, PATCH, read back on failure.
+    func setRoutineEnabled(_ projectId: Id, routineId: Id, enabled: Bool) {
+        if var list = routines[projectId], let i = list.firstIndex(where: { $0.id == routineId }) {
+            list[i].enabled = enabled
+            if !enabled { list[i].nextRunAt = nil }
+            routines[projectId] = list
+        }
+        guard !isFixture else { return }
+        Task {
+            do {
+                try await api.setRoutineEnabled(projectId, routineId: routineId, enabled: enabled)
+            } catch {
+                fail("save the routine", error)
+            }
+            await refreshRoutines(projectId)
+        }
+    }
+
+    /// `GET /machine/debug` when the pane opens and when the Computer tab is picked. A relay
+    /// without the route (404) leaves the last report alone; any other failure is shown as
+    /// "The machine did not answer" with the reason.
+    func refreshBoxReport() async {
+        if isFixture {
+            #if DEBUG
+            boxReport = fixtureBoxReport()
+            #endif
+            return
+        }
+        do {
+            boxReport = try await api.machineDebug()
+        } catch let error as RelayError where error.status == 404 {
+            return
+        } catch {
+            var r = BoxReport(debug: [String: Any](), now: nowMs())
+            r.state = machine.state.rawValue
+            r.unreachableReason = UserError.classify("reach the machine", error).why
+            boxReport = r
         }
     }
 
@@ -2302,7 +3324,7 @@ final class AppModel: ObservableObject {
         guard !isFixture else { return }
         Task {
             do { try await api.patchProject(projectId, name: name, color: color, icon: icon, avatar: avatar, avatarColor: avatarColor, description: description) }
-            catch { notice = Notice(text: "Could not save: \(error.localizedDescription)") }
+            catch { fail("save the file", error) }
         }
     }
 
@@ -2310,38 +3332,145 @@ final class AppModel: ObservableObject {
 
     /// D92: the owner's leaf and disc colour picks (nil = automatic). Optimistic, then PATCH.
     func pickAvatarLeaf(_ projectId: Id, leaf: Int?, color: Int?) {
-        if let i = projects.firstIndex(where: { $0.id == projectId }) {
-            projects[i].avatarLeaf = leaf
-            projects[i].avatarLeafColor = color
-            projects[i].imageKey = nil
-        }
+        // Optimistic, into every copy (header, rosters, chips) at once; the relay's stamp
+        // replaces the local one when it answers.
+        let local = (newestAgentAvatar(projectId)?.version ?? 0) + 1
+        applyAgentAvatar(projectId, AgentAvatarFacts(imageKey: nil, avatarLeaf: leaf, avatarLeafColor: color, version: local), force: true)
         guard !isFixture else { return }
         Task {
             do {
-                try await api.setProjectAvatarLeaf(projectId, leaf: leaf, color: color)
+                let stamped = try await api.setProjectAvatarLeaf(projectId, leaf: leaf, color: color)
+                if stamped > 0 {
+                    applyAgentAvatar(projectId, AgentAvatarFacts(imageKey: nil, avatarLeaf: leaf, avatarLeafColor: color, version: stamped), force: true)
+                }
             } catch {
-                notice = Notice(text: "Avatar: \(error.localizedDescription)")
+                fail("save the picture", error)
                 await refreshRegistry()
             }
         }
     }
 
-    /// Open (or create) the DM with a handle and navigate to it.
+    /// Open the DM with a handle and navigate to it. With nobody to open, a draft DM opens
+    /// instead and nothing goes to the relay until the first send (`sendDraftDM`).
     func openDM(handle: String, navigate: Bool = true) async -> PeopleChat? {
+        let handle = handle.trimmingCharacters(in: CharacterSet(charactersIn: "@ "))
+        guard !handle.isEmpty else { return nil }
+        if let dm = peopleChats.first(where: { $0.kind == "dm" && $0.humans.contains { $0.handle == handle && $0.member != myUserId } }) {
+            if navigate { path = [.chat(chatId: dm.id, projectId: peopleSlot)] }
+            return dm
+        }
+        let draft = openDraftDM(handle: handle)
+        if navigate { path = [.chat(chatId: draft.id, projectId: peopleSlot)] }
+        return draft
+    }
+
+    /// `POST /chats/dm`: the relay makes the DM (or answers the one it has) and tells the
+    /// other person. Only the first send of a draft calls it.
+    private func createDM(handle: String) async -> PeopleChat? {
+        #if DEBUG
+        if isFixture {
+            let dm = fixtureOpenDM(handle: handle, navigate: false)
+            if let dm { fixtureAttachDoc(chatId: dm.id) }
+            return dm
+        }
+        #endif
         do {
             let chat = try await api.openDM(handle: handle)
             if !peopleChats.contains(where: { $0.id == chat.id }) { peopleChats.insert(chat, at: 0) }
             ensureRoom(projectId: peopleSlot, key: chat.id, roomChat: chat.id)
-            if navigate { path = [.chat(chatId: chat.id, projectId: peopleSlot)] }
             return chat
         } catch {
-            notice = Notice(text: (error as? RelayError)?.type == "not_available" ? "You can't message this person." : "Could not open the chat: \(error.localizedDescription)")
+            fail((error as? RelayError)?.type == "not_available"
+                 ? UserError.refused("open the chat", "You can't message this person.")
+                 : UserError.classify("open the chat", error))
             return nil
         }
     }
 
+    // MARK: Draft DM ([feedback draft-chat-from-search-ios-2026-10-29])
+
+    /// A DM with someone I have no chat with, not sent to yet. The chat screen draws it like
+    /// an empty DM (`peopleChat` answers for it); the home list never shows it. Leaving the
+    /// screen before a send drops it.
+    @Published private(set) var draftDM: PeopleChat?
+    /// The draft's first send is with the relay: popping the screen no longer drops it.
+    private(set) var draftDMSending = false
+    static let draftDMPrefix = "draft-dm:"
+    static func isDraftDM(_ chatId: Id) -> Bool { chatId.hasPrefix(draftDMPrefix) }
+
+    private func openDraftDM(handle: String) -> PeopleChat {
+        let id = Self.draftDMPrefix + handle
+        if let d = draftDM, d.id == id { return d }
+        dropDraftDM()
+        let now = nowMs()
+        let known = peopleChats.lazy.flatMap(\.humans).first { $0.handle == handle }
+        let listed = directory.first { $0.handle == handle }
+        let peer = ChatMember(id: known?.id ?? listed?.id ?? handle, kind: .user,
+                              member: known?.member ?? "user:\(listed?.id ?? handle)", role: "owner", handle: handle,
+                              avatarUrl: known?.avatarUrl ?? listed?.avatarUrl, name: known?.name ?? listed?.name,
+                              status: "member", joinedAt: now, project: nil, ownerId: nil, ownerHandle: nil, replyPolicy: nil,
+                              avatarColorIndex: known?.avatarColorIndex ?? listed?.avatarColorIndex)
+        var members = [peer]
+        if let me = user {
+            members.append(ChatMember(id: me.id, kind: .user, member: "user:\(me.id)", role: "owner", handle: me.login,
+                                      avatarUrl: me.avatarUrl, name: me.name, status: "member", joinedAt: now, project: nil,
+                                      ownerId: nil, ownerHandle: nil, replyPolicy: nil,
+                                      avatarColorIndex: me.avatarColorIndexEffective))
+        }
+        let draft = PeopleChat(id: id, kind: "dm", createdBy: user?.id ?? "", createdAt: now, title: "@\(handle)", pending: false,
+                               members: members, headSeq: 0, readSeq: 0, unread: false, lockState: "people_only",
+                               lastActivityAt: now, myRole: "owner", muted: false, silenced: false)
+        draftDM = draft
+        messages[id] = []
+        caughtUp.insert(id)
+        return draft
+    }
+
+    /// The draft's screen left before anything was sent: it is gone, with its typed text.
+    func dropDraftDM() {
+        guard let d = draftDM, !draftDMSending else { return }
+        draftDM = nil
+        messages[d.id] = nil
+        caughtUp.remove(d.id)
+        setComposerDraft("", for: d.id)
+    }
+
+    /// `path` moved: a draft that is no longer on the stack is dropped.
+    private func dropDraftDMIfLeft() {
+        guard let d = draftDM else { return }
+        let shown = path.contains { if case .chat(let id, _) = $0 { return id == d.id } else { return false } }
+        if !shown { dropDraftDM() }
+    }
+
+    /// Sends made in the draft while the relay makes the DM, in order.
+    private var draftDMSends: [(Id) -> Void] = []
+
+    /// A send in a draft: the first one makes the DM on the relay, swaps the screen onto it,
+    /// then every send made meanwhile goes out there. The relay refusing keeps the draft and
+    /// says why.
+    private func sendDraftDM(_ draft: PeopleChat, send: @escaping (Id) -> Void) {
+        draftDMSends.append(send)
+        guard !draftDMSending else { return }
+        let handle = String(draft.id.dropFirst(Self.draftDMPrefix.count))
+        draftDMSending = true
+        Task { @MainActor in
+            let dm = await createDM(handle: handle)
+            draftDMSending = false
+            let sends = draftDMSends
+            draftDMSends = []
+            guard let dm else { return }
+            draftDM = nil
+            messages[draft.id] = nil
+            caughtUp.remove(draft.id)
+            setComposerDraft("", for: draft.id)
+            if let i = path.lastIndex(where: { if case .chat(let id, _) = $0 { return id == draft.id } else { return false } }) {
+                path[i] = .chat(chatId: dm.id, projectId: peopleSlot)
+            }
+            for s in sends { s(dm.id) }
+        }
+    }
+
     func open(peopleChat chat: PeopleChat) {
-        unarchive(peopleChatId: chat.id)
         path = [.chat(chatId: chat.id, projectId: peopleSlot)]
     }
 
@@ -2351,10 +3480,24 @@ final class AppModel: ObservableObject {
     /// "hey everyone" can reach every agent, without typing `@`.
     /// `chipMentions` are extra agent member ids from a multi-select on the conversation
     /// selector (any combination of agents that should all reply).
+    /// `chipTokens` (#1596) are the composer's committed mention chips, lower-case handle →
+    /// member id: an `@handle` in the text that has a chip means exactly that member.
+    /// `extraParts` (#forward-attachments): doc parts written after the text and attachment
+    /// parts — a forwarded chart and its fallback picture, already uploaded.
     func sendPeople(chatId: String, text: String, replyTo: String?, address: String? = nil,
-                    chipMentions: [String] = [], attachments: [PendingAttachment] = []) {
+                    chipMentions: [String] = [], attachments: [PendingAttachment] = [],
+                    forwardedFrom: String? = nil, chipTokens: [String: String] = [:],
+                    replyRef: ReplyRef? = nil, extraParts: [[String: Any]] = []) {
+        if let draft = draftDM, draft.id == chatId {
+            sendDraftDM(draft) { [weak self] dmId in
+                self?.sendPeople(chatId: dmId, text: text, replyTo: replyTo, address: address, chipMentions: chipMentions,
+                                 attachments: attachments, forwardedFrom: forwardedFrom, chipTokens: chipTokens,
+                                 replyRef: replyRef, extraParts: extraParts)
+            }
+            return
+        }
         guard let doc = docs[chatId], let chat = peopleChat(chatId), let me = user else { return }
-        var mentions = AppModel.mentions(in: text, members: chat.members)
+        var mentions = AppModel.mentions(in: text, members: chat.members, senderHandle: me.login, chipTokens: chipTokens)
         // Leading bare agent names ("Bob?", "hey Bob …", "Arbos what is your name") count as
         // addressing that agent — same as typing @bob — so the box wakes without `@`.
         // Resolve agents before people so a human display-name collision (e.g. @unarbos
@@ -2420,9 +3563,12 @@ final class AppModel: ObservableObject {
         // Text-only: write on this turn (same as project `write`) so the push leaves
         // before we return. Deferring every send into a Task left bubbles faint when
         // the room ACK raced a still-queued commit.
+        // A cross-chat reply never carries an in-chat `replyTo` as well.
+        if replyRef != nil { reply = nil }
         if attachments.isEmpty {
             commitPeople(chatId: chatId, doc: doc, messageId: messageId, text: text, author: author,
-                         mentions: mentions, reply: reply, attachments: [])
+                         mentions: mentions, reply: reply, attachments: [], forwardedFrom: forwardedFrom,
+                         replyRef: replyRef, extraParts: extraParts)
             return
         }
         markUnacked(chatId: chatId, messageId: messageId)
@@ -2434,11 +3580,14 @@ final class AppModel: ObservableObject {
                     _ = try await api.putBlob(projectId: "\(peopleSlot):\(chatId)", key: key, mime: a.mime, data: a.data)
                     uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: key, kind: Self.attachmentKind(mime: a.mime, name: a.name)))
                 } catch {
-                    notice = Notice(text: "Attachment upload failed: \(error.localizedDescription)")
+                    setSendError(chatId, UserError.classify("upload the attachment", error))
                 }
             }
+            // The forward header rides along with the pictures ([feedback
+            // forward-attachments-ios-2026-10-27]: it was dropped on this path).
             commitPeople(chatId: chatId, doc: doc, messageId: messageId, text: text, author: author,
-                         mentions: mentions, reply: reply, attachments: uploaded, alreadyUnacked: true)
+                         mentions: mentions, reply: reply, attachments: uploaded, alreadyUnacked: true,
+                         forwardedFrom: forwardedFrom, replyRef: replyRef, extraParts: extraParts)
         }
     }
 
@@ -2446,19 +3595,38 @@ final class AppModel: ObservableObject {
     /// reserved the id before an attachment upload.
     private func commitPeople(chatId: String, doc: CoreChatDoc, messageId: Id, text: String,
                               author: CoreChatDoc.Author, mentions: [String], reply: String?,
-                              attachments: [Attachment], alreadyUnacked: Bool = false) {
+                              attachments: [Attachment], alreadyUnacked: Bool = false,
+                              forwardedFrom: String? = nil, replyRef: ReplyRef? = nil,
+                              extraParts: [[String: Any]] = []) {
         if !alreadyUnacked { markUnacked(chatId: chatId, messageId: messageId) }
+        // Rig (#1596): `ARBOS_TRACE_SENDS=1` prints what the row carries.
+        if DebugHooks.traceSends {
+            print("[arbos send] text=\(text.debugDescription) mentions=\(mentions)")
+        }
         do {
             try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments,
-                                      author: author, mentions: mentions, replyTo: reply)
+                                      author: author, mentions: mentions, replyTo: reply, forwardedFrom: forwardedFrom,
+                                      replyRef: replyRef)
+            for part in extraParts { try doc.insertPart(messageId: messageId, part: part) }
             try doc.pushCommand("send", payload: ["messageId": messageId], device: deviceId)
         } catch {
             clearUnacked(chatId: chatId, messageId: messageId)
-            notice = Notice(text: "Could not write the message: \(error.localizedDescription)")
+            setSendError(chatId, UserError.classify("send your message", error))
             return
         }
+        #if DEBUG
+        SendTrace.message(messageId, chatId: chatId)
+        #endif
+        // Bubble at once — same as channels / optimistic new chats. onChange still
+        // reconciles; live coalesce + async full re-reads must not gate the send.
+        paintLocalUserMessage(chatId: chatId, messageId: messageId, text: text,
+                              attachments: attachments, replyTo: reply, forwardedFrom: forwardedFrom,
+                              author: author, mentions: mentions, doc: doc, replyRef: replyRef)
         doc.commit()
-        announce(chatId: chatId, projectId: nil, messageId: messageId, text: text)
+        #if DEBUG
+        if SendTrace.traces(chatId) { SendTrace.mark("commit") }
+        #endif
+        announce(chatId: chatId, projectId: nil, messageId: messageId, text: text, replyRef: replyRef)
         if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i].lastActivityAt = nowMs() }
         peopleChats.sort { $0.lastActivityAt > $1.lastActivityAt }
     }
@@ -2466,27 +3634,49 @@ final class AppModel: ObservableObject {
     /// `@slug` tokens that name a member: agents by their mention slug, people by handle.
     /// `@everyone` / `@all` and a leading "hey everyone" (etc.) address every agent in the chat.
     /// Soft-deleted agents (no nested `project`) are skipped — they cannot wake or reply.
-    static func mentions(in text: String, members: [ChatMember]) -> [String] {
+    /// `@slug` → member. Typed resolution (#1538): when a person and an agent share a slug, the
+    /// slug means the AGENT if it is the sender's own handle (nobody @-mentions themselves) and
+    /// the person otherwise; the autocomplete labels both so the typist can pick.
+    static func mentions(in text: String, members: [ChatMember], senderHandle: String? = nil,
+                         chipTokens: [String: String] = [:]) -> [String] {
         var out: [String] = []
         let agents = members.filter { $0.isAgent && $0.project != nil }
+        let mine = senderHandle?.lowercased()
         func appendAgents() {
             for a in agents where !out.contains(a.member) { out.append(a.member) }
         }
-        let tokens = text.split(whereSeparator: { $0.isWhitespace })
-        for t in tokens where t.hasPrefix("@") {
+        let words = text.split(whereSeparator: { $0.isWhitespace })
+        for t in words where t.hasPrefix("@") {
             let slug = t.dropFirst().trimmingCharacters(in: CharacterSet(charactersIn: ".,!?:;")).lowercased()
-            if slug == "everyone" || slug == "all" {
+            if slug == "everyone" || slug == "all" || slug == "agents" {
                 appendAgents()
+                continue
+            }
+            // `@here` (Jacob, 2026-10-24): everyone in this chat — its people but me, and its
+            // agents — as member ids, which is what every agent's gate reads (rule 3), so they wake.
+            if slug == "here" {
+                for m in members where !out.contains(m.member) {
+                    if !m.isAgent, let mine, m.handle.lowercased() == mine { continue }
+                    if m.isAgent, m.project == nil { continue }
+                    out.append(m.member)
+                }
+                continue
+            }
+            // A committed chip says who this is (#1596) — no tie rule needed.
+            if let member = chipTokens[slug] {
+                if !out.contains(member) { out.append(member) }
                 continue
             }
             if slug == "arbos", agents.count == 1, let a = agents.first {
                 if !out.contains(a.member) { out.append(a.member) }
                 continue
             }
-            if let m = members.first(where: {
+            let hits = members.filter {
                 $0.handle.lowercased() == slug
                     || ($0.isAgent && $0.project != nil && mentionSlug($0.project?.name ?? "") == slug)
-            }) {
+            }
+            let preferAgent = slug == mine
+            if let m = hits.first(where: { $0.isAgent == preferAgent }) ?? hits.first {
                 if !out.contains(m.member) { out.append(m.member) }
             }
         }
@@ -2502,6 +3692,13 @@ final class AppModel: ObservableObject {
     /// addresses every agent in the chat.
     static func addressesEveryone(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        // `@here` / `@agents` chips (collective mentions, 2026-10-24) address every agent.
+        if trimmed.split(whereSeparator: { $0.isWhitespace }).contains(where: {
+            let t = $0.trimmingCharacters(in: CharacterSet(charactersIn: ".,!?:;"))
+            return t == "@here" || t == "@agents"
+        }) {
+            return true
+        }
         for g in [
             "hey everyone", "hi everyone", "hello everyone", "yo everyone", "ok everyone", "okay everyone",
             "hey agents", "hi agents", "hello agents", "yo agents", "ok agents", "okay agents",
@@ -2610,6 +3807,7 @@ final class AppModel: ObservableObject {
     /// Pass `force` to re-PUT the same cursor (e.g. onAppear / foreground) so the
     /// relay clears unread events recorded after the last PUT.
     func markPeopleRead(_ chatId: String, force: Bool = false) {
+        if Self.isDraftDM(chatId) { return }
         let hadRemote = (unreadCounts[chatId] ?? 0) > 0
         let hadLocalFlag = peopleUnread.contains(chatId)
         peopleUnread.remove(chatId)
@@ -2631,15 +3829,106 @@ final class AppModel: ObservableObject {
         )
     }
 
+    /// `notifications_cleared`: I read this chat on another device. The thread's delivered
+    /// notifications leave Notification Center, the chat stops being unread here (no `PUT
+    /// /read` — the relay already has the cursor), and the badge drops to the relay's total
+    /// (`/me/unread` re-syncs the per-chat counts on the next poll).
+    func applyRemoteClear(chatId: Id, relayTotal: Int64) {
+        PushManager.shared.clearDelivered(chatId: chatId)
+        var remote = unreadCounts
+        var flagged = peopleUnread
+        Self.clearingChat(chatId, remote: &remote, flagged: &flagged)
+        unreadCounts = remote
+        peopleUnread = flagged
+        if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+            peopleChats[i].unread = false
+            peopleChats[i].readSeq = max(peopleChats[i].readSeq, peopleChats[i].headSeq)
+        }
+        for (pid, list) in chats {
+            if let i = list.firstIndex(where: { $0.id == chatId }), list[i].unread {
+                var updated = list
+                updated[i].unread = false
+                chats[pid] = updated
+            }
+        }
+        PushManager.shared.setBadge(Self.badgeAfterClear(relayTotal: relayTotal, localTotal: unreadTotal))
+    }
+
     func addAgent(chatId: String, projectId: Id) {
+        showMembershipNotice(chatId: chatId, names: projects.filter { $0.id == projectId }.map(\.name),
+                             subjects: [MembershipNotice.Subject(kind: "agent", id: projectId)])
         Task {
             do {
                 let chat = try await api.addAgent(chatId: chatId, projectId: projectId)
                 if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i] = chat }
             } catch {
-                notice = Notice(text: (error as? RelayError)?.type == "own_project_only" ? "You can only add your own agents." : "Add agent failed: \(error.localizedDescription)")
+                withdrawOptimisticNotices(chatId: chatId)
+                fail((error as? RelayError)?.type == "own_project_only"
+                     ? UserError.refused("add the agent", "You can only add your own agents.")
+                     : UserError.classify("add the agent", error))
             }
         }
+    }
+
+    /// The adding phone's own "<me> added <names>" line, on screen the moment Add is tapped
+    /// (ARB-393). The relay writes the row of record; `foldOptimisticNotices` swaps this copy
+    /// out when that row lands.
+    ///
+    /// `subjects`: who was added, by id, when every one of them is known — then the line is
+    /// worded from the live roster and matched to the relay's row by facts; nil (someone is
+    /// known by handle only) keeps the words-only line.
+    func showMembershipNotice(chatId: Id, names: [String], subjects: [MembershipNotice.Subject]? = nil) {
+        let name = user?.name?.trimmingCharacters(in: .whitespaces) ?? ""
+        let who = name.isEmpty ? (user?.login ?? "") : name
+        guard !who.isEmpty, let text = OptimisticNotice.addedLine(who: who, names: names) else { return }
+        var facts: MembershipNotice? = nil
+        if let me = user?.id, let subjects, !subjects.isEmpty {
+            facts = MembershipNotice(kind: "added", actor: me, subjects: subjects)
+        }
+        let n = OptimisticNotice(text: text, now: nowMs(), notice: facts)
+        optimisticNotices[chatId, default: []].append(n)
+        var next = messages
+        next[chatId, default: []].append(n.message(chatId: chatId))
+        messages = next
+    }
+
+    /// A fresh relay snapshot replaces the chat's list: keep the local notices it has not
+    /// confirmed yet, drop the ones it has (or that are past their TTL).
+    private func foldOptimisticNotices(chatId: Id, into list: inout [Message]) {
+        guard var notices = optimisticNotices[chatId] else { return }
+        OptimisticNotice.reconcile(&list, notices: &notices, chatId: chatId, now: nowMs())
+        if notices.isEmpty { optimisticNotices[chatId] = nil } else { optimisticNotices[chatId] = notices }
+    }
+
+    /// The add failed: nothing was added, so no local notice may claim it was.
+    private func withdrawOptimisticNotices(chatId: Id) {
+        guard optimisticNotices.removeValue(forKey: chatId) != nil else { return }
+        var next = messages
+        next[chatId]?.removeAll { $0.id.hasPrefix(OptimisticNotice.idPrefix) }
+        messages = next
+    }
+
+    /// Names the relay will use in its notice: a person by name, else @handle; an agent by its
+    /// project name.
+    private func membershipNames(handles: [String], agentIds: [Id]) -> [String] {
+        let people: [String] = handles.map { (h: String) -> String in
+            let n = personName(handle: h)?.trimmingCharacters(in: .whitespaces) ?? ""
+            return n.isEmpty ? "@\(h)" : n
+        }
+        let agents: [String] = agentIds.compactMap { (id: Id) -> String? in projects.first { $0.id == id }?.name }
+        return people + agents
+    }
+
+    /// The added members by id, or nil when a handle is not known here (then the line cannot
+    /// carry facts and stays words-only).
+    private func membershipSubjects(handles: [String], agentIds: [Id]) -> [MembershipNotice.Subject]? {
+        var out: [MembershipNotice.Subject] = []
+        for h in handles {
+            guard let id = personId(handle: h) else { return nil }
+            out.append(MembershipNotice.Subject(kind: "user", id: id))
+        }
+        out += agentIds.map { MembershipNotice.Subject(kind: "agent", id: $0) }
+        return out
     }
 
     func addPerson(chatId: String, handle: String) {
@@ -2649,11 +3938,60 @@ final class AppModel: ObservableObject {
                 if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i] = chat }
             } catch {
                 let e = error as? RelayError
-                notice = Notice(text: e?.type == "already_member" ? "@\(handle) is already in this chat."
-                                 : e?.type == "not_available" ? "You can't add this person."
-                                 : (e?.status == 404 || e?.status == 405 || e?.status == 501) ? "Adding people is not on this relay yet."
-                                 : "Add person failed: \(error.localizedDescription)")
+                let said: String? = e?.type == "already_member" ? "@\(handle) is already in this chat."
+                    : e?.type == "not_available" ? "You can't add this person."
+                    : (e?.status == 404 || e?.status == 405 || e?.status == 501) ? "Adding people is not on this relay yet."
+                    : nil
+                fail(said.map { UserError.refused("add @\(handle)", $0) } ?? UserError.classify("add @\(handle)", error))
             }
+        }
+    }
+
+    /// Group profile › Invite links › New link (any member).
+    func createGroupInvite(_ chatId: Id, expires: Bool, singleUse: Bool) async -> ServerInviteLink? {
+        do {
+            return try await api.createGroupInvite(chatId, expires: expires, maxUses: singleUse ? 1 : nil)
+        } catch {
+            fail("make an invite link", error)
+            return nil
+        }
+    }
+
+    /// Group profile › Invite links › list.
+    func groupInvites(_ chatId: Id) async -> [ServerInviteLink] {
+        (try? await api.groupInvites(chatId)) ?? []
+    }
+
+    /// Group profile › Invite links › revoke.
+    func revokeGroupInvite(_ chatId: Id, inviteId: String) async -> Bool {
+        do {
+            try await api.revokeGroupInvite(chatId, inviteId: inviteId)
+            return true
+        } catch {
+            fail("revoke the link", error)
+            return false
+        }
+    }
+
+    /// `arbos://join-group/<code>` (the site's group invite page): join and open the chat.
+    func joinGroupFromLink(code: String) async {
+        let code = code.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        guard !code.isEmpty else { return }
+        do {
+            let chat = try await api.joinGroup(code: code)
+            if let i = peopleChats.firstIndex(where: { $0.id == chat.id }) {
+                peopleChats[i] = chat
+            } else {
+                peopleChats.insert(chat, at: 0)
+            }
+            ensureRoom(projectId: peopleSlot, key: chat.id, roomChat: chat.id)
+            open(peopleChat: chat)
+        } catch {
+            let type = (error as? RelayError)?.type
+            let said: String? = type == "not_available" ? "You can't join this group."
+                : type == "not_found" || (error as? RelayError)?.status == 404 ? "That invite link is not valid."
+                : nil
+            fail(said.map { UserError.refused("join the group", $0) } ?? UserError.classify("join the group", error))
         }
     }
 
@@ -2661,6 +3999,8 @@ final class AppModel: ObservableObject {
     /// `POST /chats/{id}/members`, agents by `POST /chats/{id}/agents`. All are
     /// tried; the first failure is reported once and the call returns false.
     func addMembers(chatId: String, handles: [String], agentIds: [Id]) async -> Bool {
+        showMembershipNotice(chatId: chatId, names: membershipNames(handles: handles, agentIds: agentIds),
+                             subjects: membershipSubjects(handles: handles, agentIds: agentIds))
         // One call for the batch (#1349): the relay adds everyone and writes one
         // "<me> added A, B and C" line. A relay that only knows `{handle}` answers 4xx;
         // then every add is tried on its own as before.
@@ -2671,19 +4011,20 @@ final class AppModel: ObservableObject {
         } catch let e as RelayError where [400, 404, 415, 422].contains(e.status) {
             // fall through to the per-item adds
         } catch {
-            notice = Notice(text: "Could not add members: \(error.localizedDescription)")
+            withdrawOptimisticNotices(chatId: chatId)
+            fail("add members", error)
             return false
         }
-        var failure: String?
+        var failure: UserError?
         for handle in handles {
             do {
                 let chat = try await api.addMember(chatId: chatId, handle: handle)
                 if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i] = chat }
             } catch {
                 let e = error as? RelayError
-                failure = failure ?? (e?.type == "already_member" ? "@\(handle) is already in this chat."
-                                      : e?.type == "not_available" ? "You can't add @\(handle)."
-                                      : "Could not add @\(handle): \(error.localizedDescription)")
+                failure = failure ?? (e?.type == "already_member" ? UserError.refused("add @\(handle)", "@\(handle) is already in this chat.")
+                                      : e?.type == "not_available" ? UserError.refused("add @\(handle)", "You can't add @\(handle).")
+                                      : UserError.classify("add @\(handle)", error))
             }
         }
         for projectId in agentIds {
@@ -2691,28 +4032,119 @@ final class AppModel: ObservableObject {
                 let chat = try await api.addAgent(chatId: chatId, projectId: projectId)
                 if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i] = chat }
             } catch {
-                failure = failure ?? ((error as? RelayError)?.type == "own_project_only" ? "You can only add your own agents."
-                                      : "Could not add the agent: \(error.localizedDescription)")
+                failure = failure ?? ((error as? RelayError)?.type == "own_project_only"
+                                      ? UserError.refused("add the agent", "You can only add your own agents.")
+                                      : UserError.classify("add the agent", error))
             }
         }
-        if let failure { notice = Notice(text: failure); return false }
+        if let failure {
+            withdrawOptimisticNotices(chatId: chatId)
+            fail(failure)
+            return false
+        }
         return true
     }
 
-    /// Owner/admin removes a person from a people chat (`DELETE /chats/{id}/members/{userId}`);
-    /// the relay writes the "<me> removed @handle" line (#1349).
-    func removeMember(chatId: String, userId: String) {
+    /// Owner/admin removes (or bans) a person from a people chat
+    /// (`DELETE /chats/{id}/members/{userId}[?ban=1]`); the relay writes the
+    /// "<me> removed @handle" line (#1349). Ban keeps them from rejoining.
+    func removeMember(chatId: String, userId: String, ban: Bool = false) {
         Task {
             do {
-                try await api.removeMember(chatId: chatId, userId: userId)
+                try await api.removeMember(chatId: chatId, userId: userId, ban: ban)
                 if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
-                    peopleChats[i].members.removeAll { !$0.isAgent && $0.id == userId }
+                    if ban, let chat = try? await api.peopleChat(chatId) {
+                        peopleChats[i] = chat
+                    } else {
+                        peopleChats[i].members.removeAll { !$0.isAgent && $0.id == userId }
+                    }
                 }
                 // The relay writes "<me> removed @handle" into the chat (#1349).
             } catch {
                 let e = error as? RelayError
-                notice = Notice(text: e?.type == "owner_only" ? "Only an owner can remove people."
-                                 : "Remove failed: \(error.localizedDescription)")
+                let verb = ban ? "ban them" : "remove them"
+                fail(e?.type == "owner_only"
+                     ? UserError.refused(verb, "Only an owner or admin can manage members.")
+                     : UserError.classify(verb, error))
+            }
+        }
+    }
+
+    /// Owner/admin clears a ban (`POST …/members/{userId}/unban`) so the person can be added again.
+    func unbanMember(chatId: String, userId: String) {
+        Task {
+            do {
+                let chat = try await api.unbanMember(chatId: chatId, userId: userId)
+                if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+                    peopleChats[i] = chat
+                }
+            } catch {
+                let e = error as? RelayError
+                fail(e?.type == "owner_only"
+                     ? UserError.refused("unban them", "Only an owner or an admin with mute and ban rights can unban.")
+                     : UserError.classify("unban them", error))
+            }
+        }
+    }
+
+    /// Owner/admin mutes (or unmutes) a member from posting in a people group.
+    /// Pass `duration` when muting to choose how long the mute lasts.
+    func setMemberSilenced(
+        chatId: String,
+        userId: String,
+        silenced: Bool,
+        duration: MemberMuteDuration? = nil
+    ) {
+        Task {
+            do {
+                let until = silenced ? duration?.silencedUntilMs : nil
+                let chat = try await api.setMemberSilenced(
+                    chatId: chatId, userId: userId, silenced: silenced, silencedUntilMs: until
+                )
+                if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+                    peopleChats[i] = chat
+                }
+            } catch {
+                let e = error as? RelayError
+                fail(e?.type == "owner_only"
+                     ? UserError.refused("mute them", "Only an owner or an admin with mute rights can mute members.")
+                     : UserError.classify("mute them", error))
+            }
+        }
+    }
+
+    /// Owner promotes or demotes a group member (`admin` / `member`).
+    func setMemberRole(chatId: String, userId: String, role: String) {
+        Task {
+            do {
+                let chat = try await api.setMemberRole(chatId: chatId, userId: userId, role: role)
+                if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+                    peopleChats[i] = chat
+                }
+            } catch {
+                let e = error as? RelayError
+                fail(e?.type == "owner_only"
+                     ? UserError.refused("change the role", "Only the owner can change admin roles.")
+                     : UserError.classify("change the role", error))
+            }
+        }
+    }
+
+    /// Owner sets whether an admin may mute and ban members.
+    func setMemberCanMuteBan(chatId: String, userId: String, canMuteBan: Bool) {
+        Task {
+            do {
+                let chat = try await api.setMemberCanMuteBan(
+                    chatId: chatId, userId: userId, canMuteBan: canMuteBan
+                )
+                if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+                    peopleChats[i] = chat
+                }
+            } catch {
+                let e = error as? RelayError
+                fail(e?.type == "owner_only"
+                     ? UserError.refused("change the mute and ban rights", "Only the owner can set mute and ban rights.")
+                     : UserError.classify("change the mute and ban rights", error))
             }
         }
     }
@@ -2724,7 +4156,7 @@ final class AppModel: ObservableObject {
                 if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
                     peopleChats[i].members.removeAll { $0.isAgent && $0.id == projectId }
                 }
-            } catch { notice = Notice(text: "Remove agent failed: \(error.localizedDescription)") }
+            } catch { fail("remove the agent", error) }
         }
     }
 
@@ -2746,10 +4178,10 @@ final class AppModel: ObservableObject {
         Task { try? await api.leaveChat(chatId) }
     }
 
-    /// Rename a people group and/or set its picture blob key (`PATCH /chats/{id}`).
-    func patchPeopleChat(_ chatId: String, title: String? = nil, imageKey: String? = nil) async -> Bool {
+    /// Rename a people group and/or set its picture blob key or description (`PATCH /chats/{id}`).
+    func patchPeopleChat(_ chatId: String, title: String? = nil, imageKey: String? = nil, description: String? = nil) async -> Bool {
         do {
-            let chat = try await api.patchPeopleChat(chatId, title: title, imageKey: imageKey)
+            let chat = try await api.patchPeopleChat(chatId, title: title, imageKey: imageKey, description: description)
             if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
                 peopleChats[i] = chat
             } else {
@@ -2757,42 +4189,49 @@ final class AppModel: ObservableObject {
             }
             return true
         } catch {
-            notice = Notice(text: "Could not update group: \(error.localizedDescription)")
+            fail("update the group", error)
             return false
         }
     }
 
-    /// D92 amendment: the agent's picture as the avatar loader fetches it.
+    /// D92 amendment: the agent's picture as the avatar loader fetches it (the newest copy's).
     func projectImageURL(_ project: Project) -> URL? {
-        guard let key = project.imageKey, !key.isEmpty else { return nil }
-        return blobURL(projectId: project.id, key: key)
+        let facts = newestAgentAvatar(project.id) ?? AgentAvatarFacts(project)
+        return agentPictureURL(id: project.id, imageKey: facts.imageKey, version: facts.version).flatMap(URL.init(string:))
     }
 
     /// D92 amendment: upload an agent picture into the project's own blob slot and set it.
     func setProjectImage(projectId: Id, jpeg: Data) async -> Bool {
-        let key = "avatar-\(Int(Date().timeIntervalSince1970 * 1000)).jpg"
+        let key = "avatar-\(Int(Date().timeIntervalSince1970 * 1000)).\(PictureMaster.ext(jpeg))"
         if isFixture {
-            if let i = projects.firstIndex(where: { $0.id == projectId }) { projects[i].imageKey = key }
-            return true
+            return await setProjectImageKey(projectId: projectId, key: key)
         }
         do {
-            _ = try await api.putBlob(projectId: projectId, key: key, mime: "image/jpeg", data: jpeg)
+            _ = try await api.putBlob(projectId: projectId, key: key, mime: PictureMaster.mime(jpeg), data: jpeg)
             return await setProjectImageKey(projectId: projectId, key: key)
         } catch {
-            notice = Notice(text: "Could not upload the picture: \(error.localizedDescription)")
+            fail("upload the picture", error)
             return false
         }
     }
 
     /// D92 amendment: a blob the relay already holds (the Generate tab's answer) becomes the picture.
     func setProjectImageKey(projectId: Id, key: String) async -> Bool {
-        if let i = projects.firstIndex(where: { $0.id == projectId }) { projects[i].imageKey = key }
+        // Optimistic, into every copy at once (the header used to keep its old URL while the
+        // working row already drew the new picture — Jacob, 2026-10-25); the relay's stamp
+        // replaces the local one when it answers.
+        let base = newestAgentAvatar(projectId)
+        let local = (base?.version ?? 0) + 1
+        applyAgentAvatar(projectId, AgentAvatarFacts(imageKey: key, avatarLeaf: base?.avatarLeaf, avatarLeafColor: base?.avatarLeafColor, version: local), force: true)
         guard !isFixture else { return true }
         do {
-            try await api.setProjectImageKey(projectId, key: key)
+            let stamped = try await api.setProjectImageKey(projectId, key: key)
+            if stamped > 0 {
+                applyAgentAvatar(projectId, AgentAvatarFacts(imageKey: key, avatarLeaf: base?.avatarLeaf, avatarLeafColor: base?.avatarLeafColor, version: stamped), force: true)
+            }
             return true
         } catch {
-            notice = Notice(text: "Picture not saved: \(error.localizedDescription)")
+            fail("save the picture", error)
             await refreshRegistry()
             return false
         }
@@ -2800,11 +4239,23 @@ final class AppModel: ObservableObject {
 
     /// D92 amendment: the Generate tab — the relay paints one picture and answers with its key.
     func generateProjectAvatar(projectId: Id, prompt: String) async throws -> String {
-        if isFixture {
-            try? await Task.sleep(nanoseconds: 1_200_000_000)
-            return "fixture-gen-\(prompt.lowercased().replacingOccurrences(of: " ", with: "-"))"
-        }
+        if isFixture { return try await Self.fixtureGenerate(prompt) }
         return try await api.generateProjectAvatar(projectId, prompt: prompt)
+    }
+
+    /// The same for a people group's picture (any member) — the key lands in `people:{chat}`.
+    func generateGroupAvatar(chatId: String, prompt: String) async throws -> String {
+        if isFixture { return try await Self.fixtureGenerate(prompt) }
+        return try await api.generateGroupAvatar(chatId, prompt: prompt)
+    }
+
+    /// Set a group picture from a key the relay already holds (the Generate tab's answer).
+    func setGroupImageKey(chatId: String, key: String) async -> Bool {
+        if isFixture {
+            if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i].imageKey = key }
+            return true
+        }
+        return await patchPeopleChat(chatId, imageKey: key)
     }
 
     /// D92 amendment: a group's leaf picture (nil = initials); drops the uploaded picture.
@@ -2820,24 +4271,24 @@ final class AppModel: ObservableObject {
             if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i] = chat }
             return true
         } catch {
-            notice = Notice(text: "Group picture not saved: \(error.localizedDescription)")
+            fail("save the group picture", error)
             return false
         }
     }
 
     /// Upload a group picture to `people:{chatId}` and patch `image_key`.
     func setGroupImage(chatId: String, jpeg: Data) async -> Bool {
-        let key = "group-avatar-\(Int(Date().timeIntervalSince1970 * 1000)).jpg"
+        let key = "group-avatar-\(Int(Date().timeIntervalSince1970 * 1000)).\(PictureMaster.ext(jpeg))"
         do {
-            _ = try await api.putBlob(projectId: "\(peopleSlot):\(chatId)", key: key, mime: "image/jpeg", data: jpeg)
+            _ = try await api.putBlob(projectId: "\(peopleSlot):\(chatId)", key: key, mime: PictureMaster.mime(jpeg), data: jpeg)
             return await patchPeopleChat(chatId, imageKey: key)
         } catch {
-            notice = Notice(text: "Could not upload group image: \(error.localizedDescription)")
+            fail("upload the group picture", error)
             return false
         }
     }
 
-    /// Settings profile picture: `PUT /me/avatar` JPEG, then update the local user.
+    /// Settings profile picture: `PUT /me/avatar` with the master (PNG or JPEG), then update the local user.
     func setUserAvatar(jpeg: Data) async -> Bool {
         do {
             let url = try await api.putMeAvatar(jpeg: jpeg)
@@ -2848,7 +4299,53 @@ final class AppModel: ObservableObject {
             }
             return true
         } catch {
-            notice = Notice(text: "Could not update profile picture: \(error.localizedDescription)")
+            fail("save your picture", error)
+            return false
+        }
+    }
+
+    /// The fixture's "generation": a key named after the prompt after 1.2 s. Rig (error-state
+    /// shots): a prompt with "timeout" fails with the relay's 504 sentence after 2 s, one with
+    /// "slow" paints 25 s first (the progress state).
+    static func fixtureGenerate(_ prompt: String) async throws -> String {
+        let lower = prompt.lowercased()
+        if lower.contains("slow") { try? await Task.sleep(nanoseconds: 25_000_000_000) }
+        if lower.contains("timeout") {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            throw RelayError(status: 504, message: "Couldn't generate the image. The server took too long.", type: "avatar_timeout",
+                             detail: "gpt-image-1-mini: operation timed out after 40 s (attempt 2 of 2); relay budget 75 s")
+        }
+        try? await Task.sleep(nanoseconds: 1_200_000_000)
+        return "fixture-gen-\(lower.replacingOccurrences(of: " ", with: "-"))"
+    }
+
+    /// The avatar picker's Generate tab for my own picture: the relay paints one picture into
+    /// my `users:{id}` slot and answers with its key (not yet set).
+    func generateMyAvatar(prompt: String) async throws -> String {
+        if isFixture { return try await Self.fixtureGenerate(prompt) }
+        return try await api.generateMyAvatar(prompt: prompt)
+    }
+
+    /// The generated preview becomes my picture (`PUT /me/avatar {image_key}`), then the local
+    /// user carries the new URL like after an upload.
+    func setUserAvatarKey(_ key: String) async -> Bool {
+        if isFixture {
+            if var who = user {
+                who.avatarUrl = "fixture://avatar/me-\(key)"
+                user = who
+            }
+            return true
+        }
+        do {
+            let url = try await api.putMeAvatarKey(key)
+            if var who = user {
+                who.avatarUrl = url
+                user = who
+                saveAccountCache()
+            }
+            return true
+        } catch {
+            fail("save your picture", error)
             return false
         }
     }
@@ -2866,7 +4363,7 @@ final class AppModel: ObservableObject {
             saveAccountCache()
             return true
         } catch {
-            notice = Notice(text: "Picture not removed: \(error.localizedDescription)")
+            fail("remove your picture", error)
             return false
         }
     }
@@ -2897,7 +4394,7 @@ final class AppModel: ObservableObject {
         unpinHome(peopleChatId: chatId)
         path = []
         Task {
-            do { try await api.deleteChat(chatId) } catch { notice = Notice(text: "Delete failed: \(error.localizedDescription)") }
+            do { try await api.deleteChat(chatId) } catch { fail("delete it", error) }
         }
     }
 
@@ -2906,7 +4403,7 @@ final class AppModel: ObservableObject {
     func block(handle: String) {
         Task {
             do { try await api.block(handle: handle); blocked = (try? await api.blocks()) ?? blocked }
-            catch { notice = Notice(text: "Block failed: \(error.localizedDescription)") }
+            catch { fail("block them", error) }
         }
     }
 
@@ -2919,6 +4416,19 @@ final class AppModel: ObservableObject {
     @Published var profilePath: [ProfileTarget] = []
     /// A chat the next ChatView should open with its search bar up (profile "search").
     @Published var pendingSearchChat: String?
+    /// A message the next ChatView should scroll to and tint (a search result opened
+    /// from the bottom bar, [feedback iphone-bottom-search-bar-2026-10-25]).
+    @Published var pendingReveal: MessageReveal?
+    /// The Settings page the next Settings sheet lands on (a Settings row opened
+    /// from search, [feedback search-settings-ios-2026-10-26]): Home presents the
+    /// sheet when this is set and clears it when the sheet closes.
+    @Published var pendingSettingsLanding: String?
+    /// The agent pane's settings row to drop open once the pane shows (a search
+    /// result for "voice" / "model" / "reasoning").
+    @Published var pendingAgentSetting: GlobalSearch.AgentSetting?
+    /// App-wide search: message text, attachments and links per loaded chat, kept
+    /// current lazily against `messagesVersion` (`GlobalSearch`).
+    var searchIndex = SearchIndex()
     /// Unsent composer text kept per chat while the ChatView is off-screen (Mac `Composer.drafts`).
     private var composerDrafts: [Id: String] = [:]
     /// Last presence time per user id, from room presence frames this session.
@@ -2927,6 +4437,8 @@ final class AppModel: ObservableObject {
     /// with `typing`; the presence row over the composer reads it
     /// ([feedback typing-indicator-left-2026-10-23], Mac `AppState.typing`).
     @Published var typing: [Id: [String: Int64]] = [:]
+    /// Last time we told the room we are typing, per chat (Mac `typing_sent_at`).
+    private var typingSentAt: [Id: Int64] = [:]
 
     /// Draft text for a chat, or `""` when none.
     func composerDraft(for chatId: Id) -> String {
@@ -2966,36 +4478,101 @@ final class AppModel: ObservableObject {
         for c in peopleChats {
             if let m = c.members.first(where: { !$0.isAgent && $0.handle.caseInsensitiveCompare(handle) == .orderedSame }) { return m.id }
         }
+        if let m = serverMember(handle: handle) { return m.id }
         return directory.first { $0.handle.caseInsensitiveCompare(handle) == .orderedSame }?.id
     }
 
+    /// A person's display name by handle: me, the people chats' members, the servers' members
+    /// (a channel bubble's sender need not share a group with me — [feedback
+    /// server-member-names-2026-10-28]), then the directory. `nil` = no name known.
     func personName(handle: String) -> String? {
         if let me = user, me.login.caseInsensitiveCompare(handle) == .orderedSame { return me.name }
         for c in peopleChats {
             if let m = c.members.first(where: { !$0.isAgent && $0.handle.caseInsensitiveCompare(handle) == .orderedSame }) { return m.name }
         }
+        if let name = serverMember(handle: handle)?.name, !name.isEmpty { return name }
         return directory.first { $0.handle.caseInsensitiveCompare(handle) == .orderedSame }?.name
     }
 
-    func openPersonProfile(handle: String, avatarUrl: String?, chatId: String) {
-        if let m = peopleChat(chatId)?.members.first(where: { $0.handle == handle && !$0.isAgent }) {
-            showProfile(.user(ProfilePerson(m)))
-        } else if let p = directory.first(where: { $0.handle == handle }) {
-            showProfile(.user(ProfilePerson(p)))
-        } else {
-            showProfile(.user(ProfilePerson(id: handle, handle: handle, name: nil, avatarUrl: avatarUrl)))
+    /// A server member by handle, across every server's roster.
+    func serverMember(handle: String) -> ServerMember? {
+        for s in servers {
+            if let m = s.members.first(where: { $0.handle.caseInsensitiveCompare(handle) == .orderedSame }) { return m }
         }
+        return nil
+    }
+
+    /// The senders whose rows `chat` hides for me ([feedback blocked-state-ios-2026-10-26],
+    /// Jacob 2026-10-26: a group block hides the blocked person's messages from the blocker
+    /// alone): the relay's `blockedSenders` hint plus every member on my block list, as
+    /// `user:<id>`. Empty for a DM (its composer bar says Blocked instead).
+    func hiddenSenders(in chat: PeopleChat) -> Set<String> {
+        guard chat.isGroup else { return [] }
+        var out = Set(chat.blockedSenders)
+        for m in chat.humans where BlockedState.isBlocked(id: m.id, handle: m.handle, in: blocked) {
+            out.insert(m.id.hasPrefix("user:") ? m.id : "user:\(m.id)")
+        }
+        return out
+    }
+
+    /// Tests and the fixture (`ARBOS_FIXTURE_BLOCKED`): the relay's block list as `GET /blocks`
+    /// would hand it over.
+    func setBlockedForTests(_ list: [Person]) { blocked = list }
+
+    /// Is this message hidden for me — from someone I blocked, in a people group?
+    func hidesMessage(_ m: Message, chatId: Id) -> Bool {
+        guard m.role == .user, let chat = peopleChat(chatId) else { return false }
+        return hiddenSenders(in: chat).contains(m.sender)
+    }
+
+    /// The one action behind every profile target in a chat — a sender name, the
+    /// avatar beside a bubble, an @mention chip, the header pill, a status-row
+    /// picture ([feedback profile-pane-toggle-ios-2026-10-26], `ProfileToggle`):
+    /// open the sheet on `target`; dismiss it when that same person or agent is
+    /// already up, whichever target opened it; swap it in place for someone else.
+    func toggleProfile(_ target: ProfileTarget) {
+        guard let next = ProfileToggle.next(showing: profilePath.last ?? profile, tapped: target) else {
+            profilePath = []
+            profile = nil
+            return
+        }
+        profilePath = []
+        profile = next
+    }
+
+    /// True while the sheet's top page is `target`'s subject (the label then
+    /// says "Close profile").
+    func profileShows(_ target: ProfileTarget) -> Bool {
+        (profilePath.last ?? profile)?.sameSubject(as: target) ?? false
+    }
+
+    /// The page a sender's handle opens: the chat's member, else the directory
+    /// entry, else a bare person from the row's own fields.
+    func personTarget(handle: String, avatarUrl: String?, chatId: String) -> ProfileTarget {
+        if let m = peopleChat(chatId)?.members.first(where: { $0.handle == handle && !$0.isAgent }) {
+            return .user(ProfilePerson(m))
+        } else if let p = directory.first(where: { $0.handle == handle }) {
+            return .user(ProfilePerson(p))
+        } else if let m = serverMember(handle: handle) {
+            return .user(ProfilePerson(id: m.id, handle: m.handle, name: m.name, avatarUrl: m.avatarUrl,
+                                       lastSeenAt: m.lastSeenAt, online: m.online, avatarColorIndex: m.avatarColorIndex))
+        } else {
+            return .user(ProfilePerson(id: handle, handle: handle, name: nil, avatarUrl: avatarUrl))
+        }
+    }
+
+    func openPersonProfile(handle: String, avatarUrl: String?, chatId: String) {
+        toggleProfile(personTarget(handle: handle, avatarUrl: avatarUrl, chatId: chatId))
     }
 
     /// An agent that is not in my project list: the project carried by a
     /// people-chat member row (someone else's agent in a DM).
     func foreignAgent(_ projectId: Id) -> Project? {
         for c in peopleChats {
-            if let a = c.agents.first(where: { $0.id == projectId }), var p = a.project {
-                if p.ownerHandle == nil { p.ownerHandle = a.ownerHandle }
-                p.shared = true
-                if p.description.isEmpty, let d = a.description { p.description = d }
-                return p
+            if let a = c.agents.first(where: { $0.id == projectId }) {
+                // Through the shared identity (#1592): the same name, leaf and picture every
+                // other surface draws for this agent.
+                return agent(member: a, chatId: c.id)
             }
         }
         return nil
@@ -3011,7 +4588,9 @@ final class AppModel: ObservableObject {
     /// 6 s (the sender refreshes every 3 s), off → gone at once.
     func noteTyping(_ header: [String: Any], chatId: Id) {
         guard let handle = header["handle"] as? String, !handle.isEmpty,
-              let active = header["typing"] as? Bool else { return }
+              header["typing"] != nil else { return }
+        // `DocJSON.bool` accepts Bool and NSNumber; a bare `as? Bool` missed live frames.
+        let active = DocJSON.bool(header["typing"])
         if handle == user?.login { return }
         var chat = typing[chatId] ?? [:]
         if active {
@@ -3020,6 +4599,18 @@ final class AppModel: ObservableObject {
             chat[handle] = nil
         }
         typing[chatId] = chat.isEmpty ? nil : chat
+    }
+
+    /// Composer keystroke in a people chat (DM or group): at most one presence
+    /// typing ping per 3 s so peers see who is typing ([feedback
+    /// app-01M5N7WSA1VCYHE9BE3CX4V0R6], Mac `AppState::typed_in`).
+    func typedIn(chatId: Id) {
+        guard peopleChat(chatId) != nil else { return }
+        let now = nowMs()
+        let last = typingSentAt[chatId] ?? 0
+        guard now - last > 3_000 else { return }
+        typingSentAt[chatId] = now
+        rooms[chatId]?.setTyping(true)
     }
 
     /// Handles typing in `chatId` right now, the most recently seen first.
@@ -3036,6 +4627,57 @@ final class AppModel: ObservableObject {
         if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i].muted = muted }
         guard !isFixture else { return }
         Task { try? await api.chatSettings(chatId: chatId, muted: muted) }
+    }
+
+    private static let peopleMutedUntilKey = "peopleMutedUntil"
+
+    private static func loadPeopleMutedUntil() -> [String: Date] {
+        let raw = UserDefaults.standard.dictionary(forKey: peopleMutedUntilKey) as? [String: Double] ?? [:]
+        return Dictionary(uniqueKeysWithValues: raw.map { ($0.key, Date(timeIntervalSince1970: $0.value)) })
+    }
+
+    private static func savePeopleMutedUntil(_ map: [String: Date]) {
+        let raw = Dictionary(uniqueKeysWithValues: map.map { ($0.key, $0.value.timeIntervalSince1970) })
+        UserDefaults.standard.set(raw, forKey: peopleMutedUntilKey)
+    }
+
+    /// True while this people chat should not show banners (timed local mute or relay `me.muted`).
+    func isPeopleChatMuted(_ chatId: String) -> Bool {
+        if let until = peopleMutedUntil[chatId] {
+            if until > Date() { return true }
+            // Timed mute ended: clear local expiry and the relay flag.
+            peopleMutedUntil.removeValue(forKey: chatId)
+            if peopleChat(chatId)?.muted == true { setMuted(chatId: chatId, muted: false) }
+            return false
+        }
+        return peopleChat(chatId)?.muted == true
+    }
+
+    /// Mute a people group for a chosen length of time (1 hour, 8 hours, or until unmuted).
+    func mutePeopleChat(_ chatId: String, for duration: ChatMuteDuration) {
+        peopleMutedUntil[chatId] = duration.endDate
+        setMuted(chatId: chatId, muted: true)
+    }
+
+    /// Clear a people-chat mute (local expiry and relay flag).
+    func unmutePeopleChat(_ chatId: String) {
+        peopleMutedUntil.removeValue(forKey: chatId)
+        setMuted(chatId: chatId, muted: false)
+    }
+
+    /// Subtitle under Mute / Unmute on the group info page.
+    func peopleMuteSubtitle(_ chatId: String) -> String {
+        guard isPeopleChatMuted(chatId) else {
+            return "No banners for a while, or until you turn them back on"
+        }
+        if let until = peopleMutedUntil[chatId], until.timeIntervalSinceNow < 60 * 60 * 24 * 365 {
+            let f = DateFormatter()
+            f.doesRelativeDateFormatting = true
+            f.dateStyle = .short
+            f.timeStyle = .short
+            return "Muted until \(f.string(from: until))"
+        }
+        return "Muted until you turn it back on"
     }
 
     /// `GET /users/{id}` for a fresh presence line on a profile page.
@@ -3067,8 +4709,26 @@ final class AppModel: ObservableObject {
     }
 
     func unblock(_ person: Person) {
-        blocked.removeAll { $0.id == person.id }
-        Task { try? await api.unblock(userId: person.id) }
+        Task {
+            do {
+                try await api.unblock(userId: person.id)
+                // A DM refused as `blocks_member` is postable again: resend now.
+                retryRefusedRooms(only: nil)
+            }
+            catch let e as RelayError where e.status == 404 {
+                // Already not blocked on the relay; the list below says so.
+            }
+            catch { fail("unblock them", error) }
+            await refreshBlocks()
+        }
+    }
+
+    /// Ask the rooms that stand refused to resend now ([feedback 2005]): one chat when the
+    /// push names it, else every refused room (an unblock does not say which DM it frees).
+    /// A room that is not refused ignores the nudge inside its session.
+    func retryRefusedRooms(only chatId: Id?) {
+        let targets = chatId.map { pushRefused.contains($0) ? [$0] : [] } ?? Array(pushRefused)
+        for key in targets { rooms[key]?.retryRefused() }
     }
 
     func refreshBlocks() async {
@@ -3083,14 +4743,16 @@ final class AppModel: ObservableObject {
     func inviteToProject(_ projectId: Id, handle: String) async -> [ProjectMember]? {
         do { return try await api.addProjectMember(projectId, handle: handle) }
         catch {
-            notice = Notice(text: (error as? RelayError)?.type == "already_member" ? "@\(handle) is already a member." : "Invite failed: \(error.localizedDescription)")
+            fail((error as? RelayError)?.type == "already_member"
+                 ? UserError.refused("invite @\(handle)", "@\(handle) is already a member.")
+                 : UserError.classify("invite @\(handle)", error))
             return nil
         }
     }
 
     func removeProjectMember(_ projectId: Id, userId: String) async {
         do { try await api.removeProjectMember(projectId, userId: userId) }
-        catch { notice = Notice(text: "Remove failed: \(error.localizedDescription)") }
+        catch { fail("remove them", error) }
     }
 
     /// `/me/pushes`: unread flags, chat list refreshes and local notifications.
@@ -3101,29 +4763,59 @@ final class AppModel: ObservableObject {
         for p in items where !notifiedPushIds.contains(p.id) {
             notifiedPushIds.insert(p.id)
             pushLog.notice("push id=\(p.id, privacy: .public) event=\(String(describing: p.event), privacy: .public)")
+            // The chat's members or settings changed: a refused room there resends now.
+            if let cid = RefusedSendRetry.chatToRetry(p.event) { retryRefusedRooms(only: cid) }
             switch p.event {
             case .peopleMessage(let payload):
                 let cid = payload.chat_id
-                // Agent (or person) reached out in a chat we have not listed yet —
+                // Since 2026-10-26 the relay queues this for an agent's reply too (people chats
+                // and, with `project_id`, the agent's own project chats); before, only a
+                // person's row did, so an @agent answer never showed a banner here.
+                let projectId = payload.project_id ?? peopleSlot
+                let inPeople = payload.project_id == nil
+                // Agent (or person) reached out in a people chat we have not listed yet —
                 // refresh so open-from-notification can dial the room.
-                if peopleChat(cid) == nil { needChats = true }
+                if inPeople, peopleChat(cid) == nil { needChats = true }
                 if !isWatching(cid) {
-                    peopleUnread.insert(cid)
-                    let sender = payload.sender
-                    let from = sender.handle.isEmpty ? (payload.from_handle.isEmpty ? "someone" : payload.from_handle) : sender.handle
-                    // §7c sender{} first; the chat's member list fills any gap.
-                    let member = peopleChat(cid)?.members.first { $0.handle == from }
-                    let agent = member?.isAgent == true ? member?.project : nil
-                    let kind = sender.kind.isEmpty ? (agent != nil ? "agent" : "user") : sender.kind
-                    let info = MessagePush.userInfo(
-                        chatId: cid, projectId: peopleSlot, title: sender.name.isEmpty ? (member?.displayName ?? "@\(from)") : sender.name,
-                        body: "New message",
-                        senderKind: kind, senderId: sender.id.isEmpty ? (member?.id ?? from) : sender.id,
-                        senderName: sender.name.isEmpty ? (member?.displayName ?? from) : sender.name, senderHandle: from,
-                        avatar: sender.avatar,
-                        avatarColor: sender.avatar_color,
-                        avatarUrl: sender.avatar_url ?? member?.avatarUrl)
-                    Task { await PushManager.shared.postMessage(id: p.id, info: info) }
+                    if inPeople {
+                        peopleUnread.insert(cid)
+                        unarchiveOnActivity(chatId: cid)
+                    }
+                    // Muted group: keep the unread flag, skip the local banner.
+                    if !inPeople || !isPeopleChatMuted(cid) {
+                        let sender = payload.sender
+                        let from = sender.handle.isEmpty ? (payload.from_handle.isEmpty ? "someone" : payload.from_handle) : sender.handle
+                        // §7c sender{} first; the chat's member list fills any gap.
+                        let member = peopleChat(cid)?.members.first { $0.handle == from }
+                        let agent = member?.isAgent == true ? member?.project : nil
+                        let kind = sender.kind.isEmpty ? (agent != nil ? "agent" : "user") : sender.kind
+                        let text = (payload.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                        let senderName = sender.name.isEmpty ? (member?.displayName ?? from) : sender.name
+                        let who = kind == "agent" || from.isEmpty || from == "someone" ? senderName : "@\(from)"
+                        // Group / shared project chat (relay chat_kind since 2026-10-27; an older
+                        // relay sends none → the chat list's kind): title = the chat's name,
+                        // body = "Sender: text". A DM is titled with the sender.
+                        let chatKind = payload.chat_kind ?? (peopleChat(cid)?.kind == "group" ? "group" : "dm")
+                        let groupTitle = (payload.chat_title ?? peopleChat(cid)?.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                        let titled = chatKind != "dm" && !groupTitle.isEmpty
+                        let imageKey = payload.chat_image_key ?? peopleChat(cid)?.imageKey
+                        let groupImage = titled && inPeople ? imageKey.flatMap { blobURL(projectId: "\(peopleSlot):\(cid)", key: $0)?.absoluteString } : nil
+                        let shown = text.isEmpty ? "New message" : text
+                        let info = MessagePush.userInfo(
+                            chatId: cid, projectId: projectId,
+                            title: titled ? groupTitle : who,
+                            body: titled ? "\(who): \(shown)" : shown,
+                            senderKind: kind, senderId: sender.id.isEmpty ? (member?.id ?? from) : sender.id,
+                            senderName: senderName, senderHandle: from,
+                            avatar: sender.avatar,
+                            avatarColor: sender.avatar_color,
+                            avatarUrl: sender.avatar_url ?? member?.avatarUrl,
+                            chatTitle: titled ? groupTitle : nil,
+                            chatKind: chatKind,
+                            text: text.isEmpty ? nil : text,
+                            chatImageUrl: groupImage)
+                        Task { await PushManager.shared.postMessage(id: p.id, info: info) }
+                    }
                     applyBadge()
                 }
             case .peopleChatCreated(let payload):
@@ -3167,6 +4859,12 @@ final class AppModel: ObservableObject {
                 await refreshSecrets()
             case .secretsPaused:
                 await refreshSecrets()
+            case .messageRedacted(let payload):
+                // Secret hand-off: the row itself arrives through room sync (and the store's
+                // next snapshot is shallow); here the delivered notifications that may still
+                // show the pasted key go, and the search index follows the message list.
+                PushManager.shared.clearDelivered(chatId: payload.chat_id)
+                syncSearchIndex()
             case .secretExpiring(let payload):
                 PushManager.post(
                     id: p.id, title: "Secrets",
@@ -3182,8 +4880,45 @@ final class AppModel: ObservableObject {
             case .serverUpdated, .serverMemberJoined, .serverMemberRemoved, .serverDeleted:
                 // D88: the relay is the control plane for servers — re-read the list.
                 needServers = true
-            case .peopleChatDeleted, .chatArchived, .peopleInviteAccepted, .machineReady:
+            case .profileUpdated(let payload):
+                // Someone's picture changed: mine on another device (re-read /me) or a person I
+                // share a chat or a server with (their card comes with the lists).
+                if payload.user_id == user?.id { await refreshAccount() }
+                needChats = true
+                needServers = true
+            case .agentProfileUpdated(let payload):
+                // An agent's avatar changed (the agents' `profile_updated`): the new picture and
+                // stamp land in every copy now; the re-reads bring the leaf picks and the rest.
+                applyAgentAvatarPush(projectId: payload.project_id, imageKey: payload.image_key, version: Int(payload.avatar_version))
+                await refreshRegistry()
+                needChats = true
+            case .chatArchived(let payload):
+                // Another device of mine archived / unarchived a people chat.
+                if peopleChat(payload.chat_id) != nil {
+                    applyRemoteArchive(peopleChatId: payload.chat_id, archived: payload.archived_at != nil)
+                }
+            case .spaceArchived(let payload):
+                applyRemoteArchive(spaceId: payload.space_id, kind: payload.kind, archived: payload.archived_at != nil)
+            case .channelMessage(let payload):
+                // A server channel message (relay push gateway; every member but the sender).
+                // No banner while that channel is on screen; a tap opens it (openFromNotification).
+                if !isWatching(payload.channel_id) {
+                    let sender = payload.sender
+                    let who = sender.kind == "agent" || sender.handle.isEmpty ? sender.name : "@\(sender.handle)"
+                    let text = (payload.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+// Same shape as a group: title = where ("Server › #channel"), body = "Sender: text".
+                    PushManager.post(id: p.id, title: "\(payload.server_name) › #\(payload.channel_name)",
+                                     body: "\(who): \(text.isEmpty ? "New message" : text)",
+                                     chatId: payload.channel_id, projectId: channelSlot)
+                }
+            case .peopleChatDeleted, .peopleInviteAccepted, .machineReady:
                 break
+            case .pinsChanged(let payload):
+                // Another device of mine pinned, unpinned or reordered: the push carries the
+                // whole list ([feedback sidebar-pinning-ios-2026-10-28]).
+                applyRemotePins(payload.pins)
+            case .notificationsCleared(let payload):
+                applyRemoteClear(chatId: payload.chat_id, relayTotal: payload.badge)
             }
         }
         if needChats { await refreshPeople() }
@@ -3222,6 +4957,9 @@ final class AppModel: ObservableObject {
 
     // MARK: Lookups
 
+    /// The relay's HTTP origin (`https://relay.arbos.life`), for URLs built outside this file.
+    var relayHttpUrl: String { api.endpoint.httpUrl }
+
     /// Relay blob URL with the device token as a query parameter (the relay
     /// accepts `?token=` on every route), so AVPlayer and Safari can open it.
     func blobURL(projectId: Id, key: String) -> URL? {
@@ -3246,6 +4984,9 @@ final class AppModel: ObservableObject {
     var authHeaders: [String: String] {
         ["Authorization": "Bearer \(credentials?.deviceToken ?? "")"]
     }
+
+    /// The relay's GIF pass-through URL for a picked GIF (ARB-544).
+    func gifMediaURL(_ remote: String) -> URL? { api.gifMediaURL(remote) }
 
     // MARK: One chat per agent (D78)
 
@@ -3339,32 +5080,142 @@ final class AppModel: ObservableObject {
             doc.commit()
             Haptics.pick()
         } catch {
-            notice = Notice(text: "Could not update the reaction: \(error.localizedDescription)")
+            fail("update the reaction", error)
         }
     }
 
-    /// Delete a message for everyone via the shared chat doc. No push notification.
-    func deleteMessage(chatId: Id, messageId: Id) {
+    /// Delete a message for everyone. The relay decides (`DELETE /room/…/messages/{id}`,
+    /// 403 `not_yours` otherwise) and writes the deletion into the doc; it comes back as a
+    /// relay-signed row. No push notification. In a people group, this device also writes a
+    /// hidden admin audit line for the Activity screen before asking the relay.
+    func deleteMessage(chatId: Id, messageId: Id, projectId: Id? = nil) {
         guard !messageId.isEmpty else { return }
+        let audit = groupDeletionAuditLine(chatId: chatId)
         #if DEBUG
         if isFixture {
             guard var list = messages[chatId] else { return }
             list.removeAll { $0.id == messageId }
+            if let audit {
+                let m = Message(id: newId(), chatId: chatId, role: .system, sender: "system", status: .done, turn: nil, decision: nil,
+                                subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: nowMs(),
+                                completedAt: nowMs(), pending: false, parts: [.text(id: newId(), text: audit)], hiddenCount: 0)
+                list.append(m)
+            }
             messages[chatId] = list
             clearUnacked(chatId: chatId, messageId: messageId)
             Haptics.pick()
             return
         }
         #endif
+        if let audit, let doc = docs[chatId] {
+            do {
+                try doc.insertSystemLine(id: newId(), text: audit, deviceId: deviceId)
+                doc.commit()
+            } catch {
+                // Activity can miss this delete; the relay delete still runs.
+            }
+        }
+        let room: String
+        if peopleChat(chatId) != nil {
+            room = "people/\(chatId)"
+        } else if let projectId, projectId != peopleSlot {
+            room = "\(projectId)/\(chatId)"
+        } else {
+            room = "people/\(chatId)"
+        }
+        Task {
+            do {
+                try await api.deleteMessage(room: room, messageId: messageId)
+                clearUnacked(chatId: chatId, messageId: messageId)
+                Haptics.pick()
+            } catch {
+                let e = error as? RelayError
+                fail(e?.status == 403
+                     ? UserError.refused("delete the message", "You can only delete your own messages.")
+                     : UserError.classify("delete the message", error))
+            }
+        }
+    }
+
+    /// Long-press → Remove preview: the relay drops the message's link preview for everyone
+    /// (`preview: "off"`, the delete rule); the card goes at once here, the row follows.
+    func removeLinkPreview(chatId: Id, messageId: Id, projectId: Id? = nil) {
+        guard !messageId.isEmpty else { return }
+        if var list = messages[chatId], let i = list.firstIndex(where: { $0.id == messageId }) {
+            list[i].preview = "off"
+            messages[chatId] = list
+        }
+        #if DEBUG
+        if isFixture { Haptics.pick(); return }
+        #endif
+        let room: String
+        if peopleChat(chatId) != nil {
+            room = "people/\(chatId)"
+        } else if let projectId, projectId != peopleSlot {
+            room = "\(projectId)/\(chatId)"
+        } else {
+            room = "people/\(chatId)"
+        }
+        Task {
+            do {
+                try await api.removeLinkPreview(room: room, messageId: messageId)
+                Haptics.pick()
+            } catch {
+                let e = error as? RelayError
+                fail(e?.status == 403
+                     ? UserError.refused("remove the preview", "You can only remove previews on your own messages.")
+                     : UserError.classify("remove the preview", error))
+            }
+        }
+    }
+
+    /// Edit a message's text in the shared chat doc (own messages). No new send
+    /// command — peers see the updated body via room sync only.
+    func editMessage(chatId: Id, messageId: Id, text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !messageId.isEmpty, !trimmed.isEmpty else { return }
+        #if DEBUG
+        if isFixture {
+            guard var list = messages[chatId],
+                  let idx = list.firstIndex(where: { $0.id == messageId })
+            else { return }
+            var parts = list[idx].parts
+            if let t = parts.lastIndex(where: {
+                if case .text = $0 { return true } else { return false }
+            }) {
+                if case .text(let id, _) = parts[t] {
+                    parts[t] = .text(id: id, text: trimmed)
+                }
+            } else {
+                parts.append(.text(id: "\(messageId)-t", text: trimmed))
+            }
+            list[idx].parts = parts
+            messages[chatId] = list
+            Haptics.pick()
+            return
+        }
+        #endif
         guard let doc = docs[chatId] else { return }
         do {
-            try doc.deleteMessage(messageId: messageId)
+            try doc.editMessage(messageId: messageId, text: trimmed)
             doc.commit()
-            clearUnacked(chatId: chatId, messageId: messageId)
             Haptics.pick()
         } catch {
-            notice = Notice(text: "Could not delete the message: \(error.localizedDescription)")
+            fail("edit the message", error)
         }
+    }
+
+    /// Text for a people-group deletion audit, or nil when this chat is not a group.
+    private func groupDeletionAuditLine(chatId: Id) -> String? {
+        guard let people = peopleChat(chatId), people.isGroup else { return nil }
+        let who: String = {
+            if let name = user?.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+                return name
+            }
+            if let login = user?.login, !login.isEmpty { return "@\(login)" }
+            return "Someone"
+        }()
+        return GroupActivity.deletionNotice(who: who)
     }
 
     /// Paint any room doc that already has rows but no published transcript yet
@@ -3374,6 +5225,9 @@ final class AppModel: ObservableObject {
         for (key, doc) in docs {
             guard rooms[key]?.roomChat != projectDocChatId else { continue }
             if messages[key] == nil, doc.count > 0 {
+                #if DEBUG
+                PerfCounters.bump("emit.L4066")
+                #endif
                 emitSnapshot(key)
             }
         }
@@ -3394,6 +5248,22 @@ final class AppModel: ObservableObject {
         return list.filter { $0.role != .system && !$0.plainText.isEmpty }
     }
 
+    /// Every loaded message of a chat for the app-wide search index — text or
+    /// attachments; system lines never count (`SearchStore`).
+    func indexableMessages(of chatId: Id) -> [Message] {
+        let list: [Message]
+        if let published = messages[chatId] {
+            list = published
+        } else if let rows = channelRows[chatId] {
+            list = rows
+        } else if let doc = docs[chatId], doc.count > 0 {
+            list = doc.readAll()
+        } else {
+            list = []
+        }
+        return list.filter { $0.role != .system }
+    }
+
     /// S8: the last assistant message asked a question and nothing was sent since.
     func chatNeedsAnswer(_ chatId: Id) -> Bool {
         guard let last = messages(of: chatId).last, last.role == .assistant, !last.isStreaming else { return false }
@@ -3406,7 +5276,15 @@ final class AppModel: ObservableObject {
     /// message's `activity`, else the latest working/step status part with a
     /// real message; nil → "<name> is working".
     func currentActivity(_ chatId: Id) -> String? {
-        guard let m = messages(of: chatId).last(where: { $0.role == .assistant && $0.isStreaming }) else { return nil }
+        // The newest live row that has words: a short main turn streaming with no activity
+        // yet must not blank a job's "Reading … · 2 tasks" under it (duplex §2.4).
+        for m in messages(of: chatId).reversed() where m.role == .assistant && m.isStreaming {
+            if let words = Self.activityWords(m) { return words }
+        }
+        return nil
+    }
+
+    private static func activityWords(_ m: Message) -> String? {
         if let a = m.activity?.trimmingCharacters(in: .whitespacesAndNewlines), !a.isEmpty { return a }
         for part in m.parts.reversed() {
             if case .status(_, let code, let text) = part, code == .working || code == .step {
@@ -3424,14 +5302,47 @@ final class AppModel: ObservableObject {
     /// by a box that died (or a leftover stream under a later user message)
     /// must not pin the indicator forever — every streaming row uses the
     /// same 15-minute freshness window (including the last assistant message).
-    func isStreaming(_ chatId: Id) -> Bool {
+    /// What the working-state checks need from a chat's list, gathered in one pass
+    /// and cached until the list changes. The time windows are applied at read time.
+    struct ChatActivity {
+        /// `createdAt` of the newest assistant row still streaming with no user line after it.
+        var liveStreamAt: Int64?
+        /// `createdAt` of the newest job row (`job` set) still streaming, user lines or not.
+        var liveJobAt: Int64?
+        /// Open hand-off rows: (streaming, createdAt, completedAt ?? createdAt).
+        var openHandoffs: [(streaming: Bool, createdAt: Int64, finishedAt: Int64)] = []
+        /// `createdAt` of the last row when it is the user's.
+        var lastUserAt: Int64?
+    }
+
+    private func activity(_ chatId: Id) -> ChatActivity {
+        if let hit = activityCache[chatId] { return hit }
         let list = messages(of: chatId)
+        var out = ChatActivity()
+        var userAfter = false
+        for m in list.reversed() {
+            if out.liveStreamAt == nil {
+                if m.role == .user { userAfter = true }
+                if m.role == .assistant, m.isStreaming, !userAfter { out.liveStreamAt = m.createdAt }
+            }
+            if out.liveJobAt == nil, m.role == .assistant, m.job != nil, m.isStreaming { out.liveJobAt = m.createdAt }
+            if m.role == .assistant, m.subagentId != nil || m.subagentName != nil,
+               m.turn == .new || m.turn == .spawn || m.turn == .wake,
+               (m.handoffMessages ?? 1) < 2 {
+                out.openHandoffs.append((m.isStreaming, m.createdAt, m.completedAt ?? m.createdAt))
+            }
+        }
+        if let last = list.last, last.role == .user { out.lastUserAt = last.createdAt }
+        activityCache[chatId] = out
+        return out
+    }
+
+    func isStreaming(_ chatId: Id) -> Bool {
         let recent = nowMs() - 15 * 60 * 1000
-        guard let idx = list.lastIndex(where: {
-            $0.role == .assistant && $0.isStreaming && $0.createdAt >= recent
-        }) else { return false }
-        // A later user line means this stream is leftover from a prior turn.
-        return !list.suffix(from: idx + 1).contains { $0.role == .user }
+        if let at = activity(chatId).liveStreamAt, at >= recent { return true }
+        // A background job's row streams until the box finishes it, whatever the user
+        // typed since (duplex §2.3).
+        return activity(chatId).liveJobAt.map { $0 >= recent } ?? false
     }
 
     func isStreaming(project projectId: Id) -> Bool {
@@ -3443,18 +5354,14 @@ final class AppModel: ObservableObject {
     /// `done` while the child still runs, so `isStreaming` alone misses it —
     /// show the faded working line until the hand-off closes.
     func hasOpenSubagent(_ chatId: Id) -> Bool {
-        let recent = nowMs() - 15 * 60 * 1000
-        return messages(of: chatId).contains { m in
-            guard m.role == .assistant else { return false }
-            guard m.subagentId != nil || m.subagentName != nil else { return false }
-            guard m.turn == .new || m.turn == .spawn || m.turn == .wake else { return false }
-            guard (m.handoffMessages ?? 1) < 2 else { return false }
+        let now = nowMs()
+        let recent = now - 15 * 60 * 1000
+        return activity(chatId).openHandoffs.contains { h in
             // Streaming hand-off rows (the normal case while the child runs).
             // Same freshness window as `isStreaming` so a dead box cannot pin forever.
-            if m.isStreaming { return m.createdAt >= recent }
+            if h.streaming { return h.createdAt >= recent }
             // Brief race after `finish_message` before `handoffMessages` flips to 2.
-            let t = m.completedAt ?? m.createdAt
-            return nowMs() - t < 60_000
+            return now - h.finishedAt < 60_000
         }
     }
 
@@ -3467,11 +5374,10 @@ final class AppModel: ObservableObject {
         if peopleChat(chatId) != nil { return false }
         // Nobody "works" in a server channel; a sent line is just a line.
         if channel(chatId) != nil { return false }
-        let list = messages(of: chatId)
-        guard let last = list.last, last.role == .user else { return false }
+        guard let at = activity(chatId).lastUserAt else { return false }
         // Short bridge until the agent opens a streaming row (cold wake).
         // ChatView ticks this once a second so it can expire cleanly.
-        return nowMs() - last.createdAt < 15_000
+        return nowMs() - at < 15_000
     }
 
     // MARK: Commands (crdt-sync §6.2: the client writes rows and commands)
@@ -3484,11 +5390,34 @@ final class AppModel: ObservableObject {
         var data: Data
     }
 
+    /// Retry on one of my bubbles the relay refused (`status == .error`): the failed row
+    /// goes and its text + reply-to go out again as a new message through the normal send
+    /// path (attachments were picked at send time and are not re-read).
+    func resendFailed(chatId: Id, messageId: Id) {
+        guard var list = messages[chatId],
+              let ix = list.firstIndex(where: { $0.id == messageId && $0.status == .error }) else { return }
+        let failed = list.remove(at: ix)
+        messages[chatId] = list
+        let text = failed.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        send(chatId: chatId, text: text, replyTo: failed.replyTo)
+    }
+
     /// `replyTo` = the message this send answers (reply-to); it lands on the row as `replyTo`
     /// so every client draws the quote header and agentd puts the quoted message in the turn.
-    func send(chatId: Id, text: String, attachments: [PendingAttachment] = [], replyTo: Id? = nil) {
+    /// `extraParts` (#forward-attachments): doc parts written after the text and attachment
+    /// parts — a forwarded chart and its fallback picture, already uploaded.
+    func send(chatId: Id, text: String, attachments: [PendingAttachment] = [], replyTo: Id? = nil,
+              forwardedFrom: String? = nil, extraParts: [[String: Any]] = []) {
+        // A new send clears the composer's note (the next failure brings its own).
+        clearSendError(chatId)
+        if JobTabs.isJobChat(chatId) {
+            steerFromJobTab(chatId: chatId, text: text)
+            return
+        }
         if attachments.isEmpty {
-            write(chatId: chatId, text: text, command: "send", attachments: [], replyTo: replyTo)
+            write(chatId: chatId, text: text, command: "send", attachments: [], replyTo: replyTo,
+                  forwardedFrom: forwardedFrom, extraParts: extraParts)
             return
         }
         guard let chat = chat(chatId) else { return }
@@ -3507,12 +5436,75 @@ final class AppModel: ObservableObject {
                     _ = try await api.putBlob(projectId: chat.projectId, key: key, mime: a.mime, data: a.data)
                     uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: key, kind: kind))
                 } catch {
-                    notice = Notice(text: "Attachment upload failed: \(error.localizedDescription)")
+                    setSendError(chatId, UserError.classify("upload the attachment", error))
                     uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: nil, kind: kind))
                 }
             }
-            write(chatId: chatId, text: text, command: "send", attachments: uploaded, replyTo: replyTo)
+            // The forward header rides along with the pictures ([feedback
+            // forward-attachments-ios-2026-10-27]: it was dropped on this path).
+            write(chatId: chatId, text: text, command: "send", attachments: uploaded, replyTo: replyTo,
+                  forwardedFrom: forwardedFrom, extraParts: extraParts)
         }
+    }
+
+    /// Emoji · stickers · GIFs picker (ARB-544): one tap sends the sticker or GIF as its own
+    /// message at once (Jacob: "tap sends immediately"). A sticker's bytes go into the chat
+    /// slot like any picture (`kind: sticker`, the pack as `source`); a GIF carries only the
+    /// provider URL and attribution — nothing is stored (KLIPY's terms).
+    func sendMedia(chatId: Id, pick: MediaPick) {
+        clearSendError(chatId)
+        if JobTabs.isJobChat(chatId) { return }
+        if let draft = draftDM, draft.id == chatId {
+            sendDraftDM(draft) { [weak self] dmId in self?.sendMedia(chatId: dmId, pick: pick) }
+            return
+        }
+        let people = peopleChat(chatId) != nil
+        switch pick {
+        case .gif(let gif):
+            let attachment = Attachment(
+                name: "\(gif.id).gif", mime: "image/gif", blobRef: nil, kind: "image", url: gif.url,
+                source: AttachmentSource(provider: "KLIPY", id: gif.id, pageUrl: gif.pageUrl))
+            if people {
+                sendPeopleAttachments(chatId: chatId, attachments: [attachment])
+            } else {
+                write(chatId: chatId, text: "", command: "send", attachments: [attachment])
+            }
+            Task { await api.gifShare(id: gif.id, query: gif.query) }
+        case .sticker(let pack, let item, let data):
+            let ext = item.mime == "image/webp" ? "webp" : "png"
+            let name = "\(item.id).\(ext)"
+            let source = AttachmentSource(provider: pack.name, id: "\(pack.id)/\(item.id)", pageUrl: pack.pageUrl)
+            if isFixture {
+                let attachment = Attachment(name: name, mime: item.mime, blobRef: nil, kind: "sticker", source: source)
+                write(chatId: chatId, text: "", command: "send", attachments: [attachment])
+                return
+            }
+            let slot = people ? "\(peopleSlot):\(chatId)" : (chat(chatId)?.projectId ?? "")
+            guard !slot.isEmpty else { return }
+            Task {
+                var attachment = Attachment(name: name, mime: item.mime, blobRef: nil, kind: "sticker",
+                                            bytes: Int64(data.count), source: source)
+                do {
+                    attachment.blobRef = try await uploadBlob(slot: slot, name: name, mime: item.mime, data: data)
+                } catch {
+                    setSendError(chatId, UserError.classify("send the sticker", error))
+                    return
+                }
+                if people {
+                    sendPeopleAttachments(chatId: chatId, attachments: [attachment])
+                } else {
+                    write(chatId: chatId, text: "", command: "send", attachments: [attachment])
+                }
+            }
+        }
+    }
+
+    /// A media-only people-chat send (ARB-544): no text, no mentions, already-uploaded rows.
+    private func sendPeopleAttachments(chatId: Id, attachments: [Attachment]) {
+        guard let doc = docs[chatId], let me = user else { return }
+        let author = CoreChatDoc.Author(sender: "user:\(me.id)", handle: me.login, name: me.name, avatar: me.avatarUrl)
+        commitPeople(chatId: chatId, doc: doc, messageId: newId(), text: "", author: author,
+                     mentions: [], reply: nil, attachments: attachments)
     }
 
     /// Attachment `kind` hint written into the doc (matches agentd / Mac).
@@ -3533,9 +5525,22 @@ final class AppModel: ObservableObject {
             let text = try await api.transcribe(projectId: projectId, data: memo.data, mime: memo.mime)
             return text.isEmpty ? nil : text
         } catch {
-            notice = Notice(text: "Could not transcribe the memo: \(error.localizedDescription)")
+            if let chat = visibleChatId {
+                setSendError(chat, UserError.classify("transcribe your memo", error))
+            } else {
+                fail("transcribe your memo", error)
+            }
             return nil
         }
+    }
+
+    /// Upload one attachment's bytes under `slot` (`people:<chat>` or a project id) with a
+    /// fresh relay key; returns the key the row references. Forward copies a chart's fallback
+    /// picture into the target chat's slot with it ([feedback forward-attachments-ios-2026-10-27]).
+    func uploadBlob(slot: String, name: String, mime: String, data: Data) async throws -> String {
+        let key = AppModel.blobKey(for: name)
+        _ = try await api.putBlob(projectId: slot, key: key, mime: mime, data: data)
+        return key
     }
 
     /// Blob object name for `PUT /blob/{project}/{key}`. The relay's `safe_key` only
@@ -3588,6 +5593,43 @@ final class AppModel: ObservableObject {
     /// An approval card (S18) answered on the phone: for a secret request the relay row is the
     /// authority (`POST /secrets/requests/{id}/decide`), then the doc command `approve` /
     /// `reject` flips the card for agentd, exactly as the Mac does with `vaultRequestId`.
+    /// Secret hand-off request cards: where this device's save stands, by approval id.
+    enum HandoffState: Equatable {
+        case saving
+        /// Saved; the vault name.
+        case saved(String)
+        /// Drawn by the card's `ErrorNote` ("question-card-error").
+        case failed(UserError)
+    }
+
+    /// Secret hand-off request card → Save: the value leaves this device once, to
+    /// `POST /secrets` (source `chat`, the agent granted); the card is then answered with
+    /// the saved secret's id and names — never the value — so the agent learns only the name.
+    func saveSecretFromCard(chatId: Id, approvalId: String, projectId: Id, name: String, value: String, purpose: String) {
+        handoff[approvalId] = .saving
+        Task { @MainActor in
+            do {
+                let body: [String: Any] = [
+                    "name": name, "kind": "key", "value": value, "note": purpose,
+                    "agents": [["project_id": projectId, "note": purpose]],
+                    "source": ["kind": "chat", "project_id": projectId, "chat_id": chatId],
+                ]
+                let saved = try await api.createSecret(body)
+                markQuestionAnswered(chatId: chatId, questionId: "approval:\(approvalId)", answer: ["saved"])
+                if let doc = docs[chatId] {
+                    let payload: [String: Any] = ["approvalId": approvalId,
+                                                  "secret": ["id": saved.id, "name": saved.name, "env": saved.env]]
+                    try? doc.pushCommand("approve", payload: payload, device: deviceId)
+                    doc.commit()
+                }
+                handoff[approvalId] = .saved(saved.env)
+                await refreshSecrets()
+            } catch {
+                handoff[approvalId] = .failed(UserError.classify("save the secret", error))
+            }
+        }
+    }
+
     func decideApproval(chatId: Id, approvalId: String, choice: String) {
         let questionId = "approval:\(approvalId)"
         var secretRequestId: String?
@@ -3604,15 +5646,40 @@ final class AppModel: ObservableObject {
                     try await api.decideSecretRequest(rid, decision: choice)
                     await refreshSecrets()
                 } catch {
-                    notice = Notice(text: "Secrets: \(error.localizedDescription)")
+                    fail("save the secret", error)
                 }
             }
         }
         guard let doc = docs[chatId] else { return }
         var payload: [String: Any] = ["approvalId": approvalId]
         if !approve { payload["reason"] = "denied on iPhone" }
+        // #1544: "grant:<path class>" is a destructive-shell card's standing option.
+        if let grant = choice.stripping(prefix: "grant:"), !grant.isEmpty { payload["grant"] = grant }
         try? doc.pushCommand(approve ? "approve" : "reject", payload: payload, device: deviceId)
         doc.commit()
+    }
+
+    /// #1544: the agent pane opened — load its standing shell approvals.
+    func refreshShellGrants(_ projectId: Id) async {
+        guard credentials != nil, !isFixture else { return }
+        if let v = try? await relay.shellGrants(projectId) {
+            shellGrants[projectId] = v
+        }
+    }
+
+    /// Settings › Shell approvals: switch a grant off. The row goes at once; the relay's list
+    /// confirms it.
+    func revokeShellGrant(projectId: Id, grantId: String) {
+        shellGrants[projectId]?.removeAll { $0.id == grantId }
+        guard !isFixture else { return }
+        Task { @MainActor in
+            do {
+                try await relay.revokeShellGrant(projectId, grantId: grantId)
+            } catch {
+                fail("change the shell approvals", error)
+            }
+            await refreshShellGrants(projectId)
+        }
     }
 
     private func markQuestionAnswered(chatId: Id, questionId: String, answer: [String]) {
@@ -3629,7 +5696,8 @@ final class AppModel: ObservableObject {
     }
 
     private func write(chatId: Id, text: String, command: String, attachments: [Attachment],
-                       extra: [String: Any] = [:], messageId presetId: Id? = nil, replyTo: Id? = nil) {
+                       extra: [String: Any] = [:], messageId presetId: Id? = nil, replyTo: Id? = nil,
+                       forwardedFrom: String? = nil, extraParts: [[String: Any]] = []) {
         guard let chat = chat(chatId) else {
             #if DEBUG
             if isFixture { fixtureAppend(chatId: chatId, text: text, attachments: attachments, replyTo: replyTo) }
@@ -3640,14 +5708,18 @@ final class AppModel: ObservableObject {
         // Echo the bubble now and flush once `finalizeNewChat` swaps the id.
         guard let doc = docs[chatId] else {
             enqueueOptimisticSend(chatId: chatId, chat: chat, text: text, command: command,
-                                  attachments: attachments, extra: extra, replyTo: replyTo)
+                                  attachments: attachments, extra: extra, replyTo: replyTo,
+                                  forwardedFrom: forwardedFrom)
             return
         }
         let messageId = presetId ?? newId()
+        let author = projectAuthor(projectId: chat.projectId)
         markUnacked(chatId: chatId, messageId: messageId)
         do {
             try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments,
-                                      replyTo: replyTo)
+                                      author: author, replyTo: replyTo,
+                                      forwardedFrom: forwardedFrom)
+            for part in extraParts { try doc.insertPart(messageId: messageId, part: part) }
             try doc.pushCommand(command, payload: extra.merging(["messageId": messageId]) { _, new in new }, device: deviceId)
             if !chat.isPinned && chat.title == "New chat" {
                 let title = AppModel.title(from: text)
@@ -3656,15 +5728,92 @@ final class AppModel: ObservableObject {
             }
         } catch {
             clearUnacked(chatId: chatId, messageId: messageId)
-            notice = Notice(text: "Could not write the message: \(error.localizedDescription)")
+            setSendError(chatId, UserError.classify("send your message", error))
             return
         }
+        #if DEBUG
+        SendTrace.message(messageId, chatId: chatId)
+        #endif
+        // Bubble at once — same as channels / optimistic new chats. onChange still
+        // reconciles; live coalesce + async full re-reads must not gate the send.
+        paintLocalUserMessage(chatId: chatId, messageId: messageId, text: text,
+                              attachments: attachments, replyTo: replyTo, forwardedFrom: forwardedFrom,
+                              author: author, doc: doc)
         doc.commit()
+        #if DEBUG
+        if SendTrace.traces(chatId) { SendTrace.mark("commit") }
+        #endif
         markActivity(chatId: chatId)
         if command == "send" { announce(chatId: chatId, projectId: chat.projectId, messageId: messageId, text: text) }
         if let p = project(chat.projectId), p.state.isAsleep || p.state == .error {
             wake(projectId: p.id, reason: "send")
         }
+    }
+
+    /// Append a just-written user row to `messages` so the bubble appears in the
+    /// same turn as Send — before onChange's coalesced / async snapshot lands.
+    /// Without this, a send is on the wire at once but the chat stays blank until
+    /// a scroll forces a layout pass (feedback app-01M5S3V2823WNP081K5FT16ANQ).
+    ///
+    /// The row is read back from the doc (`doc`, the writer that just appended it),
+    /// so it is byte-for-byte what the next snapshot will carry — same `createdAt`,
+    /// same part ids — and that snapshot changes nothing the view can see. The
+    /// hand-built row below is the fallback for a doc that cannot be read yet.
+    private func paintLocalUserMessage(
+        chatId: Id, messageId: Id, text: String, attachments: [Attachment],
+        replyTo: Id? = nil, forwardedFrom: String? = nil,
+        author: CoreChatDoc.Author? = nil, mentions: [String] = [], doc: CoreChatDoc? = nil,
+        replyRef: ReplyRef? = nil
+    ) {
+        if messages[chatId]?.contains(where: { $0.id == messageId }) == true { return }
+        if let doc, doc.count > 0, var row = doc.readMessage(doc.count - 1), row.id == messageId {
+            row.pending = true
+            var next = messages
+            next[chatId, default: []].append(row)
+            messages = next
+            #if DEBUG
+            if SendTrace.traces(chatId) { SendTrace.mark("messages-has-row", detail: "via=optimistic-readback rows=\(next[chatId]?.count ?? 0)") }
+            #endif
+            return
+        }
+        var parts: [Part] = attachments.map { .attachment(id: newId(), attachment: $0) }
+        if !text.isEmpty {
+            parts.append(.text(id: "\(messageId)-t", text: text))
+        }
+        if parts.isEmpty {
+            parts = [.text(id: "\(messageId)-t", text: text)]
+        }
+        var m = Message(
+            id: messageId, chatId: chatId, role: .user,
+            sender: author?.sender ?? "user",
+            status: .done, turn: nil, decision: nil, subagentId: nil, subagentName: nil,
+            inReplyTo: nil, usage: [:], model: nil,
+            createdAt: nowMs(), completedAt: nowMs(), pending: true,
+            parts: parts, hiddenCount: 0
+        )
+        m.replyTo = replyTo
+        m.forwardedFrom = forwardedFrom
+        m.replyRef = replyRef
+        m.senderHandle = author?.handle
+        m.senderName = author?.name
+        m.senderAvatar = author?.avatar
+        m.mentions = mentions
+        var next = messages
+        next[chatId, default: []].append(m)
+        messages = next
+        #if DEBUG
+        if SendTrace.traces(chatId) { SendTrace.mark("messages-has-row", detail: "via=optimistic rows=\(next[chatId]?.count ?? 0)") }
+        #endif
+    }
+
+    /// Author fields for a row in a project chat (API §3/§7, same as the Mac): always the
+    /// handle and display name, so the agent addresses the writer by name; `sender: user:<id>`
+    /// in a project someone shared with me, so a guest's words are never read as the owner's
+    /// (#1580). A solo project keeps the plain `user` the box expects.
+    private func projectAuthor(projectId: Id) -> CoreChatDoc.Author? {
+        guard let me = user else { return nil }
+        let shared = project(projectId)?.shared == true
+        return CoreChatDoc.Author(sender: shared ? "user:\(me.id)" : "user", handle: me.login, name: me.name, avatar: nil)
     }
 
     /// A send typed before the optimistic new-chat's relay id landed.
@@ -3675,6 +5824,7 @@ final class AppModel: ObservableObject {
         var attachments: [Attachment]
         var extra: [String: Any]
         var replyTo: Id?
+        var forwardedFrom: String?
     }
     private var optimisticSends: [Id: [OptimisticSend]] = [:]
     /// Local chat ids still waiting on `POST /projects/{id}/chats`.
@@ -3685,13 +5835,36 @@ final class AppModel: ObservableObject {
     /// True when we already published an empty transcript for this chat
     /// (optimistic new chat) — ChatView shows the empty hint, not a spinner.
     func hasKnownEmptyTranscript(_ chatId: Id) -> Bool {
-        messages[chatId]?.isEmpty == true
+        messages[chatId]?.isEmpty == true && !transcriptPending(chatId)
+    }
+
+    /// The chat's doc holds rows that are not on screen yet (a read in flight, or one that
+    /// failed): ChatView shows the spinner, never a blank transcript.
+    func transcriptPending(_ chatId: Id) -> Bool {
+        (messages[chatId]?.isEmpty ?? true) && (docs[chatId]?.count ?? 0) > 0
+    }
+
+    /// Caught up (or opened) with an empty transcript over a doc that has rows: read again.
+    func repaintIfBlank(_ chatId: Id) {
+        guard transcriptPending(chatId), !snapshotPending.contains(chatId) else { return }
+        emitSnapshot(chatId)
+    }
+
+    nonisolated static func shouldPublishSnapshot(rows: Int, docCount: Int) -> Bool {
+        rows > 0 || docCount == 0
+    }
+
+    /// A saved replica whose rows do not read back — none decode, or none at all while the
+    /// cursor is past the start — must not be resumed at that cursor.
+    nonisolated static func storedCopyIsBlank(rows: Int, docCount: Int, cursor: Int64) -> Bool {
+        rows == 0 && (docCount > 0 || cursor > 0)
     }
 
     private func enqueueOptimisticSend(chatId: Id, chat: Chat, text: String, command: String,
-                                       attachments: [Attachment], extra: [String: Any], replyTo: Id? = nil) {
+                                       attachments: [Attachment], extra: [String: Any], replyTo: Id? = nil,
+                                       forwardedFrom: String? = nil) {
         guard optimisticChatIds.contains(chatId) else {
-            notice = Notice(text: "Could not write the message: chat is not ready yet")
+            setSendError(chatId, UserError.fromText("send your message", "chat is not ready yet"))
             return
         }
         let messageId = newId()
@@ -3703,6 +5876,7 @@ final class AppModel: ObservableObject {
                             + (text.isEmpty ? [] : [.text(id: "\(messageId)-t", text: text)]),
                         hiddenCount: 0)
         m.replyTo = replyTo
+        m.forwardedFrom = forwardedFrom
         // Keep attachment-only rows valid when text is empty.
         if m.parts.isEmpty { m.parts = [.text(id: "\(messageId)-t", text: text)] }
         messages[chatId, default: []].append(m)
@@ -3711,7 +5885,7 @@ final class AppModel: ObservableObject {
         }
         optimisticSends[chatId, default: []].append(
             OptimisticSend(messageId: messageId, text: text, command: command,
-                           attachments: attachments, extra: extra, replyTo: replyTo)
+                           attachments: attachments, extra: extra, replyTo: replyTo, forwardedFrom: forwardedFrom)
         )
         markActivity(chatId: chatId)
         if let p = project(chat.projectId), p.state.isAsleep || p.state == .error {
@@ -3721,16 +5895,387 @@ final class AppModel: ObservableObject {
 
     /// §7c: tell the relay about the row we just pushed so other members'
     /// phones get a real preview instead of "New message". Best effort.
-    private func announce(chatId: Id, projectId: Id?, messageId: String, text: String) {
+    private func announce(chatId: Id, projectId: Id?, messageId: String, text: String, replyRef: ReplyRef? = nil) {
         guard !isFixture else { return }
         let api = self.api
-        Task { try? await api.notifyMessage(chatId: chatId, projectId: projectId, messageId: messageId, text: text) }
+        Task { try? await api.notifyMessage(chatId: chatId, projectId: projectId, messageId: messageId, text: text, replyRef: replyRef) }
     }
 
+    // MARK: Reply in DM (#1836)
+
+    /// The cross-chat reply to arm on the DM that `replyInDM` opens next; the ChatView of
+    /// that DM takes it on appear (Mac `pending_dm_reply`).
+    @Published var pendingDMReply: (chatId: Id, ref: ReplyRef)?
+
+    /// Bubble menu → Forward: open the picked chat with this text drafted and
+    /// `forwardedFrom` armed for the next send (feedback app-01M5YF7JWEZXPD1JSKBH9TMCES).
+    /// The ChatView of that chat takes it on appear.
+    @Published var pendingForwardDraft: (chatId: Id, text: String, from: String?)?
+
+    /// The cross-chat reference for `message` in `chatId`: its address plus a snapshot of
+    /// who wrote it and what it said (crdt-sync §6.2 `replyRef`).
+    func replyRef(for message: Message, in chatId: Id, projectId: Id?) -> ReplyRef {
+        let people = projectId == nil || projectId == peopleSlot
+        let mine = message.sender == "user" || message.sender == myUserId
+        let (name, handle): (String, String)
+        if mine, let me = user {
+            (name, handle) = (me.name ?? me.login, me.login)
+        } else if message.role == .user {
+            (name, handle) = (message.senderName ?? "", message.senderHandle ?? "")
+        } else {
+            let agentName = projectId.flatMap { project($0)?.name } ?? message.senderName ?? ""
+            (name, handle) = (agentName, message.senderHandle ?? "")
+        }
+        var text = message.plainText
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            for part in message.parts {
+                if case .attachment(_, let a) = part { text = a.name; break }
+            }
+        }
+        return ReplyRef(chatId: chatId, projectId: people ? "people" : (projectId ?? "people"),
+                        messageId: message.id, chatTitle: chatDisplayTitle(chatId, projectId: projectId),
+                        sender: message.sender, senderName: name, senderHandle: handle,
+                        text: ReplyRef.snapshot(text))
+    }
+
+    /// What a quote header calls `chatId`: the DM peer's name, the group's title, or the
+    /// project (agent) name.
+    func chatDisplayTitle(_ chatId: Id, projectId: Id?) -> String {
+        if let pc = peopleChat(chatId) {
+            if pc.kind == "dm", let peer = pc.humans.first(where: { $0.id != user?.id }) {
+                return peer.name ?? "@\(peer.handle)"
+            }
+            return pc.title
+        }
+        if let projectId, let p = project(projectId) { return p.name }
+        return chat(chatId)?.title ?? ""
+    }
+
+    /// Is `chatId` one of this user's chats (a people chat, or a chat of an own or shared
+    /// project)? Only then can a cross-chat quote open its original.
+    func isMember(ofChat chatId: Id) -> Bool {
+        if peopleChat(chatId) != nil { return true }
+        return chats.values.contains { $0.contains { $0.id == chatId } }
+    }
+
+    /// Bubble menu → Reply in DM: open (or create) the DM with the person who wrote
+    /// `message` and arm its composer with a cross-chat reply to it.
+    func replyInDM(to message: Message, in chatId: Id, projectId: Id?) {
+        guard let handle = message.senderHandle, !handle.isEmpty,
+              message.sender.hasPrefix("user:"), message.sender != myUserId
+        else { return }
+        let ref = replyRef(for: message, in: chatId, projectId: projectId)
+        Task { @MainActor in
+            guard let dm = await openDM(handle: handle) else { return }
+            pendingDMReply = (dm.id, ref)
+        }
+    }
+
+    /// Tap on a cross-chat quote: open the source chat on the original. The ChatView
+    /// scrolls to and tints `pendingReveal` on appear. `false` when not a member.
+    @discardableResult
+    func reveal(_ r: ReplyRef) -> Bool {
+        guard isMember(ofChat: r.chatId) else { return false }
+        pendingReveal = MessageReveal(chatId: r.chatId, messageId: r.messageId)
+        if peopleChat(r.chatId) != nil {
+            path = [.chat(chatId: r.chatId, projectId: peopleSlot)]
+        } else if let pid = chats.first(where: { $0.value.contains { $0.id == r.chatId } })?.key {
+            path = [.chat(chatId: r.chatId, projectId: pid)]
+        } else {
+            return false
+        }
+        return true
+    }
+
+
     func stop(chatId: Id) {
+        if let jobId = JobTabs.jobId(chatId) {
+            // A job tab's Stop halts that job only (`stop { jobId }`).
+            if let parent = jobParentChat(jobId) { stopJob(chatId: parent, jobId: jobId) }
+            return
+        }
+        forgetJobs(chatId: chatId)
         guard let doc = docs[chatId] else { return }
         try? doc.pushCommand("stop", payload: [:], device: deviceId)
         doc.commit()
+    }
+
+    // MARK: Tasks chip and sheet (duplex §2.4, D7)
+
+    /// The open background jobs of `chatId`, newest step first as the relay lists them.
+    /// Empty when the relay predates `activity.jobs[]` or nothing runs.
+    func openJobs(_ chatId: Id) -> [Job] {
+        if peopleChat(chatId) != nil {
+            // A group / DM: the jobs any agent in it started from this chat.
+            return jobs.values.flatMap { $0 }.filter { $0.chatId == chatId }
+        }
+        guard let chat = chat(chatId), let list = jobs[chat.projectId] else { return [] }
+        return list.filter { $0.chatId == nil || $0.chatId == chatId }
+    }
+
+    /// The agent projects whose listings the open chat needs: its own agent, or every agent
+    /// in a group / DM.
+    private func jobsProjects(for chatId: Id) -> [Id] {
+        if let pc = peopleChat(chatId) {
+            return pc.members.filter { $0.isAgent }.map(\.id).filter { project($0) != nil }
+        }
+        if let chat = chat(chatId) { return [chat.projectId] }
+        return []
+    }
+
+    // MARK: Job tabs (`JobTabs`)
+
+    /// The project a job belongs to: the one whose listing or tabs hold it.
+    func jobProject(_ jobId: String) -> Id? {
+        if let hit = jobs.first(where: { $0.value.contains { $0.id == jobId } }) { return hit.key }
+        let chat = JobTabs.chatId(jobId)
+        return jobTabs.first { $0.value.contains { $0.id == chat } }?.key
+    }
+
+    /// The tab entry behind a `job:<id>` chat id.
+    func jobTab(_ chatId: Id) -> Chat? {
+        for list in jobTabs.values {
+            if let c = list.first(where: { $0.id == chatId }) { return c }
+        }
+        return nil
+    }
+
+    /// The agent's job tabs, after its chats.
+    func jobTabs(of projectId: Id) -> [Chat] { jobTabs[projectId] ?? [] }
+
+    private func jobRow(_ jobId: String) -> Job? { jobs.values.flatMap { $0 }.first { $0.id == jobId } }
+
+    /// The chat the job was asked in: the document's word, else the chip's.
+    private func jobParentChat(_ jobId: String) -> Id? {
+        rollouts[jobId]?.chatId ?? jobRow(jobId)?.chatId
+    }
+
+    /// The listing changed: every job the agent runs has a tab (unless the user closed it);
+    /// tabs of finished jobs stay until closed.
+    private func syncJobTabs(projectId: Id) {
+        var tabs = jobTabs[projectId] ?? []
+        for job in jobs[projectId] ?? [] where !closedJobTabs.contains(job.id) {
+            let id = JobTabs.chatId(job.id)
+            if let i = tabs.firstIndex(where: { $0.id == id }) {
+                if !job.title.trimmingCharacters(in: .whitespaces).isEmpty { tabs[i].title = job.title }
+            } else {
+                tabs.append(JobTabs.tab(projectId: projectId, jobId: job.id, title: job.title, at: nowMs()))
+            }
+        }
+        if tabs != (jobTabs[projectId] ?? []) { jobTabs[projectId] = tabs }
+    }
+
+    /// Open the tab of `jobId`: the agent's own chat first (so back lands there — from a
+    /// group this is the jump to the agent's space), then the job's screen. A closed tab comes back.
+    func openJobTab(_ jobId: String) {
+        guard let projectId = jobProject(jobId) else { return }
+        closedJobTabs.remove(jobId)
+        let chatId = JobTabs.chatId(jobId)
+        if jobTab(chatId) == nil {
+            let title = jobRow(jobId)?.title ?? rollouts[jobId]?.title ?? ""
+            jobTabs[projectId, default: []].append(JobTabs.tab(projectId: projectId, jobId: jobId, title: title, at: nowMs()))
+        }
+        var next: [Route] = []
+        if let main = singleChat(of: projectId) ?? chats(of: projectId).first {
+            next.append(.chat(chatId: main.id, projectId: projectId))
+        }
+        next.append(.chat(chatId: chatId, projectId: projectId))
+        path = next
+        pollRolloutIfNeeded(chatId: chatId, force: true)
+    }
+
+    /// The status line's link: the newest open job of the chat.
+    func openNewestJobTab(from chatId: Id) {
+        if let job = openJobs(chatId).first { openJobTab(job.id) }
+    }
+
+    /// Close a job tab: back to the agent's chat; the job itself goes on.
+    func closeJobTab(_ chatId: Id) {
+        guard let jobId = JobTabs.jobId(chatId), let projectId = jobProject(jobId) else { return }
+        jobTabs[projectId]?.removeAll { $0.id == chatId }
+        closedJobTabs.insert(jobId)
+        messages.removeValue(forKey: chatId)
+        pendingSteers.removeValue(forKey: jobId)
+        if isShowing(chatId: chatId) { path.removeLast() }
+    }
+
+    /// The open job tab polls its document each tick while the job runs (the whole document
+    /// first, then only the entries past the newest one held).
+    func pollRolloutIfNeeded(chatId: Id, force: Bool = false) {
+        guard let jobId = JobTabs.jobId(chatId), let projectId = jobProject(jobId) else { return }
+        if isFixture {
+            if rollouts[jobId] == nil || rollouts[jobId]?.isRunning == true { fixtureAdvanceRollout(jobId) }
+            return
+        }
+        if let held = rollouts[jobId], held.unavailable || !held.isRunning, !force { return }
+        let now = nowMs()
+        guard force || now - (rolloutPolledAt[jobId] ?? 0) >= AppModel.jobsPollMs, !rolloutPolling.contains(jobId) else { return }
+        rolloutPolledAt[jobId] = now
+        rolloutPolling.insert(jobId)
+        let after = rollouts[jobId].flatMap { $0.entries.isEmpty ? nil : $0.nextSeq - 1 }
+        let api = self.api
+        Task { @MainActor [weak self] in
+            defer { self?.rolloutPolling.remove(jobId) }
+            guard let self else { return }
+            do {
+                if let doc = try await api.jobRollout(projectId: projectId, jobId: jobId, after: after) {
+                    applyRollout(jobId: jobId, doc)
+                } else {
+                    var ph = rollouts[jobId] ?? JobRollout.placeholder(
+                        jobRow(jobId) ?? Job(id: jobId, title: "", state: .running, step: "", elapsedS: 0), parentName: "")
+                    ph.unavailable = true
+                    applyRollout(jobId: jobId, ph, replace: true)
+                }
+            } catch {
+                // Keep the last document on a blip.
+            }
+        }
+    }
+
+    /// A job document arrived: the tab's transcript is rebuilt from it.
+    func applyRollout(jobId: String, _ doc: JobRollout, replace: Bool = false) {
+        if replace || rollouts[jobId] == nil { rollouts[jobId] = doc } else { rollouts[jobId]?.merge(doc) }
+        guard let held = rollouts[jobId] else { return }
+        let chatId = JobTabs.chatId(jobId)
+        let list = JobTabs.messages(held, pending: pendingSteers[jobId] ?? [])
+        if let projectId = jobProject(jobId), var tabs = jobTabs[projectId], let i = tabs.firstIndex(where: { $0.id == chatId }) {
+            if !held.title.trimmingCharacters(in: .whitespaces).isEmpty { tabs[i].title = held.title }
+            if let last = list.map(\.createdAt).max() { tabs[i].lastMessageAt = max(tabs[i].lastMessageAt, last) }
+            if tabs != jobTabs[projectId] { jobTabs[projectId] = tabs }
+        }
+        messages[chatId] = list
+    }
+
+    /// Typing in a job tab steers the job: the words go to the parent chat as a reply under
+    /// the job's ask (the Steer button's wire) and show in the tab at once.
+    private func steerFromJobTab(chatId: Id, text: String) {
+        guard let jobId = JobTabs.jobId(chatId) else { return }
+        let ask = rollouts[jobId]?.askMessageId ?? jobRow(jobId)?.askMessageId
+        guard let parent = jobParentChat(jobId), let ask else {
+            failRefused("steer the task", "This task cannot be steered from here yet — reply to your request in the chat instead.")
+            return
+        }
+        let messageId = newId()
+        let echo = JobTabs.typedSteer(chat: chatId, messageId: messageId, text: text, ask: ask)
+        pendingSteers[jobId, default: []].append(echo)
+        messages[chatId, default: []].append(echo)
+        // The parent chat carries the real message: a reply under the ask (its own echo
+        // comes from `write`).
+        write(chatId: parent, text: text, command: "send", attachments: [], messageId: messageId, replyTo: ask)
+    }
+
+    /// Fixture: the scripted exchange of a seeded job, advanced by the clock so a tab streams.
+    private func fixtureAdvanceRollout(_ jobId: String) {
+        guard let job = jobRow(jobId) ?? rollouts[jobId].map({ Job(id: $0.id, title: $0.title, state: $0.state, step: $0.step, elapsedS: $0.elapsedS, askMessageId: $0.askMessageId, chatId: $0.chatId) }) else { return }
+        let start = nowMs() - Int64(job.elapsedS) * 1000 - 1
+        let (brief, script, result): (String, [(Int64, RolloutKind, String, Int64)], String) = {
+            switch job.title {
+            case "Searching for surf schools":
+                return ("Find the 3 best-reviewed surf schools near Santa Teresa, compare group and private lesson prices, and say which is the best value.",
+                        [(3, .text, "On it — pulling ratings and current prices for the top schools around Santa Teresa.", 0),
+                         (6, .tool, "Searched the web for “surf schools Santa Teresa reviews 2026”", 2100),
+                         (9, .tool, "Read tripadvisor.com — Santa Teresa surf schools", 4800),
+                         (15, .tool, "Read bluemysticsurf.com/prices", 3000),
+                         (19, .tool, "Reading delsoulsurf.com", 2600),
+                         (28, .text, "Three schools have enough reviews to compare; checking the lesson pages.", 0),
+                         (40, .tool, "Comparing prices across the three", 1800)],
+                        "Blue Mystic is the best value for single lessons ($60–70 group, $90 private); Del Soul if you take above five; Monkey Adventures runs $75 / $115.")
+            case "Fixing the flaky tests":
+                return ("The relay's websocket tests fail one run in five on CI. Find the race and fix it on a branch.",
+                        [(4, .text, "Reading the failing runs first.", 0), (8, .tool, "Read .github/workflows/ci.yml", 1200),
+                         (12, .tool, "Ran cargo test -p arbos-relay ws:: (3×)", 48_000), (70, .tool, "Read crates/arbos-relay/src/ws.rs", 2100),
+                         (80, .text, "The ping timer races the close frame; adding the join before the shutdown.", 0),
+                         (100, .tool, "Running cargo test -p arbos-relay (1 of 3)", 45_000)],
+                        "Fixed: the ping timer raced the close frame. Three green runs on fix/ws-close-race.")
+            default:
+                return ("Rename the config module to settings across the crate.", [], "")
+            }
+        }()
+        let done = DebugHooks.fixtureRolloutDone && job.title == "Searching for surf schools"
+        let now = nowMs()
+        var entries = [RolloutEntry(seq: 1, at: start, kind: .prompt, text: brief)]
+        var seq: Int64 = 2
+        var calls = 0
+        for (offset, kind, words, dur) in script {
+            let at = start + offset * 1000
+            if !done, at > now { break }
+            let finished = done || at + dur <= now
+            if kind == .tool { calls += 1 }
+            entries.append(RolloutEntry(seq: seq, at: at, kind: kind, text: kind == .tool ? nil : words,
+                                        label: kind == .tool ? words : nil, name: kind == .tool ? "tool" : nil,
+                                        status: kind == .tool ? (finished ? "done" : "running") : nil,
+                                        durationMs: kind == .tool && finished ? dur : nil))
+            seq += 1
+        }
+        if done {
+            entries.append(RolloutEntry(seq: seq, at: start + 372_000, kind: .result, text: result, status: "done", durationMs: 372_000))
+            seq += 1
+        }
+        let doc = JobRollout(id: job.id, title: job.title, kind: "research", state: job.state, step: job.step,
+                             elapsedS: done ? 372 : Int((now - start) / 1000), startedAt: start, endedAt: done ? start + 372_000 : nil,
+                             chatId: job.chatId, askMessageId: job.askMessageId,
+                             parentProjectId: jobProject(jobId) ?? "", parentName: project(jobProject(jobId) ?? "")?.name ?? "",
+                             brief: brief, entries: entries, toolCalls: calls, nextSeq: seq)
+        applyRollout(jobId: jobId, doc, replace: true)
+    }
+
+    /// A background job's row still runs (duplex §2.3): jobs are independent of the turn,
+    /// so a newer user line does not end one — only the box finishing the row does, or
+    /// the freshness window (a dead box).
+    func hasLiveJob(_ chatId: Id) -> Bool {
+        let recent = nowMs() - 15 * 60 * 1000
+        return messages(of: chatId).contains { $0.role == .assistant && $0.job != nil && $0.isStreaming && $0.createdAt >= recent }
+    }
+
+    /// Poll `GET /projects/{id}` for the open chat's jobs while a job row is live or the relay
+    /// listed one last time; called from the chat view's one-second tick. Transport errors keep
+    /// the last answer rather than blinking the list away.
+    func pollJobsIfNeeded(chatId: Id) {
+        guard !isFixture else { return }
+        let projects = jobsProjects(for: chatId)
+        guard !projects.isEmpty else { return }
+        let listed = projects.contains { !(jobs[$0] ?? []).isEmpty }
+        guard listed || hasLiveJob(chatId) else { return }
+        let now = nowMs()
+        for projectId in projects {
+            guard now - (jobsPolledAt[projectId] ?? 0) >= AppModel.jobsPollMs, !jobsPolling.contains(projectId) else { continue }
+            jobsPolledAt[projectId] = now
+            jobsPolling.insert(projectId)
+            let api = self.api
+            Task { @MainActor [weak self] in
+                defer { self?.jobsPolling.remove(projectId) }
+                guard let fresh = try? await api.projectJobs(projectId: projectId) else { return }
+                self?.applyJobs(projectId: projectId, fresh)
+            }
+        }
+    }
+
+    func applyJobs(projectId: Id, _ fresh: [Job]) {
+        if fresh.isEmpty {
+            if jobs[projectId] != nil { jobs.removeValue(forKey: projectId) }
+        } else if jobs[projectId] != fresh {
+            jobs[projectId] = fresh
+        }
+        syncJobTabs(projectId: projectId)
+    }
+
+    /// `stop { jobId }`: that job only. The row leaves the sheet at once; the next poll is
+    /// the box's word.
+    func stopJob(chatId: Id, jobId: String) {
+        if let chat = chat(chatId), var list = jobs[chat.projectId] {
+            list.removeAll { $0.id == jobId }
+            applyJobs(projectId: chat.projectId, list)
+        }
+        guard let doc = docs[chatId] else { return }
+        let messageId = messages(of: chatId).last { $0.role == .user }?.id ?? ""
+        try? doc.pushCommand("stop", payload: ["jobId": jobId, "messageId": messageId], device: deviceId)
+        doc.commit()
+    }
+
+    /// The Stop button / Stop all halts every job of the chat (D7): forget them at once.
+    private func forgetJobs(chatId: Id) {
+        guard let chat = chat(chatId), let list = jobs[chat.projectId] else { return }
+        applyJobs(projectId: chat.projectId, list.filter { $0.chatId != nil && $0.chatId != chatId })
     }
 
     func retry(chatId: Id, messageId: Id) {
@@ -3767,8 +6312,8 @@ final class AppModel: ObservableObject {
             do {
                 try await api.wake(projectId: projectId)
             } catch {
-                notice = Notice(text: "Wake failed: \(error.localizedDescription)")
-                setProjectState(projectId, .error, detail: error.localizedDescription)
+                fail("wake the machine", error)
+                setProjectState(projectId, .error, detail: UserError.classify("wake the machine", error).sentence)
                 machine.state = .error
             }
             await refreshMachine()
@@ -3823,7 +6368,7 @@ final class AppModel: ObservableObject {
             adoptOptimisticChat(localId: localId, real: real)
         } catch {
             abandonOptimisticChat(localId: localId, projectId: projectId,
-                                  reason: "New chat failed: \(error.localizedDescription)")
+                                  reason: UserError.classify("start the chat", error).raw)
         }
     }
 
@@ -3861,7 +6406,8 @@ final class AppModel: ObservableObject {
         // the same ids so emitSnapshot replaces them in place (no flicker).
         for item in queued {
             write(chatId: real.id, text: item.text, command: item.command,
-                  attachments: item.attachments, extra: item.extra, messageId: item.messageId, replyTo: item.replyTo)
+                  attachments: item.attachments, extra: item.extra, messageId: item.messageId, replyTo: item.replyTo,
+                  forwardedFrom: item.forwardedFrom)
         }
 
         // Swap the navigation id for the real one, then drop the local mirrors.
@@ -3885,7 +6431,7 @@ final class AppModel: ObservableObject {
             path.removeLast()
         }
         if visibleChatId == localId { visibleChatId = nil }
-        notice = Notice(text: reason)
+        fail(UserError.fromText("start the chat", reason))
     }
 
     /// Whether to PUT /read now, skip (same value already sent), or wait out the
@@ -3962,6 +6508,7 @@ final class AppModel: ObservableObject {
     /// Pass `force` to re-PUT the same cursor (e.g. onAppear / foreground) so the
     /// relay clears unread events recorded after the last PUT.
     func markRead(chatId: Id, force: Bool = false) {
+        if JobTabs.isJobChat(chatId) { return }
         let hadRemote = (unreadCounts[chatId] ?? 0) > 0
         if unreadCounts[chatId] != nil { unreadCounts[chatId] = 0 }
         PushManager.shared.clearDelivered(chatId: chatId)
@@ -3996,18 +6543,180 @@ final class AppModel: ObservableObject {
             do {
                 try await api.setModel(projectId: projectId, model: model, effort: effort)
             } catch {
-                notice = Notice(text: "Model change not saved: \(error.localizedDescription)")
+                fail("change the model", error)
             }
         }
     }
 
-    func createProject(name: String, avatarColorIndex: Int? = nil, leaf: LeafPick? = nil) {
+    func createProject(name: String, avatarColorIndex: Int? = nil, leaf: LeafPick? = nil, picture: DraftPicture? = nil) {
         Task {
             do {
-                try await api.createProject(name: name, avatarColorIndex: avatarColorIndex, leaf: leaf)
+                let id = try await api.createProject(name: name, avatarColorIndex: avatarColorIndex, leaf: leaf)
+                // The Create sheet's picture goes into the new agent's own slot first, so the
+                // list refresh already shows it.
+                if let picture, let id, let jpeg = await draftJpeg(picture) {
+                    let key = "avatar-\(Int(Date().timeIntervalSince1970 * 1000)).\(PictureMaster.ext(jpeg))"
+                    if (try? await api.putBlob(projectId: id, key: key, mime: PictureMaster.mime(jpeg), data: jpeg)) != nil {
+                        _ = try? await api.setProjectImageKey(id, key: key)
+                    }
+                }
                 await refreshRegistry()
             } catch {
-                notice = Notice(text: "New project failed: \(error.localizedDescription)")
+                fail("create the agent", error)
+            }
+        }
+    }
+
+    // MARK: Outside agents (#2142)
+
+    /// `POST /outside-agents`: the relay makes the agent (no box) and mints its key; the caller
+    /// pushes the reveal screen. A refusal is the claimed failure on the Create sheet.
+    func connectAgent(name: String, transport: String) async -> ConnectReveal? {
+        do {
+            let reveal = try await api.connectAgent(name: name, transport: transport)
+            if let info = reveal.info { outsideInfo[reveal.projectId] = info }
+            await refreshRegistry()
+            return reveal
+        } catch {
+            fail("connect the agent", error)
+            return nil
+        }
+    }
+
+    /// The connection of an outside agent for the pane and the reveal screen; a native agent
+    /// leaves no entry.
+    @discardableResult
+    func refreshOutsideInfo(_ projectId: Id) async -> OutsideAgentInfo? {
+        guard !isFixture else { return nil }
+        if let info = try? await api.outsideAgent(projectId) {
+            outsideInfo[projectId] = info
+            if info.logSummary != nil { await refreshOutsideLog(projectId) }
+            return info
+        }
+        return outsideInfo[projectId]
+    }
+
+    /// The session log for the Details pane's card and View all (#2224).
+    func refreshOutsideLog(_ projectId: Id) async {
+        guard !isFixture else { return }
+        if let entries = try? await api.outsideAgentLog(projectId) {
+            outsideLogs[projectId] = entries
+        }
+    }
+
+    /// The chat a log line names, as the person knows it: a group's or DM's name, the agent's
+    /// own chat, or "Chat" when it is not in this app's lists any more.
+    func outsideLogChatTitle(_ chat: String, agent: Id) -> String {
+        if let p = project(chat) { return p.name }
+        for p in projects where chats(of: p.id).contains(where: { $0.id == chat }) {
+            return p.id == agent ? "Your chat" : p.name
+        }
+        return "Chat"
+    }
+
+    func rotateOutsideKey(_ projectId: Id) async -> ConnectReveal? {
+        do {
+            let reveal = try await api.rotateOutsideKey(projectId)
+            if let info = reveal.info { outsideInfo[projectId] = info }
+            return reveal
+        } catch {
+            fail("rotate the key", error)
+            return nil
+        }
+    }
+
+    /// Details → Can → a switch. The row flips at once; the relay's answer confirms it.
+    func setOutsideScope(_ projectId: Id, _ scope: String, on: Bool) {
+        outsideInfo[projectId]?.scopes[scope] = on
+        guard !isFixture else { return }
+        Task {
+            do {
+                if let info = try await api.setOutsideScope(projectId, scope, on: on) {
+                    outsideInfo[projectId] = info
+                }
+            } catch {
+                outsideInfo[projectId]?.scopes[scope] = !on
+                fail("change what the agent may do", error)
+            }
+        }
+    }
+
+    func revokeOutsideAgent(_ projectId: Id) async {
+        do {
+            try await api.revokeOutsideAgent(projectId)
+            await refreshOutsideInfo(projectId)
+        } catch {
+            fail("revoke the agent's access", error)
+        }
+    }
+
+    /// Connection card → Wake URL → Save ([feedback outside-agents-wake-ios-2026-10-28]). An empty
+    /// URL clears the URL and the header value together; an empty value with a URL keeps the stored
+    /// value (it is never shown back, so blank means "unchanged"). Returns the relay's short reason
+    /// when it refused, `nil` when saved.
+    func saveOutsideWake(_ projectId: Id, url: String, auth: String) async -> String? {
+        let url = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        let auth = auth.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            let info = url.isEmpty
+                ? try await api.setOutsideWake(projectId, url: "", auth: "")
+                : try await api.setOutsideWake(projectId, url: url, auth: auth.isEmpty ? nil : auth)
+            if let info { outsideInfo[projectId] = info }
+            return nil
+        } catch let e as RelayError where !e.message.isEmpty {
+            return e.message
+        } catch {
+            return "Could not reach the relay"
+        }
+    }
+
+    /// Connection card → Wake URL → Send test wake: `(ok, text)` for the line under the buttons.
+    func testOutsideWake(_ projectId: Id) async -> (ok: Bool, text: String) {
+        let result: (ok: Bool, text: String)
+        do {
+            result = try await api.testOutsideWake(projectId)
+        } catch let e as RelayError where !e.message.isEmpty {
+            result = (false, e.message)
+        } catch {
+            result = (false, "Could not reach the relay")
+        }
+        await refreshOutsideInfo(projectId)
+        return result
+    }
+
+    // MARK: Create sheet pictures (Jacob, 2026-10-25)
+
+    /// Generate before the entity exists: into my own slot (`POST /me/avatar/generate`, #1789).
+    func generateDraftAvatar(prompt: String) async throws -> String {
+        if isFixture { return try await Self.fixtureGenerate(prompt) }
+        do {
+            return try await api.generateMyAvatar(prompt: prompt)
+        } catch let e as RelayError where e.status == 404 {
+            // A relay without the own-slot route yet: say so instead of "HTTP 404".
+            throw RelayError(status: 404, message: "Generate is not on this relay yet; upload a picture instead.")
+        }
+    }
+
+    /// Where a draft's generated picture is fetched from: `users:{me}`.
+    func draftPictureURL(key: String) -> URL? {
+        guard let me = user?.id else { return nil }
+        return blobURL(projectId: "users:\(me)", key: key)
+    }
+
+    /// The Create sheet's picture as JPEG bytes for the new entity's slot: the photo as chosen, or
+    /// the generated picture read back from my slot. nil when it cannot be read (a notice says so;
+    /// the entity keeps its neutral initial).
+    func draftJpeg(_ picture: DraftPicture) async -> Data? {
+        switch picture {
+        case .jpeg(let data):
+            return data
+        case .generated(let key):
+            guard let me = user?.id else { return nil }
+            do {
+                return try await api.blobData(projectId: "users:\(me)", key: key)
+            } catch {
+                fail("keep the generated picture", error)
+                return nil
             }
         }
     }
@@ -4027,9 +6736,9 @@ final class AppModel: ObservableObject {
                 // relay's default subagent/decision slots. Set the talking
                 // model after the copy exists. `sourceProjectId` asks the
                 // relay to copy the source agent's project folder and memory.
-                try await api.createProject(
+                _ = try await api.createProject(
                     name: name,
-                    leaf: LeafArt.pick(project),
+                    leaf: LeafArt.isNeutral(project.avatarLeaf) ? LeafArt.neutralPick : LeafArt.pick(project),
                     color: project.color,
                     description: project.description,
                     instructions: project.instructions,
@@ -4043,7 +6752,7 @@ final class AppModel: ObservableObject {
                     open(project: copy)
                 }
             } catch {
-                notice = Notice(text: "Duplicate failed: \(error.localizedDescription)")
+                fail("duplicate the agent", error)
             }
         }
     }
@@ -4077,7 +6786,7 @@ final class AppModel: ObservableObject {
                 try await api.deleteProject(projectId)
                 await refreshRegistry()
             } catch {
-                notice = Notice(text: "Delete failed: \(error.localizedDescription)")
+                fail("delete it", error)
                 await refreshRegistry()
             }
         }
@@ -4158,4 +6867,52 @@ extension AppModel {
         if let b = availableUpdate?.build { UserDefaults.standard.set(b, forKey: Self.dismissedBuildKey) }
         availableUpdate = nil
     }
+}
+
+/// The Home pin list's keys and its cache ([feedback sidebar-pinning-ios-2026-10-28]). The
+/// relay's row keys are the Mac's: `agent:<project id>`, `chat:<people chat id>`,
+/// `server:<server id>`. Pure, so the migration from the device-local list is testable.
+enum HomePins {
+    /// The synced list as the relay last confirmed it (shown at launch before `/me/pins`).
+    static let cacheKey = "homePins.synced"
+    /// The device-local list every build before the synced one kept (`p:` / `c:` keys).
+    static let legacyKey = "pinnedHome"
+    /// Set once the legacy list was uploaded (or found redundant); never uploaded twice.
+    static let migratedKey = "homePins.migrated"
+
+    static func key(projectId: String) -> String { "agent:" + projectId }
+    static func key(peopleChatId: String) -> String { "chat:" + peopleChatId }
+    static func key(serverId: String) -> String { "server:" + serverId }
+
+    /// The old `p:<project>` / `c:<people chat>` keys as relay row keys, in the same order,
+    /// duplicates folded, anything else dropped, capped like the relay.
+    static func migrateLegacy(_ legacy: [String], cap: Int) -> [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for k in legacy {
+            let mapped: String?
+            if k.hasPrefix("p:") { mapped = key(projectId: String(k.dropFirst(2))) }
+            else if k.hasPrefix("c:") { mapped = key(peopleChatId: String(k.dropFirst(2))) }
+            else if k.hasPrefix("agent:") || k.hasPrefix("chat:") || k.hasPrefix("server:") { mapped = k }
+            else { mapped = nil }
+            guard let m = mapped, let colon = m.firstIndex(of: ":"), m.index(after: colon) < m.endIndex,
+                  seen.insert(m).inserted else { continue }
+            out.append(m)
+            if out.count == cap { break }
+        }
+        return out
+    }
+
+    static func cached() -> [String] {
+        var seen = Set<String>()
+        let synced = UserDefaults.standard.stringArray(forKey: cacheKey)
+        // No synced copy yet: the legacy list, translated, so nothing vanishes before `/me/pins`.
+        let base = synced ?? migrateLegacy(legacyLocal(), cap: AppModel.maxHomePins)
+        return base.filter { seen.insert($0).inserted }
+    }
+
+    static func cache(_ pins: [String]) { UserDefaults.standard.set(pins, forKey: cacheKey) }
+    static func legacyLocal() -> [String] { UserDefaults.standard.stringArray(forKey: legacyKey) ?? [] }
+    static func migrated() -> Bool { UserDefaults.standard.bool(forKey: migratedKey) }
+    static func markMigrated() { UserDefaults.standard.set(true, forKey: migratedKey) }
 }

@@ -170,8 +170,8 @@ extension RelayAPI {
         return try RelayAPI.parseTokens(v, relayUrl: endpoint.httpUrl)
     }
 
-    /// `GET /me` → user, credits, machine summary.
-    func me() async throws -> (AuthUser, Credits?, MeMachineDto, MeFeaturesDto?) {
+    /// `GET /me` → user, credits, machine summary, privacy.
+    func me() async throws -> (AuthUser, Credits?, MeMachineDto, MeFeaturesDto?, MePrivacyDto?) {
         let v = try await json("GET", AuthEndpoints.me)
         guard JSONSerialization.isValidJSONObject(v),
               let data = try? JSONSerialization.data(withJSONObject: v) else {
@@ -193,14 +193,15 @@ extension RelayAPI {
             spentTodayUsd: c.spent_today_usd,
             dailyCapUsd: c.daily_cap_usd
         )
-        return (user, credits, dto.machine, dto.features)
+        return (user, credits, dto.machine, dto.features, dto.privacy)
     }
 
-    /// `PATCH /me {name?, login?}` → updated user (display name and/or handle).
-    func patchMe(name: String?, login: String?) async throws -> AuthUser {
+    /// `PATCH /me {name?, login?, group_add?}` → updated user (display name, handle, and/or privacy).
+    func patchMe(name: String? = nil, login: String? = nil, groupAdd: String? = nil) async throws -> AuthUser {
         var body: [String: Any] = [:]
         if let name { body["name"] = name }
         if let login { body["login"] = login }
+        if let groupAdd { body["group_add"] = groupAdd }
         let v = try await json("PATCH", AuthEndpoints.me, body: body)
         guard JSONSerialization.isValidJSONObject(v),
               let data = try? JSONSerialization.data(withJSONObject: v),

@@ -1,16 +1,21 @@
 //! In-app updates (D42, D85). A tokio worker polls the appcast, downloads and
 //! verifies on request, swaps the bundle, and asks the UI to relaunch. The
-//! UI reads [`UpdateState`] off `AppState` and shows one button in the rail.
+//! UI reads [`UpdateState`] off `AppState` and shows one control: Grok Bot's
+//! update disc at the right end of the sidebar footer — a solid blue circle
+//! with the white cloud-download glyph, drawn only when the user's click is
+//! what moves the update on ([`UpdateState::disc_action`];
+//! [feedback footer-update-button-grok-2026-10-24] replaced the "Update" pill).
 //!
 //! By default (Settings → Updates → Automatic updates Off), a newer build only
-//! lights the rail Update button; the user installs when they choose. Automatic
-//! updates (D85, opt-in): a newer build is downloaded, verified and installed
-//! in the background as soon as the poll (every 5 min) or the relay's
-//! `release_published` push sees it; the app then relaunches at a safe moment
-//! — while Arbos is focused and idle, never while another app has focus, never
-//! during a call or mid-typing — and otherwise shows "Restart now" in the rail
-//! with a one-minute countdown. The open chat comes back after the relaunch
-//! (on-device store, `RestoreSelection`).
+//! lights the footer disc; one click downloads, installs and relaunches.
+//! Automatic updates (D85, opt-in): a newer build is downloaded, verified and
+//! installed in the background as soon as the poll (every 5 min) or the
+//! relay's `release_published` push sees it; the app then relaunches at a safe
+//! moment — while Arbos has been focused continuously (countdown or idle
+//! pause), never on the swipe-back that regains focus, never while another app
+//! has focus, never during a call or mid-typing — and until then the disc
+//! offers "restart now" (a one-minute countdown runs behind it). The open chat
+//! comes back after the relaunch (on-device store, `RestoreSelection`).
 //!
 //! Where the bytes come from: the stable channel reads the manifest the site serves
 //! (`https://arbos.life/updates/mac/appcast.xml`, a mirror of the GitHub release's appcast) and
@@ -24,6 +29,8 @@
 //!   ARBOS_UPDATE_INTERVAL_SECS   poll interval (default 300; first poll after 5 s)
 //!   ARBOS_UPDATE_AUTO=0|1        override the Settings toggle for this run
 //!   ARBOS_UPDATE_DISABLE=1       never poll (dev runs)
+//!   ARBOS_UPDATE_STATE=…         rig: start in `available|downloading|installed|failed` for a
+//!                                fake 0.6.999 build and never poll (shots of the footer disc)
 //!
 //! Every check/install step is also appended to `~/Library/Logs/Arbos/update.log` (or
 //! `$XDG_STATE_HOME/arbos/update.log`), because a bundled app has no stderr anyone reads.
@@ -181,6 +188,23 @@ pub enum UpdatePhase {
     },
 }
 
+/// What one click on the footer's update disc does
+/// ([feedback footer-update-button-grok-2026-10-24]; see
+/// [`UpdateState::disc_action`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiscAction {
+    /// Nothing to offer: the disc is not drawn.
+    Hidden,
+    /// Download, verify, install and relaunch (the manual path, or a retry).
+    Install,
+    /// The build is installed and waiting for a safe moment: restart now.
+    Relaunch,
+    /// Working on the user's click (or relaunching): drawn, pulsing, not clickable.
+    Busy,
+    /// Copy the running app into Applications first (translocated / read-only copy).
+    MoveToApplications,
+}
+
 #[derive(Clone, Debug)]
 pub struct UpdateState {
     pub current_version: String,
@@ -225,16 +249,105 @@ impl UpdateState {
         })
     }
 
-    /// The rail button is visible whenever a newer build is known, through
-    /// download, install, and a failure that can be retried — or when the
-    /// running copy must be moved to Applications before updates can work.
-    pub fn button_visible(&self) -> bool {
-        self.has_installable_update() || self.needs_relocation
-    }
-
-    /// True when the button's click should move the app rather than install an update.
+    /// True when the disc's click should move the app rather than install an update.
     pub fn button_moves(&self) -> bool {
         self.needs_relocation && !self.has_installable_update()
+    }
+
+    /// What the footer's update disc is for right now — Grok Bot's solid blue
+    /// circle with the cloud-download glyph, drawn only when a click from the
+    /// user is what moves the update on ([feedback footer-update-button-grok-2026-10-24]):
+    ///
+    /// - **Automatic updates off** (the default): the feed has a newer build →
+    ///   one click downloads, verifies, installs and relaunches; the disc
+    ///   pulses while that runs.
+    /// - **Automatic updates on**: downloads and installs happen in the
+    ///   background with nothing in the footer; the disc appears once the
+    ///   build is installed and waiting for its relaunch — one click restarts
+    ///   now.
+    /// - A failed install shows the disc again (click = retry); a translocated
+    ///   / read-only copy shows it as "move to Applications".
+    /// - Up to date, checking, or a background download → no disc.
+    pub fn disc_action(&self) -> DiscAction {
+        let background = self.auto
+            && !self.button_moves()
+            && matches!(
+                self.phase,
+                UpdatePhase::Available(_)
+                    | UpdatePhase::Downloading { .. }
+                    | UpdatePhase::Installing(_)
+            );
+        if background {
+            DiscAction::Hidden
+        } else {
+            self.click_action()
+        }
+    }
+
+    /// The update's one action in the current phase, whether or not the disc
+    /// is drawn — what `AppState::install_update` runs (the automatic path
+    /// and Settings → Updates → Install call it too, so this never hides).
+    pub fn click_action(&self) -> DiscAction {
+        if self.button_moves() {
+            return match &self.phase {
+                UpdatePhase::Installing(_) | UpdatePhase::Restarting(_) => DiscAction::Busy,
+                UpdatePhase::Idle
+                | UpdatePhase::Checking
+                | UpdatePhase::UpToDate
+                | UpdatePhase::Available(_)
+                | UpdatePhase::Downloading { .. }
+                | UpdatePhase::Installed { .. }
+                | UpdatePhase::Failed { .. } => DiscAction::MoveToApplications,
+            };
+        }
+        if !self.has_installable_update() {
+            return DiscAction::Hidden;
+        }
+        match &self.phase {
+            UpdatePhase::Available(_) | UpdatePhase::Failed { .. } => DiscAction::Install,
+            UpdatePhase::Downloading { .. }
+            | UpdatePhase::Installing(_)
+            | UpdatePhase::Restarting(_) => DiscAction::Busy,
+            UpdatePhase::Installed { .. } => DiscAction::Relaunch,
+            UpdatePhase::Idle | UpdatePhase::Checking | UpdatePhase::UpToDate => DiscAction::Hidden,
+        }
+    }
+
+    /// Rig hook — `ARBOS_UPDATE_STATE=available|downloading|installed|failed`:
+    /// the phase for a fake 0.6.999 build, so the footer disc can be shot in
+    /// each of its states (the worker stays off while the variable is set).
+    pub fn fixture_phase(name: &str, current_version: &str) -> Option<UpdatePhase> {
+        let fake = Available {
+            item: arbos_update::appcast::Item {
+                title: "Arbos 0.6.999".into(),
+                version: "0.6.999".into(),
+                build: "999".into(),
+                ..Default::default()
+            },
+            url: "https://arbos.life/updates/mac/Arbos-0.6.999-macos-universal.tar.gz".into(),
+            length: 1,
+            ed_signature: String::new(),
+        };
+        if !arbos_update::version::is_newer(&fake.item.version, current_version) {
+            return None;
+        }
+        Some(match name.trim() {
+            "available" => UpdatePhase::Available(fake),
+            "downloading" => UpdatePhase::Downloading {
+                available: fake,
+                got: 21_000_000,
+                total: Some(56_000_000),
+            },
+            "installed" => UpdatePhase::Installed {
+                available: fake,
+                deadline_ms: now_ms() + 3_600_000,
+            },
+            "failed" => UpdatePhase::Failed {
+                message: "Could not download from arbos.life or github.com after 5 tries (the connection timed out).".into(),
+                available: Some(fake),
+            },
+            _ => return None,
+        })
     }
 
     pub fn busy(&self) -> bool {
@@ -244,36 +357,6 @@ impl UpdateState {
                 | UpdatePhase::Installing(_)
                 | UpdatePhase::Restarting(_)
         )
-    }
-
-    /// Short label for the rail button.
-    pub fn button_label(&self) -> String {
-        if self.button_moves() {
-            return match &self.phase {
-                UpdatePhase::Installing(_) | UpdatePhase::Restarting(_) => "Moving".into(),
-                UpdatePhase::Failed { .. } => "Retry".into(),
-                _ => "Move to Applications".into(),
-            };
-        }
-        match &self.phase {
-            UpdatePhase::Available(_) => "Update".into(),
-            UpdatePhase::Downloading { got, total, .. } => match total {
-                Some(t) if *t > 0 => format!("{}%", (got * 100 / t).min(100)),
-                _ => "Downloading".into(),
-            },
-            UpdatePhase::Installing(_) => "Installing".into(),
-            UpdatePhase::Installed { deadline_ms, .. } => {
-                let left = deadline_ms.saturating_sub(now_ms()).div_ceil(1000);
-                if left > 0 {
-                    format!("Restart now · {left}s")
-                } else {
-                    "Restart now".into()
-                }
-            }
-            UpdatePhase::Restarting(_) => "Restarting".into(),
-            UpdatePhase::Failed { .. } => "Retry".into(),
-            UpdatePhase::Idle | UpdatePhase::Checking | UpdatePhase::UpToDate => String::new(),
-        }
     }
 
     /// One line for the settings popover.
@@ -370,7 +453,9 @@ pub async fn run(
     mut commands: mpsc::UnboundedReceiver<UpdateCommand>,
     events: mpsc::UnboundedSender<UpdateEvent>,
 ) {
-    if std::env::var("ARBOS_UPDATE_DISABLE").is_ok_and(|v| v == "1") {
+    if std::env::var("ARBOS_UPDATE_DISABLE").is_ok_and(|v| v == "1")
+        || std::env::var_os("ARBOS_UPDATE_STATE").is_some()
+    {
         return;
     }
     let os = arbos_update::current_os();
@@ -659,4 +744,151 @@ pub fn open_download_page() {
 /// caller quits the app.
 pub fn relaunch(install: &Install) -> anyhow::Result<()> {
     client::relaunch_after_exit(install)
+}
+
+#[cfg(test)]
+mod disc_tests {
+    use super::{DiscAction, UpdatePhase, UpdateState};
+
+    fn state(phase: UpdatePhase, auto: bool) -> UpdateState {
+        UpdateState {
+            current_version: "0.6.218".into(),
+            feed_url: String::new(),
+            phase,
+            last_checked_at: None,
+            needs_relocation: false,
+            auto,
+        }
+    }
+
+    fn phase(name: &str) -> UpdatePhase {
+        UpdateState::fixture_phase(name, "0.6.218").expect(name)
+    }
+
+    /// Jacob (2026-10-24): Grok's update button — drawn only when the update
+    /// is ready for the user's click. Up to date, checking and a background
+    /// download (automatic updates on) show nothing in the footer.
+    #[test]
+    fn the_disc_is_hidden_until_an_update_is_ready() {
+        for auto in [false, true] {
+            for p in [
+                UpdatePhase::Idle,
+                UpdatePhase::Checking,
+                UpdatePhase::UpToDate,
+            ] {
+                assert_eq!(state(p, auto).disc_action(), DiscAction::Hidden);
+            }
+        }
+        // Automatic updates on: the download and install run in the background;
+        // the disc appears once the build is installed and waits for its relaunch.
+        assert_eq!(
+            state(phase("available"), true).disc_action(),
+            DiscAction::Hidden
+        );
+        assert_eq!(
+            state(phase("downloading"), true).disc_action(),
+            DiscAction::Hidden
+        );
+        assert_eq!(
+            state(phase("installed"), true).disc_action(),
+            DiscAction::Relaunch
+        );
+        // Automatic updates off (the default): nothing downloads by itself, so
+        // the ready build is offered the moment the feed has it.
+        assert_eq!(
+            state(phase("available"), false).disc_action(),
+            DiscAction::Install
+        );
+        assert_eq!(
+            state(phase("downloading"), false).disc_action(),
+            DiscAction::Busy
+        );
+        assert_eq!(
+            state(phase("installed"), false).disc_action(),
+            DiscAction::Relaunch
+        );
+        // A failed install can be retried from the disc either way.
+        assert_eq!(
+            state(phase("failed"), false).disc_action(),
+            DiscAction::Install
+        );
+        assert_eq!(
+            state(phase("failed"), true).disc_action(),
+            DiscAction::Install
+        );
+    }
+
+    /// A build that is not newer than the running one never lights the disc,
+    /// whatever phase the feed left behind.
+    #[test]
+    fn an_older_or_equal_build_never_shows() {
+        let Some(UpdatePhase::Available(fake)) = UpdateState::fixture_phase("available", "0.6.1")
+        else {
+            panic!("fixture")
+        };
+        let mut s = state(UpdatePhase::Available(fake.clone()), false);
+        s.current_version = "0.6.999".into();
+        assert_eq!(s.disc_action(), DiscAction::Hidden, "same version");
+        s.current_version = "0.7.0".into();
+        assert_eq!(s.disc_action(), DiscAction::Hidden, "running a newer one");
+        assert!(UpdateState::fixture_phase("installed", "0.7.0").is_none());
+    }
+
+    /// Click → install / relaunch: the disc's one action is what
+    /// `AppState::install_update` runs — download + install + relaunch for
+    /// a ready build, "restart now" for an installed one, the move for a
+    /// read-only copy; a busy disc does nothing.
+    #[test]
+    fn one_click_installs_or_relaunches() {
+        assert_eq!(
+            state(phase("available"), false).disc_action(),
+            DiscAction::Install
+        );
+        assert_eq!(
+            state(phase("installed"), true).disc_action(),
+            DiscAction::Relaunch
+        );
+        let Some(UpdatePhase::Available(fake)) = UpdateState::fixture_phase("available", "0.6.1")
+        else {
+            panic!("fixture")
+        };
+        assert_eq!(
+            state(UpdatePhase::Restarting(fake.clone()), true).disc_action(),
+            DiscAction::Busy
+        );
+        assert_eq!(
+            state(UpdatePhase::Installing(fake), false).disc_action(),
+            DiscAction::Busy
+        );
+        let mut moved = state(UpdatePhase::UpToDate, false);
+        moved.needs_relocation = true;
+        assert_eq!(moved.disc_action(), DiscAction::MoveToApplications);
+        assert!(moved.button_moves());
+    }
+
+    /// The automatic path and Settings → Updates → Install go through the same
+    /// `install_update`: hiding the disc for a background download must not
+    /// hide the action itself.
+    #[test]
+    fn the_click_action_is_never_gated_by_automatic_updates() {
+        assert_eq!(
+            state(phase("available"), true).disc_action(),
+            DiscAction::Hidden
+        );
+        assert_eq!(
+            state(phase("available"), true).click_action(),
+            DiscAction::Install
+        );
+        assert_eq!(
+            state(phase("downloading"), true).click_action(),
+            DiscAction::Busy
+        );
+        for name in ["available", "downloading", "installed", "failed"] {
+            assert_eq!(
+                state(phase(name), false).click_action(),
+                state(phase(name), false).disc_action(),
+                "{name}: with automatic updates off the disc shows every action"
+            );
+        }
+    }
 }

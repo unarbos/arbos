@@ -32,7 +32,17 @@ struct MessagePush {
     let avatarUrl: String?
     /// D79 `sender.avatar_color_index_effective` when the relay sends it.
     let avatarColorIndex: Int?
+    /// The chat's name for a group / shared project chat (`chat_title`); nil for a DM. The
+    /// banner is titled with it and the sender goes in the body ("Sender: text") — the
+    /// communication intent then shows group name / sender / text (2026-10-27).
     let groupName: String?
+    /// `dm` | `group` | `project` | `channel` (`chat_kind`; an older relay sends none).
+    let chatKind: String
+    /// The message alone (`text`), for the intent's content when the body carries "Sender: ".
+    let text: String?
+    /// Tokenised URL of the group picture (app-only: the extension has no relay token and
+    /// draws the group's initials instead).
+    let groupImageUrl: String?
 
     init?(userInfo: [AnyHashable: Any]) {
         let aps = userInfo["aps"] as? [String: Any] ?? [:]
@@ -58,12 +68,16 @@ struct MessagePush {
         avatarColorIndex = ((sender["avatar_color_index_effective"] as? NSNumber) ?? (sender["avatar_color_index"] as? NSNumber)
                             ?? (userInfo["sender_avatar_color_index"] as? NSNumber))?.intValue
         groupName = (userInfo["chat_title"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        chatKind = (userInfo["chat_kind"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? (groupName == nil ? "dm" : "group")
+        text = (userInfo["text"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        groupImageUrl = (userInfo["chat_image_url"] as? String).flatMap { $0.isEmpty ? nil : $0 }
     }
 
     /// The same shape built locally (the /me/pushes poll, the debug hook).
     static func userInfo(chatId: String, projectId: String, title: String, body: String, senderKind: String, senderId: String,
                          senderName: String, senderHandle: String, avatar: String?, avatarColor: String?, avatarUrl: String?,
-                         chatTitle: String? = nil) -> [AnyHashable: Any] {
+                         chatTitle: String? = nil, chatKind: String? = nil, text: String? = nil,
+                         chatImageUrl: String? = nil) -> [AnyHashable: Any] {
         var sender: [String: Any] = ["kind": senderKind, "id": senderId, "name": senderName, "handle": senderHandle]
         if let avatar { sender["avatar"] = avatar }
         if let avatarColor { sender["avatar_color"] = avatarColor }
@@ -73,7 +87,29 @@ struct MessagePush {
             "chat_id": chatId, "project_id": projectId, "sender": sender,
         ]
         if let chatTitle { info["chat_title"] = chatTitle }
+        if let chatKind { info["chat_kind"] = chatKind }
+        if let text { info["text"] = text }
+        if let chatImageUrl { info["chat_image_url"] = chatImageUrl }
         return info
+    }
+
+    /// The group's picture for the intent's conversation image: the real one when the app
+    /// has a tokenised URL, else the group's initials in the palette colour of its id.
+    @MainActor
+    func groupImage() async -> INImage? {
+        guard let groupName else { return nil }
+        if let urlString = groupImageUrl, let url = URL(string: urlString) {
+            var req = URLRequest(url: url)
+            req.timeoutInterval = 6
+            if let (data, _) = try? await URLSession.shared.data(for: req), !data.isEmpty,
+               let round = AvatarImage.roundPNG(data, pixels: 192) {
+                return INImage(imageData: round)
+            }
+        }
+        if let png = AvatarPalette.initialsPNG(name: groupName, handle: nil, id: chatId, pixels: 192, dark: Self.systemIsDark) {
+            return INImage(imageData: png)
+        }
+        return nil
     }
 
     /// The person's picture when there is one, else the initials circle (D79).
@@ -106,19 +142,22 @@ struct MessagePush {
     /// Donates an INSendMessageIntent and returns the content the system
     /// draws with the sender's picture; nil when the intent is refused
     /// (missing entitlement), so callers keep the plain content.
-    func communicationContent(from content: UNMutableNotificationContent, image: INImage?) -> UNNotificationContent? {
+    func communicationContent(from content: UNMutableNotificationContent, image: INImage?, groupImage: INImage? = nil) -> UNNotificationContent? {
         let handle = INPersonHandle(value: senderHandle.isEmpty ? senderId : senderHandle, type: .unknown)
         var components = PersonNameComponents()
         components.nickname = senderName
         let person = INPerson(personHandle: handle, nameComponents: components, displayName: senderName,
                               image: image, contactIdentifier: nil, customIdentifier: senderId, isMe: false, suggestionType: .none)
         let group = groupName.map { INSpeakableString(spokenPhrase: $0) }
-        let intent = INSendMessageIntent(recipients: nil, outgoingMessageType: .outgoingMessageText, content: body,
+        // The system draws group name / sender / content, so the content is the message alone;
+        // the plain `body` ("Sender: text") stays for the fallback without an intent.
+        let intent = INSendMessageIntent(recipients: nil, outgoingMessageType: .outgoingMessageText,
+                                         content: group != nil ? (text ?? body) : body,
                                          speakableGroupName: group, conversationIdentifier: chatId,
                                          serviceName: "Arbos", sender: person, attachments: nil)
-        if let image {
-            intent.setImage(image, forParameterNamed: \.sender)
-            if group != nil { intent.setImage(image, forParameterNamed: \.speakableGroupName) }
+        if let image { intent.setImage(image, forParameterNamed: \.sender) }
+        if group != nil, let conversation = groupImage ?? image {
+            intent.setImage(conversation, forParameterNamed: \.speakableGroupName)
         }
         let interaction = INInteraction(intent: intent, response: nil)
         interaction.direction = .incoming
@@ -143,7 +182,8 @@ struct MessagePush {
         info["project_id"] = projectId
         base.userInfo = info
         let image = await senderImage()
-        log.notice("message for chat \(chatId, privacy: .public) from \(senderName, privacy: .public) image=\(image == nil ? "none" : "ok", privacy: .public)")
-        return communicationContent(from: base, image: image) ?? base
+        let conversation = await groupImage()
+        log.notice("message for chat \(chatId, privacy: .public) from \(senderName, privacy: .public) kind=\(chatKind, privacy: .public) image=\(image == nil ? "none" : "ok", privacy: .public) group=\(conversation == nil ? "none" : "ok", privacy: .public)")
+        return communicationContent(from: base, image: image, groupImage: conversation) ?? base
     }
 }

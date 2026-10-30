@@ -131,6 +131,7 @@ fn insert_project(
         avatar_leaf: None,
         avatar_leaf_color: None,
         image_key: None,
+        avatar_version: 0,
     };
     state.db.insert_project(&p).unwrap();
     state
@@ -224,6 +225,7 @@ async fn member_json_matches_fixtures() {
         image_key: None,
         avatar_leaf: None,
         avatar_leaf_color: None,
+        description: None,
     };
     state.db.insert_people_chat(&dm).unwrap();
     state
@@ -260,6 +262,7 @@ async fn member_json_matches_fixtures() {
         image_key: None,
         avatar_leaf: None,
         avatar_leaf_color: None,
+        description: None,
     };
     state.db.insert_people_chat(&agent_chat).unwrap();
     state
@@ -306,6 +309,7 @@ async fn people_chat_json_matches_fixtures() {
         image_key: None,
         avatar_leaf: None,
         avatar_leaf_color: None,
+        description: None,
     };
     state.db.insert_people_chat(&dm).unwrap();
     state
@@ -530,6 +534,7 @@ async fn me_and_machine_unread_fixtures() {
         image_key: None,
         avatar_leaf: None,
         avatar_leaf_color: None,
+        description: None,
     };
     state.db.insert_people_chat(&chat).unwrap();
     for u in [&alice, &user.id] {
@@ -764,6 +769,11 @@ fn push_fixture_events() -> Vec<(&'static str, PushEventDto)> {
                 from_handle: "user201".into(),
                 seq: 42,
                 sender: sender.clone(),
+                project_id: None,
+                text: None,
+                chat_kind: None,
+                chat_title: None,
+                chat_image_key: None,
             }),
         ),
         (
@@ -788,6 +798,7 @@ fn push_fixture_events() -> Vec<(&'static str, PushEventDto)> {
                 user_id: "gh_202".into(),
                 handle: "user202".into(),
                 by_handle: "user201".into(),
+                banned: None,
             }),
         ),
         (
@@ -946,6 +957,39 @@ fn push_fixture_events() -> Vec<(&'static str, PushEventDto)> {
                 name: "STRIPE_KEY".into(),
                 expires_at: Some(FIXED_AT),
                 expired: false,
+            }),
+        ),
+        (
+            "push_profile_updated.json",
+            PushEventDto::ProfileUpdated(arbos_core::api::ProfileUpdatedPayloadDto {
+                user_id: "gh_201".into(),
+                avatar_url: Some("https://relay.example/avatars/gh_201.jpg?v=1700000000000".into()),
+            }),
+        ),
+        (
+            "push_agent_profile_updated.json",
+            PushEventDto::AgentProfileUpdated(arbos_core::api::AgentProfileUpdatedPayloadDto {
+                project_id: "01FIXTUREAGENT".into(),
+                avatar_version: FIXED_AT,
+                image_key: Some("avatar-1700000000000.jpg".into()),
+            }),
+        ),
+        (
+            "push_notifications_cleared.json",
+            PushEventDto::NotificationsCleared(arbos_core::api::NotificationsClearedPayloadDto {
+                chat_id: "people_dm".into(),
+                project_id: "people".into(),
+                badge: 2,
+            }),
+        ),
+        (
+            "push_pins_changed.json",
+            PushEventDto::PinsChanged(arbos_core::api::PinsChangedPayloadDto {
+                pins: vec![
+                    "agent:01FIXTUREAGENT".into(),
+                    "chat:people_dm".into(),
+                    "server:01FIXTURESERVER".into(),
+                ],
             }),
         ),
     ]

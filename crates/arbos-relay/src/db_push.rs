@@ -31,6 +31,10 @@ CREATE TABLE IF NOT EXISTS chat_user_archive (
   user_id TEXT NOT NULL, chat_id TEXT NOT NULL, archived_at INTEGER NOT NULL,
   PRIMARY KEY (user_id, chat_id)
 );
+CREATE TABLE IF NOT EXISTS space_user_archive (
+  user_id TEXT NOT NULL, space_id TEXT NOT NULL, kind TEXT NOT NULL, archived_at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, space_id)
+);
 CREATE TABLE IF NOT EXISTS chat_user_cursor (
   user_id TEXT NOT NULL, chat_id TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL,
   PRIMARY KEY (user_id, chat_id)
@@ -179,6 +183,17 @@ impl Db {
         })
     }
 
+    /// Was this message announced (`chat_events` row present)?
+    pub fn chat_event_exists(&self, chat_id: &str, message_id: &str) -> Result<bool> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT EXISTS (SELECT 1 FROM chat_events WHERE chat_id = ?1 AND message_id = ?2)",
+                params![chat_id, message_id],
+                |r| r.get(0),
+            )
+        })
+    }
+
     /// Has `sender_user` announced a message in `chat_id` since `since_ms`? (The row-level
     /// fallback checks this before sending a content-less notification.)
     pub fn chat_event_since(
@@ -227,6 +242,53 @@ impl Db {
                 )?;
                 Ok(None)
             }
+        })
+    }
+
+    // ---- archive of a sidebar space (an agent / project or a server), per user --------------
+    // Hides the row on every device of the user; never deletes anything. An archived agent
+    // keeps running its routines.
+
+    /// Archive or unarchive a space for a user; `kind` is `project` or `server`. Returns the new
+    /// `archived_at` (`None` = not archived).
+    pub fn set_space_archived(
+        &self,
+        user_id: &str,
+        space_id: &str,
+        kind: &str,
+        archived: bool,
+    ) -> Result<Option<i64>> {
+        self.with(|c| {
+            if archived {
+                c.execute(
+                    "INSERT INTO space_user_archive(user_id, space_id, kind, archived_at) VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(user_id, space_id) DO NOTHING",
+                    params![user_id, space_id, kind, now_ms()],
+                )?;
+                c.query_row(
+                    "SELECT archived_at FROM space_user_archive WHERE user_id = ?1 AND space_id = ?2",
+                    params![user_id, space_id],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map(Some)
+            } else {
+                c.execute(
+                    "DELETE FROM space_user_archive WHERE user_id = ?1 AND space_id = ?2",
+                    params![user_id, space_id],
+                )?;
+                Ok(None)
+            }
+        })
+    }
+
+    pub fn space_archived_at(&self, user_id: &str, space_id: &str) -> Result<Option<i64>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT archived_at FROM space_user_archive WHERE user_id = ?1 AND space_id = ?2",
+                params![user_id, space_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()
         })
     }
 
@@ -292,7 +354,8 @@ impl Db {
                 "SELECT COUNT(*) FROM chat_events e
                  WHERE e.chat_id = ?2
                    AND e.id > COALESCE((SELECT r.event_id FROM chat_user_reads r WHERE r.user_id = ?1 AND r.chat_id = ?2), 0)
-                   AND (e.sender_user IS NULL OR e.sender_user != ?1)",
+                   AND (e.sender_user IS NULL OR e.sender_user != ?1)
+                   AND (e.sender_user IS NULL OR e.sender_user NOT IN (SELECT blocked FROM blocks WHERE blocker = ?1))",
                 params![user_id, chat_id],
                 |r| r.get(0),
             )
@@ -329,6 +392,7 @@ fn unread_query(c: &Connection, user_id: &str) -> rusqlite::Result<Vec<UnreadCha
         "SELECT e.chat_id, e.project_id, COUNT(*) FROM chat_events e
          WHERE e.id > COALESCE((SELECT r.event_id FROM chat_user_reads r WHERE r.user_id = ?1 AND r.chat_id = e.chat_id), 0)
            AND (e.sender_user IS NULL OR e.sender_user != ?1)
+           AND (e.sender_user IS NULL OR e.sender_user NOT IN (SELECT blocked FROM blocks WHERE blocker = ?1))
            AND NOT EXISTS (SELECT 1 FROM chat_user_archive a WHERE a.user_id = ?1 AND a.chat_id = e.chat_id)
            AND (
              e.chat_id IN (SELECT chat_id FROM people_members WHERE member = ?2 AND left_at IS NULL)

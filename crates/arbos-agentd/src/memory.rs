@@ -19,7 +19,7 @@ pub const VERBATIM_TURNS: usize = 12;
 pub const TOOL_OUTPUT_CAP_FOR_SUMMARISER: usize = 2_000;
 
 const WRITE_SYSTEM: &str = r#"You are the memory write decision for a project agent. Decide what, if anything, the project should remember from the event below.
-First a gate: is anything here worth storing beyond the raw transcript (a decision, a durable fact, a user preference or correction, a project reference such as a path or URL, or a status that others need)? Transient chatter, tool noise, and things already obvious from the files are not store-worthy.
+First a gate: is anything here worth storing beyond the raw transcript (a decision, a durable fact, a user preference or correction, a project reference such as a path or URL, or a status that others need)? Transient chatter, tool noise, and things already obvious from the files are not store-worthy. Never store the user's name, handle or how to address them: the name the agent used in a reply and the sender label on a message are presentation that comes live from the user's profile at every turn, not facts (a name can differ per device and change at any time). Candidates like "The user's name is X" / "address the user as X" are IGNORE. Refer to the project's owner as "the owner" (or "the user"), never by name: the name is resolved live when the record is read.
 Then extract at most 8 candidate records. For each candidate compare with the SIMILAR existing records and choose one action:
 - IGNORE: not worth storing or already stored.
 - ADD: new.
@@ -38,11 +38,93 @@ pub struct Memory {
     pub cfg: Arc<Config>,
     pub store: Store,
     pub llm: Arc<Llm>,
+    /// The owner's current and former display names as the relay reports them, for
+    /// `owner_by_role`: memory refers to the owner as "the owner", never by a name that may
+    /// change (Hezbola 2026-10-26: old records said Arbos, the profile said Jacob).
+    pub owner_names: std::sync::Mutex<Vec<String>>,
+}
+
+/// `"Jacob asked for …"` → `"the owner asked for …"` for every known owner name, whole words
+/// only, case-sensitive. Names that are also the product's or the agent's name are left alone
+/// (replacing "Arbos" would rewrite "Arbos is the app").
+pub(crate) fn owner_by_role(text: &str, owner_names: &[String], skip: &[&str]) -> String {
+    let mut out = text.to_owned();
+    for name in owner_names {
+        let n = name.trim();
+        if n.len() < 2 || skip.iter().any(|s| s.eq_ignore_ascii_case(n)) {
+            continue;
+        }
+        let mut res = String::with_capacity(out.len());
+        let mut rest = out.as_str();
+        while let Some(i) = rest.find(n) {
+            let before = rest[..i].chars().next_back();
+            let after = rest[i + n.len()..].chars().next();
+            let boundary = |c: Option<char>| c.is_none_or(|c| !c.is_alphanumeric());
+            res.push_str(&rest[..i]);
+            if boundary(before) && boundary(after) {
+                res.push_str("the owner");
+            } else {
+                res.push_str(n);
+            }
+            rest = &rest[i + n.len()..];
+        }
+        res.push_str(rest);
+        out = res;
+    }
+    out
+}
+
+/// A candidate that would fix the user's name or form of address in memory (P0 San José,
+/// 2026-10-25: the write pass learned "The user's name is Const" from a reply that used the
+/// iPhone's `senderName`, and the agent kept saying Const after the display name changed and on
+/// devices that send another name). The address comes live from the row/profile every turn;
+/// such a record is never stored.
+pub(crate) fn is_user_name_fact(text: &str) -> bool {
+    let t: String = text
+        .to_lowercase()
+        .chars()
+        .map(|c| match c {
+            '\u{2019}' | '\u{2018}' | '`' => '\'',
+            c if c.is_alphanumeric() || c == ' ' || c == '\'' => c,
+            _ => ' ',
+        })
+        .collect();
+    let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+    const PATTERNS: &[&str] = &[
+        "the user's name is",
+        "the users name is",
+        "user's name is",
+        "the user is called",
+        "the user is named",
+        "the user goes by",
+        "the user prefers to be called",
+        "the user wants to be called",
+        "the user should be addressed as",
+        "address the user as",
+        "address them as",
+        "call the user",
+        "the owner's name is",
+        "the owner is called",
+        "user's display name is",
+        "the user's handle is",
+        "user's handle is",
+        "user's first name is",
+        "name of the user is",
+        "my name is",
+        "i am called",
+        "call me ",
+    ];
+    PATTERNS.iter().any(|p| t.contains(p))
 }
 
 impl Memory {
     pub fn new(cfg: Arc<Config>, store: Store, llm: Arc<Llm>) -> Self {
-        Self { cfg, store, llm }
+        Self {
+            cfg,
+            store,
+            llm,
+            owner_names: std::sync::Mutex::new(Vec::new()),
+        }
     }
 
     /// T0 + T1 whole, as Markdown lines for the prompt (design §6.4 item 2).
@@ -79,6 +161,42 @@ impl Memory {
         out
     }
 
+    /// Name/address records written before the rule existed are superseded on the next pass:
+    /// invalidated (the row stays for the audit, D7) so the prompt's User core and the walks stop
+    /// offering them. Idempotent and cheap (T0/T1 live rows only).
+    pub fn purge_user_name_memories(&self) -> usize {
+        let mut n = 0;
+        for tier in ["T0", "T1"] {
+            for m in self.store.memory_live(tier, None, 200).unwrap_or_default() {
+                if is_user_name_fact(&m.text)
+                    && self.store.memory_invalidate(&m.id, Some(now_ms())).is_ok()
+                {
+                    n += 1;
+                    tracing::info!(id = %m.id, text = %m.text.chars().take(120).collect::<String>(), "memory: user-name record superseded (address comes live from the profile)");
+                    continue;
+                }
+                // A record that names the owner is rewritten to the role, in place: the text
+                // stays true when the owner's display name changes.
+                let by_role = self.owner_by_role_text(&m.text);
+                if by_role != m.text && self.store.memory_set_text(&m.id, &by_role).is_ok() {
+                    n += 1;
+                    tracing::info!(id = %m.id, "memory: owner named by role instead of by name");
+                }
+            }
+        }
+        n
+    }
+
+    /// The owner's names the relay reports (current and former), from the box listing.
+    pub fn set_owner_names(&self, names: Vec<String>) {
+        *self.owner_names.lock().expect("owner names") = names;
+    }
+
+    fn owner_by_role_text(&self, text: &str) -> String {
+        let names = self.owner_names.lock().expect("owner names").clone();
+        owner_by_role(text, &names, &["Arbos", self.cfg.project_name.as_str()])
+    }
+
     /// Write-side decision over one event (user message, assistant reply, subagent turn end).
     pub async fn write_pass(
         &self,
@@ -88,10 +206,11 @@ impl Memory {
         text: &str,
         proposals: &[Value],
     ) -> Result<()> {
-        let text: String = text.chars().take(12_000).collect();
+        let text = crate::truncate::clip_marked(text, 12_000, "", None);
         if text.trim().len() < 20 && proposals.is_empty() {
             return Ok(());
         }
+        self.purge_user_name_memories();
         // Similar records: a coarse FTS pass over the event text (top-5 per tier).
         let mut similar: Vec<MemoryRow> = Vec::new();
         for tier in ["T1", "T2"] {
@@ -195,6 +314,11 @@ impl Memory {
                 .unwrap_or(5)
                 .clamp(1, 10);
             let reason = d.get("reason").and_then(Value::as_str);
+            if is_user_name_fact(&text) {
+                tracing::info!(event_id, text = %text.chars().take(120).collect::<String>(), "memory write: user-name candidate dropped (address comes live from the profile)");
+                continue;
+            }
+            let text = self.owner_by_role_text(&text);
             let thread = if tier == "T2" { Some(thread_id) } else { None };
             let source =
                 json!({ "event_id": event_id, "thread_id": thread_id, "role": source_role });
@@ -361,5 +485,154 @@ impl Memory {
             .await?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// P0 San José (2026-10-25): the write pass learned "The user's name is Const" from a reply
+    /// that used the iPhone's `senderName`. Name and address records are presentation, never
+    /// memory: new candidates are dropped, old rows are superseded on the next pass.
+    #[test]
+    fn user_name_facts_are_recognised_and_nothing_else_is() {
+        for t in [
+            "The user's name is Const.",
+            "The user’s name is Const",
+            "Address the user as Const, never as @unarbos.",
+            "The user prefers to be called Jake.",
+            "The owner's name is Jacob Steeves.",
+            "The user's display name is Const on the iPhone.",
+            "User goes by Const in this chat — the user goes by that name.",
+            "My name is Jacob; call me Jake.",
+        ] {
+            assert!(is_user_name_fact(t), "should be a name fact: {t}");
+        }
+        for t in [
+            "The user wants any outgoing email drafted and shown for review first.",
+            "Santa Teresa surf school shortlist: Del Soul (5.0 from 593 reviews).",
+            "This agent was renamed from \"Home\" to \"GigChadAgent\"; it introduces itself as \"GigChadAgent\".",
+            "The slugkit fix is commit a2a9d29 and was not pushed.",
+            "Deleting old build target directories requires the owner's explicit approval.",
+            "The project is named tally and its CI gate is ./check.sh.",
+        ] {
+            assert!(!is_user_name_fact(t), "not a name fact: {t}");
+        }
+    }
+
+    /// Hezbola 2026-10-26: memory refers to the owner by role, so a display-name change never
+    /// leaves two names in the records. The app's and the agent's own names are never touched.
+    #[test]
+    fn owner_is_named_by_role_in_memory() {
+        let names = vec!["Jacob".to_owned(), "Const".to_owned(), "Arbos".to_owned()];
+        let skip = ["Arbos", "Bubble"];
+        assert_eq!(
+            owner_by_role(
+                "Jacob asked Const to keep the roleplay going.",
+                &names,
+                &skip
+            ),
+            "the owner asked the owner to keep the roleplay going."
+        );
+        assert_eq!(
+            owner_by_role("Arbos is the app; Jacobson is a colleague.", &names, &skip),
+            "Arbos is the app; Jacobson is a colleague.",
+            "the app name and partial matches are left alone"
+        );
+        assert_eq!(owner_by_role("no owner here", &[], &skip), "no owner here");
+        assert!(WRITE_SYSTEM.contains("Refer to the project's owner as \"the owner\""));
+    }
+
+    #[test]
+    fn existing_name_memories_are_superseded_on_the_next_pass() {
+        let dir = std::env::temp_dir().join(format!("arbos-mem-{}", now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("agentd.db")).unwrap();
+        let bx = crate::config::BoxConfig {
+            user_id: Some("u".into()),
+            relay_url: "http://127.0.0.1:1".into(),
+            box_token: String::new(),
+            mcp_token: String::new(),
+            work_root: dir.clone(),
+            bind: "127.0.0.1".into(),
+            port: 0,
+            local_box: true,
+            pi_bin: String::new(),
+            prime_bin: String::new(),
+            claude_bin: String::new(),
+            pi_ext_override: None,
+            device_id: "box:test".into(),
+            default_talking_model: "m".into(),
+            default_subagent_model: "m".into(),
+            legacy_project_id: None,
+        };
+        let cfg = Arc::new(bx.workspace(&json!({ "id": "01MPROJ", "name": "Doug" }), 0));
+        let llm = Arc::new(Llm::new(&cfg));
+        let memory = Memory::new(cfg, store.clone(), llm);
+        let name_id = store
+            .memory_add(
+                "T1",
+                None,
+                "user",
+                "user",
+                "The user's name is Const.",
+                None,
+                Some(1),
+                0.9,
+                8,
+                &[],
+            )
+            .unwrap();
+        let keep_id = store
+            .memory_add(
+                "T1",
+                None,
+                "feedback",
+                "user",
+                "The user wants emails drafted and shown for review.",
+                None,
+                Some(1),
+                0.9,
+                8,
+                &[],
+            )
+            .unwrap();
+        let named_id = store
+            .memory_add(
+                "T1",
+                None,
+                "decision",
+                "project",
+                "Const wants the roleplay kept up.",
+                None,
+                Some(1),
+                0.9,
+                7,
+                &[],
+            )
+            .unwrap();
+        memory.set_owner_names(vec!["Jacob".into(), "Const".into()]);
+        assert_eq!(memory.purge_user_name_memories(), 2);
+        assert_eq!(
+            store
+                .memory_by_ids(std::slice::from_ref(&named_id))
+                .unwrap()[0]
+                .text,
+            "the owner wants the roleplay kept up."
+        );
+        let live: Vec<String> = store
+            .memory_live("T1", None, 50)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert!(!live.contains(&name_id), "the name record is superseded");
+        assert!(live.contains(&keep_id), "a real preference stays");
+        assert!(live.contains(&named_id), "a rewritten record stays live");
+        assert_eq!(memory.purge_user_name_memories(), 0, "idempotent");
+        assert!(!memory.core_memory_text().contains("Const"));
+        assert!(WRITE_SYSTEM.contains("Never store the user's name, handle or how to address them"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

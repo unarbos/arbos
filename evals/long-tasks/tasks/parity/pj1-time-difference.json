@@ -1,0 +1,35 @@
+{
+  "id": "pj1-time-difference",
+  "lane": "a",
+  "category": "parity",
+  "categories": [
+    "parity",
+    "quick-fact-live"
+  ],
+  "title": "Jacob Q1: Costa Rica vs London right now",
+  "parity": true,
+  "timeout_s": 120,
+  "settle_s": 12,
+  "turns": [
+    {
+      "prompt": "What's the time difference between Costa Rica and London right now?",
+      "shape": {
+        "messages_min": 1,
+        "messages_max": 2,
+        "ack_first": false,
+        "table": false,
+        "links_min": 0,
+        "offer": false,
+        "first_bubble_max_s": 5,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": false
+      },
+      "reply_regex": "\\b(6|7|six|seven)\\b.*hour",
+      "judge": {
+        "criteria": "Baseline: 'London is 7 hours ahead of you right now … The UK clocks go back tonight … so from tomorrow the difference drops to 6 hours.' Pass marks: speaks to the user ('ahead of you'), gives the difference for this moment, notes a clock change if one is within a day. No handle, no generic rule only."
+      }
+    }
+  ],
+  "baseline": "baselines/grok/pj1-time-difference.md"
+}

@@ -1,0 +1,172 @@
+{
+ "meta": {
+  "run_id": "20261024T1950-b7",
+  "started_at": "2026-10-24T19:47:55Z",
+  "image": "arbos-agent-0.1.116",
+  "agentd": "arbos-agentd 0.6.212",
+  "provider": "gvisor",
+  "user": "test_01M5JHWC586GYNTC3KCZZKS7NF",
+  "projects": {
+   "c": "01M5JHWMV6VQA2RXCAHDS5XDJQ"
+  },
+  "tasks": 1,
+  "budget_usd": 8.0,
+  "spent_today_at_start": 1.581862431,
+  "judge_model": "anthropic/claude-haiku-5.5",
+  "ended_at": "2026-10-24T19:50:54Z",
+  "spent_today_at_end": 1.76773643,
+  "run_cost_usd": 0.1859,
+  "judge_cost_usd": 0.0001
+ },
+ "summary": {
+  "tasks": 1,
+  "run": 1,
+  "passed": 0,
+  "failed": 1,
+  "skipped": 0,
+  "pass_pct": 0.0,
+  "ttfr_p50_s": 2.58,
+  "ttfr_all_p50_s": 2.58,
+  "total_p50_s": 178.4,
+  "tool_errors": 0,
+  "stalls": 0,
+  "cost_usd": 0.1807,
+  "run_cost_usd": 0.1859,
+  "judge_cost_usd": 0.0001,
+  "categories": {
+   "background": {
+    "tasks": 1,
+    "passed": 0,
+    "pass_pct": 0.0
+   }
+  }
+ },
+ "results": [
+  {
+   "task": "b7-steer-mid-task",
+   "title": "Steer a running foreground task mid-way: the working row shows the steer within 5 s and the result applies it",
+   "category": "background",
+   "categories": [
+    "background"
+   ],
+   "lane": "c",
+   "regression": "steer path: the working row's activity changes within 5 s of a steer (agentd post_activity 'Steering: \u2026'), result applied (bc-d117b386 #1598)",
+   "success": false,
+   "reasons": [
+    "t2: the working row's activity did not change within 5 s of the steer (changed at None, text None)",
+    "t3: reply matches forbidden /\\b40\\b(?! to 20)/"
+   ],
+   "ttfr_s": 2.58,
+   "first_seen_s": 0.55,
+   "route_t1": "reply",
+   "ttfr_all_s": [
+    2.58,
+    7.0,
+    0.37
+   ],
+   "total_s": 178.4,
+   "tool_errors": 0,
+   "stalls": 0,
+   "cost_usd": 0.180654,
+   "judge_usd": 6e-05,
+   "relay": {
+    "calls": 44,
+    "input": 344914,
+    "output": 16687,
+    "cache_read": 215873,
+    "cache_write": 111882,
+    "usd": 0.180654
+   },
+   "rubric_min": 5,
+   "turns": [
+    {
+     "turn": 1,
+     "chat_id": "01M5QQ997B5G04KZ4RT1TGM6GB",
+     "prompt": "Run this in the foreground and wait for it (do not background it, do not delete anything): write the numbers 1 to 40 to /work/01M5JHWMV6VQA2RXCAHDS5XDJQ/lt-b7-steer-mid-task-20261024T1950-b7/count.txt, one per line, one number every 3 seconds. When it finishes, tell me the last number written.",
+     "ok": true,
+     "reasons": [],
+     "ttfr_s": 2.58,
+     "first_status_s": 0.55,
+     "wall_s": 11.0,
+     "timed_out": false,
+     "stalls": 0,
+     "approvals_rejected": [],
+     "routes": [],
+     "tool_calls": 2,
+     "tool_errors": 0,
+     "model_calls": 1,
+     "compactions": 0,
+     "audit_denied": 0,
+     "rubric": null,
+     "truth": {},
+     "verify_out": "",
+     "reply": "",
+     "excerpt": "**User:** Run this in the foreground and wait for it (do not background it, do not delete anything): write the numbers 1 to 40 to /work/01M5JHWMV6VQA2RXCAHDS5XDJQ/lt-b7-steer-mid-task-20261024T1950-b7/count.txt, one per line, one number every 3 seconds. When it finishes, tell me the last number written.\n\n**Assistant** (result, route=None, status=streaming)\n\nmain-agent tool calls: route, bash (errors 0)"
+    },
+    {
+     "turn": 2,
+     "chat_id": "01M5QQ997B5G04KZ4RT1TGM6GB",
+     "prompt": "Change of plan: stop at 20, not 40. Please apply that to the run that is going now.",
+     "ok": false,
+     "reasons": [
+      "the working row's activity did not change within 5 s of the steer (changed at None, text None)"
+     ],
+     "ttfr_s": 7.0,
+     "first_status_s": 4.32,
+     "wall_s": 15.8,
+     "timed_out": false,
+     "stalls": 0,
+     "approvals_rejected": [],
+     "routes": [],
+     "tool_calls": 2,
+     "tool_errors": 0,
+     "model_calls": 1,
+     "compactions": 0,
+     "audit_denied": 0,
+     "rubric": {
+      "score": 5,
+      "reason": "Reply is empty, which the criteria explicitly treat as a pass; no statement that the run cannot be changed and no contradicting result is shown.",
+      "usd": 6.5e-05
+     },
+     "truth": {
+      "activity_changed_s": null,
+      "activity_text": ""
+     },
+     "verify_out": "",
+     "reply": "",
+     "excerpt": "**User:** Change of plan: stop at 20, not 40. Please apply that to the run that is going now.\n\n**Assistant** (result, route=None, status=streaming) tools: ipython\n\nmain-agent tool calls: route, bash (errors 0)"
+    },
+    {
+     "turn": 3,
+     "chat_id": "01M5QQ997B5G04KZ4RT1TGM6GB",
+     "prompt": "Done? What was the last number?",
+     "ok": false,
+     "reasons": [
+      "reply matches forbidden /\\b40\\b(?! to 20)/"
+     ],
+     "ttfr_s": 0.37,
+     "first_status_s": 0.37,
+     "wall_s": 6.8,
+     "timed_out": false,
+     "stalls": 0,
+     "approvals_rejected": [],
+     "routes": [
+      "reply"
+     ],
+     "tool_calls": 1,
+     "tool_errors": 0,
+     "model_calls": 1,
+     "compactions": 0,
+     "audit_denied": 0,
+     "rubric": null,
+     "truth": {},
+     "verify_out": "SHOW lines=20 last=20\nPASS\n",
+     "reply": "Yes, it stopped at 20. The last number written is **20**, and `lt-b7-steer-mid-task-20261024T1950-b7/count.txt` has 20 lines. No `finished.flag` was written because the run did not reach 40. Nothing was deleted or overwritten.",
+     "excerpt": "**User:** Done? What was the last number?\n\n**Assistant** (result, route=reply, status=done)\n\nYes, it stopped at 20. The last number written is **20**, and `lt-b7-steer-mid-task-20261024T1950-b7/count.txt` has 20 lines. No `finished.flag` was written because the run did not reach 40. Nothing was deleted or overwritten.\n\nmain-agent tool calls: route (errors 0)"
+    }
+   ],
+   "background": null,
+   "dir": "/work/01M5JHWMV6VQA2RXCAHDS5XDJQ/lt-b7-steer-mid-task-20261024T1950-b7"
+  }
+ ]
+}

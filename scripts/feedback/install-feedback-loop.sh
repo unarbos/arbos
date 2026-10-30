@@ -43,6 +43,19 @@ while [[ $# -gt 0 ]]; do
 done
 [[ $EUID -eq 0 ]] || { echo "run as root (sudo -E)" >&2; exit 1; }
 
+# Only committed, pushed code is installed (2026-10-23: an operator copy carried never-committed code once
+# and lagged the committed head once). The tree under scripts/feedback must be clean and HEAD must exist on
+# the remote. ALLOW_DIRTY=1 overrides for a bench. On a host without a checkout use install-poller.sh.
+if [[ "${ALLOW_DIRTY:-0}" != 1 ]] && git -C "$HERE" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  dirty=$(git -C "$HERE" status --porcelain -- . | head -n 5)
+  [[ -z "$dirty" ]] || { printf 'scripts/feedback has uncommitted changes; commit and push first (ALLOW_DIRTY=1 to override):\n%s\n' "$dirty" >&2; exit 1; }
+  head=$(git -C "$HERE" rev-parse HEAD)
+  git -C "$HERE" fetch -q origin 2>/dev/null || true
+  if ! git -C "$HERE" branch -r --contains "$head" 2>/dev/null | grep -q .; then
+    echo "HEAD ${head:0:9} is not on any remote branch; push first (ALLOW_DIRTY=1 to override)" >&2; exit 1
+  fi
+fi
+
 say() { printf '\n==> %s\n' "$*"; }
 
 say "python"

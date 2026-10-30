@@ -1,39 +1,39 @@
 {
-  "id": "h1-people-chat-coordination",
-  "lane": "a",
-  "category": "group",
-  "title": "In a DM between two people with the agent added: the peer asks, the owner confirms, the agent acts for both",
-  "turns": [
-    {
-      "prompt": "Hi — I'm the owner. My colleague is in this chat too. Please take the meeting notes we post here and keep a running summary in {D}/dm-notes.md.",
-      "chat": "dm",
-      "seed": "mkdir -p {D}",
-      "reply_regex": "\\w",
-      "timeout_s": 180
-    },
-    {
-      "prompt": "[peer] @lane-a note from me: we agreed the launch date is 12 November and Priya owns the checklist. Please add it to the summary.",
-      "chat": "dm",
-      "peer": true,
-      "verify": "f={D}/dm-notes.md; test -f $f && grep -q 'November' $f && grep -qi priya $f && echo PASS || echo FAIL: peer note not in the summary",
-      "timeout_s": 240
-    },
-    {
-      "prompt": "Read the summary back to us, and say who posted the launch-date note.",
-      "chat": "dm",
-      "reply_regex": "12 November[\\s\\S]*Priya|Priya[\\s\\S]*12 November",
-      "rubric": {
-        "criteria": "The agent kept notes from both people and attributes the launch-date note to the colleague / second person (NOT to the owner who is asking); it reads the summary back accurately. Attributing the note to the owner scores 0.",
-        "min": 3
-      },
-      "timeout_s": 180
-    }
-  ],
-  "setup_actions": [
-    {
-      "kind": "people_dm",
-      "peer_handle": "lt-peer"
-    }
-  ],
-  "regression": "D72 people chats with an agent member: two humans, one agent"
+ "id": "h1-people-chat-coordination",
+ "lane": "a",
+ "category": "group",
+ "title": "In a DM between two people with the agent added: the peer asks, the owner confirms, the agent acts for both",
+ "turns": [
+  {
+   "prompt": "Hi — I'm the owner. My colleague is in this chat too. Please take the meeting notes we post here and keep a running summary in {D}/dm-notes.md.",
+   "chat": "dm",
+   "seed": "mkdir -p {D}",
+   "reply_regex": "\\w",
+   "timeout_s": 180
+  },
+  {
+   "prompt": "[peer] @lane-a note from me: we agreed the launch date is 12 November and Priya owns the checklist. Please add it to the summary.",
+   "chat": "dm",
+   "peer": true,
+   "verify": "f={D}/dm-notes.md; test -f $f && grep -q 'November' $f && grep -qi priya $f && echo PASS || echo FAIL: peer note not in the summary",
+   "timeout_s": 240
+  },
+  {
+   "prompt": "Read the summary back to us, and say who posted the launch-date note.",
+   "chat": "dm",
+   "reply_regex": "12 November[\\s\\S]*Priya|Priya[\\s\\S]*12 November",
+   "rubric": {
+    "criteria": "The agent attributes the launch-date note to the colleague / second person (by handle or display name such as 'Long-task eval peer' — NOT to the owner who is asking) and reads the summary back accurately. Attributing it to the owner scores 0; naming the peer by any of their identifiers is a full pass.",
+    "min": 3
+   },
+   "timeout_s": 180
+  }
+ ],
+ "setup_actions": [
+  {
+   "kind": "people_dm",
+   "peer_handle": "lt-peer"
+  }
+ ],
+ "regression": "D72 people chats with an agent member: two humans, one agent; #2069 was a harness artefact (arbosctl replay); re-graded PASS on 0.1.163"
 }

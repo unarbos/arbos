@@ -39,7 +39,7 @@ pub enum NotifyKind {
 impl NotifyKind {
     /// A message from someone (agent reply or a person's line): the banner is
     /// titled with the sender, like a chat app, not with the event.
-    fn is_message(self) -> bool {
+    pub fn is_message(self) -> bool {
         matches!(
             self,
             NotifyKind::TurnFinished | NotifyKind::DirectMessage | NotifyKind::CrossProject
@@ -93,6 +93,29 @@ impl NotifyEvent {
             image: None,
         }
     }
+}
+
+/// A message in a group: the banner is titled with the group and names the sender in the
+/// body — "Arbonites" / "Doug: Five." — the same shape as the iPhone and the relay's APNs
+/// payload (2026-10-27). Returns `(title, body)`.
+pub fn group_frame(group: &str, sender: &str, detail: &str) -> (String, String) {
+    (group.to_owned(), format!("{sender}: {detail}"))
+}
+
+/// A server channel message: "Server › #channel" / "Sender: text".
+pub fn channel_frame(
+    server: &str,
+    channel: &str,
+    sender: &str,
+    text: Option<&str>,
+) -> (String, String) {
+    (
+        format!("{server} › #{channel}"),
+        format!(
+            "{sender}: {}",
+            text.filter(|t| !t.is_empty()).unwrap_or("New message")
+        ),
+    )
 }
 
 /// What actually reaches the OS.
@@ -338,6 +361,37 @@ pub fn push_click(chat_id: String) {
     clicks().lock().unwrap().push(chat_id);
 }
 
+/// The chat was read — here or on another device of the user (clear-on-read): every
+/// notification of that thread leaves Notification Center. Call banners are not touched
+/// (`withdraw_call` owns those). No-op where the platform keeps no delivered list.
+pub fn withdraw_chat(chat_id: &str) {
+    if chat_id.is_empty() {
+        return;
+    }
+    if std::env::var_os("ARBOS_NOTIFY_DRY_RUN").is_some() {
+        eprintln!("notify: withdraw chat {chat_id}");
+    } else {
+        #[cfg(target_os = "macos")]
+        if mac::available() {
+            mac::withdraw_chat(chat_id);
+        }
+    }
+}
+
+/// Which delivered request identifiers a read of `chat_id` withdraws: the chat's message
+/// banners (`chat:<id>:<stamp>`) and nothing else — not another chat's, not a call's.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn withdrawn_ids<'a>(chat_id: &str, ids: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let prefix = format!("chat:{chat_id}:");
+    ids.into_iter()
+        .filter(|id| {
+            id.strip_prefix(&prefix)
+                .is_some_and(|stamp| !stamp.contains(':'))
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
 /// The app's unread badge. `0` clears it. Dock icon on macOS; elsewhere only
 /// remembered (the rail already shows the per-project counts).
 pub fn set_badge(total: usize) {
@@ -354,11 +408,13 @@ pub fn set_badge(total: usize) {
     let _ = total;
 }
 
-/// Install the notification-center delegate (clicks, foreground banners).
-/// Call once on the main thread at start-up; a no-op off macOS.
+/// Install the notification-center delegate (clicks, foreground banners) and
+/// ask the OS where we stand on permission. Call once on the main thread at
+/// start-up; off macOS only the permission answer is recorded.
 pub fn init() {
     #[cfg(target_os = "macos")]
     mac::init();
+    refresh_permission();
 }
 
 /// Does this platform ask the user before showing notifications?
@@ -376,22 +432,114 @@ pub fn needs_permission() -> bool {
     }
 }
 
-const ASKED_MARK: &str = "notifications-asked";
-
-/// Has the one-time explainer already been shown (any answer)?
-pub fn permission_asked(config_dir: &Path) -> bool {
-    config_dir.join(ASKED_MARK).is_file()
+/// What the OS says about our permission to post notifications. The app used
+/// to remember only "the explainer was shown once" in a marker file, so a
+/// "Not now" (or a build before the explainer existed) left macOS undecided
+/// for good and every banner failed with "notifications are not allowed" on
+/// stderr — the cause of "no Mac notifications" reports. The system's own
+/// answer is the only state that counts now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Permission {
+    /// The OS has not answered yet (asked at start-up; a few ms).
+    Unknown,
+    /// Never asked, or asked and dismissed without an answer: ask again.
+    NotDetermined,
+    /// The user said no in the system prompt or turned us off in System Settings.
+    Denied,
+    Allowed,
 }
 
-pub fn mark_permission_asked(config_dir: &Path) {
-    let _ = std::fs::create_dir_all(config_dir);
-    let _ = std::fs::write(config_dir.join(ASKED_MARK), b"1");
+static PERMISSION: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn permission() -> Permission {
+    match PERMISSION.load(Ordering::Relaxed) {
+        1 => Permission::NotDetermined,
+        2 => Permission::Denied,
+        3 => Permission::Allowed,
+        _ => Permission::Unknown,
+    }
+}
+
+fn set_permission(p: Permission) {
+    let v = match p {
+        Permission::Unknown => 0,
+        Permission::NotDetermined => 1,
+        Permission::Denied => 2,
+        Permission::Allowed => 3,
+    };
+    PERMISSION.store(v, Ordering::Relaxed);
+}
+
+/// Ask the OS again (asynchronous on macOS; the answer lands in [`permission`]).
+pub fn refresh_permission() {
+    if std::env::var_os("ARBOS_NOTIFY_PROMPT").is_some() {
+        // Rigs: the explainer shows until Allow / Not now is clicked.
+        if permission() == Permission::Unknown {
+            set_permission(Permission::NotDetermined);
+        }
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if mac::available() {
+            mac::refresh_permission();
+            return;
+        }
+    }
+    // osascript / notify-send: nothing to ask.
+    set_permission(Permission::Allowed);
 }
 
 /// Show the system permission prompt (macOS). Elsewhere nothing to ask.
 pub fn request_permission() {
     #[cfg(target_os = "macos")]
-    mac::request_authorization();
+    {
+        if mac::available() {
+            mac::request_authorization();
+            return;
+        }
+    }
+    set_permission(Permission::Allowed);
+}
+
+const ASKED_MARK: &str = "notifications-asked";
+const SNOOZE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+
+/// "Not now" on the explainer snoozes it for a day (the marker's age); macOS
+/// stays undecided, so after that the card comes back — before this the
+/// marker was permanent and one "Not now" meant no banners ever. Rigs write
+/// the marker fresh before each run to keep the card out of screenshots.
+pub fn prompt_snoozed(config_dir: &Path) -> bool {
+    std::fs::metadata(config_dir.join(ASKED_MARK))
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age < SNOOZE)
+}
+
+pub fn snooze_prompt(config_dir: &Path) {
+    let _ = std::fs::create_dir_all(config_dir);
+    let _ = std::fs::write(config_dir.join(ASKED_MARK), b"1");
+}
+
+/// The user said "Not now": the OS stays undecided; this launch stays quiet.
+pub fn permission_dismissed(config_dir: &Path) {
+    snooze_prompt(config_dir);
+    if std::env::var_os("ARBOS_NOTIFY_PROMPT").is_some() {
+        set_permission(Permission::Denied);
+    }
+}
+
+/// System Settings → Notifications → Arbos (the only place a denied
+/// permission can be turned back on).
+pub fn open_system_settings() {
+    #[cfg(target_os = "macos")]
+    {
+        let bundle = mac::bundle_id().unwrap_or_else(|| "sh.arbos.mac".to_string());
+        spawn_quiet(Command::new("open").arg(format!(
+            "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id={bundle}"
+        )));
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -509,6 +657,7 @@ fn applescript_escape(s: &str) -> String {
 #[cfg(target_os = "macos")]
 mod mac {
     use std::cell::RefCell;
+    use std::ptr::NonNull;
     use std::sync::atomic::{AtomicU8, Ordering};
 
     use block2::RcBlock;
@@ -521,10 +670,11 @@ mod mac {
         NSArray, NSBundle, NSError, NSObject, NSObjectProtocol, NSString, NSURL,
     };
     use objc2_user_notifications::{
-        UNAuthorizationOptions, UNMutableNotificationContent, UNNotification, UNNotificationAction,
-        UNNotificationActionOptions, UNNotificationAttachment, UNNotificationCategory,
-        UNNotificationCategoryOptions, UNNotificationPresentationOptions, UNNotificationRequest,
-        UNNotificationResponse, UNNotificationSound, UNUserNotificationCenter,
+        UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent,
+        UNNotification, UNNotificationAction, UNNotificationActionOptions,
+        UNNotificationAttachment, UNNotificationCategory, UNNotificationCategoryOptions,
+        UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
+        UNNotificationSettings, UNNotificationSound, UNUserNotificationCenter,
         UNUserNotificationCenterDelegate,
     };
 
@@ -696,7 +846,11 @@ mod mac {
             if !error.is_null() {
                 // SAFETY: non-null NSError* handed to the completion block.
                 let error = unsafe { &*error };
-                eprintln!("notify: call: {}", error.localizedDescription());
+                log::warn!(
+                    "notify: call banner refused: {}",
+                    error.localizedDescription()
+                );
+                refresh_permission();
             }
         });
         UNUserNotificationCenter::currentNotificationCenter()
@@ -730,6 +884,54 @@ mod mac {
             RefCell::new(std::collections::HashMap::new());
     }
 
+    /// Every delivered message banner of `chat_id` (identifiers `chat:<id>:<stamp>`, which
+    /// survive relaunches — the center's list is the source, not an in-memory map) is
+    /// removed. The list arrives on a background queue; the removal is thread-safe.
+    pub fn withdraw_chat(chat_id: &str) {
+        let chat_id = chat_id.to_owned();
+        let handler = RcBlock::new(move |list: NonNull<NSArray<UNNotification>>| {
+            // SAFETY: the center hands a live array to the block.
+            let list = unsafe { list.as_ref() };
+            let ids: Vec<String> = list
+                .iter()
+                .map(|n| n.request().identifier().to_string())
+                .collect();
+            let doomed = super::withdrawn_ids(&chat_id, ids.iter().map(String::as_str));
+            if doomed.is_empty() {
+                return;
+            }
+            let arr: Vec<Retained<NSString>> =
+                doomed.iter().map(|s| NSString::from_str(s)).collect();
+            UNUserNotificationCenter::currentNotificationCenter()
+                .removeDeliveredNotificationsWithIdentifiers(&NSArray::from_retained_slice(&arr));
+        });
+        UNUserNotificationCenter::currentNotificationCenter()
+            .getDeliveredNotificationsWithCompletionHandler(&handler);
+    }
+
+    pub fn bundle_id() -> Option<String> {
+        NSBundle::mainBundle()
+            .bundleIdentifier()
+            .map(|s| s.to_string())
+    }
+
+    /// `getNotificationSettings`: the answer arrives on a background queue and
+    /// is kept in the crate-level [`super::permission`].
+    pub fn refresh_permission() {
+        let handler = RcBlock::new(|settings: NonNull<UNNotificationSettings>| {
+            // SAFETY: the center hands a live settings object to the block.
+            let status = unsafe { settings.as_ref() }.authorizationStatus();
+            let p = match status {
+                UNAuthorizationStatus::NotDetermined => super::Permission::NotDetermined,
+                UNAuthorizationStatus::Denied => super::Permission::Denied,
+                _ => super::Permission::Allowed,
+            };
+            super::set_permission(p);
+        });
+        UNUserNotificationCenter::currentNotificationCenter()
+            .getNotificationSettingsWithCompletionHandler(&handler);
+    }
+
     pub fn request_authorization() {
         if !available() {
             return;
@@ -738,8 +940,13 @@ mod mac {
             if !granted.as_bool() && !error.is_null() {
                 // SAFETY: non-null NSError* handed to the completion block.
                 let error = unsafe { &*error };
-                eprintln!("notify: permission: {}", error.localizedDescription());
+                log::warn!("notify: permission: {}", error.localizedDescription());
             }
+            super::set_permission(if granted.as_bool() {
+                super::Permission::Allowed
+            } else {
+                super::Permission::Denied
+            });
         });
         UNUserNotificationCenter::currentNotificationCenter()
             .requestAuthorizationWithOptions_completionHandler(
@@ -790,7 +997,10 @@ mod mac {
             if !error.is_null() {
                 // SAFETY: non-null NSError* handed to the completion block.
                 let error = unsafe { &*error };
-                eprintln!("notify: {}", error.localizedDescription());
+                // "Notifications are not allowed for this application" = the
+                // permission went missing; re-read it so Settings shows why.
+                log::warn!("notify: banner refused: {}", error.localizedDescription());
+                refresh_permission();
             }
         });
         UNUserNotificationCenter::currentNotificationCenter()
@@ -969,6 +1179,45 @@ mod tests {
         let other = NotifyEvent::new("arbos", "Arbos", NotifyKind::RoutineRan, "Morning digest");
         assert!(c.offer(ev(NotifyKind::TurnFinished, "a"), 0, OFF).is_some());
         assert!(c.offer(other, 1, OFF).is_some());
+    }
+
+    /// Clear-on-read withdraws exactly the chat's message banners: not another chat's that
+    /// shares a prefix, not a call banner, not a project event.
+    #[test]
+    fn withdraw_picks_only_the_chats_message_banners() {
+        let delivered = [
+            "chat:01ABC:1700000000000",
+            "chat:01ABC:1700000005000",
+            "chat:01ABCD:1700000000000",
+            "chat:01XYZ:1700000000000",
+            "call:c1:01ABC",
+            "event:p1:1700000000000",
+        ];
+        assert_eq!(
+            withdrawn_ids("01ABC", delivered),
+            vec!["chat:01ABC:1700000000000", "chat:01ABC:1700000005000"]
+        );
+        assert!(withdrawn_ids("", delivered).is_empty());
+        assert!(withdrawn_ids("01NOPE", delivered).is_empty());
+    }
+
+    #[test]
+    fn group_and_channel_banners_say_where_the_message_is_from() {
+        let (title, body) = group_frame("Arbonites", "Doug", "Five.");
+        assert_eq!(title, "Arbonites");
+        assert_eq!(body, "Doug: Five.");
+        let (title, body) = channel_frame("Arbos HQ", "general", "@sam", Some("ping"));
+        assert_eq!(title, "Arbos HQ › #general");
+        assert_eq!(body, "@sam: ping");
+        let (_, body) = channel_frame("Arbos HQ", "general", "@sam", None);
+        assert_eq!(body, "@sam: New message");
+        // Through the coalescer: the group is the title, the sender stays in the body.
+        let mut c = Coalescer::default();
+        let mut e = ev(NotifyKind::DirectMessage, &body);
+        e.sender = Some(title.clone());
+        let n = c.offer(e, 0, OFF).unwrap();
+        assert_eq!(n.title, "Arbos HQ › #general");
+        assert_eq!(n.body, "@sam: New message");
     }
 
     #[test]

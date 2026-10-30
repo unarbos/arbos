@@ -19,7 +19,7 @@ use crate::config::{BoxConfig, Config};
 use crate::isolation::Isolation;
 use crate::store::Store;
 use crate::sync::{Incoming, SyncHub};
-use crate::{hooks, http, mcp};
+use crate::{hooks, http, mcp, sites};
 
 /// Subagents running at once across the whole box (4 per workspace, see `agent.rs`).
 pub const BOX_MAX_SUBAGENTS: usize = 8;
@@ -32,6 +32,55 @@ pub struct Workspace {
     pub agent: Arc<Agent>,
     pub started_at: i64,
     tasks: Vec<tokio::task::JoinHandle<()>>,
+    /// A detached `sync_chats` is running for this workspace (#2127): the next registry pass
+    /// does not start a second one on top of it.
+    chats_syncing: std::sync::atomic::AtomicBool,
+}
+
+/// How long one relay call inside the registry pass may take before the pass moves on
+/// (#2127: a call with no bound stalled the whole pass for 9 minutes, and with it the room of a
+/// chat the user had just opened). The next poll, 3 s later, tries again.
+pub const REGISTRY_CALL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Run one registry-pass refresh under [`REGISTRY_CALL_TIMEOUT`]; `None` when it timed out.
+pub(crate) async fn bounded<T>(
+    what: &'static str,
+    project: &str,
+    f: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    bounded_by(REGISTRY_CALL_TIMEOUT, what, project, f).await
+}
+
+pub(crate) async fn bounded_by<T>(
+    limit: Duration,
+    what: &'static str,
+    project: &str,
+    f: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    match tokio::time::timeout(limit, f).await {
+        Ok(v) => Some(v),
+        Err(_) => {
+            tracing::warn!(
+                project,
+                what,
+                "registry refresh timed out; the pass moves on"
+            );
+            None
+        }
+    }
+}
+
+/// One registry pass for a workspace the relay listed (#2127): the rooms of new chats are
+/// opened on their own task FIRST, then the refreshes run, each bounded, so no refresh — slow
+/// or stalled — can delay a new chat beyond the poll interval. `open_rooms` is what opens
+/// the rooms; `refresh` is everything else the pass does for the workspace.
+pub(crate) async fn registry_pass<O, R>(open_rooms: O, refresh: R)
+where
+    O: std::future::Future<Output = ()> + Send + 'static,
+    R: std::future::Future<Output = ()>,
+{
+    tokio::spawn(open_rooms);
+    refresh.await;
 }
 
 pub struct Supervisor {
@@ -114,18 +163,27 @@ impl Supervisor {
             if let Some(owner) = project.get("user_id").and_then(Value::as_str) {
                 w.agent.people.set_project_owner(owner);
             }
-            // Settings and chats change without a restart.
-            if let Err(e) = w.agent.settings_from_relay(project, chats).await {
-                tracing::warn!(project = %project_id, error = %e, "settings from relay");
-            }
-            w.sync_chats(chats).await;
+            // New chats first, on their own task; then settings and skills, each bounded
+            // (#2127: one stalled refresh must not keep a just-opened chat unanswered).
             let rev_moved = project
                 .get("skills_rev")
                 .and_then(Value::as_str)
                 .is_some_and(|r| r != w.agent.skills.rev());
-            if rev_moved || w.agent.skills.is_stale() {
-                w.agent.refresh_skills().await;
-            }
+            let refresh = async {
+                if let Some(Err(e)) = bounded(
+                    "settings",
+                    &project_id,
+                    w.agent.settings_from_relay(project, chats),
+                )
+                .await
+                {
+                    tracing::warn!(project = %project_id, error = %e, "settings from relay");
+                }
+                if rev_moved || w.agent.skills.is_stale() {
+                    bounded("skills", &project_id, w.agent.refresh_skills()).await;
+                }
+            };
+            registry_pass(w.clone().sync_chats_detached(chats.to_vec()), refresh).await;
             return Ok(w);
         }
         let index = self
@@ -170,6 +228,9 @@ impl Supervisor {
         let stub_l = tokio::net::TcpListener::bind(("127.0.0.1", cfg.proxy_port))
             .await
             .context("bind proxy stub port")?;
+        let sites_l = tokio::net::TcpListener::bind(("127.0.0.1", cfg.sites_port))
+            .await
+            .context("bind sites preview port")?;
         let mut tasks = Vec::new();
         let (hook_app, mcp_app, stub_app) = (
             hooks::router(agent.clone()),
@@ -184,6 +245,10 @@ impl Supervisor {
         }));
         tasks.push(tokio::spawn(async move {
             axum::serve(stub_l, stub_app).await.ok();
+        }));
+        let sites_app = sites::preview_router(agent.clone());
+        tasks.push(tokio::spawn(async move {
+            axum::serve(sites_l, sites_app).await.ok();
         }));
 
         let mut forks: Vec<(String, String)> = Vec::new();
@@ -258,6 +323,9 @@ impl Supervisor {
         agent.spawn_goals_poller();
         if let Err(e) = crate::vault::refresh_all(&agent).await {
             tracing::info!(project = %project_id, error = %e, "secrets: no grants yet");
+        }
+        if let Err(e) = agent.refresh_shell_grants().await {
+            tracing::info!(project = %project_id, error = %e, "shell grants: none yet");
         }
         tasks.push(agent.spawn_tree_builder());
 
@@ -348,6 +416,7 @@ impl Supervisor {
             agent,
             started_at: now,
             tasks,
+            chats_syncing: std::sync::atomic::AtomicBool::new(false),
         });
         self.workspaces
             .write()
@@ -451,7 +520,44 @@ impl Supervisor {
                 .unwrap_or_default();
             match self.ensure_workspace(project, &chats, &pushes).await {
                 Ok(w) => {
-                    w.agent.note_people_chats(&people_chats, true).await;
+                    // The owner's profile (address name) rides on every listing: the agent
+                    // addresses the owner from it, live, never from a row's `senderName`.
+                    if let Some(o) = e.get("owner").or_else(|| listing.get("owner")) {
+                        let before = w.agent.people.owner_profile();
+                        w.agent.people.set_owner_profile(o);
+                        if w.agent.people.owner_profile() != before {
+                            // The prompt's "Your owner" section follows the profile; the pi
+                            // session re-reads it (at once when idle, else after the turn).
+                            bounded(
+                                "owner profile",
+                                &w.project_id,
+                                w.agent.refresh_session_prompt("owner profile changed"),
+                            )
+                            .await;
+                        }
+                        let names: Vec<String> = ["address_name", "name"]
+                            .iter()
+                            .filter_map(|k| o.get(*k).and_then(Value::as_str))
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_owned)
+                            .chain(
+                                o.get("former_names")
+                                    .and_then(Value::as_array)
+                                    .into_iter()
+                                    .flatten()
+                                    .filter_map(Value::as_str)
+                                    .map(str::to_owned),
+                            )
+                            .collect();
+                        w.agent.memory.set_owner_names(names);
+                    }
+                    bounded(
+                        "people chats",
+                        &w.project_id,
+                        w.agent.note_people_chats(&people_chats, true),
+                    )
+                    .await;
                     seen.push(w.project_id.clone());
                 }
                 Err(err) => {
@@ -515,41 +621,64 @@ impl Supervisor {
 }
 
 impl Workspace {
+    /// `sync_chats` as its own future for the registry pass (#2127): at most one in flight per
+    /// workspace; a pass that finds one running leaves the chats to it (the next pass, 3 s
+    /// later, brings the list again).
+    pub async fn sync_chats_detached(self: Arc<Self>, chats: Vec<Value>) {
+        use std::sync::atomic::Ordering;
+        if self
+            .chats_syncing
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+        self.sync_chats(&chats).await;
+        self.chats_syncing.store(false, Ordering::SeqCst);
+    }
+
     /// New chats from the registry get a room; titles land in the local index.
     /// A chat forked from another (#1257) is seeded from its source first.
     pub async fn sync_chats(&self, chats: &[Value]) {
         for c in chats {
-            if let Some(id) = c.get("id").and_then(Value::as_str) {
-                let first_sight = self.store.chat(id).ok().flatten().is_none();
-                let _ = self.store.upsert_chat(
-                    id,
-                    c.get("title").and_then(Value::as_str).unwrap_or("New chat"),
-                    c.get("is_pinned").and_then(Value::as_bool).unwrap_or(false),
-                    c.get("created_at").and_then(Value::as_i64).unwrap_or(0),
-                );
-                if self.sync.host(id).await.is_none() {
-                    if first_sight {
-                        if let Some(src) = c.get("forked_from").and_then(Value::as_str) {
-                            if let Err(e) = seed_forked_chat(
-                                &self.cfg,
-                                &self.store,
-                                &self.sync,
-                                &self.project_id,
-                                id,
-                                src,
-                            )
-                            .await
-                            {
-                                tracing::warn!(error = %e, id, source = src, "fork chat seed");
-                            }
-                        }
-                    }
-                    if let Err(e) = self.sync.open_room(id).await {
-                        tracing::warn!(error = %e, id, "open room");
-                    }
-                }
+            open_listed_chat(&self.cfg, &self.store, &self.sync, &self.project_id, c).await;
+        }
+    }
+}
+
+/// One chat as the relay lists it (`{id, title, is_pinned, created_at, forked_from?}`): record
+/// it and open its room unless the room is already open. Idempotent; shared by the registry
+/// pass and the relay's `chat_open` push (#2127), so a chat reaches the agent by whichever
+/// arrives first.
+pub(crate) async fn open_listed_chat(
+    cfg: &Config,
+    store: &Store,
+    sync: &SyncHub,
+    project_id: &str,
+    c: &Value,
+) {
+    let Some(id) = c.get("id").and_then(Value::as_str) else {
+        return;
+    };
+    let first_sight = store.chat(id).ok().flatten().is_none();
+    let _ = store.upsert_chat(
+        id,
+        c.get("title").and_then(Value::as_str).unwrap_or("New chat"),
+        c.get("is_pinned").and_then(Value::as_bool).unwrap_or(false),
+        c.get("created_at").and_then(Value::as_i64).unwrap_or(0),
+    );
+    if sync.host(id).await.is_some() {
+        return;
+    }
+    if first_sight {
+        if let Some(src) = c.get("forked_from").and_then(Value::as_str) {
+            if let Err(e) = seed_forked_chat(cfg, store, sync, project_id, id, src).await {
+                tracing::warn!(error = %e, id, source = src, "fork chat seed");
             }
         }
+    }
+    if let Err(e) = sync.open_room(id).await {
+        tracing::warn!(error = %e, id, "open room");
     }
 }
 
@@ -822,8 +951,27 @@ pub fn context_window_tokens() -> u64 {
 pub fn write_models_json(cfg: &Config, talking: &str, subagent: &str) -> Result<()> {
     let context_window = context_window_tokens();
     let mut window_overrides = serde_json::Map::new();
-    for id in [talking, subagent] {
-        window_overrides.insert(id.to_owned(), json!({ "contextWindow": context_window }));
+    // The research-job worker model (cost knob 1) must be in pi's catalog too; it is usually the
+    // talking model already, but a user may talk on another one.
+    let research = cfg.research_worker_model();
+    let mut ids = vec![talking, subagent];
+    if let Some(r) = research.as_deref() {
+        if !ids.contains(&r) {
+            ids.push(r);
+        }
+    }
+    for id in &ids {
+        window_overrides.insert((*id).to_owned(), json!({ "contextWindow": context_window }));
+    }
+    let mut relay_models = vec![
+        json!({ "id": talking, "name": format!("{talking} (relay)"), "reasoning": false, "input": ["text", "image"], "contextWindow": context_window, "maxTokens": 32000, "cost": { "input": 0.1, "output": 0.5, "cacheRead": 0.01, "cacheWrite": 0.125 } }),
+        json!({ "id": subagent, "name": format!("{subagent} (relay)"), "reasoning": true, "input": ["text", "image"], "contextWindow": context_window, "maxTokens": 64000, "cost": { "input": 2, "output": 10, "cacheRead": 0.2, "cacheWrite": 2.5 } }),
+    ];
+    if let Some(r) = research
+        .as_deref()
+        .filter(|r| *r != talking && *r != subagent)
+    {
+        relay_models.push(json!({ "id": r, "name": format!("{r} (relay)"), "reasoning": false, "input": ["text", "image"], "contextWindow": context_window, "maxTokens": 32000, "cost": { "input": 0.1, "output": 0.5, "cacheRead": 0.01, "cacheWrite": 0.125 } }));
     }
     let mut models = json!({
         "providers": {
@@ -832,10 +980,7 @@ pub fn write_models_json(cfg: &Config, talking: &str, subagent: &str) -> Result<
                 "baseUrl": format!("{}/v1", cfg.proxy_base()),
                 "api": "openai-completions",
                 "apiKey": cfg.box_token,
-                "models": [
-                    { "id": talking, "name": format!("{talking} (relay)"), "reasoning": false, "input": ["text", "image"], "contextWindow": context_window, "maxTokens": 32000, "cost": { "input": 0.1, "output": 0.5, "cacheRead": 0.01, "cacheWrite": 0.125 } },
-                    { "id": subagent, "name": format!("{subagent} (relay)"), "reasoning": true, "input": ["text", "image"], "contextWindow": context_window, "maxTokens": 64000, "cost": { "input": 2, "output": 10, "cacheRead": 0.2, "cacheWrite": 2.5 } }
-                ]
+                "models": relay_models
             }
         }
     });
@@ -895,18 +1040,49 @@ pub fn compact_at_tokens() -> u64 {
 /// seed, so an image roll updates `arbos-pi-ext` (and every other seed file) in a workspace that
 /// already exists. Before this, an existing workspace kept the extension of the image it was first
 /// created on — a copy-if-missing rule — and never saw later deny rules, hooks or guardrails.
+///
+/// A symlink in the seed stays a symlink in the workspace. `pi-seed/extensions/arbos-pi-ext/
+/// node_modules/{typebox,@earendil-works}` point at pi's own package tree; following them copied
+/// 18 000 files (119 MB) into every project and emptied the 131 072-inode work image of the
+/// lt-eval box after seven projects (2026-10-26, "disk full" at 87 %). A copy an earlier image
+/// made in place of a seed symlink is removed and replaced by the link.
 fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
     std::fs::create_dir_all(dst)?;
     for e in std::fs::read_dir(src)? {
         let e = e?;
         let p = e.path();
         let target = dst.join(e.file_name());
-        if p.is_dir() {
+        let meta = std::fs::symlink_metadata(&p)?;
+        if meta.file_type().is_symlink() {
+            seed_symlink(&p, &target)?;
+        } else if meta.is_dir() {
             copy_dir(&p, &target)?;
         } else if seed_file_differs(&p, &target) {
             std::fs::copy(&p, &target)?;
         }
     }
+    Ok(())
+}
+
+/// Recreate seed symlink `seed` at `target`: nothing to do when the same link is there already;
+/// a file or a (dereferenced) directory tree in its place is removed first.
+fn seed_symlink(seed: &std::path::Path, target: &std::path::Path) -> Result<()> {
+    let link = std::fs::read_link(seed)?;
+    match std::fs::symlink_metadata(target) {
+        Ok(m) if m.file_type().is_symlink() => {
+            if std::fs::read_link(target).ok().as_deref() == Some(link.as_path()) {
+                return Ok(());
+            }
+            std::fs::remove_file(target)?;
+        }
+        Ok(m) if m.is_dir() => {
+            tracing::warn!(target = %target.display(), "seed symlink was copied as a tree; replacing it with the link");
+            std::fs::remove_dir_all(target)?;
+        }
+        Ok(_) => std::fs::remove_file(target)?,
+        Err(_) => {}
+    }
+    std::os::unix::fs::symlink(&link, target)?;
     Ok(())
 }
 
@@ -926,6 +1102,61 @@ fn seed_file_differs(seed: &std::path::Path, target: &std::path::Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use super::{bounded, bounded_by, registry_pass, REGISTRY_CALL_TIMEOUT};
+
+    /// #2127: a refresh that stalls does not delay opening a new chat's room beyond one poll
+    /// interval — the rooms open on their own task, the refresh is bounded.
+    #[tokio::test]
+    async fn registry_pass_opens_rooms_before_a_stalled_refresh() {
+        let bound = Duration::from_millis(200);
+        let opened = Arc::new(std::sync::Mutex::new(None::<std::time::Instant>));
+        let o = opened.clone();
+        let open_rooms = async move {
+            *o.lock().unwrap() = Some(std::time::Instant::now());
+        };
+        let stalled = bounded_by(bound, "settings", "p1", async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+        let t0 = std::time::Instant::now();
+        registry_pass(open_rooms, async {
+            stalled.await;
+        })
+        .await;
+        let pass = t0.elapsed();
+        // The pass gave up on the stalled refresh at the bound, not at the stall's end (30 s)…
+        assert!(
+            pass >= bound && pass < Duration::from_secs(3),
+            "pass took {pass:?}"
+        );
+        // …and the rooms had opened on their own task, at once, not behind the refresh.
+        let at = opened.lock().unwrap().expect("rooms opened");
+        assert!(
+            at - t0 < Duration::from_millis(100),
+            "rooms opened after {:?}",
+            at - t0
+        );
+        assert!(
+            REGISTRY_CALL_TIMEOUT < Duration::from_secs(15),
+            "bound stays well under the relay's stale-box window"
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_returns_the_value_when_the_call_is_quick() {
+        assert_eq!(bounded("x", "p", async { 7 }).await, Some(7));
+        assert_eq!(
+            bounded_by(Duration::from_millis(50), "x", "p", async {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                7
+            })
+            .await,
+            None
+        );
+    }
+
     /// D91: the soft threshold reads its override and defaults to the design's 64k.
     #[test]
     fn compact_at_tokens_default_and_override() {
@@ -938,6 +1169,94 @@ mod tests {
         std::env::remove_var("ARBOS_CONTEXT_COMPACT_AT_TOKENS");
     }
     use super::*;
+
+    /// 2026-10-26: a seed symlink must stay a symlink in the workspace, and a tree an older
+    /// image copied in its place is replaced by the link (that tree cost 18 000 inodes per project).
+    #[test]
+    fn seed_symlinks_are_linked_not_copied() {
+        let root = std::env::temp_dir().join(format!("arbos-seed-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let seed = root.join("seed");
+        let shared = root.join("shared").join("pkg");
+        std::fs::create_dir_all(seed.join("node_modules")).unwrap();
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("a.js"), "x").unwrap();
+        std::fs::write(seed.join("index.ts"), "ext").unwrap();
+        std::os::unix::fs::symlink(&shared, seed.join("node_modules").join("pkg")).unwrap();
+        // The workspace already holds a dereferenced copy from an earlier image.
+        let ws = root.join("ws");
+        std::fs::create_dir_all(ws.join("node_modules").join("pkg").join("deep")).unwrap();
+        std::fs::write(
+            ws.join("node_modules")
+                .join("pkg")
+                .join("deep")
+                .join("b.js"),
+            "y",
+        )
+        .unwrap();
+        copy_dir(&seed, &ws).unwrap();
+        let linked = ws.join("node_modules").join("pkg");
+        assert!(std::fs::symlink_metadata(&linked)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_link(&linked).unwrap(), shared);
+        assert_eq!(std::fs::read_to_string(ws.join("index.ts")).unwrap(), "ext");
+        // Idempotent.
+        copy_dir(&seed, &ws).unwrap();
+        assert!(std::fs::symlink_metadata(&linked)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #1851 regression bound: a fresh project's own bytes from the seed copy stay tiny — the
+    /// 119 MB / 17 924 files behind the node_modules links must never be materialised again.
+    #[test]
+    fn fresh_project_seed_copy_stays_small() {
+        let root = std::env::temp_dir().join(format!("arbos-seed-size-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let seed = root.join("seed").join("extensions").join("ext");
+        let shared = root.join("global").join("pkg");
+        std::fs::create_dir_all(seed.join("node_modules")).unwrap();
+        std::fs::create_dir_all(&shared).unwrap();
+        for i in 0..200 {
+            std::fs::write(shared.join(format!("f{i}.js")), vec![b'x'; 16 * 1024]).unwrap();
+        }
+        std::fs::write(seed.join("index.ts"), "export {}").unwrap();
+        std::os::unix::fs::symlink(&shared, seed.join("node_modules").join("pkg")).unwrap();
+        let ws = root.join("fresh-project");
+        copy_dir(&root.join("seed"), &ws).unwrap();
+        let (bytes, files) = own(&ws);
+        assert!(bytes < 64 * 1024, "fresh project holds {bytes} own bytes");
+        assert!(files < 16, "fresh project holds {files} own files");
+        assert!(
+            ws.join("extensions/ext/node_modules/pkg/f0.js").exists(),
+            "link resolves"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+
+        /// Bytes and files really under `p` (symlinks counted as one entry, not followed).
+        fn own(p: &std::path::Path) -> (u64, u64) {
+            let (mut b, mut n) = (0, 0);
+            for e in std::fs::read_dir(p).unwrap().flatten() {
+                let m = std::fs::symlink_metadata(e.path()).unwrap();
+                n += 1;
+                if m.file_type().is_symlink() {
+                    continue;
+                }
+                if m.is_dir() {
+                    let (sb, sn) = own(&e.path());
+                    b += sb;
+                    n += sn;
+                } else {
+                    b += m.len();
+                }
+            }
+            (b, n)
+        }
+    }
 
     /// An image roll must reach existing workspaces: a seed file whose bytes changed is copied
     /// again, an unchanged one is left alone, a missing one is created.

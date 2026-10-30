@@ -1,4 +1,4 @@
-//! "Send feedback" (⌘⇧F, the ✎ rail button, Help → Send Feedback…): the Mac twin of
+//! "Send feedback" (⌘⌥F, the ✎ rail button, Help → Send Feedback…): the Mac twin of
 //! TestFlight's screenshot feedback. Opening the sheet grabs the Arbos window as a PNG;
 //! the user can grab it again, clear it, drag a region, or pick an image file, add a
 //! note, and send (Enter / ⌘⏎). A note alone is enough when they skip the picture.
@@ -23,8 +23,11 @@ use gpui_tokio::Tokio;
 
 use crate::app::{decode_image, AppState};
 use crate::sync::credentials;
+use crate::sync::user_error::{ErrorClass, UserError};
 use crate::ui::composer::ComposerInput;
+use crate::ui::error_note;
 use crate::ui::frost::{frosted, PANEL_BLUR};
+use crate::ui::highlight;
 use crate::ui::theme::{Theme, PANEL_RADIUS};
 
 actions!(feedback, [SendFeedback, SubmitFeedback]);
@@ -68,7 +71,7 @@ pub struct FeedbackSheet {
     open: bool,
     shot: Option<Shot>,
     busy: bool,
-    error: Option<String>,
+    error: Option<error_note::Slot>,
     /// Relay id of the item just sent; the sheet shows "Sent" until closed.
     sent: Option<String>,
     focus_handle: FocusHandle,
@@ -106,7 +109,7 @@ impl FeedbackSheet {
         self.open
     }
 
-    /// ⌘⇧F / rail / menu: grab the window first (the sheet must not be in the picture), then show.
+    /// ⌘⌥F / rail / menu: grab the window first (the sheet must not be in the picture), then show.
     pub fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.open {
             self.close(cx);
@@ -128,9 +131,13 @@ impl FeedbackSheet {
             Ok(shot) => self.shot = Some(shot),
             Err(e) => {
                 self.shot = None;
-                self.error = Some(format!(
-                    "Could not capture the window ({e:#}). Choose an image or select a region."
-                ));
+                self.error = Some(error_note::Slot::new(UserError::of(
+                    "capture the window",
+                    ErrorClass::Refused {
+                        message: Some("Choose an image or select a region instead.".into()),
+                    },
+                    format!("{e:#}"),
+                )));
             }
         }
         self.open = true;
@@ -159,7 +166,12 @@ impl FeedbackSheet {
                 self.shot = Some(s);
                 self.error = None;
             }
-            Err(e) => self.error = Some(format!("Could not capture the window ({e:#})")),
+            Err(e) => {
+                self.error = Some(error_note::Slot::new(UserError::classify(
+                    "capture the window",
+                    &e,
+                )))
+            }
         }
         cx.notify();
     }
@@ -192,7 +204,12 @@ impl FeedbackSheet {
                     Ok(shot) => sheet.shot = Some(shot),
                     // Esc in the selection just keeps the previous picture.
                     Err(e) if e.to_string().contains("exited with") => {}
-                    Err(e) => sheet.error = Some(format!("{e:#}")),
+                    Err(e) => {
+                        sheet.error = Some(error_note::Slot::new(UserError::classify(
+                            "select a region",
+                            &e,
+                        )))
+                    }
                 }
                 cx.notify();
             });
@@ -217,7 +234,12 @@ impl FeedbackSheet {
                                 sheet.shot = Some(shot);
                                 sheet.error = None;
                             }
-                            Err(e) => sheet.error = Some(format!("{e:#}")),
+                            Err(e) => {
+                                sheet.error = Some(error_note::Slot::new(UserError::classify(
+                                    "open the image",
+                                    &e,
+                                )))
+                            }
                         }
                         cx.notify();
                     });
@@ -244,13 +266,19 @@ impl FeedbackSheet {
         let note = self.note.read(cx).text().trim().to_string();
         let shot = self.shot.as_ref();
         if shot.is_none() && note.is_empty() {
-            self.error = Some("Add a note, or keep / attach a screenshot.".into());
+            self.error = Some(crate::app::refused(
+                "send your feedback",
+                "Add a note, or keep / attach a screenshot.",
+            ));
             cx.notify();
             return;
         }
         let relay_url = crate::sync::configured_relay_url();
         let Some(creds) = credentials::load(&relay_url) else {
-            self.error = Some("Sign in first: feedback goes to your relay.".into());
+            self.error = Some(crate::app::refused(
+                "send your feedback",
+                "Sign in first: feedback goes to your relay.",
+            ));
             cx.notify();
             return;
         };
@@ -312,7 +340,12 @@ impl FeedbackSheet {
                         sheet.sent = Some(id);
                         sheet.note.update(cx, |input, cx| input.clear(cx));
                     }
-                    Err(e) => sheet.error = Some(format!("{e:#}")),
+                    Err(e) => {
+                        sheet.error = Some(error_note::Slot::new(UserError::classify(
+                            "send your feedback",
+                            &e,
+                        )))
+                    }
                 }
                 cx.notify();
             });
@@ -344,12 +377,14 @@ impl FeedbackSheet {
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.9))
         } else {
-            base.bg(theme.surface_1)
-                .text_color(theme.text)
-                .border_1()
-                .border_color(theme.border_strong)
-                .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
+            highlight::washed(
+                base.text_color(theme.text)
+                    .border_1()
+                    .border_color(theme.border_strong)
+                    .cursor_pointer(),
+                theme.surface_1,
+                theme,
+            )
         }
     }
 }
@@ -447,18 +482,32 @@ impl Render for FeedbackSheet {
             );
         }
 
-        let status: Option<Div> = if let Some(id) = sent.as_ref() {
-            Some(
-                div()
-                    .text_size(px(12.0))
-                    .text_color(theme.text_muted)
-                    .child(format!(
-                        "Sent. Thank you — reference {id}. The fix lands in a coming update."
-                    )),
+        let status: Option<Div> = sent.as_ref().map(|id| {
+            div()
+                .text_size(px(12.0))
+                .text_color(theme.text_muted)
+                .child(format!(
+                    "Sent. Thank you — reference {id}. The fix lands in a coming update."
+                ))
+        });
+        // The sheet's note: at the top of the body, under the title row (Jacob 2026-10-26).
+        let note = error.filter(|_| sent.is_none()).map(|slot| {
+            error_note::render(
+                "feedback-error",
+                &slot.error,
+                slot.details_open,
+                error_note::Style::Inline,
+                &theme,
+                error_note::Handlers::new()
+                    .try_again(cx.listener(|this, _, _, cx| this.send(cx)))
+                    .toggle_details(cx.listener(|this, _, _, cx| {
+                        if let Some(slot) = this.error.as_mut() {
+                            slot.toggle_details();
+                        }
+                        cx.notify();
+                    })),
             )
-        } else {
-            error.map(|e| div().text_size(px(12.0)).text_color(theme.danger).child(e))
-        };
+        });
 
         let actions = div()
             .flex()
@@ -516,9 +565,10 @@ impl Render for FeedbackSheet {
                         div()
                             .text_size(px(11.0))
                             .text_color(theme.text_faint)
-                            .child("⌘⇧F · ⏎ send"),
+                            .child("⌘⌥F · ⏎ send"),
                     ),
             )
+            .children(note)
             .child(
                 div()
                     .text_size(px(12.0))
@@ -783,13 +833,22 @@ fn capture_window(window: &mut Window) -> Result<Shot> {
     Shot::from_bytes(bytes, "Arbos window".into())
 }
 
+/// The Arbos window's AppKit window number for `CGWindowListCreateImage` / `screencapture -l`.
+///
+/// When the user has switched to another app, `keyWindow` and `mainWindow` are often nil even
+/// though the GPUI window is still on screen (same case as sign-in's `choose_anchor`). Fall
+/// back to any visible window so agent `feedback_capture` still gets a picture instead of
+/// `failed: no key window` ([feedback app-01M5WEV45EKGZKARM2DC79JGK0]).
 #[cfg(target_os = "macos")]
 fn key_window_number() -> Option<i64> {
     use objc2::MainThreadMarker;
     use objc2_app_kit::NSApplication;
     let mtm = MainThreadMarker::new()?;
     let app = NSApplication::sharedApplication(mtm);
-    let window = app.keyWindow().or_else(|| app.mainWindow())?;
+    let window = app
+        .keyWindow()
+        .or_else(|| app.mainWindow())
+        .or_else(|| app.windows().to_vec().into_iter().find(|w| w.isVisible()))?;
     let number = window.windowNumber();
     (number > 0).then_some(number as i64)
 }

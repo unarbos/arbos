@@ -3,14 +3,16 @@
 //! sheets, menu rows, and the centered sheet scaffold every modal uses.
 
 use gpui::{
-    div, prelude::*, px, Div, ElementId, FontWeight, Global, InteractiveElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, Pixels, Point, SharedString, Stateful, Window,
-    WindowControlArea,
+    div, prelude::*, px, AnyElement, BoxShadow, Div, ElementId, FontWeight, Global,
+    InteractiveElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, SharedString,
+    Stateful, Window, WindowControlArea,
 };
 
-use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
-use crate::ui::icons::icon;
-use crate::ui::theme::{Theme, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
+use crate::ui::frost::{frosted, frosted_always, MENU_BLUR, PANEL_BLUR};
+use crate::ui::highlight;
+use crate::ui::profiles::kit;
+use crate::ui::sf_symbols;
+use crate::ui::theme::{Theme, CONTROL, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
 /// Drag this region to move the window.
 ///
@@ -91,6 +93,126 @@ pub trait WindowDrag: InteractiveElement + Sized {
 
 impl<E: InteractiveElement> WindowDrag for E {}
 
+/// Glyph size for the right pane's close `×` in a [`CONTROL`] disc: the xmark
+/// spans 12 of the 24 grid, so 22 paints Grok Bot's 11 pt mark (measured on
+/// `grok-right-pane-details.png`, 2 px/pt: × 22 × 22 px, disc 72 px).
+pub const PANE_CLOSE_GLYPH: f32 = 22.0;
+/// Glyph size for the right pane's share disc: the `share` icon spans 16 of
+/// 24, so 21 paints Grok's 14 pt mark (28 × 28 px in the same shot).
+pub const PANE_SHARE_GLYPH: f32 = 21.0;
+
+/// One disc of the round-button family (Jacob 2026-10-24, "one button
+/// family"): the sidebar strip's search · + · collapse, the folded-sidebar
+/// toggle in the chat header and the right pane's share and close. [`CONTROL`]
+/// 36 pt, `surface_2` fill, the glyph in `text`, the hover lift. Grok Bot's
+/// `#1F1F1F` disc with an `#E0E0E0` glyph.
+pub fn control_disc(
+    id: impl Into<ElementId>,
+    glyph: &str,
+    glyph_size: f32,
+    theme: &Theme,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .size(px(CONTROL))
+        .flex_shrink_0()
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .map(|el| highlight::washed(el, theme.control_fill(), theme))
+        .child(sf_symbols::glyph(glyph, glyph_size, theme.text))
+}
+
+/// The sidebar strip's search · + · collapse — also while they travel into
+/// the rail and at rest there: a [`control_disc`] that wears the chat header's
+/// glass plate ([`header_surface`]) on Glass, so the three read as glass
+/// beside the frosted pill (Jacob 2026-10-29, [feedback
+/// sidebar-header-glass-plate-mac-2026-10-29]). Matte keeps the solid disc.
+pub fn strip_disc(
+    id: impl Into<ElementId>,
+    glyph: &str,
+    glyph_size: f32,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let disc = control_disc(id, glyph, glyph_size, theme);
+    if theme.is_frost() {
+        header_surface(disc, theme)
+    } else {
+        disc
+    }
+}
+
+/// What a chat-header control is made of ([feedback mac-header-glass-2026-10-25],
+/// [feedback mac-header-pill-glass-matte-2026-10-26]; the iPhone's
+/// `HeaderGlassBackground`).
+///
+/// Jacob's reference is Grok Bot's header: frosted pills, the transcript
+/// visibly blurred through them, a light rim — over a flat dark background.
+/// #1830 gave the header that frost on Glass and left Matte solid; Jacob's
+/// Mac is on Matte, so he still saw a flat `bubble_assistant` pill
+/// (2026-10-26). The header pill and disc are frosted glass on BOTH surfaces
+/// now: Matte means no window vibrancy, not a flat header. Nothing else of
+/// the glass restyle moves with it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HeaderStyle {
+    /// White-alpha over a dark underlay (dark), a translucent white or grey
+    /// (light): the list shows through.
+    pub fill: gpui::Hsla,
+    /// The 1 pt light rim.
+    pub rim: gpui::Hsla,
+    /// The specular line along the top edge.
+    pub highlight: gpui::Hsla,
+}
+
+#[cfg(test)]
+impl HeaderStyle {
+    /// Frosted glass: a see-through fill with a visible rim. Read by the
+    /// tests on every chat kind × surface × appearance.
+    pub fn is_frosted(&self) -> bool {
+        self.fill.a < 1.0 && self.rim.a > 0.0
+    }
+}
+
+/// The pure part of a header control's look, for the tests.
+pub fn header_style(theme: &Theme) -> HeaderStyle {
+    HeaderStyle {
+        fill: theme.header_glass(),
+        rim: theme.header_glass_rim(),
+        highlight: theme.header_glass_highlight(),
+    }
+}
+
+/// Fill a header control (the name pill, the header disc): the glass fill,
+/// an inset 1 pt rim, a 1 pt specular line along the top edge and a 1 pt
+/// lift — the "glass plate" of `docs/glass-surface-directions.md` — on Glass
+/// and on Matte alike.
+pub fn header_surface<E: Styled>(el: E, theme: &Theme) -> E {
+    let style = header_style(theme);
+    el.bg(style.fill).shadow(vec![
+        BoxShadow::new(px(0.0), px(0.0), style.rim)
+            .spread_radius(px(1.0))
+            .inset(),
+        BoxShadow::new(px(0.0), px(1.0), style.highlight).inset(),
+        BoxShadow::new(px(0.0), px(1.0), gpui::hsla(0.0, 0.0, 0.0, 0.28)).blur_radius(px(3.0)),
+    ])
+}
+
+/// The blur under a header control ([feedback
+/// mac-header-pill-see-through-2026-10-26]): light enough that a line of
+/// transcript scrolling under the pill stays legible through it — Grok Bot's
+/// pill softens the text behind, it does not erase it. The menus' 16 pt
+/// (`MENU_BLUR`) turned it to mush, and with nothing behind it the pill then
+/// read as a solid chip (Jacob's 14:15 CR shot of v0.6.275).
+pub const HEADER_BLUR: f32 = 5.0;
+
+/// Blur the list under a header control (its rounded bounds), whatever the
+/// surface.
+pub fn header_frost(radius: f32, el: impl IntoElement) -> AnyElement {
+    frosted_always(radius, HEADER_BLUR, el).into_any_element()
+}
+
 /// A glass circle: field fill at 85 %, hairline rim. Content centred.
 pub fn circle(id: impl Into<ElementId>, size: f32, theme: &Theme) -> Stateful<Div> {
     div()
@@ -98,14 +220,13 @@ pub fn circle(id: impl Into<ElementId>, size: f32, theme: &Theme) -> Stateful<Di
         .size(px(size))
         .flex_shrink_0()
         .rounded_full()
-        .bg(theme.glass_fill())
         .border_1()
         .border_color(theme.field_border)
         .flex()
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
+        .map(|el| highlight::washed(el, theme.glass_fill(), theme))
 }
 
 /// Filled primary button (white on dark): the iPhone CTA.
@@ -134,7 +255,6 @@ pub fn quiet_button(id: impl Into<ElementId>, label: &str, theme: &Theme) -> Sta
         .h(px(38.0))
         .px(px(18.0))
         .rounded_full()
-        .bg(theme.field)
         .border_1()
         .border_color(theme.field_border)
         .flex()
@@ -144,7 +264,7 @@ pub fn quiet_button(id: impl Into<ElementId>, label: &str, theme: &Theme) -> Sta
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme.text)
         .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
+        .map(|el| highlight::washed(el, theme.field, theme))
         .child(label.to_string())
 }
 
@@ -190,48 +310,65 @@ pub fn group(theme: &Theme) -> Div {
 
 /// One row in a grouped card: label left, value right. Not interactive.
 pub fn row(label: impl Into<SharedString>, theme: &Theme) -> Div {
+    row_frame(theme)
+        .child(div().flex_1().min_w_0().child(label.into()))
+        .child(kit::hairline_below(theme))
+}
+
+/// [`row`] that reacts: the highlight pill under it (`ui::highlight`, inset
+/// 4, concentric with the [`group`] card), pointer cursor, and the row is its
+/// pill's group — the Machine page's breakdown row, a secret's switch row.
+pub fn hot_row(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    theme: &Theme,
+) -> Stateful<Div> {
+    highlight::row(
+        row_frame(theme).id(id).cursor_pointer(),
+        false,
+        highlight::Shape::Nested(PANEL_RADIUS),
+        theme,
+    )
+    .child(div().flex_1().min_w_0().child(label.into()))
+    .child(kit::hairline_below(theme))
+}
+
+fn row_frame(theme: &Theme) -> Div {
     // The pane kit's metrics (profiles::kit): 48 pt rows, 16 pt inset. The
-    // hairline hangs 1 pt below the row like `kit::row`'s: between rows it
-    // lands on the next row's first pixel, under the last row the card's clip
-    // swallows it. A bottom border inside the row drew a stray line under a
-    // one-row card (Settings › Notifications, Jacob Oct 21).
+    // hairline is the kit's one divider, hung 1 pt below the row: between
+    // rows it lands on the next row's first pixel, under the last row the
+    // card's clip swallows it. A bottom border inside the row drew a stray
+    // line under a one-row card (Settings › Notifications, Jacob Oct 21).
     div()
         .relative()
         .flex()
         .items_center()
         .gap(px(12.0))
         .min_h(px(48.0))
-        .px(px(16.0))
+        .px(px(kit::INSET))
         .py(px(6.0))
         .text_size(px(TEXT_BODY))
         .text_color(theme.text)
-        .child(div().flex_1().min_w_0().child(label.into()))
-        .child(
-            div()
-                .absolute()
-                .left(px(16.0))
-                .right(px(0.0))
-                .bottom(px(-1.0))
-                .h(px(1.0))
-                .bg(theme.border),
-        )
 }
 
 /// Apple-style icon tile for settings rows: 30 px rounded square, muted
 /// monochrome fill, white glyph (D80).
 pub fn icon_tile(glyph: &str, theme: &Theme) -> Div {
+    icon_tile_sized(glyph, 30.0, theme)
+}
+
+/// The settings tile at another size (the palette's 24 pt row picture);
+/// radius and glyph scale with it.
+pub fn icon_tile_sized(glyph: &str, size: f32, theme: &Theme) -> Div {
     div()
-        .size(px(30.0))
+        .size(px(size))
         .flex_shrink_0()
-        .rounded(px(7.5))
-        .bg(match theme.appearance {
-            crate::ui::theme::Appearance::Dark => gpui::Hsla::from(gpui::rgb(0x5c5c60)),
-            crate::ui::theme::Appearance::Light => gpui::Hsla::from(gpui::rgb(0x6e6e73)),
-        })
+        .rounded(px(size * 0.25))
+        .bg(theme.tile_fill())
         .flex()
         .items_center()
         .justify_center()
-        .child(icon(glyph, 15.0, gpui::white()))
+        .child(sf_symbols::glyph(glyph, size * 0.5, gpui::white()))
 }
 
 /// Segmented choice inside a row: `[Dark] Light`.
@@ -250,7 +387,7 @@ pub fn segment(id: impl Into<ElementId>, label: &str, on: bool, theme: &Theme) -
             FontWeight::NORMAL
         })
         .bg(if on {
-            theme.bubble
+            theme.segment_on_fill()
         } else {
             gpui::transparent_black()
         })
@@ -259,7 +396,7 @@ pub fn segment(id: impl Into<ElementId>, label: &str, on: bool, theme: &Theme) -
         .text_color(if on {
             theme.bubble_text()
         } else {
-            theme.text_muted
+            theme.label_muted()
         })
         .cursor_pointer()
         .when(!on, |el| el.hover(|s| s.text_color(theme.text)))
@@ -273,13 +410,25 @@ pub fn segment(id: impl Into<ElementId>, label: &str, on: bool, theme: &Theme) -
 pub const MENU_ROW_HEIGHT: f32 = 36.0;
 pub const MENU_GAP: f32 = 1.0;
 pub const MENU_CARD_PADDING: f32 = 6.0;
+/// The row is its own highlight pill inside the plate's padding: concentric
+/// with the plate ([`PANEL_RADIUS`] − `MENU_CARD_PADDING`), as every row's
+/// highlight is with its card (`ui::highlight`).
+pub const MENU_ROW_RADIUS: f32 = PANEL_RADIUS - MENU_CARD_PADDING;
 pub const MENU_CARD_BORDER: f32 = 1.0;
 pub const MENU_DIVIDER_HEIGHT: f32 = 9.0;
 
-/// Menu row (the "…" menu): glyph, label, optional trailing value.
+/// Every menu glyph is a system SF Symbol at the label's point size
+/// (`TEXT_SMALL`), regular weight, in a fixed slot so rows align — the same
+/// names the iPhone passes to `Image(systemName:)` ([feedback
+/// menu-sf-symbols-2026-10-27]; `sf_symbols` for the rendering path).
+pub const MENU_SYMBOL_PT: f32 = TEXT_SMALL;
+pub const MENU_SYMBOL_SLOT: f32 = 20.0;
+
+/// Menu row (the "…" menu): `symbol` is an SF Symbol name registered in
+/// `sf_symbols::FALLBACKS`, then the label.
 pub fn menu_row(
     id: impl Into<ElementId>,
-    glyph: &str,
+    symbol: &'static str,
     label: impl Into<SharedString>,
     danger: bool,
     theme: &Theme,
@@ -289,15 +438,21 @@ pub fn menu_row(
         .id(id)
         .flex()
         .items_center()
-        .gap(px(10.0))
+        .gap(px(8.0))
         .h(px(MENU_ROW_HEIGHT))
         .px(px(12.0))
-        .rounded(px(9.0))
+        .rounded(px(MENU_ROW_RADIUS))
         .text_size(px(TEXT_SMALL))
         .text_color(color)
         .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
-        .child(icon(glyph, 15.0, color))
+        .map(|el| highlight::row(el, false, highlight::Shape::Own, theme))
+        .child(sf_symbols::symbol(
+            symbol,
+            MENU_SYMBOL_PT,
+            sf_symbols::Weight::Regular,
+            MENU_SYMBOL_SLOT,
+            color,
+        ))
         .child(div().flex_1().min_w_0().truncate().child(label.into()))
 }
 
@@ -342,19 +497,108 @@ pub fn menu_divider(theme: &Theme) -> Div {
         .bg(theme.border)
 }
 
+/// A floating surface's glass plate on Glass ([feedback
+/// mac-glass-contrast-2026-10-26]): the card tint plus the header's 1 pt rim
+/// and top highlight, over the lift shadow it already had. On Matte the
+/// card keeps its solid fill and plain border.
+pub fn plate<E: Styled>(el: E, theme: &Theme) -> E {
+    let el = el
+        .bg(theme.card())
+        .border_1()
+        .border_color(theme.border_strong);
+    if !theme.is_frost() {
+        return el.shadow_lg();
+    }
+    el.shadow(vec![
+        BoxShadow::new(px(0.0), px(0.0), theme.plate_rim())
+            .spread_radius(px(1.0))
+            .inset(),
+        BoxShadow::new(px(0.0), px(1.0), theme.plate_highlight()).inset(),
+        BoxShadow::new(px(0.0), px(8.0), gpui::hsla(0.0, 0.0, 0.0, 0.28)).blur_radius(px(24.0)),
+    ])
+}
+
+/// The blur under a search popup ([feedback search-popup-single-layer-2026-10-28]):
+/// the sheet's 24 pt. A line of transcript under the ⌘K panel must not read
+/// through it — the header pill's 5 pt ([`HEADER_BLUR`]) is made to keep text
+/// legible, this is made to erase it: 24 pt smears a 15 pt line (≈ 18 pt
+/// pitch) into a flat band before the tint even lands.
+pub const POPUP_BLUR: f32 = PANEL_BLUR;
+
+/// What a search popup is made of — the pure part, for the tests and the
+/// rule in `docs/mac-design-rules.md`. One material: a blur (Glass only), one
+/// fill, one hairline, one lift shadow. No dim behind it, no second plate.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PopupMaterial {
+    /// Backdrop blur radius under the plate (0 on Matte).
+    pub blur: f32,
+    /// The plate's fill: the popup wash on Glass, the flat card on Matte.
+    pub fill: gpui::Hsla,
+    /// The one hairline: the glass rim on Glass, the card border on Matte.
+    pub hairline: gpui::Hsla,
+    /// Whether the window behind is dimmed by the popup (never).
+    pub dims_window: bool,
+}
+
+impl PopupMaterial {
+    /// Residual Weber-style contrast of a white-on-page (or black-on-page)
+    /// line of transcript seen through the plate's *tint alone*: how much of
+    /// the backdrop's luminance difference survives the fill. The blur is not
+    /// credited here (it is what makes the line unreadable); this is the floor
+    /// the tint provides even where the blur has nothing to smear.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn backdrop_bleed(&self) -> f32 {
+        1.0 - self.fill.a.clamp(0.0, 1.0)
+    }
+}
+
+pub fn popup_material(theme: &Theme) -> PopupMaterial {
+    PopupMaterial {
+        blur: if theme.is_frost() { POPUP_BLUR } else { 0.0 },
+        fill: theme.popup(),
+        hairline: if theme.is_frost() {
+            theme.plate_rim()
+        } else {
+            theme.border_strong
+        },
+        dims_window: false,
+    }
+}
+
+/// Dress a search popup's panel in its one material ([`popup_material`]) and
+/// frost the window under it on Glass. The panel keeps its own rounding
+/// (`radius`, the same the blur is clipped to). The lift shadow is the
+/// sheet's; the top highlight is the glass family's.
+pub fn popup_plate(radius: f32, theme: &Theme, panel: Stateful<Div>) -> AnyElement {
+    let material = popup_material(theme);
+    let panel = panel.bg(material.fill);
+    if !theme.is_frost() {
+        return panel
+            .border_1()
+            .border_color(material.hairline)
+            .shadow_lg()
+            .into_any_element();
+    }
+    let panel = panel.shadow(vec![
+        BoxShadow::new(px(0.0), px(0.0), material.hairline)
+            .spread_radius(px(1.0))
+            .inset(),
+        BoxShadow::new(px(0.0), px(1.0), theme.plate_highlight()).inset(),
+        BoxShadow::new(px(0.0), px(8.0), gpui::hsla(0.0, 0.0, 0.0, 0.28)).blur_radius(px(24.0)),
+    ]);
+    frosted(radius, material.blur, panel).into_any_element()
+}
+
 /// A dropdown card under a header control: frosted, rounded, shadowed.
 pub fn menu_card(width: f32, theme: &Theme) -> Div {
-    div()
+    let card = div()
         .w(px(width))
         .flex()
         .flex_col()
         .gap(px(MENU_GAP))
         .p(px(MENU_CARD_PADDING))
-        .rounded(px(PANEL_RADIUS))
-        .bg(theme.card())
-        .border_1()
-        .border_color(theme.border_strong)
-        .shadow_lg()
+        .rounded(px(PANEL_RADIUS));
+    plate(card, theme)
 }
 
 /// Frosted dropdown used by the tab "+" menu and sidebar row menus. Occludes
@@ -385,11 +629,8 @@ pub fn sheet(width: f32, theme: &Theme, header: Div, body: impl IntoElement) -> 
         .max_h_full()
         .flex()
         .flex_col()
-        .rounded(px(PANEL_RADIUS + 6.0))
-        .bg(theme.card())
-        .border_1()
-        .border_color(theme.border_strong)
-        .shadow_lg()
+        .rounded(px(PANEL_RADIUS + 6.0));
+    let card = plate(card, theme)
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(header)
         .child(body);
@@ -448,7 +689,6 @@ pub fn sheet_button(id: impl Into<ElementId>, label: &str, theme: &Theme) -> Sta
         .h(px(34.0))
         .px(px(14.0))
         .rounded_full()
-        .bg(theme.glass_fill())
         .border_1()
         .border_color(theme.field_border)
         .flex()
@@ -457,7 +697,7 @@ pub fn sheet_button(id: impl Into<ElementId>, label: &str, theme: &Theme) -> Sta
         .font_weight(FontWeight::MEDIUM)
         .text_color(theme.text)
         .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
+        .map(|el| highlight::washed(el, theme.glass_fill(), theme))
         .child(label.to_string())
 }
 
@@ -535,6 +775,114 @@ mod tests {
     fn wheel_over_menu_does_not_chain_into_underlying_scroll() {
         let hit = scroll_hit_layers([(true, "frosted_menu"), (false, "sidebar_list")]);
         assert_eq!(hit, vec!["frosted_menu"]);
+    }
+}
+
+#[cfg(test)]
+mod popup_tests {
+    //! The search popups' one material ([feedback
+    //! search-popup-single-layer-2026-10-28]; Jacob 2026-10-28: "double
+    //! transparency on search pop up is annoying", Scout's "double
+    //! transparency overlap"): on Glass one frosted plate whose blur and tint
+    //! together leave no transcript line legible under it, on Matte one opaque
+    //! card; one hairline either way; nothing dimmed behind it.
+    use super::*;
+    use crate::ui::modal::PASSTHROUGH_BACKDROP_ALPHA;
+    use crate::ui::theme::{Appearance, Backdrop, Surface, POPUP_WASH_FLOOR, TEXT_BODY};
+
+    /// A 15 pt line's glyphs stand ≈ 11 pt tall (cap height) on ≈ 1.5 pt
+    /// strokes. A blur radius wider than the whole glyph box — 1.5 × the
+    /// font size, 22.5 pt — leaves no stroke and no letter shape to read;
+    /// it smears each line into the next (GPUI's default pitch is φ × 15 ≈
+    /// 24 pt) and what remains is a band of the line's mean tone.
+    const GLYPH_BOX: f32 = TEXT_BODY * 1.5;
+
+    fn themes() -> Vec<(String, Theme)> {
+        let mut out = Vec::new();
+        for appearance in [Appearance::Dark, Appearance::Light] {
+            for surface in [Surface::Glass, Surface::Matte] {
+                out.push((
+                    format!("{appearance:?} {surface:?}"),
+                    Theme::with(appearance, surface),
+                ));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_popup_is_one_frosted_plate_on_glass_and_one_opaque_card_on_matte() {
+        for (name, theme) in themes() {
+            let m = popup_material(&theme);
+            assert!(
+                !m.dims_window,
+                "{name}: a dim behind the plate is a second layer"
+            );
+            assert!(m.hairline.a > 0.0, "{name}: the one hairline is drawn");
+            if theme.is_frost() {
+                assert_eq!(m.blur, POPUP_BLUR, "{name}: the sheet's blur");
+                assert!(
+                    m.blur >= GLYPH_BOX,
+                    "{name}: blur {} narrower than a {GLYPH_BOX} pt glyph box leaves strokes",
+                    m.blur
+                );
+                assert!(
+                    m.fill.a >= POPUP_WASH_FLOOR,
+                    "{name}: thinner than the popup floor: fill alpha {}",
+                    m.fill.a
+                );
+                assert_eq!(
+                    m.hairline,
+                    theme.plate_rim(),
+                    "{name}: the glass family's rim"
+                );
+                // Over a friendly desktop (dark under dark, light under light)
+                // the plate sits at its floor: glass, not a solid card.
+                let mut friendly = theme.clone();
+                friendly.backdrop =
+                    Some(Backdrop::uniform(if theme.is_light() { 1.0 } else { 0.0 }));
+                let at_floor = popup_material(&friendly).fill.a;
+                assert!(
+                    (at_floor - POPUP_WASH_FLOOR).abs() < 1e-3,
+                    "{name}: over a friendly desktop the plate is at its floor, got {at_floor}"
+                );
+            } else {
+                assert_eq!(m.blur, 0.0, "{name}: Matte does not blur");
+                assert_eq!(m.fill.a, 1.0, "{name}: Matte is one opaque card");
+                assert_eq!(m.fill, theme.surface_1);
+                assert_eq!(m.hairline, theme.border_strong, "{name}: the card border");
+            }
+        }
+    }
+
+    /// Readability: a line of transcript under the panel must not read
+    /// through. The tint alone lets at most a fifth of the backdrop's
+    /// luminance difference survive (`backdrop_bleed`), and the blur is
+    /// wider than the glyph box — together there is nothing left to read.
+    /// The popup floor sits above the menus' card floor on purpose.
+    #[test]
+    fn a_transcript_line_under_the_glass_popup_is_not_legible() {
+        for (name, theme) in themes().into_iter().filter(|(_, t)| t.is_frost()) {
+            let m = popup_material(&theme);
+            assert!(
+                m.backdrop_bleed() <= 0.2,
+                "{name}: {:.0} % of the chat bleeds through the tint",
+                m.backdrop_bleed() * 100.0
+            );
+            assert!(m.blur >= GLYPH_BOX, "{name}");
+        }
+        let (popup, card) = (POPUP_WASH_FLOOR, crate::ui::theme::CARD_WASH_FLOOR);
+        assert!(
+            popup > card,
+            "the popup ({popup}) is thicker than a menu ({card})"
+        );
+    }
+
+    /// The see-through backdrop under the palette does not dim: the plate is
+    /// the one layer between the chat and the rows.
+    #[test]
+    fn the_palette_backdrop_does_not_dim() {
+        assert_eq!(PASSTHROUGH_BACKDROP_ALPHA, 0.0);
     }
 }
 

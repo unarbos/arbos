@@ -14,13 +14,17 @@ members = [
     "crates/arbos-relay",
     "crates/arbos-agentd",
     "crates/arbosctl",
+    # Outside agents (#2143): ACP agent ⇄ relay bridge. Depends on nothing in the workspace.
+    "crates/arbos-acp",
+    # Outside agents (#2190): the sidecar on the agent's own machine. Depends on nothing in the workspace.
+    "crates/arbos-sidecar",
     "crates/arbos-local",
     "crates/arbos-mac",
     "crates/arbos-update",
 ]
 
 [workspace.package]
-version = "0.6.185"
+version = "0.6.371"
 edition = "2021"
 license = "UNLICENSED"
 publish = false
@@ -38,6 +42,7 @@ uniffi = "=0.32.2"
 
 anyhow = "1"
 thiserror = "2"
+syntect = { version = "5.3", default-features = false, features = ["parsing", "default-syntaxes", "regex-fancy", "dump-load"] }
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 futures = "0.3"
@@ -61,6 +66,8 @@ clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4", features = ["serde"] }
+# The device's IANA zone on user rows (`tz`), so the agent answers for the user's moment.
+iana-time-zone = "0.1"
 jsonschema = { version = "0.26", default-features = false }
 base64 = "0.22"
 regex-lite = "0.1"
@@ -73,7 +80,9 @@ dirs = "6"
 [profile.release]
 lto = "thin"
 codegen-units = 1
-strip = true
+# Symbol names stay (debug info goes): a panic backtrace in panic.log and a crash report's
+# frames then name the function instead of an offset (2026-10-26 Mac launch crashes).
+strip = "debuginfo"
 
 [profile.dev]
 opt-level = 0

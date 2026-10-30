@@ -50,6 +50,17 @@ pub struct Config {
     pub channels_mock: bool,
     /// `ARBOS_IMAGE_MOCK=1`: image generation answers with a labelled placeholder PNG (F10).
     pub image_mock: bool,
+    /// Waits before the avatar generator's retries of a transient provider failure (timeout,
+    /// 429, 5xx) on one model — 2 s then 5 s by default (`ARBOS_AVATAR_RETRY_MS=2000,5000`);
+    /// tests set it empty or to zeros.
+    pub avatar_retry_backoff_ms: Vec<u64>,
+    /// How long one provider call for an avatar may take before it counts as a transient failure
+    /// (`ARBOS_AVATAR_ATTEMPT_TIMEOUT_S`, default 40), and the whole generate's budget before a
+    /// clean 504 (`ARBOS_AVATAR_TOTAL_TIMEOUT_S`, default 75). Jacob's "nuke vampire"
+    /// (2026-10-26 17:4x UTC) hung on the provider past the apps' 30 s; the relay had no
+    /// timeout at all, the client gave up, the dropped handler logged nothing.
+    pub avatar_attempt_timeout: std::time::Duration,
+    pub avatar_total_timeout: std::time::Duration,
     /// `ARBOS_VOICE_MOCK=1`: `/proxy/v1/audio/*` answer locally (F11).
     pub voice_mock: bool,
     /// OpenAI-compatible base for audio (STT/TTS); api.openai.com by default
@@ -138,16 +149,52 @@ pub struct RoomBroadcast {
 /// changes the stored doc without moving the head, so both are part of the key.
 pub type HeadCache<T> = std::sync::Mutex<Option<((i64, i64), T)>>;
 
+/// Cached rebuild of a room's stored doc (checkpoint ∪ rows) at one `(head, floor)`. When the
+/// head advances, only the new rows are imported; the first build runs off the socket task.
+pub struct RoomDocCache {
+    pub key: (i64, i64),
+    pub doc: arbos_core::doc::ChatDoc,
+}
+
 pub struct Room {
     pub tx: broadcast::Sender<RoomBroadcast>,
     /// What each replica last told this relay about the room (room_health, #1470).
     pub replicas: crate::room_health::Replicas,
     /// `(head, rebuilt-doc verdict)` cache for `GET /chats/{id}/health`.
     pub health_cache: HeadCache<crate::room_health::DocHealth>,
-    /// `(head, encoded version vector)` of the stored doc (checkpoint ∪ rows) at that head —
-    /// what ROWS_DONE hands a device so it can push back history the relay lacks (#1518
-    /// follow-up). Rebuilt only when the head moved.
-    pub vv_cache: HeadCache<Vec<u8>>,
+    /// Rebuilt chat doc for covered-push checks and ROWS_DONE's version vector. Dropped when the
+    /// room has no sockets left.
+    pub doc_cache: std::sync::Mutex<Option<RoomDocCache>>,
+    /// Box users (owners) with a live socket on this room: a row from a person reaches their
+    /// agent live only through such a socket; without one the box is told to open the room
+    /// (`boxes::after_person_row`, #2120).
+    pub boxes: std::sync::Mutex<HashMap<String, u32>>,
+}
+
+impl Room {
+    pub fn box_joined(&self, user_id: &str) {
+        *self
+            .boxes
+            .lock()
+            .unwrap()
+            .entry(user_id.to_owned())
+            .or_insert(0) += 1;
+    }
+
+    pub fn box_left(&self, user_id: &str) {
+        let mut b = self.boxes.lock().unwrap();
+        if let Some(n) = b.get_mut(user_id) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                b.remove(user_id);
+            }
+        }
+    }
+
+    /// Does `user_id`'s box have a socket open on this room right now?
+    pub fn has_box(&self, user_id: &str) -> bool {
+        self.boxes.lock().unwrap().contains_key(user_id)
+    }
 }
 
 /// How the relay tells its room sockets that it is about to go down on purpose (a deploy, an
@@ -157,6 +204,12 @@ pub struct Room {
 pub struct RestartSignal {
     pub closing: tokio::sync::watch::Sender<bool>,
     pub open_sockets: std::sync::atomic::AtomicUsize,
+    /// A planned restart is under way: no box upgrade or repair may start (#2262). Set and read
+    /// under the `upgrading` lock so a run cannot slip in between the check and the restart.
+    pub box_work_frozen: std::sync::atomic::AtomicBool,
+    /// Users whose `create_box` is between its first row write and the new sandbox id landing
+    /// in the row, with the start time (#2262: a restart in that window orphaned a sandbox).
+    pub creating: std::sync::Mutex<HashMap<String, i64>>,
 }
 
 impl Default for RestartSignal {
@@ -164,6 +217,8 @@ impl Default for RestartSignal {
         Self {
             closing: tokio::sync::watch::Sender::new(false),
             open_sockets: std::sync::atomic::AtomicUsize::new(0),
+            box_work_frozen: std::sync::atomic::AtomicBool::new(false),
+            creating: std::sync::Mutex::new(HashMap::new()),
         }
     }
 }
@@ -171,6 +226,40 @@ impl Default for RestartSignal {
 impl RestartSignal {
     pub fn is_closing(&self) -> bool {
         *self.closing.borrow()
+    }
+
+    pub fn box_work_frozen(&self) -> bool {
+        self.box_work_frozen
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Marks one `create_box` as in flight for as long as it lives; dropped on every exit path,
+/// including a cancelled task.
+pub struct CreatingGuard {
+    restart: Arc<RestartSignal>,
+    user_id: String,
+}
+
+impl CreatingGuard {
+    pub fn new(restart: &Arc<RestartSignal>, user_id: &str) -> Self {
+        restart
+            .creating
+            .lock()
+            .expect("creating lock")
+            .insert(user_id.to_owned(), arbos_core::ids::now_ms());
+        Self {
+            restart: restart.clone(),
+            user_id: user_id.to_owned(),
+        }
+    }
+}
+
+impl Drop for CreatingGuard {
+    fn drop(&mut self) {
+        if let Ok(mut m) = self.restart.creating.lock() {
+            m.remove(&self.user_id);
+        }
     }
 }
 
@@ -191,6 +280,15 @@ pub struct AppState {
     pub wake_started: Arc<Mutex<HashMap<String, i64>>>,
     /// user_id → ms of the last client row; rows pushed while a box was dying must re-wake it.
     pub last_client_push: Arc<Mutex<HashMap<String, i64>>>,
+    /// `POST /proxy/decisions` answers by request hash (`proxy::DecisionsCache`): every box in
+    /// a people room asks the judge the same question about one message, and one answer for
+    /// all of them is what makes their verdicts agree.
+    pub decisions_cache: Arc<std::sync::Mutex<crate::proxy::DecisionsCache>>,
+    /// Identical decision requests in flight at the same moment (the three agents of one box
+    /// judge a message within milliseconds of each other): one per-key lock so the first
+    /// call fills the cache and the rest read it, instead of three upstream calls with three
+    /// different answers (2026-10-28 06:30: two takers for one "any of you" ask).
+    pub decisions_inflight: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     /// user_id → wakes that produced no hello within the deadline (stale-box detector).
     pub stale_bounces: Arc<Mutex<HashMap<String, u32>>>,
     pub conn_seq: Arc<std::sync::atomic::AtomicU64>,
@@ -204,12 +302,15 @@ pub struct AppState {
     pub download_cache: Arc<Mutex<Option<(i64, String)>>>,
     /// user_id → box upgrade in progress (`POST /machine/upgrade`).
     pub upgrading: Arc<Mutex<HashMap<String, UpgradeStatus>>>,
+    /// user_id → the last upgrade the relay refused before touching the box (ARB-339: `/work`
+    /// over the carry limit). Shown as `upgrade.last_refused`; cleared by the next success.
+    pub upgrade_refused: Arc<Mutex<HashMap<String, UpgradeRefusal>>>,
     /// Hash of a just-rotated refresh token → (when, the pair it was rotated into). Within
     /// `signin::REFRESH_GRACE_MS` the old token gets that same pair again instead of counting
     /// as a replay, so concurrent refreshers from one device converge on one rotation.
     pub refresh_grace: Arc<Mutex<HashMap<String, (i64, serde_json::Value)>>>,
     /// Message notifications transport (APNs, a capture list in tests, or off).
-    pub push: Arc<crate::apns::Pusher>,
+    pub push: Arc<crate::push::Push>,
     /// device_id → the chat its presence says is on screen (suppresses that chat's pushes).
     pub focus: crate::notify::Focus,
     /// (chat_id, sender user) → when the row-level fallback last notified for it.
@@ -223,6 +324,9 @@ pub struct AppState {
     /// user_id → last HTTP call from that user's box (`/box/hello`, `/box/projects`,
     /// `/box/keepalive`). A box with no project opens no room socket; this is its heartbeat.
     pub box_http_seen: Arc<Mutex<HashMap<String, i64>>>,
+    /// sandbox_id → the Daytona preview token learned after the row's one got a 401
+    /// (`boxes::send_to_box`). Memory only: the row is rewritten only by a start the relay finishes.
+    pub fresh_preview_tokens: Arc<Mutex<HashMap<String, String>>>,
     /// Users whose box said "turn running" in its last keepalive, with the time (D89: eviction skips them).
     pub turn_running: Arc<Mutex<HashMap<String, i64>>>,
     /// Sandboxes evicted under host pressure (D89), with the time; only the user's own activity wakes them.
@@ -245,6 +349,12 @@ pub struct AppState {
     pub voice_dispatched: Arc<Mutex<HashMap<String, i64>>>,
     /// What the voice worker last reported about itself (`POST /voice/worker/hello`).
     pub voice_worker: Arc<Mutex<Option<serde_json::Value>>>,
+    /// What landed in a chat while an agent call is live there (#1832): per (call, agent), the
+    /// finished bubbles and human messages the voice worker long-polls into the call's context.
+    pub voice_inbox: crate::voice::VoiceInbox,
+    /// The image provider's last health probe (`images::probe_provider`, every 5 min and on
+    /// `GET /admin/images/health?probe=1`); `healthz.images` reads it.
+    pub image_health: Arc<Mutex<Option<crate::images::ImageHealth>>>,
     /// device_id → the app version it last reported (`X-Arbos-Client`), see `releases.rs`.
     pub client_seen: Arc<crate::releases::ClientSeen>,
     /// Chats on Matrix (D88): mode, homeserver tokens and the outbox wake-up.
@@ -273,6 +383,10 @@ pub struct ProjectActivity {
     pub chat_id: String,
     pub text: String,
     pub at: i64,
+    /// Background jobs in flight for the chip ("N tasks running"; duplex design §2.4):
+    /// `{ id, title, state, step, elapsed_s }` each. Absent when none run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jobs: Option<serde_json::Value>,
 }
 
 /// An activity older than this is stale (the box died mid-turn) and is not shown.
@@ -285,6 +399,14 @@ pub struct UpgradeStatus {
     pub since: i64,
     pub from_snapshot: Option<String>,
     pub to_snapshot: String,
+}
+
+/// An upgrade refused at the measure step: the box kept running, nothing was stopped or copied.
+#[derive(Debug, Clone)]
+pub struct UpgradeRefusal {
+    pub reason: String,
+    pub at: i64,
+    pub work_mib: i64,
 }
 
 impl AppState {
@@ -300,7 +422,8 @@ impl AppState {
                     tx,
                     replicas: Default::default(),
                     health_cache: std::sync::Mutex::new(None),
-                    vv_cache: std::sync::Mutex::new(None),
+                    doc_cache: std::sync::Mutex::new(None),
+                    boxes: std::sync::Mutex::new(HashMap::new()),
                 })
             })
             .clone()
@@ -319,6 +442,31 @@ impl AppState {
     pub fn allows(&self, principal: &crate::auth::Principal, project_id: &str) -> bool {
         if let Some(chat_id) = project_id.strip_prefix(crate::people::PEOPLE_ACL_PREFIX) {
             return crate::people::room_access(self, principal, chat_id);
+        }
+        // A server's picture slot (`servers:{id}`): its non-banned members read it and may
+        // upload into it; `PATCH /servers/{id} {image_key}` (admins) is what sets the picture.
+        if let Some(server_id) = project_id.strip_prefix(crate::matrix::servers::SERVER_BLOB_PREFIX)
+        {
+            return match principal {
+                crate::auth::Principal::Device { user_id, .. } => self
+                    .db
+                    .server_member(server_id, user_id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|m| m.banned_at.is_none()),
+                crate::auth::Principal::Admin => true,
+                crate::auth::Principal::Box { .. } => false,
+            };
+        }
+        // A person's own picture slot (`users:{id}`): the generated previews of the avatar
+        // picker's Generate tab. Only that person's devices (and the admin) read it; `PUT
+        // /me/avatar {image_key}` is what makes one of them the profile picture.
+        if let Some(user_id) = project_id.strip_prefix(crate::images::USER_BLOB_PREFIX) {
+            return match principal {
+                crate::auth::Principal::Device { user_id: me, .. } => me == user_id,
+                crate::auth::Principal::Admin => true,
+                crate::auth::Principal::Box { .. } => false,
+            };
         }
         match self.user_of(project_id) {
             Some(u) if principal.can_access_project(&u) => true,
@@ -470,6 +618,9 @@ pub(crate) mod test_support {
             openai_direct_base: "https://api.openai.com/v1".into(),
             openai_route: super::OpenAiRoute::Auto,
             image_mock: false,
+            avatar_retry_backoff_ms: Vec::new(),
+            avatar_attempt_timeout: std::time::Duration::from_secs(40),
+            avatar_total_timeout: std::time::Duration::from_secs(75),
             voice_mock: true,
             openai_audio_base: String::new(),
             vault_mock: false,
@@ -497,7 +648,7 @@ pub(crate) mod test_support {
                 .collect(),
         };
         AppState {
-            db,
+            db: db.clone(),
             cfg: Arc::new(cfg),
             http: reqwest::Client::new(),
             daytona: None,
@@ -507,21 +658,25 @@ pub(crate) mod test_support {
             box_conns: Arc::new(Mutex::new(HashMap::new())),
             wake_started: Arc::new(Mutex::new(HashMap::new())),
             last_client_push: Arc::new(Mutex::new(HashMap::new())),
+            decisions_cache: Arc::new(std::sync::Mutex::new(Default::default())),
+            decisions_inflight: Arc::new(Mutex::new(HashMap::new())),
             conn_seq: Arc::new(AtomicU64::new(0)),
             relay_key: Arc::new(RelayKey::derive("test-key")),
             jwt_key: Arc::new(RelayKey::derive("test-key").subkey("jwt")),
             download_cache: Arc::new(Mutex::new(None)),
             upgrading: Arc::new(Mutex::new(HashMap::new())),
+            upgrade_refused: Arc::new(Mutex::new(HashMap::new())),
             stale_bounces: Arc::new(Mutex::new(HashMap::new())),
             local_conns: Arc::new(Mutex::new(HashMap::new())),
             refresh_grace: Arc::new(Mutex::new(HashMap::new())),
-            push: Arc::new(crate::apns::Pusher::Capture(Mutex::new(Vec::new()))),
+            push: Arc::new(crate::push::Push::capture(db.clone())),
             focus: Arc::new(Mutex::new(HashMap::new())),
             fallback_sent: Arc::new(Mutex::new(HashMap::new())),
             livekit: None,
             presence_seen: Arc::new(Mutex::new(HashMap::new())),
             activity: Arc::new(Mutex::new(HashMap::new())),
             box_http_seen: Arc::new(Mutex::new(HashMap::new())),
+            fresh_preview_tokens: Arc::new(Mutex::new(HashMap::new())),
             turn_running: Arc::new(Mutex::new(HashMap::new())),
             evicted: Arc::new(Mutex::new(HashMap::new())),
             fleet_pressure: Arc::new(Mutex::new(None)),
@@ -532,6 +687,8 @@ pub(crate) mod test_support {
             restart: Arc::new(RestartSignal::default()),
             voice_dispatched: Arc::new(Mutex::new(HashMap::new())),
             voice_worker: Arc::new(Mutex::new(None)),
+            voice_inbox: crate::voice::VoiceInbox::default(),
+            image_health: Arc::new(Mutex::new(None)),
             client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
             matrix: crate::matrix::Matrix::new(crate::matrix::Config::off()),
         }

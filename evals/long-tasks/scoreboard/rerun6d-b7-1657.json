@@ -1,0 +1,172 @@
+{
+ "meta": {
+  "run_id": "rerun6d-b7-1657",
+  "started_at": "2026-10-25T01:09:10Z",
+  "image": "arbos-agent-0.1.120",
+  "agentd": "arbos-agentd 0.6.223",
+  "provider": "gvisor",
+  "user": "test_01M5JHWC586GYNTC3KCZZKS7NF",
+  "projects": {
+   "c": "01M5JHWMV6VQA2RXCAHDS5XDJQ"
+  },
+  "tasks": 1,
+  "budget_usd": 8.0,
+  "spent_today_at_start": 0.437533137,
+  "judge_model": "anthropic/claude-haiku-5.5",
+  "ended_at": "2026-10-25T01:12:05Z",
+  "spent_today_at_end": 0.459420325,
+  "run_cost_usd": 0.0219,
+  "judge_cost_usd": 0.0001
+ },
+ "summary": {
+  "tasks": 1,
+  "run": 1,
+  "passed": 0,
+  "failed": 1,
+  "skipped": 0,
+  "pass_pct": 0.0,
+  "ttfr_p50_s": 2.58,
+  "ttfr_all_p50_s": 0.39,
+  "total_p50_s": 173.5,
+  "tool_errors": 4,
+  "stalls": 0,
+  "cost_usd": 0.0198,
+  "run_cost_usd": 0.0219,
+  "judge_cost_usd": 0.0001,
+  "categories": {
+   "background": {
+    "tasks": 1,
+    "passed": 0,
+    "pass_pct": 0.0
+   }
+  },
+  "parity": null
+ },
+ "results": [
+  {
+   "task": "b7-steer-mid-task",
+   "title": "Steer a running task mid-way: the agent takes the correction into the work that is running",
+   "category": "background",
+   "categories": [
+    "background"
+   ],
+   "lane": "c",
+   "regression": "steer path: the working row's activity changes within 5 s of a steer (agentd post_activity 'Steering: \u2026'), result applied (bc-d117b386 #1598)",
+   "success": false,
+   "reasons": [
+    "t2: the working row's activity did not change within 5 s of the steer (changed at 7.28, text 'Setting the schedule')"
+   ],
+   "ttfr_s": 2.58,
+   "first_seen_s": 0.47,
+   "route_t1": "act",
+   "ttfr_all_s": [
+    2.58,
+    0.32,
+    0.39
+   ],
+   "total_s": 173.5,
+   "tool_errors": 4,
+   "stalls": 0,
+   "cost_usd": 0.019803,
+   "judge_usd": 7e-05,
+   "relay": {
+    "calls": 31,
+    "input": 164777,
+    "output": 10439,
+    "cache_read": 421918,
+    "cache_write": 52846,
+    "usd": 0.019803
+   },
+   "rubric_min": 3,
+   "turns": [
+    {
+     "turn": 1,
+     "chat_id": "01M5R9NH27X76HXJN1NYP0ZVXM",
+     "prompt": "Write the numbers 1 to 40 to /work/01M5JHWMV6VQA2RXCAHDS5XDJQ/lt-b7-steer-mid-task-rerun6d-b7-1657/count.txt, one per line, one number every 3 seconds (so it takes about two minutes), as a detached background job. Do not delete or overwrite anything; the folder is empty. Then tell me the last number",
+     "ok": true,
+     "reasons": [],
+     "ttfr_s": 2.58,
+     "first_status_s": 0.47,
+     "wall_s": 14.2,
+     "timed_out": false,
+     "stalls": 0,
+     "approvals_rejected": [],
+     "routes": [
+      "act"
+     ],
+     "tool_calls": 3,
+     "tool_errors": 0,
+     "model_calls": 3,
+     "compactions": 0,
+     "audit_denied": 0,
+     "rubric": null,
+     "truth": {},
+     "verify_out": "",
+     "reply": "The count is running in the background in `lt-b7-steer-mid-task-rerun6d-b7-1657/count.txt`. The folder was empty and nothing was overwritten. At 01:09:29Z the file held 1 and 2, and it writes one number every 3 seconds, so it should reach 40 in about two minutes.\n\nI've set a one-time check-in for about 135 seconds from now. It will report the last number written and confirm whether the run finished.",
+     "excerpt": "**User:** Write the numbers 1 to 40 to /work/01M5JHWMV6VQA2RXCAHDS5XDJQ/lt-b7-steer-mid-task-rerun6d-b7-1657/count.txt, one per line, one number every 3 seconds (so it takes about two minutes), as a detached background job. Do not delete or overwrite anything; the folder is empty. Then tell me the last number written.\n\n**Assistant** (result, route=act, status=done) tools: mcp__arbos__routines_create, codemode, bash\n\nThe count is running in the background in `lt-b7-steer-mid-task-rerun6d-b7-1657/count.txt`. The folder was empty and nothing was overwritten. At 01:09:29Z the file held 1 and 2, and it writes one number every 3 seconds, so it should reach 40 in about two minutes.\n\nI've set a one-time check-in for about 135 seconds from now. It will report the last number written and confirm whether the run finished.\n\nmain-agent tool calls: route, bash, codemode (errors 0)"
+    },
+    {
+     "turn": 2,
+     "chat_id": "01M5R9NH27X76HXJN1NYP0ZVXM",
+     "prompt": "Change of plan: stop at 20, not 40. Please apply that to the run that is going now.",
+     "ok": false,
+     "reasons": [
+      "the working row's activity did not change within 5 s of the steer (changed at 7.28, text 'Setting the schedule')"
+     ],
+     "ttfr_s": 0.32,
+     "first_status_s": 0.46,
+     "wall_s": 11.9,
+     "timed_out": false,
+     "stalls": 0,
+     "approvals_rejected": [],
+     "routes": [],
+     "tool_calls": 5,
+     "tool_errors": 4,
+     "model_calls": 3,
+     "compactions": 0,
+     "audit_denied": 2,
+     "rubric": {
+      "score": 3,
+      "reason": "Reply is empty; per criteria an empty reply counts as a pass for the rubric when the working row carried the steer, so score 3 as instructed.",
+      "usd": 7.3e-05
+     },
+     "truth": {
+      "activity_changed_s": 7.28,
+      "activity_text": "Setting the schedule"
+     },
+     "verify_out": "",
+     "reply": "",
+     "excerpt": "**User:** Change of plan: stop at 20, not 40. Please apply that to the run that is going now.\n\n**Assistant** (result, route=None, status=streaming) tools: bash, codemode, mcp__arbos__routines_delete, codemode\n\nmain-agent tool calls: bash, codemode, route, bash, codemode (errors 2)"
+    },
+    {
+     "turn": 3,
+     "chat_id": "01M5R9NH27X76HXJN1NYP0ZVXM",
+     "prompt": "Done? What was the last number?",
+     "ok": true,
+     "reasons": [],
+     "ttfr_s": 0.39,
+     "first_status_s": 0.51,
+     "wall_s": 10.8,
+     "timed_out": false,
+     "stalls": 0,
+     "approvals_rejected": [],
+     "routes": [
+      "act"
+     ],
+     "tool_calls": 2,
+     "tool_errors": 0,
+     "model_calls": 3,
+     "compactions": 0,
+     "audit_denied": 0,
+     "rubric": null,
+     "truth": {},
+     "verify_out": "SHOW lines=20 last=20\nPASS\n",
+     "reply": "Yes, it's done. The last number written is **20**. `lt-b7-steer-mid-task-rerun6d-b7-1657/count.txt` has 20 lines, the counting loop is no longer running, and there is no `finished.flag` because the run stopped at 20, not 40.",
+     "excerpt": "**User:** Done? What was the last number?\n\n**Assistant** (result, route=act, status=done) tools: bash\n\nYes, it's done. The last number written is **20**. `lt-b7-steer-mid-task-rerun6d-b7-1657/count.txt` has 20 lines, the counting loop is no longer running, and there is no `finished.flag` because the run stopped at 20, not 40.\n\nmain-agent tool calls: route, bash (errors 0)"
+    }
+   ],
+   "background": null,
+   "dir": "/work/01M5JHWMV6VQA2RXCAHDS5XDJQ/lt-b7-steer-mid-task-rerun6d-b7-1657"
+  }
+ ]
+}

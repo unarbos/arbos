@@ -1,0 +1,40 @@
+{
+ "id": "b9-job-two-steps-steer",
+ "lane": "c",
+ "category": "background",
+ "title": "A two-step job under the job tools; a steer between the steps changes step 2",
+ "regression": "#1778 (a job request uses start_job; a steer uses steer_job, never kill + restart) — on 0.1.141 the agent still ran a detached script and its kill+rewrite got a destructive-shell card (refused) so the steer was lost; b9 stays red; run 12 note on #1778: the agent edited the running script in place, the run died, it restarted instead of steer_job (output right); #2276 (run 13, 0.1.185: steer_job → worker sed -i + rm -f + restart, file-delete approval in the pinned chat, main agent claimed 'now writes the cubes' before anything happened)",
+ "turns": [
+  {
+   "prompt": "Start a job with two steps, as a job (not in this turn): step 1 — write the numbers 1 to 10 to {D}/step1.txt, one per line, then wait 45 seconds; step 2 — write the SQUARES of those numbers to {D}/step2.txt, one per line. Tell me when it has started, and tell me when it is done.",
+   "seed": "mkdir -p {D}",
+   "background": true,
+   "latency_max_s": 10,
+   "timeout_s": 90
+  },
+  {
+   "prompt": "For step 2, write the CUBES instead of the squares — the job is still running, apply it there.",
+   "pre_wait_s": 12,
+   "background": false,
+   "timeout_s": 90,
+   "allow_timeout": true,
+   "rubric": {
+    "criteria": "Judge the reply only. Pass if it acknowledges in one short line that the running job will write cubes in step 2 (or applies it silently and says so later); fail if it starts a second job, says it cannot change a running job, or rewrites step 1.",
+    "min": 3
+   }
+  },
+  {
+   "prompt": "Done? What is the last line of step2.txt?",
+   "pre_wait_s": 75,
+   "reply_regex": "\\b1000\\b",
+   "reply_regex_not": "\\b100\\b(?!0)",
+   "timeout_s": 180,
+   "verify": "f={D}/step2.txt; test -f $f || { echo FAIL: no step2.txt; exit 0; }; n=$(grep -c . $f); last=$(tail -1 $f | tr -dc 0-9); echo \"SHOW lines=$n last=$last first=$(head -1 $f)\"; if [ \"$last\" = 1000 ] && [ $n -eq 10 ] && [ \"$(sed -n 3p $f | tr -dc 0-9)\" = 27 ]; then echo PASS; else echo FAIL: last=$last lines=$n; fi"
+  }
+ ],
+ "doc_checks": {
+  "no_truncated_reply": true,
+  "no_repeated_sentence": true
+ },
+ "cleanup_routines": true
+}

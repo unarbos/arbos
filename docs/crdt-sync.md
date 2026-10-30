@@ -107,6 +107,8 @@ commands:  List<Map { id, kind, payload, issuedBy, issuedAt, status }>
 | `createdAt` / `completedAt` | i64 ms | |
 | `parts` | List\<Map\> | ordered parts |
 | `inReplyTo` | string? | assistant reply link |
+| `replyTo` | string? | user reply link to a row **in this chat** (the quote header) |
+| `replyRef` | Map? | **Reply in DM** (cross-chat reply): `{ chatId, projectId ("people" for DMs/groups), messageId, chatTitle, sender, senderName, senderHandle, text }` — the address of the quoted row plus a ≤ 240-char snapshot, so a reader who is not in the source chat still sees the quote. Written by `ChatDoc::set_reply_ref` (core `ReplyRef`); clients draw "Replying to `senderName` in `chatTitle`" + the quote, and make it a link only when the viewer is a member of `chatId`. agentd quotes the snapshot in the user turn. A row carries `replyTo` **or** `replyRef`, never both. |
 | `activity` | string? | plain-words working line while streaming |
 | `waitingUser` | bool? | open question |
 | `answersQuestionId` | string? | user answer row |
@@ -366,6 +368,9 @@ Auth: `Authorization: Bearer <device_token>` unless noted. Apps column: **Mac** 
 | `PATCH` | `/me` | profile fields | Mac, iOS |
 | `PUT` | `/me/avatar` | image body → avatar URL | Mac, iOS |
 | `GET` | `/healthz` | `{ ok, proto, … }` | probes |
+| `GET` | `/chats/{id}/health` | room health (#1470): head/floor, checkpoint, stored vs pending rows, replicas, `divergent` + reasons, and `gate` — the newest respond-gate verdicts per message (each agent's reply/silent, the judge's reason, confidence, who the message was for) | members, debug views |
+| `GET` | `/admin/room-health/{chat}?n=` | the same block for a people chat with up to `n` (≤ 500) gate decisions | ops |
+| `POST` | `/box/people/{chat}/gate` | a box records its agent's verdict on one message `{ message_id, agent_id, handle, decision: reply\|silent, reason, chosen[], confidence, addressee, model, latency_ms, cost_usd }`; 500 kept per chat | agentd |
 
 ### 9.2 Registry: projects and chats
 

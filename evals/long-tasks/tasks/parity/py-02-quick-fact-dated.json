@@ -1,0 +1,33 @@
+{
+  "id": "py-02-quick-fact-dated",
+  "lane": "a",
+  "category": "parity",
+  "categories": [
+    "parity",
+    "quick-fact-dated"
+  ],
+  "title": "A dated fact with a source",
+  "parity": true,
+  "timeout_s": 180,
+  "settle_s": 12,
+  "turns": [
+    {
+      "prompt": "Who won the most recent Formula 1 Grand Prix? Give the date and where you got it.",
+      "shape": {
+        "messages_min": 1,
+        "messages_max": 3,
+        "ack_first": false,
+        "table": false,
+        "links_min": 1,
+        "offer": false,
+        "first_bubble_max_s": 8,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": false
+      },
+      "judge": {
+        "criteria": "Names a winner, a race and a date, and names or links the source. Short. No handle."
+      }
+    }
+  ]
+}

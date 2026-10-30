@@ -18,7 +18,12 @@ STALL_S = 90
 
 
 def text_of(row):
-    return "\n".join(p.get("text", "") for p in row.get("parts", []) if p.get("kind") == "text").strip()
+    """What the user reads in a row: its text parts, plus the question of an `ask_user` card (the agent's
+    words when it stops to ask — d1 on 0.1.141 answered "clean up" with a question card and no text)."""
+    parts = row.get("parts", [])
+    out = [p.get("text", "") for p in parts if p.get("kind") == "text"]
+    out += [f"[asks] {p.get('question') or p.get('text') or ''}" for p in parts if p.get("kind") == "question" and (p.get("question") or p.get("text"))]
+    return "\n".join(out).strip()
 
 
 def rows_after(doc, user_msg_id):
@@ -96,9 +101,10 @@ class StreamWatcher(threading.Thread):
             self.lines.append(buf)
 
 
-def send_turn(project, chat_id, prompt, timeout_s, reject_approvals=True, on_rows=None, until_first_reply=False, on_poll=None, skip_secret_cards=False):
+def send_turn(project, chat_id, prompt, timeout_s, reject_approvals=True, on_rows=None, until_first_reply=False, on_poll=None, skip_secret_cards=False, tight_s=2.0):
     """until_first_reply: for background tasks — return once the agent has answered (ack or text)
-    and the ack row has settled, without waiting for the background result."""
+    and the ack row has settled, without waiting for the background result.
+    tight_s: how long `on_poll` is called every 0.5 s before the 3 s cadence (a 5 s deadline needs it)."""
     t0 = time.time()
     proc = rl.ctl_popen("chat", "send", project, chat_id, prompt, "--stream", "--timeout", str(min(timeout_s, 600)))
     watcher = StreamWatcher(proc, t0)
@@ -113,11 +119,22 @@ def send_turn(project, chat_id, prompt, timeout_s, reject_approvals=True, on_row
     first_row_at = None
     over = False
     repaired = False
-    time.sleep(2)
+    resync = False
+    if on_poll:
+        # a tight first stretch for checks with a short deadline (the steer's working-row change)
+        for _ in range(max(1, int(tight_s / 0.5))):
+            time.sleep(0.5)
+            on_poll()
+    else:
+        time.sleep(2)
     while time.time() < deadline:
         # repair once: the stream saw assistant text but the replica shows no assistant rows
         stuck = watcher.first_text_at is not None and not rows and time.time() - t0 - watcher.first_text_at > 20
-        doc = rl.chat_dump(project, chat_id, reset=(stuck and not repaired))
+        # a stall also re-syncs the replica from the relay: run 12 (h5 t3, p1) kept a row
+        # "streaming" long after the relay had it cancelled/done (status edits lost across a
+        # relay restart or a cancelled-and-redone turn), so the finish was never seen
+        doc = rl.chat_dump(project, chat_id, reset=(stuck and not repaired) or resync)
+        resync = False
         if stuck and not repaired:
             repaired = True
         if user_msg_id is None:
@@ -144,11 +161,14 @@ def send_turn(project, chat_id, prompt, timeout_s, reject_approvals=True, on_row
         elif time.time() - last_change > STALL_S and rows and not turn_over(rows):
             stalls += 1
             last_change = time.time()
+            resync = True
         if rows and turn_over(rows) and not pending_approvals(doc):
             over = True
             break
-        if until_first_reply and (watcher.first_text_at is not None or any(text_of(r) for r in rows)):
-            # the user has an answer; give the ack row a moment to settle, then stop watching
+        seen_status = watcher.first_status_at is not None or any(p.get("kind") == "status" for r in rows for p in r.get("parts", []))
+        if until_first_reply and (watcher.first_text_at is not None or any(text_of(r) for r in rows) or seen_status):
+            # the user has seen the agent react (text, or the working-line ack since 0.1.113);
+            # give the row a moment to settle, then stop watching — never abort the turn
             if first_row_at is not None and time.time() - t0 - first_row_at > 8:
                 over = True
                 break
@@ -161,7 +181,9 @@ def send_turn(project, chat_id, prompt, timeout_s, reject_approvals=True, on_row
                 over = True
                 break
         time.sleep(POLL_S)
-    if not over:
+    if not over and not until_first_reply:
+        # a background turn is left running on purpose; anything else that never settled must
+        # not block the next task's send
         rl.ctl("chat", "stop", project, chat_id, timeout=60)
         time.sleep(5)
     try:

@@ -12,7 +12,7 @@
       },
       "reply_regex_not": "(?<!not )(?<!no )(?<!isn't )(?<!aren't )(?<!without )(?<!lacks )(?<!never )\\b(is|are|chats? (is|are)|messages? (is|are)|fully|uses|has|with|provides|offers)\\s+(end[- ]to[- ]end[- ]encrypt\\w*|E2EE?\\b)",
       "rubric": {
-        "criteria": "The reply answers from Arbos's own source tree (/opt/arbos/src): it names at least one real file (docs/… or crates/…) for the facts it states and says what that file does; it does not claim end-to-end encryption; it is honest about what it did not check. An answer from memory with no file paths, or an invented file, scores 0–2.",
+        "criteria": "The reply answers from Arbos's own source tree (/opt/arbos/src): it names at least one real file (docs/… or crates/…) for the facts it states and says what that file does; it does not claim end-to-end encryption; it is honest about what it did not check. An answer from memory with no file paths, or an invented file, scores 0–2. Tool output need not be quoted in the reply; judge the cited files/functions for plausibility against the Arbos code base (crates/arbos-agentd, crates/arbos-relay) and the honesty about what was not checked.",
         "min": 3
       },
       "timeout_s": 300,
@@ -25,5 +25,5 @@
       ]
     }
   ],
-  "regression": "agent self-reference to its repo (bc-b07f76af, docs/agent-self-reference-repo.md); needs image ≥ 0.1.93"
+  "regression": "agent self-reference to its repo (bc-b07f76af, docs/agent-self-reference-repo.md); needs image ≥ 0.1.93; run 12: relay restart 01:54:23 30 s into the turn, rows done but the replica never saw the finish — re-graded PASS; run 13: judge 2/5 'no tool output shown' on a correct isolation.rs answer — rubric wording"
 }

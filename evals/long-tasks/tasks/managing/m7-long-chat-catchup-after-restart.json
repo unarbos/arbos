@@ -1,0 +1,35 @@
+{
+  "id": "m7-long-chat-catchup-after-restart",
+  "lane": "e",
+  "category": "managing",
+  "title": "Long chat survives a box restart: facts from 30 turns ago and the running thread are intact",
+  "turns": [
+    {
+      "prompt": "Remember three things for this project: the staging host is stag-07, the release freeze starts 3 December, and the on-call phone is Lena's.",
+      "timeout_s": 180
+    },
+    {
+      "prompt": "Now a filler task: list the first 12 prime numbers.",
+      "timeout_s": 120
+    },
+    {
+      "prompt": "Another filler: name five European capitals, comma separated.",
+      "timeout_s": 120
+    },
+    {
+      "prompt": "We just restarted your machine. Quick check: which staging host, when does the freeze start, and whose phone is on call?",
+      "driver_action": {
+        "kind": "restart_machine",
+        "settle_s": 90
+      },
+      "reply_regex": "stag-07[\\s\\S]*3 December[\\s\\S]*Lena|Lena[\\s\\S]*stag-07",
+      "latency_max_s": 20,
+      "timeout_s": 300
+    }
+  ],
+  "doc_checks": {
+    "no_truncated_reply": true,
+    "no_repeated_sentence": true
+  },
+  "regression": "#1575/#1610 session liveness across a restart; memory survives (D77) · regression case for #1648 (doubled reply after restart; fixed main 78a3e6b2, image 0.1.116)"
+}

@@ -133,13 +133,18 @@ fn recent_group_context(
     participants: &[Value],
     host_name: &str,
     max: usize,
+    chat_id: &str,
 ) -> Vec<Value> {
-    let mut out = Vec::new();
+    let reply_to = messages
+        .iter()
+        .find(|m| m.id == current_id)
+        .and_then(|m| str_field(&m.rest, "replyTo"));
+    let mut lines = Vec::new();
     for m in messages {
         if m.id == current_id {
             break;
         }
-        let text: String = m.text().split_whitespace().collect::<Vec<_>>().join(" ");
+        let text = m.text();
         if text.trim().is_empty() {
             continue;
         }
@@ -156,12 +161,14 @@ fn recent_group_context(
                 }),
             _ => continue,
         };
-        out.push(json!({ "from": from, "text": text.chars().take(500).collect::<String>() }));
+        lines.push(crate::truncate::WindowLine {
+            id: m.id.clone(),
+            from,
+            text,
+            full: reply_to.as_deref() == Some(m.id.as_str()),
+        });
     }
-    if out.len() > max {
-        out.drain(0..out.len() - max);
-    }
-    out
+    crate::truncate::build_window(chat_id, lines, max).0
 }
 
 impl Agent {
@@ -308,16 +315,21 @@ impl Agent {
         let recent = recent_project_messages(&messages, user_msg_id);
         if !recent.is_empty() {
             prelude.push_str("Said in the group since your last turn:\n");
-            for m in recent.iter().rev().take(PRELUDE_RECENT_MAX).rev() {
-                let who = str_field(&m.rest, "senderName")
-                    .or_else(|| str_field(&m.rest, "sender"))
-                    .unwrap_or_else(|| "Project".into());
-                let text: String = m.text().split_whitespace().collect::<Vec<_>>().join(" ");
-                prelude.push_str(&format!(
-                    "- {who}: {}\n",
-                    text.chars().take(600).collect::<String>()
-                ));
-            }
+            let lines: Vec<crate::truncate::WindowLine> = recent
+                .iter()
+                .map(|m| crate::truncate::WindowLine {
+                    id: m.id.clone(),
+                    from: str_field(&m.rest, "senderName")
+                        .or_else(|| str_field(&m.rest, "sender"))
+                        .unwrap_or_else(|| "Project".into()),
+                    text: m.text(),
+                    full: false,
+                })
+                .collect();
+            let (window, _) = crate::truncate::build_window(chat_id, lines, PRELUDE_RECENT_MAX);
+            prelude.push_str(&crate::truncate::render_window(&window));
+            prelude.push_str(&crate::truncate::window_note(chat_id));
+            prelude.push('\n');
         }
         prelude.push('\n');
         let is_user = msg.role == "user" && from == "user";
@@ -328,6 +340,7 @@ impl Agent {
             &participants,
             &self.name(),
             PRELUDE_RECENT_MAX,
+            chat_id,
         );
         Some(GroupTurn {
             host_project_id: me,
@@ -420,9 +433,9 @@ impl Agent {
         });
     }
 
-    /// Which participant project ids should answer this user message: the responder decision
-    /// (`responders.rs`; Jev per-agent probabilities, then the LLM router). When every provider
-    /// fails, falls open to every participant (previous behaviour).
+    /// Which participant project ids should answer this user message: the judge
+    /// (`responders.rs`). When it fails, falls open to every participant (a project group is
+    /// the user with their own agents; the people-chat gate fails closed instead).
     pub async fn decide_group_responders(
         &self,
         gt: &GroupTurn,
@@ -433,7 +446,7 @@ impl Agent {
         if known.is_empty() {
             return vec![self.cfg.project_id.clone()];
         }
-        let candidates: Vec<Candidate> = gt
+        let mut candidates: Vec<Candidate> = gt
             .participants_detail
             .iter()
             .filter_map(|p| {
@@ -451,9 +464,11 @@ impl Agent {
                         .unwrap_or("")
                         .to_owned(),
                     host: id == gt.host_project_id,
+                    mentioned_as: None,
                 })
             })
             .collect();
+        candidates.sort_by(|a, b| a.id.cmp(&b.id));
         let room = Room {
             kind: "project_group",
             chat_id: gt.group_chat_id.clone(),
@@ -463,14 +478,16 @@ impl Agent {
             recent: gt.recent.clone(),
             candidates,
             people: Vec::new(),
+            reply_to: None,
         };
         match self.decide_responders(&room).await {
             Ok(d) => {
                 self.log_responder_decision(&room, user_msg_id, Ok(&d), None);
                 d.chosen
             }
-            Err(errors) => {
-                self.log_responder_decision(&room, user_msg_id, Err(&errors), Some(("ALL", known)));
+            Err(e) => {
+                let error = e.to_string();
+                self.log_responder_decision(&room, user_msg_id, Err(&error), Some(("ALL", known)));
                 known.clone()
             }
         }

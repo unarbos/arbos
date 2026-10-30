@@ -8,7 +8,7 @@ rust-version.workspace = true
 description = "Box entrypoint: doc host, pi main-agent driver, HarnessAdapter registry, project MCP, SQLite+FTS5 history and memory"
 
 [dependencies]
-arbos-core.workspace = true
+arbos-core = { workspace = true, features = ["chart-png"] }
 anyhow.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
@@ -27,10 +27,12 @@ clap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 chrono.workspace = true
+chrono-tz = "0.10"
 sha2.workspace = true
 hex.workspace = true
 async-trait.workspace = true
 nix.workspace = true
 regex-lite.workspace = true
+rand.workspace = true
 base64.workspace = true
 ulid.workspace = true

@@ -21,7 +21,9 @@ use gpui::{
 use crate::app::{AppEvent, AppState};
 use crate::audio::{self, Pcm, RATE};
 use crate::model::{now_ms, Id, Message, MessageStatus, Role};
+use crate::sync::user_error::UserError;
 use crate::ui::frost::{frosted, PANEL_BLUR};
+use crate::ui::highlight;
 use crate::ui::theme::Theme;
 
 const TICK_MS: u64 = 50;
@@ -839,7 +841,15 @@ impl Voice {
         let took = now_ms().saturating_sub(pending.started_at);
         let text = text.trim();
         if let Some(err) = error {
-            self.set_notice(format!("Transcription failed: {err}"));
+            // A failure is the composer's note (the shared error element), not a muted line.
+            let error = UserError::from_text("transcribe your memo", err);
+            self.notice = None;
+            self.state.update(cx, |s, cx| {
+                if let Some(chat) = s.active_chat_id() {
+                    s.set_send_error(chat, error);
+                }
+                cx.notify();
+            });
             if let Some(call) = &mut self.call {
                 call.phase = CallPhase::Listening;
             }
@@ -958,7 +968,11 @@ impl Voice {
         };
         self.mock = mock;
         if let Some(err) = error {
-            self.fail_speech(&message_id, format!("Speech failed: {err}"), cx);
+            self.fail_speech(
+                &message_id,
+                UserError::from_text("play the reply", err).sentence(),
+                cx,
+            );
             return;
         }
         if !mime.starts_with("audio/") && audio::decode_wav(&bytes).is_none() {
@@ -1019,7 +1033,12 @@ impl Voice {
     fn play(&mut self, message_id: Id, bytes: Arc<Vec<u8>>, cx: &mut Context<Self>) {
         self.stop_playback();
         let Some(pcm) = audio::decode_wav(&bytes) else {
-            self.fail_speech(&message_id, "Reply audio could not be decoded".into(), cx);
+            self.fail_speech(
+                &message_id,
+                UserError::from_text("play the reply", "Reply audio could not be decoded")
+                    .sentence(),
+                cx,
+            );
             return;
         };
         let secs = pcm.duration_secs();
@@ -1033,7 +1052,11 @@ impl Voice {
         let silent = matches!(self.player, Some(Player::Silent) | None);
         if let Some(player) = &mut self.player {
             if let Err(err) = player.play(&bytes) {
-                self.fail_speech(&message_id, format!("Playback failed: {err}"), cx);
+                self.fail_speech(
+                    &message_id,
+                    UserError::from_text("play the reply", err.to_string()).sentence(),
+                    cx,
+                );
                 return;
             }
         }
@@ -1265,12 +1288,18 @@ fn escape_action(recording: bool, transcribing: bool) -> Option<EscapeAction> {
 
 /// Thin recording/level row for the composer while a memo records (the voice
 /// tick re-renders it every 50 ms).
-pub fn render_recording_row(voice: &Voice, theme: &Theme) -> impl IntoElement {
+/// `mark` is the caller's `ui::working::glyph` — the braille spinner, not a red
+/// dot (Jacob, 2026-10-27); the words say it records.
+pub fn render_recording_row(
+    voice: &Voice,
+    theme: &Theme,
+    mark: impl IntoElement,
+) -> impl IntoElement {
     div()
         .flex()
         .items_center()
         .gap(px(10.0))
-        .child(div().size(px(9.0)).rounded_full().bg(theme.danger))
+        .child(mark)
         .child(
             div()
                 .text_size(px(13.0))
@@ -1299,18 +1328,21 @@ impl Render for Voice {
         let phase = call.phase;
         let muted = call.muted;
         let elapsed = mmss(now_ms().saturating_sub(call.started_at));
-        let (dot, label) = match phase {
-            CallPhase::Listening => (
-                theme.accent,
+        // The phase word; the braille spinner leads it while the agent thinks
+        // (never a coloured dot — Jacob, 2026-10-27).
+        let label = match phase {
+            CallPhase::Listening => {
                 if muted {
                     "Muted".to_owned()
                 } else {
                     CallPhase::Listening.label().to_owned()
-                },
-            ),
-            CallPhase::Thinking => (theme.warn, format!("{}…", CallPhase::Thinking.label())),
-            CallPhase::Speaking => (theme.text, CallPhase::Speaking.label().to_owned()),
+                }
+            }
+            CallPhase::Thinking => format!("{}…", CallPhase::Thinking.label()),
+            CallPhase::Speaking => CallPhase::Speaking.label().to_owned(),
         };
+        let phase_mark =
+            (phase == CallPhase::Thinking).then(|| crate::ui::working::glyph(&theme, cx));
         let mut sub: Vec<String> = Vec::new();
         if self.using_test_clip() {
             sub.push("test clip as microphone".into());
@@ -1345,7 +1377,7 @@ impl Render for Voice {
                 })
                 .text_size(px(12.0))
                 .text_color(if danger { theme.danger } else { theme.text })
-                .hover(|s| s.bg(theme.surface_2))
+                .map(|el| highlight::button(el, &theme))
                 .cursor_pointer()
                 .child(div().text_size(px(13.0)).child(glyph))
                 .child(label)
@@ -1373,7 +1405,7 @@ impl Render for Voice {
                             .items_center()
                             .gap(px(8.0))
                             .w(px(120.0))
-                            .child(div().size(px(9.0)).rounded_full().bg(dot))
+                            .children(phase_mark)
                             .child(
                                 div()
                                     .text_size(px(13.0))

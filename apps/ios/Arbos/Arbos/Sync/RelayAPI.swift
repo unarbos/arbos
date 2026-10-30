@@ -10,6 +10,8 @@ struct RelayError: Error, LocalizedError {
     var message: String
     /// `error.type` from the self-serve relay (token_expired, credits_exhausted, …).
     var type: String? = nil
+    /// `error.detail` when the relay sends one (the avatar routes: the provider's words).
+    var detail: String? = nil
 
     var errorDescription: String? {
         message.isEmpty ? "HTTP \(status)" : "HTTP \(status): \(message)"
@@ -20,7 +22,11 @@ struct RelayError: Error, LocalizedError {
     /// Decode `ApiErrorDto` when the body is the current shape; plain text for older relays.
     static func from(status: Int, body: Data) -> RelayError {
         if let dto = try? JSONDecoder().decode(ApiErrorDto.self, from: body) {
-            return RelayError(status: status, message: dto.error.message, type: dto.error.type)
+            let detail = ((try? JSONSerialization.jsonObject(with: body)) as? [String: Any])
+                .flatMap { $0["error"] as? [String: Any] }
+                .flatMap { $0["detail"] as? String }
+                .flatMap { $0.isEmpty ? nil : $0 }
+            return RelayError(status: status, message: dto.error.message, type: dto.error.type, detail: detail)
         }
         let text = (String(data: body, encoding: .utf8) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -105,23 +111,26 @@ final class RelayAPI {
         return "ios/\(v) (\(b))"
     }
 
-    func request(_ method: String, _ path: String, body: Any? = nil, auth: Bool = true, headers: [String: String] = [:]) async throws -> (Data, HTTPURLResponse) {
+    /// `timeout`: this one request's limit instead of the session's 30 s (an avatar generation
+    /// gets 90 s so the relay's 75 s budget always answers first).
+    func request(_ method: String, _ path: String, body: Any? = nil, auth: Bool = true, headers: [String: String] = [:], timeout: TimeInterval? = nil) async throws -> (Data, HTTPURLResponse) {
         do {
-            return try await requestOnce(method, path, body: body, auth: auth, headers: headers)
+            return try await requestOnce(method, path, body: body, auth: auth, headers: headers, timeout: timeout)
         } catch let error as RelayError where error.isUnauthorized && auth {
             if let refresher, await refresher() {
-                return try await requestOnce(method, path, body: body, auth: auth, headers: headers)
+                return try await requestOnce(method, path, body: body, auth: auth, headers: headers, timeout: timeout)
             }
             throw error
         }
     }
 
-    private func requestOnce(_ method: String, _ path: String, body: Any?, auth: Bool, headers: [String: String] = [:]) async throws -> (Data, HTTPURLResponse) {
+    private func requestOnce(_ method: String, _ path: String, body: Any?, auth: Bool, headers: [String: String] = [:], timeout: TimeInterval? = nil) async throws -> (Data, HTTPURLResponse) {
         guard let url = URL(string: endpoint.httpUrl + path) else {
             throw RelayError(status: 0, message: "Bad relay URL")
         }
         var req = URLRequest(url: url)
         req.httpMethod = method
+        if let timeout { req.timeoutInterval = timeout }
         if auth {
             req.setValue("Bearer \(token())", forHTTPHeaderField: "Authorization")
         }
@@ -141,6 +150,73 @@ final class RelayAPI {
             throw RelayError.from(status: http.statusCode, body: data)
         }
         return (data, http)
+    }
+
+    // MARK: Emoji · stickers · GIFs picker (ARB-544)
+
+    /// `GET /gif/search?q=` (or `/gif/trending` for an empty query): the relay's page, or why
+    /// there is none. The relay talks to KLIPY; this app never holds the key.
+    func gifSearch(query: String, pos: String?) async -> GifPage {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        var path: String
+        if q.isEmpty {
+            path = "/gif/trending"
+            if let pos, !pos.isEmpty, let enc = pos.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+                path += "?pos=\(enc)"
+            }
+        } else {
+            guard let enc = q.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return .failed }
+            path = "/gif/search?q=\(enc)"
+            if let pos, !pos.isEmpty, let penc = pos.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+                path += "&pos=\(penc)"
+            }
+        }
+        do {
+            let (data, _) = try await request("GET", path)
+            let page = try JSONDecoder().decode(GifPageDto.self, from: data)
+            return .items(page.items, next: page.next)
+        } catch let error as RelayError {
+            if error.type == "gif_unavailable" || error.status == 503 { return .unavailable }
+            if error.type == "gif_busy" || error.status == 429 { return .busy }
+            return .failed
+        } catch {
+            return .failed
+        }
+    }
+
+    /// `POST /gif/share?id=&q=` — the provider's ranking signal; never an error for the app.
+    func gifShare(id: String, query: String) async {
+        guard let i = id.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let q = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return }
+        _ = try? await request("POST", "/gif/share?id=\(i)&q=\(q)")
+    }
+
+    /// `GET /stickers/packs` — the relay's sticker-pack manifest; `nil` when it could not be read.
+    func stickerPacks() async -> [StickerPack]? {
+        guard let (data, _) = try? await request("GET", "/stickers/packs"),
+              let m = try? JSONDecoder().decode(StickerPacksDto.self, from: data) else { return nil }
+        return m.packs
+    }
+
+    /// `GET /stickers/{pack}/{id}` — one sticker's bytes (the relay caches them; MIT / CC BY).
+    func stickerData(path: String) async -> Data? {
+        guard let (data, http) = try? await request("GET", path), http.statusCode == 200, !data.isEmpty else { return nil }
+        return data
+    }
+
+    /// The relay's GIF pass-through for a provider media URL (`GET /gif/media?u=`); the caller
+    /// adds the device bearer. `nil` when the URL cannot be encoded.
+    func gifMediaURL(_ remote: String) -> URL? {
+        guard let enc = remote.addingPercentEncoding(withAllowedCharacters: .alphanumerics) else { return nil }
+        return URL(string: "\(endpoint.httpUrl)/gif/media?u=\(enc)")
+    }
+
+    /// `GET /link-icon?domain=` — the site's 64×64 PNG for the bubbles' named links, `nil` when the
+    /// site has none (204) or the call failed (nobody asked; the bubble keeps its placeholder).
+    func linkIcon(host: String) async -> Data? {
+        guard let q = host.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return nil }
+        guard let (data, http) = try? await request("GET", "/link-icon?domain=\(q)") else { return nil }
+        return http.statusCode == 200 && !data.isEmpty ? data : nil
     }
 
     func json(_ method: String, _ path: String, body: Any? = nil, auth: Bool = true) async throws -> Any {
@@ -199,8 +275,11 @@ final class RelayAPI {
                 continue
             }
             let id: String
+            // The per-user archive flag rides on the list only; the detail is shared.
+            var listArchivedAt: Int64? = nil
             if let dto = try? decoder.decode(ProjectDto.self, from: itemData) {
                 id = dto.id
+                listArchivedAt = dto.archived_at.flatMap { $0 }
             } else if let bare = try? decoder.decode(ProjectListId.self, from: itemData) {
                 id = bare.id
             } else {
@@ -230,9 +309,8 @@ final class RelayAPI {
                 continue
             }
             var project = Arbos.Project(dto: detail.project)
-            if let key = project.imageKey {
-                project.imageURL = "\(endpoint.httpUrl)/blob/\(id)/\(key)?token=\(token())"
-            }
+            project.archivedAt = listArchivedAt
+            project.imageURL = Arbos.Project.pictureURL(httpUrl: endpoint.httpUrl, id: id, imageKey: project.imageKey, version: project.avatarVersion)
             // Prefer the detail's live box word when present (same as the old parse).
             project.state = Arbos.BoxState.from(state: detail.project.state, box: detail.box)
             project.stateSince = detail.box_since
@@ -287,7 +365,7 @@ final class RelayAPI {
         description: String? = nil,
         instructions: String? = nil,
         sourceProjectId: Id? = nil
-    ) async throws {
+    ) async throws -> Id? {
         var body: [String: Any] = ["name": name]
         if let avatarColorIndex { body["avatar_color_index"] = avatarColorIndex }
         // D92: the Create sheet's leaf + colour (forks copy the source's).
@@ -297,12 +375,113 @@ final class RelayAPI {
         if let instructions, !instructions.isEmpty { body["instructions"] = instructions }
         // Fork: relay copies the source agent's workspace (files + memory) into the new one.
         if let sourceProjectId { body["source_project_id"] = sourceProjectId }
-        _ = try await json("POST", "/projects", body: body)
+        let v = try await json("POST", "/projects", body: body)
+        return (v as? [String: Any])?["id"] as? String
+    }
+
+    // MARK: Outside agents (#2142) — an agent that runs elsewhere, hosted by the relay
+
+    /// `POST /outside-agents {name, transport}` → the new agent's key, shown once.
+    func connectAgent(name: String, transport: String) async throws -> ConnectReveal {
+        let v = try await json("POST", "/outside-agents", body: ["name": name, "transport": transport])
+        guard let reveal = ConnectReveal(json: v, rotated: false) else {
+            throw RelayError(status: 500, message: "The relay answered without a key.")
+        }
+        return reveal
+    }
+
+    /// `GET /outside-agents/{id}` → its connection; `nil` for an agent that is not outside.
+    func outsideAgent(_ projectId: Id) async throws -> OutsideAgentInfo? {
+        do {
+            let v = try await json("GET", "/outside-agents/\(projectId)")
+            let d = v as? [String: Any]
+            return OutsideAgentInfo(json: d?["agent"], log: d?["log"])
+        } catch let e as RelayError where e.status == 404 {
+            return nil
+        }
+    }
+
+    /// `GET /outside-agents/{id}/log?limit=500` (#2224): the connected agent's session log,
+    /// oldest first; an older relay (404) reads as no log.
+    func outsideAgentLog(_ projectId: Id) async throws -> [OutsideLogEntry] {
+        do {
+            let v = try await json("GET", "/outside-agents/\(projectId)/log?limit=500")
+            let entries = (v as? [String: Any])?["entries"] as? [Any] ?? []
+            return entries.compactMap { OutsideLogEntry(json: $0) }
+        } catch let e as RelayError where e.status == 404 {
+            return []
+        }
+    }
+
+    /// `PATCH /outside-agents/{id} {scopes: {name: on}}` — one switch of the Can card → the
+    /// agent with its effective set.
+    func setOutsideScope(_ projectId: Id, _ scope: String, on: Bool) async throws -> OutsideAgentInfo? {
+        let v = try await json("PATCH", "/outside-agents/\(projectId)", body: ["scopes": [scope: on]])
+        return OutsideAgentInfo(json: (v as? [String: Any])?["agent"])
+    }
+
+    /// `POST /outside-agents/{id}/rotate` → a fresh key; the old one stops at once.
+    func rotateOutsideKey(_ projectId: Id) async throws -> ConnectReveal {
+        let v = try await json("POST", "/outside-agents/\(projectId)/rotate", body: [String: Any]())
+        guard let reveal = ConnectReveal(json: v, rotated: true) else {
+            throw RelayError(status: 500, message: "The relay answered without a key.")
+        }
+        return reveal
+    }
+
+    /// `DELETE /outside-agents/{id}`: revoke the key; the agent and its messages stay.
+    func revokeOutsideAgent(_ projectId: Id) async throws {
+        _ = try await request("DELETE", "/outside-agents/\(projectId)")
+    }
+
+    /// `PATCH /outside-agents/{id} {wake_url, wake_auth}` ([feedback outside-agents-wake-ios-2026-10-28]):
+    /// `nil` leaves a field alone, an empty string clears it. → the agent's connection.
+    func setOutsideWake(_ projectId: Id, url: String?, auth: String?) async throws -> OutsideAgentInfo? {
+        var body: [String: Any] = [:]
+        if let url { body["wake_url"] = url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? NSNull() : url }
+        if let auth { body["wake_auth"] = auth.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? NSNull() : auth }
+        let v = try await json("PATCH", "/outside-agents/\(projectId)", body: body)
+        return OutsideAgentInfo(json: (v as? [String: Any])?["agent"])
+    }
+
+    /// `POST /outside-agents/{id}/wake/test` → `(ok, "Delivered · HTTP 200" | "Failed · <reason>")`.
+    func testOutsideWake(_ projectId: Id) async throws -> (ok: Bool, text: String) {
+        let v = try await json("POST", "/outside-agents/\(projectId)/wake/test", body: [String: Any]())
+        let d = v as? [String: Any] ?? [:]
+        let ok = d["ok"] as? Bool ?? false
+        if ok {
+            if let s = d["status"] as? NSNumber { return (true, "Delivered · HTTP \(s.intValue)") }
+            return (true, "Delivered")
+        }
+        if let e = d["error"] as? String, !e.isEmpty { return (false, "Failed · \(e)") }
+        return (false, "Failed")
     }
 
     /// Soft-delete an owned agent (`DELETE /projects/{id}`).
     func deleteProject(_ projectId: Id) async throws {
         _ = try await request("DELETE", "/projects/\(projectId)")
+    }
+
+    /// `PUT /projects/{id}/archive {archived}` — this user's sidebar archive, synced across devices.
+    func setProjectArchived(_ projectId: Id, archived: Bool) async throws {
+        _ = try await request("PUT", "/projects/\(projectId)/archive", body: ["archived": archived])
+    }
+
+    /// `PUT /servers/{id}/archive {archived}` — same flag for a server row.
+    func setServerArchived(_ serverId: String, archived: Bool) async throws {
+        _ = try await request("PUT", "/servers/\(serverId)/archive", body: ["archived": archived])
+    }
+
+    /// `GET /me/pins` → my sidebar / Home pins, top first, and the relay's cap
+    /// ([feedback sidebar-pinning-ios-2026-10-28]).
+    func pins() async throws -> PinsDto {
+        try await decode(PinsDto.self, "GET", "/me/pins")
+    }
+
+    /// `PUT /me/pins {pins}` replaces the whole list; the answer is the list the relay kept.
+    /// Over the cap → `409 pin_cap`.
+    func setPins(_ pins: [String]) async throws -> PinsDto {
+        try await decode(PinsDto.self, "PUT", "/me/pins", body: ["pins": pins])
     }
 
     func setModel(projectId: Id, model: String, effort: Effort) async throws {
@@ -312,6 +491,27 @@ final class RelayAPI {
 
     func wake(projectId: Id) async throws {
         _ = try await json("POST", "/projects/\(projectId)/wake", body: [String: Any]())
+    }
+
+    /// The tasks chip's poll (duplex §2.4): `GET /projects/{id}` → `activity.jobs[]`. A relay
+    /// without the field or a `null` activity reads as no open jobs.
+    func projectJobs(projectId: Id) async throws -> [Job] {
+        let raw = try await json("GET", "/projects/\(projectId)")
+        guard let detail = raw as? [String: Any] else { return [] }
+        return Job.list(fromActivity: detail["activity"])
+    }
+
+    /// The job tab's document: `GET /projects/{id}/jobs/{jobId}[?after=<seq>]`
+    /// (`internal/duplex-rollout-client-contract.md`). nil when the relay has no such endpoint
+    /// (404) — the tab says so; other errors throw.
+    func jobRollout(projectId: Id, jobId: String, after: Int64?) async throws -> JobRollout? {
+        let path = after.map { "/projects/\(projectId)/jobs/\(jobId)?after=\($0)" } ?? "/projects/\(projectId)/jobs/\(jobId)"
+        do {
+            let raw = try await json("GET", path)
+            return JobRollout(raw)
+        } catch let e as RelayError where e.status == 404 {
+            return nil
+        }
     }
 
     // MARK: Machine (D70: one box per user, projects are workspaces on it)
@@ -444,7 +644,8 @@ final class RelayAPI {
         return key
     }
 
-    /// `PUT /me/avatar` (raw JPEG) → `MeUserResponseDto`; updates the signed-in user's picture.
+    /// `PUT /me/avatar` (raw PNG or JPEG master) → `MeUserResponseDto`; updates the signed-in
+    /// user's picture. The relay checks that the type and the bytes agree.
     func putMeAvatar(jpeg: Data) async throws -> String {
         guard let url = URL(string: "\(endpoint.httpUrl)/me/avatar") else {
             throw RelayError(status: 0, message: "Bad relay URL")
@@ -452,7 +653,7 @@ final class RelayAPI {
         var req = URLRequest(url: url)
         req.httpMethod = "PUT"
         req.setValue("Bearer \(token())", forHTTPHeaderField: "Authorization")
-        req.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
+        req.setValue(PictureMaster.mime(jpeg), forHTTPHeaderField: "Content-Type")
         req.httpBody = jpeg
         let (body, response) = try await session.data(for: req)
         guard let http = response as? HTTPURLResponse, http.statusCode < 400 else {
@@ -482,6 +683,12 @@ final class RelayAPI {
         }
         if let projectId, !projectId.isEmpty { body["project_id"] = projectId }
         return try await decode(FeedbackSubmitReplyDto.self, "POST", "/feedback", body: body).id
+    }
+
+    /// `POST /perf/report` (JSON, device token): one MetricKit payload in its envelope
+    /// (`PerfDiagnostics.envelope`) → `{id}`. Anonymous on the relay side.
+    func sendPerfReport(_ body: [String: Any]) async throws {
+        _ = try await json("POST", "/perf/report", body: body)
     }
 
     /// `POST /feedback/capture/{id}` (device token): the answer to a `feedback_capture` push from
@@ -536,11 +743,15 @@ final class RelayAPI {
 
     // MARK: Calls v1
 
-    /// `POST /chats/{id}/calls` (or the projects form) `{kind}` → 201 new call / 200 join;
-    /// both carry a fresh LiveKit token. Returns the call and whether we started it.
-    func startCall(chatId: String, projectId: String?, kind: CallKind) async throws -> (Call, started: Bool) {
+    /// `POST /chats/{id}/calls` (or the projects form) `{kind, ring?}` → 201 new call / 200 join;
+    /// both carry a fresh LiveKit token. `ring` is an optional list of member ids to notify
+    /// (bare user ids and agent project ids); omit or empty = the whole group. Returns the
+    /// call and whether we started it.
+    func startCall(chatId: String, projectId: String?, kind: CallKind, ring: [String]? = nil) async throws -> (Call, started: Bool) {
         let path = (projectId == nil || projectId == peopleSlot) ? "/chats/\(chatId)/calls" : "/projects/\(projectId!)/chats/\(chatId)/calls"
-        let (data, http) = try await request("POST", path, body: ["kind": kind.rawValue], headers: ["X-Arbos-Client": RelayAPI.clientHeader])
+        var body: [String: Any] = ["kind": kind.rawValue]
+        if let ring, !ring.isEmpty { body["ring"] = ring }
+        let (data, http) = try await request("POST", path, body: body, headers: ["X-Arbos-Client": RelayAPI.clientHeader])
         let resp: StartCallResponseDto
         do {
             resp = try JSONDecoder().decode(StartCallResponseDto.self, from: data)
@@ -750,6 +961,17 @@ final class RelayAPI {
         _ = try await request("PATCH", "/servers/\(id)", body: body)
     }
 
+    /// D92 amendment: a server's leaf picture — `PATCH /servers/{id} {avatar_leaf,
+    /// avatar_leaf_color, image_key: null}` (nil = back to initials; the picture goes with it).
+    func setServerLeaf(_ id: String, pick: LeafPick?) async throws {
+        let body: [String: Any] = [
+            "avatar_leaf": pick.map { Int($0.leaf) as Any } ?? NSNull(),
+            "avatar_leaf_color": pick.map { Int($0.color) as Any } ?? NSNull(),
+            "image_key": NSNull(),
+        ]
+        _ = try await request("PATCH", "/servers/\(id)", body: body)
+    }
+
     /// `GET /servers/search?q=` → open servers by name (join without an invite).
     func searchOpenServers(_ q: String) async throws -> [Server] {
         let enc = q.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? q
@@ -870,27 +1092,92 @@ final class RelayAPI {
 
     /// D92 `PATCH /projects/{id} {"avatar_leaf": 0–8|null, "avatar_leaf_color": 0–9|null}` (null =
     /// automatic). A leaf pick is "not a photo": the picture goes with it (`image_key: null`).
-    func setProjectAvatarLeaf(_ projectId: Id, leaf: Int?, color: Int?) async throws {
+    func setProjectAvatarLeaf(_ projectId: Id, leaf: Int?, color: Int?) async throws -> Int {
         let body: [String: Any] = [
             "avatar_leaf": leaf.map { $0 as Any } ?? NSNull(),
             "avatar_leaf_color": color.map { $0 as Any } ?? NSNull(),
             "image_key": NSNull(),
         ]
-        _ = try await json("PATCH", "/projects/\(projectId)", body: body)
+        return Self.avatarVersion(of: try await json("PATCH", "/projects/\(projectId)", body: body))
+    }
+
+    /// The relay's stamp of the avatar change a `PATCH /projects/{id}` answered with
+    /// (`avatar_version`); 0 from an older relay.
+    static func avatarVersion(of reply: Any) -> Int {
+        let d = reply as? [String: Any]
+        let v = d?["avatar_version"] ?? (d?["project"] as? [String: Any])?["avatar_version"]
+        return (v as? NSNumber)?.intValue ?? 0
     }
 
     /// D92 amendment: `PATCH /projects/{id} {"image_key": key}` — a blob already in the project's
     /// slot (uploaded with `putBlob`, or the Generate tab's answer) becomes the agent's picture.
-    func setProjectImageKey(_ projectId: Id, key: String) async throws {
-        _ = try await json("PATCH", "/projects/\(projectId)", body: ["image_key": key])
+    func setProjectImageKey(_ projectId: Id, key: String) async throws -> Int {
+        Self.avatarVersion(of: try await json("PATCH", "/projects/\(projectId)", body: ["image_key": key]))
     }
 
     /// D92 amendment: `POST /projects/{id}/avatar/generate {prompt}` → the stored picture's key
     /// (not yet set; "Set avatar" sends it through `setProjectImageKey`).
     func generateProjectAvatar(_ projectId: Id, prompt: String) async throws -> String {
-        let v = try await json("POST", "/projects/\(projectId)/avatar/generate", body: ["prompt": prompt])
+        try await generateAvatar(path: "/projects/\(projectId)/avatar/generate", prompt: prompt)
+    }
+
+    /// The same for a people group (`POST /chats/{id}/avatar/generate`) and a server
+    /// (`POST /servers/{id}/avatar/generate`); the key lands in their own blob slot.
+    func generateGroupAvatar(_ chatId: String, prompt: String) async throws -> String {
+        try await generateAvatar(path: "/chats/\(chatId)/avatar/generate", prompt: prompt)
+    }
+
+    func generateServerAvatar(_ serverId: String, prompt: String) async throws -> String {
+        try await generateAvatar(path: "/servers/\(serverId)/avatar/generate", prompt: prompt)
+    }
+
+    /// `POST /me/avatar/generate {prompt}` (#1789): a picture in my own slot `users:{me}` — the
+    /// own-profile picker's route (Jacob, 2026-10-25; "Set avatar" sends the key through
+    /// `putMeAvatarKey`), and the Create sheets' (the entity does not exist yet; the bytes are
+    /// copied into its slot on Create).
+    func generateMyAvatar(prompt: String) async throws -> String {
+        try await generateAvatar(path: "/me/avatar/generate", prompt: prompt)
+    }
+
+    /// `PUT /me/avatar {image_key}` (JSON): the generated preview becomes my profile picture;
+    /// answers the new `avatar_url`.
+    func putMeAvatarKey(_ key: String) async throws -> String {
+        let v = try await json("PUT", "/me/avatar", body: ["image_key": key])
+        guard JSONSerialization.isValidJSONObject(v),
+              let data = try? JSONSerialization.data(withJSONObject: v),
+              let dto = try? JSONDecoder().decode(MeUserResponseDto.self, from: data) else {
+            throw RelayError(status: 0, message: "The relay returned no avatar URL")
+        }
+        if let url = dto.avatar_url.flatMap({ $0 }), !url.isEmpty { return url }
+        if let url = dto.user.avatar_url.flatMap({ $0 }), !url.isEmpty { return url }
+        throw RelayError(status: 0, message: "The relay returned no avatar URL")
+    }
+
+    /// The bytes of a blob I may read (a generated preview in my own slot), for copying.
+    func blobData(projectId: Id, key: String) async throws -> Data {
+        guard let url = URL(string: "\(endpoint.httpUrl)/blob/\(projectId)/\(key)") else {
+            throw RelayError(status: 0, message: "Bad relay URL")
+        }
+        var req = URLRequest(url: url)
+        req.setValue("Bearer \(token())", forHTTPHeaderField: "Authorization")
+        let (body, response) = try await session.data(for: req)
+        guard let http = response as? HTTPURLResponse, http.statusCode < 400 else {
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            throw RelayError.from(status: status, body: body)
+        }
+        return body
+    }
+
+    /// How long one avatar generation may take on the wire: past the relay's 75 s budget (40 s
+    /// per provider attempt), so the relay's own 504 reaches the sheet before this client gives up
+    /// (Jacob, 2026-10-26: the session's 30 s had cut a slow generation first).
+    static let avatarGenerateTimeout: TimeInterval = 90
+
+    private func generateAvatar(path: String, prompt: String) async throws -> String {
+        let (data, _) = try await request("POST", path, body: ["prompt": prompt], timeout: Self.avatarGenerateTimeout)
+        let v = (try? JSONSerialization.jsonObject(with: data)) ?? NSNull()
         guard let d = v as? [String: Any], let key = d["image_key"] as? String, !key.isEmpty else {
-            throw RelayError(status: 0, message: "The relay sent no picture")
+            throw RelayError(status: 0, message: "Couldn't generate the image.", detail: "The relay sent no picture")
         }
         return key
     }
@@ -958,8 +1245,15 @@ final class RelayAPI {
     /// Announce a message we just wrote so recipients get a real preview
     /// (§7c): people chats `POST /chats/{id}/notify`, project chats
     /// `POST /projects/{pid}/chats/{cid}/notify`. Deduped by the relay.
-    func notifyMessage(chatId: String, projectId: Id?, messageId: String, text: String) async throws {
-        let body: [String: Any] = ["message_id": messageId, "text": String(text.prefix(140))]
+    func notifyMessage(chatId: String, projectId: Id?, messageId: String, text: String,
+                       replyRef: ReplyRef? = nil) async throws {
+        var body: [String: Any] = ["message_id": messageId, "text": String(text.prefix(140))]
+        if let r = replyRef {
+            // Reply in DM (#1834): the push says what the DM answers; the relay keeps the
+            // address only for recipients who are members of the source chat.
+            body["reply_ref"] = ["chat_id": r.chatId, "project_id": r.projectId, "message_id": r.messageId,
+                                 "chat_title": r.chatTitle, "sender_name": r.who, "text": r.text]
+        }
         if let projectId, projectId != peopleSlot {
             _ = try await request("POST", "/projects/\(projectId)/chats/\(chatId)/notify", body: body)
         } else {
@@ -999,15 +1293,92 @@ final class RelayAPI {
         return try await peopleChat(chatId)
     }
 
-    func removeMember(chatId: String, userId: String) async throws {
-        _ = try await request("DELETE", "/chats/\(chatId)/members/\(userId)")
+    /// `DELETE /chats/{id}/members/{userId}[?ban=1]` — owner/admin remove or ban.
+    func removeMember(chatId: String, userId: String, ban: Bool = false) async throws {
+        _ = try await request("DELETE", "/chats/\(chatId)/members/\(userId)\(ban ? "?ban=1" : "")")
     }
 
-    /// `PUT /chats/{id}/settings {read_receipts?, muted?}` per member.
-    func chatSettings(chatId: String, muted: Bool? = nil, readReceipts: Bool? = nil) async throws {
+    /// `POST /chats/{id}/members/{userId}/unban` — clear a ban so they can be added again.
+    func unbanMember(chatId: String, userId: String) async throws -> PeopleChat {
+        let v = try await json("POST", "/chats/\(chatId)/members/\(userId)/unban")
+        if let chat = PeopleChat.parse(v) { return chat }
+        return try await peopleChat(chatId)
+    }
+
+    /// `PUT /chats/{id}/members/{userId}` — mute/unmute from posting (optional duration).
+    func setMemberSilenced(
+        chatId: String,
+        userId: String,
+        silenced: Bool,
+        silencedUntilMs: Int64? = nil
+    ) async throws -> PeopleChat {
+        var body: [String: Any] = ["silenced": silenced]
+        if silenced, let until = silencedUntilMs {
+            body["silenced_until"] = until
+        }
+        let v = try await json("PUT", "/chats/\(chatId)/members/\(userId)", body: body)
+        if let chat = PeopleChat.parse(v) { return chat }
+        return try await peopleChat(chatId)
+    }
+
+    /// Owner: set a member's role to `admin` or `member`.
+    func setMemberRole(chatId: String, userId: String, role: String) async throws -> PeopleChat {
+        let v = try await json("PUT", "/chats/\(chatId)/members/\(userId)", body: ["role": role])
+        if let chat = PeopleChat.parse(v) { return chat }
+        return try await peopleChat(chatId)
+    }
+
+    /// Owner: whether this admin may mute and ban members.
+    func setMemberCanMuteBan(chatId: String, userId: String, canMuteBan: Bool) async throws -> PeopleChat {
+        let v = try await json("PUT", "/chats/\(chatId)/members/\(userId)", body: ["can_mute_ban": canMuteBan])
+        if let chat = PeopleChat.parse(v) { return chat }
+        return try await peopleChat(chatId)
+    }
+
+    /// `GET /chats/{id}/invites` — group invite links (same shape as server invites).
+    func groupInvites(_ chatId: String) async throws -> [ServerInviteLink] {
+        let v = try await json("GET", "/chats/\(chatId)/invites")
+        let list = ((v as? [String: Any])?["invites"] as? [Any]) ?? []
+        return list.compactMap(ServerInviteLink.parse)
+    }
+
+    /// `POST /chats/{id}/invites {expires, max_uses}` → the new group invite link.
+    func createGroupInvite(_ chatId: String, expires: Bool, maxUses: Int?) async throws -> ServerInviteLink? {
+        var body: [String: Any] = ["expires": expires]
+        if let maxUses { body["max_uses"] = maxUses }
+        return ServerInviteLink.parse(try await json("POST", "/chats/\(chatId)/invites", body: body))
+    }
+
+    /// `DELETE /chats/{id}/invites/{iid}` — the link stops working at once.
+    func revokeGroupInvite(_ chatId: String, inviteId: String) async throws {
+        _ = try await request("DELETE", "/chats/\(chatId)/invites/\(inviteId)")
+    }
+
+    /// `POST /chats/join {code}` (the code or the whole link) → the people group chat.
+    func joinGroup(code: String) async throws -> PeopleChat {
+        let v = try await json("POST", "/chats/join", body: ["code": code.trimmingCharacters(in: .whitespacesAndNewlines)])
+        guard let chat = PeopleChat.parse(v) else { throw RelayError(status: 0, message: "The relay returned no chat") }
+        return chat
+    }
+
+    /// Delete a message for everyone: the relay checks who may (403 `not_yours`) and writes
+    /// the deletion into the doc itself. `room` is `people/<chat>` or `<project>/<chat>`.
+    func deleteMessage(room: String, messageId: String) async throws {
+        _ = try await request("DELETE", "/room/\(room)/messages/\(messageId)")
+    }
+
+    /// Remove a message's link preview for everyone (#2064): the relay checks who may (the
+    /// delete rule, 403 `not_yours`), writes `preview: "off"` and drops the part itself.
+    func removeLinkPreview(room: String, messageId: String) async throws {
+        _ = try await request("DELETE", "/room/\(room)/messages/\(messageId)/preview")
+    }
+
+    /// `PUT /chats/{id}/settings {read_receipts?, muted?, archived?}` per member.
+    func chatSettings(chatId: String, muted: Bool? = nil, readReceipts: Bool? = nil, archived: Bool? = nil) async throws {
         var body: [String: Any] = [:]
         if let muted { body["muted"] = muted }
         if let readReceipts { body["read_receipts"] = readReceipts }
+        if let archived { body["archived"] = archived }
         _ = try await request("PUT", "/chats/\(chatId)/settings", body: body)
     }
 
@@ -1025,11 +1396,12 @@ final class RelayAPI {
         return chat
     }
 
-    /// `PATCH /chats/{id} {title?, image_key?}` — custom group name and optional picture key.
-    func patchPeopleChat(_ chatId: String, title: String? = nil, imageKey: String? = nil) async throws -> PeopleChat {
+    /// `PATCH /chats/{id} {title?, image_key?, description?}` — custom group name, picture key, about text.
+    func patchPeopleChat(_ chatId: String, title: String? = nil, imageKey: String? = nil, description: String? = nil) async throws -> PeopleChat {
         var body: [String: Any] = [:]
         if let title { body["title"] = title }
         if let imageKey { body["image_key"] = imageKey }
+        if let description { body["description"] = description }
         let v = try await json("PATCH", "/chats/\(chatId)", body: body)
         guard let chat = PeopleChat.parse(v) else { throw RelayError(status: 0, message: "The relay returned no chat") }
         return chat
@@ -1181,5 +1553,248 @@ final class RelayAPI {
             NSLog("GoalDto: \(error)")
             throw RelayError(status: 0, message: "Bad goal reply")
         }
+    }
+}
+
+// MARK: - Outside agents (#2142)
+
+/// The connection of an outside agent (`GET /outside-agents/{id}` → `agent`).
+struct OutsideAgentInfo: Equatable {
+    /// `connected` | `away` | `never` | `revoked`.
+    var status: String
+    var connected: Bool
+    /// `acp` | `grok` | `custom`.
+    var transport: String
+    /// `asp/1`.
+    var proto: String
+    var lastSeenAt: Int64?
+    /// The nine switches (spec §4.3), effective values: `"files.read": true`.
+    var scopes: [String: Bool]
+
+    /// The switches of the Can card in the mockup's order: wire name, title, subtitle.
+    static let scopeRows: [(name: String, title: String, subtitle: String?)] = [
+        ("chat.read", "Read messages", "in chats it is a member of"),
+        ("chat.post", "Post, edit and delete its own messages", nil),
+        ("chat.react", "React", nil),
+        ("presence", "Show typing and status", nil),
+        ("approval.request", "Ask you to approve actions", "approval cards in chat"),
+        ("secret.use", "Use your secrets", "by name only, never the value"),
+        ("members.manage", "Add members or agents", nil),
+        ("files.read", "Open files shared in chat", "pictures, files, GIFs it was sent"),
+        ("calls.join", "Join voice calls", nil),
+    ]
+    /// The Wake URL (`agent.wake`): the URL is shown back, the Authorization value never is.
+    var wakeURL: String?
+    var wakeAuthSet: Bool
+    var wakeLast: OutsideWakeLast?
+    /// True on a relay that has the Wake URL at all.
+    var hasWake: Bool
+    /// The session log's header numbers (`log` beside `agent` on the record, #2224); nil on a
+    /// relay without the log — the card stays away.
+    var logSummary: OutsideLogSummary? = nil
+
+    init?(json: Any?, log: Any? = nil) {
+        guard let d = json as? [String: Any] else { return nil }
+        logSummary = OutsideLogSummary(json: log)
+        status = d["status"] as? String ?? "never"
+        connected = d["connected"] as? Bool ?? false
+        transport = d["transport"] as? String ?? "custom"
+        proto = d["protocol"] as? String ?? "asp/1"
+        if let t = d["last_seen_at"] as? NSNumber { lastSeenAt = t.int64Value } else { lastSeenAt = nil }
+        scopes = (d["scopes"] as? [String: Any])?.compactMapValues { $0 as? Bool } ?? [:]
+        let wake = d["wake"] as? [String: Any]
+        hasWake = wake != nil
+        wakeURL = (wake?["url"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        wakeAuthSet = wake?["auth_set"] as? Bool ?? false
+        wakeLast = OutsideWakeLast(json: wake?["last"])
+    }
+
+    /// A switch's value; a relay without scopes yet reads as the spec defaults.
+    func scope(_ name: String) -> Bool {
+        if let v = scopes[name] { return v }
+        return ["chat.read", "chat.post", "chat.react", "presence", "approval.request"].contains(name)
+    }
+
+    /// The transport as the Details pane names it.
+    var transportLabel: String {
+        switch transport {
+        case "acp": return "ACP · on your Mac"
+        case "grok": return "Grok · HTTPS"
+        default: return "Custom · HTTPS / WebSocket"
+        }
+    }
+
+    /// "Connected · 12 s ago", "Away · 40 min ago", "Waiting for the first heartbeat", "Disconnected".
+    func statusLine(now: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) -> String {
+        func ago(_ t: Int64) -> String {
+            let s = max(0, (now - t) / 1000)
+            if s < 60 { return "\(s) s ago" }
+            if s < 3600 { return "\(s / 60) min ago" }
+            if s < 86_400 { return "\(s / 3600) h ago" }
+            return "\(s / 86_400) d ago"
+        }
+        switch (status, lastSeenAt) {
+        case ("revoked", _): return "Disconnected"
+        case ("connected", let t?): return "Connected · \(ago(t))"
+        case ("connected", nil): return "Connected"
+        case ("away", let t?): return "Away · \(ago(t))"
+        case ("away", nil): return "Away"
+        default: return "Waiting for the first heartbeat"
+        }
+    }
+}
+
+/// `log {entries, last_at, last_reply_ms}` on a connected agent's record (#2224).
+struct OutsideLogSummary: Equatable {
+    var entries: Int
+    var lastAt: Int64?
+    var lastReplyMs: Int64?
+
+    init?(json: Any?) {
+        guard let d = json as? [String: Any] else { return nil }
+        entries = (d["entries"] as? NSNumber)?.intValue ?? 0
+        lastAt = (d["last_at"] as? NSNumber)?.int64Value
+        lastReplyMs = (d["last_reply_ms"] as? NSNumber)?.int64Value
+    }
+}
+
+/// One line of a connected agent's session log as the sidecar uploaded it (spec §13.3): a wake,
+/// an ack, a reply, a session event or an error — never message text.
+struct OutsideLogEntry: Equatable, Identifiable {
+    let id: Int64
+    let at: Int64
+    let kind: String
+    let chat: String?
+    let message: String?
+    let ms: [String: Int64]
+    let session: String?
+    let error: String?
+    let turns: Int?
+    let reason: String?
+    let handoffFrom: String?
+
+    init?(json: Any?) {
+        guard let d = json as? [String: Any], let kind = d["kind"] as? String else { return nil }
+        id = (d["id"] as? NSNumber)?.int64Value ?? 0
+        at = (d["at"] as? NSNumber)?.int64Value ?? 0
+        self.kind = kind
+        chat = d["chat"] as? String
+        message = d["message"] as? String
+        ms = (d["ms"] as? [String: Any])?.compactMapValues { ($0 as? NSNumber)?.int64Value } ?? [:]
+        session = d["session"] as? String
+        error = d["error"] as? String
+        turns = (d["turns"] as? NSNumber)?.intValue
+        reason = d["reason"] as? String
+        handoffFrom = d["handoff_from"] as? String
+    }
+
+    var isError: Bool { kind == "error" }
+    var isSession: Bool { kind.hasPrefix("session.") }
+    /// Rows worth a line on the card: replies, errors and session events; wakes, typing, reads
+    /// and uploads are the plumbing behind them.
+    var shown: Bool { kind == "reply" || kind == "post" || isError || isSession }
+
+    private static func secs(_ ms: Int64) -> String { String(format: "%.1f s", Double(ms) / 1000) }
+
+    /// The first line for a session event.
+    var sessionTitle: String {
+        switch kind {
+        case "session.new": return "new session"
+        case "session.resume": return "session resumed"
+        case "session.resume_failed": return "session could not be resumed"
+        case "session.rotate": return "session rotated"
+        default: return "session"
+        }
+    }
+
+    /// The muted second line: "ack 1.2 s · reply 9.8 s", "turn 12", or the error sentence.
+    var detail: String {
+        if let error { return error }
+        if isSession {
+            switch kind {
+            case "session.resume": return turns.map { "turn \($0)" } ?? ""
+            case "session.new": return handoffFrom.map { "handoff from \($0.prefix(4))…" } ?? "first session"
+            case "session.rotate": return reason ?? ""
+            default: return ""
+            }
+        }
+        var parts: [String] = []
+        if let a = ms["event_to_ack"] { parts.append("ack \(Self.secs(a))") }
+        if let r = ms["event_to_reply"] ?? ms["nudge_to_reply"] { parts.append("reply \(Self.secs(r))") }
+        return parts.joined(separator: " · ")
+    }
+
+    var date: Date { Date(timeIntervalSince1970: Double(at) / 1000) }
+
+    /// "17:02:11" in local time.
+    var clock: String {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f.string(from: date)
+    }
+
+    /// "Today", "Yesterday", or the weekday and date — the View all page's section headers.
+    var day: String {
+        let cal = Calendar.current
+        if cal.isDateInToday(date) { return "Today" }
+        if cal.isDateInYesterday(date) { return "Yesterday" }
+        let f = DateFormatter()
+        f.dateFormat = "EEEE, d MMMM"
+        return f.string(from: date)
+    }
+}
+
+/// The last nudge the relay sent to an outside agent's Wake URL.
+struct OutsideWakeLast: Equatable {
+    var at: Int64
+    var status: Int?
+    var error: String?
+
+    init?(json: Any?) {
+        guard let d = json as? [String: Any], let at = d["at"] as? NSNumber else { return nil }
+        self.at = at.int64Value
+        status = (d["status"] as? NSNumber)?.intValue
+        error = (d["error"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    init(at: Int64, status: Int?, error: String?) {
+        self.at = at; self.status = status; self.error = error
+    }
+
+    /// "Delivered · HTTP 200 · 12 s ago" / "Failed · HTTP 500: boom · 3 min ago" (the Mac's `WakeLast::line`).
+    func line(now: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) -> String {
+        let s = max(0, (now - at) / 1000)
+        let when: String
+        if s < 60 { when = "\(s) s ago" } else if s < 3600 { when = "\(s / 60) min ago" } else if s < 86_400 { when = "\(s / 3600) h ago" } else { when = "\(s / 86_400) d ago" }
+        if let error { return "Failed · \(error) · \(when)" }
+        if let status { return "Delivered · HTTP \(status) · \(when)" }
+        return "Delivered · \(when)"
+    }
+}
+
+/// What the reveal screen shows once: the key and the link, plus the live connection.
+struct ConnectReveal: Equatable {
+    var projectId: Id
+    var name: String
+    var transport: String
+    var key: String
+    var link: String
+    var relayURL: String
+    var chatId: Id?
+    var rotated: Bool
+    var info: OutsideAgentInfo?
+
+    init?(json: Any, rotated: Bool) {
+        guard let d = json as? [String: Any], let agent = d["agent"] as? [String: Any],
+              let id = agent["project_id"] as? String, let key = d["key"] as? String else { return nil }
+        projectId = id
+        name = agent["name"] as? String ?? ""
+        transport = agent["transport"] as? String ?? "custom"
+        self.key = key
+        link = d["link"] as? String ?? ""
+        relayURL = d["relay_url"] as? String ?? ""
+        chatId = d["chat_id"] as? String
+        self.rotated = rotated
+        info = OutsideAgentInfo(json: agent)
     }
 }

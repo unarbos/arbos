@@ -26,6 +26,12 @@ final class CoreChatDoc {
         self.doc = ArbosFFI.ChatDoc.open()
     }
 
+    /// A replica loaded from a full snapshot (the perf rig's exported chat).
+    init(key: Id, snapshot: Data) throws {
+        self.key = key
+        self.doc = try ArbosFFI.ChatDoc.openFromSnapshot(snapshot: snapshot)
+    }
+
     var count: Int { Int(doc.messageCount()) }
 
     /// Nothing imported or written yet (a fresh replica is not worth saving).
@@ -38,6 +44,11 @@ final class CoreChatDoc {
 
     func importUpdate(_ bytes: Data) throws {
         try doc.apply(bytes: bytes)
+    }
+
+    /// Import an update; `true` when Loro parked it as pending (dependencies missing).
+    func importUpdateReportingPending(_ bytes: Data) throws -> Bool {
+        try doc.applyUpdate(bytes: bytes)
     }
 
     /// Does the replica already contain this checkpoint frontier?
@@ -70,11 +81,28 @@ final class CoreChatDoc {
     /// row crossed the FFI `count` times; a long group chat paid for that on every
     /// snapshot (2026-10-23, long-chat-perf).
     func readAll() -> [Message] {
-        let raw = doc.readRowsJson()
-        guard let data = raw.data(using: .utf8),
-              let rows = (try? JSONSerialization.jsonObject(with: data)) as? [Any]
-        else { return [] }
-        return rows.compactMap { DocJSON.message($0, chatId: key) }
+        Self.decodeRows(doc.readRowsJson(), count: count, chatId: key, row: readMessage)
+    }
+
+    /// One unreadable row must not blank the chat ([feedback arbonites-blank-chat-ios-2026-10-28]):
+    /// when the whole-list read does not parse, read row by row and leave out (log) only
+    /// the rows that do not decode.
+    static func decodeRows(_ raw: String, count: Int, chatId: Id, row: (Int) -> Message?) -> [Message] {
+        if let data = raw.data(using: .utf8),
+           let rows = (try? JSONSerialization.jsonObject(with: data)) as? [Any],
+           !(rows.isEmpty && count > 0) {
+            return rows.compactMap { DocJSON.message($0, chatId: chatId) }
+        }
+        var out: [Message] = []
+        out.reserveCapacity(count)
+        var skipped: [Int] = []
+        for ix in 0..<max(0, count) {
+            if let m = row(ix) { out.append(m) } else { skipped.append(ix) }
+        }
+        if !skipped.isEmpty {
+            NSLog("chat doc \(chatId): \(skipped.count) of \(count) rows unreadable, skipped (first index \(skipped[0]))")
+        }
+        return out
     }
 
     func mapValue(_ name: String) -> [String: Any] {
@@ -95,20 +123,35 @@ final class CoreChatDoc {
         var avatar: String?
     }
 
+    /// `forwardedFrom` = the original sender's name on a forwarded message (the bubble's
+    /// "Forwarded from <name>" header; written as `forwardedFrom` on the row).
+    /// `replyRef` = a cross-chat reply (Reply in DM, crdt-sync §6.2 `replyRef`): the quoted
+    /// message's address and snapshot, written through core as one value map.
     func insertUserMessage(
         id: Id, text: String, deviceId: String, attachments: [Attachment] = [],
-        author: Author? = nil, mentions: [String] = [], replyTo: String? = nil
+        author: Author? = nil, mentions: [String] = [], replyTo: String? = nil,
+        forwardedFrom: String? = nil, replyRef: ReplyRef? = nil
     ) throws {
         let opts = UserMessageOptsRecord(
             attachments: attachments.map {
-                UserAttachmentRecord(name: $0.name, mime: $0.mime, kind: $0.kind, blobRef: $0.blobRef)
+                UserAttachmentRecord(name: $0.name, mime: $0.mime, kind: $0.kind, blobRef: $0.blobRef,
+                                     url: $0.url,
+                                     source: $0.source.map {
+                                         AttachmentSourceRecord(provider: $0.provider, id: $0.id, pageUrl: $0.pageUrl)
+                                     })
             },
             mentions: mentions,
             replyTo: replyTo,
             sender: author?.sender,
             senderHandle: author?.handle,
             senderName: author?.name,
-            senderAvatar: author?.avatar
+            senderAvatar: author?.avatar,
+            forwardedFrom: forwardedFrom,
+            replyRef: replyRef.map {
+                ReplyRefRecord(chatId: $0.chatId, projectId: $0.projectId, messageId: $0.messageId,
+                               chatTitle: $0.chatTitle, sender: $0.sender, senderName: $0.senderName,
+                               senderHandle: $0.senderHandle, text: $0.text)
+            }
         )
         try doc.insertUserMessage(id: id, text: text, deviceId: deviceId, opts: opts)
     }
@@ -133,6 +176,21 @@ final class CoreChatDoc {
     /// Remove a message for everyone. Does not commit. Do not announce.
     func deleteMessage(messageId: Id) throws {
         try doc.deleteMessage(messageId: messageId)
+    }
+
+    /// Replace a message's text (edit). Does not commit. Sets `editedAt`.
+    func editMessage(messageId: Id, text: String) throws {
+        try doc.editMessage(messageId: messageId, text: text)
+    }
+
+    /// Append one part to a message from its JSON object (`kind` + fields; a string `id`
+    /// is kept). Forward writes a chart part and its fallback picture with it
+    /// ([feedback forward-attachments-ios-2026-10-27]). Returns the part id.
+    @discardableResult
+    func insertPart(messageId: Id, part: [String: Any]) throws -> String {
+        let data = try JSONSerialization.data(withJSONObject: part)
+        let json = String(data: data, encoding: .utf8) ?? "{}"
+        return try doc.addPartJson(messageId: messageId, partJson: json)
     }
 
     /// Append a `commands` row (`send`, `stop`, `answer`, `retry`, `retitle`). Does not commit.

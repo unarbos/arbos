@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS secrets (
   ask_every_time INTEGER NOT NULL DEFAULT 0, expires_at INTEGER, current_version INTEGER NOT NULL DEFAULT 1,
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, last_used_at INTEGER,
   daytona_secrets TEXT NOT NULL DEFAULT '{}', inject_env INTEGER NOT NULL DEFAULT 0,
-  others_ask TEXT NOT NULL DEFAULT 'refuse'
+  others_ask TEXT NOT NULL DEFAULT 'refuse',
+  source_kind TEXT NOT NULL DEFAULT 'settings', source_project_id TEXT, source_chat_id TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS secrets_user_name ON secrets(user_id, name);
 CREATE UNIQUE INDEX IF NOT EXISTS secrets_user_env ON secrets(user_id, env);
@@ -120,6 +121,13 @@ pub fn migrate_secrets(c: &rusqlite::Connection) {
     );
     let _ = c.execute("ALTER TABLE secret_requests ADD COLUMN asked_by TEXT", []);
     for col in [
+        "source_kind TEXT NOT NULL DEFAULT 'settings'",
+        "source_project_id TEXT",
+        "source_chat_id TEXT",
+    ] {
+        let _ = c.execute(&format!("ALTER TABLE secrets ADD COLUMN {col}"), []);
+    }
+    for col in [
         "enabled INTEGER NOT NULL DEFAULT 1",
         "disabled_at INTEGER",
         "scope_kind TEXT NOT NULL DEFAULT 'all'",
@@ -163,6 +171,11 @@ pub struct Secret {
     /// "Real value in the agent's environment": agents with Access get the value itself as
     /// `$ENV` in their box, no card per use (D83 decision 2 as decided 2026-10-18).
     pub inject_env: bool,
+    /// Where it came from: `settings` (the New secret form) or `chat` (handed to an agent in a
+    /// chat — the request card or "save this"); `source_project_id` / `source_chat_id` say where.
+    pub source_kind: String,
+    pub source_project_id: Option<String>,
+    pub source_chat_id: Option<String>,
     /// What happens when someone who is neither the owner nor on the People list asks an agent
     /// to use it: `refuse` (default) or `card` (the owner gets a card naming who asked).
     pub others_ask: String,
@@ -335,7 +348,7 @@ fn to_json_list(v: &[String]) -> String {
     serde_json::to_string(v).unwrap_or_else(|_| "[]".into())
 }
 
-const SECRET_COLS: &str = "id, user_id, name, env, kind, note, hosts, ask_every_time, expires_at, current_version, created_at, updated_at, last_used_at, daytona_secrets, inject_env, others_ask";
+const SECRET_COLS: &str = "id, user_id, name, env, kind, note, hosts, ask_every_time, expires_at, current_version, created_at, updated_at, last_used_at, daytona_secrets, inject_env, others_ask, source_kind, source_project_id, source_chat_id";
 
 fn row_to_secret(r: &rusqlite::Row<'_>) -> rusqlite::Result<Secret> {
     Ok(Secret {
@@ -355,6 +368,9 @@ fn row_to_secret(r: &rusqlite::Row<'_>) -> rusqlite::Result<Secret> {
         daytona_secrets: serde_json::from_str(&r.get::<_, String>(13)?).unwrap_or_default(),
         inject_env: r.get::<_, i64>(14)? != 0,
         others_ask: r.get(15)?,
+        source_kind: r.get(16)?,
+        source_project_id: r.get(17)?,
+        source_chat_id: r.get(18)?,
     })
 }
 
@@ -467,12 +483,14 @@ impl Db {
         self.with(|c| {
             c.execute(
                 "INSERT INTO secrets(id, user_id, name, env, kind, note, hosts, ask_every_time, expires_at, current_version,
-                   created_at, updated_at, last_used_at, daytona_secrets, inject_env, others_ask)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+                   created_at, updated_at, last_used_at, daytona_secrets, inject_env, others_ask,
+                   source_kind, source_project_id, source_chat_id)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
                 params![
                     s.id, s.user_id, s.name, s.env, s.kind, s.note, to_json_list(&s.hosts),
                     s.ask_every_time as i64, s.expires_at, s.current_version, s.created_at, s.updated_at,
-                    s.last_used_at, s.daytona_secrets.to_string(), s.inject_env as i64, s.others_ask
+                    s.last_used_at, s.daytona_secrets.to_string(), s.inject_env as i64, s.others_ask,
+                    s.source_kind, s.source_project_id, s.source_chat_id
                 ],
             )?;
             c.execute(
@@ -1361,6 +1379,9 @@ mod tests {
             daytona_secrets: serde_json::json!({}),
             inject_env: false,
             others_ask: "refuse".into(),
+            source_kind: "settings".into(),
+            source_project_id: None,
+            source_chat_id: None,
         }
     }
 

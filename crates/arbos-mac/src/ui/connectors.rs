@@ -11,11 +11,14 @@ use gpui::{
 
 use crate::app::AppState;
 use crate::model::{ConnectorProvider, ConnectorStatus, ConnectorsView};
+use crate::sync::user_error::UserError;
 use crate::ui::composer::ComposerInput;
+use crate::ui::error_note;
 use crate::ui::frost::{frosted, MENU_BLUR};
 use crate::ui::glass;
-use crate::ui::icons::icon;
+use crate::ui::highlight;
 use crate::ui::profiles::kit;
+use crate::ui::sf_symbols;
 use crate::ui::theme::{Theme, PANEL_RADIUS, RAIL_WIDTH};
 
 pub enum ConnectorsEvent {
@@ -154,10 +157,12 @@ impl ConnectorsPanel {
                     .font_weight(FontWeight::SEMIBOLD)
             })
             .when(!primary, |el| {
-                el.text_color(theme.text_muted)
-                    .border_1()
-                    .border_color(theme.border)
-                    .hover(|s| s.bg(theme.surface_2))
+                highlight::button(
+                    el.text_color(theme.text_muted)
+                        .border_1()
+                        .border_color(theme.border),
+                    theme,
+                )
             })
             .child(label)
     }
@@ -286,7 +291,7 @@ impl ConnectorsPanel {
             .gap(px(8.0))
             .py(px(9.0))
             .relative()
-            .child(kit::hairline_below(16.0, theme))
+            .child(kit::hairline_below(theme))
             .child(
                 div()
                     .flex()
@@ -313,13 +318,17 @@ impl ConnectorsPanel {
             );
         if let Some(err) = cn.and_then(|c| c.last_error.clone()) {
             if !connected {
-                row = row.child(
-                    div()
-                        .pl(px(42.0))
-                        .text_size(px(10.5))
-                        .text_color(theme.danger)
-                        .child(err),
-                );
+                // The connector's last failure, in the one shared element (no Try again here:
+                // Connect in the row is the retry).
+                let error = UserError::from_text(format!("connect {}", p.label), err);
+                row = row.child(div().pl(px(42.0)).pt(px(6.0)).child(error_note::render(
+                    &format!("connector-error-{}", p.provider),
+                    &error,
+                    false,
+                    error_note::Style::Inline,
+                    theme,
+                    error_note::Handlers::new(),
+                )));
             }
         }
         if menu_open {
@@ -350,7 +359,7 @@ impl ConnectorsPanel {
                     .child(
                         glass::menu_row(
                             format!("paste-{}", p.provider),
-                            "doc",
+                            "doc.on.clipboard",
                             "Paste a token…",
                             false,
                             theme,
@@ -457,29 +466,33 @@ impl ConnectorsPanel {
             .text_size(px(11.5))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(fg)
-            .bg(if on {
-                Theme::with_alpha(theme.online, 0.14)
-            } else {
-                theme.field
-            })
             .border_1()
             .border_color(if on {
                 Theme::with_alpha(theme.online, 0.35)
             } else {
                 theme.field_border
             })
-            .hover(|s| s.bg(theme.surface_2))
-            .when(check, |el| el.child(icon("check", 11.0, fg)))
+            .map(|el| {
+                let base = if on {
+                    Theme::with_alpha(theme.online, 0.14)
+                } else {
+                    theme.field
+                };
+                highlight::washed(el, base, theme)
+            })
+            .when(check, |el| {
+                el.child(sf_symbols::glyph("checkmark", 11.0, fg))
+            })
             .child(label)
     }
 
     fn glyph(provider: &str) -> &'static str {
         match provider {
             "google" => "envelope",
-            "slack" => "hash",
-            "github" => "code",
-            "harness_comms" => "antenna",
-            _ => "puzzle",
+            "slack" => "number",
+            "github" => "chevron.left.forwardslash.chevron.right",
+            "harness_comms" => "antenna.radiowaves.left.and.right",
+            _ => "puzzlepiece",
         }
     }
 

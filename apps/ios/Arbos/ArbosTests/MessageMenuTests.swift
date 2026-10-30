@@ -2,13 +2,36 @@ import XCTest
 @testable import Arbos
 
 /// The bubble's long-press menu is Copy / Reply / Forward / Reply in DM /
-/// Delete (#1370, #1472, forward feedback) — no emoji row, no Mention; a
+/// Delete (#1370, #1472, forward feedback), plus View thread when the message
+/// has replies and Edit on the user's own text — no emoji row, no Mention; a
 /// non-message row copies only.
 final class MessageMenuTests: XCTestCase {
     func testItemsAreExactlyCopyReplyForwardReplyInDMDelete() {
         XCTAssertEqual(MessageMenu.items, [.copy, .reply, .forward, .replyInDM, .delete])
         XCTAssertEqual(MessageMenu.items.map(\.label), ["Copy", "Reply", "Forward", "Reply in DM", "Delete"])
         XCTAssertEqual(MessageMenu.items(forMessage: true), MessageMenu.items)
+        XCTAssertEqual(MessageMenu.items(forMessage: true, canDelete: true, hasReplies: true), MessageMenu.itemsWithThread)
+        XCTAssertEqual(MessageMenu.itemsWithThread.map(\.label),
+                       ["Copy", "Reply", "View thread", "Forward", "Reply in DM", "Delete"])
+    }
+
+    func testOwnMessageAddsEditBeforeDelete() {
+        XCTAssertEqual(
+            MessageMenu.items(forMessage: true, canEdit: true, canDelete: true),
+            [.copy, .reply, .forward, .replyInDM, .edit, .delete]
+        )
+        XCTAssertEqual(
+            MessageMenu.items(forMessage: true, canEdit: true, canDelete: true).map(\.label),
+            ["Copy", "Reply", "Forward", "Reply in DM", "Edit", "Delete"]
+        )
+        XCTAssertEqual(
+            MessageMenu.items(forMessage: true, canEdit: true, canDelete: false),
+            [.copy, .reply, .forward, .replyInDM, .edit]
+        )
+        XCTAssertEqual(
+            MessageMenu.items(forMessage: true, canEdit: true, canDelete: true, hasReplies: true),
+            [.copy, .reply, .viewThread, .forward, .replyInDM, .edit, .delete]
+        )
     }
 
     func testNoEmojiOrExtraItems() {
@@ -16,7 +39,7 @@ final class MessageMenuTests: XCTestCase {
             XCTAssertTrue(item.label.unicodeScalars.allSatisfy { $0.isASCII }, "\(item) label carries non-ASCII text")
             XCTAssertFalse(MessageReaction.palette.contains(item.label))
         }
-        XCTAssertEqual(MessageMenuItem.allCases.count, 5)
+        XCTAssertEqual(MessageMenuItem.allCases.count, 8)
     }
 
     func testOnlyDeleteIsDestructive() {
@@ -25,7 +48,22 @@ final class MessageMenuTests: XCTestCase {
 
     func testNonMessageRowsCopyOnly() {
         XCTAssertEqual(MessageMenu.items(forMessage: false), [.copy])
+        XCTAssertEqual(MessageMenu.items(forMessage: false, canEdit: true), [.copy])
     }
+
+    /// #1871: already in a private / 1:1 chat — no Reply in DM (it would open the same chat).
+    func testPrivateChatOmitsReplyInDM() {
+        XCTAssertEqual(
+            MessageMenu.items(forMessage: true, inPrivateChat: true),
+            [.copy, .reply, .forward, .delete]
+        )
+        XCTAssertEqual(
+            MessageMenu.items(forMessage: true, canEdit: true, canDelete: true, hasReplies: true, inPrivateChat: true),
+            [.copy, .reply, .viewThread, .forward, .edit, .delete]
+        )
+        XCTAssertFalse(MessageMenu.items(forMessage: true, inPrivateChat: true).contains(.replyInDM))
+    }
+
 
     /// #1389: a long-press on any block of a bubble reaches the one menu, and
     /// its Copy is the whole message — every paragraph, the list, the code

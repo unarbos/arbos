@@ -2,10 +2,10 @@
 //! Tools: history_search, history_read, read_thread, memory_search, memory_read,
 //! peek, sub_llm, remember, recall, projects_list, ask_user,
 //! spawn_subagent, wake_subagent, connectors_list, connector_call, local_devices,
-//! local_run, local_read, local_list, deliver_file, generate_image, send_message, vault_list,
+//! local_run, local_read, local_list, deliver_file, generate_image, post_chart, send_message, vault_list,
 //! vault_request, egress, browser_fill, routines_list, routines_create, routines_update,
 //! routines_delete, goals_list, goals_create, goals_update, goals_log, goals_delete,
-//! web_search, web_fetch, submit_feedback.
+//! web_search, web_fetch, submit_feedback, publish_site, unpublish_site, list_sites.
 //!
 //! Sessions authenticate with a role-bound bearer token (main vs subagent, `Config::
 //! mcp_token_for_role`); tools that speak to other Projects are refused to subagents (D69).
@@ -47,6 +47,8 @@ fn tools() -> Value {
           "inputSchema": { "type": "object", "properties": { "id": { "type": "string" }, "range": { "type": "object", "properties": { "thread_id": { "type": "string" }, "from_id": { "type": "string" }, "to_id": { "type": "string" } } }, "cursor": { "type": "string" } } } },
         { "name": "read_thread", "description": "Verbatim turns of one chat or subagent thread (default: last 20).",
           "inputSchema": { "type": "object", "properties": { "thread_id": { "type": "string" }, "from": { "type": "integer" }, "to": { "type": "integer" }, "cursor": { "type": "string" } }, "required": ["thread_id"] } },
+        { "name": "chat_messages", "description": "Read chat messages verbatim from the live chat doc (DMs, people groups, project chats): one message in full by message_id, or a page of history (newest last; `before`/`after` a message id; default the current chat, 20 messages, max 50). Use it whenever a message in your context carries a [truncated …] or [N earlier messages not shown …] marker.",
+          "inputSchema": { "type": "object", "properties": { "chat_id": { "type": "string" }, "message_id": { "type": "string" }, "before": { "type": "string" }, "after": { "type": "string" }, "limit": { "type": "integer", "maximum": 50 } } } },
         { "name": "memory_search", "description": "Search Project memory (T0 user core, T1 project core, T2 thread memory). Bi-temporal fields included.",
           "inputSchema": { "type": "object", "properties": { "query": { "type": "string" }, "tiers": { "type": "array", "items": { "type": "string" } }, "include_expired": { "type": "boolean" }, "limit": { "type": "integer", "maximum": 20 } }, "required": ["query"] } },
         { "name": "memory_read", "description": "Read a thread's T2 memory, or memory records by id.",
@@ -59,7 +61,7 @@ fn tools() -> Value {
           "inputSchema": { "type": "object", "properties": { "name": { "type": "string" }, "value": { "type": ["string","null"] } }, "required": ["name"] } },
         { "name": "recall", "description": "Read a note saved with remember.", "inputSchema": { "type": "object", "properties": { "name": { "type": "string" } }, "required": ["name"] } },
         { "name": "projects_list", "description": "List the user's other Projects (name, state).", "inputSchema": { "type": "object", "properties": {} } },
-        { "name": "send_message", "description": "Message another agent. `to` = its name, @handle or id (your owner's agents; another owner's only when they allowed it). The text lands in that agent's own chat and its reply comes back to you here. Inside a group chat, omit `to` to speak to the other agents in the group.",
+        { "name": "send_message", "description": "Message another agent. `to` = its name, @handle or id (your owner's agents; another owner's only when they allowed it). The text lands in that agent's own chat and its reply comes back to you here — never write `@name …` as a bubble in this chat to reach them. Inside a group chat, omit `to` to speak to the other agents in the group. Without `to`, the progress-note `send_message(text)` is for the user in this chat only.",
           "inputSchema": { "type": "object", "properties": { "to": { "type": "string", "description": "Agent name, @handle or id" }, "text": { "type": "string" } }, "required": ["text"] } },
         { "name": "ask_user", "description": "Ask the user one question and wait; the answer arrives as the next message. Pass `widget` for a typed answer (choice, multi_select, text, date, form).",
           "inputSchema": { "type": "object", "properties": { "question": { "type": "string" }, "widget": widget_schema() }, "required": ["question"] } },
@@ -78,11 +80,14 @@ fn tools() -> Value {
         a.extend(crate::connectors::tool_specs());
         a.extend(crate::local::tool_specs());
         a.extend(crate::media::tool_specs());
+        a.extend(crate::chart::tool_specs());
         a.extend(crate::vault::tool_specs());
         a.extend(crate::routines::tool_specs());
         a.extend(crate::goals::tool_specs());
+        a.extend(crate::sites::tool_specs());
         a.extend(crate::web::tool_specs());
         a.extend(crate::feedback::tool_specs());
+        a.extend(crate::disk::tool_specs());
     }
     list
 }
@@ -163,6 +168,8 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
             | "local_list"
             | "vault_request"
             | "secrets_request"
+            | "request_secret"
+            | "secrets_save_from_message"
             | "browser_fill"
     ) {
         if let Err(refusal) = a.gate_tool(name, args, &chat_for_scratch).await {
@@ -264,6 +271,137 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
             } else {
                 err_result("id or range required")
             }
+        }
+        "chat_messages" => {
+            let chat_id = s("chat_id")
+                .filter(|c| !c.trim().is_empty())
+                .unwrap_or_else(|| chat_for_scratch.clone());
+            let Some(host) = a.sync.host(&chat_id).await else {
+                return err_result(format!("no open chat {chat_id} on this box"));
+            };
+            let all = { host.lock().await.doc.messages() };
+            let row = |m: &arbos_core::doc::MessageView, full: bool| -> Value {
+                let text = m.text();
+                let text = if full || text.chars().count() <= crate::truncate::FULL_MSG_CHARS {
+                    text
+                } else {
+                    crate::truncate::clip_marked(
+                        &text,
+                        crate::truncate::FULL_MSG_CHARS,
+                        &m.id,
+                        Some(&crate::truncate::fetch_message_hint(&chat_id, &m.id)),
+                    )
+                };
+                let from = m
+                    .rest
+                    .get("senderName")
+                    .and_then(Value::as_str)
+                    .or_else(|| m.rest.get("senderHandle").and_then(Value::as_str))
+                    .or_else(|| m.rest.get("sender").and_then(Value::as_str))
+                    .unwrap_or(if m.role == "assistant" {
+                        "agent"
+                    } else {
+                        "user"
+                    });
+                json!({
+                    "id": m.id, "role": m.role, "from": from, "status": m.status,
+                    "at": m.rest.get("createdAt"), "reply_to": m.rest.get("replyTo"),
+                    "chars": text.chars().count(), "text": text,
+                })
+            };
+            if let Some(mid) = s("message_id").filter(|x| !x.trim().is_empty()) {
+                return match all.iter().find(|m| m.id == mid) {
+                    Some(m) => {
+                        let text = m.text();
+                        if text.len() > PAGE_TOKENS_CHARS {
+                            let h = materialize_handle(
+                                a,
+                                &chat_for_scratch,
+                                &format!("chat message {mid}"),
+                                &text,
+                            );
+                            let mut v = row(m, false);
+                            v["handle"] = json!(h);
+                            v["note"] = json!("longer than one page: `text` is the head; read the rest with peek on `handle`");
+                            text_result(v.to_string())
+                        } else {
+                            text_result(row(m, true).to_string())
+                        }
+                    }
+                    None => err_result(format!("no message {mid} in chat {chat_id}")),
+                };
+            }
+            let limit = args
+                .get("limit")
+                .and_then(Value::as_i64)
+                .unwrap_or(20)
+                .clamp(1, 50) as usize;
+            let visible: Vec<&arbos_core::doc::MessageView> = all
+                .iter()
+                .filter(|m| m.role != "system" && !m.text().trim().is_empty())
+                .collect();
+            let (slice, older): (Vec<&arbos_core::doc::MessageView>, bool) =
+                if let Some(after) = s("after").filter(|x| !x.trim().is_empty()) {
+                    let start = visible
+                        .iter()
+                        .position(|m| m.id == after)
+                        .map(|i| i + 1)
+                        .unwrap_or(0);
+                    (
+                        visible[start..].iter().take(limit).copied().collect(),
+                        start > 0,
+                    )
+                } else {
+                    let end = match s("before").filter(|x| !x.trim().is_empty()) {
+                        Some(b) => visible
+                            .iter()
+                            .position(|m| m.id == b)
+                            .unwrap_or(visible.len()),
+                        None => visible.len(),
+                    };
+                    let start = end.saturating_sub(limit);
+                    (visible[start..end].to_vec(), start > 0)
+                };
+            let mut budget = PAGE_TOKENS_CHARS;
+            let mut rows = Vec::new();
+            for m in &slice {
+                let mut v = row(m, false);
+                let n = m.text().chars().count();
+                if n > 4000 && !rows.is_empty() {
+                    v["text"] = json!(crate::truncate::clip_marked(
+                        &m.text(),
+                        4000,
+                        &m.id,
+                        Some(&crate::truncate::fetch_message_hint(&chat_id, &m.id))
+                    ));
+                }
+                let cost = v["text"].as_str().map(str::len).unwrap_or(0);
+                if cost > budget && !rows.is_empty() {
+                    break;
+                }
+                budget = budget.saturating_sub(cost);
+                rows.push(v);
+            }
+            let oldest = rows
+                .first()
+                .and_then(|r| r["id"].as_str())
+                .unwrap_or("")
+                .to_owned();
+            let newest = rows
+                .last()
+                .and_then(|r| r["id"].as_str())
+                .unwrap_or("")
+                .to_owned();
+            text_result(
+                json!({
+                    "chat_id": chat_id,
+                    "messages": rows,
+                    "older_before": if older || rows.len() < slice.len() { Some(&oldest) } else { None },
+                    "newer_after": if newest.is_empty() { None } else { Some(&newest) },
+                    "total_in_chat": visible.len(),
+                })
+                .to_string(),
+            )
         }
         "read_thread" => {
             let tid = s("thread_id").unwrap_or_default();
@@ -660,15 +798,24 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
             crate::local::local_call(a, name, args, &chat_for_scratch).await
         }
         "deliver_file" => crate::media::deliver_file(a, args).await,
+        "post_chart" => crate::chart::post_chart(a, args).await,
         "generate_image" => crate::media::generate_image(a, args).await,
         "vault_list" | "secrets_list" => crate::vault::secrets_list(a).await,
         "vault_request" | "secrets_request" => {
             crate::vault::secrets_request(a, args, &chat_for_scratch).await
         }
         "egress" => crate::vault::egress(a, args, &chat_for_scratch).await,
+        "request_secret" => crate::handoff::request_secret(a, args, &chat_for_scratch).await,
+        "secrets_save_from_message" => {
+            crate::handoff::secrets_save_from_message(a, args, &chat_for_scratch).await
+        }
         "web_search" => crate::web::web_search(a, args, &chat_for_scratch).await,
         "web_fetch" => crate::web::web_fetch(a, args, &chat_for_scratch).await,
         "submit_feedback" => crate::feedback::submit_feedback(a, args, &chat_for_scratch).await,
+        "publish_site" => crate::sites::publish_site(a, args).await,
+        "unpublish_site" => crate::sites::unpublish_site(a, args).await,
+        "list_sites" => crate::sites::list_sites(a).await,
+        "free_space" => crate::disk::free_space_tool(a, args).await,
         "browser_fill" => crate::vault::browser_fill(a, args, &chat_for_scratch).await,
         "routines_list" | "routines_create" | "routines_update" | "routines_delete" => {
             crate::routines::call_tool(a, name, args, &chat_for_scratch).await

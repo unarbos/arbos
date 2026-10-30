@@ -11,6 +11,7 @@
 		<string>remote-notification</string>
 		<string>voip</string>
 		<string>audio</string>
+		<string>screen-capture</string>
 	</array>
 	<key>CFBundleURLTypes</key>
 	<array>

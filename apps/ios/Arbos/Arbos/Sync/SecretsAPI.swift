@@ -178,3 +178,25 @@ extension RelayAPI {
         return (try? JSONDecoder().decode(MessageGrantsDto.self, from: data))?.grants.map(MessageGrant.init(dto:)) ?? []
     }
 }
+
+// The agent pane's Details and Computer tabs ([feedback iphone-agent-pane-tabs-2026-10-25]):
+// the agent's routines with their switches, and the box as `GET /machine/debug` reports it.
+extension RelayAPI {
+    /// `GET /projects/{id}/routines` → every routine of the agent, in the relay's order.
+    func routines(_ projectId: Id) async throws -> [Routine] {
+        let v = try await json("GET", "/projects/\(projectId)/routines")
+        return (v as? [Any] ?? []).compactMap(Routine.parse)
+    }
+
+    /// `PATCH /projects/{id}/routines/{rid} {enabled}` — the row's switch.
+    func setRoutineEnabled(_ projectId: Id, routineId: Id, enabled: Bool) async throws {
+        _ = try await request("PATCH", "/projects/\(projectId)/routines/\(routineId)", body: ["enabled": enabled])
+    }
+
+    /// `GET /machine/debug` → the Computer tab's report (the relay's view plus the box's own
+    /// `/box/state`). Lenient on the wire; a relay without the route throws a 404.
+    func machineDebug() async throws -> BoxReport {
+        let v = try await json("GET", "/machine/debug")
+        return BoxReport(debug: v, now: nowMs())
+    }
+}

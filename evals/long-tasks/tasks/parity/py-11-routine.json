@@ -1,0 +1,39 @@
+{
+  "id": "py-11-routine",
+  "lane": "a",
+  "category": "parity",
+  "categories": [
+    "parity",
+    "recurring-routine"
+  ],
+  "title": "A weekday recurring routine",
+  "parity": true,
+  "timeout_s": 180,
+  "settle_s": 12,
+  "turns": [
+    {
+      "prompt": "Every weekday at 8 am tell me the surf forecast for Santa Teresa.",
+      "shape": {
+        "messages_min": 1,
+        "messages_max": 2,
+        "ack_first": false,
+        "table": false,
+        "links_min": 0,
+        "offer": false,
+        "first_bubble_max_s": 8,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": false
+      },
+      "routine": {
+        "count": 1,
+        "name_regex": "surf|forecast|santa",
+        "cron": "1-5"
+      },
+      "judge": {
+        "criteria": "Confirms the schedule in one short sentence (weekdays, 8 am, what it will send). No question unless the time zone is genuinely unknown."
+      }
+    }
+  ],
+  "cleanup_routines": true
+}

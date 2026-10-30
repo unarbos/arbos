@@ -1,0 +1,31 @@
+{
+  "id": "py-25-image-ask",
+  "lane": "a",
+  "category": "parity",
+  "categories": [
+    "parity",
+    "image-ask"
+  ],
+  "title": "An image ask (menu text stand-in)",
+  "parity": true,
+  "timeout_s": 90,
+  "settle_s": 12,
+  "turns": [
+    {
+      "prompt": "Here is a menu I photographed:\nCasado con pollo — ₡4500\nGallo pinto con huevo — ₡2800\nEnsalada de palmito — ₡3900\nPescado entero — ₡7800\nWhat's the cheapest vegetarian dish?",
+      "shape": {
+        "messages_min": 1,
+        "messages_max": 1,
+        "ack_first": false,
+        "table": false,
+        "links_min": 0,
+        "offer": false,
+        "first_bubble_max_s": 5,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": false
+      },
+      "reply_regex": "(?i)gallo pinto"
+    }
+  ]
+}

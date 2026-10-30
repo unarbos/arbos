@@ -13,14 +13,11 @@ use gpui::{
 };
 
 use crate::app::{AppState, ProfilePage};
-use crate::ui::icons::icon;
+use crate::ui::sf_symbols;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, TEXT_TINY};
 
-use super::{
-    file_list, hero, kit, link_list, media_grid, pushed_frame, tab_bar, Found, Link, HERO_AVATAR,
-    PANE_FADE_BAND,
-};
+use super::{hero, kit, pushed_frame, tab_bar, HeroClick, HERO_AVATAR, PANE_FADE_BAND};
 
 /// Everything a page declares. The component renders it.
 pub struct ProfilePane {
@@ -37,6 +34,9 @@ pub struct ProfilePane {
     pub footer: Vec<Section>,
     /// Optional control beside the × (Done, Save).
     pub done: Option<Stateful<Div>>,
+    /// Grok's share disc, left of the ×, when the page has something to share
+    /// (an agent or a group: the invite sheet). `None` draws the × alone.
+    pub share: Option<HeroClick>,
 }
 
 pub struct Hero {
@@ -47,10 +47,20 @@ pub struct Hero {
     pub badge: Option<&'static str>,
     pub subtitle: Option<SharedString>,
     pub subtitle_color: Hsla,
+    /// A click on the subtitle (the agent's "Add a label": edit it in place).
+    pub subtitle_click: Option<HeroClick>,
+    /// A ready-made subtitle in place of the text (the foreign agent's
+    /// "Run by …" link, [feedback agent-pane-run-by-link-mac-2026-10-25]).
+    pub subtitle_element: Option<AnyElement>,
     /// Mac only: inline controls under the subtitle while the name is being
     /// edited (the own profile's handle field with Cancel / Save). The iPhone
     /// edits in a sheet, so its hero has no twin field.
     pub editor: Option<AnyElement>,
+    /// The hero's one action pill under the name and handle (a person's
+    /// "Message", [feedback profile-message-button-mac-2026-10-25]); `None`
+    /// on panes with no primary action, and on a person you cannot message
+    /// (yourself, someone you blocked).
+    pub action: Option<AnyElement>,
 }
 
 pub enum Picture {
@@ -66,7 +76,8 @@ pub enum Picture {
 pub enum Section {
     /// Small caps title over a card ("Images · 4", "Archived").
     Title(SharedString),
-    /// Rows from `kit`; separators sit between rows only (`kit::section`).
+    /// Rows from `kit` (each draws its own hung hairline). Plain content
+    /// without a hairline uses `kit::section` instead.
     Card(Vec<AnyElement>),
     /// A card whose row `open` has just unfolded a picker under it (Model,
     /// Reasoning): the pane scrolls so that row is in view, once.
@@ -74,12 +85,6 @@ pub enum Section {
         rows: Vec<AnyElement>,
         open: usize,
     },
-    /// Media thumbnails, three square tiles per row.
-    Grid(Vec<Found>),
-    /// The Library's file rows: name, then "212 kB · Mira · Today".
-    Files(Vec<Found>),
-    /// The Library's link rows with favicons.
-    Links(Vec<Link>),
     /// A picker card: a `kit` row that opens and closes it, the swatch grid
     /// under it (leaves, colours), a small note under the grid.
     Picker {
@@ -141,37 +146,43 @@ fn title_of(page: &ProfilePage, state: &AppState) -> String {
 }
 
 /// Is this page the one open in the right pane (the header pill / server
-/// header ring)?
+/// header ring)? Same subject counts: a person's page opened from a chip is
+/// the DM pill's person too (`ProfilePage::same_subject`).
 pub fn is_open(state: &AppState, page: &ProfilePage) -> bool {
-    state.profile.as_ref() == Some(page)
+    state.profile_shows(page)
 }
 
 fn glyph_tile(glyph: &'static str, theme: &Theme) -> AnyElement {
     div()
         .size(px(HERO_AVATAR))
         .rounded(px(HERO_AVATAR * 0.28))
-        .bg(theme.surface_2)
+        .bg(theme.control_fill())
         .flex()
         .items_center()
         .justify_center()
-        .child(icon(glyph, HERO_AVATAR * 0.45, theme.text))
+        .child(sf_symbols::glyph(glyph, HERO_AVATAR * 0.45, theme.text))
         .into_any_element()
 }
 
-/// Which child of `kit::section` is row `open` (separators sit between rows).
+/// Child index of row `open` in a kit card (one child per row — kit rows
+/// carry their own hairlines, so the card does not interleave separators).
 fn child_index_of_row(rows: usize, open: usize) -> Option<usize> {
-    kit::section_parts(rows)
-        .iter()
-        .position(|p| *p == kit::SectionPart::Row(open))
+    (open < rows).then_some(open)
 }
 
-fn section(part: Section, shell: &Shell, theme: &Theme, cx: &mut Context<Shell>) -> AnyElement {
+/// A pane card of kit rows: one fill, no extra separators (each `kit::row`
+/// hangs its own hairline; stacking `kit::section` on top doubled the line).
+fn kit_card(rows: Vec<AnyElement>, theme: &Theme) -> Div {
+    kit::card(theme).children(rows)
+}
+
+fn section(part: Section, theme: &Theme, cx: &mut Context<Shell>) -> AnyElement {
     match part {
         Section::Title(t) => kit::section_title(t, theme).into_any_element(),
-        Section::Card(rows) => kit::section(rows, kit::INSET, theme).into_any_element(),
+        Section::Card(rows) => kit_card(rows, theme).into_any_element(),
         Section::Reveal { rows, open } => {
             let child = child_index_of_row(rows.len(), open);
-            let card = kit::section(rows, kit::INSET, theme);
+            let card = kit_card(rows, theme);
             match child {
                 Some(ix) => {
                     let reveal =
@@ -186,9 +197,6 @@ fn section(part: Section, shell: &Shell, theme: &Theme, cx: &mut Context<Shell>)
                 None => card.into_any_element(),
             }
         }
-        Section::Grid(items) => media_grid(items, theme, cx).into_any_element(),
-        Section::Files(items) => file_list(&items, "doc", "", theme).into_any_element(),
-        Section::Links(items) => link_list(&items, shell, theme, cx).into_any_element(),
         Section::Picker {
             header,
             swatches,
@@ -201,7 +209,7 @@ fn section(part: Section, shell: &Shell, theme: &Theme, cx: &mut Context<Shell>)
                     .px(px(kit::INSET))
                     .pb(px(12.0))
                     .text_size(px(TEXT_TINY))
-                    .text_color(theme.text_muted)
+                    .text_color(theme.label_muted())
                     .child(note),
             )
             .into_any_element(),
@@ -254,7 +262,7 @@ pub fn render(pane: ProfilePane, shell: &Shell, cx: &mut Context<Shell>) -> Stat
             .items_center()
             .gap(px(6.0))
             .child(pane.hero.name)
-            .child(icon(glyph, 14.0, theme.text_muted))
+            .child(sf_symbols::glyph(glyph, 14.0, theme.label_muted()))
             .into_any_element(),
         None => pane.hero.name,
     };
@@ -267,9 +275,16 @@ pub fn render(pane: ProfilePane, shell: &Shell, cx: &mut Context<Shell>) -> Stat
             name_el,
             &subtitle,
             pane.hero.subtitle_color,
+            pane.hero.subtitle_click,
+            pane.hero.subtitle_element,
             &theme,
         )
-        .children(pane.hero.editor),
+        .children(pane.hero.editor)
+        .children(
+            pane.hero
+                .action
+                .map(|a| div().pt(px(HERO_ACTION_GAP)).child(a)),
+        ),
     );
     let blocks = layout(pane.tabs.len(), pane.footer.len());
     if blocks.contains(&Block::TabPill) {
@@ -277,26 +292,32 @@ pub fn render(pane: ProfilePane, shell: &Shell, cx: &mut Context<Shell>) -> Stat
     }
     // The body starts under the pinned block's bottom margin (pane_frame pulls
     // it up by PANE_FADE_BAND); this spacer puts the first card back where
-    // the margin had it, so only scrolled rows cross the fade.
+    // the margin had it, so only scrolled rows cross the fade. A section label
+    // first ("Coding") pulls the spacer in by its own top padding, so the
+    // label's text lands where a card's top edge would — Grok's 24 under the
+    // pill ([feedback info-pane-chrome-2026-10-24]).
+    let spacer = first_spacer(pane.body.first());
     let mut body = div()
         .flex()
         .flex_col()
         .pb(px(16.0))
-        .child(div().h(px(PANE_FADE_BAND)).flex_shrink_0());
+        .child(div().h(px(spacer)).flex_shrink_0());
     for part in pane.body {
-        body = body.child(section(part, shell, &theme, cx));
+        body = body.child(section(part, &theme, cx));
     }
     if blocks.contains(&Block::Footer) {
         body = body.child(div().h(px(14.0)));
         for part in pane.footer {
-            body = body.child(section(part, shell, &theme, cx));
+            body = body.child(section(part, &theme, cx));
         }
     }
+    let share = pane.share.filter(|_| share_disc_allowed(&pane.page));
     pushed_frame(
         &title,
         Some(pinned),
         body,
         pane.done,
+        share,
         Some(&shell.profile_scroll),
         shell,
         &theme,
@@ -304,9 +325,43 @@ pub fn render(pane: ProfilePane, shell: &Shell, cx: &mut Context<Shell>) -> Stat
     )
 }
 
+/// A leading section label starts this much higher than a card would, so its
+/// glyphs (about 3 pt into the label's box, over `kit::SECTION_TITLE_TOP`)
+/// land Grok's 24 pt under the pill: 18 − 7 + 10 + 3 = 24
+/// (`grok-right-pane-details.png`: pill bottom 244, "Coding" top 268).
+pub(crate) const FIRST_TITLE_PULL: f32 = 7.0;
+
+/// Extra room over the hero's action pill: with the hero column's 6 pt gap the
+/// pill sits 12 under the "@handle" line, a control's gap and a half.
+pub(crate) const HERO_ACTION_GAP: f32 = 6.0;
+
+/// Which panes may carry Grok's share disc beside the ×: the agent pane (its
+/// owner's invite sheet) and no other. Jacob 2026-10-25: "remove this button
+/// from side bar on group/" — groups and servers draw the × alone, like the
+/// person, channel and own-profile panes ([feedback info-pane-no-share-disc-groups-2026-10-25]).
+pub(crate) fn share_disc_allowed(page: &ProfilePage) -> bool {
+    match page {
+        ProfilePage::Agent { .. } => true,
+        ProfilePage::Group { .. }
+        | ProfilePage::Server { .. }
+        | ProfilePage::Channel { .. }
+        | ProfilePage::User { .. }
+        | ProfilePage::Me => false,
+    }
+}
+
+/// The spacer over the first section: the fade band, pulled in when a section
+/// label leads (see [`FIRST_TITLE_PULL`]).
+pub(crate) fn first_spacer(first: Option<&Section>) -> f32 {
+    match first {
+        Some(Section::Title(_)) => PANE_FADE_BAND - FIRST_TITLE_PULL,
+        _ => PANE_FADE_BAND,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{child_index_of_row, layout, Block};
+    use super::{child_index_of_row, layout, share_disc_allowed, Block};
 
     /// Every kind's tab set (the same labels and order as the iPhone page of
     /// that kind — `ArbosTests/ProfilePaneStructureTests.swift` holds the twin).
@@ -344,8 +399,11 @@ mod tests {
 
     #[test]
     fn kinds_keep_their_own_tab_sets() {
+        // Grok Bot's agent tabs (Jacob 2026-10-24, [feedback agent-pane-details-tab-2026-10-24]).
         let agent: Vec<&str> = super::super::agent::TABS.to_vec();
-        assert_eq!(agent, ["Profile", "Settings", "Library"]);
+        assert_eq!(agent, ["Details", "Library", "Computer"]);
+        assert_eq!(agent[super::super::agent::TAB_LIBRARY], "Library");
+        assert_eq!(agent[super::super::agent::TAB_COMPUTER], "Computer");
         assert_eq!(super::super::me::TABS, ["Profile", "Settings"]);
         assert_eq!(super::super::user::TABS, ["Links", "Groups"]);
         assert_eq!(super::super::group::TABS, ["Members", "Library"]);
@@ -363,13 +421,36 @@ mod tests {
         }
     }
 
-    /// `kit::section` interleaves a separator between rows, so row `i` is
-    /// child `2i`; a row past the end is no child at all.
+    /// Which panes carry Grok's share disc beside the ×: the agent pane (its
+    /// owner's invite sheet) and no other — Jacob 2026-10-25, "remove this
+    /// button from side bar on group/" ([feedback info-pane-no-share-disc-groups-2026-10-25]).
+    #[test]
+    fn only_the_agent_pane_may_have_a_share_disc() {
+        use crate::app::ProfilePage;
+        let id = || "x".to_string();
+        assert!(share_disc_allowed(&ProfilePage::Agent { project_id: id() }));
+        assert!(!share_disc_allowed(&ProfilePage::Group { space_id: id() }));
+        assert!(!share_disc_allowed(&ProfilePage::Server {
+            server_id: id()
+        }));
+        assert!(!share_disc_allowed(&ProfilePage::Channel {
+            server_id: id(),
+            channel_id: id()
+        }));
+        assert!(!share_disc_allowed(&ProfilePage::User {
+            handle: id(),
+            space_id: None
+        }));
+        assert!(!share_disc_allowed(&ProfilePage::Me));
+    }
+
+    /// Kit cards are one child per row (hairlines hang from the rows), so
+    /// row `i` is child `i`; a row past the end is no child at all.
     #[test]
     fn reveal_row_maps_to_section_child() {
         assert_eq!(child_index_of_row(2, 0), Some(0));
-        assert_eq!(child_index_of_row(2, 1), Some(2));
-        assert_eq!(child_index_of_row(3, 2), Some(4));
+        assert_eq!(child_index_of_row(2, 1), Some(1));
+        assert_eq!(child_index_of_row(3, 2), Some(2));
         assert_eq!(child_index_of_row(2, 2), None);
         assert_eq!(child_index_of_row(0, 0), None);
     }

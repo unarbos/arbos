@@ -1,0 +1,51 @@
+{
+  "id": "py-19-correction",
+  "lane": "a",
+  "category": "parity",
+  "categories": [
+    "parity",
+    "correction"
+  ],
+  "title": "A correction to a quick fact",
+  "parity": true,
+  "timeout_s": 200,
+  "settle_s": 12,
+  "turns": [
+    {
+      "prompt": "What's the time difference between Costa Rica and London right now?",
+      "shape": {
+        "messages_min": 1,
+        "messages_max": 2,
+        "ack_first": false,
+        "table": false,
+        "links_min": 0,
+        "offer": false,
+        "first_bubble_max_s": 5,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": false
+      },
+      "wait_done": true
+    },
+    {
+      "prompt": "I meant Costa Rica vs Lisbon.",
+      "shape": {
+        "messages_min": 1,
+        "messages_max": 2,
+        "ack_first": false,
+        "table": false,
+        "links_min": 0,
+        "offer": false,
+        "first_bubble_max_s": 5,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": false
+      },
+      "reply_regex": "\\b(7|8|seven|eight)\\b",
+      "judge": {
+        "criteria": "Corrected answer at once (Lisbon), at most one short clause of acknowledgement, no apology paragraph."
+      },
+      "wait_done": true
+    }
+  ]
+}

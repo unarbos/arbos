@@ -586,7 +586,7 @@ fn mock_on() -> bool {
     std::env::var("ARBOS_VAULT_MOCK").is_ok_and(|v| v == "1")
 }
 
-fn wait_budget() -> Duration {
+pub(crate) fn wait_budget() -> Duration {
     Duration::from_secs(
         std::env::var("ARBOS_VAULT_WAIT_S")
             .ok()
@@ -604,7 +604,7 @@ pub fn tool_specs() -> Vec<Value> {
     alias_list["name"] = json!("vault_list");
     let mut alias_request = request.clone();
     alias_request["name"] = json!("vault_request");
-    vec![
+    let mut out = vec![
         list,
         request,
         json!({ "name": "egress", "description": "HTTP request performed by the relay with secret placeholders (arbos-secret://NAME/field, $NAME, or op:// references) substituted in headers/body for the secret's allowed hosts only. Returns status, headers and body with secret values redacted. Use this instead of curl whenever a request needs a secret.",
@@ -613,10 +613,12 @@ pub fn tool_specs() -> Vec<Value> {
                 "inputSchema": { "type": "object", "properties": { "name": { "type": "string" }, "url": { "type": "string" } }, "required": ["name", "url"] } }),
         alias_list,
         alias_request,
-    ]
+    ];
+    out.extend(crate::handoff::tool_specs());
+    out
 }
 
-async fn relay_get(agent: &Agent, path: &str) -> Result<Value, String> {
+pub(crate) async fn relay_get(agent: &Agent, path: &str) -> Result<Value, String> {
     let r = agent
         .http_client()
         .get(format!("{}{}", agent.cfg.relay_url, path))
@@ -642,7 +644,11 @@ fn relay_error(status: reqwest::StatusCode, text: &str, path: &str) -> String {
     }
 }
 
-async fn relay_post(agent: &Agent, path: &str, body: &Value) -> Result<(u16, Value), String> {
+pub(crate) async fn relay_post(
+    agent: &Agent,
+    path: &str,
+    body: &Value,
+) -> Result<(u16, Value), String> {
     let r = agent
         .http_client()
         .post(format!("{}{}", agent.cfg.relay_url, path))
@@ -820,11 +826,38 @@ pub async fn on_push(agent: &Arc<Agent>, kind: &str, payload: &Value) {
     }
 }
 
+/// Scrub one secret's values from this box now (the relay pushes `secret_scrub` too; the
+/// hand-off calls this first so the agent's own session is clean before its turn goes on).
+pub(crate) async fn scrub_now(agent: &Arc<Agent>, secret_id: &str) {
+    match scrub_secret(agent, secret_id).await {
+        Ok(stats) => {
+            tracing::info!(
+                secret_id,
+                chats = stats.chats,
+                sessions = stats.sessions,
+                t3 = stats.t3,
+                memory = stats.memory,
+                files = stats.files,
+                "secret scrubbed from context (hand-off)"
+            );
+            agent.append_audit(
+                "secret_scrub",
+                json!({ "secret_id": secret_id, "chats": stats.chats, "sessions": stats.sessions,
+                    "t3": stats.t3, "memory": stats.memory, "files": stats.files, "path": "handoff" }),
+            );
+        }
+        Err(e) => tracing::warn!(error = %e, secret_id, "secret scrub failed (hand-off)"),
+    }
+}
+
 struct ScrubStats {
     chats: usize,
     sessions: usize,
     t3: usize,
     memory: usize,
+    /// Other on-disk text the value could have reached: harness logs, subagent packs, tool
+    /// output blobs, the system prompt, the workspace's `.arbos` scratch files.
+    files: usize,
 }
 
 /// Pull the scrub values from the relay and redact them from every local context store.
@@ -845,6 +878,7 @@ async fn scrub_secret(agent: &Arc<Agent>, secret_id: &str) -> Result<ScrubStats,
             sessions: 0,
             t3: 0,
             memory: 0,
+            files: 0,
         });
     }
     for val in &values {
@@ -866,12 +900,17 @@ async fn scrub_secret(agent: &Arc<Agent>, secret_id: &str) -> Result<ScrubStats,
         map.values().cloned().collect()
     };
     for host in hosts {
-        let n = {
+        let (n, repersist) = {
             let h = host.lock().await;
-            h.doc.scrub_values(&values)
+            let n = h.doc.scrub_values(&values);
+            // A relay-side redaction already arrived as a row: the doc is in shallow mode but
+            // the persisted snapshot may still be the full one — write it again.
+            (n, h.doc.is_shallow_mode())
         };
         if n > 0 {
             chats += n;
+        }
+        if n > 0 || repersist {
             let _ = agent.sync.persist(&host).await;
         }
     }
@@ -879,12 +918,29 @@ async fn scrub_secret(agent: &Arc<Agent>, secret_id: &str) -> Result<ScrubStats,
     let sessions = scrub_session_files(&agent.cfg, &values);
     let t3 = agent.store.t3_scrub(&values).unwrap_or(0);
     let memory = agent.store.memory_scrub(&values).unwrap_or(0);
+    let files = scrub_other_files(&agent.cfg, &values);
+    let _ = agent.store.flush_after_scrub();
     Ok(ScrubStats {
         chats,
         sessions,
         t3,
         memory,
+        files,
     })
+}
+
+/// Everything else under the state dir that holds text: harness logs, subagent packs, tool
+/// output blobs, the written system prompt, scratch. Binary files are skipped (not UTF-8).
+fn scrub_other_files(cfg: &crate::config::Config, values: &[String]) -> usize {
+    let mut n = 0;
+    for dir in ["logs", "packs", "blobs", "scratch"] {
+        n += scrub_dir_files(&cfg.state_dir.join(dir), values);
+    }
+    let prompt = cfg.pi_dir().join("system-prompt.md");
+    if scrub_one_file(&prompt, values) {
+        n += 1;
+    }
+    n
 }
 
 /// Walk pi / Prime / Claude session files and rewrite any that still hold a plaintext value.

@@ -1,0 +1,51 @@
+{
+  "id": "py-18-follow-up",
+  "lane": "b",
+  "category": "parity",
+  "categories": [
+    "parity",
+    "follow-up"
+  ],
+  "title": "A follow-up answered from context",
+  "parity": true,
+  "timeout_s": 600,
+  "settle_s": 20,
+  "turns": [
+    {
+      "prompt": "Find me the 3 best-reviewed surf schools near Santa Teresa and compare their prices.",
+      "shape": {
+        "messages_min": 3,
+        "messages_max": 7,
+        "ack_first": true,
+        "table": true,
+        "links_min": 1,
+        "offer": true,
+        "first_bubble_max_s": 5,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": true
+      },
+      "wait_done": true
+    },
+    {
+      "prompt": "Which one is closest to the beach?",
+      "shape": {
+        "messages_min": 1,
+        "messages_max": 2,
+        "ack_first": false,
+        "table": false,
+        "links_min": 0,
+        "offer": false,
+        "first_bubble_max_s": 8,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": false
+      },
+      "judge": {
+        "criteria": "Answers from the comparison already given (names one school), one or two sentences; a short 'not sure from what I found' is fine; no restart of the whole research."
+      },
+      "wait_done": true,
+      "timeout_s": 180
+    }
+  ]
+}

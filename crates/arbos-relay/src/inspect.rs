@@ -464,19 +464,16 @@ async fn box_page(state: &AppState, project: &Project, q: &InspectQuery) -> Resu
         k.sort_unstable();
         params.push(("kind", k.join(",")));
     }
-    let mut req = state
-        .http
-        .get(format!("{url}/w/{}/inspect", project.id))
-        .query(&params)
-        .bearer_auth(&sb.mcp_token)
-        .timeout(BOX_TIMEOUT);
-    if let Some(t) = &sb.preview_token {
-        req = req.header("x-daytona-preview-token", t);
-    }
-    let r = req
-        .send()
-        .await
-        .map_err(|e| format!("box unreachable: {e}"))?;
+    let r = crate::boxes::send_to_box(state, &sb, || {
+        state
+            .http
+            .get(format!("{url}/w/{}/inspect", project.id))
+            .query(&params)
+            .bearer_auth(&sb.mcp_token)
+            .timeout(BOX_TIMEOUT)
+    })
+    .await
+    .map_err(|e| format!("box unreachable: {e}"))?;
     if !r.status().is_success() {
         return Err(format!("box answered {}", r.status()));
     }
@@ -672,6 +669,106 @@ pub async fn project_inspect(
     }
 }
 
+/// `GET /projects/{id}/jobs/{job_id}?after=<seq>[&chat=<id>]` — the rollout view's document for
+/// one background job (duplex §2.3; client contract `duplex-rollout-client-contract.md`): the
+/// box builds it from the job's row and the worker's T3 thread (`agentd::jobs_view`), the relay
+/// passes it through. The owner may read any job of the agent; a chat member names the chat
+/// (`chat=`) and reads only jobs asked in that chat. Polled at 1 s while a rollout is open;
+/// `after` bounds the body to newer entries.
+pub async fn project_job(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((id, job_id)): Path<(String, String)>,
+    Query(raw): Query<HashMap<String, String>>,
+) -> Response {
+    let project = match state.db.project(&id) {
+        Ok(Some(p)) => p,
+        Ok(None) => return api_error(StatusCode::NOT_FOUND, "not_found", "no such project"),
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    };
+    let scope = match (scope(&state, &principal, &project), raw.get("chat")) {
+        (Ok(s), _) => s,
+        (Err(_), Some(chat)) => match member_scope(&state, &principal, &project, chat) {
+            Ok(s) => s,
+            Err(r) => return *r,
+        },
+        (Err(r), None) => return *r,
+    };
+    let after = raw
+        .get("after")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(0)
+        .max(0);
+    let sb = match state.db.user_box(&project.user_id) {
+        Ok(Some(sb)) => sb,
+        Ok(None) => {
+            return api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "box_offline",
+                "no box for this agent",
+            )
+        }
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    };
+    let Some(url) = sb.box_url.clone() else {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "box_offline",
+            "the agent's box is asleep or starting",
+        );
+    };
+    let sent = crate::boxes::send_to_box(&state, &sb, || {
+        state
+            .http
+            .get(format!("{url}/w/{}/jobs/{job_id}", project.id))
+            .query(&[("after", after.to_string())])
+            .bearer_auth(&sb.mcp_token)
+            .timeout(BOX_TIMEOUT)
+    })
+    .await;
+    let r = match sent {
+        Ok(r) => r,
+        Err(e) => {
+            return api_error(
+                StatusCode::BAD_GATEWAY,
+                "box_unreachable",
+                format!("box unreachable: {e}"),
+            )
+        }
+    };
+    if r.status() == reqwest::StatusCode::NOT_FOUND {
+        return api_error(StatusCode::NOT_FOUND, "not_found", "no such job");
+    }
+    if !r.status().is_success() {
+        return api_error(
+            StatusCode::BAD_GATEWAY,
+            "box_error",
+            format!("box answered {}", r.status()),
+        );
+    }
+    let mut doc = match r.json::<Value>().await {
+        Ok(v) => v,
+        Err(e) => {
+            return api_error(
+                StatusCode::BAD_GATEWAY,
+                "box_error",
+                format!("box answered with bad json: {e}"),
+            )
+        }
+    };
+    if let Scope::Member { chat } = &scope {
+        if doc["chat_id"].as_str() != Some(chat.as_str()) {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "that job was not asked in your chat",
+            );
+        }
+    }
+    scrub_value(&mut doc);
+    Json(doc).into_response()
+}
+
 #[cfg(test)]
 mod tests {
     //! Scope (another user's agent → 403; a shared-chat member sees that chat only, member kinds
@@ -720,6 +817,7 @@ mod tests {
             image_key: None,
             avatar_leaf: None,
             avatar_leaf_color: None,
+            description: None,
         };
         state.db.insert_people_chat(&chat).unwrap();
         state

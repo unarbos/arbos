@@ -1,0 +1,33 @@
+{
+  "id": "py-24-voice-note",
+  "lane": "a",
+  "category": "parity",
+  "categories": [
+    "parity",
+    "voice-note"
+  ],
+  "title": "A voice-note style ask (transcript stand-in)",
+  "parity": true,
+  "timeout_s": 180,
+  "settle_s": 12,
+  "turns": [
+    {
+      "prompt": "[voice note transcript] what's the weather in Nosara tomorrow",
+      "shape": {
+        "messages_min": 1,
+        "messages_max": 3,
+        "ack_first": false,
+        "table": false,
+        "links_min": 0,
+        "offer": false,
+        "first_bubble_max_s": 8,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": false
+      },
+      "judge": {
+        "criteria": "Treats the transcript as the question: gives tomorrow's Nosara forecast (or says it could not fetch it and from where it tried), one short message."
+      }
+    }
+  ]
+}

@@ -1,3 +1,4 @@
+import ArbosFFI
 import AVKit
 import Photos
 import QuickLook
@@ -7,10 +8,48 @@ import UIKit
 // The media viewer (feedback media-viewer-2026-10-23, #1381): one full-screen
 // viewer for every chat kind, opened from an image / file bubble or a Library
 // tile. Black backdrop; the album (the chat's pictures and videos in order)
-// pages with a swipe; swipe down or × closes. Caption top-centre (who, when),
-// counter top-right, Download and Forward pills at the bottom. Video plays
+// pages with a swipe; swipe down, ×, or the Close pill closes. Caption
+// top-centre (who, when), counter top-right, Close · Copy · Download · Forward pills
+// at the bottom ([feedback ABUo19aGqPpSnnw4Ha6F6H0] — the top × was easy to
+// miss / not hittable over the paged image; Close matches Mac). Video plays
 // inline after Play; a file shows its tile with Open (Quick Look). Forward is a
 // sheet of DMs, agents and groups; one tap sends the item there as a new message.
+
+/// "via <provider>" for GIF-picker attribution. An https `pageUrl` is a link;
+/// any other scheme stays plain text. When `source` is missing and `fallback`
+/// is set, shows the fallback (the viewer's when/caption line) — feedback
+/// app-01M61EZD0GJ2XGV1EW4SCVXENK.
+struct MediaViaCaption: View {
+    @Environment(\.theme) private var theme
+    var source: AttachmentSource?
+    var fallback: String? = nil
+    var fontSize: CGFloat = 13
+    var color: Color? = nil
+    var accessibilityId: String = "viewer-via-source"
+
+    var body: some View {
+        let tint = color ?? Color.white.opacity(0.67)
+        if let source, !source.provider.isEmpty {
+            let label = "via \(source.provider)"
+            Group {
+                if let url = AttachmentSource.httpsPageURL(from: source.pageUrl) {
+                    SwiftUI.Link(label, destination: url)
+                } else {
+                    Text(label)
+                }
+            }
+            .font(theme.font(fontSize))
+            .foregroundStyle(tint)
+            .lineLimit(1)
+            .accessibilityIdentifier(accessibilityId)
+        } else if let fallback {
+            Text(fallback)
+                .font(theme.font(fontSize))
+                .foregroundStyle(tint)
+                .lineLimit(1)
+        }
+    }
+}
 
 /// One entry of the viewer's album.
 struct MediaItem: Identifiable, Equatable {
@@ -26,6 +65,24 @@ struct MediaItem: Identifiable, Equatable {
     /// Who shared it ("Samir Haddad", "You", the agent's name).
     var by: String
     var at: Int64
+    /// A profile picture (Jacob, 2026-10-25: tap the hero to view it): fetched from this URL
+    /// instead of a chat blob — no Download / Forward, and `caption` under the name.
+    var pictureURL: String? = nil
+    var caption: String? = nil
+    /// GIF-picker attribution; the viewer shows "via <provider>" under the name
+    /// (feedback app-01M61EZD0GJ2XGV1EW4SCVXENK).
+    var source: AttachmentSource? = nil
+    /// A picked GIF that lives with its provider (ARB-544): fetched through the relay's
+    /// pass-through, never stored; the row has no `blobRef`.
+    var remoteURL: String? = nil
+    /// A picker sticker: fixed square, no bubble.
+    var sticker: Bool = false
+
+    /// What the decoded picture is cached under: the blob ref, or `url:<url>` for a GIF.
+    var cacheKey: String? { blobRef ?? remoteURL.map { "url:" + $0 } }
+
+    /// The line under the name: the caption of a profile picture, else when it was shared.
+    var subline: String { caption ?? whenLabel }
 
     /// "Today at 2:14 PM", "Yesterday at 9:03 AM", "Oct 12 at 4:40 PM".
     var whenLabel: String {
@@ -81,7 +138,8 @@ enum MediaAlbum {
     static func item(id: String, message m: Message, attachment a: Attachment, kind: MediaItem.Kind, slot: String,
                      projectName: (String) -> String?) -> MediaItem {
         MediaItem(id: id, name: a.name, mime: a.mime, kind: kind, blobRef: a.blobRef, slot: slot,
-                  by: senderName(m, projectName: projectName), at: m.createdAt)
+                  by: senderName(m, projectName: projectName), at: m.createdAt, source: a.source,
+                  remoteURL: a.blobRef == nil ? a.url : nil, sticker: a.isSticker)
     }
 
     /// Who shared it, for the caption: name, else `@handle`, else "You" / the agent.
@@ -92,6 +150,12 @@ enum MediaAlbum {
         if m.sender.hasPrefix("agent:"), let n = projectName(String(m.sender.dropFirst(6))) { return n }
         if m.sender.hasPrefix("project:"), let n = projectName(String(m.sender.dropFirst(8))) { return n }
         return m.role == .assistant ? "Agent" : "You"
+    }
+
+    /// `name`'s profile picture at `url`, as a one-page album (Jacob, 2026-10-25).
+    static func picture(name: String, url: String) -> MediaItem {
+        MediaItem(id: "picture#\(url)", name: "Profile picture", mime: "image/jpeg", kind: .image, blobRef: nil, slot: "",
+                  by: name, at: 0, pictureURL: url, caption: "Profile picture")
     }
 
     /// The "Forwarded from <name>" line a forwarded attachment travels with (Mac
@@ -126,11 +190,14 @@ struct ForwardTarget: Identifiable, Equatable {
 struct MediaViewer: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
     let album: [MediaItem]
     @State var index: Int
     let onClose: () -> Void
     /// Rig: open with the Forward sheet already up (`ARBOS_SHOW=media-forward`).
     var openForward = false
+    /// The Library row's "Save": open and download at once (Photos / share sheet).
+    var openDownload = false
 
     /// Fades the chrome and backdrop while a swipe-down is in flight (0…1).
     @State private var dismissProgress: CGFloat = 0
@@ -156,11 +223,26 @@ struct MediaViewer: View {
             } else if let item {
                 page(item).ignoresSafeArea()
             }
-            chrome.opacity(1 - Double(dismissProgress))
+        }
+        // Overlays sit above the UIKit page TabView (which can punch through a
+        // ZStack sibling and eat the top × hits — feedback ABUo19aGqPpSnnw4Ha6F6H0).
+        .overlay(alignment: .top) {
+            topBar.opacity(1 - Double(dismissProgress))
+        }
+        .overlay(alignment: .bottom) {
+            bottomBar.opacity(1 - Double(dismissProgress))
         }
         .statusBarHidden(false)
         .preferredColorScheme(.dark)
-        .onAppear { if openForward { showForward = true } }
+        .onAppear {
+            if openForward { showForward = true }
+            if openDownload { Task { await download() } }
+            #if DEBUG
+            if let ms = DebugHooks.viewerCloseMs {
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(ms)) { close() }
+            }
+            #endif
+        }
         .sheet(isPresented: $showForward) {
             if let item {
                 ForwardSheet(fromName: item.by, attachmentNote: true) { target in
@@ -177,62 +259,82 @@ struct MediaViewer: View {
         .sheet(item: $shareURL) { file in
             ActivityView(items: [file.url])
         }
-        .accessibilityAction(.escape, onClose)
+        .accessibilityAction(.escape, close)
+    }
+
+    /// Dismiss the cover: clear the caller's item binding and the environment dismiss.
+    private func close() {
+        onClose()
+        dismiss()
     }
 
     @ViewBuilder
     private func page(_ item: MediaItem) -> some View {
         switch item.kind {
         case .image:
-            ZoomableImagePage(item: item, dismissProgress: $dismissProgress, onClose: onClose)
+            ZoomableImagePage(item: item, dismissProgress: $dismissProgress, onClose: close)
         case .video:
-            VideoPage(item: item, dismissProgress: $dismissProgress, onClose: onClose)
+            VideoPage(item: item, dismissProgress: $dismissProgress, onClose: close)
         case .file:
-            FilePage(item: item, dismissProgress: $dismissProgress, onClose: onClose)
+            FilePage(item: item, dismissProgress: $dismissProgress, onClose: close)
         }
     }
 
     // ----- top bar, pills, dots ----------------------------------------------
 
-    private var chrome: some View {
-        VStack(spacing: 0) {
-            ZStack {
-                if let item {
-                    VStack(spacing: 2) {
-                        Text(item.by).font(theme.font(15, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
-                        Text(item.whenLabel).font(theme.font(13)).foregroundStyle(.white.opacity(0.67)).lineLimit(1)
-                    }
-                    .padding(.horizontal, 64)
-                }
-                HStack {
-                    Button(action: onClose) {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .frame(width: 36, height: 36)
-                            .background(Circle().fill(Color.white.opacity(0.18)))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Close")
-                    Spacer()
-                    if album.count > 1 {
-                        Text("\(index + 1) of \(album.count)")
-                            .font(theme.font(13, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.67))
-                            .monospacedDigit()
-                    }
-                }
-                .padding(.horizontal, 16)
+    private var topBar: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Button(action: close) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 36, height: 36)
+                    .background(ViewerChromeBackground(shape: Circle(), interactive: true))
+                    .contentShape(Circle())
             }
-            .frame(height: 44)
-            .padding(.top, 8)
-            Spacer()
+            .buttonStyle(.plain)
+            .accessibilityLabel("Close")
+
+            Spacer(minLength: 0)
+
+            if let item {
+                VStack(spacing: 2) {
+                    Text(item.by).font(theme.font(15, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
+                    // GIF-picker "via <provider>" under the name when present;
+                    // else the when/caption subline (feedback
+                    // app-01M61EZD0GJ2XGV1EW4SCVXENK).
+                    MediaViaCaption(source: item.source, fallback: item.subline)
+                }
+                .modifier(ViewerTextShadow())
+            }
+
+            Spacer(minLength: 0)
+
+            if album.count > 1 {
+                Text("\(index + 1) of \(album.count)")
+                    .font(theme.font(13, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.67))
+                    .monospacedDigit()
+                    .frame(minWidth: 36, alignment: .trailing)
+                    .modifier(ViewerTextShadow())
+            } else {
+                Color.clear.frame(width: 36, height: 36)
+            }
+        }
+        .padding(.horizontal, 16)
+        .frame(height: 44)
+        .padding(.top, 8)
+        .padding(.bottom, 4)
+    }
+
+    private var bottomBar: some View {
+        VStack(spacing: 0) {
             if let toast {
                 Text(toast)
                     .font(theme.font(13, weight: .medium))
                     .foregroundStyle(.white)
                     .padding(.horizontal, 14).padding(.vertical, 8)
-                    .background(Capsule().fill(Color.white.opacity(0.18)))
+                    .background(ViewerChromeBackground(shape: Capsule()))
                     .padding(.bottom, 10)
                     .transition(.opacity)
             }
@@ -242,16 +344,30 @@ struct MediaViewer: View {
                         Circle().fill(Color.white.opacity(i == index ? 1 : 0.35)).frame(width: 6, height: 6)
                     }
                 }
+                .modifier(ViewerTextShadow())
                 .padding(.bottom, 12)
                 .accessibilityHidden(true)
             }
             HStack(spacing: 12) {
-                pill("Download", system: "arrow.down.to.line") { Task { await download() } }
-                pill("Forward", system: "arrowshape.turn.up.right") { showForward = true }
+                // Close beside Download / Forward — same as Mac; always exits even
+                // when swipe-down or the top × lose the gesture race with zoom/paging.
+                pill("Close", system: "xmark") { close() }
+                // A profile picture is not a chat attachment: Close only.
+                if item?.pictureURL == nil {
+                    // The picture itself, original bytes under its own type
+                    // ([feedback copy-image-messages-ios-2026-10-27]).
+                    pill("Copy", system: "doc.on.doc") { Task { await copy() } }
+                        .disabled(!canAct || busy)
+                        .opacity(canAct ? 1 : 0.5)
+                    pill("Download", system: "arrow.down.to.line") { Task { await download() } }
+                        .disabled(!canAct || busy)
+                        .opacity(canAct ? 1 : 0.5)
+                    pill("Forward", system: "arrowshape.turn.up.right") { showForward = true }
+                        .disabled(!canAct || busy)
+                        .opacity(canAct ? 1 : 0.5)
+                }
             }
             .padding(.bottom, 14)
-            .disabled(!canAct || busy)
-            .opacity(canAct ? 1 : 0.5)
         }
         .animation(.easeOut(duration: 0.2), value: toast)
     }
@@ -265,7 +381,7 @@ struct MediaViewer: View {
             .foregroundStyle(.white)
             .padding(.horizontal, 16)
             .frame(height: 38)
-            .background(Capsule().fill(Color.white.opacity(0.16)))
+            .background(ViewerChromeBackground(shape: Capsule(), interactive: true))
         }
         .buttonStyle(.plain)
     }
@@ -275,6 +391,21 @@ struct MediaViewer: View {
         Task {
             try? await Task.sleep(nanoseconds: 1_800_000_000)
             if toast == text { toast = nil }
+        }
+    }
+
+    // ----- Copy ---------------------------------------------------------------
+
+    /// The open picture or file on the pasteboard (`AppModel.copyAttachment`).
+    @MainActor
+    private func copy() async {
+        guard let item, canAct else { return }
+        busy = true
+        defer { busy = false }
+        let attachment = Attachment(name: item.name, mime: item.mime, blobRef: item.blobRef,
+                                    kind: item.kind == .image ? "image" : item.kind == .video ? "video" : nil)
+        if await model.copyAttachment(attachment, slot: item.slot) {
+            flash(item.kind == .image ? "Copied the picture" : "Copied \(item.name)")
         }
     }
 
@@ -319,10 +450,113 @@ struct MediaViewer: View {
     }
 }
 
+// MARK: - Chrome over the picture
+
+/// The viewer's × , pills and toast sit over the picture itself
+/// ([feedback image-viewer-close-button-2026-10-29]: a white image hid the ×,
+/// whose white 22 % disc took the picture's colour). They wear a dark plate of
+/// their own, the Mac hover rail's capsule recipe: on Glass the system glass
+/// (frost before iOS 26) under a black plate and a thin text-colour wash; on
+/// Matte an opaque dark fill. Both have a 1 pt rim and a 1 pt lift, so the
+/// white glyphs read on white, dark and busy pictures alike.
+enum ViewerChrome {
+    /// Black over the glass: what keeps a white picture from showing through.
+    static let glassPlate: Double = 0.6
+    /// White over the plate (the round-button wash).
+    static let glassWash: Double = 0.08
+    /// Matte: the face's grey level, opaque.
+    static let solidLevel: Double = 0.16
+    /// The rim, white, so the edge still reads on a black picture.
+    static let rimAlpha: Double = 0.18
+    static let liftAlpha: Double = 0.28
+    /// WCAG AA for the 13–15 pt labels and the 15 pt × glyph.
+    static let minContrast: Double = 4.5
+
+    static func material(surface: Surface, liquidGlassAvailable: Bool = ChatHeaderGlass.liquidGlassAvailable) -> HeaderMaterial {
+        ChatHeaderGlass.material(surface: surface, liquidGlassAvailable: liquidGlassAvailable)
+    }
+
+    /// The face's sRGB grey level over a picture of grey level `under` (1 = white),
+    /// leaving out the glass's own blur, which only darkens it further in the viewer's
+    /// dark scheme.
+    static func faceLevel(material: HeaderMaterial, over under: Double) -> Double {
+        switch material {
+        case .solid:
+            return solidLevel
+        case .liquidGlass, .frosted:
+            return under * (1 - glassPlate) * (1 - glassWash) + glassWash
+        }
+    }
+
+    /// WCAG contrast of the white glyph against a grey face.
+    static func glyphContrast(onFace level: Double) -> Double {
+        func linear(_ c: Double) -> Double { c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4) }
+        return 1.05 / (linear(level) + 0.05)
+    }
+}
+
+/// The plate under a viewer control (`ViewerChrome`).
+struct ViewerChromeBackground<S: InsettableShape>: View {
+    @Environment(\.theme) private var theme
+    let shape: S
+    /// Buttons take the interactive glass (press feedback); the toast does not.
+    var interactive: Bool = false
+
+    var body: some View {
+        face
+            .overlay(shape.strokeBorder(Color.white.opacity(ViewerChrome.rimAlpha), lineWidth: 1))
+            .compositingGroup()
+            .shadow(color: .black.opacity(ViewerChrome.liftAlpha), radius: 1.5, y: 1)
+    }
+
+    @ViewBuilder
+    private var face: some View {
+        switch ViewerChrome.material(surface: theme.surface) {
+        case .liquidGlass:
+            if #available(iOS 26.0, *) {
+                plate.glassEffect(interactive ? Glass.regular.interactive() : .regular, in: shape)
+            } else {
+                frosted
+            }
+        case .frosted:
+            frosted
+        case .solid:
+            shape.fill(Color(white: ViewerChrome.solidLevel))
+        }
+    }
+
+    private var plate: some View {
+        ZStack {
+            shape.fill(Color.black.opacity(ViewerChrome.glassPlate))
+            shape.fill(Color.white.opacity(ViewerChrome.glassWash))
+        }
+    }
+
+    private var frosted: some View {
+        ZStack {
+            shape.fill(.ultraThinMaterial)
+            plate
+        }
+    }
+}
+
+/// The caption, counter and page dots have no plate; a soft dark halo keeps them
+/// readable where the picture runs under the bars.
+private struct ViewerTextShadow: ViewModifier {
+    func body(content: Content) -> some View {
+        content.shadow(color: .black.opacity(0.55), radius: 3, y: 0.5)
+    }
+}
+
 // MARK: - Pages
 
 /// Shared swipe-down-to-dismiss for every page kind: a vertical drag at 1×
 /// follows the finger, fades the chrome, and closes past 120 pt.
+///
+/// Uses a UIKit pan that only *begins* when the drag is clearly vertical, so a
+/// horizontal album swipe is never claimed by dismiss. A SwiftUI `DragGesture`
+/// recognizes after ~12 pt in any direction and freezes paging even when its
+/// handlers then no-op ([feedback app-01M5ZFF6EW6QE7RB7M5EQ4F2NP]).
 private struct DismissDrag: ViewModifier {
     @Binding var progress: CGFloat
     let onClose: () -> Void
@@ -333,27 +567,143 @@ private struct DismissDrag: ViewModifier {
         content
             .offset(y: offset)
             .scaleEffect(max(0.85, 1 - offset / 1000))
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 12)
-                    .onChanged { v in
-                        guard enabled else { return }
-                        let t = v.translation
-                        guard t.height > 0, t.height >= abs(t.width) * 1.2 else { return }
-                        offset = t.height
-                        progress = min(1, t.height / 400)
-                    }
-                    .onEnded { v in
-                        guard enabled else { return }
-                        if offset > 120, v.translation.height > abs(v.translation.width) * 1.2 {
-                            onClose()
-                        } else {
-                            withAnimation(.easeOut(duration: 0.2)) {
-                                offset = 0
-                                progress = 0
-                            }
-                        }
-                    }
+            .background(
+                VerticalDismissProbe(enabled: enabled, offset: $offset, progress: $progress, onClose: onClose)
             )
+    }
+}
+
+/// Installs a vertical-only pan on the page host. The probe itself never takes
+/// hits (`isUserInteractionEnabled = false`); the recognizer lives on the
+/// enclosing page view so Play / Open / double-tap still work.
+private struct VerticalDismissProbe: UIViewRepresentable {
+    var enabled: Bool
+    @Binding var offset: CGFloat
+    @Binding var progress: CGFloat
+    var onClose: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(offset: $offset, progress: $progress, onClose: onClose)
+    }
+
+    func makeUIView(context: Context) -> Probe {
+        let probe = Probe()
+        probe.isUserInteractionEnabled = false
+        probe.backgroundColor = .clear
+        probe.coordinator = context.coordinator
+        return probe
+    }
+
+    func updateUIView(_ uiView: Probe, context: Context) {
+        context.coordinator.enabled = enabled
+        context.coordinator.offset = $offset
+        context.coordinator.progress = $progress
+        context.coordinator.onClose = onClose
+        DispatchQueue.main.async { uiView.attachIfNeeded() }
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var enabled = true
+        var offset: Binding<CGFloat>
+        var progress: Binding<CGFloat>
+        var onClose: () -> Void
+        /// How far down this drag has already moved the page (for the end threshold).
+        private var dragOffset: CGFloat = 0
+
+        init(offset: Binding<CGFloat>, progress: Binding<CGFloat>, onClose: @escaping () -> Void) {
+            self.offset = offset
+            self.progress = progress
+            self.onClose = onClose
+        }
+
+        @objc func handle(_ pan: UIPanGestureRecognizer) {
+            guard enabled else { return }
+            let t = pan.translation(in: pan.view)
+            switch pan.state {
+            case .changed:
+                guard t.y > 0, t.y >= abs(t.x) * 1.2 else { return }
+                dragOffset = t.y
+                offset.wrappedValue = t.y
+                progress.wrappedValue = min(1, t.y / 400)
+            case .ended, .cancelled:
+                // `dragOffset` only advances on a clearly vertical pull, so past
+                // 120 pt is enough — do not re-test the final point (a slight
+                // sideways lift at the end used to cancel a good dismiss).
+                if dragOffset > 120 {
+                    onClose()
+                } else {
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        offset.wrappedValue = 0
+                        progress.wrappedValue = 0
+                    }
+                }
+                dragOffset = 0
+            default:
+                break
+            }
+        }
+
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            guard enabled, let pan = gestureRecognizer as? UIPanGestureRecognizer else { return false }
+            let v = pan.velocity(in: pan.view)
+            let t = pan.translation(in: pan.view)
+            // Velocity when the finger is moving; translation when it is slow — either
+            // must read clearly downward so a horizontal album page is never claimed.
+            if abs(v.y) + abs(v.x) > 80 {
+                return v.y > 0 && v.y >= abs(v.x) * 1.2
+            }
+            return t.y > 0 && t.y >= abs(t.x) * 1.2
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            true
+        }
+
+        /// Do not wait on AVKit / page pans — a clear downward drag must be able to
+        /// begin while a video is playing ([feedback app-01M64DX30WRXK7B4VSNWBYRGAH]).
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldBeRequiredToFailBy other: UIGestureRecognizer) -> Bool {
+            false
+        }
+    }
+
+    final class Probe: UIView {
+        weak var coordinator: Coordinator?
+        private weak var host: UIView?
+        private var pan: UIPanGestureRecognizer?
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            attachIfNeeded()
+        }
+
+        deinit {
+            if let pan { pan.view?.removeGestureRecognizer(pan) }
+        }
+
+        func attachIfNeeded() {
+            guard window != nil, let coordinator else { return }
+            guard let found = Self.pageHost(from: self) else { return }
+            if host === found, pan != nil { return }
+            if let pan { pan.view?.removeGestureRecognizer(pan) }
+            let gr = UIPanGestureRecognizer(target: coordinator, action: #selector(Coordinator.handle(_:)))
+            gr.delegate = coordinator
+            gr.cancelsTouchesInView = false
+            found.addGestureRecognizer(gr)
+            host = found
+            pan = gr
+        }
+
+        /// First ancestor large enough to be the page (the probe is zero-sized).
+        private static func pageHost(from view: UIView) -> UIView? {
+            var node: UIView? = view.superview
+            while let current = node {
+                if current.bounds.width > 100, current.bounds.height > 100 { return current }
+                node = current.superview
+            }
+            return view.superview
+        }
     }
 }
 
@@ -376,31 +726,40 @@ private struct ZoomableImagePage: View {
     private let maxScale: CGFloat = 5
 
     var body: some View {
-        ZStack {
-            if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .scaleEffect(scale)
-                    .offset(offset)
-                    .gesture(magnify)
-                    .simultaneousGesture(pan)
-                    .onTapGesture(count: 2, perform: toggleZoom)
-                    .modifier(DismissDrag(progress: $dismissProgress, onClose: onClose, enabled: scale <= minScale + 0.01))
-                    .accessibilityLabel("Image")
-                    .accessibilityHint("Pinch to zoom, double tap to zoom in or out, swipe down to close")
-            } else if failed {
-                VStack(spacing: 12) {
-                    Image(systemName: "photo").font(.system(size: 44)).foregroundStyle(.white.opacity(0.35))
-                    Text("No preview").font(theme.font(13)).foregroundStyle(.white.opacity(0.67))
+        // Fit the whole picture in the viewport at 1× (aspect-fit). Without an
+        // explicit size, a large photo can lay out at its pixel size inside the
+        // paged TabView and look like a zoomed-in crop.
+        GeometryReader { geo in
+            ZStack {
+                if let image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .scaleEffect(scale)
+                        .offset(offset)
+                        .gesture(magnify)
+                        // Pan only while zoomed: an always-on DragGesture steals the
+                        // album's horizontal page swipe at 1× and freezes it.
+                        .simultaneousGesture(pan, including: scale > minScale + 0.01 ? .all : .subviews)
+                        .onTapGesture(count: 2, perform: toggleZoom)
+                        .modifier(DismissDrag(progress: $dismissProgress, onClose: onClose, enabled: scale <= minScale + 0.01))
+                        .accessibilityLabel("Image")
+                        .accessibilityHint("Pinch to zoom, double tap to zoom in or out, swipe down to close")
+                } else if failed {
+                    VStack(spacing: 12) {
+                        Image(systemName: "photo").font(.system(size: 44)).foregroundStyle(.white.opacity(0.35))
+                        Text("No preview").font(theme.font(13)).foregroundStyle(.white.opacity(0.67))
+                    }
+                    .frame(width: geo.size.width, height: geo.size.height)
+                    .modifier(DismissDrag(progress: $dismissProgress, onClose: onClose))
+                } else {
+                    ProgressView().tint(.white)
+                        .frame(width: geo.size.width, height: geo.size.height)
                 }
-                .modifier(DismissDrag(progress: $dismissProgress, onClose: onClose))
-            } else {
-                ProgressView().tint(.white)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .task(id: item.blobRef) {
+        .task(id: item.blobRef ?? item.pictureURL) {
             if let (data, _) = await MediaFetch.bytes(for: item, model: model), let img = UIImage(data: data) {
                 image = img
             } else {
@@ -454,6 +813,9 @@ private struct VideoPage: View {
 
     var body: some View {
         ZStack {
+            // Full-bleed hit target so letterboxing around the 16:9 player still
+            // receives the swipe-down dismiss pan.
+            Color.clear
             if let player {
                 VideoPlayer(player: player)
                     .aspectRatio(16 / 9, contentMode: .fit)
@@ -490,7 +852,12 @@ private struct VideoPage: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .modifier(DismissDrag(progress: $dismissProgress, onClose: onClose, enabled: player == nil))
+        .contentShape(Rectangle())
+        // Swipe-down closes while the poster is up *and* while the video plays
+        // ([feedback app-01M64DX30WRXK7B4VSNWBYRGAH]); the pan only begins when the
+        // drag is clearly vertical, so album paging and Play still work.
+        .modifier(DismissDrag(progress: $dismissProgress, onClose: onClose))
+        .accessibilityHint("Swipe down to close")
     }
 
     @MainActor
@@ -600,7 +967,7 @@ struct ForwardSheet: View {
         if attachmentNote {
             return "Sends it as a new message, “\(MediaAlbum.forwardedPrefix)\(fromName)”."
         }
-        return "Sends the text as a new message."
+        return "Opens the chat with the text ready to send."
     }
 
     var body: some View {
@@ -648,7 +1015,8 @@ struct ForwardSheet: View {
             AgentAvatar(project: p, theme: theme, size: 44, still: true)
         case .people(let c):
             if c.isGroup {
-                AvatarCluster(members: c.humans, size: 44, leaf: c.leafPick)
+                // The group's own picture first; the member stack only when it has none.
+                GroupAvatar(chat: c, model: model, size: 44, members: c.humans)
             } else {
                 let other = c.counterpart(me: model.user?.id)
                 PersonAvatar(url: other?.avatarUrl, handle: other?.handle ?? "?", size: 44, name: other?.name, id: other?.id, colorIndex: other?.avatarColorIndex)
@@ -664,10 +1032,25 @@ enum MediaFetch {
     /// in the simulator fixture — a generated picture / PDF for `fixture-*` keys.
     @MainActor
     static func bytes(for item: MediaItem, model: AppModel) async -> (Data, String)? {
+        // A profile picture: its public URL (the relay's `/avatars/…`, GitHub's CDN, or a
+        // tokened blob URL) — never with the device bearer, which must not reach another host.
+        if let picture = item.pictureURL {
+            guard let url = URL(string: picture), url.scheme?.hasPrefix("http") == true else { return nil }
+            return await data(url, headers: [:])
+        }
+        // A picked GIF (ARB-544): the provider's bytes through the relay's pass-through, with
+        // the device bearer (the relay checks the host; nothing is stored on either side).
+        if item.blobRef == nil, let remote = item.remoteURL {
+            guard let url = model.gifMediaURL(remote) else { return nil }
+            return await data(url, headers: model.authHeaders)
+        }
         guard let ref = item.blobRef, !ref.hasPrefix("local:") else { return nil }
         #if DEBUG
         if model.isFixture, ref.hasPrefix("fixture-") {
-            return FixtureMedia.bytes(ref: ref, item: item)
+            // Off the main actor like a network fetch, so the rig's open and scroll numbers
+            // carry the decode path's cost, not the fixture painter's.
+            let fixtureItem = item
+            return await Task.detached(priority: .userInitiated) { FixtureMedia.bytes(ref: ref, item: fixtureItem) }.value
         }
         #endif
         guard let url = model.blobURL(projectId: item.slot, key: ref) else { return nil }
@@ -719,7 +1102,7 @@ struct BlobImage: View {
                 ProgressView().tint(theme.muted)
             }
         }
-        .task(id: item.blobRef) {
+        .task(id: item.blobRef ?? item.pictureURL) {
             if let (data, _) = await MediaFetch.bytes(for: item, model: model), let img = UIImage(data: data) {
                 image = img
             } else {
@@ -734,9 +1117,14 @@ struct BlobImage: View {
 /// fixture's `fixture_png`), or a one-page PDF naming the file.
 enum FixtureMedia {
     static func bytes(ref: String, item: MediaItem) -> (Data, String)? {
+        if item.kind == .image, let kind = DebugHooks.fixturePicture {
+            return portraitPNG(kind).map { ($0, "image/png") }
+        }
         switch item.kind {
         case .image where item.name.contains("Screenshot"):
             return pagePNG().map { ($0, "image/png") }
+        case .image where item.name.hasPrefix("IMG_"):
+            return phoneShotPNG().map { ($0, "image/png") }
         case .image:
             return png(seed: ref).map { ($0, "image/png") }
         case .file:
@@ -766,6 +1154,31 @@ enum FixtureMedia {
         return img.pngData()
     }
 
+    /// A 390 × 844 portrait that fills the viewer (`ARBOS_FIXTURE_PICTURE`): `white`, `dark`
+    /// (near-black), or `busy` (bright stripes and blocks with white among them).
+    private static func portraitPNG(_ kind: String) -> Data? {
+        let (w, h) = (390, 844)
+        return UIGraphicsImageRenderer(size: CGSize(width: w, height: h)).image { ctx in
+            let cg = ctx.cgContext
+            switch kind {
+            case "dark":
+                cg.setFillColor(UIColor(white: 0.04, alpha: 1).cgColor); cg.fill(CGRect(x: 0, y: 0, width: w, height: h))
+            case "busy":
+                let colors: [UIColor] = [.white, .systemYellow, .systemPink, .white, .systemTeal, .systemOrange, .white, .systemGreen]
+                for (i, y) in stride(from: 0, to: h, by: 28).enumerated() {
+                    cg.setFillColor(colors[i % colors.count].cgColor)
+                    cg.fill(CGRect(x: 0, y: y, width: w, height: 28))
+                }
+                for (i, x) in stride(from: 0, to: w, by: 46).enumerated() where i % 2 == 0 {
+                    cg.setFillColor(colors[(i + 3) % colors.count].withAlphaComponent(0.8).cgColor)
+                    cg.fill(CGRect(x: x, y: 0, width: 23, height: h))
+                }
+            default:
+                cg.setFillColor(UIColor.white.cgColor); cg.fill(CGRect(x: 0, y: 0, width: w, height: h))
+            }
+        }.pngData()
+    }
+
     /// A 640 × 400 "page screenshot": white, empty top 22 %, title bar, line, blue
     /// button, short line — the shape of Jacob's shot (the Mac fixture's `fixture_page_png`).
     private static func pagePNG() -> Data? {
@@ -780,6 +1193,46 @@ enum FixtureMedia {
             cg.setFillColor(UIColor(red: 26 / 255, green: 115 / 255, blue: 232 / 255, alpha: 1).cgColor)
             cg.fill(CGRect(x: 40, y: 176, width: 140, height: 40))
             cg.setFillColor(UIColor(white: 0.38, alpha: 1).cgColor); cg.fill(CGRect(x: 40, y: 240, width: 150, height: 12))
+        }
+        return img.pngData()
+    }
+
+    /// A 390 × 844 portrait "phone screenshot": dark chat page with a header pill and a
+    /// few bubbles — the tall picture of [feedback image-caption-bubble-ios-2026-10-25],
+    /// whose caption must not wrap at the picture's ~150 pt fitted width.
+    private static func phoneShotPNG() -> Data? {
+        let (w, h) = (390, 844)
+        let img = UIGraphicsImageRenderer(size: CGSize(width: w, height: h), format: {
+            let f = UIGraphicsImageRendererFormat(); f.scale = 1; return f
+        }()).image { ctx in
+            let cg = ctx.cgContext
+            func fillPath(_ path: UIBezierPath) { cg.addPath(path.cgPath); cg.fillPath() }
+            cg.setFillColor(UIColor(white: 0.07, alpha: 1).cgColor); cg.fill(CGRect(x: 0, y: 0, width: w, height: h))
+            // Status bar + header pill.
+            cg.setFillColor(UIColor(white: 0.9, alpha: 1).cgColor)
+            cg.fill(CGRect(x: 32, y: 22, width: 36, height: 12))
+            cg.setFillColor(UIColor(white: 0.16, alpha: 1).cgColor)
+            fillPath(UIBezierPath(roundedRect: CGRect(x: 110, y: 62, width: 170, height: 44), cornerRadius: 22))
+            // Bubbles: three incoming on the left, two outgoing on the right.
+            let rows: [(CGFloat, CGFloat, CGFloat, Bool)] = [(150, 230, 70, false), (236, 180, 48, false), (300, 210, 92, true),
+                                                              (408, 250, 120, false), (544, 160, 48, true), (608, 240, 96, false)]
+            for (y, bw, bh, mine) in rows {
+                let x: CGFloat = mine ? CGFloat(w) - 18 - bw : 18
+                cg.setFillColor((mine ? UIColor(white: 0.32, alpha: 1) : UIColor(white: 0.14, alpha: 1)).cgColor)
+                fillPath(UIBezierPath(roundedRect: CGRect(x: x, y: y, width: bw, height: bh), cornerRadius: 18))
+                cg.setFillColor(UIColor(white: mine ? 0.85 : 0.6, alpha: 1).cgColor)
+                var ly = y + 16
+                while ly + 8 < y + bh - 10 {
+                    cg.fill(CGRect(x: x + 14, y: ly, width: bw - 28 - CGFloat((Int(ly) * 7) % 40), height: 8))
+                    ly += 20
+                }
+            }
+            // Composer.
+            cg.setFillColor(UIColor(white: 0.14, alpha: 1).cgColor)
+            fillPath(UIBezierPath(roundedRect: CGRect(x: 70, y: CGFloat(h) - 86, width: 240, height: 52), cornerRadius: 26))
+            fillPath(UIBezierPath(ovalIn: CGRect(x: 14, y: CGFloat(h) - 86, width: 52, height: 52)))
+            cg.setFillColor(UIColor.white.cgColor)
+            fillPath(UIBezierPath(ovalIn: CGRect(x: CGFloat(w) - 66, y: CGFloat(h) - 86, width: 52, height: 52)))
         }
         return img.pngData()
     }
@@ -816,10 +1269,10 @@ struct ShareFile: Identifiable, Equatable {
 
 extension AppModel {
     /// The chats the Forward sheet offers: every DM, group and agent that is
-    /// not archived, most recent first, filtered by `query`. Channels are left
-    /// out — they carry no attachments yet (Matrix `m.text`).
+    /// not archived, through the shared matcher on title, @handle and kind line
+    /// (`EntitySearch`), best match first and most recent inside a tie.
+    /// Channels are left out — they carry no attachments yet (Matrix `m.text`).
     func forwardTargets(matching query: String) -> [ForwardTarget] {
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         var out: [ForwardTarget] = []
         for c in peopleChats where !isArchived(peopleChatId: c.id) {
             let title: String
@@ -841,10 +1294,13 @@ extension AppModel {
             let at = chats(of: p.id).map(\.lastMessageAt).max() ?? 0
             out.append(ForwardTarget(id: "p:\(p.id)", kind: .agent(p), title: p.name, subtitle: "Agent", activity: at))
         }
-        if !q.isEmpty {
-            out = out.filter { $0.title.lowercased().contains(q) || $0.subtitle.lowercased().contains(q) }
+        out.sort { $0.activity > $1.activity }
+        return EntitySearch.filter(out, query: query) { t in
+            if t.subtitle.hasPrefix("@") {
+                return SearchCandidate(name: t.title, handle: String(t.subtitle.dropFirst()), title: nil)
+            }
+            return SearchCandidate(name: t.title, handle: "", title: t.subtitle)
         }
-        return out.sorted { $0.activity > $1.activity }
     }
 
     /// Forward a viewer item: fetch its bytes, then send them to `target` as a
@@ -870,7 +1326,7 @@ extension AppModel {
         guard let url = blobURL(projectId: item.slot, key: ref) else { return }
         Task { @MainActor in
             guard let (data, _) = await MediaFetch.data(url, headers: authHeaders) else {
-                notice = Notice(text: "Couldn't forward \(item.name)")
+                fail(UserError.fromText("forward \(item.name)", "the file could not be fetched"))
                 return
             }
             let pending = PendingAttachment(name: item.name, mime: item.mime, data: data)
@@ -884,17 +1340,123 @@ extension AppModel {
         }
     }
 
-    /// Bubble long-press → Forward: send the message's text to `target` as a
-    /// new message (no reply quote — it is a fresh send in that chat).
-    func forwardText(_ text: String, to target: ForwardTarget) {
-        let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !body.isEmpty else { return }
+    /// Bubble long-press → Forward. Text-only messages open `target` with the
+    /// words drafted so the user taps Send (feedback
+    /// app-01M5YF7JWEZXPD1JSKBH9TMCES). Messages with pictures / files / videos /
+    /// charts still send at once into `target` ([feedback
+    /// forward-attachments-ios-2026-10-27]). Both paths carry `forwardedFrom: by`
+    /// (app-01M5MXRZ7609S70P9S9P2RZDDF).
+    func forwardMessage(_ message: Message, from by: String, slot: String, to target: ForwardTarget) {
+        guard let payload = message.body else { return }
+        let name = by.trimmingCharacters(in: .whitespacesAndNewlines)
+        let forwardedFrom = name.isEmpty ? nil : name
+        let chatId: Id
+        let targetSlot: String
         switch target.kind {
         case .people(let c):
-            sendPeople(chatId: c.id, text: body, replyTo: nil)
+            chatId = c.id
+            targetSlot = "\(peopleSlot):\(c.id)"
         case .agent(let p):
             guard let chat = primaryChat(of: p.id) else { return }
-            send(chatId: chat.id, text: body)
+            chatId = chat.id
+            targetSlot = chat.projectId
         }
+        // Text alone: open the chat with the draft ready (user taps Send).
+        if !payload.hasMedia {
+            let body = payload.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !body.isEmpty else { return }
+            switch target.kind {
+            case .people(let c):
+                open(peopleChat: c)
+            case .agent(let p):
+                guard let chat = primaryChat(of: p.id) else { return }
+                open(chat: chat)
+            }
+            setComposerDraft(body, for: chatId)
+            pendingForwardDraft = (chatId, body, forwardedFrom)
+            return
+        }
+        #if DEBUG
+        if isFixture {
+            // No blob store to copy between: the rows land with the same keys. A chart
+            // travels as its fallback picture here.
+            fixtureAppend(chatId: chatId, text: payload.text,
+                          attachments: payload.attachments + payload.charts.compactMap(\.fallback),
+                          forwardedFrom: forwardedFrom)
+            return
+        }
+        #endif
+        Task { @MainActor in
+            var pending: [PendingAttachment] = []
+            for a in payload.attachments {
+                guard let data = await fetchForForward(a, slot: slot) else { continue }
+                pending.append(PendingAttachment(name: a.name, mime: a.mime, data: data))
+            }
+            // A chart's fallback picture is written as its own part, linked to the chart,
+            // so it is uploaded here rather than through the send's attachment list.
+            var extraParts: [[String: Any]] = []
+            for c in payload.charts {
+                var fallbackRef: String?
+                if let a = c.fallback, let data = await fetchForForward(a, slot: slot) {
+                    do {
+                        fallbackRef = try await uploadBlob(slot: targetSlot, name: a.name, mime: a.mime, data: data)
+                    } catch {
+                        fail("forward the chart's picture", error)
+                    }
+                }
+                extraParts.append(contentsOf: c.forwardParts(fallbackRef: fallbackRef))
+            }
+            guard !payload.text.isEmpty || !pending.isEmpty || !extraParts.isEmpty else {
+                notice = Notice(text: "Couldn't forward the message")
+                return
+            }
+            switch target.kind {
+            case .people(let c):
+                sendPeople(chatId: c.id, text: payload.text, replyTo: nil, attachments: pending,
+                           forwardedFrom: forwardedFrom, extraParts: extraParts)
+            case .agent:
+                send(chatId: chatId, text: payload.text, attachments: pending, forwardedFrom: forwardedFrom,
+                     extraParts: extraParts)
+            }
+        }
+    }
+
+    /// The bytes of one attachment being forwarded, from the source chat's slot; a
+    /// miss is reported and the attachment is left out.
+    private func fetchForForward(_ a: Attachment, slot: String) async -> Data? {
+        guard let ref = a.blobRef, let url = blobURL(projectId: slot, key: ref),
+              let (data, _) = await MediaFetch.data(url, headers: authHeaders) else {
+            notice = Notice(text: "Couldn't forward \(a.name)")
+            return nil
+        }
+        return data
+    }
+}
+
+/// Forward writes a chart again as its own parts ([feedback forward-attachments-ios-2026-10-27]).
+extension ChartBody {
+    /// The doc parts a forwarded chart becomes on the new row: its copied fallback picture
+    /// (when it has one, uploaded under `fallbackRef`) naming the chart as `chartPart`, then
+    /// the `chart` part itself with fresh ids and `fallback` pointing at that picture — the
+    /// shape `post_chart` writes, so a client that draws charts hides the picture and an
+    /// older one shows it. The spec travels as the JSON object it is.
+    func forwardParts(fallbackRef: String?) -> [[String: Any]] {
+        let chartId = newId()
+        var out: [[String: Any]] = []
+        var fallbackId: String?
+        if let a = fallback {
+            let id = newId()
+            var attachment: [String: Any] = ["name": a.name, "mime": a.mime, "chartPart": chartId]
+            if let kind = a.kind { attachment["kind"] = kind }
+            if let ref = fallbackRef { attachment["ref"] = ref }
+            out.append(["id": id, "kind": "attachment", "attachment": attachment])
+            fallbackId = id
+        }
+        let specValue: Any = spec.data(using: .utf8).flatMap { try? JSONSerialization.jsonObject(with: $0) } ?? spec
+        var chart: [String: Any] = ["id": chartId, "kind": "chart", "specVersion": specVersion,
+                                    "chart": specValue, "table": table]
+        if let fallbackId { chart["fallback"] = fallbackId }
+        out.append(chart)
+        return out
     }
 }

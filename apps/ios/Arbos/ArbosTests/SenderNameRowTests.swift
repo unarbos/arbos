@@ -2,9 +2,12 @@ import XCTest
 @testable import Arbos
 
 /// Jacob, 2026-10-23 (feedback `sender-name-in-bubble-2026-10-23`): the sender's name sits
-/// inside the bubble in group chats and server channels — people when the sender changed,
-/// agents on every reply (#1447) — and a 1:1 chat (me ↔ person, me ↔ agent) labels nobody. Own messages
-/// never carry a name.
+/// inside the bubble in group chats and server channels — on the first bubble of a sender
+/// run, people and agents alike (grouped messages, Jacob 2026-10-28, supersedes #1447's
+/// name on every agent reply; `GroupedMessagesTests`) — and a 1:1 chat (me ↔ person,
+/// me ↔ agent) labels nobody. Own messages never carry a name. No bubble row carries a time (Jacob, 2026-10-24, feedback
+/// `timestamps-hover-only-2026-10-24`): `.other` / `.member` have no time slot; the transcript's
+/// drag-to-reveal is the only way to see one.
 final class SenderNameRowTests: XCTestCase {
     private let chat = "fx-group-launch"
     private let t0: Int64 = 1_700_000_000_000
@@ -22,13 +25,13 @@ final class SenderNameRowTests: XCTestCase {
                 senderHandle: "comms", senderName: "Comms")
     }
 
-    /// `(text or "agent", named, hasTime)` for every bubble from someone else, plus `("mine", false, false)`.
-    private func names(_ rows: [Row]) -> [(String, Bool, Bool)] {
+    /// `(text or "agent", named)` for every bubble from someone else, plus `("mine", false)`.
+    private func names(_ rows: [Row]) -> [(String, Bool)] {
         rows.compactMap { row in
             switch row.kind {
-            case .other(let text, _, _, let named, _, let time): return (text, named, time != nil)
-            case .member(_, _, _, _, let named, _, _, let time): return ("agent", named, time != nil)
-            case .user: return ("mine", false, false)
+            case .other(let text, _, _, let named, _, _): return (text, named)
+            case .member(_, _, _, _, _, let named, _, _): return ("agent", named)
+            case .user: return ("mine", false)
             default: return nil
             }
         }
@@ -48,17 +51,16 @@ final class SenderNameRowTests: XCTestCase {
         let rows = Transcript.rows(messages, projectId: "people:\(chat)", me: "user:fx-me", people: true, multiParty: true)
         let got = names(rows)
         XCTAssertEqual(got.map(\.0), ["hi all", "second", "mine", "agent", "agent"])
-        // People: the first bubble of a run; agents: every reply (#1447); mine: never.
-        XCTAssertEqual(got.map(\.1), [true, false, false, true, true], "named on the first bubble of a run (every agent reply), never on mine")
-        XCTAssertEqual(got.map(\.2), [true, true, false, true, true], "others' bubbles carry the time after the text")
+        // The first bubble of a run — people and agents alike (these two agent replies
+        // quote nothing and sit 1 s apart, so they are one run); mine: never.
+        XCTAssertEqual(got.map(\.1), [true, false, false, true, false], "named on the first bubble of a run, never on mine")
     }
 
-    func testDMBubblesCarryNoNameAndNoInlineTime() {
+    func testDMBubblesCarryNoName() {
         let rows = Transcript.rows(messages, projectId: "people:\(chat)", me: "user:fx-me", people: true, multiParty: false)
         let got = names(rows)
         XCTAssertEqual(got.map(\.0), ["hi all", "second", "mine", "agent", "agent"])
         XCTAssertTrue(got.allSatisfy { !$0.1 }, "a 1:1 chat labels nobody")
-        XCTAssertTrue(got.allSatisfy { !$0.2 }, "no inline time in a 1:1 chat")
     }
 
     func testAgentChatBubblesCarryNoName() {
@@ -76,12 +78,11 @@ final class SenderNameRowTests: XCTestCase {
         reply.replyTo = "m0"
         let rows = Transcript.rows([person(0, sender: "user:fx-u3", handle: "mira-k", "question"), reply],
                                    projectId: "people:\(chat)", me: "user:fx-me", people: true, multiParty: true)
-        guard case .other(let text, _, _, let named, let quote, let time)? = rows.last?.kind else {
+        guard case .other(let text, _, _, let named, let quote, _)? = rows.last?.kind else {
             return XCTFail("the reply is someone else's bubble: \(String(describing: rows.last?.kind))")
         }
         XCTAssertTrue(named)
         XCTAssertNotNil(quote)
         XCTAssertEqual(text, "answer")
-        XCTAssertNotNil(time)
     }
 }

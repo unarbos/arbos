@@ -1,0 +1,50 @@
+{
+  "id": "py-23-other-chat-while-busy",
+  "lane": "b",
+  "category": "parity",
+  "categories": [
+    "parity",
+    "other-chat-while-busy"
+  ],
+  "title": "Hello? in a new chat while research runs",
+  "parity": true,
+  "timeout_s": 420,
+  "settle_s": 20,
+  "turns": [
+    {
+      "prompt": "Find me the 3 best-reviewed surf schools near Santa Teresa and compare their prices.",
+      "shape": {
+        "messages_min": 1,
+        "messages_max": 8,
+        "ack_first": true,
+        "table": false,
+        "links_min": 0,
+        "offer": false,
+        "first_bubble_max_s": 5,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": false
+      }
+    },
+    {
+      "prompt": "Hello?",
+      "at_s": 10,
+      "new_chat": true,
+      "shape": {
+        "messages_min": 1,
+        "messages_max": 1,
+        "ack_first": false,
+        "table": false,
+        "links_min": 0,
+        "offer": false,
+        "first_bubble_max_s": 5,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": false
+      },
+      "judge": {
+        "criteria": "A short friendly answer within seconds; may mention it is working on something else in another chat, but must answer."
+      }
+    }
+  ]
+}

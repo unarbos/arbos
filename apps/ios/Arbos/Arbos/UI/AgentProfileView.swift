@@ -1,8 +1,8 @@
-// Agent pages. `AgentProfileView` is the Telegram-style profile (avatar,
-// name, status, action tiles, info card, Media/Files/Links) opened from
-// anywhere an agent shows; its Edit button opens `AgentEditSheet` — the
-// original editor: tap-to-rename, colour, character picker, model, chats,
-// sharing. Name/colour/avatar/description save with `PATCH /projects/{id}`.
+// Agent pages. `AgentProfileView` is the agent's pane on the shared profile pane
+// (Details · Library · Computer, the Mac's `profiles/agent.rs`) opened from anywhere an
+// agent shows. `AgentEditSheet` is the older editor the chat's `ARBOS_SHOW=edit` rig still
+// opens: tap-to-rename, avatar, model, voice. Name/colour/avatar/description save with
+// `PATCH /projects/{id}`.
 
 import SwiftUI
 
@@ -110,7 +110,7 @@ struct AgentEditSheet: View {
 
     private func hero(_ project: Project) -> some View {
         VStack(spacing: 12) {
-            AgentAvatar(project: project, theme: theme, size: 116, dot: machineDotColor(model.machine.state, theme: theme), working: model.isStreaming(project: project.id), idle: true)
+            AgentAvatar(project: project, theme: theme, size: 116, mark: machineMark(model.machine.state), working: model.isStreaming(project: project.id), idle: true)
                 .padding(.top, 18)
                 .id("\(project.effectiveAvatarColorIndex.map(String.init) ?? "auto")")
                 .animation(.snappy, value: project.color)
@@ -123,9 +123,7 @@ struct AgentEditSheet: View {
                     .focused($nameFocused)
                     .submitLabel(.done)
                     .onSubmit(commitName)
-                    .padding(.horizontal, 16).frame(height: 46)
-                    .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(theme.field))
-                    .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                    .controlField()
                     .padding(.horizontal, 48)
             } else {
                 Button {
@@ -206,8 +204,17 @@ struct AgentEditSheet: View {
 }
 
 
-// MARK: - Telegram-style agent profile
+// MARK: - The agent pane: Details · Library · Computer
 
+/// The agent's pane on the shared profile pane (D93) — Grok Bot's content model, the same
+/// as the Mac's `profiles/agent.rs` (#1679; iPhone [feedback iphone-agent-pane-tabs-2026-10-25]):
+/// hero with the description as the label ("Add a label" for the owner, tap edits it in
+/// place; a tap on the name renames), then **Details** (Settings — Coding and Routines ahead
+/// of it while `AgentPane.agentDetailsShowCodingRoutines` is on), **Library** (images ·
+/// files · voice · links) and **Computer** (Machine · Resources · Running now from
+/// `GET /machine/debug`). No Delete footer: the home row's menu deletes, at once. "Who may
+/// message", "Permissions" and "Profile" left Details on 2026-10-25 ([feedback
+/// agent-details-remove-sections-ios-2026-10-25]).
 struct AgentProfileView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -215,67 +222,118 @@ struct AgentProfileView: View {
     let projectId: Id
     /// For an agent that is not in my project list (someone else's agent in a DM).
     var fallback: Project? = nil
-    /// Jacob's rule (2026-10-22): one tab set per entity, identical on Mac
-    /// and iPhone — Profile | Settings | Library (`PaneKinds.agent`, the Mac's
-    /// `agent.rs`). Kinds share the structure, not a tab count (22:32 UTC).
-    @State private var tab = "Profile"
-    @State private var showEdit = false
+    @State private var tab = "Details"
+    /// The hero's label (= the description) being edited in place.
+    @State private var editingLabel = false
+    @State private var labelDraft = ""
+    @FocusState private var labelFocused: Bool
+    /// The rename alert, from a tap on the hero's name (the owner only).
+    @State private var showRename = false
+    @State private var renameDraft = ""
     /// The avatar picker sheet (D92 amendment), from the hero's crayon; the rig's
     /// `ARBOS_SHOW=avatarpicker[-generate|-upload]` opens it on that tab.
     @State private var showAvatarPicker: AvatarPickerTab? = nil
     @State private var showModel = false
-    @State private var showDescription = false
-    @State private var descriptionDraft = ""
     @State private var showReasoning = false
-    @State private var confirmDelete = false
-    @State private var showMessageGrantPicker = false
-    @State private var messageGrantError: String?
+    /// The call-voice picker (#1316's `VoicePickerView`) from the Settings card's Voice row.
+    @State private var showVoice = false
+    /// Connect an agent (#2142): Rotate key… pushes the reveal screen with the fresh key.
+    @State private var rotated: ConnectReveal?
+    /// Wake URL form ([feedback outside-agents-wake-ios-2026-10-28]): the two drafts, what is in
+    /// flight ("saving" | "sending"), the last outcome line, and which agent the drafts were filled for.
+    @State private var wakeURLDraft = ""
+    @State private var wakeAuthDraft = ""
+    @State private var wakeBusy: String?
+    @State private var wakeNote: (ok: Bool, text: String)?
+    @State private var wakeFilledFor: Id?
+    /// Session log card → View all ([feedback sidecar-sessions-ios-2026-10-28]).
+    @State private var showLog = false
 
     private var project: Project? { model.project(projectId) ?? fallback }
+    /// A connected (outside) agent: no Computer tab; Connection + Key under Details (#2142).
+    private var outside: OutsideAgentInfo? { model.outsideInfo[projectId] }
     private var isMine: Bool { model.project(projectId) != nil && project?.shared != true }
     private var items: [ChatItem] {
         let msgs = model.chats(of: projectId).flatMap { model.messages(of: $0.id) }
         return ChatMedia.items(messages: msgs, slot: projectId, model: model)
     }
+    /// Live refresh cadence while the pane shows live content (the registry poll's 15 s).
+    private static let livePollSeconds: UInt64 = 15
 
     var body: some View {
         ZStack(alignment: .top) {
             theme.bg.ignoresSafeArea()
-            ScrollView {
-                if let project {
-                    VStack(spacing: 18) {
-                        Color.clear.frame(height: 80)
-                        // The shared pane (D93): leaf / photo with the owner's crayon,
-                        // name, "working" or who runs it; Profile | Settings | Library
-                        // (the Mac's set); Delete agent for the owner.
-                        ProfilePane(
-                            hero: PaneHero(picture: .image(AnyView(heroPicture(project))), name: project.name, subtitle: subtitleLine(project)),
-                            tabs: PaneKinds.agent,
-                            selected: $tab,
-                            body: sections(project),
-                            footer: isMine ? [.card([AnyView(ProfileLinkRow(title: "Delete agent", destructive: true) { confirmDelete = true })])] : []
-                        )
-                        Color.clear.frame(height: 40)
+            ScrollViewReader { reader in
+                ScrollView {
+                    if let project {
+                        VStack(spacing: 18) {
+                            Color.clear.frame(height: PaneKit.pageTop)
+                            ProfilePane(
+                                hero: hero(project),
+                                tabs: outside != nil ? PaneKinds.outsideAgent : PaneKinds.agent,
+                                selected: $tab,
+                                body: sections(project)
+                            )
+                            Color.clear.frame(height: 40).id("pane-end")
+                        }
+                    } else {
+                        Text("This agent is gone.").foregroundStyle(theme.muted).padding(.top, 120)
                     }
-                } else {
-                    Text("This agent is gone.").foregroundStyle(theme.muted).padding(.top, 120)
+                }
+                .scrollDismissesKeyboard(.interactively)
+                .onAppear {
+                    // Rig: `ARBOS_PANE_SCROLL=<anchor>` scrolls to a `pane-<anchor>` id
+                    // (`end` is the pane's foot).
+                    guard let anchor = DebugHooks.paneScroll else { return }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                        withAnimation(nil) { reader.scrollTo(anchor == "end" ? "pane-end" : "pane-\(anchor)", anchor: .top) }
+                    }
                 }
             }
-            ProfileTopBar { EmptyView() }
-        }
-        .confirmationDialog("Delete \(project?.name ?? "this agent")?", isPresented: $confirmDelete, titleVisibility: .visible) {
-            Button("Delete", role: .destructive) {
-                model.deleteProject(projectId)
-                dismiss()
+            ProfileTopBar(screen: .agentPage) {
+                if editingLabel {
+                    Button("Done") { commitLabel() }
+                        .font(theme.font(Theme.body, weight: .semibold))
+                        .foregroundStyle(theme.text)
+                }
             }
-            Button("Cancel", role: .cancel) { }
-        } message: { Text("Removes this agent and its chats from your list.") }
+        }
         .task { await model.loadVoices() }
+        .task(id: projectId) {
+            // Outside agents (#2142): the connection for the Details pane; a native agent leaves no entry.
+            guard isMine else { return }
+            await model.refreshOutsideInfo(projectId)
+            if outside != nil, tab == "Computer" { tab = "Details" }
+        }
+        .task(id: isMine) {
+            guard isMine else { return }
+            await model.refreshRoutines(projectId)
+            await model.refreshBoxReport()
+        }
+        .navigationDestination(isPresented: Binding(get: { rotated != nil }, set: { if !$0 { rotated = nil } })) {
+            if let rotated {
+                ConnectRevealView(reveal: rotated, onDone: { self.rotated = nil })
+            }
+        }
+        .navigationDestination(isPresented: $showLog) {
+            SessionLogView(projectId: projectId)
+        }
+        .task(id: "\(tab)-\(model.isStreaming(project: projectId))") {
+            // The Coding row's elapsed time and the Computer tab's jobs move: poll while
+            // something is running or the Computer tab is up (fetched again on each pick).
+            guard isMine else { return }
+            if tab == "Computer" { await model.refreshBoxReport() }
+            while !Task.isCancelled, tab == "Computer" || model.isStreaming(project: projectId) {
+                try? await Task.sleep(nanoseconds: Self.livePollSeconds * 1_000_000_000)
+                guard !Task.isCancelled else { return }
+                await model.refreshBoxReport()
+            }
+        }
+        .onChange(of: labelFocused) { _, focused in
+            if !focused, editingLabel { commitLabel() }
+        }
         .sheet(isPresented: $showModel) {
             if let project = model.project(projectId) { ModelPickerView(project: project).environmentObject(model).environment(\.theme, theme) }
-        }
-        .sheet(isPresented: $showEdit) {
-            AgentEditSheet(projectId: projectId).environmentObject(model).environment(\.theme, theme)
         }
         .sheet(item: $showAvatarPicker) { initial in
             AvatarPickerSheet(target: .agent(projectId), initialTab: initial).environmentObject(model).environment(\.theme, theme)
@@ -285,85 +343,132 @@ struct AgentProfileView: View {
                 let tab: AvatarPickerTab = show.hasSuffix("generate") ? .generate : (show.hasSuffix("upload") ? .upload : .bot)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { showAvatarPicker = tab }
             }
+            // Rig: `ARBOS_PANEL_TAB=Computer|Library` lands on a tab; `ARBOS_SHOW=agentvoice`
+            // also opens the Voice row's picker; `ARBOS_SHOW=agentlabel` edits the label;
+            // `ARBOS_SHOW=agentrename` opens the rename alert.
+            if let t = DebugHooks.panelTab, PaneKinds.agent.contains(t) { tab = t }
+            if isMine, DebugHooks.show == "agentvoice" {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { showVoice = true }
+            }
+            // A search result for the agent's Model / Reasoning / Voice row
+            // ([feedback search-settings-ios-2026-10-26]): the pane opens with that picker up.
+            if isMine, let setting = model.pendingAgentSetting {
+                model.pendingAgentSetting = nil
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                    switch setting {
+                    case .model: showModel = true
+                    case .reasoning: showReasoning = true
+                    case .voice: showVoice = true
+                    }
+                }
+            }
+            if isMine, DebugHooks.show == "agentlabel" {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { startLabelEdit() }
+            }
+            if isMine, DebugHooks.show == "agentrename" {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { startRename() }
+            }
         }
         .sheet(isPresented: $showReasoning) {
             if let project = model.project(projectId) { ReasoningPickerView(project: project).environmentObject(model).environment(\.theme, theme) }
         }
-        .sheet(isPresented: $showMessageGrantPicker) {
-            if let project = model.project(projectId) {
-                NavigationStack {
-                    AddMessageGrantSheet(project: project).environmentObject(model).environment(\.theme, theme)
-                }
-            }
+        .sheet(isPresented: $showVoice) {
+            if let project = model.project(projectId) { VoicePickerView(project: project).environmentObject(model).environment(\.theme, theme) }
         }
-        .alert("Couldn't change who may message", isPresented: Binding(get: { messageGrantError != nil }, set: { if !$0 { messageGrantError = nil } })) {
-            Button("OK", role: .cancel) { }
-        } message: { Text(messageGrantError ?? "") }
-        .alert("Description", isPresented: $showDescription) {
-            TextField("One paragraph about this agent", text: $descriptionDraft)
-            Button("Save") { model.updateProject(projectId, description: descriptionDraft.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        .alert("Name", isPresented: $showRename) {
+            TextField("Agent name", text: $renameDraft)
+            Button("Save") { commitRename() }
             Button("Cancel", role: .cancel) { }
-        } message: { Text("Shown to everyone who can see this agent (up to 500 characters).") }
+        } message: { Text("What people and their agents call it; the @handle follows the name.") }
     }
 
-    /// One grant row: avatar · name / @handle · last message · switch; swipe-free, a long
-    /// press removes it (the switch only pauses it).
-    private func messageGrantRow(_ project: Project, _ g: MessageGrant) -> some View {
-        let subtitle: String = {
-            var s = g.handle.map { "@\($0)" } ?? g.kind
-            if g.kind == "agent" { s += " · agent" }
-            if let at = g.lastAt { s += " · messaged \(SecretsText.ago(at))" } else if !g.note.isEmpty { s += " · \(g.note)" }
-            return s
-        }()
-        let isOn = Binding<Bool>(
-            get: { model.project(project.id)?.messageGrants.first(where: { $0.grantee == g.grantee })?.enabled ?? g.enabled },
-            set: { on in Task { await setMessageGrant(project.id, grantee: g.grantee, enabled: on) } }
-        )
-        return PaneRow(
-            leading: .avatar(AnyView(
-                g.kind == "agent"
-                    ? AnyView(InitialsAvatar(name: g.displayName, handle: g.handle ?? g.id, id: g.id, override: nil, size: PaneKit.avatar))
-                    : AnyView(PersonAvatar(url: g.avatarUrl, handle: g.handle ?? g.id, size: PaneKit.avatar, name: g.name, id: g.id))
-            )),
-            title: g.displayName,
+    // MARK: Hero — picture, name, the label
+
+    private func hero(_ project: Project) -> PaneHero {
+        let hasLabel = !project.description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let subtitle = AgentPane.subtitle(description: project.description, mine: isMine, ownerHandle: project.ownerHandle, ownerName: project.ownerName)
+        // Someone else's agent: "Run by …" is a link to the owner's page (Jacob 2026-10-25).
+        let owner = AgentPane.ownerLink(mine: isMine, ownerHandle: project.ownerHandle, ownerName: project.ownerName)
+        // The owner's page is pushed over this one by the root sheet's NavigationStack
+        // (`ProfileSheet`, `ProfileTarget.pushesPeople`); its top-bar chevron pops back here.
+        let openOwner: (() -> Void)? = owner.map { link in { model.showProfile(.user(ownerPerson(project, handle: link.handle))) } }
+        return PaneHero(
+            picture: .image(AnyView(heroPicture(project))),
+            name: project.name,
+            nameAction: isMine ? { startRename() } : nil,
             subtitle: subtitle,
-            trailing: AnyView(Toggle("", isOn: isOn).labelsHidden().tint(theme.online))
+            subtitleTint: hasLabel || !isMine ? nil : theme.placeholder,
+            subtitleAction: isMine ? { startLabelEdit() } : (hasLabel ? nil : openOwner),
+            subtitleLink: !isMine && !hasLabel && owner != nil,
+            subtitleEditor: editingLabel ? AnyView(labelEditor) : nil,
+            subtitleBelow: (hasLabel && owner != nil) ? AnyView(
+                Button(action: { openOwner?() }) { Text(owner!.label).lineLimit(1) }
+                    .buttonStyle(ChipLinkStyle())
+                    .accessibilityHint("Opens their profile")
+            ) : nil
         )
-        .contextMenu {
-            Button(role: .destructive) {
-                Task { await removeMessageGrant(project.id, grantee: g.grantee) }
-            } label: { Label("Remove", systemImage: "trash") }
-        }
     }
 
-    private func setMessageGrant(_ pid: Id, grantee: String, enabled: Bool) async {
-        if let i = model.projects.firstIndex(where: { $0.id == pid }),
-           let j = model.projects[i].messageGrants.firstIndex(where: { $0.grantee == grantee }) {
-            model.projects[i].messageGrants[j].enabled = enabled
-        }
-        do {
-            let grants = try await model.relay.setMessageGrant(pid, grantee: grantee, enabled: enabled)
-            if let i = model.projects.firstIndex(where: { $0.id == pid }) { model.projects[i].messageGrants = grants }
-        } catch {
-            messageGrantError = error.localizedDescription
-            await model.refreshRegistry()
-        }
+    /// The owner as the person page wants them: the relay's `owner` card when the project
+    /// carries it, else the handle resolved through the chats we share.
+    private func ownerPerson(_ project: Project, handle: String) -> ProfilePerson {
+        ProfilePerson(
+            id: project.ownerId ?? model.personId(handle: handle) ?? handle,
+            handle: handle,
+            name: project.ownerName,
+            avatarUrl: project.ownerAvatarUrl
+        )
     }
 
-    private func removeMessageGrant(_ pid: Id, grantee: String) async {
-        if let i = model.projects.firstIndex(where: { $0.id == pid }) {
-            model.projects[i].messageGrants.removeAll { $0.grantee == grantee }
-        }
-        do {
-            let grants = try await model.relay.removeMessageGrant(pid, grantee: grantee)
-            if let i = model.projects.firstIndex(where: { $0.id == pid }) { model.projects[i].messageGrants = grants }
-        } catch {
-            messageGrantError = error.localizedDescription
-            await model.refreshRegistry()
-        }
+    /// The name is renamed through an alert (a second inline editor would stack on the
+    /// label's); since the Profile card left, the hero's name is the one way in.
+    private func startRename() {
+        guard isMine, let project else { return }
+        renameDraft = project.name
+        showRename = true
     }
 
-    /// The hero picture: the leaf / photo, with the crayon → edit sheet for my own agent.
+    /// The label field under the name while the label is being edited: Return or Done
+    /// commits, leaving the field commits too (the Mac's `label_editor`).
+    private var labelEditor: some View {
+        TextField("", text: $labelDraft, prompt: Text(AgentPane.labelPlaceholder).foregroundStyle(theme.placeholder))
+            .font(theme.font(Theme.small))
+            .foregroundStyle(theme.text)
+            .multilineTextAlignment(.center)
+            .focused($labelFocused)
+            .submitLabel(.done)
+            .onSubmit(commitLabel)
+            .onChange(of: labelDraft) { _, v in if v.count > 500 { labelDraft = String(v.prefix(500)) } }
+            .padding(.horizontal, 12)
+            .frame(height: 32)
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(theme.field)) // control-size: exception inlineChips
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1)) // control-size: exception inlineChips
+            .padding(.horizontal, 56)
+    }
+
+    private func startLabelEdit() {
+        guard isMine, let project else { return }
+        labelDraft = project.description
+        editingLabel = true
+        labelFocused = true
+    }
+
+    private func commitLabel() {
+        guard editingLabel else { return }
+        let clean = labelDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        editingLabel = false
+        labelFocused = false
+        guard let project, clean != project.description else { return }
+        model.updateProject(projectId, description: clean)
+    }
+
+    private func commitRename() {
+        let clean = renameDraft.trimmingCharacters(in: .whitespaces)
+        guard let project, !clean.isEmpty, clean != project.name else { return }
+        model.updateProject(projectId, name: clean)
+    }
+
+    /// The hero picture: the leaf / photo, with the crayon → avatar picker for my own agent.
     @ViewBuilder
     private func heroPicture(_ project: Project) -> some View {
         if isMine {
@@ -375,100 +480,432 @@ struct AgentProfileView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Change avatar")
         } else {
-            AgentAvatar(project: project, theme: theme, size: PaneKit.heroAvatar, working: model.isStreaming(project: project.id), idle: true)
+            // Someone else's agent: its picture opens full-size in the media viewer (a leaf opens nothing).
+            ViewablePicture(name: project.name, url: model.projectImageURL(project)?.absoluteString) {
+                AgentAvatar(project: project, theme: theme, size: PaneKit.heroAvatar, working: model.isStreaming(project: project.id), idle: true)
+            }
         }
     }
 
-    /// "working" while a turn runs, else who runs the agent (the Mac's subtitle).
-    private func subtitleLine(_ p: Project) -> String {
-        if model.isStreaming(project: p.id) { return "working" }
-        if isMine { return "Agent · run by you" }
-        if let o = p.ownerHandle, !o.isEmpty { return "Agent · run by @\(o)" }
-        return "Agent"
-    }
+    // MARK: Tabs
 
-    /// The selected tab's sections. Voice, Share and "Add to this chat" left the
-    /// pane on 2026-10-22 (Jacob: simple, consistent, powerful).
     private func sections(_ project: Project) -> [PaneSection] {
         switch tab {
-        case "Settings":
-            // Identical to the Mac: Model · Reasoning. Per-agent secrets are reached
-            // like the Mac's — Settings → Secrets → the secret's Agents; camera vision
-            // is the call screen's "Let <agent> see" switch.
-            let rows: [AnyView] = [
-                AnyView(
-                    Button { if isMine { showModel = true } } label: {
-                        PaneRow(title: "Model", value: project.shortModel, chevron: isMine)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!isMine)
-                ),
-                AnyView(
-                    Button { if isMine { showReasoning = true } } label: {
-                        PaneRow(title: "Reasoning", value: project.effort.label, chevron: isMine)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!isMine)
-                ),
-            ]
-            guard isMine else { return [.card(rows)] }
-            // Agent-to-agent messaging: who else's agents may write into this agent's chat.
-            // My own agents always may; this card lists other people (the Mac's card, D83's
-            // People shape: avatar · name/@handle · last message · switch).
-            var grants: [AnyView] = project.messageGrants.map { g in AnyView(messageGrantRow(project, g)) }
-            grants.append(AnyView(Button { showMessageGrantPicker = true } label: {
-                PaneRow(leading: .glyph("person.badge.plus"), title: "Give a person access…", titleTint: theme.accent)
-            }.buttonStyle(.plain)))
-            return [
-                .card(rows),
-                .title("Who may message \(project.name)"),
-                .card(grants, separatorInset: PaneKit.separatorInset(.glyph(""))),
-                .footnote("Your own agents can always message \(project.name). People listed here may have their agents message it too; their messages land in this chat and \(project.name) answers them."),
-            ]
-        case "Library":
-            // Everything the agent's chats hold — images, files, voice memos, links
-            // — in sections (the group pane's Library, plus links).
-            let media = items.filter { $0.kind == .media }
-            let files = items.filter { $0.kind == .file }
-            let voice = items.filter { $0.kind == .voice }
-            let links = items.filter { $0.kind == .link }
-            if media.isEmpty && files.isEmpty && voice.isEmpty && links.isEmpty {
-                return [.empty("Nothing shared in \(project.name)'s chats yet.")]
-            }
-            var out: [PaneSection] = []
-            if !media.isEmpty { out += [.title("Images · \(media.count)"), .grid(media)] }
-            if !files.isEmpty { out += [.title("Files · \(files.count)"), .custom(AnyView(ChatItemsList(items: files, kind: .file, empty: "")))] }
-            if !voice.isEmpty { out += [.title("Voice · \(voice.count)"), .custom(AnyView(ChatItemsList(items: voice, kind: .voice, empty: "")))] }
-            if !links.isEmpty { out += [.title("Links · \(links.count)"), .custom(AnyView(ChatItemsList(items: links, kind: .link, empty: "")))] }
-            return out
+        case "Library": return librarySections(project)
+        case "Computer" where outside == nil: return computerSections(project)
         default:
-            // Profile: name, handle, description (the owner edits by tapping).
-            var rows: [AnyView] = [
-                AnyView(PaneRow(title: "Name", value: project.name)),
-                AnyView(PaneRow(title: "Handle", value: "@\(mentionSlug(project.name))")),
-            ]
-            if project.description.isEmpty {
-                rows.append(isMine
-                    ? AnyView(ProfileLinkRow(title: "Add a description") { descriptionDraft = ""; showDescription = true })
-                    : AnyView(PaneRow(title: "Description", value: "—")))
-            } else {
-                rows.append(AnyView(
-                    Button { if isMine { descriptionDraft = project.description; showDescription = true } } label: {
-                        PaneRow(title: "Description", value: project.description, chevron: isMine)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!isMine)
-                ))
-            }
-            return [
-                .card(rows),
-                .footnote(isMine
-                    ? "The name, handle, picture and description are what people and their agents see, here and on the Mac."
-                    : "Someone else's agent: what it shares with you shows in your chats."),
-            ]
+            if let outside { return outsideSections(project, outside) }
+            return detailsSections(project)
         }
     }
 
+    // MARK: Details for a connected agent — Connection · Key (#2142)
+
+    private func outsideSections(_ project: Project, _ info: OutsideAgentInfo) -> [PaneSection] {
+        var out: [PaneSection] = []
+        out.append(.title("Connection"))
+        let waiting = !info.connected && info.status == "never"
+        let statusTrailing: AnyView? = waiting
+            ? AnyView(ProgressView().controlSize(.small).tint(theme.accent))
+            : nil
+        out.append(.card([
+            AnyView(PaneRow(title: "Status", value: info.statusLine(), trailing: statusTrailing)
+                .accessibilityIdentifier("outside-status")),
+            AnyView(PaneRow(title: "Transport", value: info.transportLabel)),
+            AnyView(PaneRow(title: "Protocol", value: info.proto)),
+        ]))
+        // The Session log card (spec §13.3, approved 2026-10-28): under Connection; only on a
+        // relay that keeps the log (#2224).
+        if info.logSummary != nil {
+            out.append(contentsOf: sessionLogSections(project, info))
+        }
+        // The Can card (spec §4.3, the approved mockup): one switch per scope.
+        out.append(.title("Can"))
+        out.append(.card(OutsideAgentInfo.scopeRows.map { row -> AnyView in
+            let isOn = Binding<Bool>(
+                get: { model.outsideInfo[project.id]?.scope(row.name) ?? info.scope(row.name) },
+                set: { on in model.setOutsideScope(project.id, row.name, on: on) }
+            )
+            return AnyView(
+                PaneToggleRow(title: row.title, subtitle: row.subtitle, isOn: isOn)
+                    .accessibilityIdentifier("outside-scope-\(row.name)")
+            )
+        }))
+        out.append(.footnote("Changes apply at once. The agent sees only what is on."))
+        let revoked = info.status == "revoked"
+        if info.hasWake, !revoked {
+            out.append(contentsOf: wakeSections(project, info))
+        }
+        out.append(.title("Key"))
+        out.append(.card([
+            AnyView(
+                Button {
+                    Task { if let r = await model.rotateOutsideKey(project.id) { rotated = r } }
+                } label: {
+                    PaneRow(leading: .tile("key"), title: "Rotate key…", chevron: true)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("outside-rotate")
+            ),
+            AnyView(
+                PaneDangerRow(title: revoked ? "Access revoked" : "Revoke access") {
+                    guard !revoked else { return }
+                    Task { await model.revokeOutsideAgent(project.id) }
+                }
+                .disabled(revoked)
+                .accessibilityIdentifier("outside-revoke")
+            ),
+        ]))
+        out.append(.footnote("Revoke stops it at once. Its messages stay."))
+        return out
+    }
+
+    // MARK: Details for a connected agent — Session log ([feedback sidecar-sessions-ios-2026-10-28])
+
+    /// The card: the title with "Last reply 9.8 s · N wakes today", the newest four lines as
+    /// two-line rows, View all, a footnote.
+    private func sessionLogSections(_ project: Project, _ info: OutsideAgentInfo) -> [PaneSection] {
+        let entries = model.outsideLogs[project.id] ?? []
+        var out: [PaneSection] = []
+        out.append(.custom(AnyView(
+            HStack(alignment: .firstTextBaseline) {
+                PaneSectionTitle("Session log")
+                Spacer(minLength: 8)
+                if let line = SessionLogView.headerLine(summary: info.logSummary, entries: entries) {
+                    Text(line)
+                        .font(theme.font(Theme.tiny))
+                        .foregroundStyle(theme.muted)
+                        .lineLimit(1)
+                        .padding(.trailing, PaneKit.inset * 2)
+                }
+            }
+        )))
+        let shown = Array(entries.reversed().filter(\.shown).prefix(4))
+        var rows: [AnyView] = shown.map { e in
+            AnyView(SessionLogRow(entry: e, chatTitle: e.chat.map { model.outsideLogChatTitle($0, agent: project.id) } ?? ""))
+        }
+        if shown.isEmpty {
+            rows.append(AnyView(PaneRow(title: "No wakes yet", subtitle: "Lines appear here when someone writes to the agent.")))
+        }
+        rows.append(AnyView(
+            Button { showLog = true } label: {
+                PaneRow(title: "View all", chevron: true)
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("outside-log-all")
+        ))
+        out.append(.card(rows))
+        out.append(.footnote("Written by the sidecar on the agent's machine. Never message text or secrets."))
+        return out
+    }
+
+    // MARK: Details for a connected agent — Wake URL ([feedback outside-agents-wake-ios-2026-10-28])
+
+    /// What the line under the Wake URL buttons says: the in-flight word, the last Save / test
+    /// outcome, else the relay's last delivery (the Mac's `connect_agent::wake_note`).
+    static func wakeNoteLine(busy: String?, note: (ok: Bool, text: String)?, last: OutsideWakeLast?,
+                             now: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) -> (ok: Bool, text: String)? {
+        if busy == "saving" { return (true, "Saving…") }
+        if busy == "sending" { return (true, "Sending…") }
+        if let note { return note }
+        if let last { return (last.error == nil, "Last wake · \(last.line(now: now))") }
+        return nil
+    }
+
+    /// **Wake URL** card: URL field, the Authorization value (secure, never shown back), Save and
+    /// Send test wake, the outcome line — the braille spinner while something is in flight.
+    private func wakeSections(_ project: Project, _ info: OutsideAgentInfo) -> [PaneSection] {
+        let busy = wakeBusy != nil
+        let canTest = info.wakeURL != nil && info.wakeAuthSet && !busy
+        let line = Self.wakeNoteLine(busy: wakeBusy, note: wakeNote, last: info.wakeLast)
+        let urlRow = VStack(alignment: .leading, spacing: 6) {
+            Text("URL").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+            TextField("", text: $wakeURLDraft, prompt: Text("https://…").foregroundStyle(theme.placeholder))
+                .font(theme.font(Theme.body))
+                .foregroundStyle(theme.text)
+                .keyboardType(.URL)
+                .textContentType(.URL)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .controlField()
+                .accessibilityIdentifier("wake-url-field")
+        }
+        .padding(.horizontal, PaneKit.inset).padding(.vertical, 12)
+        .onAppear { fillWakeForm(project.id, info) }
+        let authRow = VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Authorization header value").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                Spacer()
+                if info.wakeAuthSet {
+                    Text("saved · paste again to replace").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                }
+            }
+            SecureField("", text: $wakeAuthDraft, prompt: Text("Paste the Authorization header value").foregroundStyle(theme.placeholder))
+                .font(theme.font(Theme.body))
+                .foregroundStyle(theme.text)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .controlField()
+                .accessibilityIdentifier("wake-auth-field")
+        }
+        .padding(.horizontal, PaneKit.inset).padding(.vertical, 12)
+        let buttonsRow = VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                PanePillButton(glyph: "checkmark", title: "Save") { saveWake(project.id) }
+                    .disabled(busy)
+                    .opacity(busy ? 0.5 : 1)
+                    .accessibilityIdentifier("wake-save")
+                PanePillButton(glyph: "antenna.radiowaves.left.and.right", title: "Send test wake") { testWake(project.id) }
+                    .disabled(!canTest)
+                    .opacity(canTest ? 1 : 0.5)
+                    .accessibilityIdentifier("wake-test")
+            }
+            if let line {
+                HStack(spacing: 6) {
+                    if busy { WorkingSpinner() }
+                    // A delivery readout ("Last wake · Failed · HTTP 401 · 3 min ago"), muted
+                    // like the status rows — not an error note.
+                    Text(line.text)
+                        .font(theme.font(Theme.tiny))
+                        .foregroundStyle(theme.muted)
+                        .lineLimit(2)
+                }
+                .accessibilityIdentifier("wake-note")
+            }
+        }
+        .padding(.horizontal, PaneKit.inset).padding(.vertical, 12)
+        return [
+            .title("Wake URL"),
+            .card([AnyView(urlRow), AnyView(authRow), AnyView(buttonsRow)]),
+            .footnote("When a message needs an answer, Arbos posts a small signed nudge here at once — no message text. The value is sent as the Authorization header, verbatim, and is never shown again. Keep a slow poll as the fallback."),
+        ]
+    }
+
+    /// Fill the two fields the first time the pane shows this agent (the stored URL; the value
+    /// field starts empty because the value is never shown back).
+    private func fillWakeForm(_ projectId: Id, _ info: OutsideAgentInfo) {
+        guard wakeFilledFor != projectId else { return }
+        wakeFilledFor = projectId
+        wakeURLDraft = info.wakeURL ?? ""
+        wakeAuthDraft = ""
+        wakeNote = nil
+    }
+
+    private func saveWake(_ projectId: Id) {
+        guard wakeBusy == nil else { return }
+        wakeBusy = "saving"; wakeNote = nil
+        let url = wakeURLDraft, auth = wakeAuthDraft
+        Task {
+            let error = await model.saveOutsideWake(projectId, url: url, auth: auth)
+            wakeAuthDraft = ""
+            wakeBusy = nil
+            wakeNote = error.map { (ok: false, text: $0) } ?? (ok: true, text: "Saved")
+        }
+    }
+
+    private func testWake(_ projectId: Id) {
+        guard wakeBusy == nil else { return }
+        wakeBusy = "sending"; wakeNote = nil
+        Task {
+            let r = await model.testOutsideWake(projectId)
+            wakeBusy = nil
+            wakeNote = r
+        }
+    }
+
+    // MARK: Details — Settings (Coding and Routines ahead of it while the flag is on)
+
+    private func detailsSections(_ project: Project) -> [PaneSection] {
+        var out: [PaneSection] = []
+        for block in AgentPane.detailsOrder(mine: isMine) {
+            switch block {
+            case .coding:
+                out.append(.title("Coding"))
+                out.append(.card([AnyView(codingRow(project))], separatorInset: PaneKit.separatorInset(.avatar(AnyView(EmptyView())))))
+            case .routines:
+                out.append(.title("Routines"))
+                let list = model.routines[project.id] ?? []
+                let rows: [AnyView] = list.isEmpty
+                    ? [AnyView(PaneRow(title: "No routines yet", subtitle: "Ask \(project.name) to schedule one", titleTint: theme.muted))]
+                    : list.map { r in AnyView(routineRow(project, r)) }
+                out.append(.card(rows))
+            case .settings:
+                out.append(.title("Settings"))
+                out.append(.card(settingsRows(project)))
+            }
+        }
+        return out
+    }
+
+    /// "Coding": the agent's workspace — a spinner while a turn runs, the status under the
+    /// name; a tap opens the Computer tab.
+    private func codingRow(_ project: Project) -> some View {
+        let workspace = model.boxReport?.workspace(project.id)
+        let streaming = model.isStreaming(project: project.id)
+        let working = streaming || workspace?.running == true
+        let status = AgentPane.codingStatus(streaming: streaming, workspace: workspace, machine: model.machine.state, alwaysOn: model.machine.alwaysOn)
+        return Button { withAnimation(.snappy(duration: 0.2)) { tab = "Computer" } } label: {
+            PaneRow(leading: .avatar(AnyView(activityLeading(working))), title: project.name, subtitle: status, chevron: true)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(project.name), \(status)")
+    }
+
+    /// The row's picture slot: the system spinner (Grok's 15 pt eight-spoke, accent) while
+    /// working, the code glyph when idle.
+    @ViewBuilder
+    private func activityLeading(_ working: Bool) -> some View {
+        if working {
+            ProgressView().controlSize(.small).tint(theme.accent)
+                .frame(width: PaneKit.avatar, height: PaneKit.avatar)
+        } else {
+            Image(systemName: "chevron.left.forwardslash.chevron.right")
+                .font(theme.font(17, weight: .medium))
+                .foregroundStyle(theme.muted)
+                .frame(width: PaneKit.avatar, height: PaneKit.avatar)
+        }
+    }
+
+    private func routineRow(_ project: Project, _ r: Routine) -> some View {
+        let isOn = Binding<Bool>(
+            get: { model.routines[project.id]?.first(where: { $0.id == r.id })?.enabled ?? r.enabled },
+            set: { on in model.setRoutineEnabled(project.id, routineId: r.id, enabled: on) }
+        )
+        return PaneRow(title: r.name, subtitle: AgentPane.routineStatus(r, now: nowMs()), trailing: AnyView(
+            Toggle("", isOn: isOn).labelsHidden().tint(theme.online)
+        ))
+    }
+
+    /// Model · Reasoning · Voice (Model alone on someone else's agent).
+    private func settingsRows(_ project: Project) -> [AnyView] {
+        var rows: [AnyView] = [
+            AnyView(
+                Button { if isMine { showModel = true } } label: {
+                    PaneRow(title: "Model", value: project.shortModel, chevron: isMine)
+                }
+                .buttonStyle(.plain)
+                .disabled(!isMine)
+            ),
+        ]
+        guard isMine else { return rows }
+        rows.append(AnyView(
+            Button { showReasoning = true } label: {
+                PaneRow(title: "Reasoning", value: project.effort.label, chevron: true)
+            }
+            .buttonStyle(.plain)
+        ))
+        rows.append(AnyView(
+            Button { showVoice = true } label: {
+                PaneRow(title: "Voice", value: voiceLine(project), chevron: true)
+            }
+            .buttonStyle(.plain)
+        ))
+        return rows
+    }
+
+    // MARK: Library — everything the agent's chats hold
+
+    private func librarySections(_ project: Project) -> [PaneSection] {
+        // One list by day with the long-press preview — the Mac's `profiles/library.rs`
+        // ([feedback library-list-ios-2026-10-25]).
+        LibraryList.sections(items: items, empty: "Nothing shared in \(project.name)'s chats yet.")
+    }
+
+    // MARK: Computer — the agent's box
+
+    private func computerSections(_ project: Project) -> [PaneSection] {
+        let report = model.boxReport
+        var out: [PaneSection] = []
+        for block in AgentPane.computerOrder(mine: isMine, report: report) {
+            switch block {
+            case .machine:
+                out.append(.title("Machine"))
+                out.append(.card(machineRows(project, report)))
+            case .resources:
+                guard let r = report else { continue }
+                out.append(.title("Resources"))
+                var rows: [AnyView] = []
+                if let disk = AgentPane.freeOf(available: r.diskAvailableMb, total: r.diskTotalMb) { rows.append(AnyView(PaneRow(title: "Disk", value: disk))) }
+                if let mem = AgentPane.freeOf(available: r.memAvailableMb, total: r.memTotalMb) { rows.append(AnyView(PaneRow(title: "Memory", value: mem))) }
+                // CPU share from the box's cgroup (agentd ≥ 0.6.277); the load average is the host's
+                // inside Daytona (`loadIsHost`), drawn only when it is really the box's and no CPU exists.
+                if let cpu = r.cpuPct {
+                    rows.append(AnyView(PaneRow(title: "CPU", value: "\(Int(cpu.rounded())) %")))
+                } else if let load = r.load1m, !r.loadIsHost {
+                    rows.append(AnyView(PaneRow(title: "Load", value: String(format: "%.2f", load))))
+                }
+                if let up = r.uptimeS { rows.append(AnyView(PaneRow(title: "Up for", value: AgentPane.durationS(up)))) }
+                out.append(.card(rows))
+            case .running:
+                out.append(.title("Running now"))
+                out.append(.card(runningRows(report), separatorInset: PaneKit.separatorInset(.avatar(AnyView(EmptyView())))))
+            }
+        }
+        return out
+    }
+
+    /// Status (dot + "Awake · 5 h 12 m"), where it runs, spec, image, spend today — `GET /machine`
+    /// plus the report; someone else's agent: status and class from its project.
+    private func machineRows(_ project: Project, _ report: BoxReport?) -> [AnyView] {
+        var rows: [AnyView] = []
+        if isMine {
+            let m = model.machine
+            var status = m.reported ? m.label : "Checking…"
+            if m.state == .awake, let s = report?.awakeForS { status += " · \(AgentPane.durationS(s))" }
+            rows.append(AnyView(statusRow(status, mark: machineMark(m.state))))
+            rows.append(AnyView(PaneRow(title: "Where it runs", value: m.whereItRuns)))
+            // The spec line names the provider first; "Where it runs" already did.
+            var spec = m.spec
+            let provider = m.provider.prefix(1).uppercased() + m.provider.dropFirst() + " · "
+            if !m.provider.isEmpty, spec.hasPrefix(provider) { spec.removeFirst(provider.count) }
+            if !spec.isEmpty { rows.append(AnyView(PaneRow(title: "Machine", value: spec))) }
+            if let image = report?.image ?? m.image { rows.append(AnyView(PaneRow(title: "Image", value: image))) }
+            if m.spendCapUsd > 0 || m.spendTodayUsd > 0 {
+                let spend = m.spendCapUsd > 0 ? String(format: "$%.2f of $%.0f", m.spendTodayUsd, m.spendCapUsd) : String(format: "$%.2f", m.spendTodayUsd)
+                rows.append(AnyView(PaneRow(title: "Spend today", value: spend)))
+            }
+        } else {
+            let raw = project.machineState ?? ""
+            let state: BoxState = project.machineAlwaysOn && raw != "error" ? .awake : (BoxState.fromWire(raw) ?? project.state)
+            let shown = Machine(state: state, since: nil, spec: "")
+            rows.append(AnyView(statusRow(shown.label, mark: machineMark(state))))
+            if let klass = project.machineClass, !klass.isEmpty { rows.append(AnyView(PaneRow(title: "Machine", value: klass))) }
+        }
+        return rows
+    }
+
+    /// The Status row's trailing mark (Jacob, 2026-10-27: never a coloured dot): the
+    /// spinner while the machine wakes, the fault glyph on error, nothing at rest.
+    private func statusRow(_ status: String, mark: StatusMark?) -> some View {
+        PaneRow(title: "Status", value: status, trailing: mark.map { AnyView(StatusMarkView(mark: $0, size: 10)) })
+    }
+
+    /// Every workspace with a turn running (spinner, name, elapsed, tool calls), or why
+    /// there is nothing to show.
+    private func runningRows(_ report: BoxReport?) -> [AnyView] {
+        guard let r = report else {
+            return [AnyView(PaneRow(title: "Checking the machine…", titleTint: theme.muted))]
+        }
+        guard r.reachable else {
+            return [AnyView(PaneRow(title: "The machine did not answer", subtitle: r.unreachableReason, titleTint: theme.muted))]
+        }
+        let running = r.running
+        guard !running.isEmpty else {
+            let n = r.workspaces.count
+            return [AnyView(PaneRow(title: "Nothing running", subtitle: "\(n) workspace\(n == 1 ? "" : "s") on this machine", titleTint: theme.muted))]
+        }
+        return running.map { w in
+            let detail = AgentPane.runningDetail(w)
+            return AnyView(PaneRow(leading: .avatar(AnyView(activityLeading(true))), title: w.name, subtitle: detail.isEmpty ? nil : detail))
+        }
+    }
+
+    /// The Voice row's value — the chosen voice's name, or "Default" (the Mac's
+    /// `voicepicker::current_label`); the raw id until the catalog arrives.
+    private func voiceLine(_ p: Project) -> String {
+        guard let id = p.voice else { return "Default" }
+        return model.voiceCatalog?.voices.first { $0.id == id }?.name ?? id.capitalized
+    }
 }
 
 // MARK: - Reasoning picker (the Mac's Reasoning dropdown)
@@ -519,93 +956,121 @@ struct ReasoningPickerView: View {
     }
 }
 
-/// "Give a person access…": pick an Arbos user; their agents may then message this agent
-/// (`PUT /projects/{id}/message-access`). The secrets' "Who can direct" picker, same shape.
-struct AddMessageGrantSheet: View {
-    @EnvironmentObject private var model: AppModel
+
+// MARK: - Session log ([feedback sidecar-sessions-ios-2026-10-28])
+
+/// One log line: the time on the left, then the chat (or the session event) over the muted
+/// latency / detail. Only an error's sentence is red — no dots, no badges (2026-10-27 rule).
+struct SessionLogRow: View {
     @Environment(\.theme) private var theme
-    @Environment(\.dismiss) private var dismiss
-    let project: Project
-    @State private var query = ""
-    @State private var remote: [Person] = []
-    @State private var busy = false
-    @State private var error: String?
+    let entry: OutsideLogEntry
+    let chatTitle: String
 
-    private var already: Set<String> { Set(project.messageGrants.map(\.id)) }
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: PaneKit.gap) {
+            Text(entry.clock)
+                .font(theme.font(Theme.small))
+                .foregroundStyle(theme.muted)
+                .monospacedDigit()
+                .frame(width: 66, alignment: .leading)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.isSession ? entry.sessionTitle : chatTitle)
+                    .font(theme.font(Theme.body))
+                    .italic(entry.isSession)
+                    .foregroundStyle(entry.isSession ? theme.muted : theme.text)
+                    .lineLimit(1)
+                let detail = entry.detail
+                if !detail.isEmpty {
+                    Text(detail)
+                        .font(theme.font(Theme.small))
+                        .italic(entry.isSession)
+                        .foregroundStyle(entry.isError ? theme.danger : theme.muted)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, PaneKit.inset)
+        .padding(.vertical, 6)
+        .frame(minHeight: PaneKit.rowHeight)
+        .accessibilityElement(children: .combine)
+    }
+}
 
-    private var candidates: [Person] {
-        let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        var out = q.isEmpty
-            ? model.directory
-            : model.directory.filter { $0.handle.lowercased().contains(q) || ($0.name ?? "").lowercased().contains(q) }
-        for p in remote where !out.contains(where: { $0.id == p.id }) { out.append(p) }
-        return out.filter { $0.id != model.user?.id && !already.contains($0.id) }
+/// The View all page: every line, newest first, grouped by day, with the pane's tab pill as
+/// the filter (All · Replies · Errors · Sessions) — the same labels as the Mac page.
+struct SessionLogView: View {
+    @Environment(\.theme) private var theme
+    @EnvironmentObject private var model: AppModel
+    let projectId: Id
+    @State private var filter = "All"
+
+    static let filters = ["All", "Replies", "Errors", "Sessions"]
+
+    /// "Last reply 9.8 s · 12 wakes today" for the card's header.
+    static func headerLine(summary: OutsideLogSummary?, entries: [OutsideLogEntry]) -> String? {
+        var parts: [String] = []
+        if let ms = summary?.lastReplyMs { parts.append(String(format: "Last reply %.1f s", Double(ms) / 1000)) }
+        let today = entries.filter { $0.kind == "wake" && $0.day == "Today" }.count
+        if today > 0 { parts.append("\(today) wake\(today == 1 ? "" : "s") today") }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    /// Which lines a filter keeps.
+    static func keeps(_ e: OutsideLogEntry, filter: String) -> Bool {
+        switch filter {
+        case "Replies": return e.kind == "reply" || e.kind == "post"
+        case "Errors": return e.isError
+        case "Sessions": return e.isSession
+        default: return e.shown
+        }
+    }
+
+    private var sections: [PaneSection] {
+        let entries = (model.outsideLogs[projectId] ?? []).reversed().filter { Self.keeps($0, filter: filter) }
+        var out: [PaneSection] = []
+        var day = ""
+        var rows: [AnyView] = []
+        for e in entries {
+            if e.day != day {
+                if !rows.isEmpty { out.append(.card(rows)); rows = [] }
+                out.append(.title(e.day))
+                day = e.day
+            }
+            rows.append(AnyView(SessionLogRow(entry: e, chatTitle: e.chat.map { model.outsideLogChatTitle($0, agent: projectId) } ?? "")))
+        }
+        if !rows.isEmpty { out.append(.card(rows)) }
+        if out.isEmpty {
+            switch filter {
+            case "Replies": out.append(.empty("No replies yet"))
+            case "Errors": out.append(.empty("No errors"))
+            case "Sessions": out.append(.empty("No session events yet"))
+            default: out.append(.empty("No wakes yet"))
+            }
+        }
+        out.append(.footnote("Written by the sidecar on the agent's machine. Never message text or secrets."))
+        return out
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                Text("The person you add may have their agents message \(project.name). Their messages land in \(project.name)'s chat, and \(project.name) answers them. Your own agents can always message it.")
-                    .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
-                TextField("", text: $query, prompt: Text("Search by name or @handle").foregroundStyle(theme.placeholder))
-                    .font(theme.font(Theme.body))
-                    .foregroundStyle(theme.text)
-                    .padding(.horizontal, 14)
-                    .frame(height: Theme.fieldHeight)
-                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
-                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                if candidates.isEmpty {
-                    Text(query.isEmpty ? "Nobody else on Arbos yet." : "No one named that.")
-                        .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
-                } else {
-                    VStack(spacing: 0) {
-                        ForEach(Array(candidates.prefix(12))) { p in
-                            Button {
-                                Haptics.pick()
-                                Task { await grant(p) }
-                            } label: { PersonRow(person: p) }
-                            .buttonStyle(.plain)
-                            .disabled(busy)
-                        }
-                    }
-                }
-                if let error {
-                    Text(error).font(theme.font(Theme.tiny)).foregroundStyle(theme.danger)
+        ZStack(alignment: .top) {
+            theme.bg.ignoresSafeArea()
+            ScrollView {
+                VStack(spacing: 18) {
+                    Color.clear.frame(height: PaneKit.pageTop)
+                    ProfilePane(
+                        hero: PaneHero(picture: .glyph("list.bullet.rectangle"), name: "Session log",
+                                       subtitle: model.project(projectId)?.name ?? ""),
+                        tabs: Self.filters,
+                        selected: $filter,
+                        body: sections
+                    )
+                    Color.clear.frame(height: 40)
                 }
             }
-            .padding(.horizontal, 24)
-            .padding(.top, 16)
-            .padding(.bottom, 32)
+            ProfileTopBar(screen: .agentPage) { EmptyView() }
         }
-        .scrollDismissesKeyboard(.interactively)
-        .background(theme.bg)
-        .navigationTitle("Who may message \(project.name)")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                Button("Cancel") { dismiss() }.foregroundStyle(theme.text)
-            }
-        }
-        .task { await model.loadDirectory(force: false) }
-        .task(id: query) {
-            let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard q.count >= 2 else { remote = []; return }
-            try? await Task.sleep(nanoseconds: 250_000_000)
-            remote = await model.searchPeople(q)
-        }
-    }
-
-    private func grant(_ p: Person) async {
-        busy = true
-        defer { busy = false }
-        do {
-            let grants = try await model.relay.setMessageGrant(project.id, grantee: "@\(p.handle)", enabled: true)
-            if let i = model.projects.firstIndex(where: { $0.id == project.id }) { model.projects[i].messageGrants = grants }
-            dismiss()
-        } catch {
-            self.error = error.localizedDescription
-        }
+        .toolbar(.hidden, for: .navigationBar)
+        .task(id: projectId) { await model.refreshOutsideLog(projectId) }
     }
 }
