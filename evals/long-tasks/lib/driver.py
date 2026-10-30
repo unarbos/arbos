@@ -38,6 +38,17 @@ def rows_after(doc, user_msg_id):
     return out
 
 
+def rows_before(doc, user_msg_id, n):
+    """The last `n` rows with text before the user message, as `role: text` lines."""
+    out = []
+    for m in doc.get("messages", []):
+        if m.get("id") == user_msg_id:
+            break
+        if text_of(m):
+            out.append(f"{m.get('senderHandle') or m.get('role')}: {text_of(m)[:600]}")
+    return out[-n:]
+
+
 def pending_approvals(doc, skip_secret_cards=False):
     out = []
     for m in doc.get("messages", []):

@@ -418,6 +418,8 @@ class Lane(threading.Thread):
                 if turn_spec.get(k):
                     turn_spec[k] = turn_spec[k].replace("{D}", D).replace("{P}", proj_dir).replace("{RUN}", tag)
             ctx = {"reply": dm.get("reply") or dm.get("all_text") or "", "all_text": dm.get("all_text"), "dm": dm, "res": res, "gen_truth": gen_truth, "state": task_state}
+            if turn.get("judge_prior_rows") and res.get("user_msg_id"):
+                ctx["prior_rows"] = dr.rows_before(res.get("doc") or {}, res["user_msg_id"], turn["judge_prior_rows"])
             for k in ("reply_regex", "reply_regex_not"):
                 if turn_spec.get(k) and task_state.get("old_name"):
                     turn_spec[k] = turn_spec[k].replace("{OLD_NAME}", re.escape(task_state["old_name"]))
