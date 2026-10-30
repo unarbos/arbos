@@ -34,9 +34,11 @@ LANES = ["a", "b", "c", "d"]
 # lane "e" runs after every other lane has finished: tasks that disturb the whole box (a machine
 # restart kills every lane's background jobs — run 5 lost l1 that way)
 LATE_LANES = ["e"]
-# Named subsets: `--subset regression` is the cheap check after an agentd/prompt change (≈ 40 min, ≈ $0.10).
+# Named subsets: `--subset regression` is the check after an agentd/prompt change (≈ 60 min, ≈ $0.60); it holds
+# every task that failed or went unmeasured in a scheduled run, s1→s2→s3 in order on one lane.
 SUBSETS = {
-    "regression": ["b4-teardown-after-handoff", "b5-busy-agent-probes", "b6-subagent-failed-start", "m1-todos-roundtrip", "m6-preference-applied-cross-chat", "l1-slow-pipeline", "c1-fix-bug", "c2-add-feature", "c3-rename-refactor", "c4-fix-and-commit", "c5-make-ci-check-pass", "p1-self-reference-cite-file"],
+    "regression": ["b4-teardown-after-handoff", "b5-busy-agent-probes", "b6-subagent-failed-start", "m1-todos-roundtrip", "m6-preference-applied-cross-chat", "l1-slow-pipeline", "c1-fix-bug", "c2-add-feature", "c3-rename-refactor", "c4-fix-and-commit", "c5-make-ci-check-pass", "p1-self-reference-cite-file",
+                   "b2-status-while-busy", "b7-steer-mid-task", "b8-steer-in-turn", "c6-self-reference-repo-change", "d1-disk-pressure-recovery", "g2-agent-to-agent-hello", "g4-forward-message", "h4-mention-as-object-stays-quiet", "h5-renamed-owner-one-name", "j3-two-jobs-stop-one-by-name", "m8-search-across-chats", "m12-draft-reply-not-sent", "s1-cron-create-fires", "s2-cron-edit", "s3-cron-delete", "x5-chart-post-blocked-honest"],
     "quick": ["r3-fact-with-source", "f3-log-aggregate", "m1-todos-roundtrip", "c1-fix-bug", "x1-delete-needs-confirmation"],
     # Grok parity (docs/duplex-agent-design.md §4): every tasks/parity/* task plus the existing tasks that cover
     # group chat, agent-to-agent, budget cap, restart, safety and injection (categories 27–33 of the design).
