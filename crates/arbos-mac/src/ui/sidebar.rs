@@ -1132,6 +1132,13 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     render_with(shell, false, cx)
 }
 
+/// The column's background. While the rail morph runs, `rail::render_morph`
+/// paints it under this layout and fades the layout out, so a second wash
+/// here would stack on Glass (translucent) and thin out by half-way.
+pub(crate) fn column_fill(theme: &Theme, hide_morphing: bool) -> Option<gpui::Hsla> {
+    (!hide_morphing).then(|| theme.chrome())
+}
+
 /// `hide_morphing`: while the collapse / open slide runs, the strip's discs,
 /// the rows' pictures, the selected row's fill and my footer picture are drawn
 /// by `ui::rail`'s overlay on their way between the two layouts — here they
@@ -1617,7 +1624,7 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
         .flex_shrink_0()
         .flex()
         .flex_col()
-        .bg(theme.chrome())
+        .when_some(column_fill(&theme, hide_morphing), |el, fill| el.bg(fill))
         .border_r_1()
         .border_color(theme.border)
         .child(strip)
