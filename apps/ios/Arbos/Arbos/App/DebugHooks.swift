@@ -247,7 +247,8 @@ enum DebugHooks {
     static let perfTouch: Bool = value("ARBOS_PERF_TOUCH") == "1"
     /// Scroll rig A/B: comma-separated gestures left out of the chat screen for this launch —
     /// `time` (transcript swipe-left time peek), `back` (the full-screen swipe-right back; the
-    /// system edge pop is never off), `longpress` (bubble long-press menu).
+    /// system edge pop is never off), `reply` (the swipe-left-on-a-bubble reply),
+    /// `longpress` (bubble long-press menu).
     static let gesturesOff: Set<String> = Set((value("ARBOS_PERF_GESTURES_OFF") ?? "").split(separator: ",").map(String.init))
     /// With `ARBOS_FIXTURE_LONG_ROWS`: an Arbonites-shaped history — code cards, chart bubbles,
     /// @mentions, reactions and real (generated) pictures on top of the prose / markdown rows.
