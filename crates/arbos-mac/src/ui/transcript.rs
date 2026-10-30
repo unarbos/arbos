@@ -4116,7 +4116,7 @@ impl MessageRowCache {
 
 /// Fingerprint of the fields that change a message's rows: text, parts,
 /// status, completed time, reactions, and the stamp / sender-run context
-/// (plus speech / details / thumbs / width-class flags).
+/// (plus speech / details / thumbs / width-class / link-card flags).
 #[allow(clippy::too_many_arguments)]
 fn message_render_version(
     message: &Message,
@@ -4130,6 +4130,7 @@ fn message_render_version(
     names_senders: bool,
     // Width class: multi-party layout changes who gets a name caption.
     width_class: u8,
+    link_previews: bool,
 ) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     message.id.hash(&mut h);
@@ -4191,6 +4192,11 @@ fn message_render_version(
     me_id.hash(&mut h);
     names_senders.hash(&mut h);
     width_class.hash(&mut h);
+    // Whether the card draws, not the setting itself: the Link previews toggle and Remove
+    // preview (`preview: "off"`) rebuild only the rows that carry a card.
+    link_preview_of(message, link_previews)
+        .is_some()
+        .hash(&mut h);
     h.finish()
 }
 
@@ -4366,6 +4372,7 @@ pub fn build_rows_with_cache(
             thumb_keys,
             names_senders,
             width_class,
+            link_previews,
         );
         if let Some(hit) = cache.entries.get(&message.id) {
             if hit.version == version {
