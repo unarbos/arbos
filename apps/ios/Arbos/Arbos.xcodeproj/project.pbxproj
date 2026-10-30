@@ -59,6 +59,7 @@
 		A1BB00000000000000000035 /* ReactionPickerUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000034 /* ReactionPickerUITests.swift */; };
 		A1BB00000000000000000037 /* ChatSearchCloseUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000036 /* ChatSearchCloseUITests.swift */; };
 		A1BB4D3E7A0C29F1B6E85039 /* MentionListOverlayUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB4D3E7A0C29F1B6E85038 /* MentionListOverlayUITests.swift */; };
+		A1CAB7000000000000000002 /* CaptureRigUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CAB7000000000000000001 /* CaptureRigUITests.swift */; };
 		A11B0000000000000000A002 /* LibraryList.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11B0000000000000000A001 /* LibraryList.swift */; };
 		A15EC9000000000000000002 /* AgentPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15EC9000000000000000001 /* AgentPicker.swift */; };
 		A11B0000000000000000A004 /* LibraryListTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11B0000000000000000A003 /* LibraryListTests.swift */; };
@@ -303,6 +304,7 @@
 		A1BB00000000000000000034 /* ReactionPickerUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReactionPickerUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000036 /* ChatSearchCloseUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSearchCloseUITests.swift; sourceTree = "<group>"; };
 		A1BB4D3E7A0C29F1B6E85038 /* MentionListOverlayUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MentionListOverlayUITests.swift; sourceTree = "<group>"; };
+		A1CAB7000000000000000001 /* CaptureRigUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureRigUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000010 /* ArbosUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ArbosUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A11B0000000000000000A001 /* LibraryList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryList.swift; sourceTree = "<group>"; };
 		A15EC9000000000000000001 /* AgentPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentPicker.swift; sourceTree = "<group>"; };
@@ -764,6 +766,7 @@
 				A1BB00000000000000000034 /* ReactionPickerUITests.swift */,
 				A1BB00000000000000000036 /* ChatSearchCloseUITests.swift */,
 				A1BB4D3E7A0C29F1B6E85038 /* MentionListOverlayUITests.swift */,
+				A1CAB7000000000000000001 /* CaptureRigUITests.swift */,
 			);
 			path = ArbosUITests;
 			sourceTree = "<group>";
@@ -1146,6 +1149,7 @@
 				A1BB00000000000000000035 /* ReactionPickerUITests.swift in Sources */,
 				A1BB00000000000000000037 /* ChatSearchCloseUITests.swift in Sources */,
 				A1BB4D3E7A0C29F1B6E85039 /* MentionListOverlayUITests.swift in Sources */,
+				A1CAB7000000000000000002 /* CaptureRigUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
