@@ -20,7 +20,9 @@
 //! and role (`owner` | `guest`) in the prompt. The author is the row's `sender: user:<id>`,
 //! else the person whose device wrote it (the relay's box roster lists each member's device
 //! ids), else the only human in the chat; a row nobody can be matched to is "a member" with
-//! guest powers — the owner is never assumed (#1580). Guests may direct ordinary work; they may
+//! guest powers — the owner is never assumed (#1580). That resolution answers two questions
+//! that must not share a value: `display_author_of` for whose name is drawn, `asker_standing`
+//! for what the turn is allowed to do. Guests may direct ordinary work; they may
 //! not use the owner's secrets unless the owner put them on that secret's People list. Agents
 //! address people by display name, never `@handle`. The owner's credits pay; audit lines carry
 //! `asked_by`.
@@ -182,13 +184,10 @@ impl PeopleChatInfo {
     ///
     /// The row's `senderHandle` is deliberately **not** a step here, and must not become one.
     /// It is payload — whoever wrote the row chose it, and nothing on the way in checks it
-    /// against the authenticated writer — while this answer is more than a label: it becomes
-    /// `Asker.role`, and `role == "owner"` is what lets `vault.rs`'s `asker_may_direct` skip a
-    /// grant's People-list check. An authorship claim therefore has to rest on something the
-    /// row cannot choose for itself. Every writer of a human row into a people doc sets
+    /// against the authenticated writer. Every writer of a human row into a people doc sets
     /// `sender: user:<id>` unconditionally, so step 1 answers all of them; `senderHandle` is
     /// still what [`author_handle`] *labels* an author with, which is a display question.
-    pub(crate) fn author_of(&self, msg: &MessageView) -> Option<String> {
+    fn resolve_author(&self, msg: &MessageView) -> Option<String> {
         let sender = msg.rest.get("sender").and_then(Value::as_str).unwrap_or("");
         if let Some(uid) = sender.strip_prefix("user:") {
             if !uid.is_empty() {
@@ -204,6 +203,64 @@ impl PeopleChatInfo {
         match humans.as_slice() {
             [only] => Some(only.clone()),
             _ => None,
+        }
+    }
+
+    /// Whose name is drawn next to this row: the window lines, the reply attribution, the
+    /// judge's "who is asking" label, the budget sentence.
+    ///
+    /// **Display only.** Nothing that decides what an agent is allowed to do may read this —
+    /// use [`Self::asker_standing`]. The two were one function until a resolution step added
+    /// for a labelling reason (a row's own `senderHandle`, #1580) turned out to be an
+    /// authorisation input as well, because the same `Option<String>` fed both. Keeping them
+    /// apart is what stops the next labelling convenience from doing it again.
+    pub(crate) fn display_author_of(&self, msg: &MessageView) -> Option<String> {
+        self.resolve_author(msg)
+    }
+
+    /// Where this row's author stands for authorisation: the owner, a named non-owner, or
+    /// nobody the box can name.
+    ///
+    /// Same evidence as [`Self::display_author_of`], different contract. It names the owner
+    /// here rather than leaving every gate to compare ids for itself, and it cannot answer
+    /// "unknown" in a shape a caller can mistake for a person. How much the answer is worth
+    /// rests on the relay's push path, which is the only place that still knows the
+    /// authenticated writer of a row (`arbos-relay/src/rooms.rs`, `inspect_push`); by the time
+    /// a row reaches agentd it is a line in a merged document with no author attached.
+    pub(crate) fn asker_standing(&self, msg: &MessageView) -> AskerStanding {
+        match self.resolve_author(msg) {
+            Some(uid) if uid == self.owner_user => AskerStanding::Owner,
+            Some(uid) => AskerStanding::Identified(uid),
+            None => AskerStanding::Unidentified,
+        }
+    }
+}
+
+/// Where the person directing the current turn stands, as far as the box can tell.
+///
+/// Deliberately not `Option<String>`. The gate in `vault.rs` used to read an `Option<Asker>`
+/// in which `None` meant *both* "the owner is asking" and "no asker was resolved for this
+/// turn", and both took the allow branch — so every new way to produce the second silently
+/// became a way to be treated as the first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AskerStanding {
+    /// The project's owner.
+    Owner,
+    /// A named person who is not the owner: a grant's People list decides.
+    Identified(String),
+    /// Somebody is asking and the box cannot name them. Never the owner.
+    Unidentified,
+    /// No asker was resolved for this turn at all — the Project's own chats, where only the
+    /// owner and invited guests write, or a people-chat turn whose prelude did not run.
+    Unresolved,
+}
+
+impl AskerStanding {
+    /// The word the prompt, the reply attribution and the audit line use.
+    pub fn role(&self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+            Self::Identified(_) | Self::Unidentified | Self::Unresolved => "guest",
         }
     }
 }
@@ -316,11 +373,17 @@ pub struct Asker {
     pub handle: String,
     /// Display name when known; empty means speak the bare handle.
     pub name: String,
-    pub role: &'static str,
+    /// Where this person stands for authorisation. Gates read this; `role()` is for prose.
+    pub standing: AskerStanding,
     pub message_id: String,
 }
 
 impl Asker {
+    /// The word the prompt, the reply attribution and the audit line use for this person.
+    pub fn role(&self) -> &'static str {
+        self.standing.role()
+    }
+
     /// How to speak about this person: display name, else bare handle (no `@`).
     pub fn spoken(&self) -> &str {
         let n = self.name.trim();
@@ -740,7 +803,7 @@ pub(crate) fn recent_people_context_for(
                 .unwrap_or("agent");
             format!("@{handle} (agent)")
         } else {
-            let author = info.author_of(m);
+            let author = info.display_author_of(m);
             author_spoken(m, info, author.as_deref())
         };
         let full = reply_to.as_deref() == Some(m.id.as_str())
@@ -1075,7 +1138,7 @@ impl Agent {
                                 .unwrap_or("agent")
                         )
                     } else {
-                        author_spoken(&r, info, info.author_of(&r).as_deref())
+                        author_spoken(&r, info, info.display_author_of(&r).as_deref())
                     };
                     json!({ "from": from, "text": crate::truncate::clip_marked(&r.text(), 500, &r.id, None) })
                 });
@@ -1118,7 +1181,7 @@ impl Agent {
         };
         let my_role = my_mention_role(&msg, info, &self.cfg.project_id, &slug);
         let chips = mentioned_agent_ids(&msg);
-        let asker = author_spoken(&msg, info, info.author_of(&msg).as_deref());
+        let asker = author_spoken(&msg, info, info.display_author_of(&msg).as_deref());
         let mut candidates: Vec<Candidate> = info
             .members
             .iter()
@@ -1299,10 +1362,11 @@ impl Agent {
             };
             (msg, recent)
         };
-        // Who is asking: the row's `sender`, its device, its handle, or the only human in the
-        // chat. An author the row does not identify is "a member" with guest powers — the owner
-        // is never assumed (#1580).
-        let author = info.author_of(&msg);
+        // Who is asking: the row's `sender`, its device, or the only human in the chat. An
+        // author the row does not identify is "a member" with guest powers — the owner is never
+        // assumed (#1580). The gate reads `standing`; the label fields below are prose.
+        let standing = info.asker_standing(&msg);
+        let author = info.display_author_of(&msg);
         let handle = author_handle(&msg, &info, author.as_deref());
         // The owner's spoken name comes from their relay profile (PATCH /me), not the row's
         // `senderName` (one device's label); guests keep the member card / row name.
@@ -1311,17 +1375,14 @@ impl Agent {
             (Some(a), Some(n)) if *a == info.owner_user => n.clone(),
             _ => author_spoken(&msg, &info, author.as_deref()),
         };
-        let role = match author.as_deref() {
-            Some(uid) if uid == info.owner_user => "owner",
-            Some(_) | None => "guest",
-        };
         let asker = Asker {
             user_id: author.clone().unwrap_or_else(|| UNKNOWN_ASKER.to_owned()),
             handle: handle.clone(),
             name: spoken.clone(),
-            role,
+            standing,
             message_id: user_msg_id.to_owned(),
         };
+        let role = asker.role();
         self.people
             .askers
             .lock()
@@ -1509,7 +1570,7 @@ impl Agent {
                 user_id: user_id.to_owned(),
                 handle: handle.to_owned(),
                 name: spoken.clone(),
-                role: "guest",
+                standing: AskerStanding::Identified(user_id.to_owned()),
                 message_id: user_msg_id.to_owned(),
             },
         );
@@ -1853,9 +1914,9 @@ mod tests {
     ///
     /// This test used to assert the handle fallback as a feature ("a handle alone still finds
     /// the member"), which made it a defence of the thing it should have caught: the handle is
-    /// payload, and `author_of`'s answer reaches `Asker.role` and from there the vault's
-    /// `asker_may_direct`. The case below is the one that matters — an unrecognised device and
-    /// the *owner's* handle must come back unknown.
+    /// payload, and this resolution used to be what `Asker.standing` was computed from. The
+    /// case below is the one that matters — an unrecognised device and the *owner's* handle
+    /// must come back unknown.
     #[test]
     fn a_handle_alone_never_names_a_rows_author() {
         let group = PeopleChatInfo {
@@ -1882,16 +1943,16 @@ mod tests {
 
         // Explicit sender wins.
         let labelled = msg("hi", json!({}));
-        assert_eq!(group.author_of(&labelled).as_deref(), Some("gh_2"));
+        assert_eq!(group.display_author_of(&labelled).as_deref(), Some("gh_2"));
         assert_eq!(author_handle(&labelled, &group, Some("gh_2")), "sam");
         assert_eq!(author_spoken(&labelled, &group, Some("gh_2")), "Sam Okafor");
 
         // The guest's device (with or without the `dev:` prefix) names the guest.
         let by_device = bare(json!({ "deviceId": "dev:DEVSAM" }));
-        assert_eq!(group.author_of(&by_device).as_deref(), Some("gh_2"));
+        assert_eq!(group.display_author_of(&by_device).as_deref(), Some("gh_2"));
         assert_eq!(
             group
-                .author_of(&bare(json!({ "deviceId": "DEVJ2" })))
+                .display_author_of(&bare(json!({ "deviceId": "DEVJ2" })))
                 .as_deref(),
             Some("gh_1")
         );
@@ -1899,23 +1960,23 @@ mod tests {
         // answer is what `Asker.role` reads as "owner".
         let claims_owner = bare(json!({ "deviceId": "dev:anon", "senderHandle": "Jacob" }));
         assert_eq!(
-            group.author_of(&claims_owner),
+            group.display_author_of(&claims_owner),
             None,
             "the owner's handle on a row is a claim, not evidence"
         );
         let claims_guest = bare(json!({ "deviceId": "dev:anon", "senderHandle": "Sam" }));
-        assert_eq!(group.author_of(&claims_guest), None);
+        assert_eq!(group.display_author_of(&claims_guest), None);
         // The handle is still how the row is *labelled*, which is a display question.
         assert_eq!(author_handle(&claims_guest, &group, None), "Sam");
 
         // Unknown device, no handle, two humans: nobody — and not the owner.
         let unknown = bare(json!({ "deviceId": "dev:anon" }));
-        assert_eq!(group.author_of(&unknown), None);
+        assert_eq!(group.display_author_of(&unknown), None);
         assert_eq!(author_handle(&unknown, &group, None), UNKNOWN_SPOKEN);
         assert_eq!(author_spoken(&unknown, &group, None), UNKNOWN_SPOKEN);
         // A handle the roster lacks is still kept as the label (never swapped for the owner).
         let stranger = bare(json!({ "deviceId": "dev:anon", "senderHandle": "priya" }));
-        assert_eq!(group.author_of(&stranger), None);
+        assert_eq!(group.display_author_of(&stranger), None);
         assert_eq!(author_handle(&stranger, &group, None), "priya");
         assert_eq!(author_spoken(&stranger, &group, None), "priya");
         let named = bare(json!({ "senderName": "Priya N." }));
@@ -1942,7 +2003,7 @@ mod tests {
             kind: "dm".into(),
             ..Default::default()
         };
-        assert_eq!(dm.author_of(&unknown).as_deref(), Some("gh_1"));
+        assert_eq!(dm.display_author_of(&unknown).as_deref(), Some("gh_1"));
         // Two humans and no roster devices: still unknown.
         let no_devices = PeopleChatInfo {
             members: vec![
@@ -1952,7 +2013,54 @@ mod tests {
             owner_user: "gh_1".into(),
             ..Default::default()
         };
-        assert_eq!(no_devices.author_of(&unknown), None);
+        assert_eq!(no_devices.display_author_of(&unknown), None);
+    }
+
+    /// The display answer and the authorisation answer come from the same evidence and are not
+    /// the same value. A row the roster cannot place still gets a label — that is a drawing
+    /// question — but its standing is `Unidentified`, which no gate may read as the owner.
+    #[test]
+    fn the_authorisation_answer_is_not_the_display_answer() {
+        let group = PeopleChatInfo {
+            members: vec![
+                json!({ "member": "user:gh_1", "handle": "jacob", "name": "Jacob", "devices": ["DEVJ1"] }),
+                json!({ "member": "user:gh_2", "handle": "sam", "name": "Sam Okafor", "devices": ["DEVSAM"] }),
+                json!({ "member": "agent:01HPROJ", "handle": "bob" }),
+            ],
+            owner_user: "gh_1".into(),
+            slug: "bob".into(),
+            kind: "group".into(),
+            ..Default::default()
+        };
+        let row = |extra: Value| {
+            let mut m = msg("who is on call tonight?", json!({}));
+            m.rest = json!({ "sender": "user" });
+            if let (Some(r), Some(e)) = (m.rest.as_object_mut(), extra.as_object()) {
+                for (k, v) in e {
+                    r.insert(k.clone(), v.clone());
+                }
+            }
+            m
+        };
+
+        let owners_row = row(json!({ "deviceId": "DEVJ1" }));
+        assert_eq!(group.asker_standing(&owners_row), AskerStanding::Owner);
+        assert_eq!(group.asker_standing(&owners_row).role(), "owner");
+
+        let guests_row = row(json!({ "deviceId": "DEVSAM" }));
+        assert_eq!(
+            group.asker_standing(&guests_row),
+            AskerStanding::Identified("gh_2".into())
+        );
+
+        // Claims the owner's handle, device unknown: labelled "Jacob", authorised as nobody.
+        let claims_owner = row(json!({ "deviceId": "dev:anon", "senderHandle": "jacob" }));
+        assert_eq!(
+            group.asker_standing(&claims_owner),
+            AskerStanding::Unidentified
+        );
+        assert_eq!(group.asker_standing(&claims_owner).role(), "guest");
+        assert_eq!(author_handle(&claims_owner, &group, None), "jacob");
     }
 
     /// #1538: Jacob (@unarbos) named an agent "unarbos", and the composer resolved `@unarbos`
@@ -2186,7 +2294,7 @@ mod attribution_tests {
         assert!(!prelude.contains("from Jacob (owner)"), "{prelude}");
         let asker = agent.people.asker(chat).unwrap();
         assert_eq!(asker.user_id, UNKNOWN_ASKER);
-        assert_eq!(asker.role, "guest");
+        assert_eq!(asker.role(), "guest");
         assert_eq!(asker.spoken(), "a member");
         let fields = agent.people_reply_fields(chat).unwrap().fields;
         assert!(
