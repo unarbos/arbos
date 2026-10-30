@@ -984,11 +984,20 @@ fn unsorted_entries(shell: &Shell, cx: &Context<Shell>) -> Vec<ListEntry> {
 /// A **DM** keeps the bare line, because the row's own title *is* that one
 /// person — naming them again would only repeat the row to itself — and a DM
 /// has nobody else it could be.
+///
+/// The DM line keeps its **ellipsis**, where Scout's group forms carry none
+/// (coordinator ruling, 2026-10-30). Scout asked for the three group forms and
+/// said nothing about the 1:1 line, which has read `typing…` for as long as it
+/// has existed; changing a surface nobody reported is how a fix earns its own
+/// bug report. So one row in this list reads `typing…` and another reads
+/// `Sam is typing`. That difference is deliberate and known, not an oversight:
+/// unifying it later is one string, whereas restoring a shipped behaviour is a
+/// visible flip-flop.
 fn typing_line(state: &AppState, space: &Project) -> Option<String> {
     if space.is_people_group() {
         arbos_core::presence::typing_line(&presence::typing_names(state, space))
     } else {
-        (!state.typing_in(&space.id).is_empty()).then(|| "typing".to_string())
+        (!state.typing_in(&space.id).is_empty()).then(|| "typing…".to_string())
     }
 }
 
@@ -4339,11 +4348,12 @@ mod status_cell_tests {
     }
 
     /// Scout's report ([feedback group-typing-names-2026-10-30]): a group row's
-    /// typing indicator said only "typing", naming nobody. It now names them in
+    /// typing indicator said only "typing…", naming nobody. It now names them in
     /// Scout's own wording (Jacob's call, 2026-10-30), read from
     /// `arbos_core::presence` so the iPhone says the same. A DM row keeps the
-    /// bare line: its own title is that one person, so there is nothing to
-    /// disambiguate.
+    /// bare line, ellipsis included: its own title is that one person, so there
+    /// is nothing to disambiguate, and Scout's forms were asked for the group
+    /// rows only.
     #[gpui::test]
     fn a_group_row_names_who_is_typing_and_a_dm_row_keeps_the_bare_line(cx: &mut TestAppContext) {
         let (_rt, state, _shell, vcx) = mount(cx);
@@ -4398,8 +4408,9 @@ mod status_cell_tests {
         // "Sam Rivera", so naming him again would only repeat the row.
         assert_eq!(
             typing_words(&state, vcx, "dm").as_deref(),
-            Some("typing"),
-            "a DM keeps the bare line"
+            Some("typing…"),
+            "a DM keeps the bare line, ellipsis and all — Scout's forms were \
+             for group rows, and this one was never reported"
         );
     }
 
