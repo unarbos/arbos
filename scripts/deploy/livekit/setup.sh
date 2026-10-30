@@ -32,7 +32,8 @@ PRINT_ONLY=0
 [[ "${1:-}" == "--print-env" ]] && PRINT_ONLY=1
 
 # ---- settings (env overrides; existing livekit.env is the baseline) ---------------------------------
-# shellcheck disable=SC1090  # the host's livekit.env, outside the repo
+# the host's livekit.env, outside the repo
+# shellcheck disable=SC1090
 [[ -f "$ENV_FILE" ]] && . "$ENV_FILE"
 LIVEKIT_HOST="${LIVEKIT_HOST:-livekit.arbos.life}"
 TURN_DOMAIN="${TURN_DOMAIN:-turn.arbos.life}"
