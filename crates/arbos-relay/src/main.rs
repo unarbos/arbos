@@ -262,6 +262,16 @@ async fn main() -> anyhow::Result<()> {
         default_provider: env_nonempty("ARBOS_DEFAULT_PROVIDER"),
         fleet: fleet::FleetCfg::from_env(),
         connectors_mock: std::env::var("ARBOS_CONNECTORS_MOCK").is_ok_and(|v| v == "1"),
+        connector_users: std::env::var("ARBOS_CONNECTORS_USERS")
+            .ok()
+            .map(|v| {
+                v.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
         channels_mock: std::env::var("ARBOS_CHANNELS_MOCK").is_ok_and(|v| v == "1"),
         image_mock: std::env::var("ARBOS_IMAGE_MOCK").is_ok_and(|v| v == "1"),
         avatar_retry_backoff_ms: std::env::var("ARBOS_AVATAR_RETRY_MS")
