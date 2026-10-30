@@ -37,9 +37,13 @@ enum Keychain {
 
     static func storeData(_ data: Data, account: String) throws {
         let query = baseQuery(account: account)
+        // `ThisDeviceOnly`: the relay binds these tokens to this device, so they are no use
+        // anywhere else — and without it the item travels in an encrypted iTunes/Finder
+        // backup and comes back live on whatever device that backup is restored to.
+        // `AfterFirstUnlock` stays, so a wake behind the lock screen can still read it.
         let attributes: [String: Any] = [
             kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
         ]
         let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
         if status == errSecItemNotFound {
