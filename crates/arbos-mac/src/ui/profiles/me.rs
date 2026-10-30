@@ -12,7 +12,7 @@ use gpui::{
 };
 
 use crate::app::ProfilePage;
-use crate::model::{now_ms, MachineState};
+use crate::model::{now_ms, GroupAdd, MachineState};
 use crate::sync::user_error::UserError;
 use crate::ui::devices;
 use crate::ui::error_note;
@@ -68,6 +68,7 @@ impl Shell {
         let permission = state.notification_permission();
         let read_receipts = state.read_receipts;
         let link_previews = state.link_previews;
+        let group_add = state.group_add;
         let secrets_value = if state.secrets.loaded {
             state.secrets.row_value()
         } else {
@@ -880,6 +881,47 @@ impl Shell {
             ))
         };
 
+        // ----- Privacy page body -------------------------------------------------
+        // The iPhone's Settings › Privacy: who may add me to a people group,
+        // one row per choice, a checkmark on mine (the hoverpick lists' mark).
+        let privacy_body = {
+            let mut group = settings_group(&theme);
+            for choice in GroupAdd::ALL {
+                let picked = group_add == choice;
+                group = group.child(
+                    glass::hot_row(
+                        ElementId::Name(format!("privacy-group-add-{}", choice.wire()).into()),
+                        choice.label(),
+                        &theme,
+                    )
+                    .debug_selector(move || format!("privacy-group-add-{}", choice.wire()))
+                    .when(picked, |el| {
+                        el.child(sf_symbols::glyph("checkmark", 14.0, theme.accent))
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.state.update(cx, |s, cx| s.set_group_add(choice, cx));
+                    })),
+                );
+            }
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(22.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(kit::section_title("Groups", &theme))
+                        .child(group),
+                )
+                .child(footnote(
+                    "Controls who can put you in a group without asking. “People I message” \
+                     means anyone you already have a direct chat with."
+                        .into(),
+                    &theme,
+                ))
+        };
+
         // ----- Updates page body -------------------------------------------------
         let updates_body = {
             // A failed install is the page's note (under the pane header, before the card):
@@ -1197,6 +1239,7 @@ impl Shell {
                     SettingsPage::Machine => machine_body,
                     SettingsPage::Appearance => appearance_body,
                     SettingsPage::Notifications => notifications_body,
+                    SettingsPage::Privacy => privacy_body,
                     SettingsPage::Updates => updates_body,
                     SettingsPage::About => about_body,
                     SettingsPage::Devices => devices_body,
@@ -1222,6 +1265,7 @@ impl Shell {
                     | SettingsPage::Machine
                     | SettingsPage::Appearance
                     | SettingsPage::Notifications
+                    | SettingsPage::Privacy
                     | SettingsPage::Updates
                     | SettingsPage::About
                     | SettingsPage::Devices => unreachable!("handled above"),
@@ -1395,7 +1439,7 @@ impl Shell {
             ));
         } else {
             // ----- Settings: D80 cards, mockup g order, every Mac setting kept --------
-            // Appearance · Notifications.
+            // Appearance · Notifications · Privacy.
             body.push(Section::Card(vec![
                 page_row(
                     "settings-appearance",
@@ -1423,6 +1467,16 @@ impl Shell {
                     &theme,
                     cx,
                 )
+                .into_any_element(),
+                page_row(
+                    "settings-privacy",
+                    "hand.raised",
+                    SettingsPage::Privacy,
+                    Some(group_add.label().into()),
+                    &theme,
+                    cx,
+                )
+                .debug_selector(|| "settings-privacy".into())
                 .into_any_element(),
             ]));
             // Secrets · Devices (Credits · Connected apps hidden until implemented).
@@ -1526,5 +1580,149 @@ impl Shell {
             self,
             cx,
         )
+    }
+}
+
+#[cfg(test)]
+mod privacy_tests {
+    //! Settings › Privacy on the Mac (ARB-631): the iPhone's "who can add me to groups" row,
+    //! its page, and the `PATCH /me {group_add}` it sends.
+
+    use futures::future::BoxFuture;
+    use gpui::{point, AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext};
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::app::AppState;
+    use crate::model::AccountView;
+    use crate::sync::{ClientCommand, SyncEvent, SyncSource};
+    use crate::ui::motion::PulseClock;
+
+    struct Idle;
+
+    impl SyncSource for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            _commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    fn mount(
+        cx: &mut TestAppContext,
+    ) -> (
+        tokio::runtime::Runtime,
+        Entity<AppState>,
+        Entity<Shell>,
+        &mut VisualTestContext,
+    ) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| {
+            gpui_tokio::init_from_handle(cx, handle);
+            cx.set_global(Theme::dark(Surface::Matte));
+            if !cx.has_global::<PulseClock>() {
+                PulseClock::init(cx);
+            }
+        });
+        let state = cx.new(|cx| AppState::new(Box::new(Idle), cx));
+        state.update(cx, |s, cx| {
+            s.apply(
+                SyncEvent::Account(Some(AccountView {
+                    id: "gh_1".into(),
+                    login: "tester".into(),
+                    name: "Tester".into(),
+                    ..AccountView::default()
+                })),
+                cx,
+            );
+            s.open_profile(ProfilePage::Me, cx);
+            s.set_profile_tab(1, cx);
+        });
+        let (shell, vcx) = cx.add_window_view(|window, cx| Shell::new(state.clone(), window, cx));
+        vcx.simulate_resize(gpui::size(px(1180.0), px(1000.0)));
+        vcx.run_until_parked();
+        (rt, state, shell, vcx)
+    }
+
+    fn settle(shell: &Entity<Shell>, vcx: &mut VisualTestContext) {
+        for _ in 0..3 {
+            shell.update(vcx, |_, cx| cx.notify());
+            vcx.run_until_parked();
+        }
+    }
+
+    fn click(vcx: &mut VisualTestContext, shell: &Entity<Shell>, id: &'static str) {
+        let b = vcx
+            .debug_bounds(id)
+            .unwrap_or_else(|| panic!("{id} is on screen"));
+        let centre = point(b.left() + b.size.width / 2.0, b.top() + b.size.height / 2.0);
+        vcx.simulate_click(centre, Modifiers::default());
+        settle(shell, vcx);
+    }
+
+    #[test]
+    fn group_add_words_are_the_relays() {
+        for choice in GroupAdd::ALL {
+            assert_eq!(GroupAdd::from_wire(choice.wire()), choice);
+        }
+        assert_eq!(
+            GroupAdd::ALL.map(GroupAdd::wire),
+            ["anyone", "people_i_know", "nobody"]
+        );
+        assert_eq!(
+            GroupAdd::ALL.map(GroupAdd::label),
+            ["Anyone", "People I message", "Nobody"]
+        );
+        assert_eq!(GroupAdd::from_wire(""), GroupAdd::Anyone);
+        assert_eq!(GroupAdd::from_wire("friends"), GroupAdd::Anyone);
+    }
+
+    #[gpui::test]
+    fn the_privacy_row_opens_its_page_and_a_choice_patches_me(cx: &mut TestAppContext) {
+        let (_rt, state, shell, vcx) = mount(cx);
+        let mut commands = state.update(vcx, |s, _| s.take_command_channel());
+        settle(&shell, vcx);
+
+        click(vcx, &shell, "settings-privacy");
+        assert_eq!(
+            shell.read_with(&*vcx, |sh, _| sh.settings_page),
+            SettingsPage::Privacy
+        );
+        for choice in GroupAdd::ALL {
+            let id: &'static str =
+                Box::leak(format!("privacy-group-add-{}", choice.wire()).into_boxed_str());
+            assert!(vcx.debug_bounds(id).is_some(), "{id} is on the page");
+        }
+
+        click(vcx, &shell, "privacy-group-add-nobody");
+        assert_eq!(state.read_with(&*vcx, |s, _| s.group_add), GroupAdd::Nobody);
+        let sent: Vec<ClientCommand> = std::iter::from_fn(|| commands.try_recv().ok()).collect();
+        assert!(
+            sent.iter()
+                .any(|c| matches!(c, ClientCommand::SetGroupAdd(GroupAdd::Nobody))),
+            "the choice goes to the relay: {sent:?}"
+        );
+
+        // The picked row again sends nothing; the relay's `GET /me` answer wins.
+        click(vcx, &shell, "privacy-group-add-nobody");
+        assert!(!std::iter::from_fn(|| commands.try_recv().ok())
+            .any(|c| matches!(c, ClientCommand::SetGroupAdd(_))));
+        state.update(vcx, |s, cx| {
+            s.apply(SyncEvent::GroupAdd(GroupAdd::PeopleIMessage), cx)
+        });
+        assert_eq!(
+            state.read_with(&*vcx, |s, _| s.group_add),
+            GroupAdd::PeopleIMessage
+        );
     }
 }

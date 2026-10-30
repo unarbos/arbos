@@ -124,6 +124,8 @@ pub(crate) enum SettingsPage {
     Machine,
     Appearance,
     Notifications,
+    /// Who may add me to people groups (the iPhone's Settings › Privacy).
+    Privacy,
     Updates,
     About,
     Connectors,
@@ -147,9 +149,10 @@ impl SettingsPage {
     /// its order); the search index must find each of them
     /// ([feedback search-settings-mac-2026-10-26], `palette::tests`).
     #[cfg(test)]
-    pub(crate) const LISTED: [SettingsPage; 8] = [
+    pub(crate) const LISTED: [SettingsPage; 9] = [
         SettingsPage::Appearance,
         SettingsPage::Notifications,
+        SettingsPage::Privacy,
         SettingsPage::Secrets,
         SettingsPage::Devices,
         SettingsPage::ThisMac,
@@ -165,6 +168,7 @@ impl SettingsPage {
             SettingsPage::Machine => "Machine",
             SettingsPage::Appearance => "Appearance",
             SettingsPage::Notifications => "Notifications",
+            SettingsPage::Privacy => "Privacy",
             SettingsPage::Updates => "Updates",
             SettingsPage::About => "About",
             SettingsPage::Connectors => "Connected apps",
@@ -185,6 +189,7 @@ impl SettingsPage {
                 | SettingsPage::Machine
                 | SettingsPage::Appearance
                 | SettingsPage::Notifications
+                | SettingsPage::Privacy
                 | SettingsPage::Updates
                 | SettingsPage::About
                 | SettingsPage::Devices
@@ -199,6 +204,7 @@ impl SettingsPage {
             | SettingsPage::Machine
             | SettingsPage::Appearance
             | SettingsPage::Notifications
+            | SettingsPage::Privacy
             | SettingsPage::Updates
             | SettingsPage::About
             | SettingsPage::Connectors
@@ -1139,9 +1145,10 @@ impl Shell {
             // that page) — rig; the pane itself is opened below.
             settings_page: match open_settings.as_deref() {
                 Some("connectors") => SettingsPage::Connectors,
-                // Rig: `ARBOS_OPEN_SETTINGS=notifications|machine|updates|about|appearance|credits`
+                // Rig: `ARBOS_OPEN_SETTINGS=notifications|privacy|machine|updates|about|appearance|credits`
                 // lands on that subpage.
                 Some("notifications") => SettingsPage::Notifications,
+                Some("privacy") => SettingsPage::Privacy,
                 Some("machine") => SettingsPage::Machine,
                 Some("updates") => SettingsPage::Updates,
                 Some("about") => SettingsPage::About,
@@ -1429,6 +1436,7 @@ impl Shell {
             | SettingsPage::Machine
             | SettingsPage::Appearance
             | SettingsPage::Notifications
+            | SettingsPage::Privacy
             | SettingsPage::Updates
             | SettingsPage::About => {}
             SettingsPage::Devices => self.state.update(cx, |s, cx| s.devices_refresh(cx)),
@@ -1478,6 +1486,7 @@ impl Shell {
             | SettingsPage::Machine
             | SettingsPage::Appearance
             | SettingsPage::Notifications
+            | SettingsPage::Privacy
             | SettingsPage::Updates
             | SettingsPage::About
             | SettingsPage::Devices => {}
@@ -1619,6 +1628,7 @@ impl Shell {
             | SettingsPage::Machine
             | SettingsPage::Appearance
             | SettingsPage::Notifications
+            | SettingsPage::Privacy
             | SettingsPage::Updates
             | SettingsPage::About
             | SettingsPage::Devices => true,

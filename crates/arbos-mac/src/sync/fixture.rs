@@ -2008,6 +2008,9 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     daily_cap_usd: Some(20.0),
                 })));
         }
+        ClientCommand::SetGroupAdd(choice) => {
+            let _ = shared.events.send(SyncEvent::GroupAdd(choice));
+        }
         ClientCommand::SetDescription {
             project_id,
             description,
