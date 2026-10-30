@@ -5914,6 +5914,27 @@ mod caret_tests {
     }
 
     #[gpui::test]
+    fn shift_backspace_and_shift_delete_remove_the_selection(cx: &mut TestAppContext) {
+        let (d, cx) = draft(cx);
+        let before = text(&d, cx);
+        for key in ["shift-backspace", "shift-delete"] {
+            put_caret(&d, d.rows[1] + 4, cx);
+            cx.simulate_keystrokes("shift-up shift-up shift-up");
+            let (range, _) = selection(&d, cx);
+            assert!(!range.is_empty(), "⇧↑ selected something");
+            cx.simulate_keystrokes(key);
+            assert_eq!(
+                text(&d, cx),
+                format!("{}{}", &before[..range.start], &before[range.end..]),
+                "{key} with ⇧ still held removes the selection"
+            );
+            assert!(selection(&d, cx).0.is_empty());
+            cx.update(|_, cx| d.input.update(cx, |i, cx| i.set_text(before.clone(), cx)));
+            cx.run_until_parked();
+        }
+    }
+
+    #[gpui::test]
     fn option_arrows_still_step_words(cx: &mut TestAppContext) {
         let (d, cx) = draft(cx);
         put_caret(&d, 0, cx);
