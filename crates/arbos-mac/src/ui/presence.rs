@@ -154,6 +154,63 @@ pub fn sentence(typing: &[&str], working: &[&str], detail: Option<&str>, queued:
     clauses.join(" · ")
 }
 
+/// The typing clause for `names`, in the one wording the app already has: this
+/// module's [`sentence`] and [`first_name`], which the iPhone's `PresenceLine`
+/// mirrors — alone the full display name, first names from two on, "A and B",
+/// "A, B and C", then "A, B and N others". `None` when nobody is typing.
+///
+/// The chat list calls this so its row cannot drift from the row over the
+/// composer ([feedback group-typing-names-2026-10-30], Scout: a group row said
+/// only "typing…", naming nobody). There is no second format to keep in step.
+/// `names` must already be in a stable order ([`typing_names`]).
+pub fn typing_sentence(names: &[String]) -> Option<String> {
+    if names.is_empty() {
+        return None;
+    }
+    // The row's own rule: one name stays whole, from two on they shorten, so
+    // the line stays one line.
+    let several = names.len() > 1;
+    let shown: Vec<String> = names
+        .iter()
+        .map(|n| if several { first_name(n) } else { n.clone() })
+        .collect();
+    let shown: Vec<&str> = shown.iter().map(String::as_str).collect();
+    Some(sentence(&shown, &[], None, false))
+}
+
+/// Everyone typing in `space`, by the display name the chat list already shows
+/// for that person, in an order that does not move while they type.
+///
+/// [`AppState::typing_in`] answers newest ping first, and a typist re-pings
+/// every 3 s, so that order churns while the same people type — the words would
+/// swap between "Mira and Sam" and "Sam and Mira" on every frame. Sorting by
+/// the name instead keeps the line still: it changes when the set of typists
+/// changes, never because a ping landed. (Typing marks are keyed by the space
+/// id for a people chat, as the chat list reads them.)
+pub fn typing_names(state: &AppState, space: &Project) -> Vec<String> {
+    let mut rows: Vec<(String, String)> = state
+        .typing_in(&space.id)
+        .into_iter()
+        .map(|handle| {
+            let name = space
+                .people
+                .iter()
+                .find(|p| p.handle == handle)
+                .map(Person::display_name)
+                // Typing from someone the roster has no card for yet: the same
+                // fallback this module's own row draws.
+                .unwrap_or_else(|| format!("@{handle}"));
+            (name, handle)
+        })
+        .collect();
+    rows.sort_by(|(a, ah), (b, bh)| {
+        a.to_lowercase()
+            .cmp(&b.to_lowercase())
+            .then_with(|| ah.cmp(bh))
+    });
+    rows.into_iter().map(|(name, _)| name).collect()
+}
+
 /// Everyone typing or working in `chat_id`, newest first; `None` when the row
 /// has nothing to say. Pictures are the same ones the header pill and the
 /// rows use for that person / agent (D79 disc, D92 leaf, or the photo).
@@ -509,6 +566,53 @@ mod text_tests {
         };
         assert_eq!(two.text(), "Mira and Sam are typing…");
         assert_eq!(first_name("@sam"), "@sam");
+    }
+
+    /// The chat list's typing words are this row's words ([feedback
+    /// group-typing-names-2026-10-30], Scout: a group row said only "typing…").
+    /// The cases are `apps/ios/Arbos/ArbosTests/PresenceRowTests.swift`'s, so
+    /// the two platforms cannot drift: one name in full, first names from two
+    /// on, "A, B and C", then "A, B and N others" — and the ellipsis is the one
+    /// character, never three dots.
+    #[test]
+    fn the_chat_lists_typing_words_are_this_rows_words() {
+        let line = |names: &[&str]| -> Option<String> {
+            typing_sentence(&names.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>())
+        };
+        assert_eq!(line(&[]), None, "nobody typing: the row keeps its preview");
+        assert_eq!(
+            line(&["Sam Okafor"]).as_deref(),
+            Some("Sam Okafor is typing…")
+        );
+        assert_eq!(
+            line(&["Mira Kaplan", "Sam Okafor"]).as_deref(),
+            Some("Mira and Sam are typing…")
+        );
+        assert_eq!(
+            line(&["Sam Okafor", "Mira Kaplan", "Kai Osei"]).as_deref(),
+            Some("Sam, Mira and Kai are typing…")
+        );
+        assert_eq!(
+            line(&["Sam", "Mira", "Kai", "Ava"]).as_deref(),
+            Some("Sam, Mira and 2 others are typing…")
+        );
+        let one = line(&["Sam"]).expect("a line");
+        assert!(one.ends_with('…'), "the ellipsis character: {one}");
+        assert!(!one.contains("..."), "never three dots: {one}");
+
+        // The same people on the row over the composer read the same.
+        let p = |name: &str| Participant {
+            name: name.to_string(),
+            activity: Activity::Typing,
+            picture: gpui::Empty.into_any_element(),
+            page: None,
+        };
+        let row = Presence {
+            participants: vec![p("Mira Kaplan"), p("Sam Okafor")],
+            detail: None,
+            queued: false,
+        };
+        assert_eq!(line(&["Mira Kaplan", "Sam Okafor"]), Some(row.text()));
     }
 
     #[test]
