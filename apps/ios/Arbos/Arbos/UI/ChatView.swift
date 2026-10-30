@@ -1018,6 +1018,7 @@ struct ChatSession: View {
             // No background of its own: the bar floats on `BottomBarFadeView` in the canvas.
             // A drag that starts here selects text or slides the mic — never "back".
             .backSwipeComposerBar()
+            .modifier(ChatBarHeightProbe())
         }
         .overlayPreferenceValue(RowFrameKey.self) { anchors in
             GeometryReader { geo in
@@ -2062,6 +2063,7 @@ struct ChatSession: View {
             // composer a second time; the canvas fade is the one treatment.
             .modifier(NoBottomScrollEdgeEffect())
             .scrollDismissesKeyboard(.interactively)
+            .modifier(TranscriptBottomInsetProbe())
             // Tap empty chat chrome to dismiss the keyboard and free the transcript — and, with
             // Search-in-chat up, close it ([feedback iphone-search-close-2026-10-28], Jacob:
             // "clicking away from the search should close it"). A tap on a result row runs
@@ -4143,3 +4145,69 @@ private struct SearchResultTap: ViewModifier {
         }
     }
 }
+
+// UI-test hooks, DEBUG builds only (release builds compile both modifiers to a no-op). The rule they
+// let a test check: the chat bar growing must not change the transcript's bottom inset. The failure
+// that rule prevents — a LazyVStack dropping every visible row when that inset grows — shows on
+// devices and not in the simulator, so a test asserts the inset instead of the blank: the bar's
+// height went up (`chat-bar-height`) and the inset did not (`transcript-bottom-inset`). Values are
+// points with one decimal, e.g. "34.0"; "-1.0" until the first sample.
+
+/// `transcript-bottom-inset`: the transcript scroll view's bottom content inset (safe area included).
+private struct TranscriptBottomInsetProbe: ViewModifier {
+    #if DEBUG
+    @State private var inset: CGFloat = -1
+    #endif
+
+    func body(content: Content) -> some View {
+        #if DEBUG
+        if #available(iOS 18, *) {
+            content
+                .onScrollGeometryChange(for: CGFloat.self) { $0.contentInsets.bottom } action: { _, new in inset = new }
+                .overlay(alignment: .topLeading) {
+                    TestProbeElement(id: "transcript-bottom-inset", label: "Transcript bottom inset", value: inset)
+                }
+        } else {
+            content
+        }
+        #else
+        content
+        #endif
+    }
+}
+
+/// `chat-bar-height`: the chat bar's own height (error note, status row, banners, chips, field, pads).
+private struct ChatBarHeightProbe: ViewModifier {
+    #if DEBUG
+    @State private var height: CGFloat = -1
+    #endif
+
+    func body(content: Content) -> some View {
+        #if DEBUG
+        content
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
+            .overlay(alignment: .topLeading) {
+                TestProbeElement(id: "chat-bar-height", label: "Chat bar height", value: height)
+            }
+        #else
+        content
+        #endif
+    }
+}
+
+#if DEBUG
+private struct TestProbeElement: View {
+    let id: String
+    let label: String
+    let value: CGFloat
+
+    var body: some View {
+        Color.clear.frame(width: 1, height: 1)
+            .allowsHitTesting(false)
+            .accessibilityElement()
+            .accessibilityLabel(label)
+            .accessibilityIdentifier(id)
+            .accessibilityValue(String(format: "%.1f", value))
+    }
+}
+#endif
