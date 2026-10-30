@@ -200,7 +200,7 @@ impl DocHost {
         self.last_active_ms = now_ms();
     }
 
-    /// No traffic for [`room_idle_ms`]. The cheap half of the idle check.
+    /// No traffic for [`room_idle_ms`]. Cheap, unlike [`DocHost::work_in_flight`].
     pub fn quiet(&self, now: i64) -> bool {
         room_idle_ms() > 0
             && !self.keep_open
@@ -1074,8 +1074,14 @@ impl SyncHub {
                     }
                     // #2367: a room nobody has used for `room_idle_ms` closes itself. The
                     // session ends here; the relay reopens the room on the next row.
-                    let quiet = { host.lock().await.quiet(now_ms()) };
-                    if quiet && idle_checked_at.elapsed() >= IDLE_CHECK_EVERY {
+                    // Both halves of this are cheap, and both must hold before the once-a-minute
+                    // budget is spent: a room still waiting on an ack would otherwise burn the
+                    // whole minute and close a minute late for no reason.
+                    let ready = {
+                        let h = host.lock().await;
+                        h.quiet(now_ms()) && h.settled()
+                    };
+                    if ready && idle_checked_at.elapsed() >= IDLE_CHECK_EVERY {
                         idle_checked_at = std::time::Instant::now();
                         if self.close_cold(&chat_id, host, "idle", true).await {
                             return Ok(());
@@ -1408,9 +1414,15 @@ mod tests {
             wait_for("catch-up", || async { host.lock().await.caught_up }).await;
         }
 
-        /// Pretend the room has seen no traffic for its whole quiet window.
+        /// Pretend the room has seen no traffic for its whole quiet window. Waits for the room
+        /// to finish its own opening traffic first: an ack landing after this would touch the
+        /// room and push the quiet window back out.
         async fn make_quiet(&self, chat_id: &str) {
             let host = self.hub.host(chat_id).await.expect("room open");
+            wait_for("the room to settle", || async {
+                host.lock().await.closable(now_ms(), false)
+            })
+            .await;
             host.lock().await.last_active_ms = now_ms() - room_idle_ms() - 1;
         }
 
