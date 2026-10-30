@@ -16,7 +16,9 @@ import SwiftUI
 /// Tokens (`Theme.swift`): fill `dangerSoft`, radius 16, padding 12 / 14, disc 18 in `danger`
 /// with a white "!", sentence `Theme.small` 15 / 20 in `text`, Try again a 32 pt capsule (15
 /// semibold), Details 15 `muted` + chevron, the Details block `codeChip` radius 12 mono 12 / 17
-/// `muted` with a 26 pt Copy capsule; a toast adds a shadow and a × top-right.
+/// `muted` with a 26 pt Copy capsule; a toast adds a shadow, and any note given an `onDismiss`
+/// draws a × top-right (every toast, and the chat-level note since
+/// [feedback machine-banner-glass-2026-10-30]).
 struct ErrorNote: View {
     enum Style { case inline, toast }
 
@@ -32,6 +34,11 @@ struct ErrorNote: View {
     var onTryAgain: (() -> Void)? = nil
     var onSignIn: (() -> Void)? = nil
     var onDismiss: (() -> Void)? = nil
+    /// The note hangs over the transcript rather than sitting on an opaque page (the chat-level
+    /// note, pinned under the header). On Glass it then needs a material under its tint, or the
+    /// sentence reads against the bubbles scrolling beneath it
+    /// ([feedback machine-banner-glass-2026-10-30]).
+    var overTranscript: Bool = false
     /// How many times this same failure arrived while the note stands; 2 and up draws a small
     /// "×N" after the sentence (`{id}-count`) instead of a second note.
     var count: Int = 1
@@ -47,6 +54,11 @@ struct ErrorNote: View {
     static let copyHeight: CGFloat = 26
     /// The gap a surface leaves between the note and what follows it.
     static let gap: CGFloat = 12
+
+    /// The identity of a dismissible pinned note, so closing one does not hide the next. The
+    /// same sentence after a fresh state change is a different note and shows again
+    /// ([feedback machine-banner-glass-2026-10-30]).
+    static func dismissKey(stateSince: Int64?, raw: String) -> String { "\(stateSince ?? 0)|\(raw)" }
 
     private var pillFill: Color {
         scheme == .dark ? Color(hex: "#2A2A2C")! : Color(hex: "#E8E8E8")!
@@ -75,11 +87,18 @@ struct ErrorNote: View {
         }
         .padding(.vertical, Self.padV)
         .padding(.leading, Self.padH)
-        .padding(.trailing, style == .toast ? Self.padH + 22 : Self.padH)
+        .padding(.trailing, onDismiss == nil ? Self.padH : Self.padH + 22)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: Self.radius, style: .continuous).fill(theme.dangerSoft))
+        .background {
+            let shape = RoundedRectangle(cornerRadius: Self.radius, style: .continuous)
+            if overTranscript {
+                OverlayNoteSurface(shape: shape, tint: theme.dangerSoft)
+            } else {
+                shape.fill(theme.dangerSoft)
+            }
+        }
         .overlay(alignment: .topTrailing) {
-            if style == .toast, let onDismiss {
+            if let onDismiss {
                 Button(action: onDismiss) {
                     Image(systemName: "xmark")
                         .font(.system(size: 13, weight: .semibold))

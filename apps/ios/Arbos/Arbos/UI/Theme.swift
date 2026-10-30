@@ -535,6 +535,21 @@ enum ChatHeaderGlass {
         let m = material(surface: surface, liquidGlassAvailable: liquidGlassAvailable)
         return PillGlass(material: m, clear: m != .solid, tinted: false)
     }
+
+    /// The material under a note pinned over the transcript — the chat-level `ErrorNote`
+    /// ([feedback machine-banner-glass-2026-10-30], Arbonites: the "Can't reach your machine"
+    /// banner is unreadable in glass mode). The note's own `dangerSoft` is a 14 % wash, which
+    /// reads only while an opaque page sits behind it; on Glass the transcript runs under the
+    /// header chrome instead, so the sentence needs the blur this material gives it. `.regular`,
+    /// not `.clear`: a whole paragraph reads over it, as with the Search-in-chat bar.
+    ///
+    /// `nil` means "no material layer, keep the bare tint" — Matte, where the page is already
+    /// opaque, and the light appearance until Jacob rules on light glass.
+    static func overlayNoteMaterial(surface: Surface, isDark: Bool,
+                                    liquidGlassAvailable: Bool = liquidGlassAvailable) -> HeaderMaterial? {
+        guard isDark, surface == .glass else { return nil }
+        return material(surface: surface, liquidGlassAvailable: liquidGlassAvailable)
+    }
 }
 
 /// The glass behind a header control: one shape, three materials.
@@ -875,6 +890,25 @@ struct PillSurface<S: InsettableShape>: View {
         } else {
             let glass = ChatHeaderGlass.pillGlass(surface: .glass)
             HeaderGlassBackground(shape: shape, material: glass.material, tinted: glass.tinted, clear: glass.clear)
+        }
+    }
+}
+
+/// The surface under a note pinned over the transcript: on dark Glass the material of
+/// `ChatHeaderGlass.overlayNoteMaterial` with the note's own `tint` over it, so the sentence
+/// reads against a blurred transcript rather than a sharp one; elsewhere the bare tint, which
+/// is all it has ever been and all it needs over an opaque page.
+struct OverlayNoteSurface<S: InsettableShape>: View {
+    @Environment(\.theme) private var theme
+    let shape: S
+    let tint: Color
+
+    var body: some View {
+        ZStack {
+            if let material = ChatHeaderGlass.overlayNoteMaterial(surface: theme.surface, isDark: theme.isDark) {
+                HeaderGlassBackground(shape: shape, material: material)
+            }
+            shape.fill(tint)
         }
     }
 }
