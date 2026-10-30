@@ -703,8 +703,8 @@ impl BubbleSelectable {
 /// bytes), what it shows and where a click goes.
 pub struct Chip {
     pub range: Range<usize>,
-    /// Bytes of the picture cell at the start of the run (`@` or `@` + hair space).
-    pub cell: usize,
+    /// How the run divides up: the pad cells and the picture cell.
+    pub text: mention::ChipText,
     pub mention: Rc<Mention>,
     pub mentions: Rc<Mentions>,
     /// The accent the pill is tinted with (see [`mention::pill_color`]).
@@ -745,16 +745,12 @@ impl BubbleSelectable {
         let mut chips = Vec::with_capacity(found.len());
         let mut runs = runs;
         for (range, mention) in found {
-            let cell = if text[range.clone()].starts_with(mention::CELL) {
-                mention::CELL.len()
-            } else {
-                1
-            };
-            runs = chip_runs(runs, range.clone(), cell, accent);
+            let chip_text = mention::chip_text(&text[range.clone()]);
+            runs = chip_runs(runs, range.clone(), chip_text.cell, accent);
             chips.push(Chip {
                 key: (self.at.key.clone(), at + range.start..at + range.end),
                 range,
-                cell,
+                text: chip_text,
                 mention,
                 mentions: self.mentions.clone(),
                 accent,
@@ -1369,19 +1365,33 @@ fn chip_at<'a>(
         .find(|c| c.clickable() && c.range.contains(&ix))
 }
 
-/// The chip's pill: one rounded quad per line fragment the `@Name` run
-/// occupies, `PILL_PAD_X` wider than the glyphs on each side and
-/// `PILL_PAD_Y` taller above and below the line box. Painted before the text.
+/// The chip's pill: one rounded quad per line fragment the chip's run
+/// occupies, `PILL_PAD_Y` taller than the line box above and below.
+///
+/// Across the line the pill stays inside the run, because the run reserves a
+/// [`mention::PAD`] cell at each end for it; only an end with no pad cell
+/// falls back to the painted `PILL_PAD_X` inset. A wrapped chip takes its
+/// leading inset on the first fragment and its trailing one on the last, so
+/// neither half reaches past the edge of its line. Painted before the text.
 fn paint_chip_pill(layout: &TextLayout, chip: &Chip, color: Hsla, window: &mut Window) {
-    for (start, end, top) in chip_fragments(layout, &chip.range) {
+    let fragments = chip_fragments(layout, &chip.range);
+    let last = fragments.len().saturating_sub(1);
+    for (i, (start, end, top)) in fragments.into_iter().enumerate() {
         let line_h = layout.line_height();
+        let lead = if i == 0 && chip.text.lead == 0 {
+            px(mention::PILL_PAD_X)
+        } else {
+            px(0.0)
+        };
+        let trail = if i == last && chip.text.tail == 0 {
+            px(mention::PILL_PAD_X)
+        } else {
+            px(0.0)
+        };
         let bounds = Bounds::new(
-            point(
-                start - px(mention::PILL_PAD_X),
-                top - px(mention::PILL_PAD_Y),
-            ),
+            point(start - lead, top - px(mention::PILL_PAD_Y)),
             size(
-                end - start + px(mention::PILL_PAD_X * 2.0),
+                end - start + lead + trail,
                 line_h + px(mention::PILL_PAD_Y * 2.0),
             ),
         );
@@ -1453,10 +1463,10 @@ thread_local! {
 }
 
 fn paint_chip_picture(layout: &TextLayout, chip: &Chip, window: &mut Window, cx: &mut App) {
-    let Some(at) = layout.position_for_index(chip.range.start) else {
+    let Some(at) = layout.position_for_index(chip.range.start + chip.text.lead) else {
         return;
     };
-    let Some(after_at) = layout.position_for_index(chip.range.start + chip.cell) else {
+    let Some(after_at) = layout.position_for_index(chip.range.start + chip.text.cell) else {
         return;
     };
     if after_at.y != at.y {
@@ -2509,11 +2519,16 @@ mod tests {
             );
         };
         let mid_y = |b: &Bounds<Pixels>| b.origin.y + b.size.height / 2.0;
-        let pad = px(mention::PILL_PAD_X);
         for ((pill, (start, end), (top, line_h)), (disc, name_x)) in pills.iter().zip(&discs) {
-            close(disc.left() - pill.left(), pad, "inset before the picture");
-            close(pill.right() - *end, pad, "inset after the name");
-            close(pill.left(), *start - pad, "the pill starts at the chip");
+            // Scout, 2026-10-30: the pill used to be painted `PILL_PAD_X` past
+            // the run on each side, over the word beside it. It now stays
+            // inside the run, whose pad cells are its inset.
+            close(pill.left(), *start, "the pill starts at the chip's run");
+            close(pill.right(), *end, "the pill ends at the chip's run");
+            assert!(
+                disc.left() > pill.left(),
+                "the pad cell holds the picture clear of the pill's edge"
+            );
             assert!(
                 f32::from(*name_x - disc.right()) >= mention::PICTURE_GAP - 0.01,
                 "the disc keeps its gap to the name"
