@@ -215,14 +215,6 @@ pub struct Frame {
     pub pane_sliding: bool,
     /// Set while any slide runs: the transcript keeps its start width.
     pub chat: Option<ChatSlide>,
-    /// The width the expanded sidebar is laid out at this frame — the rail
-    /// morph's full width. The saved width, except while a fold that left
-    /// from a narrower column (a drag folds from the snap width, not from the
-    /// width it will come back to) is under way: then the width it left from,
-    /// widening with the column if the fold turns round, so the morph starts
-    /// at exactly the frame before it ([`Frame::rail_progress`] 0, the text
-    /// opaque) instead of a third of the way in.
-    pub sidebar_layout: f32,
 }
 
 impl Frame {
@@ -255,7 +247,7 @@ pub struct PaneSlides {
     last_pane: Option<(bool, f32)>,
     chat: Option<ChatSlide>,
     /// The expanded width a running fold to the rail left from, when that is
-    /// narrower than the saved width (`Frame::sidebar_layout`).
+    /// narrower than the saved width ([`PaneSlides::sidebar_layout`]).
     fold_from: Option<f32>,
 }
 
@@ -422,9 +414,6 @@ impl PaneSlides {
         if !sidebar_moving {
             self.fold_from = None;
         }
-        let sidebar_layout = self.fold_from.map_or(sidebar_full, |from| {
-            sidebar_visible.max(from).min(sidebar_full)
-        });
         // The sidebar moving: the held transcript only glides (centred) while
         // its rows are capped at every width the column passes — the start,
         // this frame's and the narrowest it can end at (a tracked drag may
@@ -457,8 +446,22 @@ impl PaneSlides {
             pane_visible,
             pane_sliding: self.pane.is_some(),
             chat: self.chat,
-            sidebar_layout,
         }
+    }
+
+    /// The width the expanded sidebar is laid out at for the frame
+    /// [`PaneSlides::step`] just returned — the rail morph's full width, given
+    /// that frame's `sidebar_visible` and the saved width. The saved width,
+    /// except while a fold that left from a narrower column (a drag folds from
+    /// the snap width, not from the width it will come back to) is under way:
+    /// then the width it left from, widening with the column if the fold
+    /// turns round, so the morph starts at exactly the frame before it
+    /// ([`Frame::rail_progress`] 0, the text opaque) instead of a third of the
+    /// way in.
+    pub fn sidebar_layout(&self, sidebar_visible: f32, sidebar_full: f32) -> f32 {
+        self.fold_from.map_or(sidebar_full, |from| {
+            sidebar_visible.max(from).min(sidebar_full)
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -782,8 +785,9 @@ mod tests {
                 .enumerate()
                 .map(|(i, w)| {
                     let f = slides.step(*w, ms(t0, i as u64 * 16));
-                    match (f.sidebar_sliding, f.rail_progress(f.sidebar_layout)) {
-                        (true, Some(t)) => (t, f.sidebar_layout, f.sidebar_visible, true),
+                    let layout = slides.sidebar_layout(f.sidebar_visible, w.sidebar_width);
+                    match (f.sidebar_sliding, f.rail_progress(layout)) {
+                        (true, Some(t)) => (t, layout, f.sidebar_visible, true),
                         _ if w.sidebar_rail => (1.0, RAIL, f.sidebar_visible, false),
                         _ => (0.0, w.sidebar_width, f.sidebar_visible, false),
                     }
@@ -1345,7 +1349,6 @@ mod layout_tests {
                     pane_visible: PANE,
                     pane_sliding: false,
                     chat: None,
-                    sidebar_layout: SIDEBAR,
                 }),
                 width: W,
             },
@@ -1365,7 +1368,6 @@ mod layout_tests {
                         start_width: W - SIDEBAR - PANE,
                         anchor: Anchor::Left,
                     }),
-                    sidebar_layout: SIDEBAR,
                 }),
                 width: W,
             },
@@ -1392,7 +1394,6 @@ mod layout_tests {
                     pane_visible: 170.0,
                     pane_sliding: true,
                     chat: Some(chat),
-                    sidebar_layout: SIDEBAR,
                 }),
                 width: W,
             },

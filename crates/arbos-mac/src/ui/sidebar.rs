@@ -1129,16 +1129,8 @@ pub(crate) fn faded_list(list: impl IntoElement) -> gpui::AnyElement {
 /// ([feedback mac-sidebar-rail-2026-10-26]: "do not change the expanded
 /// sidebar").
 pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
-    render_with(shell, false, cx)
-}
-
-/// The width the expanded column is laid out at: the saved width, or the
-/// rail morph's (`Shell::morph_layout`) while a fold that left from a
-/// narrower column runs.
-pub(crate) fn layout_width(shell: &Shell, cx: &App) -> f32 {
-    shell
-        .morph_layout
-        .unwrap_or_else(|| shell.state.read(cx).sidebar_width)
+    let sidebar_width = shell.state.read(cx).sidebar_width;
+    render_with(shell, false, sidebar_width, cx)
 }
 
 /// `hide_morphing`: while the collapse / open slide runs, the strip's discs,
@@ -1147,13 +1139,21 @@ pub(crate) fn layout_width(shell: &Shell, cx: &App) -> f32 {
 /// keep their layout slot but are not painted (`invisible`), so nothing shows
 /// twice. Their resting bounds are recorded into `Shell::morph` every frame
 /// they are painted, which is what the overlay interpolates from.
-pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<Shell>) -> Div {
+///
+/// `sidebar_width` is the width the column is laid out at: the saved width,
+/// or the rail morph's (`slide::PaneSlides::sidebar_layout`) while a fold
+/// that left from a narrower column runs.
+pub(crate) fn render_with(
+    shell: &Shell,
+    hide_morphing: bool,
+    sidebar_width: f32,
+    cx: &mut Context<Shell>,
+) -> Div {
     let theme = Theme::of(cx).clone();
     let (pinned_rows, rest_rows) = list_sections(shell, cx);
     let pinned_count = pinned_rows.len();
     let rows: Vec<ListEntry> = pinned_rows.into_iter().chain(rest_rows).collect();
     let snap = shell.morph.clone();
-    let sidebar_width = layout_width(shell, cx);
     let state = shell.state.read(cx);
     let machine = state.machine.shown_state();
     // Inside a server the left pane shows its channels (D88 rule 2).
@@ -1501,10 +1501,11 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
         let card_id = entry.id().clone();
         let row = match entry {
             ListEntry::Chat(row) => {
-                render_row(*row, shell, hide_morphing, &theme, cx).into_any_element()
+                render_row(*row, shell, hide_morphing, sidebar_width, &theme, cx).into_any_element()
             }
             ListEntry::Server(row) => {
-                render_server_row(*row, shell, hide_morphing, &theme, cx).into_any_element()
+                render_server_row(*row, shell, hide_morphing, sidebar_width, &theme, cx)
+                    .into_any_element()
             }
         };
         list = list.child(
@@ -1636,7 +1637,7 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
         })
         .child(match open_server.as_ref() {
             // Inside a server the left pane shows its channels (mockup h).
-            Some(server) => faded_list(server_channels(server, shell, &theme, cx)),
+            Some(server) => faded_list(server_channels(server, shell, sidebar_width, &theme, cx)),
             None => faded_list(list),
         });
     // Grok Bot's update disc at the footer's right end, only when an update is
@@ -1715,6 +1716,7 @@ fn render_server_row(
     row: ServerRowView,
     shell: &Shell,
     hide_morphing: bool,
+    sidebar_width: f32,
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> gpui::Stateful<Div> {
@@ -1834,7 +1836,7 @@ fn render_server_row(
                         )
                         .child(div().flex_1())
                         .when(pinned, |el| el.child(pin_mark(&mark_id, theme)))
-                        .when_some(row_time_size(shell, cx), |el, size| {
+                        .when_some(row_time_size(sidebar_width), |el, size| {
                             el.child(time_el(time, size, theme))
                         }),
                 )
@@ -1866,6 +1868,7 @@ fn render_server_row(
 fn server_channels(
     server: &ServerInfo,
     shell: &Shell,
+    sidebar_width: f32,
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> gpui::Stateful<Div> {
@@ -2020,7 +2023,7 @@ fn server_channels(
                                     el.child(sf_symbols::glyph("lock", 11.0, theme.text_faint))
                                 })
                                 .child(div().flex_1())
-                                .when_some(row_time_size(shell, cx), |el, size| {
+                                .when_some(row_time_size(sidebar_width), |el, size| {
                                     el.child(time_el(time, size, theme))
                                 }),
                         )
@@ -2208,8 +2211,8 @@ pub fn channel_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
 /// The rows' time size at the column's width — `None` hides it: the name
 /// wins as the column narrows (`ui::sidebar_fit::row_time`,
 /// [feedback sidebar-narrow-wrap-2026-10-27]).
-fn row_time_size(shell: &Shell, cx: &Context<Shell>) -> Option<f32> {
-    match sidebar_fit::row_time(layout_width(shell, cx)) {
+fn row_time_size(sidebar_width: f32) -> Option<f32> {
+    match sidebar_fit::row_time(sidebar_width) {
         sidebar_fit::RowTime::Full => Some(TEXT_TINY),
         sidebar_fit::RowTime::Small => Some(sidebar_fit::TIME_SMALL_SIZE),
         sidebar_fit::RowTime::Hidden => None,
@@ -2242,6 +2245,7 @@ fn render_row(
     row: RowView,
     shell: &Shell,
     hide_morphing: bool,
+    sidebar_width: f32,
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> impl IntoElement {
@@ -2289,7 +2293,7 @@ fn render_row(
     // The name wins over the time as the column narrows: the time shrinks,
     // then hides, and the `@handle` goes first (`ui::sidebar_fit::row_time`,
     // [feedback sidebar-narrow-wrap-2026-10-27]).
-    let handle_shown = sidebar_fit::handle_shown(layout_width(shell, cx));
+    let handle_shown = sidebar_fit::handle_shown(sidebar_width);
     // A group row reads like an agent row: name and preview, no member count.
     let handle = space
         .person()
@@ -2432,7 +2436,7 @@ fn render_row(
                         })
                         .child(div().flex_1())
                         .when(pinned, |el| el.child(pin_mark(&id, theme)))
-                        .when_some(row_time_size(shell, cx), |el, size| {
+                        .when_some(row_time_size(sidebar_width), |el, size| {
                             el.child(
                                 time_el(time, size, theme)
                                     .debug_selector(|| format!("row-time-{id}")),
