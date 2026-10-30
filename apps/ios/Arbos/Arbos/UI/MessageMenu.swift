@@ -17,6 +17,9 @@ enum MessageMenuItem: CaseIterable, Equatable {
     /// The message shows a link preview card and the user may delete the message: drop the
     /// card for everyone ([feedback link-embeds-ios-2026-10-27]).
     case removePreview
+    /// People group chats only, when the group's pin policy lets this member pin (#1547).
+    case pin
+    case unpin
     case delete
 
     var label: String {
@@ -28,6 +31,8 @@ enum MessageMenuItem: CaseIterable, Equatable {
         case .replyInDM: return "Reply in DM"
         case .edit: return "Edit"
         case .removePreview: return "Remove preview"
+        case .pin: return "Pin"
+        case .unpin: return "Unpin"
         case .delete: return "Delete"
         }
     }
@@ -41,6 +46,8 @@ enum MessageMenuItem: CaseIterable, Equatable {
         case .replyInDM: return "bubble.left"
         case .edit: return "pencil"
         case .removePreview: return "link"
+        case .pin: return "pin"
+        case .unpin: return "pin.slash"
         case .delete: return "trash"
         }
     }
@@ -69,9 +76,12 @@ enum MessageMenu {
     /// when the relay would allow it (`MessageDeleteRule.mayDelete`); Remove preview only on a
     /// message that shows a link card (`hasPreview`) the user may delete. Reply in DM is
     /// for group chats only — omit it in a private / 1:1 chat (`inPrivateChat`).
+    /// Pin / Unpin only where the member may pin (`canPin`, group chats under the
+    /// group's pin policy); `isPinned` picks which of the two is offered.
     static func items(forMessage: Bool, canEdit: Bool = false, canDelete: Bool = true,
                       hasReplies: Bool = false, hasPreview: Bool = false,
-                      inPrivateChat: Bool = false) -> [MessageMenuItem] {
+                      inPrivateChat: Bool = false, canPin: Bool = false,
+                      isPinned: Bool = false) -> [MessageMenuItem] {
         guard forMessage else { return copyOnly }
         var out: [MessageMenuItem] = [.copy, .reply]
         if hasReplies { out.append(.viewThread) }
@@ -79,6 +89,7 @@ enum MessageMenu {
         if !inPrivateChat { out.append(.replyInDM) }
         if canEdit { out.append(.edit) }
         if canDelete && hasPreview { out.append(.removePreview) }
+        if canPin { out.append(isPinned ? .unpin : .pin) }
         if canDelete { out.append(.delete) }
         return out
     }

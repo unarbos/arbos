@@ -861,6 +861,32 @@ impl ChatDoc {
             .map_err(write_err)
     }
 
+    /// Pin or unpin one message for everyone (#1547). Does not commit. Peers
+    /// learn through room sync, like a reaction.
+    pub fn set_message_pinned(
+        &self,
+        message_id: String,
+        pinned: bool,
+        by: String,
+    ) -> Result<(), FfiError> {
+        self.lock_doc()
+            .set_message_pinned(&message_id, pinned, &by, arbos_core::ids::now_ms())
+            .map_err(write_err)
+    }
+
+    /// Who may pin in this chat: `"admins"` or `"everyone"`. Anything else is
+    /// stored as written but reads back as `"admins"`.
+    pub fn set_pin_policy(&self, policy: String) -> Result<(), FfiError> {
+        self.lock_doc()
+            .set_pin_policy(doc::PinPolicy::parse(&policy))
+            .map_err(write_err)
+    }
+
+    /// The chat's pin policy. Missing or unknown reads as `"admins"`.
+    pub fn pin_policy(&self) -> String {
+        self.lock_doc().pin_policy().as_str().to_string()
+    }
+
     /// Remove one message from the shared list (delete for everyone). Does not
     /// commit. Callers must not announce — peers learn via room sync only.
     pub fn delete_message(&self, message_id: String) -> Result<(), FfiError> {
@@ -1185,6 +1211,51 @@ mod tests {
         doc.delete_message("gone".into()).unwrap();
         doc.commit();
         assert_eq!(doc.message_count(), 1);
+    }
+
+    #[test]
+    fn pin_round_trips_through_the_doc() {
+        let doc = ChatDoc::open();
+        for id in ["m1", "m2"] {
+            doc.insert_user_message(
+                id.into(),
+                "text".into(),
+                "dev".into(),
+                UserMessageOptsRecord::default(),
+            )
+            .unwrap();
+        }
+        doc.set_message_pinned("m1".into(), true, "user:a".into())
+            .unwrap();
+        doc.commit();
+        // The row the Swift transcript decodes carries the pin.
+        let row: Value = serde_json::from_str(&doc.read_message_json(0).unwrap()).unwrap();
+        assert_eq!(row["pinnedBy"], "user:a");
+        assert!(row["pinnedAt"].as_i64().unwrap_or(0) > 0);
+        let other: Value = serde_json::from_str(&doc.read_message_json(1).unwrap()).unwrap();
+        assert!(
+            other.get("pinnedAt").is_none(),
+            "the pin must not touch another row"
+        );
+
+        doc.set_message_pinned("m1".into(), false, "user:a".into())
+            .unwrap();
+        doc.commit();
+        let row: Value = serde_json::from_str(&doc.read_message_json(0).unwrap()).unwrap();
+        assert!(row.get("pinnedAt").is_none());
+        assert!(row.get("pinnedBy").is_none());
+    }
+
+    #[test]
+    fn pin_policy_defaults_to_admins() {
+        let doc = ChatDoc::open();
+        assert_eq!(doc.pin_policy(), "admins");
+        doc.set_pin_policy("everyone".into()).unwrap();
+        doc.commit();
+        assert_eq!(doc.pin_policy(), "everyone");
+        doc.set_pin_policy("nonsense".into()).unwrap();
+        doc.commit();
+        assert_eq!(doc.pin_policy(), "admins");
     }
 
     #[test]

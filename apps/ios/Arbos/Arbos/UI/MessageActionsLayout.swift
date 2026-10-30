@@ -175,7 +175,7 @@ enum MessageActionsKeyboard {
         guard wasFocused else { return false }
         guard let item else { return true }
         switch item {
-        case .copy, .delete, .removePreview:
+        case .copy, .delete, .removePreview, .pin, .unpin:
             return true
         case .reply, .edit:
             // These focus the composer themselves (reply preview / editing bar).

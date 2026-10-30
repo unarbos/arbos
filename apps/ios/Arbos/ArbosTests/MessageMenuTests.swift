@@ -3,7 +3,8 @@ import XCTest
 
 /// The bubble's long-press menu is Copy / Reply / Forward / Reply in DM /
 /// Delete (#1370, #1472, forward feedback), plus View thread when the message
-/// has replies and Edit on the user's own text — no emoji row, no Mention; a
+/// has replies, Edit on the user's own text, and Pin / Unpin in a group whose
+/// policy lets this member pin (#1547) — no emoji row, no Mention; a
 /// non-message row copies only.
 final class MessageMenuTests: XCTestCase {
     func testItemsAreExactlyCopyReplyForwardReplyInDMDelete() {
@@ -39,7 +40,32 @@ final class MessageMenuTests: XCTestCase {
             XCTAssertTrue(item.label.unicodeScalars.allSatisfy { $0.isASCII }, "\(item) label carries non-ASCII text")
             XCTAssertFalse(MessageReaction.palette.contains(item.label))
         }
-        XCTAssertEqual(MessageMenuItem.allCases.count, 8)
+        XCTAssertEqual(MessageMenuItem.allCases.count, 10)
+    }
+
+    /// #1547: Pin only where the group's policy lets this member pin, and the
+    /// held message decides whether Pin or Unpin is offered.
+    func testPinAppearsOnlyWhenTheMemberMayPin() {
+        XCTAssertEqual(
+            MessageMenu.items(forMessage: true, canPin: true),
+            [.copy, .reply, .forward, .replyInDM, .pin, .delete]
+        )
+        XCTAssertEqual(
+            MessageMenu.items(forMessage: true, canPin: true, isPinned: true),
+            [.copy, .reply, .forward, .replyInDM, .unpin, .delete]
+        )
+        XCTAssertEqual(MessageMenu.items(forMessage: true, canPin: false), MessageMenu.items)
+        // isPinned alone never shows an item: the policy decides.
+        XCTAssertEqual(MessageMenu.items(forMessage: true, isPinned: true), MessageMenu.items)
+        XCTAssertEqual(MessageMenu.items(forMessage: false, canPin: true, isPinned: true), [.copy])
+    }
+
+    /// Pin sits between Edit / Remove preview and Delete, so Delete stays last.
+    func testPinSitsJustBeforeDelete() {
+        let items = MessageMenu.items(forMessage: true, canEdit: true, canDelete: true,
+                                      hasReplies: true, canPin: true)
+        XCTAssertEqual(items, [.copy, .reply, .viewThread, .forward, .replyInDM, .edit, .pin, .delete])
+        XCTAssertEqual(items.last, .delete)
     }
 
     func testOnlyDeleteIsDestructive() {

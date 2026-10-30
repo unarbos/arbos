@@ -122,6 +122,41 @@ pub fn project_hidden_parts(json: &mut Value) {
 /// Separator in flat reaction keys: `"emoji|sender"` under `reactions`.
 pub const REACTION_KEY_SEP: char = '|';
 
+/// When a message was pinned (ms). Absent = not pinned.
+pub const PINNED_AT_FIELD: &str = "pinnedAt";
+/// Who pinned it (`user:<id>`). Written beside [`PINNED_AT_FIELD`].
+pub const PINNED_BY_FIELD: &str = "pinnedBy";
+/// Who may pin in this chat, under the root `settings` map.
+pub const PIN_POLICY_KEY: &str = "pinPolicy";
+
+/// Who may pin a message in a group (#1547: "the admin decides who is allowed
+/// to pin"). The chat's own value lives in the shared doc, so every member and
+/// every device reads the same one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinPolicy {
+    /// Owner and admins only. The default when the chat never set one.
+    Admins,
+    Everyone,
+}
+
+impl PinPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PinPolicy::Admins => "admins",
+            PinPolicy::Everyone => "everyone",
+        }
+    }
+
+    /// Unknown and missing values read as [`PinPolicy::Admins`], so a chat
+    /// written by a newer client never widens who may pin on an older one.
+    pub fn parse(raw: &str) -> PinPolicy {
+        match raw {
+            "everyone" => PinPolicy::Everyone,
+            _ => PinPolicy::Admins,
+        }
+    }
+}
+
 /// Fitzpatrick skin-tone modifiers (U+1F3FB … U+1F3FF). Stripped so
 /// `👍🏽` and `👍🏿` count as the same reaction on a message.
 const SKIN_TONE_LO: u32 = 0x1F3FB;
@@ -1028,6 +1063,85 @@ impl ChatDoc {
             }
         }
         Ok(())
+    }
+
+    /// Client write: pin or unpin one message for everyone (#1547). Sets
+    /// `pinnedAt` / `pinnedBy` on the row, or clears both. Does not commit.
+    /// No-op when the id is missing.
+    ///
+    /// The field sits on the message, not on a chat-level pointer, so the doc
+    /// holds any number of pinned messages. How many a group may show is the
+    /// client's rule, not the doc's — see [`Self::pinned_message_ids`].
+    pub fn set_message_pinned(
+        &self,
+        msg_id: &str,
+        pinned: bool,
+        by: &str,
+        at: i64,
+    ) -> CoreResult<()> {
+        if msg_id.is_empty() {
+            return Ok(());
+        }
+        let Some(map) = self.find_message(msg_id) else {
+            return Ok(());
+        };
+        if pinned {
+            loro_err(map.insert(PINNED_AT_FIELD, at))?;
+            if !by.is_empty() {
+                loro_err(map.insert(PINNED_BY_FIELD, by))?;
+            }
+        } else {
+            let _ = map.delete(PINNED_AT_FIELD);
+            let _ = map.delete(PINNED_BY_FIELD);
+        }
+        Ok(())
+    }
+
+    /// Pinned message ids, newest pin first. Empty when nothing is pinned.
+    ///
+    /// Returns every pinned row. A caller that shows one pin reads the first
+    /// entry; a caller that shows a list reads them all.
+    pub fn pinned_message_ids(&self) -> Vec<String> {
+        let msgs = self.messages_list();
+        let mut found: Vec<(i64, String)> = Vec::new();
+        for i in 0..msgs.len() {
+            let Some(ValueOrContainer::Container(Container::Map(m))) = msgs.get(i) else {
+                continue;
+            };
+            let at = match m.get(PINNED_AT_FIELD) {
+                Some(ValueOrContainer::Value(LoroValue::I64(at))) => at,
+                Some(ValueOrContainer::Value(LoroValue::Double(at))) => at as i64,
+                _ => continue,
+            };
+            if at <= 0 {
+                continue;
+            }
+            let Some(ValueOrContainer::Value(LoroValue::String(id))) = m.get("id") else {
+                continue;
+            };
+            found.push((at, id.to_string()));
+        }
+        // Newest pin first; the id breaks a tie so every replica agrees on the
+        // order after two devices pin at the same millisecond.
+        found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        found.into_iter().map(|(_, id)| id).collect()
+    }
+
+    /// Client write: who may pin in this chat, into the root `settings` map so
+    /// every member reads the same value. Does not commit.
+    pub fn set_pin_policy(&self, policy: PinPolicy) -> CoreResult<()> {
+        let settings = self.doc.get_map("settings");
+        loro_err(settings.insert(PIN_POLICY_KEY, policy.as_str()))?;
+        Ok(())
+    }
+
+    /// The chat's pin policy. Missing or unreadable reads as
+    /// [`PinPolicy::Admins`].
+    pub fn pin_policy(&self) -> PinPolicy {
+        match self.doc.get_map("settings").get(PIN_POLICY_KEY) {
+            Some(ValueOrContainer::Value(LoroValue::String(s))) => PinPolicy::parse(s.as_str()),
+            _ => PinPolicy::Admins,
+        }
     }
 
     /// Client write: remove one message from the shared `messages` list (delete for
@@ -2858,6 +2972,81 @@ mod tests {
 
         b.import(&a.export_updates_since(&base)).unwrap();
         assert_eq!(message_text(&b.to_json()["messages"][0]), "hello edited");
+    }
+
+    #[test]
+    fn pinning_a_message_syncs_to_the_other_replica() {
+        let a = ChatDoc::new(None, false);
+        let mut b = ChatDoc::new(None, false);
+        a.transact(|d| {
+            d.append_user_message("m1", "read this", "dev:a", &UserMessageOpts::default())
+                .unwrap();
+        });
+        b.import(&a.snapshot()).unwrap();
+        assert!(b.pinned_message_ids().is_empty());
+
+        let base = a.oplog_vv();
+        a.transact(|d| d.set_message_pinned("m1", true, "user:a", 1_000).unwrap());
+        b.import(&a.export_updates_since(&base)).unwrap();
+        assert_eq!(b.pinned_message_ids(), vec!["m1".to_string()]);
+        let row = &b.to_json()["messages"][0];
+        assert_eq!(row[PINNED_AT_FIELD].as_i64(), Some(1_000));
+        assert_eq!(row[PINNED_BY_FIELD].as_str(), Some("user:a"));
+
+        let base = a.oplog_vv();
+        a.transact(|d| d.set_message_pinned("m1", false, "user:a", 2_000).unwrap());
+        b.import(&a.export_updates_since(&base)).unwrap();
+        assert!(b.pinned_message_ids().is_empty());
+        assert!(b.to_json()["messages"][0].get(PINNED_BY_FIELD).is_none());
+
+        a.set_message_pinned("missing", true, "user:a", 1).unwrap();
+        a.set_message_pinned("", true, "user:a", 1).unwrap();
+    }
+
+    /// The doc holds any number of pins, newest first, so showing one pin or a
+    /// list of them is the client's choice and not a doc limit.
+    #[test]
+    fn pinned_message_ids_returns_every_pin_newest_first() {
+        let a = ChatDoc::new(None, false);
+        a.transact(|d| {
+            for id in ["m1", "m2", "m3"] {
+                d.append_user_message(id, id, "dev:a", &UserMessageOpts::default())
+                    .unwrap();
+            }
+        });
+        a.transact(|d| {
+            d.set_message_pinned("m1", true, "user:a", 100).unwrap();
+            d.set_message_pinned("m3", true, "user:b", 300).unwrap();
+        });
+        assert_eq!(
+            a.pinned_message_ids(),
+            vec!["m3".to_string(), "m1".to_string()]
+        );
+    }
+
+    #[test]
+    fn pin_policy_defaults_to_admins_and_syncs() {
+        let a = ChatDoc::new(None, false);
+        let mut b = ChatDoc::new(None, false);
+        assert_eq!(a.pin_policy(), PinPolicy::Admins);
+
+        a.transact(|d| d.set_pin_policy(PinPolicy::Everyone).unwrap());
+        b.import(&a.snapshot()).unwrap();
+        assert_eq!(b.pin_policy(), PinPolicy::Everyone);
+
+        let base = a.oplog_vv();
+        a.transact(|d| d.set_pin_policy(PinPolicy::Admins).unwrap());
+        b.import(&a.export_updates_since(&base)).unwrap();
+        assert_eq!(b.pin_policy(), PinPolicy::Admins);
+    }
+
+    /// An unknown policy from a newer client must never widen who may pin.
+    #[test]
+    fn unknown_pin_policy_reads_as_admins() {
+        assert_eq!(PinPolicy::parse("everyone"), PinPolicy::Everyone);
+        assert_eq!(PinPolicy::parse("admins"), PinPolicy::Admins);
+        assert_eq!(PinPolicy::parse("moderators"), PinPolicy::Admins);
+        assert_eq!(PinPolicy::parse(""), PinPolicy::Admins);
     }
 
     #[test]

@@ -341,6 +341,12 @@ extension AppModel {
                 messages["fx-group-launch"] = list
             }
         }
+        // `ARBOS_FIXTURE_PINNED=1` (#1547 shot rig): the group's earliest message is pinned,
+        // so the strip under the header is on screen at launch.
+        if DebugHooks.fixturePinned, var rows = messages["fx-group-launch"], let first = rows.first {
+            rows[0].pinnedAt = first.createdAt
+            messages["fx-group-launch"] = rows
+        }
         if let replay = DebugHooks.perfReplay {
             perfReplay(checkpointPath: replay.checkpoint, rowsPath: replay.rows, rooms: DebugHooks.perfReplayRooms,
                        gapMs: DebugHooks.perfReplayGapMs, afterMs: DebugHooks.perfReplayAfterMs)
