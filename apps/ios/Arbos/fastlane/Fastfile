@@ -116,6 +116,21 @@ def require_xcframework!
   )
 end
 
+# A test run that executed nothing is not a pass. xcodebuild exits 0 and prints no
+# `error:` line when the selected tests do not exist, when a test bundle was built
+# without its sources, or when the scheme's Test action has no target, so neither
+# xcodebuild_logged's exit status nor its error count can see it. `selection` names
+# what to look at first (2026-10-30: a rig reported success on 0 tests because a new
+# file was never added to project.pbxproj, so it compiled into no bundle).
+def require_tests_ran!(log, selection)
+  counts = File.exist?(log) ? File.read(log).scan(/Executed (\d+) test/).flatten.map(&:to_i) : []
+  return if counts.any?(&:positive?)
+  UI.user_error!(
+    "#{selection} executed 0 tests (see #{log}) — check that the scheme's Test action " \
+    "builds the test target and that every test file is a member of it in project.pbxproj"
+  )
+end
+
 def report_arbosffi_size(archive_path)
   fw = "#{archive_path}/Products/Applications/Arbos.app/Frameworks/ArbosFFI.framework"
   UI.user_error!("archive embeds no ArbosFFI.framework at #{fw}") unless File.directory?(fw)
@@ -146,10 +161,11 @@ platform :ios do
   desc "Run ArbosTests on the iOS simulator (no signing); requires packages/ArbosFFI"
   lane :test do
     require_xcframework!
-    xcodebuild_logged("test",
+    log = xcodebuild_logged("test",
       "cd .. && xcodebuild test -project #{PROJECT} -scheme #{SCHEME} -configuration Debug " \
       "-destination 'platform=iOS Simulator,name=iPhone 17' -derivedDataPath '#{out_dir}/dd' #{spm_flags}" \
       "CODE_SIGNING_ALLOWED=NO")
+    require_tests_ran!(log, "the Test action of scheme #{SCHEME} (no -only-testing filter)")
   end
 
   desc "Unsigned Release archive (what CI keeps even when no Apple secret is set)"

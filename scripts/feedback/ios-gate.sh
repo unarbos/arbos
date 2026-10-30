@@ -36,6 +36,16 @@ new_test_errors() {
 # new head appears — and only failures outside that baseline fail the half (the #1843 / known-red rule).
 TEST_SIM_NAME="${ARBOS_GATE_TEST_SIM:-iPhone 17}"
 BASELINE_DIR="$HOME/arbos-gate/.test-baseline"
+# The target run_suite selects. Named once so the xcodebuild flag and the "0 tests" message cannot drift.
+TEST_ONLY=ArbosTests
+
+# tests_executed <xcodebuild log> → how many tests the run executed, 0 when the log never says.
+# The largest count, not the last: a watchdog kill can leave a per-suite line after the total.
+tests_executed() {
+  local n
+  n=$(grep -oE 'Executed [0-9]+ test' "$1" 2>/dev/null | grep -oE '[0-9]+' | sort -n | tail -n 1)
+  echo "${n:-0}"
+}
 
 # failing_tests <xcodebuild log> → "Class/test" per failing test, sorted.
 failing_tests() {
@@ -59,7 +69,7 @@ run_suite() {
   # carries the suite verdict (plus a 20 s grace for the result bundle), or after TEST_RUN_MAX_S.
   xcodebuild test-without-building -xctestrun "$xctestrun" \
     -destination "platform=iOS Simulator,id=$udid" -parallel-testing-enabled NO \
-    -only-testing:ArbosTests >"$log" 2>&1 &
+    "-only-testing:$TEST_ONLY" >"$log" 2>&1 &
   local pid=$! t0 done_at=0 now
   t0=$(date +%s)
   while kill -0 "$pid" 2>/dev/null; do
@@ -110,13 +120,25 @@ baseline_for() {
 }
 
 run_unit_tests() {
-  local log t0 fails base baseline new
+  local log t0 fails ran base baseline new
   log=$(mktemp -t ios-gate-tests); t0=$(date +%s)
   run_suite "$HOME/arbos-gate-dd-Debug" "$log"
   local trc=$?
   fails=$(failing_tests "$log")
+  ran=$(tests_executed "$log")
   if [[ "$trc" -eq 0 && -z "$fails" ]]; then
-    echo "== tests: $(grep -oE 'Executed [0-9]+ tests' "$log" | tail -n 1 | tr -d '\n') pass ($(( $(date +%s) - t0 )) s)"
+    # A run that executed nothing is not a pass. xcodebuild exits 0 and prints "** TEST SUCCEEDED **"
+    # when -only-testing matches no test in the .xctestrun, so the verdict line above cannot see it
+    # (2026-10-30: a rig built the app, ran 0 tests and reported success because a new ArbosUITests
+    # file was never added to project.pbxproj, so it compiled into no bundle).
+    if (( ran == 0 )); then
+      echo "== tests: FAIL — the suite reported success but executed 0 tests; -only-testing:$TEST_ONLY"
+      echo "   matched nothing in the .xctestrun. Check that $TEST_ONLY is a target of the Arbos scheme's"
+      echo "   Test action and that every test file is a member of it in project.pbxproj."
+      tail -n 8 "$log" | cut -c1-200
+      rm -f "$log"; return 1
+    fi
+    echo "== tests: $ran passed ($(( $(date +%s) - t0 )) s)"
     rm -f "$log"; return 0
   fi
   if [[ -z "$fails" ]]; then
@@ -174,6 +196,21 @@ if [[ "${1:-}" == "selftest" ]]; then
     echo "selftest: failing-test parser reads Class/test"
   else
     echo "selftest: failing-test parser WRONG — got: $(failing_tests "$tlog")"; rm -f "$tlog"; exit 1
+  fi
+  # The counter must read the executed count, including the 0 of a run that selected no test at all.
+  printf '%s\n' "Test Suite 'ArbosTests.xctest' passed at 2026-10-26 05:52:12.318." \
+                 "	 Executed 217 tests, with 0 failures (0 unexpected) in 4.012 (4.098) seconds" > "$tlog"
+  counted=$(tests_executed "$tlog")
+  printf '%s\n' "Test Suite 'Selected tests' passed at 2026-10-30 17:24:31.002." \
+                 "	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds" \
+                 "** TEST SUCCEEDED **" > "$tlog"
+  empty=$(tests_executed "$tlog")
+  : > "$tlog"
+  silent=$(tests_executed "$tlog")
+  if [[ "$counted" == "217" && "$empty" == "0" && "$silent" == "0" ]]; then
+    echo "selftest: test counter reads the executed count (0 for an empty run and for a log that never says)"
+  else
+    echo "selftest: test counter WRONG — got $counted / $empty / $silent, want 217 / 0 / 0"; rm -f "$tlog"; exit 1
   fi
   rm -f "$tlog"
   [[ -n "$(test_sim_udid)" ]] && echo "selftest: test simulator '$TEST_SIM_NAME' present ($(test_sim_udid))" || { echo "selftest: test simulator '$TEST_SIM_NAME' MISSING"; exit 1; }
