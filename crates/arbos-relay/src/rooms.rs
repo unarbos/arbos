@@ -2335,3 +2335,205 @@ mod covered_push_tests {
         assert_eq!(vv_cached, encode_vv(&doc.oplog_vv()));
     }
 }
+
+#[cfg(test)]
+mod read_receipt_privacy_tests {
+    //! #1484: "Read receipts: Off" promises the other people in a chat stop being told when I
+    //! open their messages. The relay stores `read_receipts` per member but never reads it when
+    //! it broadcasts a Presence frame, so a `seen` from any client of that person still reaches
+    //! the other members. The switch is therefore only as good as the client that drew it.
+
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use axum::routing::get;
+    use axum::{Json, Router};
+    use futures::{SinkExt, StreamExt};
+    use serde_json::json;
+    use std::net::SocketAddr;
+    use std::time::Duration;
+    use tokio_tungstenite::tungstenite::Message as TMsg;
+
+    use arbos_core::ids::ulid;
+    use arbos_core::wire::{Frame, FrameType};
+
+    use crate::auth::Principal;
+    use crate::people::tests_support::{dm, person};
+    use crate::people::ChatSettingsBody;
+    use crate::state::test_support::test_state;
+    use crate::state::{AppState, AuthMode};
+
+    async fn serve(state: AppState) -> SocketAddr {
+        let app = Router::new()
+            .route("/room/{project}/{chat}", get(super::ws_room))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        addr
+    }
+
+    /// A device of `user` whose raw token the test keeps, so it can open a room socket.
+    fn device_with_token(state: &AppState, user: &str) -> (Principal, String) {
+        let id = ulid();
+        let token = format!("adv_{}", ulid().to_ascii_lowercase());
+        state
+            .db
+            .insert_device(&id, "t", &arbos_core::auth::hash(&token), user, "paircode")
+            .unwrap();
+        (
+            Principal::Device {
+                id,
+                token: token.clone(),
+                user_id: user.to_owned(),
+            },
+            token,
+        )
+    }
+
+    fn decode(m: TMsg) -> Option<Frame> {
+        match m {
+            TMsg::Binary(b) => Frame::decode(b).ok().flatten(),
+            _ => None,
+        }
+    }
+
+    type Socket = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    /// Open a room socket and finish the HELLO → STATE → ROWS_REQ → ROWS_DONE catch-up, so the
+    /// socket is subscribed to the room before the test sends anything.
+    async fn joined(addr: SocketAddr, room: &str, token: &str, device: &str) -> Socket {
+        let url = format!("ws://{addr}/room/{room}?token={token}");
+        let (mut ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+        ws.send(TMsg::Binary(
+            Frame::new(
+                FrameType::Hello,
+                json!({
+                    "cursor": 0,
+                    "device": device,
+                    "room": room,
+                    "proto": arbos_core::PROTO_VERSION
+                }),
+                bytes::Bytes::new(),
+            )
+            .encode(),
+        ))
+        .await
+        .unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let m = tokio::time::timeout_at(deadline, ws.next())
+                .await
+                .expect("the relay answers HELLO")
+                .unwrap()
+                .unwrap();
+            let Some(f) = decode(m) else { continue };
+            match f.ty {
+                FrameType::State => {
+                    ws.send(TMsg::Binary(
+                        Frame::new(
+                            FrameType::RowsReq,
+                            json!({ "after": 0, "excludeOwn": false }),
+                            bytes::Bytes::new(),
+                        )
+                        .encode(),
+                    ))
+                    .await
+                    .unwrap();
+                }
+                FrameType::RowsDone => break,
+                _ => {}
+            }
+        }
+        ws
+    }
+
+    /// The next Presence frame on `ws`, or `None` if none arrives within `wait`.
+    async fn next_presence(ws: &mut Socket, wait: Duration) -> Option<Frame> {
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            match tokio::time::timeout_at(deadline, ws.next()).await {
+                Ok(Some(Ok(m))) => match decode(m) {
+                    Some(f) if f.ty == FrameType::Presence => return Some(f),
+                    _ => continue,
+                },
+                Ok(_) => return None,
+                Err(_) => return None,
+            }
+        }
+    }
+
+    /// Alice turns read receipts off for a DM, then one of her clients sends a Presence frame
+    /// carrying `seen` anyway (the iPhone app has no such switch and always does this). Bob must
+    /// not learn that she read his message. Presence itself still has to reach him: it also
+    /// carries typing and online, so the rule is "drop `seen`", not "drop the frame".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_seen_from_a_member_with_receipts_off_never_reaches_the_other_member() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        let room = format!("people/{chat}");
+        let (alice_dev, alice_token) = device_with_token(&state, &alice);
+        let (_, bob_token) = device_with_token(&state, &bob);
+
+        // Settings → "Read receipts: Off", the way both apps record it.
+        let answer = crate::people::chat_settings(
+            State(state.clone()),
+            alice_dev,
+            Path(chat.clone()),
+            Json(ChatSettingsBody {
+                read_receipts: Some(false),
+                muted: None,
+                archived: None,
+                notifications: None,
+            }),
+        )
+        .await;
+        assert_eq!(answer.status(), StatusCode::OK, "the setting was accepted");
+        assert_eq!(
+            state
+                .db
+                .membership(&chat, &format!("user:{alice}"))
+                .unwrap()
+                .and_then(|m| m.settings.get("read_receipts").cloned()),
+            Some(json!(false)),
+            "the relay stored the setting",
+        );
+
+        let addr = serve(state.clone()).await;
+        let mut bobs = joined(addr, &room, &bob_token, "dev:bob").await;
+        let mut alices = joined(addr, &room, &alice_token, "dev:alice").await;
+
+        // A client of Alice's that does not honour the setting, which is every iPhone build.
+        alices
+            .send(TMsg::Binary(
+                Frame::new(
+                    FrameType::Presence,
+                    json!({
+                        "device": "dev:alice",
+                        "user": alice,
+                        "handle": format!("user{}", 1),
+                        "at": arbos_core::ids::now_ms(),
+                        "focused_chat": chat,
+                        "seen": "01M5XATTTX957RTR99XNE0W9BD",
+                    }),
+                    bytes::Bytes::new(),
+                )
+                .encode(),
+            ))
+            .await
+            .unwrap();
+
+        let got = next_presence(&mut bobs, Duration::from_secs(5))
+            .await
+            .expect("Alice's presence still reaches Bob: it carries typing and online too");
+        assert_eq!(got.header["focused_chat"], json!(chat));
+        assert!(
+            got.header.get("seen").is_none(),
+            "read receipts are off for Alice, so Bob must not be told what she has read; got {}",
+            got.header,
+        );
+    }
+}
