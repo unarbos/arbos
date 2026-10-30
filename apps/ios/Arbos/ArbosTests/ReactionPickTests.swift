@@ -49,6 +49,20 @@ final class ReactionPickTests: XCTestCase {
         XCTAssertEqual(row.reactions.first?.senders, ["user:me"])
     }
 
+    /// A keycap from the keyboard's Symbols page is a reaction on the row too
+    /// ([feedback full-picker-reaction-ios-2026-10-29]: the field dropped it).
+    func testPickedKeycapReachesTheDocRow() throws {
+        let doc = CoreChatDoc(key: "react-pick-keycap")
+        try doc.insertUserMessage(id: "m1", text: "ship it", deviceId: "dev", author: .init(sender: "user:ken"))
+        let coordinator = EmojiKeyboardField.Coordinator { emoji in
+            try? doc.toggleReaction(messageId: "m1", emoji: emoji, sender: "user:me")
+            doc.commit()
+        }
+        typeOnKeyboard("1️⃣", into: UITextField(), coordinator: coordinator)
+
+        XCTAssertEqual(try XCTUnwrap(doc.readAll().first).reactions.map(\.emoji), ["1️⃣"])
+    }
+
     /// What the bug did: the same pick toggled twice leaves the row empty.
     func testTwoTogglesOfOnePickWouldClearTheRow() throws {
         let doc = CoreChatDoc(key: "react-pick-twice")

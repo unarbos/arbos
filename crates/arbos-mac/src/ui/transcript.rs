@@ -810,8 +810,10 @@ const JUMP_ARRIVE_FROM_ALPHA: f32 = 0.35;
 pub const RAIL_BUTTON: f32 = 24.0;
 pub const RAIL_GLYPH: f32 = 16.0;
 pub const RAIL_GAP: f32 = 2.0;
-/// The Glass capsule's inset either side of the rail's buttons.
-pub const RAIL_PLATE_PAD_X: f32 = 2.0;
+/// The Glass capsule's inset on every side of the rail's buttons. The same
+/// inset all round keeps each button's round hover wash inside the capsule's
+/// rim and concentric with its rounded ends ([feedback hover-bar-highlight-mac-2026-10-29]).
+pub const RAIL_PLATE_PAD: f32 = 2.0;
 
 /// A reaction chip under a bubble (iPhone `reactionChips`: 14 pt emoji, 12 pt
 /// medium count, 8 pt side pads, 4 pt vertical pads, 1 pt rim). The height is
@@ -2130,8 +2132,8 @@ impl Transcript {
             .gap(px(RAIL_GAP))
             .when_some(plate, |el, plate| {
                 el.debug_selector(|| "rail-plate".into())
-                    .h(px(RAIL_BUTTON))
-                    .px(px(RAIL_PLATE_PAD_X))
+                    .h(px(RAIL_BUTTON + 2.0 * RAIL_PLATE_PAD))
+                    .p(px(RAIL_PLATE_PAD))
                     .rounded_full()
                     .opacity(group_opacity)
                     // Every row carries a rail; only a revealed one paints its plate.
@@ -2444,8 +2446,6 @@ impl Transcript {
             .items_center()
             .gap(px(6.0))
             .child(
-                // The bubble sits under this line: an emoji-only sender name is
-                // lifted onto the baseline like every other stacked name.
                 identity::name(name, CHAT_BODY)
                     .line_height(px(CHAT_LINE_HEIGHT))
                     .font_weight(FontWeight::SEMIBOLD)

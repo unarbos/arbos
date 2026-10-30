@@ -164,7 +164,6 @@ struct GlobalSearchRow: View {
                     .font(theme.font(Theme.body, weight: .medium))
                     .foregroundStyle(theme.text)
                     .lineLimit(1)
-                    .emojiNameLift(entry.subtitle.isEmpty ? "" : entry.title, size: theme.pt(Theme.body))
                 Text(entry.subtitle)
                     .font(theme.font(Theme.tiny))
                     .foregroundStyle(theme.muted)
