@@ -59,9 +59,21 @@ final class DeviceStore {
         return directory().appendingPathComponent("store-\(name).sqlite")
     }
 
+    /// Keep the whole store folder out of iTunes/iCloud backups. Excluding the `.sqlite`
+    /// file alone left `-wal` and `-shm` behind, and in WAL mode the newest chat content is
+    /// in the `-wal` — so an unencrypted backup still carried recent messages. The relay has
+    /// everything in here anyway, so nothing is lost by leaving it out.
+    static func excludeFromBackup() {
+        var dir = directory()
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? dir.setResourceValues(values)
+    }
+
     static func open(relayUrl: String, account: String) -> DeviceStore? {
         let url = fileURL(relayUrl: relayUrl, account: account)
         try? FileManager.default.createDirectory(at: directory(), withIntermediateDirectories: true)
+        excludeFromBackup()
         if let s = DeviceStore(url: url) { return s }
         // Unreadable or corrupt: start over (the relay has everything).
         log.error("store: could not open \(url.lastPathComponent, privacy: .public); recreating")
@@ -92,6 +104,7 @@ final class DeviceStore {
         excluded.isExcludedFromBackup = true
         var u = url
         try? u.setResourceValues(excluded)
+        DeviceStore.excludeFromBackup()
         guard migrate() else {
             sqlite3_close(handle)
             db = nil
