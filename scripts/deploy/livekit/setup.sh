@@ -32,6 +32,7 @@ PRINT_ONLY=0
 [[ "${1:-}" == "--print-env" ]] && PRINT_ONLY=1
 
 # ---- settings (env overrides; existing livekit.env is the baseline) ---------------------------------
+# shellcheck disable=SC1090  # the host's livekit.env, outside the repo
 [[ -f "$ENV_FILE" ]] && . "$ENV_FILE"
 LIVEKIT_HOST="${LIVEKIT_HOST:-livekit.arbos.life}"
 TURN_DOMAIN="${TURN_DOMAIN:-turn.arbos.life}"
@@ -124,7 +125,7 @@ Persistent=true
 WantedBy=timers.target
 EOF
 # Caddy issues the certificate on first use of the vhost; poke it and wait a little.
-for i in $(seq 1 30); do
+for _ in $(seq 1 30); do
   curl -fsS -o /dev/null --max-time 5 "https://$TURN_DOMAIN/" 2>/dev/null || true
   if find "$CADDY_DATA/certificates" -type f -name "$TURN_DOMAIN.crt" 2>/dev/null | grep -q .; then break; fi
   sleep 3
@@ -174,7 +175,7 @@ if systemctl is-active --quiet livekit.service; then
 else
   systemctl start livekit.service
 fi
-for i in $(seq 1 30); do curl -fsS --max-time 2 http://127.0.0.1:7880/ >/dev/null 2>&1 && break; sleep 1; done
+for _ in $(seq 1 30); do curl -fsS --max-time 2 http://127.0.0.1:7880/ >/dev/null 2>&1 && break; sleep 1; done
 curl -fsS --max-time 2 http://127.0.0.1:7880/ >/dev/null && echo "livekit answering on 127.0.0.1:7880" || { echo "livekit not answering; docker logs livekit" >&2; docker logs --tail 50 livekit >&2; exit 1; }
 
 # ---- 6. relay env ----------------------------------------------------------------------------------
