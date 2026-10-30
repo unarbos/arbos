@@ -1589,7 +1589,7 @@ mod privacy_tests {
     //! its page, and the `PATCH /me {group_add}` it sends.
 
     use futures::future::BoxFuture;
-    use gpui::{point, AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext};
+    use gpui::{point, Entity, Modifiers, TestAppContext, VisualTestContext};
     use tokio::sync::mpsc;
 
     use super::*;
