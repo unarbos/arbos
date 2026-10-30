@@ -514,6 +514,12 @@ fn mentions_agent(text: &str, mentions: &[String], project: &Project) -> bool {
         })
 }
 
+/// How long an announce waits for its own row to reach the relay's doc. The apps send
+/// `POST …/notify` and the room push side by side, so the announce often lands first
+/// (Arbonites 01M64SV6F5…, #2305: the row was stored 440 ms after the announce).
+const ROW_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+const ROW_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// Called from `notify::announce_with` once per announced message (people and project chats):
 /// every outside agent in the chat gets a `message.received` event. `wake` says whether the
 /// agent should answer — always in its own 1:1 chat and in DMs; in groups when it is
@@ -526,6 +532,43 @@ pub fn on_announce(
     text: &str,
     reply_to: Option<&str>,
     mentions: &[String],
+) {
+    // Tests announce rows that are never stored and read the event at once.
+    let wait = if cfg!(test) {
+        std::time::Duration::ZERO
+    } else {
+        ROW_WAIT
+    };
+    on_announce_waiting(
+        state, chat, sender, message_id, text, reply_to, mentions, wait,
+    );
+}
+
+/// The event of one announced message, waiting for its row.
+struct Announced {
+    chat: ChatRef,
+    sender: Sender,
+    message_id: String,
+    text: String,
+    reply_to: Option<String>,
+    mentions: Vec<String>,
+    targets: Vec<(Project, bool, Value)>,
+}
+
+/// [`on_announce`] that waits up to `wait` for the row when the relay's doc does not hold it
+/// yet. A row that never shows up (not stored in time, or stored but not applicable to a
+/// divergent doc) is delivered without `attachments` and with `attachments_unknown: true`:
+/// an empty list would tell the agent the message has none.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn on_announce_waiting(
+    state: &AppState,
+    chat: &ChatRef,
+    sender: &Sender,
+    message_id: &str,
+    text: &str,
+    reply_to: Option<&str>,
+    mentions: &[String],
+    wait: std::time::Duration,
 ) {
     let targets: Vec<(Project, bool, Value)> = match &chat.project_id {
         Some(pid) => {
@@ -575,18 +618,82 @@ pub fn on_announce(
     if targets.is_empty() {
         return;
     }
-    // Pictures, files, GIFs and chart PNGs on the row, and the message it replies to (the
-    // announce carries text only).
-    let doc = crate::matrix::backfill::load_doc(state, &chat.chat_id, chat.project_id.as_deref())
-        .ok()
-        .flatten();
-    let attachments = doc
+    let ev = Announced {
+        chat: chat.clone(),
+        sender: sender.clone(),
+        message_id: message_id.to_owned(),
+        text: text.to_owned(),
+        reply_to: reply_to.map(str::to_owned),
+        mentions: mentions.to_vec(),
+        targets,
+    };
+    // Pictures, files, GIFs and chart PNGs come from the announced row itself (the announce
+    // carries text only).
+    let doc = load_announced_doc(state, chat);
+    if doc
         .as_ref()
-        .and_then(|doc| doc.message(message_id))
-        .map(|row| attachments_of(&row, chat))
-        .unwrap_or_default();
-    let reply_to = reply_json(state, doc.as_ref(), chat, reply_to);
-    for (p, wake, chat_json) in targets {
+        .is_some_and(|d| d.message(message_id).is_some())
+    {
+        deliver_announced(state, &ev, doc.as_ref());
+        return;
+    }
+    let handle = tokio::runtime::Handle::try_current()
+        .ok()
+        .filter(|_| !wait.is_zero());
+    let Some(handle) = handle else {
+        deliver_announced(state, &ev, doc.as_ref());
+        return;
+    };
+    let state = state.clone();
+    handle.spawn(async move {
+        let room = arbos_core::wire::room_name(ev.chat.project_label(), &ev.chat.chat_id);
+        let head = |s: &AppState| s.db.room_activity(&room).map(|(h, _)| h).unwrap_or(0);
+        let deadline = tokio::time::Instant::now() + wait;
+        let mut seen = head(&state);
+        let mut doc = doc;
+        while tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(ROW_POLL).await;
+            let now = head(&state);
+            if now == seen {
+                continue;
+            }
+            seen = now;
+            doc = load_announced_doc(&state, &ev.chat);
+            if doc
+                .as_ref()
+                .is_some_and(|d| d.message(&ev.message_id).is_some())
+            {
+                break;
+            }
+        }
+        deliver_announced(&state, &ev, doc.as_ref());
+    });
+}
+
+fn load_announced_doc(state: &AppState, chat: &ChatRef) -> Option<ChatDoc> {
+    crate::matrix::backfill::load_doc(state, &chat.chat_id, chat.project_id.as_deref())
+        .ok()
+        .flatten()
+}
+
+/// One `message.received` per target. `attachments` is the row's own list when `doc` holds
+/// the row; otherwise the field is left out and `attachments_unknown` is set.
+fn deliver_announced(state: &AppState, ev: &Announced, doc: Option<&ChatDoc>) {
+    let chat = &ev.chat;
+    let sender = &ev.sender;
+    let message_id = ev.message_id.as_str();
+    let attachments = doc
+        .and_then(|d| d.message(message_id))
+        .map(|row| attachments_of(&row, chat));
+    if attachments.is_none() {
+        tracing::warn!(
+            chat = %chat.chat_id,
+            message = %message_id,
+            "announced row not in the relay's doc: message.received sent with attachments unknown"
+        );
+    }
+    let reply_to = reply_json(state, doc, chat, ev.reply_to.as_deref());
+    for (p, wake, chat_json) in &ev.targets {
         // Its own message, announced by the relay on its behalf: not news to it.
         if sender.kind == "agent" && sender.id == p.id {
             continue;
@@ -600,25 +707,29 @@ pub fn on_announce(
         {
             continue;
         }
+        let mut message = json!({
+            "id": message_id,
+            "text": ev.text,
+            "from": {
+                "kind": sender.kind,
+                "id": sender.id,
+                "name": sender.name,
+                "handle": sender.handle,
+            },
+            "reply_to": reply_to,
+            "mentions": ev.mentions,
+        });
+        match &attachments {
+            Some(a) => message["attachments"] = json!(a),
+            None => message["attachments_unknown"] = json!(true),
+        }
         deliver(
             state,
             &p.id,
             json!({
                 "type": "message.received",
                 "chat": chat_json,
-                "message": {
-                    "id": message_id,
-                    "text": text,
-                    "from": {
-                        "kind": sender.kind,
-                        "id": sender.id,
-                        "name": sender.name,
-                        "handle": sender.handle,
-                    },
-                    "reply_to": reply_to,
-                    "mentions": mentions,
-                    "attachments": attachments,
-                },
+                "message": message,
                 "wake": wake,
             }),
         );
@@ -2633,6 +2744,159 @@ mod tests {
             reply_json(&state, Some(&doc), &chat_ref, Some("nope")),
             json!({ "id": "nope" })
         );
+    }
+
+    /// A group with one outside agent in it: (state, agent project id, group id, a member).
+    fn outside_group(seed: i64) -> (AppState, String, String, String) {
+        use crate::people::tests_support::{group, person, project_of};
+        use crate::state::test_support::test_state;
+        use crate::state::AuthMode;
+
+        let state = test_state(AuthMode::Github);
+        let (owner, _) = person(&state, seed);
+        let (other, _) = person(&state, seed + 1);
+        let pid = project_of(&state, &owner, "Grok Bot");
+        state
+            .db
+            .insert_outside_agent(&pid, &owner, "grok", &hash(&mint_key()))
+            .unwrap();
+        let g = group(&state, &[&owner, &other]);
+        state
+            .db
+            .add_member(&g, &format!("agent:{pid}"), "agent", &owner, &json!({}))
+            .unwrap();
+        (state, pid, g, other)
+    }
+
+    fn picture_opts(sender: &str) -> arbos_core::doc::UserMessageOpts {
+        arbos_core::doc::UserMessageOpts {
+            attachments: vec![arbos_core::doc::UserAttachment {
+                name: "shot.png".into(),
+                mime: "image/png".into(),
+                kind: None,
+                blob_ref: Some("att-shot".into()),
+                url: None,
+                source: None,
+            }],
+            sender: Some(format!("user:{sender}")),
+            ..Default::default()
+        }
+    }
+
+    async fn events_eventually(state: &AppState, pid: &str) -> Vec<(i64, Value)> {
+        for _ in 0..100 {
+            let events = state.db.asp_events_after(pid, 0, 10).unwrap();
+            if !events.is_empty() {
+                return events;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        Vec::new()
+    }
+
+    /// #2305: the app's announce reached the relay 440 ms before its row (Arbonites
+    /// 01M64SV6F5…), and the event said `attachments: []` for a message with a screenshot. The
+    /// event now waits for the row and lists the picture.
+    #[tokio::test]
+    async fn announce_before_its_row_still_lists_the_picture() {
+        let (state, pid, g, other) = outside_group(7201);
+        let msg_id = ulid();
+        let me = Sender::user(&state, &other);
+        on_announce_waiting(
+            &state,
+            &ChatRef::people(&g),
+            &me,
+            &msg_id,
+            "look at this",
+            None,
+            &[],
+            std::time::Duration::from_secs(3),
+        );
+        assert!(
+            state.db.asp_events_after(&pid, 0, 10).unwrap().is_empty(),
+            "no event before the row is in"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let (m, o) = (msg_id.clone(), other.clone());
+        crate::notices::write_doc(&state, None, &g, move |doc| {
+            doc.append_user_message(&m, "look at this", "dev:test", &picture_opts(&o))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let events = events_eventually(&state, &pid).await;
+        assert_eq!(events.len(), 1);
+        let msg = &events[0].1["message"];
+        assert_eq!(msg["id"], msg_id);
+        assert_eq!(
+            msg["attachments"][0]["blob"],
+            format!("people:{g}/att-shot")
+        );
+        assert_eq!(msg["attachments"][0]["kind"], "image");
+        assert_eq!(msg["attachments"][0]["mime"], "image/png");
+        assert!(msg.get("attachments_unknown").is_none());
+    }
+
+    /// #2305, divergent chat: the row is stored but depends on history the relay lost, so the
+    /// rebuilt doc cannot show it. The event must not claim `attachments: []`.
+    #[tokio::test]
+    async fn row_the_doc_cannot_apply_is_attachments_unknown() {
+        let (state, pid, g, other) = outside_group(7211);
+        crate::notices::write_doc(&state, None, &g, |doc| {
+            doc.append_user_message(&ulid(), "hello", "dev:test", &Default::default())?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        // A device holds a message the relay never got, then writes a picture on top of it.
+        let device = ChatDoc::new(None, false);
+        device
+            .append_user_message(&ulid(), "lost", "dev:phone", &Default::default())
+            .unwrap();
+        let base = device.oplog_vv();
+        let msg_id = ulid();
+        device
+            .append_user_message(&msg_id, "with picture", "dev:phone", &picture_opts(&other))
+            .unwrap();
+        let bytes = device.export_updates_since(&base);
+        let room = arbos_core::wire::room_name(people::PEOPLE_PROJECT, &g);
+        state
+            .db
+            .append_row(&room, "dev:phone", &ulid(), &bytes)
+            .unwrap();
+        let doc = crate::matrix::backfill::load_doc(&state, &g, None)
+            .unwrap()
+            .unwrap();
+        assert!(
+            doc.message(&msg_id).is_none(),
+            "the doc cannot apply the row"
+        );
+
+        let me = Sender::user(&state, &other);
+        on_announce_waiting(
+            &state,
+            &ChatRef::people(&g),
+            &me,
+            &msg_id,
+            "with picture",
+            None,
+            &[],
+            std::time::Duration::from_millis(400),
+        );
+        let events = events_eventually(&state, &pid).await;
+        assert_eq!(events.len(), 1);
+        let msg = &events[0].1["message"];
+        assert_eq!(msg["text"], "with picture");
+        assert!(msg.get("attachments").is_none(), "no empty list: {msg}");
+        assert_eq!(msg["attachments_unknown"], true);
+
+        // With no wait at all the answer is the same, delivered at once.
+        let next = ulid();
+        on_announce(&state, &ChatRef::people(&g), &me, &next, "x", None, &[]);
+        let events = state.db.asp_events_after(&pid, 0, 10).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].1["message"]["attachments_unknown"], true);
+        assert!(events[1].1["message"].get("attachments").is_none());
     }
 
     /// Arbonites, 2026-10-28 (01M627S7…, 01M627VG…): a box wrote an agent-to-agent hand-off row

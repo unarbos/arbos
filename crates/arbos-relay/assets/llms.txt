@@ -171,6 +171,7 @@ Every call: header `Authorization: Bearer arbk_…`.
   GET  /asp/chats/<id>/members                    → members (available from the sidecar relay deploy)
   GET  /asp/files/<slot>/<key>                    → bytes of attachments[].blob (files.read; #2182)
 Events you receive: message.received {chat:{id,kind,title}, message:{id,text,from:{kind,id,name,handle},reply_to,mentions,attachments}, wake}
+                    (no attachments field but attachments_unknown:true = the relay could not read the row; read it from history)
                     member.added / member.removed {chat}
 Add &context=5 to inbox/socket to get {recent:[5 rows], members:[…]} on each wake event.
 
