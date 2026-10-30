@@ -69,6 +69,7 @@ CLI:  feedback_poller.py [run] | status | testers | set-cursor <ISO-8601>
       | gate-tree <sha-or-branch> <fid>…   (gate a hand-prepared integration tree as one run and land it whole)
       | gate-abort   (drop the active gate run without verdicts; every ready branch re-batches at its current head)
       | park <id> <note…>   (hand a gating item back to its owner at the head the red run judged; a newer push re-gates by itself)
+      | retire <id> <note…>   (a handed_off item whose owner is gone: ends it, releases its solo slot and pin; the issue and branch are not touched)
       | gate-next <fid>… [--then <fid>…] [--abort]   (pin: these items gate next and alone; while a pinned item is with its owner nothing else merges)
       | gate-unpin <fid>…   | unfail <fid>…   (a failed item whose fix is on main goes back to pushed)
 """
@@ -118,7 +119,7 @@ DEPLOY_HOOK = "/usr/local/bin/arbos-deploy-hook"  # CD worker's hook: `<relay|ag
 DEPLOY_QUEUE = os.environ.get("ARBOS_DEPLOY_QUEUE", "/var/lib/arbos-feedback/deploy-requests")  # the hook's queue: one file per kind
 USER_AGENT = "arbos-feedback-poller/1 (+https://github.com/unarbos/arbos)"
 
-TERMINAL = {"shipped", "failed", "ignored", "rejected", "duplicate", "no_change", "handed_off", "deferred", "declined", "closed_externally"}
+TERMINAL = {"shipped", "failed", "ignored", "rejected", "duplicate", "no_change", "handed_off", "deferred", "declined", "closed_externally", "retired"}
 
 # Fixes in these areas only count as shipped with device-level evidence (a real phone, the
 # tester's confirmation, or Jacob's OK): the simulator cannot show a silent ringback, a missing
@@ -5591,6 +5592,59 @@ def main(argv: list[str]) -> int:
         cur["since"] = iso(parse_iso(argv[2]))
         store.save_cursor(cur)
         print(f"cursor since={cur['since']}")
+        return 0
+    if cmd == "retire":
+        # `retire <id> <note…>`: the owner of a handed-off item is gone (a worker died holding it). The item ends as
+        # `retired`; its solo-slot reservation and pin are released, so the "main just moved" note stops and the slot
+        # is free. The issue is not touched (the feature is still wanted, replacement work is tracked on it) and the
+        # branch is kept (it may hold the owner's work): this verb builds no GitHub client at all. `park` cannot do
+        # this (gating items only, keeps `solo_next`), `decline` closes the issue, `requeue` deletes the branch.
+        # A new owner takes the item back with `handoff <id> bc-…`.
+        if len(argv) < 4 or not " ".join(argv[3:]).strip():
+            print("retire <id> <note…>")
+            return 2
+        fid, note = argv[2], " ".join(argv[3:]).strip()
+        store = Store(cfg)
+        with (cfg.state_dir / ".lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            st = store.state(fid)
+            if not st:
+                print(f"{fid}: unknown")
+                return 2
+            status = st.get("status")
+            if status == "gating":
+                print(f"{fid}: refused — gating: its branch is in the gate queue and can still merge. `park {fid} <note>` hands it back "
+                      "to its owner first; retire it after that")
+                return 2
+            if status != "handed_off":
+                print(f"{fid}: refused — status {status}: only a handed_off item is waiting on an owner")
+                return 2
+            run = store.cursor().get("rust_gate") or {}
+            if fid in (run.get("members") or {}):
+                # A green `gate-tree` run (land_tree) still lands a handed_off member.
+                print(f"{fid}: refused — a member of the active gate run {run.get('id')}; retire it after that run settles")
+                return 2
+            raw_owner = str(st.get("handed_off_to") or "")
+            # `handoff <id>` without an owner writes its default label into `handed_off_to` (#959: "in-progress"),
+            # so the field is not always an agent id.
+            owner = raw_owner if raw_owner.startswith("bc-") else None
+            st["retired"] = {"at": iso(), "note": note[:300], "owner": owner, "branch_head": st.get("branch_head"),
+                             "solo_next": bool(st.get("solo_next")), "gate_pinned": bool(st.get("gate_pinned")),
+                             "sibling_conflicts": st.get("sibling_conflicts") or 0, "main_conflicts": st.get("main_conflicts") or 0}
+            if owner is None:
+                st["retired"]["owner_field"] = raw_owner or None
+            st["status"] = "retired"
+            # The conflict counters go too: kept, they re-arm the solo slot on a new owner's first conflict.
+            for k in ("solo_next", "gate_pinned", "pinned_by", "pinned_at", "main_moved_noted", "sibling_conflicts", "main_conflicts", "follow_after"):
+                st.pop(k, None)
+            store.save_state(fid, st)
+            store.event(fid, "retired", owner=owner, owner_field=raw_owner or None, note=note[:300],
+                        released_solo=st["retired"]["solo_next"], released_pin=st["retired"]["gate_pinned"], branch_head=st.get("branch_head"))
+        who = owner or (f"no agent owner: handed_off_to is {raw_owner!r}, not a bc- id" if raw_owner else "no owner recorded")
+        print(f"{fid}: retired ({who})" + ("; solo slot released" if st["retired"]["solo_next"] else "")
+              + ("; pin released" if st["retired"]["gate_pinned"] else "")
+              + (f"; branch {st.get('branch') or 'feedback/' + fid} kept at {st['branch_head'][:9]}" if st.get("branch_head") else "")
+              + (f"; issue #{st['issue']} untouched" if st.get("issue") else ""))
         return 0
     missing = [k for k in ("ASC_KEY_ID", "ASC_ISSUER_ID", "ASC_KEY_P8_B64", "CURSOR_API_KEY", "GITHUB_TOKEN") if not os.environ.get(k)]
     if missing and cmd != "status":
