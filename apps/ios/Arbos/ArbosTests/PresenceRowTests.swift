@@ -51,20 +51,17 @@ final class PresenceRowTests: XCTestCase {
 
     func testBubblePictureStaysOnThePlusColumnAndTheRowPictureIsGroks() {
         // The bubble's picture (people chats) is the Discord-standard 36 pt disc
-        // ([feedback chat-density-ios-2026-10-26]; was 42) centred on the `+` through
-        // both composer insets; the `+` itself is Grok's 48 pt
+        // ([feedback chat-density-ios-2026-10-26]; was 42) centred on the resting `+`
+        // (keyboard down; it stays put when the keyboard opens, [feedback
+        // ios-bubble-reflow-2026-10-30]); the `+` itself is Grok's 48 pt
         // ([feedback iphone-composer-grok-parity-2026-10-25]).
         XCTAssertEqual(Theme.memberAvatar, 36)
-        for composerInset in [Theme.composerInset, Theme.composerInsetKeyboard] {
-            let center = 16 + Theme.avatarColumnInset(composerInset: composerInset) + Theme.memberAvatar / 2
-            let plusCenter = composerInset + Theme.plusButton / 2
-            XCTAssertEqual(center, plusCenter, accuracy: 1, "inset \(composerInset)")
-            XCTAssertEqual(16 + Theme.memberLane(composerInset: composerInset),
-                           16 + Theme.avatarColumnInset(composerInset: composerInset) + Theme.memberAvatar + Theme.memberAvatarGap)
-        }
-        // Keyboard up: avatar spans 24–60 inside the `+` (18–66), body after the gap at 70.
-        XCTAssertEqual(16 + Theme.avatarColumnInset(composerInset: Theme.composerInsetKeyboard), 24)
-        XCTAssertEqual(16 + Theme.memberLane(composerInset: Theme.composerInsetKeyboard), 70)
+        let center = 16 + Theme.avatarColumnInset + Theme.memberAvatar / 2
+        XCTAssertEqual(center, Theme.composerInset + Theme.plusButton / 2, accuracy: 1)
+        XCTAssertEqual(Theme.memberLane, Theme.avatarColumnInset + Theme.memberAvatar + Theme.memberAvatarGap)
+        // Avatar spans 37–73 inside the resting `+` (31–79), body after the gap at 83.
+        XCTAssertEqual(16 + Theme.avatarColumnInset, 37)
+        XCTAssertEqual(16 + Theme.memberLane, 83)
         // The row's own picture is Grok's smaller one, 6 pt inside the `+`, words 14 pt after it.
         XCTAssertEqual(PresenceRow.avatar, Theme.presenceAvatar)
         XCTAssertEqual(PresenceRow.gap, Theme.presenceGap)

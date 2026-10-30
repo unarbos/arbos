@@ -19,23 +19,18 @@ final class ChatDensityMetricsTests: XCTestCase {
         XCTAssertLessThan(Theme.memberAvatar, 42, "smaller than the 42 pt disc Jacob saw")
     }
 
-    func testTheAvatarColumnStaysCentredOnThePlusAndSharesTheStatusPicturesLeftEdge() {
-        for composerInset in [Theme.composerInset, Theme.composerInsetKeyboard] {
-            let avatarLeft = listPad + Theme.avatarColumnInset(composerInset: composerInset)
-            let plusCenter = composerInset + Theme.plusButton / 2
-            XCTAssertEqual(avatarLeft + Theme.memberAvatar / 2, plusCenter, accuracy: 0.001,
-                           "inset \(composerInset): the disc is centred on the `+`")
-            // A 36 disc centred on the 48 `+` starts 6 inside it — exactly where the
-            // status row's picture starts (`presenceAvatarOffset`): one left edge for
-            // every picture in the chat.
-            XCTAssertEqual(avatarLeft, composerInset + Theme.presenceAvatarOffset, accuracy: 0.001)
-            XCTAssertEqual(avatarLeft, listPad + Theme.presenceInset(composerInset: composerInset), accuracy: 0.001)
-        }
-        // Keyboard up: disc 24–60, body at 70 (was 21–63 / 76). Down: 37–73, body at 83 (was 34–76 / 89).
-        XCTAssertEqual(listPad + Theme.avatarColumnInset(composerInset: Theme.composerInsetKeyboard), 24)
-        XCTAssertEqual(listPad + Theme.memberLane(composerInset: Theme.composerInsetKeyboard), 70)
-        XCTAssertEqual(listPad + Theme.avatarColumnInset(composerInset: Theme.composerInset), 37)
-        XCTAssertEqual(listPad + Theme.memberLane(composerInset: Theme.composerInset), 83)
+    func testTheAvatarColumnIsCentredOnTheRestingPlusAndSharesTheStatusPicturesLeftEdge() {
+        let avatarLeft = listPad + Theme.avatarColumnInset
+        let plusCenter = Theme.composerInset + Theme.plusButton / 2
+        XCTAssertEqual(avatarLeft + Theme.memberAvatar / 2, plusCenter, accuracy: 0.001,
+                       "keyboard down: the disc is centred on the `+`")
+        // A 36 disc centred on the 48 `+` starts 6 inside it — exactly where the
+        // status row's picture starts (`presenceAvatarOffset`) with the keyboard down.
+        XCTAssertEqual(avatarLeft, Theme.composerInset + Theme.presenceAvatarOffset, accuracy: 0.001)
+        XCTAssertEqual(avatarLeft, listPad + Theme.presenceInset(composerInset: Theme.composerInset), accuracy: 0.001)
+        // Disc 37–73, body at 83 (was 34–76 / 89).
+        XCTAssertEqual(listPad + Theme.avatarColumnInset, 37)
+        XCTAssertEqual(listPad + Theme.memberLane, 83)
     }
 
     func testPeopleChatBubblesKeepAThirtyTwoPointFarMarginAndAgentChatsKeepGroks() {
@@ -52,21 +47,17 @@ final class ChatDensityMetricsTests: XCTestCase {
         XCTAssertEqual(RowView.maxBubble(width: screen, people: false), 326, "agent chat unchanged")
 
         // Someone else's bubble: after the lane, at most 300 wide → right edge ≤ 370.
-        for composerInset in [Theme.composerInset, Theme.composerInsetKeyboard] {
-            let lane = Theme.memberLane(composerInset: composerInset)
-            let incoming = mine - lane
-            let bodyLeft = listPad + lane
-            XCTAssertEqual(bodyLeft + incoming, screen - Theme.bubbleOppositeMargin, accuracy: 0.001,
-                           "inset \(composerInset): an incoming bubble may run to 32 from the right edge")
-            XCTAssertGreaterThan(incoming, 253, "wider than before (253 keyboard down)")
-        }
-        XCTAssertEqual(mine - Theme.memberLane(composerInset: Theme.composerInsetKeyboard), 300)
-        XCTAssertEqual(mine - Theme.memberLane(composerInset: Theme.composerInset), 287)
+        let incoming = mine - Theme.memberLane
+        let bodyLeft = listPad + Theme.memberLane
+        XCTAssertEqual(bodyLeft + incoming, screen - Theme.bubbleOppositeMargin, accuracy: 0.001,
+                       "an incoming bubble may run to 32 from the right edge")
+        XCTAssertGreaterThan(incoming, 253, "wider than before (253)")
+        XCTAssertEqual(incoming, 287)
     }
 
     func testThePhotoBubbleWidthIsUntouchedByTheWiderCaps() {
         // #1840: a photo + caption bubble is at most 280 wide whatever the cap.
-        let people = RowView.maxBubble(width: screen, people: true) - Theme.memberLane(composerInset: Theme.composerInset)
+        let people = RowView.maxBubble(width: screen, people: true) - Theme.memberLane
         XCTAssertEqual(min(280, people), 280)
     }
 }
