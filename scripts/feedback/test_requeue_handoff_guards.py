@@ -16,8 +16,8 @@ sys.path.insert(0, str(HERE))
 
 import feedback_poller as fp  # noqa: E402
 
-ORPHANS = {  # the four orphaned handed-off items with real branch heads (relay host status, 2026-10-30)
-    "link-open-confirm-2026-10-23": "6ce4198f" + "0" * 32,
+ORPHANS = {  # handed-off items whose owner is gone, with live branches (#1547, #1529, #1890, #2126; 2026-10-30)
+    "app-01M5N5WPHBR935T6SXFE1F31E1": "6ce4198f" + "0" * 32,
     "call-strip-in-chat-column-2026-10-23": "c298bff5" + "0" * 32,
     "relay-host-disk-guard-2026-10-26": "5e0ca586" + "0" * 32,
     "link-wrap-hints-revert-2026-10-27": "09b0929d" + "0" * 32,
