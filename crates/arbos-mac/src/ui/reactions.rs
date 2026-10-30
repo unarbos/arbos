@@ -55,6 +55,13 @@ pub fn place(anchor: Point<Pixels>, size: Size<Pixels>, viewport: Size<Pixels>) 
     point(px(x), px(y))
 }
 
+/// Emoji outside the blocks `picked_emoji` takes whole that the system picker
+/// types bare, with no U+FE0F: ⌚ ⌛ ⏩ ⏪ ⏫ ⏬ ⏰ ⏳ ◽ ◾
+/// ([feedback full-picker-reaction-mac-2026-10-29]: those picks were dropped).
+const BARE_EMOJI: [u32; 10] = [
+    0x231A, 0x231B, 0x23E9, 0x23EA, 0x23EB, 0x23EC, 0x23F0, 0x23F3, 0x25FD, 0x25FE,
+];
+
 /// The first emoji in `text`, if the text starts with one: what the system
 /// picker (or a keyboard) typed into the pick field.
 pub fn picked_emoji(text: &str) -> Option<String> {
@@ -68,6 +75,7 @@ pub fn picked_emoji(text: &str) -> Option<String> {
             || (0x1F900..=0x1F9FF).contains(&u)
             || (0x2190..=0x21FF).contains(&u)
             || (0x3030..=0x303F).contains(&u)
+            || BARE_EMOJI.contains(&u)
             || u == 0x200D
             || u == 0xFE0F
     });
@@ -369,5 +377,18 @@ mod tests {
         assert_eq!(picked_emoji("👍🏽").as_deref(), Some("👍🏽"));
         assert_eq!(picked_emoji("ok"), None);
         assert_eq!(picked_emoji(""), None);
+    }
+
+    #[test]
+    fn picked_emoji_takes_every_emoji_the_picker_types() {
+        for e in [
+            "⌚", "⌛", "⏩", "⏪", "⏫", "⏬", "⏰", "⏳", "◽", "◾", "©️", "‼️", "1️⃣", "#️⃣",
+            "↔️", "⌨️",
+        ] {
+            assert_eq!(picked_emoji(e).as_deref(), Some(e), "{e}");
+        }
+        for t in ["1", "#", "©", "⌘", "▪", "a"] {
+            assert_eq!(picked_emoji(t), None, "{t}");
+        }
     }
 }
