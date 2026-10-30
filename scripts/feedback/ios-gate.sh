@@ -28,6 +28,12 @@ test_error_set() {
 new_test_errors() {
   comm -23 <(printf '%s\n' "$1" | sed '/^$/d' | sort -u) <(printf '%s\n' "$2" | sed '/^$/d' | sort -u)
 }
+# print_errors <set> → the set as "error: <path>: <message>" lines. rust-gate.sh `status` hands the poller only
+# "== " lines and lines shaped like a compiler diagnostic; the bare "<path>: <message>" form was dropped there,
+# and #2301's red verdict reached its owner with no error under "errors NOT on main".
+print_errors() {
+  printf '%s\n' "$1" | sed '/^$/d; s/^/error: /' | head -20
+}
 
 # Run the whole ArbosTests suite (#1868, coordinator 2026-10-26 05:52) on ONE named simulator, parallel
 # off (docs/process-rules.md), reusing the .xctestrun that build-for-testing just produced: 217 tests run
@@ -139,7 +145,7 @@ run_unit_tests() {
     rm -f "$log"; return 0
   fi
   echo "== tests: FAIL — failing and NOT red on main (${base:0:8}):"
-  printf '%s\n' "$new" | head -20
+  printf '%s\n' "$new" | sed '/^$/d; s/.*/test & ... FAILED/' | head -20
   grep -E "error: -\[ArbosTests\." "$log" | sed 's#/Users/[^/]*/arbos-gate/##' | head -20 | cut -c1-300
   rm -f "$log"; return 1
 }
@@ -336,7 +342,7 @@ if [[ "$rc" -eq 0 ]]; then
   else
     echo "== tests: FAIL to compile (ArbosTests)"
     branch_errs=$(test_error_set "$log")
-    printf '%s\n' "$branch_errs" | head -20
+    print_errors "$branch_errs"
     base_errs=""
     GATE_BASE_SHA=${GATE_BASE_SHA:-$(git -C "$ROOT" rev-parse origin/main 2>/dev/null || true)}
     if [[ -n "${GATE_BASE_SHA:-}" ]] && git -C "$ROOT" cat-file -e "$GATE_BASE_SHA^{commit}" 2>/dev/null; then
@@ -357,7 +363,7 @@ if [[ "$rc" -eq 0 ]]; then
       echo "== tests: every error exists on main too (${GATE_BASE_SHA:0:8}); not this branch's regression — reported, not blamed"
     else
       echo "== tests: errors NOT on main (${GATE_BASE_SHA:0:8}) — this branch's regression:"
-      printf '%s\n' "$new_errs" | head -20
+      print_errors "$new_errs"
       rc=1
     fi
   fi

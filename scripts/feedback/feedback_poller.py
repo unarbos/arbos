@@ -342,6 +342,101 @@ def http(method: str, url: str, headers: dict[str, str] | None = None, data: byt
         raise HttpError(e.code, body, url, {k.lower(): v for k, v in e.headers.items()}) from None
 
 
+class _KeepRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+_NO_REDIRECT = urllib.request.build_opener(_KeepRedirect)
+
+_LOG_TIMESTAMP = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z ?")
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_RUNNER_ROOT = re.compile(r"/(home|Users)/runner/work/[^/\s]+/[^/\s]+/")
+_LOG_NOISE = ("For more information about this error", "##[error]Process completed with exit code",
+              "To learn more, run the command again with --verbose")
+_STEP_FAILED = "##[error]Process completed with exit code"
+
+
+def log_error_lines(text: str, limit: int = 40) -> list[str]:
+    """The diagnostics in one GitHub Actions job log: compiler errors with their `-->` location, fmt and
+    typeshare diffs, shellcheck findings, failed tests, Xcode failures. cargo colours its output, so the
+    ANSI codes go before any matching (`\\berror\\b` cannot match `\\x1b[91merror[E0004]`: the "m" of the
+    colour code is a word character). When nothing matches, the failed step's last lines stand in."""
+    rows = []
+    for raw in text.splitlines():
+        raw = _LOG_TIMESTAMP.sub("", raw)
+        if raw.startswith("\x1b[36;1m"):
+            continue  # GitHub echoes each step's script in cyan: the commands, not their output
+        rows.append(_RUNNER_ROOT.sub("", _ANSI.sub("", raw)).rstrip())
+    out: list[str] = []
+
+    def keep(line: str) -> None:
+        if line.strip() and line not in out:
+            out.append(line[:400])
+
+    in_diff, want_location, want_panic = False, 0, 0
+    for line in rows:
+        if line.startswith("##[") and not line.startswith("##[error]"):
+            in_diff = False
+            continue
+        want_location -= 1
+        want_panic -= 1
+        if line.startswith(("diff --git ", "Diff in ")):
+            in_diff = True
+            keep(line)
+        elif in_diff and re.match(r"(---|\+\+\+|@@|[+-]([^+-]|$))", line):
+            keep(line)
+        elif want_location > 0 and re.match(r"\s*--> ", line):
+            keep(line)
+            want_location = 0
+        elif want_panic > 0 and not line.startswith("note: "):
+            keep(line)
+        elif line.startswith(_LOG_NOISE):
+            continue
+        elif re.match(r"error(\[[A-Z]*\d+\])?: ", line):
+            keep(line)
+            want_location = 4
+        elif re.match(r"thread '.*'.* panicked at ", line):
+            keep(line)
+            want_panic = 4
+        elif (re.search(r"\berror\b|\*\* (ARCHIVE|EXPORT|BUILD|TEST BUILD) FAILED", line, re.I)
+              or re.match(r"In \S+ line \d+:|test \S+ \.\.\. FAILED$", line)
+              or re.search(r"\^-+\^? SC\d{4} ", line)):
+            keep(line.strip())
+        if len(out) >= limit:
+            break
+    if out:
+        return out[:limit]
+    end = next((i for i, l in enumerate(rows) if l.startswith(_STEP_FAILED)), len(rows))
+    tail = [l for l in rows[:end] if l.strip() and not l.startswith("##[")][-25:]
+    if not tail:
+        return ["(the job's log has no output before the failure; open the run)"]
+    return ["(no error pattern matched; the failed step's last lines:)", *tail]
+
+
+def gate_diagnostics(active: dict) -> str:
+    """The red halves of a gate run, for the issue comment and the agent. A half that brought back no line
+    besides the gate's `== ` step summaries says so in place: an empty block reads as "nothing to fix"."""
+
+    def half(title: str, text: str, where: str) -> str:
+        if any(l.strip() and not l.startswith("== ") for l in text.splitlines()):
+            return f"{title}:\n{text.rstrip()}\n"
+        summary = f"{text.rstrip()}\n" if text.strip() else ""
+        return f"{title}:\n{summary}(no error lines could be retrieved from {where}; open it for the failure)\n"
+
+    out = ""
+    if active.get("linux") == "fail":
+        run = active.get("linux_run") or "no run"
+        out += half(f"Linux (CI on the integration tree, {run})", "\n".join(active.get("linux_errors") or []), run)
+    if active.get("mac") == "fail":
+        out += half("Mac (cargo build --release -p arbos-mac on the integration tree)", active.get("mac_tail") or "",
+                    "the gate Mac's log of this run")
+    if active.get("ios") == "fail":
+        out += half("iOS (xcodebuild Release + Debug of the integration tree, i.e. your branch merged with current main)",
+                    active.get("ios_tail") or "", "the gate Mac's log of this run")
+    return out
+
+
 def http_json(method: str, url: str, **kw: Any) -> Any:
     status, _, body = http(method, url, **kw)
     if status == 204 or not body:
@@ -726,35 +821,49 @@ class GitHub:
     def run_artifacts(self, run_id: int) -> list[dict]:
         return self.repo_api("GET", f"/actions/runs/{run_id}/artifacts").get("artifacts", [])
 
+    def job_log(self, job_id: int) -> str:
+        """A job's plain-text log. The API answers with a redirect to a signed blob-storage URL that rejects any
+        other credential, and urllib carries the Authorization header across hosts on a redirect (HTTP 401
+        InvalidAuthenticationInfo on every job, from the loop's first day to 2026-10-30), so the redirect is
+        followed here without it."""
+        url = f"{GITHUB_API}/repos/{self.repo}/actions/jobs/{job_id}/logs"
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, **self.h})
+        try:
+            with _NO_REDIRECT.open(req, timeout=60) as resp:
+                return resp.read().decode(errors="replace")
+        except urllib.error.HTTPError as e:
+            location = e.headers.get("Location") if e.code in (301, 302, 303, 307, 308) else None
+            if not location:
+                raise HttpError(e.code, e.read().decode(errors="replace"), url, {k.lower(): v for k, v in e.headers.items()}) from None
+        return http("GET", location, timeout=120)[2].decode(errors="replace")
+
     def run_error_lines(self, run_id: int, limit: int = 40) -> list[str]:
+        """The failed jobs' diagnostics, for the comment and the agent. Never empty for a failed run: a log
+        that cannot be read, or one whose errors match no pattern, says so in the list itself — an empty
+        block reads as "nothing to fix" (#2232's owner was shown none of its two E0004 errors and stopped)."""
         jobs = self.repo_api("GET", f"/actions/runs/{run_id}/jobs").get("jobs", [])
         lines: list[str] = []
-        for job in jobs:
-            if job.get("conclusion") != "failure":
-                continue
-            try:
-                status, hdrs, body = http("GET", f"{GITHUB_API}/repos/{self.repo}/actions/jobs/{job['id']}/logs",
-                                          headers=self.h, timeout=120)
-            except HttpError:
-                continue
-            text = body.decode(errors="replace")
+        failed = [j for j in jobs if j.get("conclusion") == "failure"]
+        if not failed:
+            seen = sorted({str(j.get("conclusion")) for j in jobs}) or ["no jobs"]
+            return [f"(no job of the run failed — job conclusions: {', '.join(seen)}; open the run)"]
+        for job in failed:
             # The failed step's name first: a step that fails without the word "error" (the typeshare freshness
             # check prints a diff — #2028 09:33, #2032 19:44 Oct 27 — showed as "no error lines" and the item was
             # restored as if the runner had hiccuped) is named here and its diff lines are kept.
             for step in job.get("steps") or []:
                 if step.get("conclusion") == "failure":
                     lines.append(f"step failed: {step.get('name')}")
-            in_diff = False
-            for line in text.splitlines():
-                line = re.sub(r"^\S+\s", "", line)  # strip the timestamp column
-                if line.startswith("diff --git "):
-                    in_diff = True
-                if in_diff and re.match(r"(diff --git|---|\+\+\+|@@|[+-][^+-])", line) and line not in lines:
-                    lines.append(line.rstrip()[:400])
-                elif re.search(r"\berror\b|\*\* (ARCHIVE|EXPORT|BUILD) FAILED", line, re.I) and line not in lines:
-                    lines.append(line.strip()[:400])
-                if len(lines) >= limit:
-                    return lines
+            try:
+                text = self.job_log(job["id"])
+            except (HttpError, OSError) as e:
+                lines.append(f"(could not retrieve the log of job `{job.get('name')}`: {str(e)[:160]} — open {job.get('html_url') or 'the run'})")
+                continue
+            for line in log_error_lines(text, limit):
+                if line not in lines:
+                    lines.append(line)
+            if len(lines) >= limit:
+                return lines[:limit]
         return lines
 
     def run_failed_tests(self, run_id: int) -> tuple[set[str], bool]:
@@ -2212,7 +2321,7 @@ class Loop:
             self.store.save_state(fid, st)
             self.gh.comment(st["issue"], f"{label.split(' (')[0]} gate: `{st['branch']}`@{head[:8]} is red — not merged. "
                             f"{st['handed_off_to']}: fix and push a new commit to the same branch (no force-push) to re-gate.\n\n```\n"
-                            + "\n".join(output.splitlines()[-40:]) + "\n```")
+                            + "\n".join(output.splitlines()[:60]) + "\n```")
             return
         if retries >= 2:
             self.fail(fid, st, f"the {label} of `{st['branch']}` failed {retries + 1} times on the gate Mac; not merged", extra=output)
@@ -2227,7 +2336,7 @@ class Loop:
                     "crates/arbos-mac is touched). Run the same commands locally until they pass. ")
         followup = (what + f"Fix it with the smallest change and push a **new commit** to the same branch `{st['branch']}` "
                     f"(no force-push, no amend; same commit message shape `fix(feedback): <summary> [feedback {fid}]`). "
-                    "Diagnostics:\n\n```\n" + output[-6000:] + "\n```\n\nEnd with the SUMMARY:/PUSHED: lines again.")
+                    "Diagnostics:\n\n```\n" + output[:6000] + "\n```\n\nEnd with the SUMMARY:/PUSHED: lines again.")
         try:
             run = self.cursor.followup(st["agent_id"], followup)
         except HttpError as e:
@@ -3148,18 +3257,12 @@ class Loop:
         note = (f"Gate ✓ (CI on Linux {active.get('linux_run') or ''}; arbos-mac release build on the Mac" + ("; Xcode build of the tree" if active.get("ios") == "ok" else "") + ")" if ok
                 else f"Gate red (linux={active['linux']}, mac={active['mac']}, ios={active.get('ios', 'skipped')})")
         if not ok:
-            diag = ""
-            if active["linux"] == "fail":
-                diag += "\n".join(active.get("linux_errors") or []) + "\n"
-            if active["mac"] == "fail":
-                diag += active.get("mac_tail") or ""
-            if active.get("ios") == "fail":
-                diag += active.get("ios_tail") or ""
+            diag = gate_diagnostics(active)
             for fid in members:
                 st = self.store.state(fid)
                 if st.get("issue"):
                     self.gh.comment(st["issue"], f"{note} for integration tree `{tree[:8]}` — not merged. {st.get('handed_off_to') or 'owner'}: fix on the "
-                                    "integration branch and ask for a new `gate-tree` run.\n\n```\n" + diag[-5000:] + "\n```")
+                                    "integration branch and ask for a new `gate-tree` run.\n\n```\n" + diag[:5000] + "\n```")
             log(f"Rust gate {active['id']}: integration tree {tree[:8]} red; nothing landed")
             return
         merged = self.gh.merge_into_main(tree, f"Merge integration tree {tree[:8]}: {len(members)} feedback fixes [gate {active['id']}]")
@@ -3430,13 +3533,7 @@ class Loop:
                 order = [f for f in order if f not in innocent]
                 if not order:
                     return
-        diagnostics = ""
-        if active["linux"] == "fail":
-            diagnostics += f"Linux (CI on the integration tree, {active.get('linux_run') or 'no run'}):\n" + "\n".join(active.get("linux_errors") or []) + "\n"
-        if active["mac"] == "fail":
-            diagnostics += f"Mac (cargo build --release -p arbos-mac on the integration tree):\n{active.get('mac_tail') or ''}\n"
-        if active.get("ios") == "fail":
-            diagnostics += f"iOS (xcodebuild Release + Debug of the integration tree, i.e. your branch merged with current main):\n{active.get('ios_tail') or ''}\n"
+        diagnostics = gate_diagnostics(active)
         if len(order) == 1:
             fid = order[0]
             st = self.store.state(fid)
