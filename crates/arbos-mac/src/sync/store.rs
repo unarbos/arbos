@@ -33,6 +33,10 @@ pub const KEY_LAST_CHATS: &str = "last_chats";
 pub const KEY_ARCHIVED_CHATS: &str = "archived_chats";
 /// Set once the local archived ids were pushed up to the relay (§9c union migration).
 pub const KEY_ARCHIVE_MIGRATED: &str = "archive_migrated";
+/// Set once the per-chat `read_receipts` values this Mac wrote before #1484 were cleared to
+/// `"inherit"` and the account default was seeded. Until then the account setting is not read:
+/// a stored override beats it, so reading it early would show a value that is not in force.
+pub const KEY_READ_RECEIPTS_MIGRATED: &str = "read_receipts_migrated";
 /// My sidebar pins (row keys, top first) as the relay last confirmed them — shown at launch
 /// before `GET /me/pins` answers ([feedback sidebar-pinning-mac-2026-10-28]).
 pub const KEY_PINS: &str = "pins";

@@ -251,6 +251,10 @@ struct Shared {
     /// Settings → Notifications "Read receipts": when true, people-chat presence
     /// frames carry `seen: <newest message id>` (API chat settings / §7c).
     read_receipts: AtomicBool,
+    /// The app has handed over its saved preference, so `read_receipts` above is that person's
+    /// answer and not the default. The #1484 pass seeds the account setting from it, so it must
+    /// not run before this is true.
+    read_receipts_known: AtomicBool,
     /// Calls v1: `in_call` on every presence frame while this device is in one (§8).
     in_call: Mutex<Option<String>>,
     /// On-device store (#929); `None` without credentials or with `ARBOS_NO_STORE=1`.
@@ -846,6 +850,7 @@ impl SyncSource for RelaySource {
                 rooms: Mutex::new(HashMap::new()),
                 focused_chat: Mutex::new(None),
                 read_receipts: AtomicBool::new(true),
+                read_receipts_known: AtomicBool::new(false),
                 in_call: Mutex::new(None),
                 projects: Mutex::new(Vec::new()),
                 chats: Mutex::new(Vec::new()),
@@ -2778,6 +2783,9 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
     }
     let _ = people_ids;
     migrate_local_archive(shared, &mut all_chats).await;
+    if migrate_read_receipts(shared).await {
+        refresh_read_receipts(shared).await;
+    }
     // The relay's archive state is the truth; the store keeps an offline copy.
     shared.with_store(|s| {
         let ids: Vec<Id> = all_chats
@@ -2924,6 +2932,95 @@ async fn migrate_local_archive(shared: &Arc<Shared>, all_chats: &mut [Chat]) {
     if all_ok {
         shared.with_store(|s| s.put_json(store::KEY_ARCHIVE_MIGRATED, &true));
     }
+}
+
+/// A relay that predates the account setting (#2371) answers 404 for `/me/read-receipts` and
+/// 400 for the word `"inherit"`. Either way the pass simply has not happened yet, so it stays
+/// quiet and the old per-chat path keeps working until that relay is deployed.
+fn read_receipts_endpoint_missing(err: &anyhow::Error) -> bool {
+    let text = format!("{err:#}");
+    text.contains("HTTP 404") || text.contains("HTTP 400")
+}
+
+/// Read receipts are an account setting on the relay now (#1484), with the per-chat value as an
+/// override. Macs in the field wrote a per-chat value onto every people chat they knew, and an
+/// override beats the account default by design — so those stale values have to go before this
+/// Mac reads the account setting. Otherwise an account-level "off" would be silently overridden
+/// by the person's own old "on"s, which looks exactly like the bug being fixed.
+///
+/// The order is the point:
+///
+/// 1. Clear every per-chat value this Mac may have written (`"inherit"`).
+/// 2. Seed the account setting from the preference saved on this Mac.
+/// 3. Only then record the pass, and only then read the account setting back.
+///
+/// Nothing is recorded unless 1 and 2 both succeeded, so a failure leaves the old behaviour
+/// standing and the next refresh tries again. Returns true when the account setting is in force.
+async fn migrate_read_receipts(shared: &Arc<Shared>) -> bool {
+    let done = shared
+        .with_store(|s| {
+            s.get_json::<bool>(store::KEY_READ_RECEIPTS_MIGRATED)
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    if done {
+        return true;
+    }
+    if !shared.read_receipts_known.load(Ordering::Relaxed) {
+        // Seeding from the default rather than from the person's answer would write the wrong
+        // account setting, and there is no second chance once the pass is recorded.
+        return false;
+    }
+    let people: Vec<Id> = shared.people.lock().unwrap().iter().cloned().collect();
+    for chat_id in people {
+        if let Err(err) = shared
+            .put_json(
+                &format!("/chats/{chat_id}/settings"),
+                json!({ "read_receipts": "inherit" }),
+            )
+            .await
+        {
+            if !read_receipts_endpoint_missing(&err) {
+                shared.diagnostic("read-receipts", people_error(&err));
+            }
+            return false;
+        }
+    }
+    let enabled = shared.read_receipts.load(Ordering::Relaxed);
+    if let Err(err) = shared
+        .put_json("/me/read-receipts", json!({ "read_receipts": enabled }))
+        .await
+    {
+        if !read_receipts_endpoint_missing(&err) {
+            shared.diagnostic("read-receipts", people_error(&err));
+        }
+        return false;
+    }
+    shared.with_store(|s| s.put_json(store::KEY_READ_RECEIPTS_MIGRATED, &true));
+    true
+}
+
+/// `GET /me/read-receipts` → this Mac. The account setting is the truth once the pass above has
+/// run, so a switch moved on another device lands here.
+async fn refresh_read_receipts(shared: &Arc<Shared>) {
+    let enabled = match shared.get_json("/me/read-receipts").await {
+        Ok(v) => v.get("read_receipts").and_then(|b| b.as_bool()),
+        Err(err) => {
+            if !read_receipts_endpoint_missing(&err) {
+                shared.diagnostic("read-receipts", format!("{err:#}"));
+            }
+            None
+        }
+    };
+    let Some(enabled) = enabled else { return };
+    if shared.read_receipts.swap(enabled, Ordering::Relaxed) == enabled {
+        return;
+    }
+    // Presence frames pick up or drop `seen` at once, as the Settings toggle does.
+    for room in shared.rooms.lock().unwrap().values() {
+        let _ = room.cmds.send(RoomCmd::Presence);
+    }
+    let _ = shared.events.send(SyncEvent::ReadReceipts { enabled });
 }
 
 /// The relay's pin cap until `GET /me/pins` says otherwise (Jacob 2026-10-28: 5, no tiers).
@@ -7418,15 +7515,27 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         }
         ClientCommand::SetReadReceipts { enabled, persist } => {
             shared.read_receipts.store(enabled, Ordering::Relaxed);
+            shared.read_receipts_known.store(true, Ordering::Relaxed);
             // Refresh presence so peers drop or pick up our `seen` at once.
             for room in shared.rooms.lock().unwrap().values() {
                 let _ = room.cmds.send(RoomCmd::Presence);
             }
             if persist {
-                // Mirror onto every people chat we know (`PUT …/settings`).
-                let people: Vec<Id> = shared.people.lock().unwrap().iter().cloned().collect();
                 let shared = shared.clone();
                 tokio::spawn(async move {
+                    // The account setting, once the #1484 pass has cleared the per-chat values
+                    // this Mac wrote. Before that a per-chat value is still in force, so the
+                    // old mirror is what the relay actually reads.
+                    if migrate_read_receipts(&shared).await {
+                        if let Err(err) = shared
+                            .put_json("/me/read-receipts", json!({ "read_receipts": enabled }))
+                            .await
+                        {
+                            shared.fail("change the read-receipts setting", &err);
+                        }
+                        return;
+                    }
+                    let people: Vec<Id> = shared.people.lock().unwrap().iter().cloned().collect();
                     for chat_id in people {
                         let _ = shared
                             .put_json(

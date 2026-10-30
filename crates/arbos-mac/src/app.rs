@@ -2777,6 +2777,17 @@ impl AppState {
                 self.pin_cap = cap.max(1);
                 cx.notify();
             }
+            SyncEvent::ReadReceipts { enabled } => {
+                // The account's answer (#1484), so the switch reads the same on every device.
+                if self.read_receipts != enabled {
+                    self.read_receipts = enabled;
+                    save_read_receipts(enabled);
+                    if !enabled {
+                        self.message_receipts.clear();
+                    }
+                    cx.notify();
+                }
+            }
             SyncEvent::StoreUsage { bytes, chats } => {
                 self.store_usage = (bytes, chats);
                 cx.notify();
