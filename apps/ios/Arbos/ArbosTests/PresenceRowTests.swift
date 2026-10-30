@@ -1,3 +1,4 @@
+import ArbosFFI
 import SwiftUI
 import XCTest
 @testable import Arbos
