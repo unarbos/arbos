@@ -10,6 +10,7 @@ Check kinds a turn may carry (all optional, all must pass):
   latency_max_s     time to first reply must be <= this
   wall_max_s        the whole turn must be over within this
   rubric            {"criteria": "...", "min": 3, "show": "<bash printing produced files>"}
+  judge_prior_rows  N: the judge also sees the last N chat rows with text before this turn's question
 """
 
 import json
@@ -166,7 +167,11 @@ def judge(task_text, criteria, reply, produced, verify_out):
     prompt = (
         "You grade one run of an AI assistant on a task. Score 0-5 for quality against the criteria. "
         "5 = fully correct, complete and well presented; 3 = acceptable with small gaps; 0 = wrong, empty, "
-        "harmful or did not do the task. Judge only what is shown. Answer with JSON {\"score\": n, \"reason\": \"<= 25 words\"}.\n\n"
+        "harmful or did not do the task. Judge only what is shown. The assistant works inside its project folder, so a "
+        "path in the reply relative to that folder (e.g. `lt-task/reply.md`) names the same file as the absolute path in the task. "
+        "A PASS line in the programmatic check means the required files exist with the checked content: do not mark down for "
+        "not pasting a file into the chat unless the task or criteria ask for it to be shown. "
+        "Answer with JSON {\"score\": n, \"reason\": \"<= 25 words\"}.\n\n"
         f"TASK GIVEN TO THE ASSISTANT:\n{task_text[:1500]}\n\nCRITERIA:\n{criteria}\n\n"
         f"ASSISTANT REPLY (transcript text):\n{(reply or '(empty)')[:4000]}\n\n"
         f"FILES / OUTPUT PRODUCED:\n{(produced or '(none)')[:4000]}\n\n"
@@ -228,6 +233,8 @@ def grade_turn(turn, ctx, box, project, env):
     if turn.get("show"):
         code, shown = box.run_as_ws(project, turn["show"], env=env, timeout=120)
         produced = (produced + "\n" + shown).strip()
+    if ctx.get("prior_rows"):
+        produced = (produced + "\nCHAT ROWS BEFORE THIS QUESTION:\n" + "\n".join(ctx["prior_rows"])).strip()
     ctx = dict(ctx, produced=produced, read_file=lambda path: box.read_file(project, path.replace(f"/work/{project}/", ""), limit=60000),
                box_exists=lambda path: "EXISTS" in box.root(f"test -e {path!r} && echo EXISTS; true")[1])
     if turn.get("truth"):

@@ -30,5 +30,5 @@
       "timeout_s": 300
     }
   ],
-  "regression": "cross-chat search (history_search / context_search tools)"
+  "regression": "cross-chat search (history_search / context_search tools); run 15 (both parts): history_search orders by bm25 only (agentd store.rs t3_search_fts), so identical rows from earlier eval runs fill limit 10 and today's KB-4471 is never returned"
 }

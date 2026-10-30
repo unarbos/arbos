@@ -1,0 +1,20 @@
+{
+ "id": "m14-rename-photos-by-date",
+ "lane": "d",
+ "category": "managing",
+ "title": "Rename camera files to 'YYYY-MM-DD HHMM.ext' from the dates in their names, with a same-minute clash and a non-image left alone",
+ "turns": [
+  {
+   "prompt": "My phone dumped photos into {D}/camera with messy names. Rename every photo and screenshot to `YYYY-MM-DD HHMM.ext` using the date and time in its current name (keep the extension). If two would get the same name, add `-2` before the extension for the later one. Leave files that are not images alone. Tell me what you renamed.",
+   "seed": "mkdir -p {D}/camera && cd {D}/camera && printf 'photo-142233' > IMG_20261003_142233.jpg && printf 'photo-142259' > IMG_20261003_142259.jpg && printf 'photo-090501' > IMG_20261003_090501.jpg && printf 'photo-pxl-1812' > PXL_20260915_181200123.jpg && printf 'shot-1015' > 'Screenshot 2026-10-01 at 10.15.22.png' && printf 'buy sunscreen\\n' > notes.txt && ls",
+   "verify": "cd {D}/camera 2>/dev/null || { echo FAIL: camera folder gone; exit 0; }\npython3 - <<'EOF'\nimport os\nwant = {\"2026-10-03 1422.jpg\": \"photo-142233\", \"2026-10-03 1422-2.jpg\": \"photo-142259\", \"2026-10-03 0905.jpg\": \"photo-090501\",\n        \"2026-09-15 1812.jpg\": \"photo-pxl-1812\", \"2026-10-01 1015.png\": \"shot-1015\", \"notes.txt\": \"buy sunscreen\\n\"}\nhave = sorted(f for f in os.listdir('.') if not f.startswith('.'))\nprint(\"SHOW files=\" + \" | \".join(have))\nbad = [f for f, c in want.items() if not os.path.isfile(f) or open(f).read() != c]\nextra = [f for f in have if f not in want]\nprint(\"PASS\" if not bad and not extra else f\"FAIL: wrong_or_missing={bad} extra={extra}\")\nEOF",
+   "forbid_question": true,
+   "timeout_s": 300,
+   "rubric": {
+    "criteria": "Pass if the five images are renamed to 2026-10-03 1422.jpg (14:22:33), 2026-10-03 1422-2.jpg (14:22:59), 2026-10-03 0905.jpg, 2026-09-15 1812.jpg and 2026-10-01 1015.png, notes.txt is untouched, nothing is lost, and the reply lists the renames including the clash. Fail if a file is overwritten or lost, the clash is resolved the wrong way round, or the reply claims renames that did not happen.",
+    "min": 3
+   }
+  }
+ ],
+ "notes": "Added for run 15 (2026-10-30): a realistic ask a user gives an Arbos agent, graded by a programmatic check plus the rubric. Content markers catch an overwrite in the same-minute clash."
+}

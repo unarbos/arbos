@@ -34,9 +34,11 @@ LANES = ["a", "b", "c", "d"]
 # lane "e" runs after every other lane has finished: tasks that disturb the whole box (a machine
 # restart kills every lane's background jobs — run 5 lost l1 that way)
 LATE_LANES = ["e"]
-# Named subsets: `--subset regression` is the cheap check after an agentd/prompt change (≈ 40 min, ≈ $0.10).
+# Named subsets: `--subset regression` is the check after an agentd/prompt change (≈ 60 min, ≈ $0.60); it holds
+# every task that failed or went unmeasured in a scheduled run, s1→s2→s3 in order on one lane.
 SUBSETS = {
-    "regression": ["b4-teardown-after-handoff", "b5-busy-agent-probes", "b6-subagent-failed-start", "m1-todos-roundtrip", "m6-preference-applied-cross-chat", "l1-slow-pipeline", "c1-fix-bug", "c2-add-feature", "c3-rename-refactor", "c4-fix-and-commit", "c5-make-ci-check-pass", "p1-self-reference-cite-file"],
+    "regression": ["b4-teardown-after-handoff", "b5-busy-agent-probes", "b6-subagent-failed-start", "m1-todos-roundtrip", "m6-preference-applied-cross-chat", "l1-slow-pipeline", "c1-fix-bug", "c2-add-feature", "c3-rename-refactor", "c4-fix-and-commit", "c5-make-ci-check-pass", "p1-self-reference-cite-file",
+                   "b2-status-while-busy", "b7-steer-mid-task", "b8-steer-in-turn", "c6-self-reference-repo-change", "d1-disk-pressure-recovery", "g2-agent-to-agent-hello", "g4-forward-message", "h4-mention-as-object-stays-quiet", "h5-renamed-owner-one-name", "j3-two-jobs-stop-one-by-name", "m8-search-across-chats", "m12-draft-reply-not-sent", "s1-cron-create-fires", "s2-cron-edit", "s3-cron-delete", "x5-chart-post-blocked-honest"],
     "quick": ["r3-fact-with-source", "f3-log-aggregate", "m1-todos-roundtrip", "c1-fix-bug", "x1-delete-needs-confirmation"],
     # Grok parity (docs/duplex-agent-design.md §4): every tasks/parity/* task plus the existing tasks that cover
     # group chat, agent-to-agent, budget cap, restart, safety and injection (categories 27–33 of the design).
@@ -102,14 +104,37 @@ class Lane(threading.Thread):
                 self.say(f"budget stop: run cost ${run_cost:.2f} ≥ ${self.rs['budget']}")
                 self.results.append({"task": task["id"], "category": task["category"], "lane": self.lane, "success": False, "skipped": "budget", "reasons": ["skipped: budget exhausted"]})
                 continue
+            t0_ms = int(time.time() * 1000)
+            boot0 = self.box.boot_epoch()
             try:
                 rec = self.run_task(task)
             except Exception as e:
                 rec = {"task": task["id"], "category": task["category"], "lane": self.lane, "success": False, "reasons": [f"driver error: {e}"], "traceback": traceback.format_exc()[-1500:]}
                 self.say(f"{task['id']}: DRIVER ERROR {e}")
+            self.mark_box_restart(task, rec, t0_ms, boot0)
             self.results.append(rec)
             with self.rs["lock"]:
                 (self.out / "records.jsonl").open("a").write(json.dumps(rec) + "\n")
+
+    def mark_box_restart(self, task, rec, t0_ms, boot0):
+        """A box that restarts mid-task (OOM, deploy, another lane's restart) wipes running work and seeds:
+        the verdict measures the box, not the agent, so it becomes `skipped: box_restart` (run 15 lost c1/c2/e3
+        to the 15:16 OOM of #2302). Tasks that restart the machine on purpose keep their verdict."""
+        acts = (task.get("setup_actions") or []) + [t.get("driver_action") or {} for t in task.get("turns") or []]
+        if any(a.get("kind") == "restart_machine" for a in acts):
+            return
+        boot1 = self.box.boot_epoch()
+        if boot0 is None or boot1 is None or abs(boot1 - boot0) < 30:
+            return
+        events = rl.fleet_events_for(self.box.user, t0_ms)
+        why = "; ".join(f"{e.get('kind')} {e.get('detail')}" for e in events)[:240] or "no fleet event recorded"
+        rec["box_restart"] = {"booted_at": time.strftime("%H:%M:%S", time.gmtime(boot1)), "fleet": [{"at": e.get("at"), "kind": e.get("kind"), "detail": e.get("detail")} for e in events]}
+        if rec.get("success"):
+            return
+        rec["first_verdict"] = rec.get("reasons")
+        rec["skipped"] = "box_restart"
+        rec["reasons"] = [f"not measured: the box restarted during the task at {rec['box_restart']['booted_at']} UTC ({why})"]
+        self.say(f"{task['id']}: box restarted mid-task → not measured ({why[:120]})")
 
     def driver_action(self, act, st):
         """Things the user (or the product) does between turns: rename the agent, store a secret,
@@ -395,6 +420,8 @@ class Lane(threading.Thread):
                 if turn_spec.get(k):
                     turn_spec[k] = turn_spec[k].replace("{D}", D).replace("{P}", proj_dir).replace("{RUN}", tag)
             ctx = {"reply": dm.get("reply") or dm.get("all_text") or "", "all_text": dm.get("all_text"), "dm": dm, "res": res, "gen_truth": gen_truth, "state": task_state}
+            if turn.get("judge_prior_rows") and res.get("user_msg_id"):
+                ctx["prior_rows"] = dr.rows_before(res.get("doc") or {}, res["user_msg_id"], turn["judge_prior_rows"])
             for k in ("reply_regex", "reply_regex_not"):
                 if turn_spec.get(k) and task_state.get("old_name"):
                     turn_spec[k] = turn_spec[k].replace("{OLD_NAME}", re.escape(task_state["old_name"]))
@@ -472,6 +499,7 @@ class Lane(threading.Thread):
                 "rubric": g["rubric"],
                 "truth": g["truth"],
                 "verify_out": g["verify_out"],
+                "produced": g.get("produced"),
                 "reply": (dm.get("reply") or "")[:1500],
                 "excerpt": dr.transcript_excerpt(prompt, res["rows"], sm),
             }
@@ -797,6 +825,8 @@ def main():
         "user": box.user,
         "projects": projects,
         "tasks": len(tasks),
+        # "full" (the scheduled run), a named subset, or "tasks" for a hand-picked rerun; the report compares like with like
+        "subset": args.subset or ("tasks" if args.tasks else "full"),
         "budget_usd": args.budget_usd,
         "spent_today_at_start": spent,
         "judge_model": gr.JUDGE_MODEL,
@@ -833,7 +863,11 @@ def main():
     if meta.get("relay_build") and meta["relay_build_at_end"] != meta["relay_build"]:
         print(f"NOTE: the relay binary changed during the run: {meta['relay_build']} -> {meta['relay_build_at_end']}; every task reads rows through a client path (arbosctl), so verdicts around the change are suspect", flush=True)
     meta["spent_today_at_end"] = spent_end
-    meta["run_cost_usd"] = round(spent_end - spent, 4)
+    # the relay's "spent today" resets at 00:00 UTC; a run across midnight reads negative, so fall back to the per-task sum
+    run_cost = spent_end - spent
+    if run_cost < 0:
+        run_cost = sum(r.get("cost_usd") or 0 for r in results)
+    meta["run_cost_usd"] = round(run_cost, 4)
     meta["judge_cost_usd"] = round(sum(r.get("judge_usd") or 0 for r in results), 4)
     board = summarize(meta, results)
     sb_dir = HERE / "scoreboard"

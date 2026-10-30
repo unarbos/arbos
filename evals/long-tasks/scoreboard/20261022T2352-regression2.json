@@ -17,8 +17,9 @@
   "judge_model": "anthropic/claude-haiku-5.5",
   "ended_at": "2026-10-23T00:28:27Z",
   "spent_today_at_end": 0.024341082,
-  "run_cost_usd": -0.917,
-  "judge_cost_usd": 0.0002
+  "run_cost_usd": 0.0403,
+  "judge_cost_usd": 0.0002,
+  "run_cost_note": "run crossed 00:00 UTC (relay spent-today reset); cost is the per-task sum"
  },
  "summary": {
   "tasks": 3,
@@ -33,7 +34,7 @@
   "tool_errors": 0,
   "stalls": 0,
   "cost_usd": 0.0403,
-  "run_cost_usd": -0.917,
+  "run_cost_usd": 0.0403,
   "judge_cost_usd": 0.0002,
   "categories": {
    "managing": {
