@@ -54,6 +54,7 @@
 		A1BB00000000000000000002 /* BackSwipe.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000001 /* BackSwipe.swift */; };
 		A1BB00000000000000000004 /* BackSwipeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000003 /* BackSwipeTests.swift */; };
 		A1BB00000000000000000006 /* BackSwipeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000005 /* BackSwipeUITests.swift */; };
+		A1BB000000000000000000A1 /* SwipeDirectionsUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB000000000000000000A2 /* SwipeDirectionsUITests.swift */; };
 		A1BB00000000000000000031 /* ScrollPerfUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000030 /* ScrollPerfUITests.swift */; };
 		A1BB00000000000000000033 /* HomeFilterTabsUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000032 /* HomeFilterTabsUITests.swift */; };
 		A1BB00000000000000000035 /* ReactionPickerUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000034 /* ReactionPickerUITests.swift */; };
@@ -298,6 +299,7 @@
 		A1BB00000000000000000001 /* BackSwipe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackSwipe.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000003 /* BackSwipeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackSwipeTests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000005 /* BackSwipeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackSwipeUITests.swift; sourceTree = "<group>"; };
+		A1BB000000000000000000A2 /* SwipeDirectionsUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwipeDirectionsUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000030 /* ScrollPerfUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollPerfUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000032 /* HomeFilterTabsUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeFilterTabsUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000034 /* ReactionPickerUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReactionPickerUITests.swift; sourceTree = "<group>"; };
@@ -759,6 +761,7 @@
 			isa = PBXGroup;
 			children = (
 				A1BB00000000000000000005 /* BackSwipeUITests.swift */,
+				A1BB000000000000000000A2 /* SwipeDirectionsUITests.swift */,
 				A1BB00000000000000000030 /* ScrollPerfUITests.swift */,
 				A1BB00000000000000000032 /* HomeFilterTabsUITests.swift */,
 				A1BB00000000000000000034 /* ReactionPickerUITests.swift */,
@@ -1141,6 +1144,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A1BB00000000000000000006 /* BackSwipeUITests.swift in Sources */,
+				A1BB000000000000000000A1 /* SwipeDirectionsUITests.swift in Sources */,
 				A1BB00000000000000000031 /* ScrollPerfUITests.swift in Sources */,
 				A1BB00000000000000000033 /* HomeFilterTabsUITests.swift in Sources */,
 				A1BB00000000000000000035 /* ReactionPickerUITests.swift in Sources */,
