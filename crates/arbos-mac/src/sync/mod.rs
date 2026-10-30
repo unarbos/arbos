@@ -202,6 +202,12 @@ pub enum SyncEvent {
         project_id: Id,
         info: crate::model::OutsideInfo,
     },
+    /// The connected agent's session log, newest last as the relay stores it (the Details
+    /// pane's Session log card and its View all page).
+    OutsideAgentLog {
+        project_id: Id,
+        entries: Vec<crate::model::OutsideLogEntry>,
+    },
     /// The Wake URL form was saved (`PATCH /outside-agents/{id}`); `error` is the relay's
     /// short reason when it refused.
     OutsideAgentWakeSaved {
@@ -1060,6 +1066,10 @@ pub enum ClientCommand {
     },
     /// `GET /outside-agents/{id}` → [`SyncEvent::OutsideAgentStatus`].
     OutsideAgentStatus {
+        project_id: Id,
+    },
+    /// `GET /outside-agents/{id}/log` (#2224) → [`SyncEvent::OutsideAgentLog`].
+    OutsideAgentLog {
         project_id: Id,
     },
     /// `POST /outside-agents/{id}/rotate` → [`SyncEvent::OutsideAgentKey`] (fresh key).

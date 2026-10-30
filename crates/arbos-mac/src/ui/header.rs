@@ -61,7 +61,11 @@ pub fn render(
             .filter(|_| is_people && !space.is_people_group())
             .is_some_and(|p| p.handle.eq_ignore_ascii_case(handle)),
         Some(ProfilePage::Group { space_id }) => space_id == &space.id,
-        Some(ProfilePage::Agent { project_id }) => project_id == &space.id,
+        // The log page is the agent's own pane pushed one level deeper, so the
+        // pill stays ringed while it is up (#2232).
+        Some(ProfilePage::Agent { project_id }) | Some(ProfilePage::AgentLog { project_id }) => {
+            project_id == &space.id
+        }
         Some(ProfilePage::Me)
         | Some(ProfilePage::Server { .. })
         | Some(ProfilePage::Channel { .. })

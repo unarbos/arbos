@@ -74,6 +74,9 @@ pub fn pane(page: &ProfilePage, shell: &Shell, cx: &mut Context<Shell>) -> Optio
         }
         ProfilePage::Group { space_id } => group::page(space_id, shell, cx),
         ProfilePage::Agent { project_id } => agent::page(project_id, shell, cx),
+        ProfilePage::AgentLog { project_id } => {
+            crate::ui::connect_agent::log_page(project_id, shell, cx)
+        }
         ProfilePage::Me => Some(me::page(shell, cx)),
         ProfilePage::Server { server_id } => server::page(server_id, shell, cx),
         ProfilePage::Channel {

@@ -7680,14 +7680,56 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .get_json(&format!("/outside-agents/{project_id}"))
                     .await
                 {
-                    if let Ok(info) =
+                    if let Ok(mut info) =
                         serde_json::from_value::<crate::model::OutsideInfo>(v["agent"].clone())
                     {
+                        // The log summary rides beside `agent` on the record (#2224).
+                        if info.log.is_none() {
+                            info.log = serde_json::from_value(v["log"].clone()).ok();
+                        }
                         let _ = shared
                             .events
                             .send(SyncEvent::OutsideAgentStatus { project_id, info });
                     }
                 }
+            });
+        }
+        ClientCommand::OutsideAgentLog { project_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                // The route answers oldest-first from `since` (#2224), so the whole log has to
+                // be walked to reach the newest lines the card shows. The relay keeps at most
+                // 2 000 entries per agent, which PAGES × LIMIT covers. An older relay answers
+                // 404 and the card simply stays away.
+                const LIMIT: i64 = 500;
+                const PAGES: usize = 4;
+                let mut entries: Vec<crate::model::OutsideLogEntry> = Vec::new();
+                let mut since = 0_i64;
+                for _ in 0..PAGES {
+                    let Ok(v) = shared
+                        .get_json(&format!(
+                            "/outside-agents/{project_id}/log?since={since}&limit={LIMIT}"
+                        ))
+                        .await
+                    else {
+                        return;
+                    };
+                    let page = v["entries"].as_array().cloned().unwrap_or_default();
+                    entries.extend(
+                        page.iter()
+                            .filter_map(|e| serde_json::from_value(e.clone()).ok()),
+                    );
+                    // A short page is the end of the log; `next` repeats `since` when it is empty.
+                    let next = v["next"].as_i64().unwrap_or(since);
+                    if (page.len() as i64) < LIMIT || next <= since {
+                        break;
+                    }
+                    since = next;
+                }
+                let _ = shared.events.send(SyncEvent::OutsideAgentLog {
+                    project_id,
+                    entries,
+                });
             });
         }
         ClientCommand::OutsideAgentWakeSet {
