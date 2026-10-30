@@ -337,14 +337,19 @@ async fn owner_card_chat(agent: &Arc<Agent>, asking_chat: &str) -> String {
     main.id.clone()
 }
 
-/// User id of the human directing the current turn, when known.
-fn asked_by_user_id(agent: &Agent) -> Option<String> {
-    agent.people.current_asker().map(|a| a.user_id)
+/// User id of the human who asked for the work in `chat_id`, when known.
+///
+/// The chat is the authority, never `people.current`: that slot names whichever chat holds the
+/// turn lock right now and is cleared when that turn ends, so a background job, a subagent or a
+/// second chat's turn would otherwise report a guest's request as the owner's — and the relay
+/// enforces each secret's People list from the `asked_by` this returns.
+fn asked_by_user_id(agent: &Agent, chat_id: &str) -> Option<String> {
+    agent.people.asker(chat_id).map(|a| a.user_id)
 }
 
-/// The person asking this turn when they are not the owner (a people-chat guest or member).
-fn non_owner_asker(agent: &Agent) -> Option<crate::people::Asker> {
-    let asker = agent.people.current_asker()?;
+/// The person who asked in this chat when they are not the owner (a people-chat guest or member).
+fn non_owner_asker(agent: &Agent, chat_id: &str) -> Option<crate::people::Asker> {
+    let asker = agent.people.asker(chat_id)?;
     let owner = agent.people.project_owner();
     if asker.role == "owner" || (!owner.is_empty() && asker.user_id == owner) {
         return None;
@@ -352,9 +357,10 @@ fn non_owner_asker(agent: &Agent) -> Option<crate::people::Asker> {
     Some(asker)
 }
 
-/// May the current asker direct use of this grant? Owner / no asker → yes; else the People list.
-fn asker_may_direct(agent: &Agent, g: &Grant) -> bool {
-    match non_owner_asker(agent) {
+/// May the person who asked in this chat direct use of this grant? Owner / no asker → yes; else
+/// the People list.
+fn asker_may_direct(agent: &Agent, chat_id: &str, g: &Grant) -> bool {
+    match non_owner_asker(agent, chat_id) {
         None => true,
         Some(asker) => g.director_ids.iter().any(|id| id == &asker.user_id),
     }
@@ -1153,10 +1159,10 @@ async fn obtain_grant(
                 })
             })
     };
-    let asker = non_owner_asker(agent);
+    let asker = non_owner_asker(agent, chat_hint);
     if let Some(g) = grant_for(&project, &name) {
         if g.request_id.is_none() && host_ok(&g) && use_kind != "browser_fill" {
-            if asker_may_direct(agent, &g) {
+            if asker_may_direct(agent, chat_hint, &g) {
                 return Ok(g);
             }
             if g.others_ask != "card" {
@@ -1166,7 +1172,7 @@ async fn obtain_grant(
         }
     }
     let mut req = json!({ "name": name, "purpose": purpose, "use": use_kind, "host": host, "chat_id": chat_id });
-    if let Some(uid) = asked_by_user_id(agent) {
+    if let Some(uid) = asked_by_user_id(agent, chat_hint) {
         req["asked_by"] = json!(uid);
     }
     let (status_code, created) = relay_post(agent, "/box/secrets/request", &req)
@@ -1471,7 +1477,7 @@ pub async fn egress(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> Value {
         None,
     );
     let mut egress_body = json!({ "url": url, "method": method, "headers": headers, "body": body, "placeholders": placeholders, "chat_id": chat_id });
-    if let Some(uid) = asked_by_user_id(agent) {
+    if let Some(uid) = asked_by_user_id(agent, chat_id) {
         egress_body["asked_by"] = json!(uid);
     }
     let r = agent
@@ -1681,6 +1687,104 @@ pub async fn browser_fill(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> Va
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A secret use is attributed to the chat it was asked in, not to whichever chat happens to
+    /// hold the turn lock. The relay enforces a secret's People list from `asked_by`, and
+    /// `asker_may_direct` reads the same asker, so attributing a guest's request to the owner
+    /// hands the guest the owner's authority over every secret.
+    #[tokio::test]
+    async fn a_secret_use_is_attributed_to_the_chat_it_was_asked_in() {
+        let seen: Arc<std::sync::Mutex<Vec<Value>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = seen.clone();
+        let extra = axum::Router::new().route(
+            "/egress",
+            axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+                let recorder = recorder.clone();
+                async move {
+                    recorder.lock().expect("seen").push(body);
+                    axum::Json(json!({ "status": 200, "body": "ok" }))
+                }
+            }),
+        );
+        let (agent, root) = crate::status::tests::test_agent_with(extra).await;
+        agent.people.set_project_owner("u-owner");
+        agent.people.test_set_asker("c-owner", "u-owner", "owner");
+        agent.people.test_set_asker("c-guest", "u-guest", "guest");
+
+        // The owner's chat holds the turn lock; the call belongs to the guest's chat.
+        agent.people.set_current(Some("c-owner"));
+        let v = egress(
+            &agent,
+            &json!({ "url": "https://api.example.com/v1/x", "method": "GET",
+                     "headers": { "authorization": "Bearer arbos-secret://STRIPE_KEY/value" } }),
+            "c-guest",
+        )
+        .await;
+        assert!(v.get("isError").is_none(), "{v}");
+        let body = seen.lock().expect("seen").last().cloned().expect("a call");
+        assert_eq!(body["chat_id"], json!("c-guest"));
+        assert_eq!(
+            body["asked_by"],
+            json!("u-guest"),
+            "the guest who asked, not the owner whose chat holds the lock"
+        );
+
+        // No turn at all (a background job, after the turn that started it ended): still the
+        // guest, never an absent `asked_by` the relay reads as the owner.
+        agent.people.set_current(None);
+        let v = egress(
+            &agent,
+            &json!({ "url": "https://api.example.com/v1/x", "method": "GET" }),
+            "c-guest",
+        )
+        .await;
+        assert!(v.get("isError").is_none(), "{v}");
+        let body = seen.lock().expect("seen").last().cloned().expect("a call");
+        assert_eq!(body["asked_by"], json!("u-guest"));
+
+        // The owner's own chat is still the owner's: no asker on the body is the owner's case.
+        let v = egress(
+            &agent,
+            &json!({ "url": "https://api.example.com/v1/x", "method": "GET" }),
+            "c-owner",
+        )
+        .await;
+        assert!(v.get("isError").is_none(), "{v}");
+        let body = seen.lock().expect("seen").last().cloned().expect("a call");
+        assert_eq!(body["asked_by"], json!("u-owner"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The People list is read for the asker of the chat the secret is wanted in: a guest the
+    /// owner did not list cannot direct the grant from their own chat while the owner's chat is
+    /// the one holding the turn lock.
+    #[tokio::test]
+    async fn the_people_list_is_read_for_the_chat_the_secret_is_wanted_in() {
+        let (agent, root) = crate::status::tests::test_agent().await;
+        agent.people.set_project_owner("u-owner");
+        agent.people.test_set_asker("c-owner", "u-owner", "owner");
+        agent.people.test_set_asker("c-guest", "u-guest", "guest");
+        let g = Grant::from_item(
+            &agent.cfg.project_id,
+            &json!({ "env": "ASKERTEST_KEY", "kind": "key", "enabled": true, "hosts": [],
+                "placeholders": { "value": "arbos-secret://ASKERTEST_KEY/value" },
+                "people": [ { "user_id": "u-listed", "enabled": true } ], "others_ask": "refuse" }),
+        )
+        .expect("grant");
+
+        agent.people.set_current(Some("c-owner"));
+        assert!(
+            !asker_may_direct(&agent, "c-guest", &g),
+            "an unlisted guest may not direct it from their own chat"
+        );
+        assert!(asker_may_direct(&agent, "c-owner", &g), "the owner may");
+        agent.people.set_current(None);
+        assert!(
+            !asker_may_direct(&agent, "c-guest", &g),
+            "and not once the turn that set the lock has ended"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     /// The People list reaches the box as `people[]` (rows that are on) plus `others_ask`;
     /// an older relay's `directors[]` still works; the rule line follows the switch.

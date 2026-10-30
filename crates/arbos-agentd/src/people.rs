@@ -494,6 +494,21 @@ impl PeopleState {
             .insert(message_id, v);
     }
 
+    /// Test-only: record who asked in a chat, as a people-chat or shared-project turn does.
+    #[cfg(test)]
+    pub(crate) fn test_set_asker(&self, chat_id: &str, user_id: &str, role: &'static str) {
+        self.askers.lock().expect("people").insert(
+            chat_id.to_owned(),
+            Asker {
+                user_id: user_id.to_owned(),
+                handle: user_id.to_owned(),
+                name: user_id.to_owned(),
+                role,
+                message_id: "m-test".to_owned(),
+            },
+        );
+    }
+
     /// Test-only: seed a people-chat snapshot (e.g. rename + @handle refresh).
     #[cfg(test)]
     pub(crate) fn test_insert(&self, chat_id: &str, info: PeopleChatInfo) {
