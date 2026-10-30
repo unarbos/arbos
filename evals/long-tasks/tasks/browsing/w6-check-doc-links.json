@@ -12,7 +12,7 @@
    "forbid_question": true,
    "timeout_s": 300,
    "rubric": {
-    "criteria": "Pass if the reply names exactly two broken links (the docs.python.org no-such-module page, 404, and httpbin status/500) with their status codes, treats the redirect as working, and broken.txt holds those two URLs. Fail if a working link is reported broken, a broken one is missed, or statuses are invented without fetching.",
+    "criteria": "Pass if the reply names exactly two broken links (the docs.python.org no-such-module page, 404, and httpbin status/500) with their status codes, treats the redirect as working, and broken.txt holds those two URLs. Fail if a working link is reported broken, a broken one is missed, or statuses are invented without fetching. The produced output's httpbin_status line is the harness's own probe of https://httpbin.org/status/200 (it shows httpbin was reachable), not the status of the status/500 link.",
     "min": 3
    }
   }
