@@ -2714,13 +2714,10 @@ private struct LiveSenderName: View {
     var body: some View {
         let color = fixed ?? accents.color(url: url, seed: seed, override: override, dark: theme.isDark)
         HStack(spacing: 6) {
-            // The bubble sits under this line: an emoji-only sender name is raised onto
-            // the baseline like every other stacked name.
             Text(name)
                 .font(theme.font(Theme.small, weight: .semibold))
                 .foregroundStyle(color)
                 .lineLimit(1)
-                .emojiNameLift(name, size: theme.pt(Theme.small))
             if agent {
                 Text("agent")
                     .font(theme.font(10, weight: .semibold))

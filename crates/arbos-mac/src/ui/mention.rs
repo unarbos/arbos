@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use gpui::{App, Entity, Hsla, RenderImage};
 
 use crate::app::{AppState, ProfilePage};
-use crate::model::Project;
+use crate::model::{Person, Project};
 use crate::ui::avatars::{self, LeafPick};
 use crate::ui::theme::Theme;
 
@@ -378,6 +378,35 @@ impl Mentions {
                 id: Some(crate::sync::COLLECTIVE_AGENTS.into()),
             },
         );
+        // Me, by handle like everyone else: a bubble that says `@<my handle>` is my
+        // chip for me too, as it is for the other members (Scout's report, Oct 29: his
+        // own `@A` read as raw text). Before the chat people so a same-named directory
+        // result cannot take my name's chip.
+        let me = Person {
+            id: s.me_id(),
+            handle: s.me_handle(),
+            name: Some(s.me_name()),
+            avatar_url: s
+                .account
+                .as_ref()
+                .map(|a| a.avatar_url.clone())
+                .unwrap_or_default(),
+            ..Default::default()
+        };
+        if !me.id.is_empty() && !me.handle.is_empty() {
+            add(
+                me.handle.clone(),
+                Mention {
+                    page: Some(ProfilePage::User {
+                        handle: me.handle.clone(),
+                        space_id: None,
+                    }),
+                    name: me.display_name(),
+                    picture: person_picture(s, &me, theme),
+                    id: Some(format!("user:{}", me.id)),
+                },
+            );
+        }
         for p in &s.projects {
             if p.is_people() && !p.is_people_group() {
                 // A DM: its person is mentionable by handle.
@@ -500,8 +529,8 @@ impl Mentions {
                 },
             );
         }
-        // Me, by id only (never a chip for my own handle): membership lines name their
-        // actor by user id from the live roster, and I am the actor of my own adds.
+        // Me by id even without a handle yet: membership lines name their actor by
+        // user id from the live roster, and I am the actor of my own adds.
         let me_id = s.me_id();
         if !me_id.is_empty() {
             table
@@ -778,7 +807,7 @@ pub fn agent_member_picture(
     identity_picture(s, &ident, theme)
 }
 
-pub fn person_picture(s: &AppState, person: &crate::model::Person, theme: &Theme) -> Picture {
+pub fn person_picture(s: &AppState, person: &Person, theme: &Theme) -> Picture {
     match s.avatar(&person.avatar_url) {
         Some(image) => Picture::Image(image),
         None => initials(

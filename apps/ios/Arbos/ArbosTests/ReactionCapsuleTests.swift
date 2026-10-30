@@ -22,6 +22,20 @@ final class ReactionCapsuleTests: XCTestCase {
         XCTAssertNil(ReactionCapsule.pickedEmoji(""))
     }
 
+    /// The emoji keyboard's symbol and keycap emoji are text-default characters it sends
+    /// with U+FE0F (and U+20E3); the bare characters are not reactions.
+    func testPickedEmojiTakesTheKeyboardsSymbolsAndKeycaps() {
+        let symbols = ["©️", "®️", "™️", "‼️", "⁉️", "ℹ️", "⌨️",
+                       "↔️", "↕️", "↖️", "↗️", "↘️", "↙️", "↩️", "↪️",
+                       "#️⃣", "*️⃣", "0️⃣", "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"]
+        for emoji in symbols {
+            XCTAssertEqual(ReactionCapsule.pickedEmoji(emoji), emoji, "\(emoji) is a reaction")
+        }
+        for text in ["1", "#", "*", "©", "™", "↔", "!", "?", "→"] {
+            XCTAssertNil(ReactionCapsule.pickedEmoji(text), "\(text) is not a reaction")
+        }
+    }
+
     func testMenuUnderTheCapsuleCarriesNoEmoji() {
         XCTAssertEqual(MessageMenu.items.last, .delete)
         for item in MessageMenu.items {

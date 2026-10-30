@@ -810,10 +810,12 @@ const JUMP_ARRIVE_FROM_ALPHA: f32 = 0.35;
 pub const RAIL_BUTTON: f32 = 24.0;
 pub const RAIL_GLYPH: f32 = 16.0;
 pub const RAIL_GAP: f32 = 2.0;
-/// The Glass capsule's inset either side of the rail's buttons.
-pub const RAIL_PLATE_PAD_X: f32 = 2.0;
+/// The Glass capsule's inset on every side of the rail's buttons. The same
+/// inset all round keeps each button's round hover wash inside the capsule's
+/// rim and concentric with its rounded ends ([feedback hover-bar-highlight-mac-2026-10-29]).
+pub const RAIL_PLATE_PAD: f32 = 2.0;
 /// The rail's widest box: three buttons, their gaps and the Glass capsule's insets.
-pub const RAIL_WIDTH: f32 = 3.0 * RAIL_BUTTON + 2.0 * RAIL_GAP + 2.0 * RAIL_PLATE_PAD_X;
+pub const RAIL_WIDTH: f32 = 3.0 * RAIL_BUTTON + 2.0 * RAIL_GAP + 2.0 * RAIL_PLATE_PAD;
 /// Room for the widest 11 pt hover time ("12:44 PM": 49 pt in the Mac system
 /// font, 53 in the Linux test font).
 pub const HOVER_TIME_WIDTH: f32 = 56.0;
@@ -2140,8 +2142,8 @@ impl Transcript {
             .gap(px(RAIL_GAP))
             .when_some(plate, |el, plate| {
                 el.debug_selector(|| "rail-plate".into())
-                    .h(px(RAIL_BUTTON))
-                    .px(px(RAIL_PLATE_PAD_X))
+                    .h(px(RAIL_BUTTON + 2.0 * RAIL_PLATE_PAD))
+                    .p(px(RAIL_PLATE_PAD))
                     .rounded_full()
                     .opacity(group_opacity)
                     // Every row carries a rail; only a revealed one paints its plate.
@@ -2454,8 +2456,6 @@ impl Transcript {
             .items_center()
             .gap(px(6.0))
             .child(
-                // The bubble sits under this line: an emoji-only sender name is
-                // lifted onto the baseline like every other stacked name.
                 identity::name(name, CHAT_BODY)
                     .line_height(px(CHAT_LINE_HEIGHT))
                     .font_weight(FontWeight::SEMIBOLD)

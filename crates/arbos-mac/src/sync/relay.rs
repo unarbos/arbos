@@ -276,6 +276,9 @@ struct Shared {
     /// When the Matrix session was last (re)started: a rejected token restarts it at most
     /// once a minute.
     matrix_started_at: Mutex<Option<Instant>>,
+    /// The relay said it has no servers (503 `servers_off`, or 404 from one that predates
+    /// them): the registry poll stops retrying the homeserver.
+    servers_off: AtomicBool,
     /// Per-chat ordered network sends (photo then text must stay in push order).
     send_queue: ChatSendQueue,
 }
@@ -869,6 +872,7 @@ impl SyncSource for RelaySource {
                 diagnostics: diagnostics::Diagnostics::load(),
                 matrix: Mutex::new(None),
                 matrix_started_at: Mutex::new(None),
+                servers_off: AtomicBool::new(false),
                 send_queue: {
                     let events = events.clone();
                     ChatSendQueue::new(move |chat_id, message_id| {
@@ -1130,6 +1134,13 @@ fn start_after_pairing(shared: &Arc<Shared>) {
                         let _ = shared.events.send(SyncEvent::RelayLink(verdict));
                     }
                 }
+            }
+            // The server list rides this loop like the iPhone's 15 s loop, not only the
+            // launch's homeserver handshake: one failed launch fetch left the sidebar at
+            // "No servers yet" until a server push came ([feedback mac-server-missing-2026-10-29]).
+            if !shared.servers_off.load(Ordering::Relaxed) {
+                refresh_servers_list(&shared).await;
+                start_matrix_if_needed(&shared);
             }
         }
     });
@@ -1735,14 +1746,11 @@ async fn start_matrix(shared: &Arc<Shared>) {
             }
         },
         Err(err) => {
-            let text = format!("{err:#}");
-            if text.contains("servers_off") || text.contains("HTTP 503") {
-                let _ = shared.events.send(SyncEvent::ServersAvailable(false));
-            } else if text.contains("HTTP 404") {
-                // Older relay without the route.
+            if relay_has_no_servers(&err) {
+                shared.servers_off.store(true, Ordering::Relaxed);
                 let _ = shared.events.send(SyncEvent::ServersAvailable(false));
             } else {
-                shared.diagnostic("matrix-session", text);
+                shared.diagnostic("matrix-session", format!("{err:#}"));
             }
             return;
         }
@@ -1764,18 +1772,41 @@ async fn start_matrix(shared: &Arc<Shared>) {
     refresh_servers_list(shared).await;
 }
 
-/// `GET /servers` → `SyncEvent::Servers`.
+/// The registry poll's homeserver retry: a launch whose `GET /me/matrix` failed (a timeout,
+/// a proxy's 502/503) used to stay without channels until the next launch. At most once a
+/// minute, like the rejected-token restart.
+fn start_matrix_if_needed(shared: &Arc<Shared>) {
+    if shared.matrix.lock().unwrap().is_some() || shared.creds.read().unwrap().is_none() {
+        return;
+    }
+    let due = shared
+        .matrix_started_at
+        .lock()
+        .unwrap()
+        .is_none_or(|t| t.elapsed() > MATRIX_RETRY_GAP);
+    if due {
+        let shared = shared.clone();
+        tokio::spawn(async move { start_matrix(&shared).await });
+    }
+}
+
+const MATRIX_RETRY_GAP: Duration = Duration::from_secs(60);
+
+/// 503 `servers_off`, or 404 from a relay that predates servers. A bare 503 is a proxy blip
+/// in front of a relay that has them: it keeps the list and the next poll asks again.
+fn relay_has_no_servers(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<RelayError>()
+        .is_some_and(|e| e.kind == "servers_off" || e.status == 404)
+}
+
+/// `GET /servers` → `SyncEvent::Servers`. A failure keeps the list the sidebar shows.
 async fn refresh_servers_list(shared: &Arc<Shared>) {
     match shared.get_json("/servers").await {
         Ok(v) => {
-            let servers: Vec<ServerInfo> = v
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|s| serde_json::from_value::<ServerInfo>(s.clone()).ok())
-                        .collect()
-                })
-                .unwrap_or_default();
+            shared.servers_off.store(false, Ordering::Relaxed);
+            let Some(servers) = parse_server_list(shared, &v) else {
+                return;
+            };
             let servers = servers
                 .into_iter()
                 .map(|s| with_server_picture(shared, s))
@@ -1783,14 +1814,34 @@ async fn refresh_servers_list(shared: &Arc<Shared>) {
             let _ = shared.events.send(SyncEvent::Servers(servers));
         }
         Err(err) => {
-            let text = format!("{err:#}");
-            if text.contains("servers_off") || text.contains("HTTP 503") {
+            if relay_has_no_servers(&err) {
+                shared.servers_off.store(true, Ordering::Relaxed);
                 let _ = shared.events.send(SyncEvent::ServersAvailable(false));
             } else {
-                shared.diagnostic("servers", text);
+                shared.diagnostic("servers", format!("{err:#}"));
             }
         }
     }
+}
+
+/// The servers of a `GET /servers` answer; one the client cannot read is reported, not
+/// dropped without a word. `None` (not a list) keeps the list the sidebar shows.
+fn parse_server_list(shared: &Arc<Shared>, v: &Value) -> Option<Vec<ServerInfo>> {
+    let Some(list) = v.as_array() else {
+        shared.diagnostic("servers", "GET /servers: not a list".to_owned());
+        return None;
+    };
+    let servers = list
+        .iter()
+        .filter_map(|s| match serde_json::from_value::<ServerInfo>(s.clone()) {
+            Ok(server) => Some(server),
+            Err(err) => {
+                shared.diagnostic("servers", format!("bad server JSON: {err}"));
+                None
+            }
+        })
+        .collect();
+    Some(servers)
 }
 
 fn parse_server(v: Value) -> Result<ServerInfo> {
