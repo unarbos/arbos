@@ -248,16 +248,6 @@ pub fn row_state(
         Leading::None | Leading::Tile(_) => FontWeight::NORMAL,
     };
     let leading = leading_el(leading, theme);
-    // A title over a subtitle (a member's name over "@handle") lifts an
-    // emoji-only name onto the baseline (`identity::name`); a one-line title
-    // is centred in the row, where Core Text's own emoji placement already
-    // sits level with capitals.
-    let title: SharedString = title.into();
-    let title_el = if subtitle.is_some() {
-        identity::name(title, TEXT_BODY)
-    } else {
-        div().truncate().child(title)
-    };
     div()
         .id(id)
         .relative()
@@ -284,7 +274,12 @@ pub fn row_state(
                 .flex()
                 .flex_col()
                 .gap(px(1.0))
-                .child(title_el.font_weight(title_weight))
+                .child(
+                    div()
+                        .truncate()
+                        .font_weight(title_weight)
+                        .child(title.into()),
+                )
                 .when_some(subtitle, |el, s| {
                     el.child(
                         div()
@@ -763,7 +758,7 @@ mod tests {
 
     /// [feedback emoji-name-handle-offset-mac-2026-10-28]: a member row whose
     /// name is one emoji is as tall as a text name's row, its `@handle` sits at
-    /// the same place in it, and only the emoji name is drawn lifted.
+    /// the same place in it ([feedback emoji-name-baseline-2026-10-29]: no lift).
     #[gpui::test]
     fn an_emoji_member_name_keeps_the_row_and_its_handle_in_place(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
@@ -784,7 +779,6 @@ mod tests {
                 row.size,
                 handle.origin.y - row.origin.y,
                 divider.origin.y - row.origin.y,
-                vcx.debug_bounds(identity::LIFTED_SELECTOR),
             )
         };
         let text = lay(cx, "Sam Rivera");
@@ -795,14 +789,6 @@ mod tests {
         assert_eq!(emoji.2, text.2, "divider offset in the row");
         assert_eq!(mixed.0, text.0, "row size (mixed)");
         assert_eq!(mixed.1, text.1, "handle offset in the row (mixed)");
-        assert!(
-            text.3.is_none() && mixed.3.is_none(),
-            "text and mixed names are not lifted"
-        );
-        assert!(
-            emoji.3.is_some(),
-            "the emoji name is drawn lifted onto the baseline"
-        );
     }
 
     /// Headless GPUI render: a 1-row and a 3-row section draw without a panic
