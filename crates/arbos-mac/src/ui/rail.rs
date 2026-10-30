@@ -574,7 +574,7 @@ pub(crate) fn render_tip(shell: &Shell, cx: &Context<Shell>) -> Option<Div> {
 /// [`render_overlay`].
 pub(crate) fn render_morph(shell: &Shell, t: f32, width: f32, cx: &mut Context<Shell>) -> Div {
     let theme = Theme::of(cx).clone();
-    let full = shell.state.read(cx).sidebar_width;
+    let full = sidebar::layout_width(shell, cx);
     div()
         .h_full()
         .w(px(width.max(0.0)))
@@ -618,7 +618,7 @@ pub(crate) fn render_overlay(
         .absolute()
         .left_0()
         .top(px(clip_top))
-        .w(px(shell.state.read(cx).sidebar_width.max(metrics::WIDTH)))
+        .w(px(sidebar::layout_width(shell, cx).max(metrics::WIDTH)))
         .h(px((window_height - clip_top - FOOTER_HEIGHT).max(0.0)))
         .overflow_hidden();
     for (index, entry) in entries.iter().enumerate() {

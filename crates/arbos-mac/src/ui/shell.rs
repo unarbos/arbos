@@ -346,6 +346,10 @@ pub struct Shell {
     /// Where the expanded sidebar's discs, pictures and footer picture rest,
     /// recorded every frame they are painted; the rail morph reads it.
     pub(crate) morph: rail::Morph,
+    /// While the rail morph runs: the width its expanded layout is drawn at
+    /// when that is not the saved width (`slide::Frame::sidebar_layout`);
+    /// `sidebar::layout_width` reads it.
+    pub(crate) morph_layout: Option<f32>,
     /// The rail picture under the pointer (its name tip is drawn at the root).
     pub(crate) rail_hover: Option<crate::model::Id>,
     /// Whether the sidebar's edge handle is mid-drag: its hairline shows the
@@ -1202,6 +1206,7 @@ impl Shell {
             // wins at launch.
             list_filter: sidebar::ListFilter::load(),
             morph: Default::default(),
+            morph_layout: None,
             rail_hover: None,
             split_drag: Default::default(),
             rail_scroll: ScrollHandle::new(),
@@ -5079,7 +5084,7 @@ impl Render for Shell {
         // carries it in between), so the header draws one only for the
         // narrow band's hidden sidebar, as before
         // ([feedback sidebar-toggle-in-rail-2026-10-27]).
-        let rail_progress = frame.rail_progress(sidebar_width);
+        let rail_progress = frame.rail_progress(frame.sidebar_layout);
         let show_sidebar_toggle = rail::header_toggle_shown(sidebar_hidden, frame.sidebar_visible);
         let geometry = CenterGeometry {
             header_inset: (TRAFFIC_LIGHTS_INSET - frame.sidebar_visible).max(0.0),
@@ -5088,10 +5093,13 @@ impl Render for Shell {
         };
 
         let mut morph_overlay = None;
+        self.morph_layout = None;
         match (frame.sidebar_sliding, rail_progress) {
             // Collapsing to / opening from the rail: the column morphs and the
             // moving pieces travel over the window.
             (true, Some(t)) => {
+                self.morph_layout = Some(frame.sidebar_layout)
+                    .filter(|layout| (layout - sidebar_width).abs() > 0.5);
                 root = root.child(frosted(
                     0.0,
                     PANEL_BLUR,

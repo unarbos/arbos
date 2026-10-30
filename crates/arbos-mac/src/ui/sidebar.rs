@@ -1132,6 +1132,15 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     render_with(shell, false, cx)
 }
 
+/// The width the expanded column is laid out at: the saved width, or the
+/// rail morph's (`Shell::morph_layout`) while a fold that left from a
+/// narrower column runs.
+pub(crate) fn layout_width(shell: &Shell, cx: &App) -> f32 {
+    shell
+        .morph_layout
+        .unwrap_or_else(|| shell.state.read(cx).sidebar_width)
+}
+
 /// `hide_morphing`: while the collapse / open slide runs, the strip's discs,
 /// the rows' pictures, the selected row's fill and my footer picture are drawn
 /// by `ui::rail`'s overlay on their way between the two layouts — here they
@@ -1144,9 +1153,9 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
     let pinned_count = pinned_rows.len();
     let rows: Vec<ListEntry> = pinned_rows.into_iter().chain(rest_rows).collect();
     let snap = shell.morph.clone();
+    let sidebar_width = layout_width(shell, cx);
     let state = shell.state.read(cx);
     let machine = state.machine.shown_state();
-    let sidebar_width = state.sidebar_width;
     // Inside a server the left pane shows its channels (D88 rule 2).
     let open_server = state.open_server_info().cloned();
     let open_server_admin = open_server.as_ref().is_some_and(ServerInfo::can_admin);
@@ -2200,7 +2209,7 @@ pub fn channel_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
 /// wins as the column narrows (`ui::sidebar_fit::row_time`,
 /// [feedback sidebar-narrow-wrap-2026-10-27]).
 fn row_time_size(shell: &Shell, cx: &Context<Shell>) -> Option<f32> {
-    match sidebar_fit::row_time(shell.state.read(cx).sidebar_width) {
+    match sidebar_fit::row_time(layout_width(shell, cx)) {
         sidebar_fit::RowTime::Full => Some(TEXT_TINY),
         sidebar_fit::RowTime::Small => Some(sidebar_fit::TIME_SMALL_SIZE),
         sidebar_fit::RowTime::Hidden => None,
@@ -2280,7 +2289,7 @@ fn render_row(
     // The name wins over the time as the column narrows: the time shrinks,
     // then hides, and the `@handle` goes first (`ui::sidebar_fit::row_time`,
     // [feedback sidebar-narrow-wrap-2026-10-27]).
-    let handle_shown = sidebar_fit::handle_shown(shell.state.read(cx).sidebar_width);
+    let handle_shown = sidebar_fit::handle_shown(layout_width(shell, cx));
     // A group row reads like an agent row: name and preview, no member count.
     let handle = space
         .person()
@@ -4340,6 +4349,75 @@ mod status_cell_tests {
         let text_h = row_h(vcx, "row-preview-line-dm");
         assert_eq!(row_h(vcx, "row-preview-line-dm-emoji"), text_h);
         assert_eq!(row_h(vcx, "row-preview-line-dm-mixed"), text_h);
+    }
+
+    /// ARB-619: a drag folds the column into the rail from the width the hand
+    /// left it at. The column follows the pointer down to the snap width (220:
+    /// no times, no `@handle`); past the snap point the state goes to the rail
+    /// and the saved width back to the 296 the drag began from. The morph's
+    /// faded column used to be laid out at that 296 from its first frame —
+    /// times and `@handle` back, the collapse disc 76 pt to the right, the
+    /// text a third of the way through its fade — so the fold jumped where the
+    /// unfold and the toggle glide. Now it starts at the 220 it left from.
+    #[gpui::test]
+    fn a_drag_fold_morphs_from_the_width_the_hand_left_the_column_at(cx: &mut TestAppContext) {
+        use super::STRIP_INSET;
+        use crate::ui::sidebar_fit::SNAP_WIDTH;
+        let (_rt, state, _shell, vcx) = mount(cx);
+        let collapse_right = |vcx: &mut VisualTestContext| {
+            f32::from(
+                vcx.debug_bounds("sidebar-collapse")
+                    .expect("the expanded column's collapse disc")
+                    .right(),
+            )
+        };
+        state.update(vcx, |s, cx| {
+            s.rail_collapsed = false;
+            s.sidebar_width = 296.0;
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        let at_296 = collapse_right(vcx);
+        assert!((296.0 - STRIP_INSET - 1.0..=296.0 - STRIP_INSET).contains(&at_296));
+        assert!(vcx.debug_bounds("row-handle-dm").is_some(), "296: @handle");
+        assert!(vcx.debug_bounds("row-time-quiet").is_some(), "296: times");
+
+        // The hand drags the edge in: the column follows it to the snap width.
+        state.update(vcx, |s, cx| {
+            s.sidebar_width = SNAP_WIDTH;
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        let at_snap = collapse_right(vcx);
+        assert_eq!(at_snap, at_296 - (296.0 - SNAP_WIDTH));
+        assert!(vcx.debug_bounds("row-handle-dm").is_none());
+        assert!(vcx.debug_bounds("row-time-quiet").is_none());
+
+        // Past the snap point, as `AppState::drag_sidebar_edge` leaves it: the
+        // rail, with the width the drag began from saved.
+        state.update(vcx, |s, cx| {
+            s.rail_collapsed = true;
+            s.sidebar_width = 296.0;
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert!(
+            vcx.debug_bounds("rail-collapse").is_none(),
+            "the morph is running, not the rail at rest"
+        );
+        assert_eq!(
+            collapse_right(vcx),
+            at_snap,
+            "the faded column stays laid out at the width the hand left it at"
+        );
+        assert!(
+            vcx.debug_bounds("row-handle-dm").is_none(),
+            "no @handle comes back as the fold begins"
+        );
+        assert!(
+            vcx.debug_bounds("row-time-quiet").is_none(),
+            "no time comes back as the fold begins"
+        );
     }
 }
 
