@@ -3,7 +3,8 @@
 #   ios-gate.sh <branch> <sha>
 # Fetches the branch into ~/arbos-gate (its own clone, never the audit clone), checks out <sha>
 # detached, and builds the iPhone app twice (Release, then Debug; generic simulator, no signing). Prints the
-# compiler errors; exit 0 = both compile, 1 = one does not, 2 = infrastructure trouble (fetch/checkout).
+# compiler errors; exit 0 = both compile, 1 = one does not, 2 = infrastructure trouble (fetch, checkout, or a
+# rig that cannot run the suite — the poller retries those and records no verdict against the branch).
 set -uo pipefail
 
 # The embedded ArbosFFI framework is current when it carries the metadata symbol of the newest struct
@@ -34,7 +35,19 @@ new_test_errors() {
 # in 4 s, ≈ 1 min wall. A test red on MAIN is not the branch's fault: the failing set of the base main
 # head is cached per head (~/arbos-gate/.test-baseline/<sha>) — computed once on main's own tree when a
 # new head appears — and only failures outside that baseline fail the half (the #1843 / known-red rule).
-TEST_SIM_NAME="${ARBOS_GATE_TEST_SIM:-iPhone 17}"
+#
+# Two operator overrides, both one-line files in ~/arbos-gate, because the poller launches this over
+# ssh and no environment of yours reaches it. Both are named in the failure message, so whoever meets
+# a rig that cannot test at 3am does not have to read this script to find them:
+#   .test-sim        the simulator to run on, when the rig has no device under the default name.
+#                    Stands until removed. ARBOS_GATE_TEST_SIM does the same for a hand-run gate.
+#   .allow-untested  one line of reason. Lets ONE run ship a branch the rig could not test, then is
+#                    consumed, so the next branch is gated normally. The reason is printed into the
+#                    gate output, which the poller posts on the issue.
+SIM_PIN="$HOME/arbos-gate/.test-sim"
+ALLOW_UNTESTED="$HOME/arbos-gate/.allow-untested"
+TEST_SIM_NAME="${ARBOS_GATE_TEST_SIM:-$(head -n 1 "$SIM_PIN" 2>/dev/null)}"
+TEST_SIM_NAME="${TEST_SIM_NAME:-iPhone 17}"
 BASELINE_DIR="$HOME/arbos-gate/.test-baseline"
 # The target run_suite selects. Named once so the xcodebuild flag and the "0 tests" message cannot drift.
 TEST_ONLY=ArbosTests
@@ -224,18 +237,38 @@ run_unit_tests() {
       tail -n 8 "$log" | cut -c1-200
       rm -f "$log"; return 1 ;;
     incomplete)
-      # No verdict banner at all: the suite never started. Usually the rig (no simulator named
-      # TEST_SIM_NAME, no .xctestrun, a watchdog kill before the first case), which is why the
-      # wording points at the rig — but it is still a non-pass, because the branch went unchecked.
-      # The hosted runner lost its whole simulator set twice on 2026-10-30 (runs 41114348485 and
-      # 41116429834) and went red for it; the gate used to call the same thing "not blamed" and
-      # return a pass, which is the silent no-test run this check exists to stop.
-      echo "== tests: FAIL to run — the suite never reached a verdict banner (rc=$trc), so no test ran"
-      echo "   and this branch was NOT checked. This reads as the rig, not the branch: no simulator"
-      echo "   named '$TEST_SIM_NAME', no .xctestrun from build-for-testing, or a kill before the first"
-      echo "   case. Repair the rig and run the gate again — a run that checked nothing is not a pass."
+      # No verdict banner at all: the suite never started, so nothing was checked. The cause is the
+      # rig (no simulator named TEST_SIM_NAME, no .xctestrun, a kill before the first case), never the
+      # branch — which is why this returns 2 and not 1. Two is the gate's infrastructure code, like a
+      # failed fetch: rust-gate.sh reports `infra`, the poller retries on the next tick, no verdict is
+      # recorded and no issue is told its branch failed. What it must never do again is return 0. It
+      # did until 2026-10-30, printing "could not run — not blamed" on a pass, which let a branch no
+      # test ran against merge as if it had been tested. The hosted runner met the same empty
+      # simulator set three times that day (runs 41081201116, 41114348485, 41116429834) and went red
+      # for it; the gate waved it through.
+      if [[ -f "$ALLOW_UNTESTED" ]]; then
+        local why; why=$(head -n 1 "$ALLOW_UNTESTED"); rm -f "$ALLOW_UNTESTED"
+        echo "== tests: NOT RUN (rc=$trc) and shipped anyway on the operator's one-shot override"
+        echo "   ($ALLOW_UNTESTED, now consumed): ${why:-no reason given}"
+        echo "   This branch merges WITHOUT a test run. The next branch is gated normally."
+        tail -n 12 "$log" | cut -c1-200
+        rm -f "$log"; return 0
+      fi
+      echo "== tests: NOT RUN — the suite never reached a verdict (rc=$trc), so this branch was NOT"
+      echo "   checked. The rig could not test, which is not the branch's fault and is not a pass:"
+      echo "   the gate reports infrastructure, the poller retries next tick, nothing merges untested."
+      echo "   On the gate Mac (ssh via the relay host, docs/process-rules.md), in this order:"
+      echo "     1. xcrun simctl list devices available | grep -F '$TEST_SIM_NAME'"
+      echo "        — it is there: nothing to fix, the retry will pass. Stop here."
+      echo "     2. No device of any name: CoreSimulator is sick. Restart it with"
+      echo "        'sudo killall -9 com.apple.CoreSimulator.CoreSimulatorService' and let the gate retry."
+      echo "     3. Devices exist under other names: pin one with"
+      echo "        \"echo '<device name>' > $SIM_PIN\" (stands until you remove it)."
+      echo "     4. None of that, or a hotfix must ship now: allow ONE untested run with"
+      echo "        \"echo '<your name>: <why>' > $ALLOW_UNTESTED\". It is consumed by the next run."
+      echo "     5. Still stuck: escalate — items stay gating and the merge queue stops draining."
       tail -n 12 "$log" | cut -c1-200
-      rm -f "$log"; return 1 ;;
+      rm -f "$log"; return 2 ;;
   esac
   if [[ "$trc" -eq 0 && -z "$fails" ]]; then
     echo "== tests: $passed passed ($(( $(date +%s) - t0 )) s)"
@@ -351,23 +384,37 @@ if [[ "${1:-}" == "selftest" ]]; then
     echo "          '$suite_failed', execute-failed '$execute_failed', unfinished '$unfinished'"; rm -f "$tlog"; exit 1
   fi
   rm -f "$tlog"
-  # The decision itself, not only the reader: stub the suite with the two logs that reach
-  # run_unit_tests without a single case line — the rig with no simulator (what the hosted runner
-  # hit on 2026-10-30), and a finished run that selected nothing — and require a failure for both.
-  # Before this, the first of the two printed "not blamed" and returned a pass on zero tests.
+  # The decision itself, not only the reader. Stub the suite with the logs that reach run_unit_tests
+  # without a single case line and check each verdict: the rig that cannot test is infrastructure (2),
+  # a finished run that selected nothing is the branch's (1), and neither is ever a pass. Until
+  # 2026-10-30 the first of the two printed "not blamed" and returned 0 on zero tests.
+  # ALLOW_UNTESTED is pointed at a scratch file here: a selftest must not eat an override an operator
+  # has armed for the next gate run.
+  no_sim() { run_suite() { printf '%s\n' "no xctestrun or no simulator '$TEST_SIM_NAME'" >"$2"; return 2; }; }
   no_sim_rc=0
-  ( run_suite() { printf '%s\n' "no xctestrun or no simulator '$TEST_SIM_NAME'" >"$2"; return 2; }
+  ( no_sim; ALLOW_UNTESTED=/nonexistent/no-override-armed
     run_unit_tests >/dev/null 2>&1 ) || no_sim_rc=$?
   nothing_rc=0
   ( run_suite() { printf '%s\n' "Test Suite 'Selected tests' passed at 2026-10-30 17:24:31.002." \
                                 "** TEST SUCCEEDED **" >"$2"; return 0; }
     run_unit_tests >/dev/null 2>&1 ) || nothing_rc=$?
-  if (( no_sim_rc == 1 && nothing_rc == 1 )); then
-    echo "selftest: a run that executed no test fails the gate (no simulator, and nothing selected)"
+  if (( no_sim_rc == 2 && nothing_rc == 1 )); then
+    echo "selftest: a run that executed no test never passes — untestable rig 2 (retried), nothing selected 1"
   else
-    echo "selftest: WRONG — no-simulator run returned $no_sim_rc, selected-nothing run returned $nothing_rc;"
-    echo "          one of them reported a pass for a branch no test ran against"; exit 1
+    echo "selftest: WRONG — untestable rig returned $no_sim_rc (want 2), selected-nothing returned"
+    echo "          $nothing_rc (want 1); a 0 there is a pass for a branch no test ran against"; exit 1
   fi
+  # The operator's escape hatch has to work on the night it is needed, and has to be one-shot.
+  allow=$(mktemp -t ios-gate-allow); echo "selftest: pretending to be the operator" >"$allow"
+  armed_rc=0
+  ( no_sim; ALLOW_UNTESTED="$allow"; run_unit_tests >/dev/null 2>&1 ) || armed_rc=$?
+  if (( armed_rc == 0 )) && [[ ! -f "$allow" ]]; then
+    echo "selftest: .allow-untested ships one untested run and is consumed by it"
+  else
+    echo "selftest: WRONG — armed override returned $armed_rc (want 0) and the file is"
+    echo "          $([[ -f "$allow" ]] && echo "still there (want consumed)" || echo "gone")"; rm -f "$allow"; exit 1
+  fi
+  rm -f "$allow"
   [[ -n "$(test_sim_udid)" ]] && echo "selftest: test simulator '$TEST_SIM_NAME' present ($(test_sim_udid))" || { echo "selftest: test simulator '$TEST_SIM_NAME' MISSING"; exit 1; }
   # The scheme must build the unit-test target in its Test action, or build-for-testing checks nothing.
   scheme=$HOME/arbos-gate/apps/ios/Arbos/Arbos.xcodeproj/xcshareddata/xcschemes/Arbos.xcscheme
@@ -524,7 +571,13 @@ if [[ "$rc" -eq 0 ]]; then
   trc=$?
   if [[ "$trc" -eq 0 ]]; then
     echo "== tests: compile"
-    run_unit_tests || rc=1
+    # 2 keeps its meaning all the way out: infrastructure, retried, never a verdict on the branch.
+    run_unit_tests; urc=$?
+    case "$urc" in
+      0) ;;
+      2) rc=2 ;;
+      *) rc=1 ;;
+    esac
   else
     echo "== tests: FAIL to compile (ArbosTests)"
     branch_errs=$(test_error_set "$log")
