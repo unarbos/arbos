@@ -226,7 +226,9 @@ pub fn render(shell: &Shell, window: &Window, cx: &mut Context<Shell>) -> Option
                     && m.sender_handle.as_deref().is_some_and(|h| !h.is_empty())
             }),
             message.is_some_and(|m| can_edit_message(&me_id, m)),
-            message.is_some_and(|m| crate::ui::transcript::link_preview_of(m).is_some()),
+            message.is_some_and(|m| {
+                crate::ui::transcript::link_preview_of(m, state.link_previews).is_some()
+            }),
         )
     };
     let items = items_for(can_delete, can_dm, can_edit, has_preview);
