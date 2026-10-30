@@ -40,6 +40,7 @@ use crate::ui::highlight::{self, Shape};
 use crate::ui::identity;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
+use crate::ui::presence;
 use crate::ui::sf_symbols;
 use crate::ui::shell::{Shell, TRAFFIC_LIGHTS_INSET};
 use crate::ui::sidebar_fit;
@@ -739,7 +740,9 @@ pub(crate) struct RowView {
     pub(crate) unread: bool,
     /// Missed messages across the space's tabs (≥ 1 whenever `unread`).
     pub(crate) unread_count: usize,
-    pub(crate) typing: bool,
+    /// Somebody is typing in this chat, as the words that take the preview's
+    /// place ([`typing_line`]); `None` when nobody is.
+    pub(crate) typing: Option<String>,
     pub(crate) preview: String,
     pub(crate) time: String,
     pub(crate) person_image: Option<Arc<RenderImage>>,
@@ -946,7 +949,7 @@ fn unsorted_entries(shell: &Shell, cx: &Context<Shell>) -> Vec<ListEntry> {
                 .iter()
                 .map(|c| c.missed_count())
                 .sum(),
-            typing: !state.typing_in(&p.id).is_empty(),
+            typing: typing_line(state, p),
             preview: hit.reason.unwrap_or_else(|| preview(state, p)),
             time: time_label(last_activity(state, p)),
             person_image: p.person().and_then(|x| state.avatar(&x.avatar_url)),
@@ -967,6 +970,35 @@ fn unsorted_entries(shell: &Shell, cx: &Context<Shell>) -> Vec<ListEntry> {
     }
     rows.sort_by_key(|(key, _)| *key);
     rows.into_iter().map(|(_, e)| e).collect()
+}
+
+/// A chat row's typing words, in place of its preview, or `None` when nobody
+/// is typing there.
+///
+/// A **group** names who is typing ([feedback group-typing-names-2026-10-30],
+/// Scout; Jacob's wording call 2026-10-30): a bare "typing" among several
+/// people says nothing about which of them it is. The words come from
+/// [`arbos_core::presence::typing_line`], the one place the whole app — this
+/// row, the row over the composer, and the iPhone — reads them from.
+///
+/// A **DM** keeps the bare line, because the row's own title *is* that one
+/// person — naming them again would only repeat the row to itself — and a DM
+/// has nobody else it could be.
+///
+/// The DM line keeps its **ellipsis**, where Scout's group forms carry none
+/// (coordinator ruling, 2026-10-30). Scout asked for the three group forms and
+/// said nothing about the 1:1 line, which has read `typing…` for as long as it
+/// has existed; changing a surface nobody reported is how a fix earns its own
+/// bug report. So one row in this list reads `typing…` and another reads
+/// `Sam is typing`. That difference is deliberate and known, not an oversight:
+/// unifying it later is one string, whereas restoring a shipped behaviour is a
+/// visible flip-flop.
+fn typing_line(state: &AppState, space: &Project) -> Option<String> {
+    if space.is_people_group() {
+        arbos_core::presence::typing_line(&presence::typing_names(state, space))
+    } else {
+        (!state.typing_in(&space.id).is_empty()).then(|| "typing…".to_string())
+    }
 }
 
 /// A chat row's title: the group's title, the DM partner's display name, the
@@ -2270,7 +2302,8 @@ fn render_row(
         .as_ref()
         .is_some_and(|p| p == &space.id);
     // No pulse-clock request from a row any more: the typing pulse is gone
-    // (never a coloured dot — Jacob, 2026-10-27; "typing…" is the preview), and
+    // (never a coloured dot — Jacob, 2026-10-27; the typing words are the
+    // preview), and
     // the old working-row request made the window redraw at 30 fps for nothing.
     // The spinner has its own shared 11 fps ticker (`ui::working`).
 
@@ -2287,11 +2320,11 @@ fn render_row(
         .filter(|_| space.is_people() && !space.is_people_group())
         .filter(|_| handle_shown)
         .map(|p| format!("@{}", p.handle));
-    let preview = if typing {
-        "typing…".to_string()
-    } else {
-        preview
-    };
+    // The typing words take the preview's place in the same box, so the line
+    // truncates where a long last message would and the status cell beside it
+    // never moves.
+    let is_typing = typing.is_some();
+    let preview = typing.unwrap_or(preview);
 
     div()
         .id(ElementId::Name(SharedString::from(format!(
@@ -2448,10 +2481,10 @@ fn render_row(
                         // The status cell under the time (Jacob, 2026-10-27): the
                         // braille spinner while the chat's agent works (one shared
                         // ticker); the unread count pill; nothing for a person typing
-                        // (the preview says "typing…") or a quiet read chat. Never a
-                        // coloured dot.
+                        // (the preview says who is typing) or a quiet read chat. Never
+                        // a coloured dot.
                         .children(row_status_cell(
-                            RowStatus::of(streaming, typing, unread),
+                            RowStatus::of(streaming, is_typing, unread),
                             unread_count,
                             &id,
                             theme,
@@ -2465,7 +2498,7 @@ fn render_row(
 /// [feedback working-braille-spinner-mac-2026-10-27] + [feedback
 /// neon-dots-mac-2026-10-27]). One cell, one mark, never a coloured dot: a
 /// person typing shows nothing in the cell (the spinner is the *agent's*
-/// working sign, never a human's; the preview reads "typing…"); the spinner
+/// working sign, never a human's; the preview names who is typing); the spinner
 /// while the chat's agent works; the unread **count pill** otherwise; a quiet
 /// read chat shows nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4018,9 +4051,11 @@ mod status_cell_tests {
         .expect("person")
     }
 
-    /// Four rows: an agent working (`working`), an agent with unread
+    /// Five rows: an agent working (`working`), an agent with unread
     /// (`unread`), a quiet read agent (`quiet`), a DM whose person is typing
-    /// (`dm`). The quiet one is selected so the others keep their state.
+    /// (`dm`), and a three-person group with nobody typing yet (`group`, for
+    /// the typing-words tests, which seed its marks themselves). The quiet one
+    /// is selected so the others keep their state.
     fn mount(
         cx: &mut TestAppContext,
     ) -> (
@@ -4054,6 +4089,16 @@ mod status_cell_tests {
                     "Sam Rivera",
                     SpaceKind::Dm,
                     vec![person("gh_2", "sam", "Sam Rivera")],
+                ),
+                (
+                    "group",
+                    "Launch week",
+                    SpaceKind::Group,
+                    vec![
+                        person("gh_2", "sam", "Sam Rivera"),
+                        person("gh_3", "mira", "Mira Kaplan"),
+                        person("gh_4", "kai", "Kai Osei"),
+                    ],
                 ),
             ] {
                 s.projects.push(Project {
@@ -4186,7 +4231,7 @@ mod status_cell_tests {
         );
         assert!(
             vcx.debug_bounds("row-status-unread-dm").is_none(),
-            "a person typing shows no mark in the cell (the preview says typing…)"
+            "a person typing shows no mark in the cell (the preview names who is typing)"
         );
     }
 
@@ -4262,6 +4307,209 @@ mod status_cell_tests {
             !t.running,
             "Reduce Motion: nothing asks for frames, the ticker parks"
         );
+    }
+
+    /// Everyone typing in `id`'s row right now, as (handle, until ms).
+    fn set_typing(
+        state: &Entity<AppState>,
+        vcx: &mut VisualTestContext,
+        id: &str,
+        marks: &[(&str, u64)],
+    ) {
+        state.update(vcx, |s, cx| {
+            let marks: Vec<(String, u64)> = marks
+                .iter()
+                .map(|(h, until)| ((*h).to_owned(), *until))
+                .collect();
+            if marks.is_empty() {
+                s.typing.remove(id);
+            } else {
+                s.typing.insert(id.into(), marks);
+            }
+            cx.notify();
+        });
+        vcx.run_until_parked();
+    }
+
+    /// The words `id`'s row shows in place of its preview, or `None`.
+    fn typing_words(
+        state: &Entity<AppState>,
+        vcx: &mut VisualTestContext,
+        id: &str,
+    ) -> Option<String> {
+        state.read_with(&*vcx, |s, _| {
+            let space = s
+                .projects
+                .iter()
+                .find(|p| p.id == id)
+                .unwrap_or_else(|| panic!("no {id} row"));
+            super::typing_line(s, space)
+        })
+    }
+
+    /// Scout's report ([feedback group-typing-names-2026-10-30]): a group row's
+    /// typing indicator said only "typing…", naming nobody. It now names them in
+    /// Scout's own wording (Jacob's call, 2026-10-30), read from
+    /// `arbos_core::presence` so the iPhone says the same. A DM row keeps the
+    /// bare line, ellipsis included: its own title is that one person, so there
+    /// is nothing to disambiguate, and Scout's forms were asked for the group
+    /// rows only.
+    #[gpui::test]
+    fn a_group_row_names_who_is_typing_and_a_dm_row_keeps_the_bare_line(cx: &mut TestAppContext) {
+        let (_rt, state, _shell, vcx) = mount(cx);
+        let now = crate::model::now_ms();
+        let soon = now + 60_000;
+
+        assert_eq!(
+            typing_words(&state, vcx, "group"),
+            None,
+            "nobody typing: the row keeps its last message"
+        );
+
+        set_typing(&state, vcx, "group", &[("mira", soon)]);
+        assert_eq!(
+            typing_words(&state, vcx, "group").as_deref(),
+            Some("Mira Kaplan is typing"),
+            "one person: the display name the rest of the list uses"
+        );
+
+        set_typing(&state, vcx, "group", &[("mira", soon), ("sam", soon)]);
+        assert_eq!(
+            typing_words(&state, vcx, "group").as_deref(),
+            Some("Mira and Sam are typing"),
+            "two: first names, so the line stays one line"
+        );
+
+        set_typing(
+            &state,
+            vcx,
+            "group",
+            &[("mira", soon), ("sam", soon), ("kai", soon)],
+        );
+        assert_eq!(
+            typing_words(&state, vcx, "group").as_deref(),
+            Some("3 people are typing"),
+            "three: a count, so the line never grows with the room"
+        );
+
+        // Not on the roster yet: the handle, never a raw user id — the same
+        // fallback the row over the composer draws.
+        set_typing(&state, vcx, "group", &[("newcomer", soon)]);
+        assert_eq!(
+            typing_words(&state, vcx, "group").as_deref(),
+            Some("@newcomer is typing")
+        );
+
+        // A stale mark is nobody typing.
+        set_typing(&state, vcx, "group", &[("mira", now - 1)]);
+        assert_eq!(typing_words(&state, vcx, "group"), None);
+
+        // The DM `mount` seeds: one person, and the row is already called
+        // "Sam Rivera", so naming him again would only repeat the row.
+        assert_eq!(
+            typing_words(&state, vcx, "dm").as_deref(),
+            Some("typing…"),
+            "a DM keeps the bare line, ellipsis and all — Scout's forms were \
+             for group rows, and this one was never reported"
+        );
+    }
+
+    /// Everyone re-pings every 3 s while they type, so the order
+    /// `AppState::typing_in` answers in churns. The row's words must not: they
+    /// may change when the set of typists changes, never because a ping landed.
+    #[gpui::test]
+    fn a_refreshed_typing_ping_never_swaps_the_names(cx: &mut TestAppContext) {
+        let (_rt, state, _shell, vcx) = mount(cx);
+        let now = crate::model::now_ms();
+
+        set_typing(
+            &state,
+            vcx,
+            "group",
+            &[("sam", now + 6_000), ("mira", now + 5_000)],
+        );
+        let first = typing_words(&state, vcx, "group");
+        let order = state.read_with(&*vcx, |s, _| s.typing_in("group"));
+
+        // Mira's next keystroke refreshes her mark: newest-first now flips.
+        set_typing(
+            &state,
+            vcx,
+            "group",
+            &[("sam", now + 6_000), ("mira", now + 9_000)],
+        );
+        assert_ne!(
+            order,
+            state.read_with(&*vcx, |s, _| s.typing_in("group")),
+            "the ping really did reorder `typing_in` — the guard is doing work"
+        );
+        assert_eq!(
+            typing_words(&state, vcx, "group"),
+            first,
+            "the words held still across the refresh"
+        );
+        assert_eq!(first.as_deref(), Some("Mira and Sam are typing"));
+    }
+
+    /// The typing words take the preview's own box, so a narrow column
+    /// truncates them there: the row keeps its height, its time stays put, and
+    /// the rows under it do not move. Measured at the narrowest column the
+    /// slider holds at (`sidebar_fit::SNAP_WIDTH`), with names far too long for
+    /// it.
+    ///
+    /// One and two names are the cases that can outgrow the column, so they are
+    /// where truncation is worth proving. Three or more is a count ("3 people
+    /// are typing") and is short whatever the room is called — that is the whole
+    /// reason the count form exists, and the test asserts it stays short.
+    #[gpui::test]
+    fn long_typing_words_truncate_instead_of_moving_anything(cx: &mut TestAppContext) {
+        let (_rt, state, shell, vcx) = mount(cx);
+        state.update(vcx, |s, cx| {
+            s.sidebar_width = crate::ui::sidebar_fit::SNAP_WIDTH;
+            for p in s.projects.iter_mut().filter(|p| p.id == "group") {
+                p.people = vec![
+                    person("gh_2", "sam", "Samantha Abernathy-Fitzwilliam"),
+                    person("gh_3", "mira", "Miranda Vasquez-Oyelaran"),
+                    person("gh_4", "kai", "Kaimana Alexandrescu-Whitfield"),
+                ];
+            }
+            cx.notify();
+        });
+        vcx.run_until_parked();
+
+        let boxes = |vcx: &mut VisualTestContext| {
+            (
+                vcx.debug_bounds("row-preview-line-group")
+                    .expect("the group row's preview line"),
+                vcx.debug_bounds("row-time-group"),
+                vcx.debug_bounds("row-preview-line-dm")
+                    .expect("the row under it"),
+            )
+        };
+        let quiet = boxes(vcx);
+
+        for marks in [
+            vec![("sam", u64::MAX)],
+            vec![("sam", u64::MAX), ("mira", u64::MAX)],
+            vec![("sam", u64::MAX), ("mira", u64::MAX), ("kai", u64::MAX)],
+        ] {
+            set_typing(&state, vcx, "group", &marks);
+            shell.update(vcx, |_, cx| cx.notify());
+            vcx.run_until_parked();
+            let words = typing_words(&state, vcx, "group").expect("someone is typing");
+            assert_eq!(
+                words.len() > 30,
+                marks.len() < 3,
+                "{} typist(s): names overflow this column, a count does not: {words}",
+                marks.len()
+            );
+            assert_eq!(
+                boxes(vcx),
+                quiet,
+                "{} typist(s): the line, the time and the row below it all held",
+                marks.len()
+            );
+        }
     }
 
     /// Where a row's `@handle` sits against its own preview line — the one
