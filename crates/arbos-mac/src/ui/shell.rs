@@ -515,6 +515,7 @@ impl Shell {
                 || v == "bottom"
                 || v == "connectors"
                 || v == "notifications"
+                || v == "privacy"
                 || v == "machine"
                 || v == "updates"
                 || v == "about"
