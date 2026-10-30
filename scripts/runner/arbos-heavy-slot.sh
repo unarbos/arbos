@@ -1,8 +1,12 @@
 #!/bin/bash
 # Concurrency cap for heavy jobs on the shared EC2 Mac (8 cores, one 250 GB volume).
 #
-#   arbos-heavy-slot.sh acquire <name> [--priority] [--pid <owner>]   → prints the slot path; blocks until free
-#       (the owner pid defaults to the caller's parent; pass `--pid $$` from a script that uses $(…))
+#   arbos-heavy-slot.sh acquire <name> [--priority] [--pid <owner>] [--no-wait]   → prints the slot path; blocks until free
+#       (the owner pid defaults to the caller's parent; pass `--pid $$` from a script that uses $(…)).
+#       A rig asking while a release lane holds a slot is refused: nothing printed, exit 75 (see "Release window").
+#       --no-wait asks once and never joins a queue: no waiting marker is written, nothing is promoted over the
+#       cap, and the owner is not signalled. It prints the slot path (exit 0) when a slot is free and it is this
+#       caller's turn, otherwise nothing (exit 75) — "ask, and if refused do something else".
 #   arbos-heavy-slot.sh release <slot-path>
 #   arbos-heavy-slot.sh status
 #
@@ -21,6 +25,7 @@ SLOTS_DIR="${ARBOS_HEAVY_SLOTS_DIR:-/Users/Shared/arbos-run/heavy-slots}"
 MAX_SLOTS="${ARBOS_HEAVY_MAX_SLOTS:-1}"
 PRIORITY_EXTRA="${ARBOS_HEAVY_PRIORITY_EXTRA:-1}"
 WAIT_MAX_S="${ARBOS_HEAVY_WAIT_MAX_S:-2700}"
+UNCAPPED_LOAD_MAX="${ARBOS_HEAVY_UNCAPPED_LOAD_MAX:-48}"  # rigs do not go uncapped while the 1-min load is above this (8 cores × 6)
 # Gate halves (names gate-*, the loop's merge path) must not starve behind rigs (2026-10-27 02:58: the pool
 # batch's iOS half waited behind rigs mp-ios and clearread, then a rig held the only slot for over an hour).
 # Two rules: (1) while a gate half is queued, non-gate acquirers wait (GATE_QUEUE marks the queue; a gate
@@ -104,6 +109,45 @@ release_due() {  # 1 when some waiting release may preempt the next grant
     (( now - start >= RELEASE_PREEMPT_S )) && return 0
   done
   return 1
+}
+# Release window (18:07 Oct 30): mac-release took its slot at 18:07:03, and 41 s later a rig past WAIT_MAX_S was
+# promoted to an uncapped-* slot, because the one-minute load had not yet climbed past UNCAPPED_LOAD_MAX. The
+# load guard only lets a rig through in exactly that window, where a heavy job has started but the average has
+# not caught up. So while a release lane holds a slot, rigs get nothing: no capped grant and no uncapped
+# promotion. A rig that asks, or is already waiting, fails with exit 75 and an instruction rather than firing.
+# This reads the slot table, not the load. The rule lives here, not in a document, because a worker in the
+# middle of a turn cannot hear a stand-down, and every rig already comes through this script.
+# The owner (--pid) is sent SIGTERM on refusal: rig scripts written `slot=$(… acquire …)` carry on whatever the
+# exit status, and a refused rig that carries on runs uncapped. ARBOS_HEAVY_REFUSE_STOPS_OWNER=0 turns that off.
+REFUSE_STOPS_OWNER="${ARBOS_HEAVY_REFUSE_STOPS_OWNER:-1}"
+release_held() {  # prints the release lane that holds a live slot; status 1 when none does
+  local d pid name
+  for d in "$SLOTS_DIR"/*.slot; do
+    [[ -d "$d" ]] || continue
+    name=$(cat "$d/name" 2>/dev/null || echo "")
+    is_release_name "$name" || continue
+    pid=$(cat "$d/pid" 2>/dev/null || echo "")
+    if [[ -n "$pid" ]] && ps -p "$pid" >/dev/null 2>&1; then echo "$name"; return 0; fi
+  done
+  return 1
+}
+release_waiting() {  # a release lane is queued for a slot (its marker's pid is alive)
+  local f
+  for f in "$RELEASE_QUEUE"/*; do
+    [[ -f "$f" ]] || continue
+    ps -p "$(basename "$f")" >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+refuse_in_release() {  # refuse_in_release <name> <release> <owner> <owner-given> <mark>
+  local name=$1 rel=$2 owner=$3 given=$4 mark=$5
+  [[ -n "$mark" ]] && rm -f "$mark" 2>/dev/null
+  echo "$(ts) heavy-slot: $name refused — $rel holds the Mac. No slot, capped or uncapped, during a release. Do not retry or requeue: ask the coordinator for a window between releases." >&2
+  logger -t arbos-heavy-slot "refused rig $name during $rel (owner pid $owner)" 2>/dev/null || true
+  if (( REFUSE_STOPS_OWNER && given )) && [[ "$owner" =~ ^[0-9]+$ ]] && (( owner > 1 && owner != $$ )); then
+    echo "$(ts) heavy-slot: stopping $name's owner (pid $owner, SIGTERM) so it does not run without a slot" >&2
+    kill -TERM "$owner" 2>/dev/null || true
+  fi
 }
 # A rig acquirer running under the shared GUI runner (a `bash cmd-*.sh` ancestor) gives up after
 # RIG_RUNNER_WAIT_MAX_S: the command file is copied to the back of the runner's FIFO (name sorts last) and the
@@ -201,12 +245,13 @@ gate_waiting() {
 }
 
 acquire() {
-  local name="$1" priority=0 owner=$PPID limit t0 slot n waited_note=0
+  local name="$1" priority=0 owner=$PPID owner_given=0 nowait=0 limit t0 slot n waited_note=0
   shift
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --priority) priority=1 ;;
-      --pid) owner="${2:-$PPID}"; shift ;;
+      --pid) owner="${2:-$PPID}"; owner_given=1; shift ;;
+      --no-wait) nowait=1 ;;
     esac
     shift
   done
@@ -222,7 +267,9 @@ acquire() {
   ! is_exempt_name "$name" && is_p0_rig "$name" && limit=$((MAX_SLOTS + PRIORITY_EXTRA))
   t0=$(date +%s)
   local mark=""
-  if is_gate_name "$name"; then
+  # Writing the marker is joining the queue (others yield to it), so a --no-wait ask writes none.
+  if (( nowait )); then :
+  elif is_gate_name "$name"; then
     mkdir -p "$GATE_QUEUE" 2>/dev/null; chmod 1777 "$GATE_QUEUE" 2>/dev/null || true
     mark="$GATE_QUEUE/$$"; echo "$owner" > "$mark" 2>/dev/null || mark=""
   elif is_release_name "$name"; then
@@ -235,13 +282,28 @@ acquire() {
   local runner_cmd=""; ! is_exempt_name "$name" && runner_cmd=$(runner_cmd_file || true)
   local fair=0 fair_after
   while :; do
+    # The work this slot is for is gone (its rig was killed): stop waiting rather than win a grant nothing will use
+    # (internal/heavy-slot-orphaned-acquire.md, 30 Oct: an orphaned pin1547-ios waiter, owner dead 30 min, still
+    # queued; a dead grant holds the cap until the 300 s reclaim job runs). `ps`, not `kill -0`: the owner may be
+    # another user's process, and kill -0 across users is EPERM.
+    if ! ps -p "$owner" >/dev/null 2>&1; then
+      [[ -n "$mark" ]] && rm -f "$mark" 2>/dev/null
+      echo "$(ts) heavy-slot: $name's owner (pid $owner) is gone; giving up the wait" >&2
+      return 75
+    fi
     n=$(live_slots)
+    local rel
+    if ! is_exempt_name "$name" && rel=$(release_held); then
+      refuse_in_release "$name" "$rel" "$owner" "$(( owner_given && ! nowait ))" "$mark"
+      return 75
+    fi
     # Rig fair share: a rig may take the slot ahead of a queued gate half once RIG_FAIR_AFTER_GATES gate halves
     # were granted in a row (short lease); with RIG_CROWD_N or more rigs waiting, after a single gate grant.
     fair=0; fair_after=$RIG_FAIR_AFTER_GATES
     if ! is_gate_name "$name" && ! is_exempt_name "$name"; then
       (( $(rigs_waiting) >= RIG_CROWD_N )) && fair_after=1
-      (( $(cat "$GATE_GRANTS" 2>/dev/null || echo 0) >= fair_after )) && fair=1
+      # An empty counter file made `(( >= fair_after ))` a syntax error (chart rig, 05:3x Oct 28): read it into a variable.
+      local grants; grants=$(cat "$GATE_GRANTS" 2>/dev/null); grants=${grants//[^0-9]/}; (( ${grants:-0} >= fair_after )) && fair=1
     fi
     # Grant order: a due release first (it preempts gate halves and rigs); then gate halves; rigs when no gate half
     # waits or on their fair turn. A release not yet due still yields to a queued gate half, as before.
@@ -266,9 +328,9 @@ acquire() {
           (( waited_note )) && echo "$(ts) heavy-slot: $name got a slot after $(( $(date +%s) - t0 )) s" >&2
           [[ -n "$mark" ]] && rm -f "$mark" 2>/dev/null
           if is_gate_name "$name"; then
-            echo $(( $(cat "$GATE_GRANTS" 2>/dev/null || echo 0) + 1 )) > "$GATE_GRANTS" 2>/dev/null || true
+            { local g; g=$(cat "$GATE_GRANTS" 2>/dev/null); g=${g//[^0-9]/}; echo $(( ${g:-0} + 1 )) > "$GATE_GRANTS"; chmod 666 "$GATE_GRANTS"; } 2>/dev/null || true
           elif ! is_exempt_name "$name"; then
-            echo 0 > "$GATE_GRANTS" 2>/dev/null || true
+            { echo 0 > "$GATE_GRANTS"; chmod 666 "$GATE_GRANTS"; } 2>/dev/null || true  # world-writable: rigs run as ec2-user and arbosgui
             if (( fair )); then echo "$RIG_FAIR_LEASE_S" > "$slot/lease"; echo "$(ts) heavy-slot: $name took its fair-share turn (lease ${RIG_FAIR_LEASE_S}s, after $fair_after gate grant(s), $(rigs_waiting) rig(s) waiting) ahead of a queued gate half" >&2; fi
             if is_p0_rig "$name"; then echo "$P0_RIG_LEASE_S" > "$slot/lease"; echo "$(ts) heavy-slot: $name is a P0 rig — first in the rig queue, lease ${P0_RIG_LEASE_S}s" >&2; fi
           fi
@@ -276,20 +338,40 @@ acquire() {
         fi
       fi
     fi
+    if (( nowait )); then
+      local busy="$n heavy job(s) running (cap $limit)"
+      (( my_turn )) || busy="$busy; an earlier rig is waiting"
+      ! is_gate_name "$name" && gate_waiting && busy="$busy; a gate half is queued"
+      release_due && busy="$busy; a release is due"
+      echo "$(ts) heavy-slot: $name not granted (--no-wait, not queued) — $busy: $(status_line)" >&2
+      return 75
+    fi
     # A P0 rig is not requeued either: the requeue copy only puts the same series at the back of the runner
     # (and the author's script runs on uncapped when the acquire exits 75 — cmd-outside-agents-02, 04:07).
-    if [[ -n "$runner_cmd" ]] && (( ! p0 )) && (( $(date +%s) - t0 >= RIG_RUNNER_WAIT_MAX_S )); then
-      local again orig; orig="${runner_cmd%.running}"; again="/Users/Shared/arbos-run/cmd-zz~requeued-$(date +%s)-$(basename "${orig%.sh}").sh"
-      if [[ -f "$runner_cmd" ]] && { printf '# requeued by arbos-heavy-slot at %s: %s waited %ss for a heavy slot under the shared runner (cap %s); original %s\n' "$(ts)" "$name" "$RIG_RUNNER_WAIT_MAX_S" "$limit" "$(basename "$runner_cmd")"; cat "$runner_cmd"; } > "$again" 2>/dev/null; then
-        echo "$(ts) heavy-slot: $name waited ${RIG_RUNNER_WAIT_MAX_S}s under the shared runner ($n busy); giving up — command requeued at the back as $(basename "$again")" >&2
-        logger -t arbos-heavy-slot "rig $name gave up its slot wait after ${RIG_RUNNER_WAIT_MAX_S}s; requeued $(basename "$again")" 2>/dev/null || true
-      else
-        echo "$(ts) heavy-slot: $name waited ${RIG_RUNNER_WAIT_MAX_S}s under the shared runner ($n busy); giving up (could not requeue $runner_cmd)" >&2
-      fi
-      [[ -n "$mark" ]] && rm -f "$mark" 2>/dev/null
-      echo none; return 75
+    # No uncapped fallthrough while the box is already overloaded (19:45 Oct 28: three rigs fell through on top
+    # of a release build and a gate half, 3 booted sims, load 975 on 8 cores): a waiter past its budget keeps
+    # waiting while the 1-min load is above UNCAPPED_LOAD_MAX; gate halves and releases are not rigs and keep
+    # their own fallthrough (they are what the rigs would starve).
+    local load1; load1=$(sysctl -n vm.loadavg 2>/dev/null | awk "{print int(\$2)}"); load1=${load1:-0}
+    local overloaded=0; (( load1 > UNCAPPED_LOAD_MAX )) && ! is_exempt_name "$name" && overloaded=1
+    # A queued release is about to load the box whatever the average says now: no promotion ahead of it.
+    local release_queued=0; ! is_exempt_name "$name" && release_waiting && release_queued=1
+    if (( overloaded )) && (( $(date +%s) - t0 >= RIG_RUNNER_WAIT_MAX_S )) && (( ($(date +%s) - t0) % 600 < 15 )); then
+      echo "$(ts) heavy-slot: $name past its wait budget but load is $load1 (> $UNCAPPED_LOAD_MAX); not going uncapped, still waiting" >&2
     fi
-    if (( $(date +%s) - t0 >= WAIT_MAX_S )); then
+    if (( ! overloaded && ! release_queued )) && [[ -n "$runner_cmd" ]] && (( ! p0 )) && (( $(date +%s) - t0 >= RIG_RUNNER_WAIT_MAX_S )); then
+      # No requeue copies any more (17:2x Oct 28): a rig script that ignores exit 75 kept running while its copy
+      # waited, requeued itself again, and so on — 32 cmd-zz~requeued-*-pd-before copies and duplicate runs took
+      # the Mac to load 558. Under the shared runner a rig that waited RIG_RUNNER_WAIT_MAX_S proceeds with a real
+      # uncapped slot instead (same as WAIT_MAX_S), so the work runs once and stays visible to the reclaim rules.
+      slot="$SLOTS_DIR/$(date +%s)-$$-uncapped-${name//\//_}.slot"
+      if mkdir "$slot" 2>/dev/null; then echo "$owner" > "$slot/pid"; echo "uncapped-$name" > "$slot/name"; date -u +%s > "$slot/since"; else slot=none; fi
+      echo "$(ts) heavy-slot: $name waited ${RIG_RUNNER_WAIT_MAX_S}s under the shared runner ($n busy); proceeding uncapped (slot $(basename "$slot"))" >&2
+      logger -t arbos-heavy-slot "rig $name proceeds uncapped after ${RIG_RUNNER_WAIT_MAX_S}s under the shared runner" 2>/dev/null || true
+      [[ -n "$mark" ]] && rm -f "$mark" 2>/dev/null
+      echo "$slot"; return 0
+    fi
+    if (( ! overloaded && ! release_queued )) && (( $(date +%s) - t0 >= WAIT_MAX_S )); then
       # A real slot over the cap, so the boot guard and the reclaim rules still see this job.
       slot="$SLOTS_DIR/$(date +%s)-$$-uncapped-${name//\//_}.slot"
       if mkdir "$slot" 2>/dev/null; then echo "$owner" > "$slot/pid"; echo "uncapped-$name" > "$slot/name"; date -u +%s > "$slot/since"; else slot=none; fi
@@ -324,6 +406,6 @@ case "${1:-}" in
   release) release "${2:-}" ;;
   bind)    bind "${2:-}" "${3:-}" ;;
   reclaim) ensure_dir; n=$(live_slots); echo "$(ts) heavy-slot: reclaim pass — $n live slot(s)" ;;
-  status)  ensure_dir; echo "heavy slots: $(live_slots)/$MAX_SLOTS (+$PRIORITY_EXTRA priority; rig lease cap ${RIG_LEASE_MAX_S}s$(gate_waiting && echo '; gate half queued')) — $(status_line)" ;;
-  *) echo "usage: $0 acquire <name> [--priority] [--pid <owner>] | release <slot> | bind <slot> <udid> | reclaim | status" >&2; exit 2 ;;
+  status)  ensure_dir; echo "heavy slots: $(live_slots)/$MAX_SLOTS (+$PRIORITY_EXTRA priority; rig lease cap ${RIG_LEASE_MAX_S}s$(gate_waiting && echo '; gate half queued')$(rel=$(release_held) && echo "; $rel holds the Mac — rigs refused")) — $(status_line)" ;;
+  *) echo "usage: $0 acquire <name> [--priority] [--pid <owner>] [--no-wait] | release <slot> | bind <slot> <udid> | reclaim | status" >&2; exit 2 ;;
 esac
