@@ -30,8 +30,9 @@ JUDGE_MODEL = os.environ.get("LT_JUDGE_MODEL", "anthropic/claude-haiku-5.5")
 def _get_json(url, timeout=30):
     headers = {"user-agent": "arbos-long-task-eval/1.0", "accept": "application/json"}
     # the unauthenticated GitHub API quota is shared by the VM's egress IP (run 13: r5's truth
-    # check got 403 "rate limit exceeded"); the eval's PAT is in the environment already
-    tok = os.environ.get("GH_TOKEN") or os.environ.get("ARBOS_GITHUB")
+    # check got 403 "rate limit exceeded"), and a VM's own GH_TOKEN can expire mid-run (run 15:
+    # 401), so the eval's vault PAT (run-suite.sh exports LT_GITHUB_TOKEN) goes first
+    tok = os.environ.get("LT_GITHUB_TOKEN") or os.environ.get("ARBOS_GITHUB") or os.environ.get("GH_TOKEN")
     if tok and url.startswith("https://api.github.com/"):
         headers["authorization"] = f"Bearer {tok}"
     req = urllib.request.Request(url, headers=headers)

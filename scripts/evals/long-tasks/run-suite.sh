@@ -37,8 +37,14 @@ if [ -z "${OPENROUTER_API_KEY:-}" ]; then
   OPENROUTER_API_KEY="$(op item get hy3omqs2ak2tkjmzji2uerbmya --vault Arbos --fields notesPlain --reveal | tr -d '"\n')"
   export OPENROUTER_API_KEY
 fi
+if [ -z "${LT_GITHUB_TOKEN:-}" ]; then
+  # read-only use: the GitHub truth checks (r5, w2, …); unauthenticated they share the egress IP's
+  # 60/h quota (run 13: 403), and a VM's `gh auth token` expires within the hour (run 15: 401)
+  LT_GITHUB_TOKEN="$(op item get gefompyaklwbv2iuyyb4z5rvbm --vault Arbos --format json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(f["value"] for f in d["fields"] if f.get("value") and f.get("type")=="CONCEALED"))')"
+  export LT_GITHUB_TOKEN
+fi
 if [ -z "${ARBOS_GITHUB:-}" ] && [ "$FILE_ISSUES" = 1 ]; then
-  ARBOS_GITHUB="$(op item get gefompyaklwbv2iuyyb4z5rvbm --vault Arbos --format json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(f["value"] for f in d["fields"] if f.get("value") and f.get("type")=="CONCEALED"))')"
+  ARBOS_GITHUB="$LT_GITHUB_TOKEN"
   export ARBOS_GITHUB
 fi
 if [ ! -f "${LT_HOST_SSH_KEY:-$HOME/.ssh/arbos_cloud}" ]; then
