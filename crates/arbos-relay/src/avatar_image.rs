@@ -77,10 +77,7 @@ pub fn mime_of(kind: ImageKind) -> &'static str {
 
 /// Decode with the EXIF orientation applied (phone photos are stored sideways with a flag).
 fn decode(bytes: &[u8]) -> Result<DynamicImage, String> {
-    let reader = image::ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .map_err(|e| format!("decode: {e}"))?;
-    let mut decoder = reader.into_decoder().map_err(|e| format!("decode: {e}"))?;
+    let mut decoder = crate::image_sniff::decoder(bytes)?;
     let orientation = decoder
         .orientation()
         .unwrap_or(image::metadata::Orientation::NoTransforms);
@@ -213,19 +210,27 @@ pub fn master(bytes: &[u8]) -> Result<Master, String> {
 /// already within the master size is kept byte for byte (no second lossy generation).
 /// Bytes that do not decode are returned unchanged with their sniffed kind — the caller has
 /// already run the type gate.
-pub fn normalize_upload(kind: ImageKind, bytes: &[u8]) -> Master {
-    if let Ok(img) = decode(bytes) {
-        let (w, h) = img.dimensions();
-        if w.max(h) > MASTER_SIDE {
-            if let Ok(m) = master(bytes) {
-                return m;
+///
+/// `Err` only for a picture too large to decode ([`crate::image_sniff::MAX_DECODE_SIDE`]).
+/// Those are refused rather than kept: storing one would hand every viewer's client the same
+/// picture the relay would not open itself.
+pub fn normalize_upload(kind: ImageKind, bytes: &[u8]) -> Result<Master, String> {
+    match decode(bytes) {
+        Ok(img) => {
+            let (w, h) = img.dimensions();
+            if w.max(h) > MASTER_SIDE {
+                if let Ok(m) = master(bytes) {
+                    return Ok(m);
+                }
             }
         }
+        Err(why) if why == crate::image_sniff::TOO_LARGE => return Err(why),
+        Err(_) => {}
     }
-    Master {
+    Ok(Master {
         kind,
         bytes: bytes.to_vec(),
-    }
+    })
 }
 
 /// `?w=` → the bucket served (rounded up; above the largest bucket the master itself).
@@ -650,16 +655,16 @@ mod tests {
     #[test]
     fn uploads_are_normalized_only_when_too_large() {
         let big = png_bytes(&mark(1536));
-        let m = normalize_upload(ImageKind::Png, &big);
+        let m = normalize_upload(ImageKind::Png, &big).unwrap();
         assert_eq!(
             image::load_from_memory(&m.bytes).unwrap().dimensions(),
             (1024, 1024)
         );
         let fine = png_bytes(&mark(800));
-        let m = normalize_upload(ImageKind::Png, &fine);
+        let m = normalize_upload(ImageKind::Png, &fine).unwrap();
         assert_eq!(m.bytes, fine, "kept byte for byte");
         let head = crate::image_sniff::samples::JPEG;
-        let m = normalize_upload(ImageKind::Jpeg, head);
+        let m = normalize_upload(ImageKind::Jpeg, head).unwrap();
         assert_eq!(m.bytes, head);
         assert_eq!(m.kind, ImageKind::Jpeg);
     }

@@ -143,6 +143,54 @@ pub fn check_avatar(content_type: Option<&str>, bytes: &[u8]) -> Result<ImageKin
     Ok(kind)
 }
 
+/// The largest picture the relay will decode, per side.
+///
+/// A picture's header says how big it is and its pixels come out of a compressed body, so a
+/// small file can ask for an enormous frame buffer: measured on 2026-10-30, an 854 KB grey PNG
+/// declaring 30000 x 30000 took 1.8 GB resident to decode, and a 3.5 MB one declaring
+/// 60000 x 60000 asked the allocator for 3.6 GB in a single call — which, when the allocation
+/// fails, aborts the process rather than the request. `image`'s own `max_alloc` does not cover
+/// it (`decoder_to_vec` reserves the whole output buffer itself, outside the decoders'
+/// accounting), but `max_image_width` / `max_image_height` are strict and are checked from the
+/// header before any of it happens.
+///
+/// Everything the relay decodes is a profile picture, a link preview or a site icon, and all of
+/// them are resampled down to 1024 px or less, so 8192 px a side — a 67 Mpx photo, larger than
+/// any phone takes — is well past anything real.
+pub const MAX_DECODE_SIDE: u32 = 8192;
+
+/// What [`decode`] and [`decoder`] say about a picture too large to hold in memory.
+pub const TOO_LARGE: &str = "picture is too large to decode";
+
+fn reader(bytes: &[u8]) -> Result<image::ImageReader<std::io::Cursor<&[u8]>>, String> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| format!("not an image: {e}"))?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_DECODE_SIDE);
+    limits.max_image_height = Some(MAX_DECODE_SIDE);
+    reader.limits(limits);
+    Ok(reader)
+}
+
+fn why(e: image::ImageError) -> String {
+    match e {
+        image::ImageError::Limits(_) => TOO_LARGE.to_owned(),
+        other => format!("decode: {other}"),
+    }
+}
+
+/// Decode a picture, refusing one over [`MAX_DECODE_SIDE`] before anything is allocated for it.
+/// Every decode of bytes the relay did not make itself goes through here or [`decoder`].
+pub fn decode(bytes: &[u8]) -> Result<image::DynamicImage, String> {
+    reader(bytes)?.decode().map_err(why)
+}
+
+/// Same, for a caller that needs the decoder itself (EXIF orientation).
+pub fn decoder(bytes: &[u8]) -> Result<impl image::ImageDecoder + '_, String> {
+    reader(bytes)?.into_decoder().map_err(why)
+}
+
 #[cfg(test)]
 pub(crate) mod samples {
     //! Minimal byte heads for tests: real signatures, no pixel data needed to be judged.
@@ -157,6 +205,46 @@ pub(crate) mod samples {
     /// The head of an ONNX model (a protobuf), as in the report that opened this work.
     pub const ONNX: &[u8] = b"\x08\x07\x12\x07pytorch\x1a\x052.1.0:\xe4\x03";
     pub const TEXT: &[u8] = b"hello, this is not a picture at all\n";
+
+    /// A whole, well-formed PNG of `w` x `h` whose pixel data is a stub: the IHDR states the
+    /// size, and a decoder reserves the frame buffer for it before reading any pixels, so this
+    /// is as expensive to open as a real picture that big (30000 x 30000 is 900 MB) and 68 bytes
+    /// on the wire.
+    pub fn png_claiming(w: u32, h: u32) -> Vec<u8> {
+        fn crc32(bytes: &[u8]) -> u32 {
+            let mut c = 0xFFFF_FFFFu32;
+            for b in bytes {
+                c ^= u32::from(*b);
+                for _ in 0..8 {
+                    c = if c & 1 == 1 {
+                        0xEDB8_8320 ^ (c >> 1)
+                    } else {
+                        c >> 1
+                    };
+                }
+            }
+            c ^ 0xFFFF_FFFF
+        }
+        fn chunk(typ: &[u8], data: &[u8]) -> Vec<u8> {
+            let mut body = typ.to_vec();
+            body.extend_from_slice(data);
+            let mut out = (data.len() as u32).to_be_bytes().to_vec();
+            out.extend_from_slice(&body);
+            out.extend_from_slice(&crc32(&body).to_be_bytes());
+            out
+        }
+        let mut ihdr = w.to_be_bytes().to_vec();
+        ihdr.extend(h.to_be_bytes());
+        ihdr.extend([8, 0, 0, 0, 0]); // 8-bit greyscale, no interlace
+        let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+        out.extend(chunk(b"IHDR", &ihdr));
+        out.extend(chunk(
+            b"IDAT",
+            b"\x78\x9c\x01\x00\x00\xff\xff\x00\x00\x00\x01",
+        ));
+        out.extend(chunk(b"IEND", b""));
+        out
+    }
 }
 
 #[cfg(test)]
@@ -265,5 +353,31 @@ mod tests {
             msg,
             "The file is JPEG but was sent as PNG; pictures must be PNG, JPEG, HEIC, GIF or WebP"
         );
+    }
+
+    /// A PNG's IHDR states the size and the decoder reserves the whole frame buffer from it
+    /// before reading a single pixel, so a few hundred bytes can ask for gigabytes. The relay
+    /// refuses anything over `MAX_DECODE_SIDE` from the header, and still decodes real pictures.
+    #[test]
+    fn a_picture_that_claims_to_be_huge_is_refused_before_it_is_allocated() {
+        let bomb = png_claiming(30_000, 30_000);
+        assert!(bomb.len() < 200, "{} bytes on the wire", bomb.len());
+        assert_eq!(sniff(&bomb), Some(ImageKind::Png));
+        assert_eq!(decode(&bomb).unwrap_err(), TOO_LARGE);
+        assert_eq!(
+            decoder(&bomb).err().as_deref(),
+            Some(TOO_LARGE),
+            "the EXIF path is bounded too"
+        );
+        assert_eq!(decode(&png_claiming(1, 60_000)).unwrap_err(), TOO_LARGE);
+
+        // A real picture of a sane size still decodes.
+        let mut real = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(64, 48)
+            .write_to(&mut real, image::ImageFormat::Png)
+            .unwrap();
+        let real = real.into_inner();
+        assert_eq!(decode(&real).unwrap().width(), 64);
+        assert!(decoder(&real).is_ok());
     }
 }

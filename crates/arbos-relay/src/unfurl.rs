@@ -1538,7 +1538,7 @@ pub async fn resolve(fetch: &Fetcher, url: &Url) -> Option<Preview> {
 /// Decode, bound, re-encode: at most `max_side` px on the long edge, JPEG under
 /// [`IMAGE_MAX_OUT_BYTES`] (quality then size stepped down). Pictures under 48 px are dropped.
 pub fn process_picture(bytes: &[u8], art: bool) -> Option<Picture> {
-    let img = image::load_from_memory(bytes).ok()?;
+    let img = crate::image_sniff::decode(bytes).ok()?;
     let (w, h) = (img.width(), img.height());
     if w < 48 || h < 48 {
         return None;

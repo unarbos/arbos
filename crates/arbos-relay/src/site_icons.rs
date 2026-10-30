@@ -304,7 +304,7 @@ pub async fn resolve_with(fetch: &Fetcher, base: &str) -> Option<Icon> {
 /// under [`MIN_SOURCE_SIDE`] on its shorter side; centre-crop square and scale **down** to at
 /// most [`ICON_SIDE`] with Lanczos3 (never up); PNG out.
 pub fn normalize(bytes: &[u8]) -> Option<Icon> {
-    let img = image::load_from_memory(bytes).ok()?;
+    let img = crate::image_sniff::decode(bytes).ok()?;
     let (w, h) = (img.width(), img.height());
     let short = w.min(h);
     if short < MIN_SOURCE_SIDE {
@@ -368,7 +368,7 @@ async fn lookup(state: &AppState, host: &str, now: i64) -> Option<Cached> {
         .as_millis() as i64;
     let icon = if found {
         let bytes = tokio::fs::read(&path).await.ok()?;
-        let side = image::load_from_memory(&bytes).ok()?.width();
+        let side = crate::image_sniff::decode(&bytes).ok()?.width();
         Some(Icon {
             png: Bytes::from(bytes),
             side,

@@ -1048,11 +1048,24 @@ pub async fn put_avatar(
     };
     // An over-size upload (a 4000 px export, an older client's 1536 px JPEG) is brought down to
     // the 1024 px master; anything already within it is stored byte for byte.
-    let jpeg = tokio::task::spawn_blocking(move || {
-        crate::avatar_image::normalize_upload(kind, &bytes).bytes
-    })
-    .await
-    .unwrap_or_default();
+    let normalized =
+        tokio::task::spawn_blocking(move || crate::avatar_image::normalize_upload(kind, &bytes))
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
+    let jpeg = match normalized {
+        Ok(master) => master.bytes,
+        Err(why) if why == crate::image_sniff::TOO_LARGE => {
+            return api_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "too_large",
+                format!(
+                    "That picture is over {} px on a side; scale it down first",
+                    crate::image_sniff::MAX_DECODE_SIDE
+                ),
+            )
+        }
+        Err(_) => Vec::new(),
+    };
     if jpeg.is_empty() {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1778,6 +1791,31 @@ mod avatar_tests {
             .avatar_url
             .unwrap_or_default();
         assert!(url.contains(&format!("/avatars/{alice}.jpg")), "{url}");
+    }
+
+    /// A PNG's IHDR states the size and the decoder reserves the whole frame buffer from it, so
+    /// a few hundred bytes of header can ask for gigabytes. The route refuses the picture on its
+    /// stated size, before anything is allocated for it, and stores nothing — storing it would
+    /// hand every viewer's client the same picture the relay would not open itself.
+    #[tokio::test]
+    async fn a_profile_picture_that_claims_to_be_huge_is_refused() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 44);
+        // 30000 x 30000 greyscale: 900 MB of frame buffer from 68 bytes on the wire.
+        let bomb = samples::png_claiming(30_000, 30_000);
+        assert_eq!(
+            crate::image_sniff::sniff(&bomb),
+            Some(crate::image_sniff::ImageKind::Png)
+        );
+
+        let r = put(&state, &alice_dev, Some("image/png"), &bomb).await;
+        assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let msg = error_message(r).await;
+        assert!(msg.contains("px on a side"), "{msg}");
+        assert!(
+            !avatar_file(&state, &alice).exists(),
+            "nothing was written for the refused picture"
+        );
     }
 
     /// Jacob's 4000 px mark, end to end on the relay: a PNG upload is accepted, stored as a
