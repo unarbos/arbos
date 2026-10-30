@@ -95,9 +95,10 @@ on:
         type: string
         default: ""
 
+# Default for the whole file; each job widens only what it needs. `macos` runs on the
+# self-hosted EC2 Mac, so its GITHUB_TOKEN is the one most worth keeping read-only.
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 concurrency:
   # Tag pushes and hotfix pushes get their own group: a hotfix must never wait behind, or be cancelled
@@ -114,6 +115,9 @@ jobs:
     name: What to publish
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    # auto-stable.sh pushes the version-bump commit and the vX.Y.Z tag.
+    permissions:
+      contents: write
     if: >-
       github.event_name != 'workflow_run' ||
       (github.event.workflow_run.conclusion == 'success' &&
@@ -233,6 +237,9 @@ jobs:
   macos:
     name: Mac app (sign, notarize, dmg)
     needs: plan
+    # Checkout, build, sign, notarize, upload an artifact. Nothing here calls the GitHub API.
+    permissions:
+      contents: read
     if: needs.plan.outputs.channel != 'none'
     runs-on: ${{ inputs.runner || vars.ARBOS_MAC_RUNNER || 'macos-15' }}
     timeout-minutes: 150
@@ -414,6 +421,10 @@ jobs:
   linux:
     name: Relay, agentd, arbosctl, image
     needs: plan
+    # docker/login-action signs in to GHCR with GITHUB_TOKEN.
+    permissions:
+      contents: read
+      packages: write
     if: needs.plan.outputs.channel != 'none'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -480,6 +491,9 @@ jobs:
   publish:
     name: Appcast and release
     needs: [plan, macos, linux]
+    # publish-release.sh creates, uploads to and prunes GitHub releases.
+    permissions:
+      contents: write
     if: needs.plan.outputs.publish == 'true' && needs.plan.outputs.channel != 'none'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
