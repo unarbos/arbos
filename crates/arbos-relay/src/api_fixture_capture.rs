@@ -36,7 +36,7 @@ use crate::state::test_support::test_state;
 use crate::state::{AppState, AuthMode};
 
 const FIXED_AT: i64 = 1_700_000_000_000;
-/// `active_channel_pair_code` only returns codes that have not expired yet.
+/// `active_channel_pair_codes` only returns codes that have not expired yet.
 const PAIR_EXPIRES_AT: i64 = 4_102_444_800_000;
 
 fn fixtures_dir() -> std::path::PathBuf {

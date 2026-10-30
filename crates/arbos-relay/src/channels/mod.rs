@@ -38,6 +38,10 @@ pub const HINT_TEXT: &str =
     "Pair this chat in Arbos → Settings → Channels, then send /pair <code> here.";
 /// Platform text limits are all above this; longer replies are cut with a marker.
 const MAX_REPLY_CHARS: usize = 3800;
+/// How many outbox rows `mock_outbox` returns, and how many it reads to fill that page once the
+/// rows belonging to other people's projects are dropped.
+const OUTBOX_PAGE: usize = 100;
+const OUTBOX_SCAN: i64 = 1000;
 
 fn internal(e: impl std::fmt::Display) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
@@ -453,7 +457,7 @@ fn pair_json(c: &ChannelPairCode) -> Value {
     serde_json::to_value(pair_dto(c)).expect("ChannelPairingDto")
 }
 
-/// `GET /channels`: platform states, bindings, the active pairing code.
+/// `GET /channels`: platform states, the caller's bindings, their active pairing code.
 pub async fn overview(State(state): State<AppState>, principal: Principal) -> ApiResult {
     if principal.is_box() {
         return Err((StatusCode::FORBIDDEN, "device only".into()));
@@ -490,12 +494,15 @@ pub async fn overview(State(state): State<AppState>, principal: Principal) -> Ap
         .list_channel_bindings()
         .map_err(internal)?
         .iter()
+        .filter(|b| state.allows(&principal, &b.project_id))
         .map(binding_dto)
         .collect();
     let pairing = state
         .db
-        .active_channel_pair_code()
+        .active_channel_pair_codes()
         .map_err(internal)?
+        .into_iter()
+        .find(|c| state.allows(&principal, &c.project_id))
         .map(|c| pair_dto(&c));
     Ok(Json(ChannelsOverviewDto {
         mock: mock_on(&state),
@@ -516,6 +523,11 @@ pub struct PairNewBody {
 }
 
 /// `POST /channels/pair/new { projectId, chatId? }` → `{ code, expiresAt }` (10 min, one use).
+///
+/// Scoped to the caller's own projects: whoever holds a live code binds their Slack, Telegram,
+/// WhatsApp or Beeper chat to the project chat it names, which drives that project's agent and
+/// gets its replies. A project the caller may not touch answers 404, as `api::revoke_device`
+/// does for a foreign device, so the route is not a project-id oracle either (#1952).
 pub async fn pair_new(
     State(state): State<AppState>,
     principal: Principal,
@@ -524,11 +536,15 @@ pub async fn pair_new(
     if principal.is_box() {
         return Err((StatusCode::FORBIDDEN, "device only".into()));
     }
+    let no_project = || (StatusCode::NOT_FOUND, "no such project".to_owned());
     let p = state
         .db
         .project(&b.project_id)
         .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
+        .ok_or_else(no_project)?;
+    if !state.allows(&principal, &p.id) {
+        return Err(no_project());
+    }
     let chats = state.db.list_chats(&p.id).map_err(internal)?;
     let chat_id = match b.chat_id {
         Some(c) => {
@@ -556,6 +572,7 @@ pub async fn pair_new(
     Ok(Json(pair_json(&code)).into_response())
 }
 
+/// `GET /channels/bindings`: the caller's own bindings.
 pub async fn list_bindings(State(state): State<AppState>, principal: Principal) -> ApiResult {
     if principal.is_box() {
         return Err((StatusCode::FORBIDDEN, "device only".into()));
@@ -565,6 +582,7 @@ pub async fn list_bindings(State(state): State<AppState>, principal: Principal) 
         .list_channel_bindings()
         .map_err(internal)?
         .iter()
+        .filter(|b| state.allows(&principal, &b.project_id))
         .map(binding_json)
         .collect();
     Ok(Json(json!({ "items": items })).into_response())
@@ -715,12 +733,35 @@ fn outcome_json(o: &Outcome) -> Value {
     }
 }
 
-/// `GET /channels/mock/outbox`: what was (or would have been) sent, newest first.
+/// `GET /channels/mock/outbox`: what was (or would have been) sent to the caller's own channels,
+/// newest first. A row carries the prose an agent sent out, so it is scoped like a binding; the
+/// pairing hints, which belong to no project, are the admin's alone.
 pub async fn mock_outbox(State(state): State<AppState>, principal: Principal) -> ApiResult {
     if principal.is_box() {
         return Err((StatusCode::FORBIDDEN, "device only".into()));
     }
-    let items = state.db.channel_outbox(100).map_err(internal)?;
+    let mine: std::collections::HashSet<String> = state
+        .db
+        .list_channel_bindings()
+        .map_err(internal)?
+        .into_iter()
+        .filter(|b| state.allows(&principal, &b.project_id))
+        .map(|b| b.id)
+        .collect();
+    let unscoped = principal.user_id().is_none();
+    let items: Vec<Value> = state
+        .db
+        .channel_outbox(OUTBOX_SCAN)
+        .map_err(internal)?
+        .into_iter()
+        .filter(|r| {
+            unscoped
+                || r.get("bindingId")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|id| mine.contains(id))
+        })
+        .take(OUTBOX_PAGE)
+        .collect();
     Ok(Json(json!({ "mock": mock_on(&state), "items": items })).into_response())
 }
 
@@ -1115,5 +1156,162 @@ mod tests {
         let out = state.db.channel_outbox(10).unwrap();
         assert_eq!(out.len(), before + 1);
         assert_eq!(out[0]["text"], "from invited B");
+    }
+
+    async fn read_json(r: axum::response::Response) -> Value {
+        let bytes = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// Every channel route is project work, so each one must be scoped to the caller's projects.
+    /// `pair_new` only refused boxes, so a stranger could mint a pairing code against another
+    /// user's project and bind their own Telegram chat to it; `overview` and `list_bindings`
+    /// returned every binding on the relay and the newest live code whoever made it; and
+    /// `mock_outbox` returned every reply the relay had sent out.
+    #[tokio::test]
+    async fn channel_routes_are_scoped_to_the_callers_projects() {
+        let state = crate::state::test_support::test_state(crate::state::AuthMode::Github);
+        let (alice, alice_dev) = crate::people::tests_support::person(&state, 11);
+        let (bob, bob_dev) = crate::people::tests_support::person(&state, 12);
+        let alice_project = crate::people::tests_support::project_of(&state, &alice, "Comms");
+
+        let pair_body = |project: &str| {
+            Json(PairNewBody {
+                project_id: project.to_owned(),
+                chat_id: None,
+            })
+        };
+
+        // 1. A stranger cannot mint a pairing code against Alice's project. A project they may
+        // not touch answers 404, like `api::revoke_device` does for a foreign device, so the
+        // route is not a project-id oracle either.
+        let err = pair_new(
+            State(state.clone()),
+            bob_dev.clone(),
+            pair_body(&alice_project),
+        )
+        .await
+        .expect_err("stranger pairing into Alice's project");
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+        assert!(
+            state.db.active_channel_pair_codes().unwrap().is_empty(),
+            "no code was minted for Alice's project"
+        );
+
+        // Alice pairs her own project.
+        let r = pair_new(
+            State(state.clone()),
+            alice_dev.clone(),
+            pair_body(&alice_project),
+        )
+        .await
+        .expect("owner pairing");
+        assert_eq!(r.status(), StatusCode::OK);
+        let alice_code = read_json(r).await["code"].as_str().unwrap().to_owned();
+
+        let binding = ChannelBinding {
+            id: "bind_alice".into(),
+            platform: "telegram".into(),
+            external_chat_id: "tg-chat".into(),
+            external_user_id: "tg-user".into(),
+            project_id: alice_project.clone(),
+            chat_id: "c1".into(),
+            label: "Telegram · Alice".into(),
+            bound_at: 0,
+        };
+        state.db.upsert_channel_binding(&binding).unwrap();
+        state
+            .db
+            .record_channel_outbox(
+                "telegram",
+                "tg-chat",
+                "Alice's agent said this",
+                "req-1",
+                "mock",
+                None,
+                Some("bind_alice"),
+            )
+            .unwrap();
+
+        // 2. None of Alice's channel state reaches Bob.
+        let bobs_overview = read_json(
+            overview(State(state.clone()), bob_dev.clone())
+                .await
+                .expect("overview"),
+        )
+        .await;
+        assert_eq!(
+            bobs_overview["pairing"],
+            Value::Null,
+            "Alice's live pairing code leaked to Bob"
+        );
+        assert!(
+            bobs_overview["bindings"].as_array().unwrap().is_empty(),
+            "Alice's bindings leaked to Bob"
+        );
+
+        let bobs_bindings = read_json(
+            list_bindings(State(state.clone()), bob_dev.clone())
+                .await
+                .expect("list bindings"),
+        )
+        .await;
+        assert!(
+            bobs_bindings["items"].as_array().unwrap().is_empty(),
+            "Alice's bindings leaked to Bob"
+        );
+
+        let bobs_outbox = read_json(
+            mock_outbox(State(state.clone()), bob_dev.clone())
+                .await
+                .expect("outbox"),
+        )
+        .await;
+        assert!(
+            bobs_outbox["items"].as_array().unwrap().is_empty(),
+            "the text Alice's agent sent out leaked to Bob"
+        );
+
+        // 3. Alice still sees her own.
+        let hers = read_json(
+            overview(State(state.clone()), alice_dev.clone())
+                .await
+                .expect("overview"),
+        )
+        .await;
+        assert_eq!(hers["pairing"]["code"], alice_code);
+        assert_eq!(hers["bindings"].as_array().unwrap().len(), 1);
+        let hers = read_json(
+            list_bindings(State(state.clone()), alice_dev.clone())
+                .await
+                .expect("list bindings"),
+        )
+        .await;
+        assert_eq!(hers["items"].as_array().unwrap().len(), 1);
+        let hers = read_json(
+            mock_outbox(State(state.clone()), alice_dev.clone())
+                .await
+                .expect("outbox"),
+        )
+        .await;
+        assert_eq!(hers["items"].as_array().unwrap().len(), 1);
+        assert_eq!(hers["items"][0]["text"], "Alice's agent said this");
+
+        // 4. Someone Alice invited into the project is inside the scope, as `reply` already is.
+        state
+            .db
+            .add_project_member(&alice_project, &bob, &alice)
+            .unwrap();
+        let bobs_bindings = read_json(
+            list_bindings(State(state.clone()), bob_dev.clone())
+                .await
+                .expect("list bindings"),
+        )
+        .await;
+        assert_eq!(bobs_bindings["items"].as_array().unwrap().len(), 1);
+        let r = pair_new(State(state.clone()), bob_dev, pair_body(&alice_project))
+            .await
+            .expect("invited member pairing");
+        assert_eq!(r.status(), StatusCode::OK);
     }
 }

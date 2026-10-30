@@ -2457,24 +2457,25 @@ impl Db {
         })
     }
 
-    /// The newest unused, unexpired code (so a client can show it again after a restart).
-    pub fn active_channel_pair_code(&self) -> Result<Option<ChannelPairCode>> {
+    /// Every unused, unexpired code, newest first (so a client can show one again after a
+    /// restart). Callers that serve a device filter these down to the projects that device may
+    /// touch: a live code is enough to bind a channel to a chat.
+    pub fn active_channel_pair_codes(&self) -> Result<Vec<ChannelPairCode>> {
         self.with(|conn| {
-            conn.query_row(
+            let mut st = conn.prepare(
                 "SELECT code, project_id, chat_id, created_at, expires_at FROM channel_pair_codes
-                 WHERE used_at IS NULL AND expires_at > ?1 ORDER BY created_at DESC LIMIT 1",
-                params![now_ms()],
-                |r| {
-                    Ok(ChannelPairCode {
-                        code: r.get(0)?,
-                        project_id: r.get(1)?,
-                        chat_id: r.get(2)?,
-                        created_at: r.get(3)?,
-                        expires_at: r.get(4)?,
-                    })
-                },
-            )
-            .optional()
+                 WHERE used_at IS NULL AND expires_at > ?1 ORDER BY created_at DESC",
+            )?;
+            let rows = st.query_map(params![now_ms()], |r| {
+                Ok(ChannelPairCode {
+                    code: r.get(0)?,
+                    project_id: r.get(1)?,
+                    chat_id: r.get(2)?,
+                    created_at: r.get(3)?,
+                    expires_at: r.get(4)?,
+                })
+            })?;
+            rows.collect()
         })
     }
 
