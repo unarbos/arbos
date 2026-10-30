@@ -9,7 +9,7 @@ use serde_json::Value;
 /// Known key shapes, `Authorization: Bearer …` and `KEY=value` lines for well-known secret names.
 pub fn redact_patterns(text: &str) -> String {
     let mut out = text.to_owned();
-    let patterns: [(&str, &str); 8] = [
+    let patterns: [(&str, &str); 9] = [
         (r"sk-or-v1-[A-Za-z0-9]{20,}", "[REDACTED:openrouter-key]"),
         (r"\bops_[A-Za-z0-9]{20,}", "[REDACTED:1password-token]"),
         (r"\bdp\.st\.[A-Za-z0-9_\-]{10,}", "[REDACTED:doppler-token]"),
@@ -23,6 +23,14 @@ pub fn redact_patterns(text: &str) -> String {
         (
             r"(?i)\b(gh[pousr]_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9\-]{10,}|AKIA[0-9A-Z]{16})\b",
             "[REDACTED:token]",
+        ),
+        // Arbos's own bearer tokens: `auth::mint` hex-encodes 32 random bytes behind a kind
+        // prefix (adv_ device, abx_ box, apr_ project, amc_ MCP), signin adds arf_ for refresh
+        // and the relay adm_ for admin. The full 64 hex digits are required so an ordinary
+        // identifier that happens to start `adv_` is left alone.
+        (
+            r"\ba(?:dv|bx|pr|mc|rf|dm)_[0-9a-f]{64}\b",
+            "[REDACTED:arbos-token]",
         ),
     ];
     for (pat, rep) in patterns {
@@ -252,6 +260,34 @@ mod tests {
         assert!(out.contains("[secret env]"), "{out}");
         assert!(out.contains("Bearer [REDACTED:bearer]"), "{out}");
         assert!(!out.contains("abc.def-ghi"), "{out}");
+    }
+
+    /// `auth::TokenKind::prefix` says the prefixes exist so "a leaked string is identifiable in
+    /// logs and greps". The scrubber has to know them, or the thing that makes an Arbos token
+    /// recognisable is only useful to whoever finds it.
+    #[test]
+    fn arbos_own_bearer_tokens_go() {
+        let hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        for prefix in ["adv_", "abx_", "apr_", "amc_", "arf_", "adm_"] {
+            let text = format!("the agent printed {prefix}{hex} into the session");
+            let out = scrub(&text);
+            assert!(out.contains("[REDACTED:arbos-token]"), "{prefix}: {out}");
+            assert!(!out.contains(hex), "{prefix}: the value survived: {out}");
+        }
+    }
+
+    /// The prefixes are four ordinary lowercase letters and an underscore. They must not eat an
+    /// identifier that merely starts the same way.
+    #[test]
+    fn arbos_token_shape_does_not_eat_prose() {
+        for t in [
+            "adv_mode is a column name",
+            "set abx_count = 3",
+            "apr_2026 is a partition",
+            "adv_0123456789abcdef",
+        ] {
+            assert_eq!(scrub(t), t, "{t}");
+        }
     }
 
     #[test]
