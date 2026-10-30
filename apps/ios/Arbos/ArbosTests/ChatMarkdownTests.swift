@@ -195,54 +195,23 @@ final class ChatMarkdownTests: XCTestCase {
         paragraphText.lineSpacing(Theme.bodyLineSpacing).tint(.blue)
     }
 
-    /// Writes the measurements where the workflow's `xcodebuild-*.log` artifact glob picks them
-    /// up. `ArbosTests` is `parallelizable = "YES"`, and that reporter prints one line per case
-    /// with no summary; a number that only reached stdout may never reach the log. `#filePath`
-    /// locates the checkout, and the simulator shares the host file system.
-    private func writeMeasurements(_ lines: [String]) {
-        let app = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        let build = app.appendingPathComponent("build")
-        try? FileManager.default.createDirectory(at: build, withIntermediateDirectories: true)
-        let text = lines.joined(separator: "\n") + "\n"
-        try? text.write(to: build.appendingPathComponent("xcodebuild-af233-measurements.log"),
-                        atomically: true, encoding: .utf8)
-    }
-
-    /// Every block kind a long message is made of, measured in a real bubble. A block whose
-    /// bubble is barely taller than one line has dropped its text; the table says which.
+    /// #1403 shipped as four lines with no test: markdown list items in agent bubbles truncated
+    /// to one line because the `HStack` proposed a single-line width, and
+    /// `.fixedSize(horizontal: false, vertical: true)` fixed it. This is that missing test. It
+    /// measures every block kind a long message is made of inside a real bubble's chrome, and it
+    /// hardcodes no line count: each block is compared against the same text wrapped as a plain
+    /// `Text` at the same width. A block barely taller than one line has dropped its text.
     func testLongMessageBlocksKeepTheirTextInABubble() {
         let chrome = 2 * Theme.bubbleVPad
-        let oneLine = wrapped("one line", at: contentWidth)
         let paragraphTruth = wrapped(Self.longParagraph, at: contentWidth)
         let itemTruth = wrapped(Self.longSentence, at: itemWidth)
-
-        var measured: [(String, CGFloat)] = []
-        func measure<V: View>(_ name: String, _ view: V) -> CGFloat {
-            let h = height(bubble(view)) - chrome
-            measured.append((name, h))
-            return h
-        }
+        func measure<V: View>(_ view: V) -> CGFloat { height(bubble(view)) - chrome }
 
         let table = MentionTable()
-        let paragraph = measure("BlockView .paragraph", BlockView(block: .paragraph(Self.longParagraph), live: false, mentions: table))
-        let bullets = measure("BlockView .bullets", BlockView(block: .bullets([Self.longSentence, Self.longSentence]), live: false, mentions: table))
-        let numbered = measure("BlockView .numbered", BlockView(block: .numbered([Self.longSentence]), live: false, mentions: table))
-        let quote = measure("BlockView .quote", BlockView(block: .quote([.paragraph(Self.longParagraph)]), live: false, mentions: table))
-        let pillParagraph = measure("paragraph with pills", paragraphWithPills)
-        let plainParagraph = measure("paragraph without pills", paragraphWithoutPills)
-        let pillItem = measure("list item with pills", listRowWithPills)
-        let plainItem = measure("list item without pills", listRowWithoutPills)
-
-        var lines = [
-            "AF-233 widths: cap=\(cap) content=\(contentWidth) itemWidth=\(itemWidth)",
-            "AF-233 one line=\(oneLine) wrapped paragraph=\(paragraphTruth) wrapped item=\(itemTruth)",
-        ]
-        for (name, h) in measured { lines.append("AF-233 \(name) = \(h) pt = \(h / oneLine) lines") }
-        writeMeasurements(lines)
-        let oneLiner = lines.joined(separator: " | ")
-        print(oneLiner)
+        let paragraph = measure(BlockView(block: .paragraph(Self.longParagraph), live: false, mentions: table))
+        let bullets = measure(BlockView(block: .bullets([Self.longSentence, Self.longSentence]), live: false, mentions: table))
+        let numbered = measure(BlockView(block: .numbered([Self.longSentence]), live: false, mentions: table))
+        let quote = measure(BlockView(block: .quote([.paragraph(Self.longParagraph)]), live: false, mentions: table))
 
         // The whole text reaches the renderer: nothing on the way in shortens the body.
         XCTAssertEqual(Markdown.blocks(Self.longParagraph), [.paragraph(Self.longParagraph)])
@@ -254,12 +223,13 @@ final class ChatMarkdownTests: XCTestCase {
         XCTAssertGreaterThan(numbered, itemTruth * 0.9, "numbered item lost lines")
         XCTAssertGreaterThan(quote, paragraphTruth * 0.9, "quoted paragraph lost lines")
 
-        // The A/B: the text renderer is the only difference between these pairs.
-        XCTAssertEqual(pillParagraph, plainParagraph, accuracy: 1, "the text renderer changed a paragraph's height")
-        XCTAssertEqual(pillItem, plainItem, accuracy: 1, "the text renderer changed a list item's height")
-
-        // AF-233 diagnostic round only: carries the table into the case stream as well, in case
-        // the artifact upload is lost. Removed once the measurement has been read.
-        XCTFail(oneLiner)
+        // `.mentionPills()` is applied to every paragraph and list item whether or not the text
+        // has a mention, and on iOS 18+ it swaps the `Text` for a `TextRenderer`. The pair below
+        // differ in nothing else, so an inequality means the renderer changed the layout and
+        // #1403's fix no longer holds for text that carries no mention at all.
+        XCTAssertEqual(measure(paragraphWithPills), measure(paragraphWithoutPills), accuracy: 1,
+                       "the text renderer changed a paragraph's height")
+        XCTAssertEqual(measure(listRowWithPills), measure(listRowWithoutPills), accuracy: 1,
+                       "the text renderer changed a list item's height")
     }
 }
