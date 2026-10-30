@@ -26,6 +26,13 @@
 //!   agree.
 //! * **Who else is on the line.** A row that also has agents working joins this
 //!   clause to its own with " · ".
+//!
+//! A 1:1 chat row does not come here at all: it draws a bare `typing…`, because
+//! its own title is already that one person. That line keeps the ellipsis these
+//! forms do not (coordinator ruling, 2026-10-30) — Scout asked for the group
+//! forms and said nothing about the 1:1 line, so changing it would have been an
+//! unrequested change to a surface nobody reported. Do not "tidy" the two into
+//! agreement without asking.
 
 /// "Sam Okafor" → "Sam"; "@sam" and one-word names stay as they are.
 ///

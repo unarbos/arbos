@@ -25,7 +25,7 @@ principle never use colored dots." App-wide, both platforms:
 | **unread** | the **count pill** (`marks::unread_pill` / `UnreadBadge`: accent capsule, white digits, "99+") beside the bold title; a lit flag with no count reads "1" |
 | **a fault** — relay down, machine error | the red **`exclamation` glyph** (`marks::fault_glyph`), the error note's mark |
 | **a resting state** — awake, asleep, offline, read | **nothing**; the words say it ("Awake · 5 h", "Offline") |
-| **a person typing** | nothing in the status cell; the preview names them in a group ("Mira and Sam are typing", "3 people are typing") and reads the bare "typing" in a DM, where the row's own title is already that person; the status row over the composer names them too. The spinner is never a human's sign |
+| **a person typing** | nothing in the status cell; the preview names them in a group ("Mira and Sam are typing", "3 people are typing") and reads the bare "typing…" in a DM, where the row's own title is already that person; the status row over the composer names them too. The spinner is never a human's sign. The group forms carry no ellipsis and the DM line keeps its own: Scout asked for the group wording and the 1:1 line was never reported, so it was left as it shipped (coordinator ruling, 2026-10-30) |
 
 Exemptions carry `// status-dot: exception <why>` on the `.bg(` line (Mac)
 or the `Circle().fill(` line (iPhone): a chart legend's series swatch, a
