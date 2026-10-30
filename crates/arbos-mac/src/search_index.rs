@@ -252,10 +252,26 @@ impl SearchIndex {
     }
 }
 
-/// System lines never count; a message with no prose, no attachment and no
-/// link is not indexed at all.
+/// Only what the chat exchanged is searchable ([feedback
+/// search-chat-only-mac-2026-10-30], the twin of the Library's rule — Jacob,
+/// 2026-10-25): a hidden job row (duplex §2.3) or an unnamed worker's spawn row
+/// is the agent's own machinery — the files it read, the pages it fetched — and
+/// the transcript draws neither, so the palette must not offer them. Links the
+/// agent typed in a **visible** reply stay indexed, unlike the Library's list:
+/// they are in the chat, and the URL is part of the indexed prose anyway, so
+/// dropping the link row would hide the direct result while leaving the same
+/// page one section above.
+///
+/// Keep this the same predicate as `ui::profiles::shared_in_chat`; the two
+/// should be folded into one helper once both land on main.
+fn shared_in_chat(m: &Message) -> bool {
+    !m.hidden && !m.worker
+}
+
+/// System lines never count, nor does anything the chat did not exchange; a
+/// message with no prose, no attachment and no link is not indexed at all.
 fn index_message(chat_id: &str, m: &Message, names: &dyn SenderName) -> Option<Indexed> {
-    if m.role == Role::System {
+    if m.role == Role::System || !shared_in_chat(m) {
         return None;
     }
     let text = crate::ui::sidebar::plain(&m.plain_text());
@@ -450,6 +466,129 @@ mod tests {
         assert_eq!(ix.size(), (1, 2));
         ix.remove_chat("chat-arbonites");
         assert_eq!(ix.size(), (0, 0));
+    }
+
+    fn row(v: serde_json::Value) -> Message {
+        serde_json::from_value(v).expect("message")
+    }
+
+    #[test]
+    fn only_rows_the_chat_exchanged_are_shared() {
+        let mut m = msg("m", 1, Role::Assistant, "hi");
+        assert!(shared_in_chat(&m));
+        m.worker = true;
+        assert!(!shared_in_chat(&m), "an unnamed worker's row");
+        m.worker = false;
+        m.hidden = true;
+        assert!(!shared_in_chat(&m), "a hidden job row");
+    }
+
+    /// The Library's rule on this surface ([feedback
+    /// search-chat-only-mac-2026-10-30], the twin of #1819): a hidden job row
+    /// and an unnamed worker's spawn row are the agent's own machinery — the
+    /// files it read, the pages it fetched — and the transcript draws neither,
+    /// so the palette must not find them. What the chat exchanged stays
+    /// findable, the agent's visible prose links included (they are in the
+    /// chat, and the same URL is already searchable as message text).
+    #[test]
+    fn the_agents_machinery_is_never_indexed_but_the_chat_stays_searchable() {
+        let job = row(serde_json::json!({
+            "id": "j", "chatId": "c", "role": "assistant", "sender": "agent:01PROJ",
+            "status": "streaming", "createdAt": 1, "hidden": true, "worker": true,
+            "job": { "id": "job1", "title": "Reading the repo" },
+            "parts": [
+                { "id": "j-t", "kind": "text", "text": "Read https://github.com/unarbos/arbos/blob/main/crates/arbos-mac/src/app.rs" },
+                { "id": "j-a", "kind": "attachment", "attachment": { "name": "app.rs", "mime": "text/plain", "ref": "blob-1" } }
+            ],
+        }));
+        let worker = row(serde_json::json!({
+            "id": "w", "chatId": "c", "role": "assistant", "sender": "agent:01PROJ",
+            "status": "done", "createdAt": 2, "worker": true, "subagentName": "reader",
+            "turn": { "kind": "spawn" },
+            "parts": [{ "id": "w-t", "kind": "text", "text": "Fetched https://docs.rs/gpui/layout" }],
+        }));
+        let reply = row(serde_json::json!({
+            "id": "a", "chatId": "c", "role": "assistant", "sender": "agent:01PROJ",
+            "status": "done", "createdAt": 3,
+            "parts": [
+                { "id": "a-t", "kind": "text", "text": "Nothing to change. Source: https://arbos.life/notes" },
+                { "id": "a-a", "kind": "attachment", "attachment": { "name": "signups.png", "mime": "image/png", "ref": "blob-3", "kind": "image" } }
+            ],
+        }));
+        let sent = row(serde_json::json!({
+            "id": "u", "chatId": "c", "role": "user", "sender": "user:gh_2",
+            "status": "done", "createdAt": 4,
+            "parts": [
+                { "id": "u-t", "kind": "text", "text": "Deck and the page: https://arbos.life/launch" },
+                { "id": "u-a", "kind": "attachment", "attachment": { "name": "deck-v3.pdf", "mime": "application/pdf", "ref": "blob-2" } }
+            ],
+        }));
+
+        let mut ix = SearchIndex::default();
+        ix.replace_chat("c", &[job.clone(), worker, reply, sent], &Names);
+
+        assert!(
+            ix.attachments(&normalize_query("app.rs"), 10).is_empty(),
+            "a file the agent read is not a file in the chat: {:?}",
+            ix.attachments(&normalize_query("app.rs"), 10)
+        );
+        assert!(
+            ix.links(&normalize_query("github.com"), 10).is_empty(),
+            "a page a job row fetched is not a link the chat shared: {:?}",
+            ix.links(&normalize_query("github.com"), 10)
+        );
+        assert!(
+            ix.links(&normalize_query("docs.rs"), 10).is_empty(),
+            "nor is a worker row's page: {:?}",
+            ix.links(&normalize_query("docs.rs"), 10)
+        );
+        assert!(
+            ix.messages(&normalize_query("Reading the repo"), 10)
+                .is_empty()
+                && ix.messages(&normalize_query("Fetched"), 10).is_empty(),
+            "a row the transcript never draws cannot be jumped to, so it is not a Messages hit"
+        );
+
+        // What the chat exchanged is still there.
+        assert_eq!(
+            ix.attachments(&normalize_query("deck-v3"), 10).len(),
+            1,
+            "the file a person sent"
+        );
+        assert_eq!(
+            ix.attachments(&normalize_query("signups"), 10).len(),
+            1,
+            "the picture the agent shared"
+        );
+        assert_eq!(
+            ix.links(&normalize_query("arbos.life"), 10).len(),
+            2,
+            "the person's link and the agent's visible prose link: {:?}",
+            ix.links(&normalize_query("arbos.life"), 10)
+        );
+        assert_eq!(
+            ix.messages(&normalize_query("Nothing to change"), 10).len(),
+            1,
+            "the agent's visible reply"
+        );
+
+        // A row that turns hidden later leaves the index on its next upsert.
+        let mut visible = job;
+        visible.hidden = false;
+        visible.worker = false;
+        ix.upsert("c", &visible, &Names);
+        assert_eq!(ix.attachments(&normalize_query("app.rs"), 10).len(), 1);
+        ix.upsert(
+            "c",
+            &{
+                let mut m = visible;
+                m.hidden = true;
+                m.worker = true;
+                m
+            },
+            &Names,
+        );
+        assert!(ix.attachments(&normalize_query("app.rs"), 10).is_empty());
     }
 
     /// Case and diacritics fold the way the sidebar search does.
