@@ -2171,36 +2171,28 @@ fn slot_allowed(state: &AppState, project: &Project, slot: &str) -> bool {
 }
 
 /// The provider URL a [`hosted_key`] stands for: the chat it names must be one of this agent's,
-/// and the part it names must still carry a URL the pass-through will relay. `Err` is the
-/// answer to send back.
-fn hosted_url(state: &AppState, project: &Project, key: &str) -> Result<String, Response> {
+/// and the part it names must still carry a URL the pass-through will relay. The `Err` is the
+/// status to answer with.
+fn hosted_url(state: &AppState, project: &Project, key: &str) -> Result<String, StatusCode> {
     let rest = key.trim_start_matches(HOSTED_KEY_PREFIX);
     let mut parts = rest.splitn(3, ':');
     let (Some(chat_id), Some(message_id), Some(part_id)) =
         (parts.next(), parts.next(), parts.next())
     else {
-        return Err(api_error(StatusCode::NOT_FOUND, "no_file", "no such file"));
+        return Err(StatusCode::NOT_FOUND);
     };
     let Some(chat) = chat_json_for(state, project, chat_id) else {
-        return Err(api_error(
-            StatusCode::FORBIDDEN,
-            "forbidden",
-            "not a file of this agent's chats",
-        ));
+        return Err(StatusCode::FORBIDDEN);
     };
     let doc = match crate::matrix::backfill::load_doc(state, chat_id, chat["project_id"].as_str()) {
         Ok(Some(doc)) => doc,
-        Ok(None) => return Err(api_error(StatusCode::NOT_FOUND, "no_file", "no such file")),
+        Ok(None) => return Err(StatusCode::NOT_FOUND),
         Err(e) => {
-            return Err(api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db",
-                e.to_string(),
-            ))
+            tracing::warn!("hosted file {key}: {e}");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
     };
-    let url = doc
-        .messages()
+    doc.messages()
         .iter()
         .find(|m| m.id == message_id)
         .and_then(|m| {
@@ -2211,8 +2203,25 @@ fn hosted_url(state: &AppState, project: &Project, key: &str) -> Result<String, 
                     .map(str::to_owned)
             })
         })
-        .filter(|u| crate::gifs::media_url_allowed(u));
-    url.ok_or_else(|| api_error(StatusCode::NOT_FOUND, "no_file", "no such file"))
+        .filter(|u| crate::gifs::media_url_allowed(u))
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+/// The bytes a [`hosted_key`] stands for, streamed from the provider. Nothing is stored on the
+/// way through — that is the whole point of the key.
+async fn hosted_file(state: &AppState, project: &Project, key: &str) -> Response {
+    match hosted_url(state, project, key) {
+        Ok(url) => crate::gifs::relay_media(&url).await,
+        Err(StatusCode::FORBIDDEN) => api_error(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "not a file of this agent's chats",
+        ),
+        Err(StatusCode::INTERNAL_SERVER_ERROR) => {
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", "chat unreadable")
+        }
+        Err(_) => api_error(StatusCode::NOT_FOUND, "no_file", "no such file"),
+    }
 }
 
 /// `GET /asp/files/{slot}/{key}` — the bytes of a picture / file / GIF / chart PNG named in an
@@ -2238,10 +2247,7 @@ pub async fn file(
     // back out of the chat document and stream the provider's bytes through, the same
     // pass-through and host allow-list the apps use. `?w=` cannot resize what is not stored.
     if key.starts_with(HOSTED_KEY_PREFIX) {
-        return match hosted_url(&state, &me.project, &key) {
-            Ok(url) => crate::gifs::relay_media(&url).await,
-            Err(response) => response,
-        };
+        return hosted_file(&state, &me.project, &key).await;
     }
     // `?w=<px>`: a picture scaled down on the way out (the apps' thumbnail path); anything
     // else, or no `w`, is the original bytes with the stored mime.
@@ -2441,6 +2447,22 @@ mod tests {
         assert!(k.starts_with(KEY_PREFIX));
         assert_eq!(k.len(), KEY_PREFIX.len() + 40);
         assert_ne!(k, mint_key());
+    }
+
+    /// Only the provider's own hosts are relayed, so a `hosted:` key cannot be turned into a
+    /// fetch of anything else.
+    #[test]
+    fn only_the_providers_hosts_are_relayed() {
+        assert!(crate::gifs::media_url_allowed(
+            "https://static.klipy.com/ii/a/f3/bd/G88BNBBL.gif"
+        ));
+        assert!(!crate::gifs::media_url_allowed(
+            "https://evil.example/x.gif"
+        ));
+        assert!(!crate::gifs::media_url_allowed(
+            "http://static.klipy.com/x.gif"
+        ));
+        assert!(!crate::gifs::media_url_allowed("file:///etc/passwd"));
     }
 
     #[test]
@@ -2785,7 +2807,10 @@ mod tests {
         let (slot, key) = blob.split_once('/').unwrap();
         assert_eq!(slot, format!("people:{g}"));
         let project = state.db.project(&pid).unwrap().unwrap();
-        assert_eq!(hosted_url(&state, &project, key).ok().as_deref(), Some(klipy));
+        assert_eq!(
+            hosted_url(&state, &project, key).ok().as_deref(),
+            Some(klipy)
+        );
 
         // Another agent's key resolves to nothing, and a part that is not there either.
         let elsewhere = hosted_key("not-a-chat", &picked, "p1");
