@@ -2636,6 +2636,17 @@ impl AppState {
                                     .set_profile_tab(crate::ui::profiles::agent::TAB_LIBRARY, cx),
                                 ":computer" => self
                                     .set_profile_tab(crate::ui::profiles::agent::TAB_COMPUTER, cx),
+                                // `agent:log[:replies|errors|sessions]` follows the Session log
+                                // card's "View all" and picks a filter (#2232).
+                                r if r.starts_with(":log") => {
+                                    self.open_outside_log(project_id.clone(), cx);
+                                    self.profile_tab = match r.trim_start_matches(":log") {
+                                        ":replies" => 1,
+                                        ":errors" => 2,
+                                        ":sessions" => 3,
+                                        _ => 0,
+                                    };
+                                }
                                 _ => {}
                             }
                             // `agent:avatar[:generate|:upload[=<path>]]` opens the avatar picker
@@ -10762,7 +10773,7 @@ impl AppState {
     /// own chat, or "Chat" when it is not in this app's lists any more.
     pub fn outside_log_chat_title(&self, chat: &str, agent: &str) -> String {
         if let Some(p) = self.project(chat) {
-            return p.name.clone();
+            return Self::room_title(p);
         }
         for (pid, chats) in &self.chats {
             if chats.iter().any(|c| c.id == chat) {
@@ -10770,12 +10781,21 @@ impl AppState {
                     "Your chat".to_owned()
                 } else {
                     self.project(pid)
-                        .map(|p| p.name.clone())
+                        .map(Self::room_title)
                         .unwrap_or_else(|| "Chat".to_owned())
                 };
             }
         }
         "Chat".to_owned()
+    }
+
+    /// A room as the sidebar names it. A DM's `name` is the other person's handle, but every
+    /// other surface shows their display name, so the log agrees with them rather than the row.
+    fn room_title(space: &Project) -> String {
+        match space.person() {
+            Some(p) if !space.is_people_group() => p.display_name(),
+            _ => space.name.clone(),
+        }
     }
 
     /// The Wake URL form for this agent; a form left over from another agent is replaced.

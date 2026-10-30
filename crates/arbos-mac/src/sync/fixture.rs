@@ -610,40 +610,49 @@ fn outside_log_fixture() -> Vec<crate::model::OutsideLogEntry> {
         kind: kind.into(),
         ..Default::default()
     };
+    let wake = |id: i64, at: i64, chat: &str| crate::model::OutsideLogEntry {
+        chat: Some(chat.into()),
+        ..entry(id, at, "wake")
+    };
     vec![
         crate::model::OutsideLogEntry {
             session: Some("01J9SESS000000000000000001".into()),
             generation: Some(1),
             ..entry(1, t - 3 * 3_600_000, "session.new")
         },
+        wake(2, t - 2 * 3_600_000 - 9_603, GROUP_LAUNCH),
         crate::model::OutsideLogEntry {
-            chat: Some(CHAT_ARBOS_LAUNCH.into()),
-            ms: ms(&[("event_to_reply", 9603), ("ack_to_reply", 8400)]),
-            ..entry(2, t - 2 * 3_600_000, "reply")
+            chat: Some(GROUP_LAUNCH.into()),
+            ms: ms(&[("event_to_reply", 9_603), ("ack_to_reply", 8_400)]),
+            ..entry(3, t - 2 * 3_600_000, "reply")
         },
         crate::model::OutsideLogEntry {
             session: Some("01J9SESS000000000000000001".into()),
             turns: Some(12),
-            ..entry(3, t - 95 * 60_000, "session.resume")
+            ..entry(4, t - 95 * 60_000, "session.resume")
         },
+        wake(5, t - 90 * 60_000 - 14_200, DM_SAM),
         crate::model::OutsideLogEntry {
-            chat: Some(CHAT_COMMS_MAIN.into()),
+            chat: Some(DM_SAM.into()),
             ms: ms(&[("event_to_reply", 14_200), ("ack_to_reply", 12_900)]),
-            ..entry(4, t - 90 * 60_000, "reply")
+            ..entry(6, t - 90 * 60_000, "reply")
         },
+        wake(7, t - 40 * 60_000 - 2_000, GROUP_LAUNCH),
         crate::model::OutsideLogEntry {
-            error: Some("The agent's machine refused the wake: connection timed out.".into()),
-            ..entry(5, t - 40 * 60_000, "error")
+            chat: Some(GROUP_LAUNCH.into()),
+            error: Some("The agent's machine did not answer the wake.".into()),
+            ..entry(8, t - 40 * 60_000, "error")
         },
         crate::model::OutsideLogEntry {
             session: Some("01J9SESS000000000000000002".into()),
             reason: Some("context_full".into()),
-            ..entry(6, t - 25 * 60_000, "session.rotate")
+            ..entry(9, t - 25 * 60_000, "session.rotate")
         },
+        wake(10, t - 11 * 60_000 - 7_480, GROUP_LAUNCH),
         crate::model::OutsideLogEntry {
-            chat: Some(CHAT_ARBOS_LAUNCH.into()),
+            chat: Some(GROUP_LAUNCH.into()),
             ms: ms(&[("event_to_reply", 7_480), ("ack_to_reply", 6_300)]),
-            ..entry(7, t - 11 * 60_000, "reply")
+            ..entry(11, t - 11 * 60_000, "reply")
         },
     ]
 }
