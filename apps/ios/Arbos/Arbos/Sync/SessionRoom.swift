@@ -585,7 +585,7 @@ final class SessionRoom {
     }
 
     /// Composer keystroke in a people chat: set / clear the `typing` field on a
-    /// presence frame so peers show "<name> is typing…" ([feedback
+    /// presence frame so peers show "<name> is typing" ([feedback
     /// app-01M5N7WSA1VCYHE9BE3CX4V0R6], Mac `RoomCmd::Typing`).
     func setTyping(_ active: Bool) {
         guard let json = presenceHeaderJSON() else { return }

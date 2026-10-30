@@ -1,3 +1,4 @@
+import ArbosFFI
 import SwiftUI
 import XCTest
 @testable import Arbos
@@ -6,14 +7,27 @@ import XCTest
 /// line of text whatever the count, and one typing mark per handle per chat.
 final class PresenceRowTests: XCTestCase {
     func testOneLineWhateverTheCount() {
-        XCTAssertEqual(PresenceLine.sentence(typing: ["Sam"], working: []), "Sam is typing…")
-        XCTAssertEqual(PresenceLine.sentence(typing: ["Sam", "Mira"], working: []), "Sam and Mira are typing…")
-        XCTAssertEqual(PresenceLine.sentence(typing: ["Sam", "Mira", "Kai", "Ava"], working: []), "Sam, Mira and 2 others are typing…")
+        XCTAssertEqual(PresenceLine.sentence(typing: ["Sam"], working: []), "Sam is typing")
+        XCTAssertEqual(PresenceLine.sentence(typing: ["Sam", "Mira"], working: []), "Sam and Mira are typing")
+        XCTAssertEqual(PresenceLine.sentence(typing: ["Sam", "Mira", "Kai", "Ava"], working: []), "4 people are typing")
         XCTAssertEqual(PresenceLine.sentence(typing: [], working: ["Lium"]), "Lium is working")
         XCTAssertEqual(PresenceLine.sentence(typing: [], working: ["Lium", "Home"]), "Lium and Home are working")
         XCTAssertEqual(PresenceLine.sentence(typing: [], working: ["Lium", "Home", "Doug"]), "Lium, Home and Doug are working")
-        XCTAssertEqual(PresenceLine.sentence(typing: ["Sam"], working: ["Lium"]), "Sam is typing… · Lium is working")
+        XCTAssertEqual(PresenceLine.sentence(typing: ["Sam"], working: ["Lium"]), "Sam is typing · Lium is working")
         XCTAssertEqual(PresenceLine.sentence(typing: [], working: []), "")
+    }
+
+    /// Scout's wording, and the proof that it is the core's and not a second
+    /// copy: the clause this row draws is byte-for-byte what `arbos-core`
+    /// answers through the FFI ([feedback group-typing-names-2026-10-30]).
+    func testTheTypingClauseIsTheSharedCoresOwnWords() {
+        for names in [["Sam Okafor"], ["Mira Kaplan", "Sam Okafor"], ["Sam", "Mira", "Kai"]] {
+            XCTAssertEqual(PresenceLine.sentence(typing: names, working: []),
+                           presenceTypingLine(names: names),
+                           "\(names.count) typing")
+        }
+        XCTAssertEqual(presenceTypingLine(names: ["Sam", "Mira", "Kai"]), "3 people are typing")
+        XCTAssertNil(presenceTypingLine(names: []))
     }
 
     func testDetailAndQueueApplyToASingleWorkerOnly() {
@@ -40,12 +54,16 @@ final class PresenceRowTests: XCTestCase {
     func testFirstNamesFromTwoParticipantsOn() {
         let pic = AnyView(EmptyView())
         let one = PresenceRow(participants: [PresenceParticipant(id: "a", name: "Sam Okafor", activity: .typing, picture: pic)])
-        XCTAssertEqual(one.text, "Sam Okafor is typing…")
+        XCTAssertEqual(one.text, "Sam Okafor is typing")
         let two = PresenceRow(participants: [
             PresenceParticipant(id: "a", name: "Mira Kaplan", activity: .typing, picture: pic),
             PresenceParticipant(id: "b", name: "Sam Okafor", activity: .typing, picture: pic),
         ])
-        XCTAssertEqual(two.text, "Mira and Sam are typing…")
+        XCTAssertEqual(two.text, "Mira and Sam are typing")
+        let crowd = PresenceRow(participants: ["Mira Kaplan", "Sam Okafor", "Kai Osei"].enumerated().map {
+            PresenceParticipant(id: "p\($0.offset)", name: $0.element, activity: .typing, picture: pic)
+        })
+        XCTAssertEqual(crowd.text, "3 people are typing", "from three on it counts, so the line cannot grow")
         XCTAssertEqual(PresenceLine.firstName("@sam"), "@sam")
     }
 
