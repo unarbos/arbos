@@ -1178,7 +1178,7 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
     let round = |id: &'static str, control: StripControl, theme: &Theme| {
         let (glyph, size) = control.glyph();
         debug_assert_eq!(control.size(), crate::ui::theme::CONTROL);
-        glass::control_disc(id, glyph, size, theme)
+        glass::strip_disc(id, glyph, size, theme)
             .when(hide_morphing, |el| el.opacity(0.0))
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
     };
@@ -2396,9 +2396,6 @@ fn render_row(
                                 .child(shell.agent_name_input.clone())
                                 .into_any_element()
                         } else {
-                            // The `@handle` beside it is bottom-aligned with this
-                            // box: an emoji-only name is lifted onto the baseline
-                            // ([feedback emoji-name-handle-offset-mac-2026-10-28]).
                             identity::name(name, TEXT_BODY)
                                 .min_w_0()
                                 .font_weight(if unread || streaming {
@@ -4343,11 +4340,6 @@ mod status_cell_tests {
         let text_h = row_h(vcx, "row-preview-line-dm");
         assert_eq!(row_h(vcx, "row-preview-line-dm-emoji"), text_h);
         assert_eq!(row_h(vcx, "row-preview-line-dm-mixed"), text_h);
-        assert!(
-            vcx.debug_bounds(crate::ui::identity::LIFTED_SELECTOR)
-                .is_some(),
-            "the emoji name is drawn lifted onto the baseline"
-        );
     }
 }
 

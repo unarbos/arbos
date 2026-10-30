@@ -276,6 +276,9 @@ struct Shared {
     /// When the Matrix session was last (re)started: a rejected token restarts it at most
     /// once a minute.
     matrix_started_at: Mutex<Option<Instant>>,
+    /// The relay said it has no servers (503 `servers_off`, or 404 from one that predates
+    /// them): the registry poll stops retrying the homeserver.
+    servers_off: AtomicBool,
     /// Per-chat ordered network sends (photo then text must stay in push order).
     send_queue: ChatSendQueue,
 }
@@ -869,6 +872,7 @@ impl SyncSource for RelaySource {
                 diagnostics: diagnostics::Diagnostics::load(),
                 matrix: Mutex::new(None),
                 matrix_started_at: Mutex::new(None),
+                servers_off: AtomicBool::new(false),
                 send_queue: {
                     let events = events.clone();
                     ChatSendQueue::new(move |chat_id, message_id| {
@@ -1130,6 +1134,13 @@ fn start_after_pairing(shared: &Arc<Shared>) {
                         let _ = shared.events.send(SyncEvent::RelayLink(verdict));
                     }
                 }
+            }
+            // The server list rides this loop like the iPhone's 15 s loop, not only the
+            // launch's homeserver handshake: one failed launch fetch left the sidebar at
+            // "No servers yet" until a server push came ([feedback mac-server-missing-2026-10-29]).
+            if !shared.servers_off.load(Ordering::Relaxed) {
+                refresh_servers_list(&shared).await;
+                start_matrix_if_needed(&shared);
             }
         }
     });
@@ -1735,14 +1746,11 @@ async fn start_matrix(shared: &Arc<Shared>) {
             }
         },
         Err(err) => {
-            let text = format!("{err:#}");
-            if text.contains("servers_off") || text.contains("HTTP 503") {
-                let _ = shared.events.send(SyncEvent::ServersAvailable(false));
-            } else if text.contains("HTTP 404") {
-                // Older relay without the route.
+            if relay_has_no_servers(&err) {
+                shared.servers_off.store(true, Ordering::Relaxed);
                 let _ = shared.events.send(SyncEvent::ServersAvailable(false));
             } else {
-                shared.diagnostic("matrix-session", text);
+                shared.diagnostic("matrix-session", format!("{err:#}"));
             }
             return;
         }
@@ -1764,18 +1772,41 @@ async fn start_matrix(shared: &Arc<Shared>) {
     refresh_servers_list(shared).await;
 }
 
-/// `GET /servers` → `SyncEvent::Servers`.
+/// The registry poll's homeserver retry: a launch whose `GET /me/matrix` failed (a timeout,
+/// a proxy's 502/503) used to stay without channels until the next launch. At most once a
+/// minute, like the rejected-token restart.
+fn start_matrix_if_needed(shared: &Arc<Shared>) {
+    if shared.matrix.lock().unwrap().is_some() || shared.creds.read().unwrap().is_none() {
+        return;
+    }
+    let due = shared
+        .matrix_started_at
+        .lock()
+        .unwrap()
+        .is_none_or(|t| t.elapsed() > MATRIX_RETRY_GAP);
+    if due {
+        let shared = shared.clone();
+        tokio::spawn(async move { start_matrix(&shared).await });
+    }
+}
+
+const MATRIX_RETRY_GAP: Duration = Duration::from_secs(60);
+
+/// 503 `servers_off`, or 404 from a relay that predates servers. A bare 503 is a proxy blip
+/// in front of a relay that has them: it keeps the list and the next poll asks again.
+fn relay_has_no_servers(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<RelayError>()
+        .is_some_and(|e| e.kind == "servers_off" || e.status == 404)
+}
+
+/// `GET /servers` → `SyncEvent::Servers`. A failure keeps the list the sidebar shows.
 async fn refresh_servers_list(shared: &Arc<Shared>) {
     match shared.get_json("/servers").await {
         Ok(v) => {
-            let servers: Vec<ServerInfo> = v
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|s| serde_json::from_value::<ServerInfo>(s.clone()).ok())
-                        .collect()
-                })
-                .unwrap_or_default();
+            shared.servers_off.store(false, Ordering::Relaxed);
+            let Some(servers) = parse_server_list(shared, &v) else {
+                return;
+            };
             let servers = servers
                 .into_iter()
                 .map(|s| with_server_picture(shared, s))
@@ -1783,14 +1814,34 @@ async fn refresh_servers_list(shared: &Arc<Shared>) {
             let _ = shared.events.send(SyncEvent::Servers(servers));
         }
         Err(err) => {
-            let text = format!("{err:#}");
-            if text.contains("servers_off") || text.contains("HTTP 503") {
+            if relay_has_no_servers(&err) {
+                shared.servers_off.store(true, Ordering::Relaxed);
                 let _ = shared.events.send(SyncEvent::ServersAvailable(false));
             } else {
-                shared.diagnostic("servers", text);
+                shared.diagnostic("servers", format!("{err:#}"));
             }
         }
     }
+}
+
+/// The servers of a `GET /servers` answer; one the client cannot read is reported, not
+/// dropped without a word. `None` (not a list) keeps the list the sidebar shows.
+fn parse_server_list(shared: &Arc<Shared>, v: &Value) -> Option<Vec<ServerInfo>> {
+    let Some(list) = v.as_array() else {
+        shared.diagnostic("servers", "GET /servers: not a list".to_owned());
+        return None;
+    };
+    let servers = list
+        .iter()
+        .filter_map(|s| match serde_json::from_value::<ServerInfo>(s.clone()) {
+            Ok(server) => Some(server),
+            Err(err) => {
+                shared.diagnostic("servers", format!("bad server JSON: {err}"));
+                None
+            }
+        })
+        .collect();
+    Some(servers)
 }
 
 fn parse_server(v: Value) -> Result<ServerInfo> {
@@ -5452,9 +5503,51 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .post_json("/chats/dm", json!({ "handle": handle }))
                     .await
                 {
-                    Ok(_) => {
+                    Ok(v) => {
+                        // A draft's first message is sent the moment the app sees the DM
+                        // listed, and the refresh opens the DM's room only after that: hold
+                        // those sends until the room is there.
+                        let new_dm = serde_json::from_value::<PeopleChatDto>(v)
+                            .ok()
+                            .map(|dto| dto.id)
+                            .filter(|id| {
+                                !id.is_empty() && !shared.docs.lock().unwrap().contains_key(id)
+                            });
+                        if let Some(id) = &new_dm {
+                            shared
+                                .pending_new_chats
+                                .lock()
+                                .unwrap()
+                                .entry(id.clone())
+                                .or_default();
+                        }
                         if let Err(err) = refresh_registry(&shared).await {
                             shared.diagnostic("refresh", format!("{err:#}"));
+                        }
+                        let Some(id) = new_dm else {
+                            return;
+                        };
+                        let queued = shared
+                            .pending_new_chats
+                            .lock()
+                            .unwrap()
+                            .remove(&id)
+                            .unwrap_or_default();
+                        for q in queued {
+                            enqueue_send(
+                                &shared,
+                                id.clone(),
+                                q.message_id,
+                                q.text,
+                                q.attachments,
+                                q.voice_wav,
+                                q.command,
+                                q.answer,
+                                q.reply_to,
+                                q.forwarded,
+                                q.reply_ref,
+                                q.mentions,
+                            );
                         }
                     }
                     Err(err) => {
@@ -9236,11 +9329,34 @@ async fn refresh_shell_grants(shared: &Arc<Shared>, project_id: &str) {
             });
         }
         Err(err) => {
-            if !format!("{err:#}").contains("HTTP 404") {
-                shared.fail("load the shell approvals", &err);
+            if let Some(event) = shell_grants_failed(project_id, &err) {
+                let _ = shared.events.send(event);
             }
         }
     }
+}
+
+/// What a failed shell-approvals load becomes. Shell approvals are the owner's: a viewer of
+/// someone else's agent (a guest, a connected agent run by another account) gets 403
+/// `not_owner`, which is the expected answer — the pane just has none, no toast. A 404 (older
+/// relay) says nothing; anything else is a real failure and is told.
+pub(super) fn shell_grants_failed(project_id: &str, err: &anyhow::Error) -> Option<SyncEvent> {
+    let not_ours = err
+        .downcast_ref::<RelayError>()
+        .is_some_and(|e| e.status == 403 && e.kind == "not_owner");
+    if not_ours {
+        return Some(SyncEvent::ShellGrants {
+            project_id: project_id.to_string(),
+            items: Vec::new(),
+        });
+    }
+    if format!("{err:#}").contains("HTTP 404") {
+        return None;
+    }
+    Some(SyncEvent::Failure {
+        error: UserError::classify("load the shell approvals", err),
+        retry: None,
+    })
 }
 
 /// Marker in a `run_session` error chain: the WebSocket never opened (TCP,
@@ -9668,6 +9784,62 @@ mod people_archive_tests {
             Some(7),
             "agents use the space archive"
         );
+    }
+}
+
+/// [feedback shell-approvals-403-quiet-2026-10-29]: opening someone else's agent hides its
+/// shell approvals quietly; every other failure still reaches the user.
+#[cfg(test)]
+mod shell_grants_failed_tests {
+    use super::{shell_grants_failed, RelayError, SyncEvent};
+    use reqwest::StatusCode;
+
+    fn relay(status: u16, kind: &str, message: &str) -> anyhow::Error {
+        let body = serde_json::json!({ "error": { "type": kind, "message": message } });
+        RelayError::from_body(
+            StatusCode::from_u16(status).expect("status"),
+            &body.to_string(),
+        )
+        .into()
+    }
+
+    fn is_toast(event: Option<SyncEvent>) -> bool {
+        matches!(event, Some(SyncEvent::Failure { .. }))
+    }
+
+    #[test]
+    fn not_owner_hides_the_approvals_without_a_toast() {
+        let err =
+            relay(403, "not_owner", "not your project").context("GET /projects/p1/shell-grants");
+        match shell_grants_failed("p1", &err) {
+            Some(SyncEvent::ShellGrants { project_id, items }) => {
+                assert_eq!(project_id, "p1");
+                assert!(items.is_empty());
+            }
+            _ => panic!("403 not_owner must be an empty list, not a failure"),
+        }
+    }
+
+    #[test]
+    fn real_failures_still_surface() {
+        for (status, kind) in [
+            (403, "forbidden"),
+            (401, "unauthorized"),
+            (400, "bad_request"),
+            (500, "internal"),
+        ] {
+            let err = relay(status, kind, "refused");
+            assert!(is_toast(shell_grants_failed("p1", &err)), "{status} {kind}");
+        }
+        assert!(is_toast(shell_grants_failed(
+            "p1",
+            &anyhow::anyhow!("connection reset").context("GET /projects/p1/shell-grants")
+        )));
+    }
+
+    #[test]
+    fn an_older_relay_without_the_route_says_nothing() {
+        assert!(shell_grants_failed("p1", &relay(404, "not_found", "no route")).is_none());
     }
 }
 
