@@ -331,24 +331,27 @@ impl Meter {
     }
 }
 
-/// Which project a box's model call is for: the box serves every project of its user, so the
-/// per-workspace model stub names the project in `X-Arbos-Project`; without it, usage lands on the
-/// user's most recently active project.
+/// Which project a model call is metered on. A box serves every project of its user and a
+/// device drives the projects it owns or was invited into, so the caller names one in
+/// `X-Arbos-Project`. The name only counts when `state.allows` says the caller may touch that
+/// project: metering is spend, and a project's usage drives its own daily cap, so an unchecked
+/// name would let a stranger bill their calls to someone else's agent (#1952). A box without a
+/// usable name falls back to its user's most recently active project.
 pub(crate) fn project_of(state: &AppState, p: &Principal, headers: &HeaderMap) -> Option<String> {
-    let Principal::Box { user_id } = p else {
-        return None;
-    };
     if let Some(h) = headers
         .get("x-arbos-project")
         .and_then(|v| v.to_str().ok())
         .filter(|s| !s.is_empty())
     {
         if let Ok(Some(proj)) = state.db.project(h) {
-            if proj.user_id == *user_id {
+            if state.allows(p, &proj.id) {
                 return Some(proj.id);
             }
         }
     }
+    let Principal::Box { user_id } = p else {
+        return None;
+    };
     state
         .db
         .projects_of_user(user_id)
@@ -373,11 +376,9 @@ async fn forward(
     api: Api,
     path_tail: &str,
     mut body: Bytes,
-    project_override: Option<String>,
 ) -> Response {
-    let project_id = project_of(&state, &principal, &headers)
-        .or(project_override)
-        .unwrap_or_else(|| "relay-admin".to_owned());
+    let project_id =
+        project_of(&state, &principal, &headers).unwrap_or_else(|| "relay-admin".to_owned());
     if let Some(r) = crate::credits::project_cap_refusal(&state, &project_id) {
         return r;
     }
@@ -637,20 +638,7 @@ pub async fn openai(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let project_override = headers
-        .get("x-arbos-project")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
-    forward(
-        state,
-        principal,
-        headers,
-        Api::OpenAi,
-        &tail,
-        body,
-        project_override,
-    )
-    .await
+    forward(state, principal, headers, Api::OpenAi, &tail, body).await
 }
 
 /// `POST /proxy/anthropic/v1/messages` (Anthropic-compatible; Claude Code's `ANTHROPIC_BASE_URL` lands here).
@@ -661,20 +649,7 @@ pub async fn anthropic(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let project_override = headers
-        .get("x-arbos-project")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
-    forward(
-        state,
-        principal,
-        headers,
-        Api::Anthropic,
-        &tail,
-        body,
-        project_override,
-    )
-    .await
+    forward(state, principal, headers, Api::Anthropic, &tail, body).await
 }
 
 /// Decisions answered recently, by the sha-256 of the request body. The respond judge sends
@@ -733,10 +708,6 @@ pub async fn decisions(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let project_override = headers
-        .get("x-arbos-project")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
     let key = decisions_cache_key(&body);
     let served = |cached: Bytes| {
         let mut h = HeaderMap::new();
@@ -768,7 +739,7 @@ pub async fn decisions(
         state.decisions_inflight.lock().await.remove(&key);
         return served(cached);
     }
-    let resp = forward_decisions(&state, principal, headers, body, project_override, &key).await;
+    let resp = forward_decisions(&state, principal, headers, body, &key).await;
     state.decisions_inflight.lock().await.remove(&key);
     resp
 }
@@ -778,7 +749,6 @@ async fn forward_decisions(
     principal: Principal,
     headers: HeaderMap,
     body: Bytes,
-    project_override: Option<String>,
     key: &str,
 ) -> Response {
     let resp = forward(
@@ -788,7 +758,6 @@ async fn forward_decisions(
         Api::Decisions,
         "alpha/decisions",
         body,
-        project_override,
     )
     .await;
     if resp.status() != StatusCode::OK {
@@ -913,14 +882,7 @@ pub fn sine_wav(seconds: f64, hz: f64) -> Vec<u8> {
 }
 
 fn audio_project(state: &AppState, principal: &Principal, headers: &HeaderMap) -> String {
-    project_of(state, principal, headers)
-        .or_else(|| {
-            headers
-                .get("x-arbos-project")
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_owned)
-        })
-        .unwrap_or_else(|| "relay-admin".to_owned())
+    project_of(state, principal, headers).unwrap_or_else(|| "relay-admin".to_owned())
 }
 
 /// `Some(response)` when the project's daily cap is already spent or the user may not spend.
@@ -1249,6 +1211,73 @@ pub async fn openai_models(State(state): State<AppState>, _principal: Principal)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `X-Arbos-Project` says which project a model call is metered on. It was only checked
+    /// against the caller for a box token; a device's header went through unread, so a signed-in
+    /// stranger could bill their calls to someone else's project — padding that project's usage,
+    /// walking it into its own daily spend cap (which stops its agent), and firing the
+    /// `spend_cap` alert in its owner's app.
+    #[tokio::test]
+    async fn a_device_cannot_meter_its_calls_on_another_users_project() {
+        let state = crate::state::test_support::test_state(crate::state::AuthMode::Github);
+        let (alice, _alice_dev) = crate::people::tests_support::person(&state, 21);
+        let (bob, bob_dev) = crate::people::tests_support::person(&state, 22);
+        let alices = crate::people::tests_support::project_of(&state, &alice, "Research");
+        state
+            .db
+            .grant_credits(&bob, 100.0, "test", "relay")
+            .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-arbos-project",
+            HeaderValue::from_str(&alices).expect("header"),
+        );
+        let day = start_of_utc_day_ms();
+
+        // The relay is in voice mock, so the transcription meters without an upstream call.
+        let r = audio_transcriptions(
+            State(state.clone()),
+            bob_dev.clone(),
+            headers.clone(),
+            Bytes::from_static(b"not really audio"),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(
+            state.db.usage_since(&alices, day).unwrap().calls,
+            0,
+            "a stranger's call was metered on Alice's project"
+        );
+
+        // A capped-out project is not a stranger's business either: the refusal reads Alice's
+        // spend and pushes a `spend_cap` alert to her app.
+        state
+            .db
+            .record_usage(&alices, "openai", "gpt-5", 0, 0, 0, 0, 99.0, 0, None)
+            .unwrap();
+        assert!(
+            crate::credits::project_cap_refusal(&state, &alices).is_some(),
+            "Alice's project is over its cap"
+        );
+        let _ = state.db.take_pushes(&alices);
+        let r = audio_transcriptions(
+            State(state.clone()),
+            bob_dev,
+            headers,
+            Bytes::from_static(b"not really audio"),
+        )
+        .await;
+        assert_eq!(
+            r.status(),
+            StatusCode::OK,
+            "a stranger's call was refused by Alice's spend cap"
+        );
+        assert!(
+            state.db.take_pushes(&alices).unwrap().is_empty(),
+            "a stranger made Alice's app show a spend-cap alert"
+        );
+    }
 
     #[test]
     fn openai_models_go_direct_when_a_key_exists() {
