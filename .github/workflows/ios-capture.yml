@@ -1,0 +1,445 @@
+name: iPhone capture
+
+# Before/after iPhone screenshots on GitHub's hosted macOS runners, so that a fix is not held up
+# waiting for a heavy slot on the shared EC2 Mac. One dispatch shoots the same screens twice — once
+# on a base commit, once on a branch — because a screenshot of a fix proves nothing without the
+# matching before shot, taken the same way.
+#
+# The work is `ArbosUITests/CaptureRigUITests`, which is driven entirely by environment variables:
+# a launch environment for `DebugHooks` and a small step script. That file skips itself when
+# `ARBOS_SHOT_DIR` is absent, so the `swift-core-check.yml` gate pays one skipped test case for it
+# and nothing else. Read its doc comment for the step vocabulary.
+#
+#   gh workflow run ios-capture.yml \
+#     -f head_ref=cursor/my-fix -f base_ref=main \
+#     -f launch_env='ARBOS_FIXTURE=1;ARBOS_NO_STORE=1;ARBOS_OPEN_PEOPLE=fx-group-launch' \
+#     -f script='wait chat-back:fx-group-launch;sleep 4;shot transcript'
+#
+# ──────────────────────────────────────────────────────────────────────────────────────────────
+# READ THIS BEFORE YOU CHOOSE WHERE TO SHOOT
+# ──────────────────────────────────────────────────────────────────────────────────────────────
+#
+# This job does not replace the gate Mac. It covers most shots. For the rest it will hand you a
+# confident-looking picture that cannot support the claim you attach to it, which is worse than no
+# picture. Five cases belong on the gate Mac:
+#
+# 1. ANYTHING ABOUT SYSTEM CHROME. Hosted `macos-15` is Xcode 26.3 with an iOS 26.2 simulator; the
+#    gate Mac is Xcode 27 and iOS 27. The app compiles either way (deployment target is 17.0 and no
+#    source file names anything newer than iOS 26), but the *operating system* draws the status
+#    bar, the keyboard, the system glass materials, the share sheet and the long-press menu
+#    platter. A fix to any of those — `ARBOS_SURFACE=glass`, `ARBOS_PILL_STYLE`, keyboard
+#    appearance, the context-menu platter — may render differently here or not reproduce at all.
+#    A before/after PAIR from this job is still sound, because both shots come off one runtime and
+#    the only difference between them is the branch. What breaks is comparing a shot from here
+#    against a tester's iOS 27 screenshot, which is step one of reproducing a report.
+#
+# 2. ANYTHING MEASURED IN TIME. A hosted runner is a shared three-core machine. The split is sharp,
+#    and worth getting right: a still is a still, so the pixel-band brightness measurement in
+#    `internal/ios-fade-measurement-rig.md` transfers to this job's output exactly as written. What
+#    does not transfer is sampling frames to catch a transient — a fade that lasts about a fifth of
+#    a second, scroll performance, `ARBOS_PERF_LOG`, `ARBOS_PERF_TOUCH`, frame pacing. On a shared
+#    three-core machine those measure the machine as much as the app.
+#
+# 3. FIXTURE DATA THAT IS NOT IN GIT. `ARBOS_FIXTURE_DOC` and `ARBOS_PERF_REPLAY` read Loro
+#    checkpoints and row dumps that are relay exports living on the gate Mac. A runner has no copy.
+#
+# 4. TWO SIMULATORS AT ONCE. Calls, pairing, and presence between two peers. Two booted simulators
+#    on three cores and seven gigabytes is not realistic, and the call rigs want an audio device.
+#
+# 5. BRINGING UP A SCREEN FOR THE FIRST TIME. You cannot attach to a runner and poke the simulator
+#    by hand, and working out which query and which hooks reach a new screen is faster when you
+#    can. The step script is data, not code, so iterating here costs a re-dispatch rather than a
+#    commit — but the gate Mac is still quicker for the first attempt at an awkward screen.
+#
+# Camera, microphone, push notifications and real TestFlight behaviour are simulator limits
+# everywhere, not a difference between the two boxes. Do not dispatch for them at all.
+#
+# Four rules carry over from the hand shoots (`internal/ios-capture-requirements.md`) and this job
+# cannot enforce them for you:
+#
+#  - The fixture data must be IDENTICAL in both builds, or a difference in the shots may come from
+#    the data and not from the fix. `fixture_patch` exists for this: it is applied to both legs.
+#  - A mention handle must resolve to a real fixture member, or it draws as plain text in both
+#    builds and the after shot looks like the fix failed. Check `Store/Fixture.swift` first.
+#  - Keep a control in the frame: something the bug does not touch, next to something it does.
+#    It proves the rig worked. Do not crop it away.
+#  - Compare colours by sampling pixels, not by eye. The pair job does a first pass for you.
+#
+# ──────────────────────────────────────────────────────────────────────────────────────────────
+#
+# Dispatch only, deliberately. A capture holds a macOS runner for about 25 minutes, and that pool
+# is already this repository's bottleneck: `ios.yml` records nine queued runs sitting behind each
+# other for up to 2.5 h, and job queue times of 87 and 90 minutes were measured on 2026-10-30.
+# Running a capture on every pull request would deepen the queue that starves TestFlight uploads,
+# to produce screenshots nobody asked for. There is no pull-request trigger here and there should
+# never be one.
+
+on:
+  workflow_dispatch:
+    inputs:
+      head_ref:
+        description: "Branch, tag or SHA to capture as the AFTER shot"
+        type: string
+        required: true
+      base_ref:
+        description: "Branch, tag or SHA for the BEFORE shot (resolved once, at the start)"
+        type: string
+        default: "main"
+      script:
+        description: "Steps, separated by `;` — e.g. `wait chat-back:fx-group-launch; sleep 4; shot transcript`"
+        type: string
+        required: true
+      launch_env:
+        description: "DebugHooks variables for the app, separated by `;`"
+        type: string
+        default: "ARBOS_FIXTURE=1;ARBOS_NO_STORE=1"
+      fixture_patch:
+        description: "Path in the HEAD ref to a patch applied to BOTH legs (rig-only fixture data); empty = none"
+        type: string
+        default: ""
+      appearance:
+        description: "Simulator appearance"
+        type: choice
+        options: [dark, light]
+        default: dark
+      device:
+        description: "Simulator device name"
+        type: string
+        default: "iPhone 17"
+      runner:
+        description: "runs-on label; empty = macos-15. `arbos-mac` sends it to the shared EC2 Mac (takes a heavy slot)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+# No concurrency group on purpose. A dispatch is deliberate and rare, and coalescing two of them
+# would throw away ~25 minutes of finished work to keep the newest — the opposite of what the
+# person who dispatched wants.
+
+jobs:
+  plan:
+    name: Pin both commits
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.refs.outputs.matrix }}
+      base_sha: ${{ steps.refs.outputs.base_sha }}
+      head_sha: ${{ steps.refs.outputs.head_sha }}
+      patch: ${{ steps.patch.outputs.found }}
+    steps:
+      # Both legs must build the SAME base. Resolving `base_ref` to a SHA here, once, is what stops
+      # a merge landing on main halfway through the run and leaving the pair incomparable.
+      - name: Resolve both refs to commits
+        id: refs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BASE_REF: ${{ inputs.base_ref }}
+          HEAD_REF: ${{ inputs.head_ref }}
+        run: |
+          set -euo pipefail
+          resolve() {
+            gh api "repos/$REPO/commits/$1" --jq .sha 2>/dev/null \
+              || { echo "::error title=Unknown ref::$1 is not a branch, tag or commit of $REPO"; exit 1; }
+          }
+          base="$(resolve "$BASE_REF")"
+          head="$(resolve "$HEAD_REF")"
+          if [[ "$base" == "$head" ]]; then
+            echo "::error title=Same commit twice::base_ref ($BASE_REF) and head_ref ($HEAD_REF) are both $base; the pair would show nothing."
+            exit 1
+          fi
+          echo "base_sha=$base" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$head" >> "$GITHUB_OUTPUT"
+          printf 'matrix={"include":[{"leg":"base","sha":"%s","ref":"%s"},{"leg":"head","sha":"%s","ref":"%s"}]}\n' \
+            "$base" "$BASE_REF" "$head" "$HEAD_REF" >> "$GITHUB_OUTPUT"
+          {
+            echo "## iPhone capture"
+            echo "| leg | ref | commit |"
+            echo "|---|---|---|"
+            echo "| before | \`$BASE_REF\` | \`$base\` |"
+            echo "| after | \`$HEAD_REF\` | \`$head\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+      # The rig fixture patch is never app code and is taken from the HEAD ref only, so that both
+      # legs get byte-identical fixture data regardless of what the base commit contains.
+      - name: Fetch the fixture patch
+        id: patch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PATCH: ${{ inputs.fixture_patch }}
+          HEAD_SHA: ${{ steps.refs.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p patch
+          if [[ -z "$PATCH" ]]; then
+            echo "found=no" >> "$GITHUB_OUTPUT"
+            echo "no fixture patch asked for"
+            exit 0
+          fi
+          gh api "repos/$REPO/contents/$PATCH?ref=$HEAD_SHA" --jq .content \
+            | base64 --decode > patch/fixture.patch
+          test -s patch/fixture.patch
+          echo "found=yes" >> "$GITHUB_OUTPUT"
+          echo "fixture patch $PATCH ($(wc -l < patch/fixture.patch) lines) will be applied to both legs"
+      - name: Keep the fixture patch for both legs
+        if: steps.patch.outputs.found == 'yes'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fixture-patch
+          path: patch/fixture.patch
+          retention-days: 7
+
+  capture:
+    name: Shoot ${{ matrix.leg }}
+    needs: plan
+    runs-on: ${{ inputs.runner || 'macos-15' }}
+    # ~25 min of work when the caches are cold (12 min xcframework, 7 min compile, the rest boot
+    # and capture). Queue time is not counted against this.
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      APP_DIR: apps/ios/Arbos
+      SIM_NAME: Arbos Capture ${{ matrix.leg }} ${{ github.run_id }}
+      SHOT_DIR: ${{ github.workspace }}/shots
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.sha }}
+      # Copied from ios.yml, not shared: at most two heavy jobs run on the EC2 Mac at a time
+      # (#1839). Only relevant when someone points `runner` at it; the hosted pool has no slots.
+      - name: Heavy-job slot
+        id: slot
+        if: runner.environment == 'self-hosted'
+        run: |
+          if [ -x /usr/local/bin/arbos-heavy-slot.sh ]; then
+            slot=$(/usr/local/bin/arbos-heavy-slot.sh acquire "ios-capture" --pid "$PPID")
+          else
+            slot=none
+          fi
+          echo "slot=$slot" >> "$GITHUB_OUTPUT"
+      - name: Select Xcode
+        id: xcode
+        run: |
+          set -euo pipefail
+          newest="$(find /Applications -maxdepth 1 -name 'Xcode_*.app' | sort -V | tail -1)"
+          if [[ -n "$newest" ]]; then sudo xcode-select -s "$newest"; fi
+          xcodebuild -version
+          echo "version=$(xcodebuild -version | head -1 | tr ' ' '-')" >> "$GITHUB_OUTPUT"
+      - name: Collect the fixture patch
+        if: needs.plan.outputs.patch == 'yes'
+        uses: actions/download-artifact@v4
+        with:
+          name: fixture-patch
+          path: ${{ runner.temp }}/patch
+      - name: Apply the fixture patch to this leg
+        if: needs.plan.outputs.patch == 'yes'
+        run: |
+          set -euo pipefail
+          git apply --verbose "$RUNNER_TEMP/patch/fixture.patch"
+          git diff --stat
+      - name: Rust toolchain
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+        # The EC2 Mac keeps its own target dir; saving the cache cost minutes there (#1233).
+        if: runner.environment != 'self-hosted'
+        with:
+          key: ios-capture
+          cache-on-failure: true
+      # The xcframework is 10–13 min of the run and does not change between two commits that do not
+      # touch the FFI. The key covers every input to it plus the Xcode version, so a changed FFI can
+      # never restore a stale framework — the staleness that cost the gate a day in #1811 came from
+      # reused derived data, and every leg here builds into a fresh one.
+      - name: ArbosFFI xcframework cache
+        id: ffi-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            packages/ArbosFFI/ArbosFFIRust.xcframework
+            packages/ArbosFFI/Sources/ArbosFFI/ArbosFFI.swift
+          key: ffi-xcframework-${{ steps.xcode.outputs.version }}-${{ hashFiles('crates/arbos-ffi/**', 'crates/arbos-core/**', 'crates/arbos-client/**', 'Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'scripts/build-xcframework.sh') }}
+      - name: Build ArbosFFI xcframework
+        if: steps.ffi-cache.outputs.cache-hit != 'true'
+        run: ./scripts/build-xcframework.sh
+      - name: The app must have an xcframework to embed
+        run: |
+          set -euo pipefail
+          test -d packages/ArbosFFI/ArbosFFIRust.xcframework
+          test -f packages/ArbosFFI/Sources/ArbosFFI/ArbosFFI.swift
+      - name: Swift package cache
+        uses: actions/cache@v4
+        with:
+          path: apps/ios/Arbos/build/spm
+          key: spm-${{ runner.os }}-${{ hashFiles('apps/ios/Arbos/Arbos.xcodeproj/project.pbxproj', 'apps/ios/Arbos/Arbos.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved', 'packages/ArbosFFI/Package.swift') }}
+          restore-keys: spm-${{ runner.os }}-
+      # Its own simulator, named after the run, so nothing touches the shared `Arbos *` or
+      # `iPhone 17` devices that the rigs and the gate depend on (docs/process-rules.md).
+      - name: Simulator
+        id: sim
+        env:
+          DEVICE: ${{ inputs.device }}
+          APPEARANCE: ${{ inputs.appearance }}
+        run: |
+          set -euo pipefail
+          runtime="$(xcrun simctl list runtimes --json \
+            | python3 -c 'import json,sys; rs=[r for r in json.load(sys.stdin)["runtimes"] if r["isAvailable"] and r["identifier"].startswith("com.apple.CoreSimulator.SimRuntime.iOS")]; print(sorted(rs, key=lambda r: [int(p) for p in r["version"].split(".")])[-1]["identifier"] if rs else "")')"
+          if [[ -z "$runtime" ]]; then
+            echo "::error title=No iOS runtime::this runner has no available iOS simulator runtime"
+            exit 1
+          fi
+          udid="$(xcrun simctl create "$SIM_NAME" "$DEVICE" "$runtime")"
+          echo "udid=$udid" >> "$GITHUB_OUTPUT"
+          xcrun simctl boot "$udid"
+          xcrun simctl bootstatus "$udid" -b
+          xcrun simctl ui "$udid" appearance "$APPEARANCE"
+          echo "$DEVICE on $runtime ($udid), appearance $APPEARANCE"
+          echo "- \`${{ matrix.leg }}\`: $DEVICE, \`$runtime\`, $APPEARANCE" >> "$GITHUB_STEP_SUMMARY"
+      # Separate from the capture, so a compile failure reads as a compile failure in the log
+      # rather than as a screenshot that never appeared.
+      # `ARBOS_SHOT_DIR` is what wakes CaptureRigUITests up; everything else is its instructions.
+      # `TEST_RUNNER_<name>=<value>` puts <name> in the UI test runner's own environment. They are
+      # given to BOTH xcodebuild calls on purpose: `build-for-testing` bakes them into the
+      # `.xctestrun` it writes, and the run below sets them again, so the capture gets them
+      # whichever of the two Xcode honours.
+      - name: Build for testing
+        env:
+          ARBOS_SPM_DIR: ${{ github.workspace }}/apps/ios/Arbos/build/spm
+          SHOT_SCRIPT: ${{ inputs.script }}
+          SHOT_LAUNCH_ENV: ${{ inputs.launch_env }}
+        run: |
+          set -euo pipefail
+          cd "$APP_DIR"
+          mkdir -p build
+          xcodebuild build-for-testing -project Arbos.xcodeproj -scheme Arbos -configuration Debug \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}" \
+            -derivedDataPath build/dd -clonedSourcePackagesDirPath "$ARBOS_SPM_DIR" \
+            -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+            TEST_RUNNER_ARBOS_SHOT_DIR="$SHOT_DIR" \
+            TEST_RUNNER_ARBOS_SHOT_TAG="${{ matrix.leg }}" \
+            TEST_RUNNER_ARBOS_SHOT_SCRIPT="$SHOT_SCRIPT" \
+            TEST_RUNNER_ARBOS_SHOT_LAUNCH_ENV="$SHOT_LAUNCH_ENV" 2>&1 \
+            | tee build/xcodebuild-capture-build.log \
+            | grep -E "error:|\*\* BUILD" || true
+          grep -q "\*\* BUILD SUCCEEDED \*\*" build/xcodebuild-capture-build.log
+      #
+      # xcodebuild has sat idle for minutes after a suite finished, still holding the machine. The
+      # watchdog below stops it ~20 s after the log carries the verdict, which is the same trick
+      # `scripts/feedback/ios-gate.sh` uses, and reads the verdict from the log rather than from
+      # xcodebuild's exit code.
+      - name: Capture
+        id: shoot
+        env:
+          SHOT_SCRIPT: ${{ inputs.script }}
+          SHOT_LAUNCH_ENV: ${{ inputs.launch_env }}
+        run: |
+          set -uo pipefail
+          mkdir -p "$SHOT_DIR"
+          cd "$APP_DIR"
+          log=build/xcodebuild-capture-test.log
+          xcodebuild test-without-building -project Arbos.xcodeproj -scheme Arbos -configuration Debug \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}" \
+            -derivedDataPath build/dd -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
+            -only-testing:ArbosUITests/CaptureRigUITests \
+            TEST_RUNNER_ARBOS_SHOT_DIR="$SHOT_DIR" \
+            TEST_RUNNER_ARBOS_SHOT_TAG="${{ matrix.leg }}" \
+            TEST_RUNNER_ARBOS_SHOT_SCRIPT="$SHOT_SCRIPT" \
+            TEST_RUNNER_ARBOS_SHOT_LAUNCH_ENV="$SHOT_LAUNCH_ENV" > "$log" 2>&1 &
+          pid=$!
+          start=$(date +%s); verdict=0
+          while kill -0 "$pid" 2>/dev/null; do
+            now=$(date +%s)
+            if [ "$verdict" -eq 0 ] && grep -qE "Test Suite '(Selected tests|All tests)' (passed|failed)|\*\* TEST (EXECUTE FAILED|SUCCEEDED|FAILED) \*\*" "$log"; then
+              verdict=$now
+            fi
+            if { [ "$verdict" -gt 0 ] && [ $((now - verdict)) -gt 20 ]; } || [ $((now - start)) -gt 1800 ]; then
+              echo "watchdog: stopping xcodebuild after $((now - start)) s (verdict $([ "$verdict" -gt 0 ] && echo present || echo MISSING))"
+              kill "$pid" 2>/dev/null; sleep 3; kill -9 "$pid" 2>/dev/null
+              break
+            fi
+            sleep 5
+          done
+          wait "$pid" 2>/dev/null
+          grep -E "ARBOS_CAPTURE|error: |Test Case .* (passed|failed)|was skipped|\*\* TEST" "$log" | tail -40 || true
+          ls -la "$SHOT_DIR" || true
+          # A leg with no PNG is a failed leg, whatever xcodebuild said.
+          shopt -s nullglob
+          shots=("$SHOT_DIR"/*.png)
+          if [ "${#shots[@]}" -eq 0 ]; then
+            echo "::error title=No screenshots::${{ matrix.leg }} wrote no PNG; see the capture log artifact"
+            exit 1
+          fi
+          echo "${{ matrix.leg }}: ${#shots[@]} screenshot(s)"
+      - name: Keep this leg's screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shots-${{ matrix.leg }}
+          path: ${{ env.SHOT_DIR }}
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Keep the xcodebuild logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: capture-logs-${{ matrix.leg }}
+          path: apps/ios/Arbos/build/xcodebuild-capture-*.log
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Shut the simulator down
+        if: always()
+        run: |
+          udid="${{ steps.sim.outputs.udid }}"
+          [ -n "$udid" ] || exit 0
+          xcrun simctl shutdown "$udid" 2>/dev/null || true
+          xcrun simctl delete "$udid" 2>/dev/null || true
+      - name: Release the heavy-job slot
+        if: always() && runner.environment == 'self-hosted' && steps.slot.outputs.slot != ''
+        run: /usr/local/bin/arbos-heavy-slot.sh release "${{ steps.slot.outputs.slot }}" || true
+
+  pair:
+    name: Pair the shots
+    needs: [plan, capture]
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: shots-*
+          path: legs
+      - name: Pair, measure, report
+        env:
+          BASE_SHA: ${{ needs.plan.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.plan.outputs.head_sha }}
+          BASE_REF: ${{ inputs.base_ref }}
+          HEAD_REF: ${{ inputs.head_ref }}
+          SHOT_SCRIPT: ${{ inputs.script }}
+          SHOT_LAUNCH_ENV: ${{ inputs.launch_env }}
+          APPEARANCE: ${{ inputs.appearance }}
+          DEVICE: ${{ inputs.device }}
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/venv
+          /tmp/venv/bin/pip install --quiet 'pillow>=10.1'
+          /tmp/venv/bin/python scripts/ci/pair-screenshots.py legs out
+      - name: Say it in the summary
+        if: always()
+        run: cat out/report.md >> "$GITHUB_STEP_SUMMARY" || echo "no report produced" >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish the pair
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-${{ github.run_id }}
+          path: out
+          if-no-files-found: warn
+          retention-days: 30
