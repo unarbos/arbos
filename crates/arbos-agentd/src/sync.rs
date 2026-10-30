@@ -1251,11 +1251,16 @@ mod tests {
             let axum::extract::ws::Message::Binary(b) = msg else {
                 continue;
             };
-            let Ok(Some(f)) = Frame::decode(b) else { continue };
+            let Ok(Some(f)) = Frame::decode(b) else {
+                continue;
+            };
             match f.ty {
                 FrameType::Hello => {
                     let (rows, bytes) = relay.with(&room, |r| {
-                        (r.rows.len() as i64, r.rows.iter().map(Vec::len).sum::<usize>() as i64)
+                        (
+                            r.rows.len() as i64,
+                            r.rows.iter().map(Vec::len).sum::<usize>() as i64,
+                        )
                     });
                     let st = wire::State {
                         head_seq: rows,
@@ -1290,8 +1295,7 @@ mod tests {
                             batch_id: ulid(),
                         })
                         .unwrap();
-                        let f =
-                            Frame::new(FrameType::Row, header, Bytes::from(payload.clone()));
+                        let f = Frame::new(FrameType::Row, header, Bytes::from(payload.clone()));
                         ok = send(&mut socket, f).await;
                         if !ok {
                             break;
@@ -1401,10 +1405,7 @@ mod tests {
         /// Wait for the room to have walked the relay's rows.
         async fn wait_caught_up(&self, chat_id: &str) {
             let host = self.hub.host(chat_id).await.expect("room open");
-            wait_for("catch-up", || async {
-                host.lock().await.caught_up
-            })
-            .await;
+            wait_for("catch-up", || async { host.lock().await.caught_up }).await;
         }
 
         /// Pretend the room has seen no traffic for its whole quiet window.
@@ -1515,7 +1516,12 @@ mod tests {
         let now = now_ms();
         for i in 0..chats {
             bx.store
-                .upsert_chat(&format!("chat{i:06}"), "Chat", i == 0, now - i as i64 * 1000)
+                .upsert_chat(
+                    &format!("chat{i:06}"),
+                    "Chat",
+                    i == 0,
+                    now - i as i64 * 1000,
+                )
                 .unwrap();
         }
         let known = bx.store.chats().unwrap();
@@ -2114,7 +2120,11 @@ mod tests {
                 Err(_) => {}
             }
         }
-        assert_eq!(sends.len(), 1, "the waiting send reached the agent loop once");
+        assert_eq!(
+            sends.len(),
+            1,
+            "the waiting send reached the agent loop once"
+        );
         assert_eq!(sends[0].kind, "send");
         assert_eq!(sends[0].payload["messageId"], json!("m1"));
         let host = bx.hub.host(chat).await.expect("room open");
@@ -2226,7 +2236,10 @@ mod tests {
             assert!(bx.hub.is_open(c).await, "the rooms just opened are kept");
         }
         for c in &chats[..8] {
-            assert!(!bx.hub.is_open(c).await, "the coldest rooms are the ones closed");
+            assert!(
+                !bx.hub.is_open(c).await,
+                "the coldest rooms are the ones closed"
+            );
         }
         wait_for("the sockets over the cap to go", || async {
             bx.relay.open_sockets() <= cap as i64

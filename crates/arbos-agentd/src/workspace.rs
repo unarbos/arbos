@@ -643,7 +643,15 @@ impl Workspace {
     /// A chat forked from another (#1257) is seeded from its source first.
     pub async fn sync_chats(&self, chats: &[Value]) {
         for c in chats {
-            open_listed_chat(&self.cfg, &self.store, &self.sync, &self.project_id, c, false).await;
+            open_listed_chat(
+                &self.cfg,
+                &self.store,
+                &self.sync,
+                &self.project_id,
+                c,
+                false,
+            )
+            .await;
         }
     }
 }
@@ -1177,8 +1185,8 @@ mod tests {
     /// `max_open_rooms` of them — not a room for every chat the box has ever had.
     #[test]
     fn boot_opens_the_pinned_chat_and_the_most_recently_used_ones() {
-        let chat = |id: &str, pinned: bool, created: i64, used: Option<i64>| {
-            crate::store::ChatRow {
+        let chat =
+            |id: &str, pinned: bool, created: i64, used: Option<i64>| crate::store::ChatRow {
                 id: id.to_owned(),
                 title: id.to_owned(),
                 is_pinned: pinned,
@@ -1188,8 +1196,7 @@ mod tests {
                 compacted_through: None,
                 compaction_version: 0,
                 pi_session_path: None,
-            }
-        };
+            };
         let cap = crate::sync::max_open_rooms();
         assert!(cap > 0, "the test needs a cap to exceed");
         let mut chats = vec![
