@@ -63,6 +63,13 @@ CREATE TABLE IF NOT EXISTS boxes (
   snapshot TEXT, region TEXT, last_started_at INTEGER, last_stopped_at INTEGER, last_seen_at INTEGER,
   box_url TEXT, preview_token TEXT, local_pid INTEGER, migrated_from TEXT NOT NULL DEFAULT '[]'
 );
+-- A box create in flight (#2262): written before the provider is asked for the sandbox, removed
+-- once the row holds the sandbox id or the create failed. A row left here after a restart names
+-- the sandbox that may be running without a row pointing at it.
+CREATE TABLE IF NOT EXISTS box_creates (
+  user_id TEXT PRIMARY KEY, sandbox_name TEXT NOT NULL, provider TEXT NOT NULL, snapshot TEXT,
+  replacing TEXT, started_at INTEGER NOT NULL
+);
 -- Per-user box class: the Daytona snapshot (which fixes vCPU/RAM/disk) a user's box is created
 -- from; NULL = the relay default (ARBOS_DAYTONA_SNAPSHOT). Raise a user's class later by setting
 -- it and recreating the box; no code change needed.
@@ -188,6 +195,39 @@ CREATE INDEX IF NOT EXISTS vault_requests_project ON vault_requests(project_id, 
 CREATE TABLE IF NOT EXISTS project_forks (
   project_id TEXT PRIMARY KEY, source_project_id TEXT NOT NULL, created_at INTEGER NOT NULL
 );
+-- Agent-hosted sites (arbos.life/<prefix>/<app>/, #2060). The prefix is fixed per user on the
+-- first publish; sites carry the live manifest; versions keep every published manifest; pending
+-- rows are begin→commit sessions; events are the audit trail; quotas override the defaults.
+CREATE TABLE IF NOT EXISTS site_prefixes (
+  user_id TEXT PRIMARY KEY, prefix TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sites (
+  user_id TEXT NOT NULL, app TEXT NOT NULL, prefix TEXT NOT NULL, status TEXT NOT NULL,
+  version INTEGER NOT NULL, manifest TEXT NOT NULL, bytes INTEGER NOT NULL, files INTEGER NOT NULL,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, published_at INTEGER,
+  edge_synced_at INTEGER, takedown_reason TEXT, takedown_by TEXT,
+  PRIMARY KEY (user_id, app)
+);
+CREATE TABLE IF NOT EXISTS site_versions (
+  user_id TEXT NOT NULL, app TEXT NOT NULL, version INTEGER NOT NULL, manifest TEXT NOT NULL,
+  bytes INTEGER NOT NULL, files INTEGER NOT NULL, created_at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, app, version)
+);
+CREATE TABLE IF NOT EXISTS site_pending (
+  user_id TEXT NOT NULL, app TEXT NOT NULL, files TEXT NOT NULL, created_at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, app)
+);
+CREATE TABLE IF NOT EXISTS site_blobs (
+  sha256 TEXT PRIMARY KEY, size INTEGER NOT NULL, created_at INTEGER NOT NULL, edge_pushed_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS site_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, user_id TEXT NOT NULL, app TEXT NOT NULL,
+  kind TEXT NOT NULL, actor TEXT NOT NULL, version INTEGER, bytes INTEGER, files INTEGER, detail TEXT
+);
+CREATE INDEX IF NOT EXISTS site_events_at ON site_events(at);
+CREATE TABLE IF NOT EXISTS site_quotas (
+  user_id TEXT PRIMARY KEY, max_sites INTEGER, max_bytes INTEGER, publish_blocked INTEGER NOT NULL DEFAULT 0
+);
 "#;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -291,6 +331,18 @@ pub struct Sandbox {
     /// Project ids whose legacy per-project sandbox was copied into this box.
     #[serde(default)]
     pub migrated_from: Vec<String>,
+}
+
+/// One row of `box_creates`: a create that started and has not finished.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BoxCreate {
+    pub user_id: String,
+    pub sandbox_name: String,
+    pub provider: String,
+    pub snapshot: Option<String>,
+    /// The sandbox the user's row named when the create began (an upgrade or repair).
+    pub replacing: Option<String>,
+    pub started_at: i64,
 }
 
 /// A scheduled or event-triggered prompt (design §10 "Routines").
@@ -506,6 +558,14 @@ impl Db {
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON;",
         )?;
         c.execute_batch(SCHEMA)?;
+        c.execute_batch(crate::outside::SCHEMA)?;
+        c.execute_batch(crate::outside_log::SCHEMA)?;
+        for m in crate::outside::MIGRATIONS {
+            let _ = c.execute(m, []);
+        }
+        for m in crate::outside_wake::MIGRATIONS {
+            let _ = c.execute(m, []);
+        }
         // Forward-only, additive migrations (D50).
         let _ = c.execute(
             "ALTER TABLE projects ADD COLUMN color TEXT NOT NULL DEFAULT '#8b7cf6'",
@@ -513,6 +573,9 @@ impl Db {
         );
         let _ = c.execute("ALTER TABLE chats ADD COLUMN closed_at INTEGER", []);
         let _ = c.execute("ALTER TABLE box_agentd ADD COLUMN seed_sha TEXT", []);
+        // Agent sites: an explicit prefix move keeps the old name answering 301 for 30 days.
+        let _ = c.execute("ALTER TABLE site_prefixes ADD COLUMN moved_from TEXT", []);
+        let _ = c.execute("ALTER TABLE site_prefixes ADD COLUMN moved_at INTEGER", []);
         let _ = c.execute("ALTER TABLE projects ADD COLUMN avatar TEXT", []);
         let _ = c.execute("ALTER TABLE projects ADD COLUMN deleted_at INTEGER", []);
         let _ = c.execute("ALTER TABLE projects ADD COLUMN avatar_color TEXT", []);
@@ -594,6 +657,7 @@ impl Db {
         crate::db_voice::migrate_voice(&c);
         Self::migrate_vault_items_per_user(&c)?;
         c.execute_batch(crate::db_secrets::SECRETS_SCHEMA)?;
+        c.execute_batch(crate::pins::PINS_SCHEMA)?;
         c.execute_batch(crate::agent_messages::SCHEMA)?;
         crate::db_secrets::migrate_secrets(&c);
         crate::shell_grants::ensure_schema(&c);
@@ -1323,7 +1387,50 @@ impl Db {
         })
     }
 
+    /// Write the user's box row. A row that names a sandbox is never overwritten by one that does
+    /// not (#2262: a sandbox-less row over a live box hid it from rolls and always-on); that write
+    /// is refused with an error and the row stays as it was. Use
+    /// [`Db::upsert_box_clearing_sandbox`] when the sandbox is really gone.
     pub fn upsert_box(&self, s: &Sandbox) -> Result<()> {
+        let written = self.write_box(s, false)?;
+        if !written {
+            tracing::error!(user = %s.user_id, "refused to overwrite a box row that has a sandbox with one that has none");
+            anyhow::bail!(
+                "box row of {} has a sandbox; refusing to write one without it",
+                s.user_id
+            );
+        }
+        Ok(())
+    }
+
+    /// [`Db::upsert_box`] that may drop the row's sandbox: only for a sandbox that was deleted.
+    pub fn upsert_box_clearing_sandbox(&self, s: &Sandbox) -> Result<()> {
+        self.write_box(s, true).map(|_| ())
+    }
+
+    /// Write back a row read before a slow provider call (start, stop) only while the row still
+    /// names `sandbox_id`. `Ok(false)` when it moved on meanwhile: an upgrade rollback put the
+    /// source back (2026-10-25 21:35, a wake that started in the same second as the rollback wrote
+    /// the half-filled new sandbox over it and the full source ran on with no row).
+    pub fn write_back_box(&self, s: &Sandbox, sandbox_id: Option<&str>) -> Result<bool> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE boxes SET provider=?2, sandbox_id=?3, daytona_state=?4, device_id=?5, box_token_hash=?6, mcp_token=?7,
+                    snapshot=?8, last_started_at=?9, last_stopped_at=?10, last_seen_at=?11, box_url=?12, preview_token=?13,
+                    local_pid=?14, migrated_from=?15
+                 WHERE user_id = ?1 AND sandbox_id IS ?16",
+                params![
+                    s.user_id, s.provider, s.sandbox_id, s.daytona_state, s.device_id, s.box_token_hash, s.mcp_token, s.snapshot,
+                    s.last_started_at, s.last_stopped_at, s.last_seen_at, s.box_url, s.preview_token, s.local_pid,
+                    serde_json::to_string(&s.migrated_from).unwrap_or_else(|_| "[]".into()),
+                    sandbox_id
+                ],
+            )
+            .map(|n| n > 0)
+        })
+    }
+
+    fn write_box(&self, s: &Sandbox, may_clear_sandbox: bool) -> Result<bool> {
         self.with(|c| {
             c.execute(
                 "INSERT INTO boxes(user_id, provider, sandbox_id, daytona_state, device_id, box_token_hash, mcp_token, snapshot,
@@ -1333,14 +1440,68 @@ impl Db {
                     daytona_state=excluded.daytona_state, device_id=excluded.device_id, box_token_hash=excluded.box_token_hash,
                     mcp_token=excluded.mcp_token, snapshot=excluded.snapshot, last_started_at=excluded.last_started_at,
                     last_stopped_at=excluded.last_stopped_at, last_seen_at=excluded.last_seen_at, box_url=excluded.box_url,
-                    preview_token=excluded.preview_token, local_pid=excluded.local_pid, migrated_from=excluded.migrated_from",
+                    preview_token=excluded.preview_token, local_pid=excluded.local_pid, migrated_from=excluded.migrated_from
+                 WHERE ?16 OR excluded.sandbox_id IS NOT NULL OR boxes.sandbox_id IS NULL",
                 params![
                     s.user_id, s.provider, s.sandbox_id, s.daytona_state, s.device_id, s.box_token_hash, s.mcp_token, s.snapshot,
                     s.last_started_at, s.last_stopped_at, s.last_seen_at, s.box_url, s.preview_token, s.local_pid,
-                    serde_json::to_string(&s.migrated_from).unwrap_or_else(|_| "[]".into())
+                    serde_json::to_string(&s.migrated_from).unwrap_or_else(|_| "[]".into()),
+                    may_clear_sandbox
                 ],
             )
+            .map(|n| n > 0)
+        })
+    }
+
+    /// Record a box create before the provider is asked for the sandbox (see `box_creates`).
+    pub fn begin_box_create(
+        &self,
+        user_id: &str,
+        sandbox_name: &str,
+        provider: &str,
+        snapshot: Option<&str>,
+        replacing: Option<&str>,
+    ) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO box_creates(user_id, sandbox_name, provider, snapshot, replacing, started_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(user_id) DO UPDATE SET sandbox_name = excluded.sandbox_name, provider = excluded.provider,
+                    snapshot = excluded.snapshot, replacing = excluded.replacing, started_at = excluded.started_at",
+                params![user_id, sandbox_name, provider, snapshot, replacing, now_ms()],
+            )
             .map(|_| ())
+        })
+    }
+
+    pub fn end_box_create(&self, user_id: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "DELETE FROM box_creates WHERE user_id = ?1",
+                params![user_id],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Box creates recorded before `before_ms` and never finished.
+    pub fn unfinished_box_creates(&self, before_ms: i64) -> Result<Vec<BoxCreate>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT user_id, sandbox_name, provider, snapshot, replacing, started_at FROM box_creates
+                 WHERE started_at < ?1 ORDER BY started_at",
+            )?;
+            let rows = st.query_map(params![before_ms], |r| {
+                Ok(BoxCreate {
+                    user_id: r.get(0)?,
+                    sandbox_name: r.get(1)?,
+                    provider: r.get(2)?,
+                    snapshot: r.get(3)?,
+                    replacing: r.get(4)?,
+                    started_at: r.get(5)?,
+                })
+            })?;
+            rows.collect()
         })
     }
 
@@ -1931,6 +2092,27 @@ impl Db {
                 params![project_id, kind, payload.to_string(), now_ms()],
             )
             .map(|_| ())
+        })
+    }
+
+    /// [`Self::enqueue_push`] unless an identical push (kind and payload) is still undelivered:
+    /// a box told once to open a room need not be told again per row. Returns whether a row
+    /// was added.
+    pub fn enqueue_push_once(
+        &self,
+        project_id: &str,
+        kind: &str,
+        payload: &serde_json::Value,
+    ) -> Result<bool> {
+        let payload = payload.to_string();
+        self.with(|c| {
+            let n = c.execute(
+                "INSERT INTO push_queue(project_id, kind, payload, created_at)
+                 SELECT ?1, ?2, ?3, ?4
+                 WHERE NOT EXISTS (SELECT 1 FROM push_queue WHERE project_id = ?1 AND kind = ?2 AND payload = ?3 AND delivered_at IS NULL)",
+                params![project_id, kind, payload, now_ms()],
+            )?;
+            Ok(n > 0)
         })
     }
 

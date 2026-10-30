@@ -1122,23 +1122,10 @@ pub(crate) mod tests {
             .expect("member");
         assert_eq!(mine["handle"].as_str(), Some("feedbackguy"));
         assert_eq!(mine["project"]["name"].as_str(), Some("FeedbackGuy"));
-        assert!(crate::people::addressed(
-            &arbos_core::doc::MessageView {
-                id: "m1".into(),
-                role: "user".into(),
-                status: "done".into(),
-                parts: vec![serde_json::json!({
-                    "kind": "text",
-                    "text": "@feedbackguy you alive?"
-                })],
-                rest: serde_json::json!({ "sender": "user:u1" }),
-            },
-            &agent.cfg.project_id,
-            &info.slug,
-            false,
-            false,
-            false,
-        ));
+        assert_eq!(
+            crate::people::mention_role("@feedbackguy you alive?", &info.slug),
+            crate::people::MentionRole::Addressed
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2003,6 +1990,91 @@ pub(crate) mod tests {
             h.doc.finish_message(&id, MessageStatus::Done);
             assert_eq!(trim_wordless_result_row(&h.doc, &id), "kept");
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Bubble in Arbonites (2026-10-28 21:50 UTC, agentd 0.6.338): `route reply` with a first
+    /// line, then `send_message` parts. The first part was appended to the first line's row and
+    /// the bubble read "…never became a reply for him.Bob was up. When I messaged him…".
+    #[tokio::test]
+    async fn send_message_after_route_reply_line_is_its_own_bubble() {
+        use crate::config::SendTool;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000015";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.ack_text.clear();
+            t.activity = None;
+            t.send_tool = SendTool::On;
+            agent.test_open_row(&host, t).await;
+        }
+        let first = "Bob was up. That line never became a reply for him.";
+        let part1 = "Bob was up. When I messaged him a minute later he answered right away.";
+        let part2 = "Want me to ask Bob what he saw on that message?";
+        agent
+            .hook_route(&json!({ "action": "reply", "reply": first }))
+            .await
+            .unwrap();
+        agent.hook_send_message(part1, None, None).await.unwrap();
+        agent.hook_send_message(part2, None, None).await.unwrap();
+        let posted: Vec<String> = reply_rows(&host, "m-busy")
+            .iter()
+            .map(|r| r.text().trim().to_owned())
+            .filter(|t| !t.is_empty())
+            .collect();
+        assert_eq!(
+            posted,
+            vec![first.to_owned(), part1.to_owned(), part2.to_owned()],
+            "each line is one bubble, none glued onto another"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// @mwbob on a scratch box (2026-10-29 02:43 UTC, agentd 0.1.181): the relay turn for
+    /// @mwbubble's answer routed `reply` with the line, the extension said the line "is not the
+    /// answer", and the model sent the same line with `send_message`. The group showed it twice.
+    #[tokio::test]
+    async fn send_message_repeating_the_route_reply_posts_once() {
+        use crate::config::SendTool;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000016";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.ack_text.clear();
+            t.activity = None;
+            t.send_tool = SendTool::On;
+            t.reply_only = true;
+            agent.test_open_row(&host, t).await;
+        }
+        let line = "mwbubble says dinner after the offsite is booked at Saffron House, at 7 pm. It got that from the Long-task eval peer's message in this chat.";
+        let more = "Want me to ask it who else is coming?";
+        agent
+            .hook_route(&json!({ "action": "reply", "reply": line }))
+            .await
+            .unwrap();
+        agent.hook_send_message(line, None, None).await.unwrap();
+        agent
+            .hook_send_message(&format!("{line}\n"), None, None)
+            .await
+            .unwrap();
+        agent.hook_send_message(more, None, None).await.unwrap();
+        agent.hook_send_message(more, None, None).await.unwrap();
+        let posted: Vec<String> = reply_rows(&host, "m-busy")
+            .iter()
+            .map(|r| r.text().trim().to_owned())
+            .filter(|t| !t.is_empty())
+            .collect();
+        assert_eq!(
+            posted,
+            vec![line.to_owned(), more.to_owned()],
+            "a line already posted in this turn is not posted again"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

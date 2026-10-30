@@ -15,10 +15,10 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, Mutex, Semaphore};
 
 use arbos_core::approval::ApprovalOutcome;
-use arbos_core::doc::{CommandStatus, CommandView, MessageStatus};
+use arbos_core::doc::{CommandStatus, CommandView, MessageStatus, MessageView};
 use arbos_core::ids::{now_ms, ulid};
 use arbos_core::route::{pick_harness, validate, Harness, ValidRoute};
-use arbos_core::rpc::{AssistantEvent, Command as RpcCommand, Event};
+use arbos_core::rpc::{AssistantEvent, Command as RpcCommand, Event, StreamingBehavior};
 use arbos_core::widget::Widget;
 use arbos_core::{TOOL_OUTPUT_SUMMARY_MAX, TURN_DEADLINE_SECS};
 
@@ -1256,6 +1256,10 @@ pub struct TurnState {
     /// This turn was started by a voice-call `ask_agent` / `look` (user row `voice: true`).
     /// A later typed `send` preempts it so text chat is not stuck behind a hung call turn.
     pub from_voice: bool,
+    /// What pi does with this turn's prompt if its agent is still running something when the
+    /// prompt arrives (#2073): `FollowUp` queues it behind that run, `Steer` injects it into
+    /// it. Never unset — a prompt without a behaviour is what pi rejects outright.
+    pub streaming_behavior: StreamingBehavior,
     /// This turn was started by a routine fire (user row `sender: routine:<id>`), not by a
     /// person: nobody is waiting, so an `act` route writes no ack bubble (#1391).
     pub routine_turn: bool,
@@ -1499,6 +1503,7 @@ impl TurnState {
             parts_continuation: false,
             attachments_posted: Vec::new(),
             ack_row_id: None,
+            streaming_behavior: StreamingBehavior::FollowUp,
         }
     }
 }
@@ -1568,6 +1573,17 @@ pub struct Agent {
     /// A respawn is replacing the child right now: the supervisor must not spawn a second one
     /// because `pi` is momentarily empty.
     pub(crate) pi_respawning: AtomicBool,
+    /// The main pi child was stopped after [`Self::PI_PARK_IDLE_MS`] without use; the next
+    /// `pi()` wakes the supervisor to start it again. One resident pi per agent is ~220 MB, and
+    /// a box with many agents ran out of its 3 GB with all of them idle.
+    pub(crate) pi_parked: AtomicBool,
+    pub(crate) pi_wake: tokio::sync::Notify,
+    pub(crate) pi_last_use_ms: std::sync::atomic::AtomicU64,
+    /// agentd stopped listening to a pi run before pi settled it (a Prompt call that timed out,
+    /// a relay turn cut short, a turn deadline): pi may still be running it, and would reject
+    /// the next plain prompt with "Agent is already processing" (#2073, Doug 2026-10-27). The
+    /// next turn reclaims pi (abort, wait for idle) before it prompts.
+    pub(crate) pi_run_orphaned: AtomicBool,
     /// D91 soft-compaction hysteresis per chat: `None` right after a compaction (the floor is
     /// not known yet), then the window observed on the first turn after it.
     compaction_floor: std::sync::Mutex<HashMap<String, Option<i64>>>,
@@ -1673,6 +1689,10 @@ impl Agent {
             prompt_refresh_due_ms: std::sync::atomic::AtomicU64::new(0),
             pi_lease: Mutex::new(()),
             pi_respawning: AtomicBool::new(false),
+            pi_parked: AtomicBool::new(false),
+            pi_wake: tokio::sync::Notify::new(),
+            pi_last_use_ms: std::sync::atomic::AtomicU64::new(now_ms() as u64),
+            pi_run_orphaned: AtomicBool::new(false),
             compaction_floor: std::sync::Mutex::new(HashMap::new()),
             pending_sends: std::sync::atomic::AtomicUsize::new(0),
             side_notes: std::sync::Mutex::new(HashMap::new()),
@@ -1935,7 +1955,10 @@ impl Agent {
         let me = self.clone();
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                    _ = me.pi_wake.notified() => {}
+                }
                 let alive = me
                     .pi
                     .lock()
@@ -1949,7 +1972,25 @@ impl Agent {
                 if me.pi_respawning.load(Ordering::SeqCst) {
                     continue;
                 }
-                if !alive && !me.turn_running.load(Ordering::SeqCst) {
+                if me.pi_parked.load(Ordering::SeqCst) {
+                    if me.pi_idle_ms() >= Self::PI_PARK_IDLE_MS {
+                        continue;
+                    }
+                    // the respawn writes the current system prompt, so a refresh that came in
+                    // while parked needs no second restart
+                    me.prompt_refresh_pending.store(false, Ordering::SeqCst);
+                    let chat = me.current_chat.lock().await.clone().unwrap_or_default();
+                    match me.respawn_pi(&chat).await {
+                        Ok(()) => {
+                            me.pi_parked.store(false, Ordering::SeqCst);
+                            tracing::info!("pi main woken from park");
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "pi wake from park failed");
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                        }
+                    }
+                } else if !alive && !me.turn_running.load(Ordering::SeqCst) {
                     me.pi_ready.store(false, Ordering::SeqCst);
                     let chat = me.current_chat.lock().await.clone().unwrap_or_default();
                     tracing::warn!("pi main child is gone; respawning");
@@ -1957,6 +1998,26 @@ impl Agent {
                         tracing::error!(error = %e, "pi respawn failed");
                         tokio::time::sleep(Duration::from_secs(5)).await;
                     }
+                } else if alive
+                    && me.pi_idle_ms() >= Self::PI_PARK_IDLE_MS
+                    && !me.any_turn_running()
+                {
+                    let Ok(_lease) = me.pi_lease.try_lock() else {
+                        continue;
+                    };
+                    let old = {
+                        let mut slot = me.pi.lock().await;
+                        if me.any_turn_running() || me.pi_idle_ms() < Self::PI_PARK_IDLE_MS {
+                            continue;
+                        }
+                        me.pi_parked.store(true, Ordering::SeqCst);
+                        me.pi_ready.store(false, Ordering::SeqCst);
+                        slot.take()
+                    };
+                    if let Some(old) = old {
+                        old.shutdown().await;
+                    }
+                    tracing::info!(idle_s = me.pi_idle_ms() / 1000, "pi main parked while idle");
                 } else if alive && me.prompt_refresh_ready() {
                     // The system prompt changed (#1431, #1908): pi reads it at spawn, so the
                     // session restarts — at a turn boundary only (the lease is free), once the
@@ -1986,6 +2047,15 @@ impl Agent {
     pub(crate) async fn respawn_pi_current(self: &Arc<Self>) -> Result<()> {
         let chat = self.current_chat.lock().await.clone().unwrap_or_default();
         self.respawn_pi(&chat).await
+    }
+
+    /// An agent whose main pi was not used for this long gives its process back; the next use
+    /// starts it again on the same session file (~1 s).
+    pub(crate) const PI_PARK_IDLE_MS: u64 = 10 * 60_000;
+
+    fn pi_idle_ms(&self) -> u64 {
+        (arbos_core::ids::now_ms() as u64)
+            .saturating_sub(self.pi_last_use_ms.load(Ordering::SeqCst))
     }
 
     /// How long a prompt change settles before the session restarts on it: a rename and its
@@ -2062,6 +2132,11 @@ impl Agent {
     /// Wait briefly for the supervisor to respawn pi (it polls every 2 s). A send that
     /// lands between death and respawn must not permanently Fail with no assistant bubble.
     async fn pi(&self) -> Result<Arc<RpcChild>> {
+        self.pi_last_use_ms
+            .store(arbos_core::ids::now_ms() as u64, Ordering::SeqCst);
+        if self.pi_parked.load(Ordering::SeqCst) {
+            self.pi_wake.notify_one();
+        }
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             if let Some(c) = self.pi.lock().await.clone() {
@@ -2148,10 +2223,10 @@ impl Agent {
         let Some(host) = self.sync.host(chat_id).await else {
             return Err(anyhow!("no room for chat {chat_id}"));
         };
-        // People chats route by mention (or, in a group, the decision model): a message not
-        // for this agent is left pending for whoever it is for; humans' own sends are theirs.
-        // Shared addresses ("hey agents", several @agents) stay `taken` until each addressed
-        // agent has replied — see `people_shared_send_open` / sync `new_pending`.
+        // People chats route by the judge (`people.rs`): a message not for this agent is left
+        // pending for whoever it is for; humans' own sends are theirs. When the judge picked
+        // several agents the send stays `taken` until each has replied — see
+        // `people_shared_send_open` / sync `new_pending`.
         // Every human command carries the mention rule, not only `send`: a `steer` the Mac
         // sends while another agent's turn runs ("@gigchadagent you still borked?") is for the
         // named agent, not for whoever happens to be busy.
@@ -2951,18 +3026,28 @@ impl Agent {
         // A structured answer (`answer { questionId, value }`): render the value to text with the
         // widget the question was asked with, and mark the part answered before the turn runs.
         let structured = self.resolve_structured_answer(host, cmd).await;
-        let (mut user_text, channel_note, message_view, reply_note) = {
+        let (mut user_text, channel_note, message_view, reply_note, replies_to_me, mentions_me) = {
             let h = host.lock().await;
             let m = h.doc.message(&user_msg_id);
             let text = m.as_ref().map(|m| m.text()).unwrap_or_default();
             let reply_note = m
                 .as_ref()
                 .and_then(|m| crate::reply::quoted_message_note(&h.doc, m, &self.reply_me()));
+            let replies_to_me = m
+                .as_ref()
+                .and_then(|m| m.rest.get("replyTo").and_then(Value::as_str))
+                .and_then(|id| h.doc.message(id))
+                .is_some_and(|q| crate::reply::quoted_is_mine(&q, &self.reply_me()));
+            let mentions_me = m.as_ref().is_some_and(|m| {
+                message_mentions_agent(m, &self.cfg.project_id, &self.identity.handle())
+            });
             (
                 text,
                 m.as_ref().and_then(crate::channels::prompt_note),
                 m,
                 reply_note,
+                replies_to_me,
+                mentions_me,
             )
         };
         if user_text.trim().is_empty() {
@@ -3038,11 +3123,26 @@ impl Agent {
         }
         // Answering an open question (S8): mark it answered; pi receives the text as the next prompt.
         let mut prompt_text = user_text.clone();
+        let mut answers_my_question = structured.is_some();
         if let Some((question, rendered)) = &structured {
             prompt_text = format!("Answer to your question \"{question}\":\n{rendered}");
         } else if let Ok(Some((ask_id, _, question))) = self.store.open_ask(chat_id) {
             let _ = self.store.answer_ask(&ask_id);
             prompt_text = format!("Answer to your question \"{question}\": {user_text}");
+            answers_my_question = true;
+        }
+        // Should pi still be running something when this prompt lands, it queues or steers —
+        // never refuses (#2073).
+        {
+            let behavior = streaming_behavior_for(
+                answers_my_question,
+                replies_to_me,
+                mentions_me,
+                looks_imperative(&user_text),
+            );
+            if let Some(t) = self.turn.lock().await.as_mut() {
+                t.streaming_behavior = behavior;
+            }
         }
         // Reply-to: the quoted message rides with the user's words (user turn, never the
         // system prompt — D87 keeps the prefix byte-stable).
@@ -3809,6 +3909,9 @@ impl Agent {
     /// `child pi-main timed out on sw-1`, #2007), anything else as is.
     pub(crate) fn user_error_line(&self, e: &anyhow::Error) -> String {
         let text = e.to_string();
+        if is_prompt_rejection(&text) {
+            return PROMPT_REJECTED_LINE.to_owned();
+        }
         if is_child_error(&text) {
             return CHILD_ERROR_LINE.to_owned();
         }
@@ -4114,6 +4217,7 @@ impl Agent {
             parts_continuation: false,
             attachments_posted: Vec::new(),
             ack_row_id: None,
+            streaming_behavior: StreamingBehavior::FollowUp,
         });
         self.turn_running.store(true, Ordering::SeqCst);
         let keepalive = self.spawn_keepalive();
@@ -4365,7 +4469,7 @@ impl Agent {
                 h.doc.add_error_part(
                     &assistant_msg_id,
                     "turn_failed",
-                    &crate::disk::friendly(e, &self.work_root()),
+                    &self.user_error_line(&anyhow!("{e}")),
                 );
             }
             if let Some(m) = &model_failed {
@@ -4529,16 +4633,6 @@ impl Agent {
                 "result",
                 Some(&voice_text),
             );
-            if self.people.is_people_chat(chat_id) {
-                self.dispatch_agent_mentions(
-                    chat_id,
-                    host,
-                    &turn.user_msg_id,
-                    &assistant_msg_id,
-                    announce,
-                )
-                .await;
-            }
         }
         if !turn.ack_text.trim().is_empty() {
             let _ = self.store.t3_append(
@@ -5007,17 +5101,69 @@ impl Agent {
     ) -> Result<()> {
         let pi = self.pi().await?;
         let mut events = pi.subscribe();
+        // Whatever ends this call, pi is either settled (we saw `agent_settled`) or running a
+        // turn nobody listens to; the next prompt must know which (#2073).
+        let settled = Arc::new(AtomicBool::new(false));
+        let _orphan_note = OrphanNote {
+            settled: settled.clone(),
+            flag: &self.pi_run_orphaned,
+        };
         let images = std::mem::take(&mut *self.turn_images.lock().expect("turn images"));
-        let r = pi
+        let behavior = self
+            .turn
+            .lock()
+            .await
+            .as_ref()
+            .map(|t| t.streaming_behavior)
+            .unwrap_or(StreamingBehavior::FollowUp);
+        self.reclaim_pi_run(chat_id, &pi).await;
+        let mut r = pi
             .call(RpcCommand::Prompt {
                 id: pi.next_id("p"),
                 message: prompt_text.to_owned(),
-                streaming_behavior: None,
-                images,
+                streaming_behavior: Some(behavior),
+                images: images.clone(),
             })
             .await?;
+        if !r.success && is_pi_busy_rejection(r.error.as_deref().unwrap_or_default()) {
+            // pi still had a run we did not know about: take it back and ask once more, queued.
+            tracing::warn!(chat_id, error = ?r.error, "pi rejected the prompt as busy; reclaiming and retrying once");
+            self.pi_run_orphaned.store(true, Ordering::SeqCst);
+            self.reclaim_pi_run(chat_id, &pi).await;
+            r = pi
+                .call(RpcCommand::Prompt {
+                    id: pi.next_id("p"),
+                    message: prompt_text.to_owned(),
+                    streaming_behavior: Some(StreamingBehavior::FollowUp),
+                    images,
+                })
+                .await?;
+        }
         if !r.success {
-            return Err(anyhow!("prompt rejected: {}", r.error.unwrap_or_default()));
+            let detail = r.error.unwrap_or_default();
+            self.append_audit(
+                "prompt_rejected",
+                json!({ "chat_id": chat_id, "behavior": behavior_name(behavior), "error": detail }),
+            );
+            return Err(anyhow!("prompt rejected: {detail}"));
+        }
+        if r.data
+            .as_ref()
+            .and_then(|d| d.get("disposition"))
+            .and_then(Value::as_str)
+            == Some("queued")
+        {
+            // pi was still finishing something: the prompt waits behind it instead of being
+            // refused; the turn runs when pi gets to it.
+            tracing::info!(
+                chat_id,
+                behavior = behavior_name(behavior),
+                "prompt queued behind pi's running turn"
+            );
+            self.append_audit(
+                "prompt_queued",
+                json!({ "chat_id": chat_id, "behavior": behavior_name(behavior) }),
+            );
         }
         let started = Instant::now();
         let mut deadline_announced = false;
@@ -5119,14 +5265,72 @@ impl Agent {
             if self.turn.lock().await.as_ref().is_some_and(|t| t.stopped) {
                 break;
             }
+            if matches!(ev, Event::AgentSettled { .. }) {
+                settled.store(true, Ordering::SeqCst);
+            }
             if self.fold_main_event(chat_id, host, &ev, started).await? {
                 break;
             }
             if matches!(ev, Event::Other) && !pi.is_alive() {
+                settled.store(true, Ordering::SeqCst);
                 return Err(anyhow!("pi main child exited mid-turn"));
             }
         }
         Ok(())
+    }
+
+    /// pi may still be running a turn agentd stopped listening to (`pi_run_orphaned`), or one
+    /// agentd never knew about: ask pi, and when it is busy abort that run and wait for idle,
+    /// so the prompt that follows starts clean instead of being refused (#2073). Bounded: a pi
+    /// that will not settle in 20 s is left to the queued prompt.
+    async fn reclaim_pi_run(self: &Arc<Self>, chat_id: &str, pi: &Arc<RpcChild>) {
+        let flagged = self.pi_run_orphaned.load(Ordering::SeqCst);
+        let busy = match pi
+            .call_timeout(
+                RpcCommand::GetState {
+                    id: pi.next_id("gs"),
+                },
+                Duration::from_secs(5),
+            )
+            .await
+        {
+            Ok(r) => r
+                .data
+                .as_ref()
+                .and_then(|d| d.get("isStreaming"))
+                .and_then(Value::as_bool)
+                .unwrap_or(flagged),
+            Err(_) => flagged,
+        };
+        if !busy && !flagged {
+            return;
+        }
+        if !busy {
+            self.pi_run_orphaned.store(false, Ordering::SeqCst);
+            return;
+        }
+        let t0 = Instant::now();
+        let aborted = pi
+            .call_timeout(
+                RpcCommand::Abort {
+                    id: pi.next_id("ab"),
+                },
+                Duration::from_secs(20),
+            )
+            .await
+            .is_ok();
+        self.pi_run_orphaned.store(!aborted, Ordering::SeqCst);
+        tracing::warn!(
+            chat_id,
+            flagged,
+            aborted,
+            ms = t0.elapsed().as_millis() as i64,
+            "pi was still running a turn nobody listened to; reclaimed before the prompt"
+        );
+        self.append_audit(
+            "pi_run_reclaimed",
+            json!({ "chat_id": chat_id, "flagged": flagged, "aborted": aborted, "ms": t0.elapsed().as_millis() as i64 }),
+        );
     }
 
     /// End a relay turn now: the plain fallback line when the model wrote nothing yet, the turn
@@ -6158,6 +6362,20 @@ impl Agent {
             .await
         {
             ""
+        } else if Self::already_posted(t, text) {
+            // A relay turn's `route.reply` result tells the model its line "is not the answer",
+            // and the model can send the same line again. It is in the chat once already.
+            tracing::info!(chat_id = %t.chat_id, chars = text.chars().count(), "send_message repeats a line this turn already posted; not posted again");
+            let _ = self.store.t3_append(
+                &t.chat_id,
+                None,
+                Some(&t.chat_id),
+                "interim",
+                Some("assistant"),
+                text,
+                Some(&json!({ "message_id": t.assistant_msg_id, "duplicate": true })),
+            );
+            ""
         } else {
             text
         };
@@ -6178,6 +6396,12 @@ impl Agent {
                 );
             }
             if t.row_closed {
+                self.open_row(&host, t, "progress").await;
+            } else if Self::row_has_words(&host, t).await {
+                // The live row already shows words (the `route.reply` first line, a reply ack,
+                // streamed prose): appending would glue this message onto them with no break.
+                // Those words stay their own bubble.
+                self.close_row(&host, t, "progress").await;
                 self.open_row(&host, t, "progress").await;
             }
             {
@@ -6326,6 +6550,21 @@ impl Agent {
             .await
             .get(chat_id)
             .is_some_and(|v| v.iter().any(|(_, at)| *at >= since_ms))
+    }
+
+    async fn row_has_words(host: &SharedHost, t: &TurnState) -> bool {
+        let h = host.lock().await;
+        h.doc
+            .message(&t.assistant_msg_id)
+            .is_some_and(|m| !m.text().trim().is_empty())
+    }
+
+    fn already_posted(t: &TurnState, text: &str) -> bool {
+        let key = norm_head(text, usize::MAX);
+        !key.is_empty()
+            && std::iter::once(t.streamed_text.as_str())
+                .chain(t.progress_texts.iter().map(String::as_str))
+                .any(|p| norm_head(p, usize::MAX) == key)
     }
 
     fn posted_result(t: &TurnState) -> bool {
@@ -7123,7 +7362,7 @@ impl Agent {
             s.push_str(&skills_text);
             s.push_str("\n\n");
         }
-        s.push_str("## Tools\n\nMCP server `arbos`: context_search, context_open, context_around (this Project's memory tree: raw events plus index cards of episodes and threads), history_search, history_read, read_thread, memory_search, memory_read (you may search and read the entire history of this Project), chat_messages (any chat message in full by id, or a page of a chat's history — use it whenever your context shows a [truncated …] or [N earlier messages not shown …] marker; never guess at a cut-off message), peek, sub_llm, remember/recall, projects_list, send_message (message another agent by name, @handle or id: it lands in that agent's own chat and its reply comes back to you; in a group chat, no `to` = the other agents there), ask_user (optional widget: choice, multi_select, text, date, form), skills_list/skills_read/skills_save (reusable how-tos), draft_message (an outbound email or chat message shown to the user as an approval card; nothing is sent without their click), connectors_list/connector_call (the user's Gmail, Calendar, Slack, GitHub, Harness Comms through the relay; write/send actions need the user's approval), local_devices/local_run/local_read/local_list (the user's own computer through the arbos-local helper; every command and, unless the user allowed reads, every file read needs the user's approval), deliver_file (hand a file you made to the user as a card), generate_image (an image from a prompt, delivered as a card), post_chart (a line / area / bar / scatter / pie chart from structured series, drawn natively in the chat), secrets_list/secrets_request/egress/browser_fill (the owner's secrets: you only ever get a placeholder such as `arbos-secret://STRIPE_KEY/value`, `$STRIPE_KEY` in a shell, or an `op://` reference; send it through `egress` or use it as `$NAME`; never try to read, print, encode or copy a value; a secret with no access → secrets_request and wait for the owner's card; if they deny or pause, stop and say so; logins are typed by browser_fill), routines_list/routines_create/routines_update/routines_delete (cron jobs and one-shot reminders on the relay scheduler), goals_list/goals_create/goals_update/goals_log/goals_delete (long-running objectives across days: plan, status, progress log, check-ins via routines; active goals stay pinned in the working set; autonomy ask|suggest|act), web_search/web_fetch (search the web; read a public page, spec or file as text), submit_feedback (file the user's feedback or bug report for them: captures their screen from their app, or attaches a PNG/JPEG they already provided via image_path; also attaches the recent conversation, tool calls and timings scrubbed of secrets, and returns a reference id; filing is irreversible from the chat — use it when they ask to submit, send or report feedback or a bug and have said what to report; when they only ask to file with no content, ask what to include first — never point them to a menu, settings screen or another channel).\n\n");
+        s.push_str("## Tools\n\nMCP server `arbos`: context_search, context_open, context_around (this Project's memory tree: raw events plus index cards of episodes and threads), history_search, history_read, read_thread, memory_search, memory_read (you may search and read the entire history of this Project), chat_messages (any chat message in full by id, or a page of a chat's history — use it whenever your context shows a [truncated …] or [N earlier messages not shown …] marker; never guess at a cut-off message), peek, sub_llm, remember/recall, projects_list, send_message (message another agent by name, @handle or id: it lands in that agent's own chat and its reply comes back to you; in a group chat, no `to` = the other agents there), ask_user (optional widget: choice, multi_select, text, date, form), skills_list/skills_read/skills_save (reusable how-tos), draft_message (an outbound email or chat message shown to the user as an approval card; nothing is sent without their click), connectors_list/connector_call (the user's Gmail, Calendar, Slack, GitHub, Harness Comms through the relay; write/send actions need the user's approval), local_devices/local_run/local_read/local_list (the user's own computer through the arbos-local helper; every command and, unless the user allowed reads, every file read needs the user's approval), deliver_file (hand a file you made to the user as a card), generate_image (an image from a prompt, delivered as a card), post_chart (a line / area / bar / scatter / pie chart from structured series, drawn natively in the chat), secrets_list/secrets_request/egress/browser_fill (the owner's secrets: you only ever get a placeholder such as `arbos-secret://STRIPE_KEY/value`, `$STRIPE_KEY` in a shell, or an `op://` reference; send it through `egress` or use it as `$NAME`; never print, encode or copy a value (its length or a hash, when asked, is fine); a secret with no access → secrets_request and wait for the owner's card; if they deny or pause, stop and say so; logins are typed by browser_fill), routines_list/routines_create/routines_update/routines_delete (cron jobs and one-shot reminders on the relay scheduler), goals_list/goals_create/goals_update/goals_log/goals_delete (long-running objectives across days: plan, status, progress log, check-ins via routines; active goals stay pinned in the working set; autonomy ask|suggest|act), web_search/web_fetch (search the web; read a public page, spec or file as text), submit_feedback (file the user's feedback or bug report for them: captures their screen from their app, or attaches a PNG/JPEG they already provided via image_path; also attaches the recent conversation, tool calls and timings scrubbed of secrets, and returns a reference id; filing is irreversible from the chat — use it when they ask to submit, send or report feedback or a bug and have said what to report; when they only ask to file with no content, ask what to include first — never point them to a menu, settings screen or another channel).\n\n");
         s.push_str(WORK_RULES_SECTION);
         s.push_str(RESEARCH_SECTION);
         s.push_str(&crate::media::prompt_section(&self.cfg));
@@ -7432,6 +7671,9 @@ impl Agent {
                         ],
                     );
                 }
+            }
+            if let Some(fields) = self.people_sender_fields(chat_id) {
+                h.doc.set_message_fields(&msg_id, &fields);
             }
         }
         if let Some(j) = &job {
@@ -8458,7 +8700,7 @@ impl Agent {
     }
 
     pub fn is_healthy(&self) -> bool {
-        self.pi_ready.load(Ordering::SeqCst)
+        self.pi_ready.load(Ordering::SeqCst) || self.pi_parked.load(Ordering::SeqCst)
     }
 }
 
@@ -8552,6 +8794,96 @@ const RECAP_ROW_CHARS: usize = 500;
 /// What a person reads when the agent's model process died or restarted under their turn.
 pub(crate) const CHILD_ERROR_LINE: &str =
     "The agent restarted while it was working on this. Send the message again.";
+
+/// What a person reads when pi refused the prompt because it was still running something
+/// (#2073). Never the RPC's own words.
+pub(crate) const PROMPT_REJECTED_LINE: &str =
+    "I was still busy with the previous message and couldn't take this one. Send it again.";
+
+/// pi's refusal of a prompt (any reason), as run_main_turn words it.
+pub(crate) fn is_prompt_rejection(text: &str) -> bool {
+    text.starts_with("prompt rejected")
+}
+
+/// pi 1.2's refusal of a prompt that carries no streaming behaviour while a run is active.
+pub(crate) fn is_pi_busy_rejection(error: &str) -> bool {
+    error.contains("already processing")
+}
+
+fn behavior_name(b: StreamingBehavior) -> &'static str {
+    match b {
+        StreamingBehavior::Steer => "steer",
+        StreamingBehavior::FollowUp => "followUp",
+    }
+}
+
+/// Clears or sets `pi_run_orphaned` when a main turn ends, from whether pi settled it.
+struct OrphanNote<'a> {
+    settled: Arc<AtomicBool>,
+    flag: &'a AtomicBool,
+}
+
+impl Drop for OrphanNote<'_> {
+    fn drop(&mut self) {
+        let settled = self.settled.load(Ordering::SeqCst);
+        self.flag.store(!settled, Ordering::SeqCst);
+        if !settled {
+            tracing::warn!("main turn ended before pi settled; the next prompt reclaims pi first");
+        }
+    }
+}
+
+/// How pi should take a prompt that reaches it while a run is still active (#2073): a direct
+/// answer to the agent's own open question, a reply quoting one of its messages, or an
+/// @mention that tells it to do something steers the running turn; anything else waits its
+/// turn behind it. Never "reject".
+pub(crate) fn streaming_behavior_for(
+    answers_my_question: bool,
+    replies_to_me: bool,
+    mentions_me: bool,
+    imperative: bool,
+) -> StreamingBehavior {
+    if answers_my_question || replies_to_me || (mentions_me && imperative) {
+        StreamingBehavior::Steer
+    } else {
+        StreamingBehavior::FollowUp
+    }
+}
+
+/// The message names this agent: an `agent:<project>` chip in `mentions`, or `@handle` in the
+/// text (a typed mention the composer did not resolve).
+pub(crate) fn message_mentions_agent(msg: &MessageView, project_id: &str, handle: &str) -> bool {
+    let chip = format!("agent:{project_id}");
+    let by_chip = msg
+        .rest
+        .get("mentions")
+        .and_then(Value::as_array)
+        .is_some_and(|ms| ms.iter().any(|m| m.as_str() == Some(chip.as_str())));
+    by_chip || (!handle.is_empty() && msg.text().contains(&format!("@{handle}")))
+}
+
+/// A message that tells the agent to change what it is doing: it opens with a directive
+/// verb (after any @handles). Deliberately narrow — a steer interrupts a running turn.
+pub(crate) fn looks_imperative(text: &str) -> bool {
+    const VERBS: &[&str] = &[
+        "stop", "wait", "hold", "pause", "cancel", "don't", "dont", "do", "use", "switch",
+        "change", "instead", "no", "skip", "drop", "make", "try", "fix", "add", "remove", "run",
+        "check", "go", "keep", "focus", "ignore", "forget", "actually", "also", "now", "please",
+        "pls", "plz",
+    ];
+    let mut words = text
+        .split_whitespace()
+        .skip_while(|w| w.starts_with('@'))
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\''))
+        .filter(|w| !w.is_empty());
+    match words.next() {
+        Some(first) => {
+            let first = first.to_lowercase();
+            VERBS.contains(&first.as_str())
+        }
+        None => false,
+    }
+}
 
 /// An error from the pi child's plumbing (`RpcChild`): a call that timed out, a child that
 /// exited before answering, closed stdin, or no child at all.
@@ -9385,6 +9717,106 @@ impl Agent {
 mod tests {
     use super::*;
 
+    /// #2073: how a prompt is handed to a pi that may still be running — never "reject".
+    #[test]
+    fn mid_run_prompts_queue_or_steer_never_reject() {
+        use StreamingBehavior::{FollowUp, Steer};
+        // (answers my question, replies to me, mentions me, imperative) → behaviour
+        type Case = ((bool, bool, bool, bool), StreamingBehavior);
+        let matrix: &[Case] = &[
+            ((false, false, false, false), FollowUp), // an ordinary message
+            ((false, false, false, true), FollowUp),  // imperative, but to nobody in particular
+            ((false, false, true, false), FollowUp), // "@doug what do you think?" — a question waits
+            ((false, false, true, true), Steer),     // "@doug stop, use the other file"
+            ((true, false, false, false), Steer),    // "yes" to the agent's own open question
+            ((false, true, false, false), Steer),    // a quoted reply to the agent's message
+            ((true, true, true, true), Steer),
+        ];
+        for ((a, r, m, i), want) in matrix {
+            assert_eq!(
+                streaming_behavior_for(*a, *r, *m, *i),
+                *want,
+                "answers={a} replies={r} mentions={m} imperative={i}"
+            );
+        }
+    }
+
+    #[test]
+    fn imperative_openers_are_narrow() {
+        for t in [
+            "stop",
+            "Stop that and use the CSV",
+            "@doug-agent don't publish yet",
+            "@doug-agent @affine switch to dark mode",
+            "no, the other one",
+            "please add a legend",
+        ] {
+            assert!(looks_imperative(t), "{t:?}");
+        }
+        for t in [
+            "yes",
+            "what do you think about scout?",
+            "@doug-agent how did you make that link?",
+            "https://open.spotify.com/track/x",
+            "",
+            "Lol",
+        ] {
+            assert!(!looks_imperative(t), "{t:?}");
+        }
+    }
+
+    #[test]
+    fn a_message_mentions_the_agent_by_chip_or_handle() {
+        let row = |text: &str, mentions: Vec<&str>| MessageView {
+            id: "m".into(),
+            role: "user".into(),
+            status: "done".into(),
+            parts: vec![json!({ "kind": "text", "text": text })],
+            rest: json!({ "mentions": mentions }),
+        };
+        assert!(message_mentions_agent(
+            &row("plot it", vec!["agent:p1"]),
+            "p1",
+            "doug-agent"
+        ));
+        assert!(!message_mentions_agent(
+            &row("plot it", vec!["agent:p2"]),
+            "p1",
+            "doug-agent"
+        ));
+        assert!(message_mentions_agent(
+            &row("@doug-agent plot it", vec![]),
+            "p1",
+            "doug-agent"
+        ));
+        assert!(!message_mentions_agent(
+            &row("doug, plot it", vec![]),
+            "p1",
+            "doug-agent"
+        ));
+        assert!(!message_mentions_agent(
+            &row("@doug-agent plot it", vec![]),
+            "p1",
+            ""
+        ));
+    }
+
+    /// The RPC's refusal never reaches the room; the person reads one plain line.
+    #[test]
+    fn a_rejected_prompt_reads_as_one_plain_line() {
+        let raw = "prompt rejected: Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.";
+        assert!(is_prompt_rejection(raw));
+        assert!(is_pi_busy_rejection(
+            "Agent is already processing. Specify streamingBehavior"
+        ));
+        assert!(!is_pi_busy_rejection(
+            "Cannot submit a prompt while compaction is in progress"
+        ));
+        assert!(!PROMPT_REJECTED_LINE.contains("streamingBehavior"));
+        assert!(!PROMPT_REJECTED_LINE.contains("prompt rejected"));
+        assert!(!is_prompt_rejection("workspace disk full (2 MB free)"));
+    }
+
     #[test]
     fn child_plumbing_errors_read_as_one_plain_line() {
         for raw in [
@@ -9855,6 +10287,10 @@ mod tests {
         ] {
             assert!(router.contains(rule), "router prompt lost the rule: {rule}");
         }
+        // #2070: the secret rule forbids the VALUE, not facts about it — a length or a hash on
+        // request is legitimate work (0.1.163 refused "print only the length and SHA-256").
+        assert!(router.contains("repeat a credential's value"));
+        assert!(router.contains("(set or not, length, a hash), is fine"));
         // Nothing the core forbids slipped back into the router as a second, different voice rule.
         assert!(!router.contains("No preamble, no emoji"));
         assert!(!router.contains("## How you write"));

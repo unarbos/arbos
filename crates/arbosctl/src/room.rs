@@ -286,6 +286,9 @@ enum Mode {
         reply_to: Option<String>,
         /// Reply in DM: the quoted message in another chat (`replyRef` on the row).
         reply_ref: Option<Box<arbos_core::doc::ReplyRef>>,
+        /// An uploaded attachment (`{name, mime, kind, ref, bytes, width?, height?}`) added as a
+        /// part beside the text.
+        attachment: Option<Value>,
     },
     /// Append one out-of-band command (`stop`, `approve`, `reject`) and exit on its ack.
     Command {
@@ -390,9 +393,14 @@ async fn run(
                     "[room {} head={} cursor={} box={}]",
                     s.room, st.head_seq, s.cursor, box_state
                 );
+                // Request own rows too (`excludeOwn:false`), like arbos-client and agentd. A
+                // replay that omits this device's own rows leaves every row that causally
+                // depends on them (e.g. the box's reply to a message this device sent) parked
+                // by Loro as pending, so the rebuilt doc is truncated at the last row before
+                // this device's first omitted message. Loro drops the duplicates. (#2069)
                 let req = Frame::new(
                     FrameType::RowsReq,
-                    json!({ "after": after, "excludeOwn": true }),
+                    json!({ "after": after, "excludeOwn": false }),
                     Bytes::new(),
                 );
                 sink.send(Message::Binary(req.encode())).await?;
@@ -402,9 +410,11 @@ async fn run(
                 // Import every row, whatever its seq: a Loro update is idempotent, and a row
                 // below the cursor may be one the socket had not delivered yet (the relay now
                 // orders them, but a replica must never drop data on an ordering assumption).
-                if rh.device != s.device {
-                    s.doc.import(&f.payload)?;
-                }
+                // Own rows too: on a fresh replica (after `chat reset`, or a new process) this
+                // device's earlier rows exist only on the relay, and every row that causally
+                // depends on them stays pending until they are imported. Loro drops a duplicate
+                // of a row the replica already holds, so importing unconditionally is safe. (#2069)
+                s.doc.import(&f.payload)?;
                 s.cursor = s.cursor.max(rh.seq);
                 rows_seen += 1;
                 s.persist()?;
@@ -476,6 +486,7 @@ async fn run(
                         answer,
                         reply_to,
                         reply_ref,
+                        attachment,
                     } => {
                         s.print_new();
                         let msg_id = ulid();
@@ -523,6 +534,9 @@ async fn run(
                                     &extra,
                                 );
                             }
+                        }
+                        if let Some(a) = attachment {
+                            s.doc.add_attachment_part(&msg_id, a);
                         }
                         if let Some(reply_to) = reply_to {
                             s.doc
@@ -649,6 +663,7 @@ pub async fn send(
     text: &str,
     reply_to: Option<&str>,
     reply_ref: Option<&arbos_core::doc::ReplyRef>,
+    attachment: Option<&Value>,
     stream: bool,
     timeout_s: u64,
 ) -> Result<()> {
@@ -662,6 +677,7 @@ pub async fn send(
             answer: None,
             reply_to: reply_to.map(str::to_owned),
             reply_ref: reply_ref.cloned().map(Box::new),
+            attachment: attachment.cloned(),
         },
         Duration::from_secs(timeout_s),
     )
@@ -689,6 +705,7 @@ pub async fn answer(
             answer: Some((question_id.unwrap_or("").to_owned(), value)),
             reply_to: None,
             reply_ref: None,
+            attachment: None,
         },
         Duration::from_secs(timeout_s),
     )

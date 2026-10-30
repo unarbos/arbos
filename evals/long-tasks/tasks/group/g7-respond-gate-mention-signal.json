@@ -1,0 +1,48 @@
+{
+  "id": "g7-respond-gate-mention-signal",
+  "lane": "a",
+  "category": "group",
+  "title": "A person's @mention always wakes the agent, but thanks and passing-along mentions still get no post; a mentioned question is answered by that agent only",
+  "turns": [
+    {
+      "prompt": "@lane-a what is 12 × 12? Just the number.",
+      "chat": "dm",
+      "reply_regex": "144",
+      "reply_from": "lane-a",
+      "silent_agents": [
+        "lane-b"
+      ],
+      "timeout_s": 180
+    },
+    {
+      "prompt": "thanks @lane-a, that was quick",
+      "chat": "dm",
+      "expect_no_reply_s": 45,
+      "timeout_s": 60
+    },
+    {
+      "prompt": "@lane-b has the notes from yesterday, I'll ask them later",
+      "chat": "dm",
+      "expect_no_reply_s": 45,
+      "timeout_s": 60
+    },
+    {
+      "prompt": "@lane-b can you tell @lane-a that the sync moved to 4 pm?",
+      "chat": "dm",
+      "reply_regex": "4 ?pm|four",
+      "reply_from": "lane-b",
+      "timeout_s": 180
+    }
+  ],
+  "setup_actions": [
+    {
+      "kind": "people_group",
+      "peer_handle": "lt-peer",
+      "with": [
+        "lane-b"
+      ],
+      "title": "eval respond gate mentions"
+    }
+  ],
+  "regression": "Jacob 2026-10-26/27: 'thanks @x' and a mention passing information along are silence; the agent named as the object of a request to another agent does not answer that request. Since 2026-10-28 a person's @mention always wakes the agent (the judge never vetoes it); the woken agent itself posts nothing for these lines."
+}

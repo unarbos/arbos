@@ -41,7 +41,7 @@ pub async fn browser_stream(
             .replacen("http://", "ws://", 1),
         project.id
     );
-    let token = sb.preview_token.clone();
+    let token = crate::boxes::preview_token_for(&state, &sb).await;
     ws.max_message_size(32 * 1024 * 1024)
         .on_upgrade(move |socket| async move {
             if let Err(e) = pipe(socket, &upstream, token.as_deref()).await {

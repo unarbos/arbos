@@ -1,6 +1,7 @@
 import ArbosFFI
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 // MARK: - Composer @-mention autocomplete (#1596, Jacob, Oct 23)
 //
@@ -292,6 +293,15 @@ struct MentionTextView: UIViewRepresentable {
     /// matches the bubbles.
     var agentProject: (ChatMember) -> Project? = { $0.project }
     var maxLines: Int = 8
+    /// Pictures / files pasted into the field, for the owner to stage as attachments.
+    var onPasteMedia: (([AppModel.PendingAttachment]) -> Void)? = nil
+    /// ⌫ with nothing to delete (an empty draft): the owner acts on it — the
+    /// chat composer removes its last pending attachment
+    /// ([feedback composer-attachment-removal-ios-2026-10-27]).
+    var onDeleteBackwardEmpty: (() -> Void)? = nil
+    /// Paste menu → image / GIF from the pasteboard (feedback
+    /// app-01M5TGH18WV3QCK5KZT6XKG7FG). `mime` stays image/gif or image/webp.
+    var onPasteImage: ((Data, String, String) -> Void)? = nil
 
     /// Grok: the caret 17 pt in from the field's edge, one 22 pt line centred in 48.
     static let insets = UIEdgeInsets(top: Theme.composerTextPadY, left: Theme.composerTextInset, bottom: Theme.composerTextPadY, right: 0)
@@ -317,13 +327,19 @@ struct MentionTextView: UIViewRepresentable {
         }
         coordinator.apply(theme: theme, to: view)
         coordinator.rebuild(view, text: text, mentions: mentions, caret: caret)
+        view.onPasteMedia = onPasteMedia
+        view.onDeleteBackwardEmpty = onDeleteBackwardEmpty
+        view.onPasteImage = onPasteImage
         return view
     }
 
     func updateUIView(_ view: MentionUITextView, context: Context) {
         let c = context.coordinator
         c.parent = self
+        view.onPasteMedia = onPasteMedia
         c.apply(theme: theme, to: view)
+        view.onDeleteBackwardEmpty = onDeleteBackwardEmpty
+        view.onPasteImage = onPasteImage
         view.placeholderLabel.text = placeholder
         view.placeholderLabel.isHidden = !text.isEmpty
         view.placeholderLabel.font = c.font
@@ -605,6 +621,84 @@ struct MentionTextView: UIViewRepresentable {
 final class MentionUITextView: UITextView {
     let placeholderLabel = UILabel()
     var onMoveToWindow: (() -> Void)?
+    /// Paste with pictures or files on the pasteboard: the owner stages them as
+    /// attachments ([feedback copy-image-messages-ios-2026-10-27]); the words, when the
+    /// same items carry any, still land at the caret.
+    var onPasteMedia: (([AppModel.PendingAttachment]) -> Void)?
+
+    /// ⌫ on an empty field (software or hardware keyboard): the owner's call.
+    var onDeleteBackwardEmpty: (() -> Void)?
+    /// Paste of an image / GIF / WebP from the pasteboard.
+    var onPasteImage: ((Data, String, String) -> Void)?
+
+    override func deleteBackward() {
+        if text.isEmpty, let onDeleteBackwardEmpty {
+            onDeleteBackwardEmpty()
+            return
+        }
+        super.deleteBackward()
+    }
+
+    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        if action == #selector(paste(_:)),
+           (onPasteMedia != nil && MessagePasteboard.hasMedia()) || (onPasteImage != nil && Self.pasteboardImage() != nil) {
+            return true
+        }
+        return super.canPerformAction(action, withSender: sender)
+    }
+
+    /// One paste path: an owner with `onPasteMedia` takes every picture / file item
+    /// (the chat composer, [feedback copy-image-messages-ios-2026-10-27]); an owner with
+    /// only `onPasteImage` takes the first picture; the words on the pasteboard, if any,
+    /// still land at the caret.
+    override func paste(_ sender: Any?) {
+        let pasteboard = UIPasteboard.general
+        if let onPasteMedia {
+            let media = MessagePasteboard.pendingAttachments(from: pasteboard)
+            if !media.isEmpty { onPasteMedia(media) }
+        } else if let pasted = Self.pasteboardImage() {
+            onPasteImage?(pasted.data, pasted.mime, pasted.ext)
+            return
+        }
+        if pasteboard.hasStrings {
+            super.paste(sender)
+        }
+    }
+
+    /// Raw image bytes from the pasteboard, mime kept (GIF/WebP stay GIF/WebP).
+    static func pasteboardImage() -> (data: Data, mime: String, ext: String)? {
+        let pb = UIPasteboard.general
+        if let data = pb.data(forPasteboardType: UTType.gif.identifier), Self.isGif(data) {
+            return (data, "image/gif", "gif")
+        }
+        if let data = pb.data(forPasteboardType: "public.webp") ?? pb.data(forPasteboardType: "org.webmproject.webp"),
+           Self.isWebP(data) {
+            return (data, "image/webp", "webp")
+        }
+        // Prefer the original typed bytes over a re-encoded UIImage.
+        if let data = pb.data(forPasteboardType: UTType.png.identifier) {
+            return (data, "image/png", "png")
+        }
+        if let data = pb.data(forPasteboardType: UTType.jpeg.identifier) {
+            return (data, "image/jpeg", "jpg")
+        }
+        if let data = pb.data(forPasteboardType: UTType.webP.identifier), Self.isWebP(data) {
+            return (data, "image/webp", "webp")
+        }
+        if let image = pb.image, let data = image.pngData() {
+            return (data, "image/png", "png")
+        }
+        return nil
+    }
+
+    private static func isGif(_ data: Data) -> Bool {
+        data.count >= 6 && data.starts(with: Data("GIF8".utf8))
+    }
+
+    private static func isWebP(_ data: Data) -> Bool {
+        data.count >= 12 && data.starts(with: Data("RIFF".utf8))
+            && data.subdata(in: 8..<12) == Data("WEBP".utf8)
+    }
 
     override init(frame: CGRect, textContainer: NSTextContainer?) {
         super.init(frame: frame, textContainer: textContainer)

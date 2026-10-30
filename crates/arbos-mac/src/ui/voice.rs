@@ -23,6 +23,7 @@ use crate::audio::{self, Pcm, RATE};
 use crate::model::{now_ms, Id, Message, MessageStatus, Role};
 use crate::sync::user_error::UserError;
 use crate::ui::frost::{frosted, PANEL_BLUR};
+use crate::ui::highlight;
 use crate::ui::theme::Theme;
 
 const TICK_MS: u64 = 50;
@@ -1287,12 +1288,18 @@ fn escape_action(recording: bool, transcribing: bool) -> Option<EscapeAction> {
 
 /// Thin recording/level row for the composer while a memo records (the voice
 /// tick re-renders it every 50 ms).
-pub fn render_recording_row(voice: &Voice, theme: &Theme) -> impl IntoElement {
+/// `mark` is the caller's `ui::working::glyph` — the braille spinner, not a red
+/// dot (Jacob, 2026-10-27); the words say it records.
+pub fn render_recording_row(
+    voice: &Voice,
+    theme: &Theme,
+    mark: impl IntoElement,
+) -> impl IntoElement {
     div()
         .flex()
         .items_center()
         .gap(px(10.0))
-        .child(div().size(px(9.0)).rounded_full().bg(theme.danger))
+        .child(mark)
         .child(
             div()
                 .text_size(px(13.0))
@@ -1321,18 +1328,21 @@ impl Render for Voice {
         let phase = call.phase;
         let muted = call.muted;
         let elapsed = mmss(now_ms().saturating_sub(call.started_at));
-        let (dot, label) = match phase {
-            CallPhase::Listening => (
-                theme.accent,
+        // The phase word; the braille spinner leads it while the agent thinks
+        // (never a coloured dot — Jacob, 2026-10-27).
+        let label = match phase {
+            CallPhase::Listening => {
                 if muted {
                     "Muted".to_owned()
                 } else {
                     CallPhase::Listening.label().to_owned()
-                },
-            ),
-            CallPhase::Thinking => (theme.warn, format!("{}…", CallPhase::Thinking.label())),
-            CallPhase::Speaking => (theme.text, CallPhase::Speaking.label().to_owned()),
+                }
+            }
+            CallPhase::Thinking => format!("{}…", CallPhase::Thinking.label()),
+            CallPhase::Speaking => CallPhase::Speaking.label().to_owned(),
         };
+        let phase_mark =
+            (phase == CallPhase::Thinking).then(|| crate::ui::working::glyph(&theme, cx));
         let mut sub: Vec<String> = Vec::new();
         if self.using_test_clip() {
             sub.push("test clip as microphone".into());
@@ -1367,7 +1377,7 @@ impl Render for Voice {
                 })
                 .text_size(px(12.0))
                 .text_color(if danger { theme.danger } else { theme.text })
-                .hover(|s| s.bg(theme.surface_2))
+                .map(|el| highlight::button(el, &theme))
                 .cursor_pointer()
                 .child(div().text_size(px(13.0)).child(glyph))
                 .child(label)
@@ -1395,7 +1405,7 @@ impl Render for Voice {
                             .items_center()
                             .gap(px(8.0))
                             .w(px(120.0))
-                            .child(div().size(px(9.0)).rounded_full().bg(dot))
+                            .children(phase_mark)
                             .child(
                                 div()
                                     .text_size(px(13.0))

@@ -15,9 +15,10 @@ use gpui::{
     RenderImage, SharedString,
 };
 
-use crate::app::{AppState, FORWARDED_FROM_PREFIX};
+use crate::app::{is_https_page_url, AppState, FORWARDED_FROM_PREFIX};
 use crate::model::{Attachment, AttachmentKind};
-use crate::ui::icons::icon;
+use crate::ui::highlight;
+use crate::ui::sf_symbols;
 use crate::ui::theme::{Theme, BUBBLE_RADIUS};
 
 /// What a card click does: open the media viewer on this attachment.
@@ -39,6 +40,8 @@ const DOC_W: f32 = 20.0;
 const DOC_H: f32 = 27.0;
 /// The hover ↓ disc.
 const DISC: f32 = 28.0;
+/// A picker sticker's square (ARB-544): no bubble, no hairline, fixed size.
+pub const STICKER_SIZE: f32 = 128.0;
 
 /// The doc glyph's colour by kind: Grok's Docs yellow for documents, PDF red,
 /// Sheets green, Slides orange; media and the rest stay neutral.
@@ -57,6 +60,7 @@ pub fn kind_color(kind: AttachmentKind, theme: &Theme) -> Hsla {
         AttachmentKind::Image
         | AttachmentKind::Video
         | AttachmentKind::Audio
+        | AttachmentKind::Sticker
         | AttachmentKind::File => theme.text_muted,
     }
 }
@@ -106,43 +110,94 @@ fn download_disc(id: SharedString, muted: bool, theme: &Theme) -> gpui::Stateful
         .items_center()
         .justify_center()
         .cursor_pointer()
+        // hover-fill: exception overlay
         .hover(|s| s.bg(Theme::with_alpha(gpui::black(), 0.75)))
-        .child(icon("arrow-down", 12.0, fg))
+        .child(sf_symbols::glyph("arrow.down", 12.0, fg))
 }
 
 /// The card element for one attachment row. `forwarded_from` is the message's
 /// "Forwarded from …" line, shown as the card's hint instead of a bubble.
+/// `quote_header` is a reply's quote, drawn above the picture / card like a text
+/// bubble's ([feedback picture-reply-quote-mac-2026-10-28]).
+#[allow(clippy::too_many_arguments)]
 pub fn card(
     row_id: &str,
     attachment: &Attachment,
     preview: Preview,
     forwarded_from: Option<&str>,
+    quote_header: Option<AnyElement>,
     open: Option<OpenFn>,
     state: Entity<AppState>,
     theme: &Theme,
 ) -> AnyElement {
+    if attachment.is_sticker() {
+        return sticker_tile(row_id, preview, open, theme);
+    }
     if attachment.kind() == AttachmentKind::Image {
         picture_bubble(
             row_id,
             attachment,
             preview,
             forwarded_from,
+            quote_header,
             open,
             state,
             theme,
         )
     } else {
-        file_card(row_id, attachment, forwarded_from, open, state, theme)
+        file_card(
+            row_id,
+            attachment,
+            forwarded_from,
+            quote_header,
+            open,
+            state,
+            theme,
+        )
     }
+}
+
+/// A sticker (ARB-544): the picture alone on the chat background at a fixed square —
+/// no bubble, no hairline, no caption — like Telegram / iMessage stickers. Click opens the
+/// viewer like any picture. Both apps draw this the same (iPhone 160 pt, Mac 128 pt).
+fn sticker_tile(row_id: &str, preview: Preview, open: Option<OpenFn>, theme: &Theme) -> AnyElement {
+    let mut tile = div()
+        .id(SharedString::from(row_id.to_owned()))
+        .w(px(STICKER_SIZE))
+        .h(px(STICKER_SIZE))
+        .flex()
+        .items_center()
+        .justify_center();
+    tile = match preview {
+        Preview::Ready(image) => tile.child(
+            img(image)
+                .w(px(STICKER_SIZE))
+                .h(px(STICKER_SIZE))
+                .object_fit(ObjectFit::Contain),
+        ),
+        Preview::Loading => tile.child(
+            div()
+                .size(px(STICKER_SIZE * 0.6))
+                .rounded(px(BUBBLE_RADIUS))
+                .bg(theme.surface_2),
+        ),
+        Preview::Unavailable => tile.child(sf_symbols::glyph("photo", 22.0, theme.text_faint)),
+    };
+    if let Some(open) = open {
+        tile = tile.cursor_pointer().on_click(move |_, _, cx| open(cx));
+    }
+    tile.into_any_element()
 }
 
 /// A picture: aspect-fit at its own ratio, bubble radius, slim outline. Hover
 /// shows the ↓ disc top-right; the whole bubble opens the viewer.
+#[allow(clippy::too_many_arguments)]
 fn picture_bubble(
     row_id: &str,
     attachment: &Attachment,
     preview: Preview,
     forwarded_from: Option<&str>,
+    quote_header: Option<AnyElement>,
     open: Option<OpenFn>,
     state: Entity<AppState>,
     theme: &Theme,
@@ -194,7 +249,7 @@ fn picture_bubble(
                 .flex_col()
                 .items_center()
                 .gap(px(6.0))
-                .child(icon("photo", 22.0, theme.text_faint))
+                .child(sf_symbols::glyph("photo", 22.0, theme.text_faint))
                 .child(
                     div()
                         .text_size(px(11.0))
@@ -240,15 +295,43 @@ fn picture_bubble(
             crate::ui::transcript::forwarded_header(by.to_owned(), theme.text),
         ));
     }
-    out.child(bubble).into_any_element()
+    if let Some(quote) = quote_header {
+        // A reply's quote above the picture, where a text bubble carries it
+        // ([feedback picture-reply-quote-mac-2026-10-28]).
+        out = out.child(div().pl(px(6.0)).max_w(px(w)).child(quote));
+    }
+    out = out.child(bubble);
+    // GIF-picker attribution (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG /
+    // app-01M61EZD0GJ2XGV1EW4SCVXENK): a small "via <provider>" under the
+    // picture. Only an https `page_url` is a link; other schemes stay plain.
+    if let Some(src) = attachment.source.clone() {
+        let label = format!("via {}", src.provider);
+        let url = src.page_url.clone();
+        let mut via = div()
+            .id(SharedString::from(format!("{row_id}-via")))
+            .pl(px(6.0))
+            .max_w(px(w))
+            .text_size(px(11.0))
+            .text_color(theme.text_faint)
+            .child(label);
+        if is_https_page_url(&url) {
+            via = via.cursor_pointer().on_click(move |_, _, cx| {
+                cx.open_url(&url);
+            });
+        }
+        out = out.child(via);
+    }
+    out.into_any_element()
 }
 
 /// Grok's doc card (web-08): kind-coloured doc glyph, name, "PDF · 1.8 MB";
 /// no Download pill — the ↓ disc appears on hover, the viewer has the rest.
+#[allow(clippy::too_many_arguments)]
 fn file_card(
     row_id: &str,
     attachment: &Attachment,
     forwarded_from: Option<&str>,
+    quote_header: Option<AnyElement>,
     open: Option<OpenFn>,
     state: Entity<AppState>,
     theme: &Theme,
@@ -275,9 +358,9 @@ fn file_card(
         .flex()
         .items_center()
         .justify_center()
-        .child(icon(
+        .child(sf_symbols::glyph(
             match kind {
-                AttachmentKind::Video => "play",
+                AttachmentKind::Video => "play.fill",
                 AttachmentKind::Audio => "waveform",
                 _ => "doc",
             },
@@ -347,12 +430,20 @@ fn file_card(
         );
     }
     if let Some(open) = open {
-        card = card
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
-            .on_click(move |_, _, cx| open(cx));
+        card = highlight::button(card.cursor_pointer(), theme).on_click(move |_, _, cx| open(cx));
     }
-    card.into_any_element()
+    match quote_header {
+        // A reply's quote above the card, where a text bubble carries it
+        // ([feedback picture-reply-quote-mac-2026-10-28]).
+        Some(quote) => div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(div().pl(px(6.0)).max_w(px(CARD_WIDTH)).child(quote))
+            .child(card)
+            .into_any_element(),
+        None => card.into_any_element(),
+    }
 }
 
 /// The "Forwarded from <name>" line of a message, when its text is one.
@@ -377,7 +468,9 @@ pub fn reveal(path: &Path) {
 }
 
 /// Hand a fetched file to macOS: Quick Look (`qlmanage -p`) for documents, the
-/// default app for the rest (QuickTime Player for video). Elsewhere `xdg-open`.
+/// default app for the rest. Videos in the media viewer play inline instead
+/// ([feedback app-01M6147S9TPNBQA7KSDEY0K8C4]); this path is for Quick Look
+/// and non-mac fallbacks. Elsewhere `xdg-open`.
 pub fn open_with_system(path: &Path, quick_look: bool) {
     #[cfg(target_os = "macos")]
     let spawned = if quick_look {

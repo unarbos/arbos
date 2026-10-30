@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
@@ -18,7 +18,7 @@ use arbos_core::api::{
     ChannelPlatformDto, ChatDto, ConnectConnectorReplyDto, ConnectorsCatalogDto, ConnectorsListDto,
     CreateChatResponseDto, DecideSecretResponseDto, GetProjectResponseDto, LeaveCallResponseDto,
     LocalDevicesDto, MachineStateDto, MachineStatusDto, MeResponseDto, MeUserResponseDto,
-    ModelListDto, PairResponseDto, PeopleChatDto, ProjectMembersDto, ProjectSecretsDto,
+    ModelListDto, PairResponseDto, PeopleChatDto, PinsDto, ProjectMembersDto, ProjectSecretsDto,
     PushEventDto, PushItemDto, RoutineDto, RoutineRunDto, SecretEnvelopeDto, SecretRequestsDto,
     SecretsOverviewDto, SkillDto, StartCallResponseDto, TokenResponseDto, TranscriptionDto,
     UnreadDto, UserCardDto, UsersPageDto, VaultEnvelopeDto, VoiceCatalogDto,
@@ -39,6 +39,7 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use super::avatar_master::Master;
+use super::chat_send_queue::ChatSendQueue;
 use super::credentials::{self, DeviceCredentials};
 use super::diagnostics;
 use super::doc::ChatDoc;
@@ -52,14 +53,16 @@ use super::dto::{
 use super::store::{self, Store};
 use super::user_error::{ErrorClass, Fault, UserError};
 use super::{
-    ClientCommand, DraftPicture, PictureSource, PictureTarget, PushRefusal, SyncEvent, SyncSource,
+    ClientCommand, CopyBlob, DraftPicture, PictureSource, PictureTarget, PushRefusal, SyncEvent,
+    SyncSource,
 };
 use crate::model::{
     new_id, now_ms, trace_rows, AccountView, Attachment, AttachmentKind, BoxReport, BoxState, Call,
     CallEnded, CallLeft, CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView,
-    ChartBody, Chat, Effort, Id, Link, LinkState, Machine, MachineState, Message, Part, Person,
-    Project, ProjectDocView, ProjectSecrets, Reachable, ReplyRef, Role, Routine, RoutineRun,
-    Sender, ServerInfo, ThreadInfo,
+    ChartBody, Chat, Effort, GifItem, GifPage, Id, Link, LinkState, Machine, MachineState,
+    MediaPick, Message, Part, Person, Project, ProjectDocView, ProjectSecrets, Reachable, ReplyRef,
+    Role, Routine, RoutineRun, Sender, ServerInfo, StickerPack, ThreadInfo, STICKER_KEY_PREFIX,
+    URL_KEY_PREFIX,
 };
 use crate::update;
 
@@ -224,6 +227,11 @@ struct Shared {
     people: Mutex<HashSet<Id>>,
     /// Highest relay seq seen per room key (read marks, D61).
     room_seq: Mutex<HashMap<Id, i64>>,
+    /// Rooms that have finished catch-up (`ROWS_DONE` / `LinkLive`) on the
+    /// current socket. Cleared when the room goes back to Syncing. While a
+    /// room is absent here, `forward_changes` coalesces `list_changed`
+    /// snapshots (#1405 / feedback app-01M5Z3QPDA5BRE84SAPADXX05V).
+    caught_up: Mutex<HashSet<Id>>,
     /// When this device last sent `PUT /chats/{id}/read` (ms). Used so a
     /// registry refresh does not resurrect unread before the relay catches up.
     local_read_at: Mutex<HashMap<Id, i64>>,
@@ -247,6 +255,17 @@ struct Shared {
     in_call: Mutex<Option<String>>,
     /// On-device store (#929); `None` without credentials or with `ARBOS_NO_STORE=1`.
     store: Mutex<Option<Store>>,
+    /// The 15 s secrets poll: one fetch in flight at a time, and a failure streak backs the
+    /// poll off (`secrets_poll_skip`) instead of asking — and failing — every tick
+    /// ([feedback toast-stack-mac-2026-10-27]).
+    secrets_inflight: AtomicBool,
+    secrets_poll_failures: AtomicU32,
+    secrets_poll_skip: AtomicU32,
+    /// When the relay last answered any request over HTTP (ms; any status — an answer is an
+    /// answer). The registry poll reads it so an odd failure (bad JSON, one project's 404) does
+    /// not leave a stale Offline / RelayDown on the connection pill ([feedback
+    /// stale-offline-pill-mac-2026-10-27]).
+    relay_answered_ms: AtomicU64,
     /// Room keys whose doc or cursor changed since the last save.
     dirty: Mutex<HashSet<Id>>,
     /// Silent error reports: one per signature per week (see `diagnostics.rs`).
@@ -257,6 +276,11 @@ struct Shared {
     /// When the Matrix session was last (re)started: a rejected token restarts it at most
     /// once a minute.
     matrix_started_at: Mutex<Option<Instant>>,
+    /// The relay said it has no servers (503 `servers_off`, or 404 from one that predates
+    /// them): the registry poll stops retrying the homeserver.
+    servers_off: AtomicBool,
+    /// Per-chat ordered network sends (photo then text must stay in push order).
+    send_queue: ChatSendQueue,
 }
 
 /// Blob slot prefix of a people chat (`people:<chat_id>`, people-chats API §2).
@@ -443,6 +467,18 @@ impl Shared {
         }
     }
 
+    /// The relay answered a request (any status): the link is up, whatever else went wrong.
+    fn relay_answered(&self) {
+        self.relay_answered_ms
+            .store(crate::model::now_ms(), Ordering::SeqCst);
+    }
+
+    /// Did the relay answer anything within the last `within`?
+    fn relay_answered_within(&self, within: Duration) -> bool {
+        let last = self.relay_answered_ms.load(Ordering::SeqCst);
+        last > 0 && crate::model::now_ms().saturating_sub(last) < within.as_millis() as u64
+    }
+
     async fn delete(self: &Arc<Self>, path: &str) -> Result<()> {
         let resp = self
             .http
@@ -451,6 +487,7 @@ impl Shared {
             .send()
             .await
             .with_context(|| format!("DELETE {path}"))?;
+        self.relay_answered();
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
@@ -468,6 +505,7 @@ impl Shared {
             .send()
             .await
             .with_context(|| format!("PUT {path}"))?;
+        self.relay_answered();
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
@@ -485,6 +523,7 @@ impl Shared {
 
     /// Forget the tokens and show the sign-in screen.
     fn sign_out_locally(&self) {
+        self.send_queue.clear();
         credentials::clear(&self.http_url);
         self.stop_matrix();
         self.drop_store(true);
@@ -623,6 +662,7 @@ impl Shared {
                 .send()
                 .await
                 .with_context(|| format!("GET {path}"))?;
+            self.relay_answered();
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             if !status.is_success() {
@@ -663,6 +703,7 @@ impl Shared {
                 req = req.header(*name, value);
             }
             let resp = req.send().await.with_context(|| format!("POST {path}"))?;
+            self.relay_answered();
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             if !status.is_success() {
@@ -707,6 +748,7 @@ impl Shared {
                 req = req.timeout(t);
             }
             let resp = req.send().await.with_context(|| format!("POST {path}"))?;
+            self.relay_answered();
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             if !status.is_success() {
@@ -737,6 +779,7 @@ impl Shared {
                 .send()
                 .await
                 .with_context(|| format!("PATCH {path}"))?;
+            self.relay_answered();
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             if !status.is_success() {
@@ -750,6 +793,23 @@ impl Shared {
             }
             return Ok(serde_json::from_str(&text).unwrap_or(Value::Null));
         }
+    }
+}
+
+/// A relay refusal as the Connection card shows it: the relay's own short sentence when it
+/// sent one, a plain "could not reach" otherwise — never a status code or an error chain.
+fn short_relay_error(e: &anyhow::Error) -> String {
+    match e.downcast_ref::<RelayError>() {
+        Some(r) if !r.message.trim().is_empty() => {
+            let m = r.message.trim();
+            if m.chars().count() > 160 {
+                format!("{}…", m.chars().take(160).collect::<String>())
+            } else {
+                m.to_owned()
+            }
+        }
+        Some(_) => "The relay refused the request".to_owned(),
+        None => "Could not reach the relay".to_owned(),
     }
 }
 
@@ -797,16 +857,32 @@ impl SyncSource for RelaySource {
                 refresh_lock: tokio::sync::Mutex::new(()),
                 people: Mutex::new(HashSet::new()),
                 room_seq: Mutex::new(HashMap::new()),
+                caught_up: Mutex::new(HashSet::new()),
                 local_read_at: Mutex::new(HashMap::new()),
                 local_changed_at: Mutex::new(HashMap::new()),
                 pending_new_chats: Mutex::new(HashMap::new()),
                 avatars_done: Mutex::new(HashSet::new()),
                 me: Mutex::new(None),
                 store: Mutex::new(None),
+                secrets_inflight: AtomicBool::new(false),
+                secrets_poll_failures: AtomicU32::new(0),
+                secrets_poll_skip: AtomicU32::new(0),
+                relay_answered_ms: AtomicU64::new(0),
                 dirty: Mutex::new(HashSet::new()),
                 diagnostics: diagnostics::Diagnostics::load(),
                 matrix: Mutex::new(None),
                 matrix_started_at: Mutex::new(None),
+                servers_off: AtomicBool::new(false),
+                send_queue: {
+                    let events = events.clone();
+                    ChatSendQueue::new(move |chat_id, message_id| {
+                        let _ = events.send(SyncEvent::MessageSendFailed {
+                            chat_id,
+                            message_id,
+                            error: UserError::from_text("send your message", "timed out"),
+                        });
+                    })
+                },
             });
             let _ = events.send(SyncEvent::Link(Link::Connecting));
 
@@ -979,6 +1055,10 @@ fn start_after_pairing(shared: &Arc<Shared>) {
         let shared = shared.clone();
         tokio::spawn(async move { refresh_me(&shared).await });
     }
+    {
+        let shared = shared.clone();
+        tokio::spawn(async move { refresh_pins(&shared).await });
+    }
     let skills_shared = shared.clone();
     tokio::spawn(async move { refresh_skills(&skills_shared).await });
     let models_shared = shared.clone();
@@ -996,7 +1076,7 @@ fn start_after_pairing(shared: &Arc<Shared>) {
         let shared = shared.clone();
         tokio::spawn(async move {
             refresh_connectors(&shared).await;
-            refresh_secrets(&shared).await;
+            refresh_secrets(&shared, SecretsWhy::Asked).await;
         });
     }
     {
@@ -1019,8 +1099,9 @@ fn start_after_pairing(shared: &Arc<Shared>) {
         let mut poll = interval(REGISTRY_POLL);
         loop {
             poll.tick().await;
-            // Pending secret requests show up without a manual refresh.
-            refresh_secrets(&shared).await;
+            // Pending secret requests show up without a manual refresh; a failing poll
+            // backs off and stays quiet (the pane's own note / the connection pill speak).
+            poll_secrets(&shared).await;
             match refresh_registry(&shared).await {
                 Ok(()) => {
                     let _ = shared.events.send(SyncEvent::RelayLink(LinkState::Live));
@@ -1043,11 +1124,23 @@ fn start_after_pairing(shared: &Arc<Shared>) {
                     // says nothing about the link.
                     eprintln!("relay registry: {text}");
                     let _ = shared.events.send(SyncEvent::Link(Link::Reconnecting));
-                    let fault = link_fault(&err);
-                    if matches!(fault, LinkState::Offline | LinkState::RelayDown) {
-                        let _ = shared.events.send(SyncEvent::RelayLink(fault));
+                    // A fresh socket / resolver fault is a verdict. An odd error after the
+                    // relay answered this tick (one project's 404, bad JSON, an empty body)
+                    // is not — and it must not leave an earlier Offline / RelayDown standing
+                    // on the pill ([feedback stale-offline-pill-mac-2026-10-27]: Jacob's Mac
+                    // read "Offline" under the header pill while it was talking to the relay).
+                    let answered = shared.relay_answered_within(2 * REGISTRY_POLL);
+                    if let Some(verdict) = registry_link_verdict(link_fault(&err), answered) {
+                        let _ = shared.events.send(SyncEvent::RelayLink(verdict));
                     }
                 }
+            }
+            // The server list rides this loop like the iPhone's 15 s loop, not only the
+            // launch's homeserver handshake: one failed launch fetch left the sidebar at
+            // "No servers yet" until a server push came ([feedback mac-server-missing-2026-10-29]).
+            if !shared.servers_off.load(Ordering::Relaxed) {
+                refresh_servers_list(&shared).await;
+                start_matrix_if_needed(&shared);
             }
         }
     });
@@ -1118,6 +1211,13 @@ fn load_store(shared: &Arc<Shared>) {
         let _ = shared.events.send(SyncEvent::ChatPrefs {
             last_chats,
             archived,
+        });
+    }
+    // The pins as the relay last confirmed them, so the Pinned section is there at launch.
+    if let Some(Some(pins)) = shared.with_store(|s| s.get_json::<Vec<String>>(store::KEY_PINS)) {
+        let _ = shared.events.send(SyncEvent::Pins {
+            pins,
+            cap: PIN_CAP_DEFAULT,
         });
     }
     if let Some(u) = account {
@@ -1547,9 +1647,18 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
                 let _ = shared.events.send(SyncEvent::Projects(snapshot));
                 refresh = true;
             }
-            // Channel banners: own item (the Mac also sees the room through its Matrix sync).
-            PushEventDto::ChannelMessage(_)
-            | PushEventDto::PeopleMessage(_)
+            PushEventDto::ChannelMessage(payload) => {
+                let _ = shared.events.send(SyncEvent::ChannelMessage {
+                    server_id: payload.server_id.clone(),
+                    server_name: payload.server_name.clone(),
+                    channel_id: payload.channel_id.clone(),
+                    channel_name: payload.channel_name.clone(),
+                    room_id: payload.room_id.clone(),
+                    sender: Sender::from(&payload.sender),
+                    text: payload.text.clone(),
+                });
+            }
+            PushEventDto::PeopleMessage(_)
             | PushEventDto::PeopleChatDeleted(_)
             | PushEventDto::ProjectMemberRemoved(_)
             | PushEventDto::PeopleInviteAccepted(_)
@@ -1559,6 +1668,10 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
             | PushEventDto::SecretExpiring(_)
             | PushEventDto::MessageRedacted(_)
             | PushEventDto::CallMissed(_) => {}
+            PushEventDto::PinsChanged(payload) => {
+                // Another device of mine replaced the list: the push carries the whole list.
+                apply_pins(shared, payload.pins.clone(), None);
+            }
         }
     }
     if refresh {
@@ -1633,14 +1746,11 @@ async fn start_matrix(shared: &Arc<Shared>) {
             }
         },
         Err(err) => {
-            let text = format!("{err:#}");
-            if text.contains("servers_off") || text.contains("HTTP 503") {
-                let _ = shared.events.send(SyncEvent::ServersAvailable(false));
-            } else if text.contains("HTTP 404") {
-                // Older relay without the route.
+            if relay_has_no_servers(&err) {
+                shared.servers_off.store(true, Ordering::Relaxed);
                 let _ = shared.events.send(SyncEvent::ServersAvailable(false));
             } else {
-                shared.diagnostic("matrix-session", text);
+                shared.diagnostic("matrix-session", format!("{err:#}"));
             }
             return;
         }
@@ -1662,18 +1772,41 @@ async fn start_matrix(shared: &Arc<Shared>) {
     refresh_servers_list(shared).await;
 }
 
-/// `GET /servers` → `SyncEvent::Servers`.
+/// The registry poll's homeserver retry: a launch whose `GET /me/matrix` failed (a timeout,
+/// a proxy's 502/503) used to stay without channels until the next launch. At most once a
+/// minute, like the rejected-token restart.
+fn start_matrix_if_needed(shared: &Arc<Shared>) {
+    if shared.matrix.lock().unwrap().is_some() || shared.creds.read().unwrap().is_none() {
+        return;
+    }
+    let due = shared
+        .matrix_started_at
+        .lock()
+        .unwrap()
+        .is_none_or(|t| t.elapsed() > MATRIX_RETRY_GAP);
+    if due {
+        let shared = shared.clone();
+        tokio::spawn(async move { start_matrix(&shared).await });
+    }
+}
+
+const MATRIX_RETRY_GAP: Duration = Duration::from_secs(60);
+
+/// 503 `servers_off`, or 404 from a relay that predates servers. A bare 503 is a proxy blip
+/// in front of a relay that has them: it keeps the list and the next poll asks again.
+fn relay_has_no_servers(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<RelayError>()
+        .is_some_and(|e| e.kind == "servers_off" || e.status == 404)
+}
+
+/// `GET /servers` → `SyncEvent::Servers`. A failure keeps the list the sidebar shows.
 async fn refresh_servers_list(shared: &Arc<Shared>) {
     match shared.get_json("/servers").await {
         Ok(v) => {
-            let servers: Vec<ServerInfo> = v
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|s| serde_json::from_value::<ServerInfo>(s.clone()).ok())
-                        .collect()
-                })
-                .unwrap_or_default();
+            shared.servers_off.store(false, Ordering::Relaxed);
+            let Some(servers) = parse_server_list(shared, &v) else {
+                return;
+            };
             let servers = servers
                 .into_iter()
                 .map(|s| with_server_picture(shared, s))
@@ -1681,14 +1814,34 @@ async fn refresh_servers_list(shared: &Arc<Shared>) {
             let _ = shared.events.send(SyncEvent::Servers(servers));
         }
         Err(err) => {
-            let text = format!("{err:#}");
-            if text.contains("servers_off") || text.contains("HTTP 503") {
+            if relay_has_no_servers(&err) {
+                shared.servers_off.store(true, Ordering::Relaxed);
                 let _ = shared.events.send(SyncEvent::ServersAvailable(false));
             } else {
-                shared.diagnostic("servers", text);
+                shared.diagnostic("servers", format!("{err:#}"));
             }
         }
     }
+}
+
+/// The servers of a `GET /servers` answer; one the client cannot read is reported, not
+/// dropped without a word. `None` (not a list) keeps the list the sidebar shows.
+fn parse_server_list(shared: &Arc<Shared>, v: &Value) -> Option<Vec<ServerInfo>> {
+    let Some(list) = v.as_array() else {
+        shared.diagnostic("servers", "GET /servers: not a list".to_owned());
+        return None;
+    };
+    let servers = list
+        .iter()
+        .filter_map(|s| match serde_json::from_value::<ServerInfo>(s.clone()) {
+            Ok(server) => Some(server),
+            Err(err) => {
+                shared.diagnostic("servers", format!("bad server JSON: {err}"));
+                None
+            }
+        })
+        .collect();
+    Some(servers)
 }
 
 fn parse_server(v: Value) -> Result<ServerInfo> {
@@ -2279,6 +2432,16 @@ fn cache_archived(shared: &Arc<Shared>, chat_id: &str, archived: bool) {
     });
 }
 
+/// A people chat's sidebar row is hidden exactly when its chat is archived for me. `chats` is
+/// the merged list, so an (un)archive made on this Mac after the refresh started still wins.
+fn align_people_archive(projects: &mut [Project], chats: &[Chat]) {
+    for p in projects.iter_mut().filter(|p| p.is_people()) {
+        if let Some(c) = chats.iter().find(|c| c.id == p.id) {
+            p.archived_at = c.archived_at;
+        }
+    }
+}
+
 /// Push a presence frame on the chat's room right away (focus / call changes).
 fn presence_now(shared: &Arc<Shared>, chat_id: &str) {
     if let Some(room) = shared.rooms.lock().unwrap().get(chat_id) {
@@ -2475,6 +2638,11 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
                 continue;
             }
         };
+        // Outside agents (#2141): an extra key beside the DTO.
+        let outside: Option<crate::model::OutsideInfo> = detail_val
+            .get("outside")
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok());
         let detail: GetProjectResponseDto = match serde_json::from_value(detail_val) {
             Ok(d) => d,
             Err(err) => {
@@ -2501,6 +2669,7 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
             .find(|x| x.id == id)
             .cloned();
         let mut project = project_from_dto(&detail, members.as_ref());
+        project.outside = outside;
         // D92 amendment: the agent's uploaded / generated picture — the public versioned route.
         project.image_url = project_image_url(
             &shared.http_url,
@@ -2646,6 +2815,7 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
             c.unread_count = count;
             c.unread = count > 0;
         }
+        align_people_archive(&mut projects, &merged);
         *local = merged;
     }
     // One copy of each agent's avatar everywhere: the newest stamp wins over any roster copy
@@ -2756,6 +2926,35 @@ async fn migrate_local_archive(shared: &Arc<Shared>, all_chats: &mut [Chat]) {
     }
 }
 
+/// The relay's pin cap until `GET /me/pins` says otherwise (Jacob 2026-10-28: 5, no tiers).
+const PIN_CAP_DEFAULT: usize = 5;
+
+/// `GET /me/pins` → the cache and `SyncEvent::Pins` ([feedback sidebar-pinning-mac-2026-10-28]).
+async fn refresh_pins(shared: &Arc<Shared>) {
+    match shared.get_json("/me/pins").await {
+        Ok(v) => match serde_json::from_value::<PinsDto>(v) {
+            Ok(dto) => apply_pins(shared, dto.pins, Some(dto.cap as usize)),
+            Err(err) => shared.diagnostic("pins", format!("{err:#}")),
+        },
+        Err(err) => {
+            let text = format!("{err:#}");
+            // An older relay without the endpoint: the cached list stands, quietly.
+            if !text.contains("HTTP 404") {
+                shared.diagnostic("pins", text);
+            }
+        }
+    }
+}
+
+/// A confirmed pin list: cached for the next launch and handed to the app.
+fn apply_pins(shared: &Arc<Shared>, pins: Vec<String>, cap: Option<usize>) {
+    shared.with_store(|s| s.put_json(store::KEY_PINS, &pins));
+    let _ = shared.events.send(SyncEvent::Pins {
+        pins,
+        cap: cap.unwrap_or(PIN_CAP_DEFAULT),
+    });
+}
+
 /// `PUT /chats/{id}/settings {archived}` (§9c). The relay echoes a project chat as `ChatDto`
 /// and a people chat as `PeopleChatDto`; answers the stored `archived_at` (None = unarchived).
 async fn set_archived(
@@ -2836,6 +3035,93 @@ fn emit_snapshot(shared: &Shared, chat_id: &str) {
         chat_id: chat_id.to_string(),
         messages,
     });
+}
+
+/// While a room catches up, coalesce `list_changed` into at most one snapshot
+/// per this window (plus the `LinkLive` emit when catch-up ends). Live rooms
+/// still emit on every `list_changed` (#1405).
+const CATCH_UP_SNAPSHOT_WINDOW_MS: u64 = 80;
+
+/// Pure helper: trailing-edge emit times for `list_changed` events during
+/// catch-up. Events that fall inside an open window are absorbed; the window
+/// fires at `open + window_ms`, then a new window opens on the next event.
+///
+/// `events_ms = [0, 10, 50, 120], window_ms = 80` → `[80, 200]` (two snapshots).
+#[cfg(test)]
+fn catch_up_snapshot_times(events_ms: &[u64], window_ms: u64) -> Vec<u64> {
+    let mut emits = Vec::new();
+    let mut window_open_at: Option<u64> = None;
+    for &t in events_ms {
+        match window_open_at {
+            Some(start) if t < start.saturating_add(window_ms) => {}
+            Some(start) => {
+                emits.push(start.saturating_add(window_ms));
+                window_open_at = Some(t);
+            }
+            None => {
+                window_open_at = Some(t);
+            }
+        }
+    }
+    if let Some(start) = window_open_at {
+        emits.push(start.saturating_add(window_ms));
+    }
+    emits
+}
+
+/// Pure helper for mixed catch-up / live sequences. Each event is
+/// `(time_ms, catching_up)`. While catching up, windows coalesce as in
+/// [`catch_up_snapshot_times`]; the first `catching_up = false` flushes a
+/// pending window (the LinkLive paint) and is not itself a live
+/// `list_changed`; later live events emit immediately.
+#[cfg(test)]
+fn snapshot_emit_times(events: &[(u64, bool)], window_ms: u64) -> Vec<u64> {
+    let mut emits = Vec::new();
+    let mut window_open_at: Option<u64> = None;
+    // Seed from the first event so an all-live sequence does not look like a
+    // catch-up → live transition on event 0.
+    let mut was_catching_up = events.first().map(|(_, c)| *c).unwrap_or(true);
+    for &(t, catching_up) in events {
+        if was_catching_up && !catching_up {
+            if window_open_at.take().is_some() {
+                emits.push(t);
+            }
+            was_catching_up = false;
+            continue;
+        }
+        if catching_up {
+            match window_open_at {
+                Some(start) if t < start.saturating_add(window_ms) => {}
+                Some(start) => {
+                    emits.push(start.saturating_add(window_ms));
+                    window_open_at = Some(t);
+                }
+                None => {
+                    window_open_at = Some(t);
+                }
+            }
+        } else {
+            emits.push(t);
+        }
+        was_catching_up = catching_up;
+    }
+    if let Some(start) = window_open_at {
+        emits.push(start.saturating_add(window_ms));
+    }
+    emits
+}
+
+fn room_caught_up(shared: &Shared, key: &str) -> bool {
+    shared.caught_up.lock().unwrap().contains(key)
+}
+
+fn set_room_caught_up(shared: &Shared, key: &str, up: bool) {
+    let mut g = shared.caught_up.lock().unwrap();
+    if up {
+        g.insert(key.to_string());
+    } else {
+        g.remove(key);
+    }
 }
 
 fn emit_project_doc(shared: &Shared, project_id: &str) {
@@ -2978,27 +3264,56 @@ async fn forward_changes(
     is_project_doc: bool,
     mut rx: mpsc::UnboundedReceiver<super::doc::Touched>,
 ) {
-    while let Some(touched) = rx.recv().await {
-        shared.mark_dirty(&key);
-        if is_project_doc {
-            emit_project_doc(&shared, &project_id);
-            apply_project_doc_status(&shared, &project_id);
-            continue;
-        }
-        if touched.list_changed {
-            emit_snapshot(&shared, &key);
-            mark_activity(&shared, &key);
-            continue;
-        }
-        let docs = shared.docs.lock().unwrap();
-        let Some(doc) = docs.get(&key) else { continue };
-        for ix in touched.messages {
-            if let Some(mut message) = doc.read_message(ix) {
-                apply_pending(&shared, &mut message);
-                let _ = shared.events.send(SyncEvent::MessageUpsert {
-                    chat_id: key.clone(),
-                    message: Box::new(message),
-                });
+    // Catch-up: at most one ChatSnapshot per CATCH_UP_SNAPSHOT_WINDOW_MS.
+    // Live: emit on every list_changed (unchanged). Message upserts always
+    // pass through immediately (#1405).
+    let window = Duration::from_millis(CATCH_UP_SNAPSHOT_WINDOW_MS);
+    let mut pending_deadline: Option<tokio::time::Instant> = None;
+    loop {
+        let wait_pending = pending_deadline;
+        tokio::select! {
+            _ = async {
+                if let Some(deadline) = wait_pending {
+                    tokio::time::sleep_until(deadline).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            }, if pending_deadline.is_some() => {
+                pending_deadline = None;
+                // LinkLive may have painted already; skip a duplicate.
+                if !room_caught_up(&shared, &key) {
+                    emit_snapshot(&shared, &key);
+                }
+            }
+            touched = rx.recv() => {
+                let Some(touched) = touched else { break };
+                shared.mark_dirty(&key);
+                if is_project_doc {
+                    emit_project_doc(&shared, &project_id);
+                    apply_project_doc_status(&shared, &project_id);
+                    continue;
+                }
+                if touched.list_changed {
+                    if room_caught_up(&shared, &key) {
+                        pending_deadline = None;
+                        emit_snapshot(&shared, &key);
+                    } else if pending_deadline.is_none() {
+                        pending_deadline = Some(tokio::time::Instant::now() + window);
+                    }
+                    mark_activity(&shared, &key);
+                    continue;
+                }
+                let docs = shared.docs.lock().unwrap();
+                let Some(doc) = docs.get(&key) else { continue };
+                for ix in touched.messages {
+                    if let Some(mut message) = doc.read_message(ix) {
+                        apply_pending(&shared, &mut message);
+                        let _ = shared.events.send(SyncEvent::MessageUpsert {
+                            chat_id: key.clone(),
+                            message: Box::new(message),
+                        });
+                    }
+                }
             }
         }
     }
@@ -3247,6 +3562,7 @@ async fn room_loop(
     let mut session = RoomSession::new(shared.device_id(), room, saved_cursor, saved_pending);
     // The first dial: the chat is about to catch up, so the pill (after its
     // grace) says "Syncing…", not "Reconnecting…".
+    set_room_caught_up(&shared, &key, false);
     let _ = shared.events.send(SyncEvent::RoomLink {
         key: key.clone(),
         state: LinkState::Syncing,
@@ -3375,6 +3691,7 @@ async fn run_session(
     let (mut tx, mut rx) = ws.split();
 
     // Socket up: catching up until RowsDone (`RoomAction::LinkLive`).
+    set_room_caught_up(shared, key, false);
     let _ = shared.events.send(SyncEvent::RoomLink {
         key: key.to_string(),
         state: LinkState::Syncing,
@@ -3650,6 +3967,10 @@ async fn perform_room_actions(
                     }
                 }
                 RoomAction::LinkLive => {
+                    // Catch-up done: mark live so forward_changes stops
+                    // coalescing, then paint once (the "plus one when catch-up
+                    // ends" snapshot). A pending coalesce timer is skipped.
+                    set_room_caught_up(shared, key, true);
                     let _ = shared.events.send(SyncEvent::Link(Link::Live));
                     let _ = shared.events.send(SyncEvent::RoomLink {
                         key: key.to_string(),
@@ -4086,6 +4407,24 @@ pub(crate) fn mime_for(path: &Path) -> &'static str {
     }
 }
 
+/// Where a thumbnail key's bytes live on the relay: the chat slot's blob, or — for the
+/// picker's keys (ARB-544) — the GIF pass-through (`url:<url>`) or a hosted sticker
+/// (`sticker:<pack>/<id>`). The GIF bytes are never stored by the relay; the Mac keeps only
+/// its in-memory decode.
+fn blob_request_url(shared: &Shared, id: &str, key: &str) -> String {
+    if let Some(url) = key.strip_prefix(URL_KEY_PREFIX) {
+        return format!(
+            "{}/gif/media?u={}",
+            shared.http_url,
+            crate::auth::url_encode(url)
+        );
+    }
+    if let Some(path) = key.strip_prefix(STICKER_KEY_PREFIX) {
+        return format!("{}/stickers/{}", shared.http_url, path);
+    }
+    format!("{}/blob/{}/{}", shared.http_url, shared.blob_slot(id), key)
+}
+
 /// `GET /blob/{slot}/{key}` → (mime, bytes); `id` is a project id or a people chat id.
 async fn fetch_blob_bytes(shared: &Arc<Shared>, id: &str, key: &str) -> Result<(String, Vec<u8>)> {
     // Same refresh-once path as `get_json`: an expired access token must not leave
@@ -4096,12 +4435,7 @@ async fn fetch_blob_bytes(shared: &Arc<Shared>, id: &str, key: &str) -> Result<(
         let token = shared.token();
         let r = shared
             .http
-            .get(format!(
-                "{}/blob/{}/{}",
-                shared.http_url,
-                shared.blob_slot(id),
-                key
-            ))
+            .get(blob_request_url(shared, id, key))
             .bearer_auth(&token)
             .send()
             .await?;
@@ -4163,6 +4497,44 @@ fn safe_name(name: &str) -> String {
 }
 
 /// Upload attachments as blobs, then write the user row and its `send`
+/// `GET /gif/search?q=` (or `/gif/trending` for an empty query) → the page, or the reason
+/// the picker shows instead of a grid (ARB-544).
+async fn gif_search(shared: &Arc<Shared>, query: &str, pos: Option<&str>) -> GifPage {
+    let q = query.trim();
+    let mut path = if q.is_empty() {
+        "/gif/trending?".to_owned()
+    } else {
+        format!("/gif/search?q={}&", crate::auth::url_encode(q))
+    };
+    if let Some(pos) = pos.filter(|p| !p.is_empty()) {
+        path.push_str(&format!("pos={}&", crate::auth::url_encode(pos)));
+    }
+    let path = path.trim_end_matches(['?', '&']).to_owned();
+    match shared.get_json(&path).await {
+        Ok(v) => {
+            let items: Vec<GifItem> = v
+                .get("items")
+                .cloned()
+                .and_then(|i| serde_json::from_value(i).ok())
+                .unwrap_or_default();
+            let next = v
+                .get("next")
+                .and_then(Value::as_str)
+                .filter(|n| !n.is_empty())
+                .map(str::to_owned);
+            GifPage::Items { items, next }
+        }
+        Err(err) => match err.downcast_ref::<RelayError>() {
+            Some(e) if e.kind == "gif_unavailable" => GifPage::Unavailable,
+            Some(e) if e.kind == "gif_busy" || e.status == 429 => GifPage::Busy,
+            _ => {
+                log::warn!("gif search: {err:#}");
+                GifPage::Failed
+            }
+        },
+    }
+}
+
 /// command in one commit (crdt-sync §6.2).
 #[allow(clippy::too_many_arguments)]
 fn attachment_kind_str(kind: AttachmentKind) -> String {
@@ -4174,6 +4546,7 @@ fn attachment_kind_str(kind: AttachmentKind) -> String {
         AttachmentKind::Sheet => "sheet".into(),
         AttachmentKind::Pdf => "pdf".into(),
         AttachmentKind::Audio => "audio".into(),
+        AttachmentKind::Sticker => "sticker".into(),
         AttachmentKind::File => "file".into(),
     }
 }
@@ -4184,6 +4557,12 @@ fn user_attachment_from_part(att: Attachment) -> UserAttachment {
         mime: att.mime,
         kind: att.kind.map(attachment_kind_str),
         blob_ref: att.blob_ref,
+        url: att.url,
+        source: att.source.map(|s| arbos_core::doc::AttachmentSource {
+            provider: s.provider,
+            id: s.id,
+            page_url: s.page_url,
+        }),
     }
 }
 
@@ -4195,10 +4574,98 @@ enum Outgoing {
         from_slot: String,
         attachment: Attachment,
     },
+    /// A picker sticker (ARB-544): bytes the picker already fetched, stored in the chat
+    /// slot like any picture, `kind: sticker` so both apps draw it without a bubble.
+    Sticker {
+        name: String,
+        mime: String,
+        bytes: Arc<Vec<u8>>,
+        source: arbos_core::doc::AttachmentSource,
+    },
+    /// A picked GIF: nothing uploaded — the row carries the provider URL and attribution.
+    Gif {
+        name: String,
+        mime: String,
+        url: String,
+        source: arbos_core::doc::AttachmentSource,
+    },
+}
+
+impl Outgoing {
+    fn from_pick(pick: MediaPick) -> Self {
+        match pick {
+            MediaPick::Sticker { pack, item, bytes } => {
+                let ext = if item.mime == "image/webp" {
+                    "webp"
+                } else {
+                    "png"
+                };
+                Outgoing::Sticker {
+                    name: format!("{}.{ext}", item.id),
+                    mime: item.mime,
+                    bytes,
+                    source: arbos_core::doc::AttachmentSource {
+                        provider: pack.name,
+                        id: format!("{}/{}", pack.id, item.id),
+                        page_url: pack.page_url,
+                    },
+                }
+            }
+            MediaPick::Gif(gif) => {
+                let gif = *gif;
+                Outgoing::Gif {
+                    name: format!("{}.gif", gif.id),
+                    mime: "image/gif".into(),
+                    url: gif.url,
+                    source: arbos_core::doc::AttachmentSource {
+                        provider: "KLIPY".into(),
+                        id: gif.id,
+                        page_url: gif.page_url,
+                    },
+                }
+            }
+        }
+    }
 }
 
 fn outgoing_paths(paths: Vec<PathBuf>) -> Vec<Outgoing> {
     paths.into_iter().map(Outgoing::Path).collect()
+}
+
+/// Push a network send onto this chat's ordered queue (local echo is already done).
+#[allow(clippy::too_many_arguments)]
+fn enqueue_send(
+    shared: &Arc<Shared>,
+    chat_id: Id,
+    message_id: Id,
+    text: String,
+    attachments: Vec<Outgoing>,
+    voice_wav: Option<Arc<Vec<u8>>>,
+    command: &'static str,
+    answer: Option<(String, serde_json::Value)>,
+    reply_to: Option<String>,
+    forwarded: Option<Forwarded>,
+    reply_ref: Option<ReplyRef>,
+    mentions: Vec<String>,
+) {
+    shared.send_queue.push(
+        chat_id.clone(),
+        message_id.clone(),
+        send_message(
+            shared.clone(),
+            chat_id,
+            message_id,
+            text,
+            attachments,
+            voice_wav,
+            command,
+            answer,
+            reply_to,
+            forwarded,
+            reply_ref,
+            mentions,
+        ),
+    );
 }
 
 /// Put one outgoing attachment under `blob_slot` (a file read from disk, or a
@@ -4209,7 +4676,37 @@ async fn upload_outgoing(
     blob_slot: &str,
     outgoing: Outgoing,
 ) -> UserAttachment {
+    let mut source = None;
     let (name, mime, kind, bytes) = match outgoing {
+        Outgoing::Gif {
+            name,
+            mime,
+            url,
+            source,
+        } => {
+            return UserAttachment {
+                name,
+                mime,
+                kind: Some("image".into()),
+                blob_ref: None,
+                url: Some(url),
+                source: Some(source),
+            };
+        }
+        Outgoing::Sticker {
+            name,
+            mime,
+            bytes,
+            source: src,
+        } => {
+            source = Some(src);
+            (
+                name,
+                mime,
+                Some("sticker".to_owned()),
+                Ok::<Vec<u8>, String>(bytes.as_ref().clone()),
+            )
+        }
         Outgoing::Path(path) => {
             let name = path
                 .file_name()
@@ -4274,6 +4771,8 @@ async fn upload_outgoing(
         mime,
         kind,
         blob_ref,
+        url: None,
+        source,
     }
 }
 
@@ -4598,6 +5097,8 @@ async fn upload_voice_memo(shared: &Shared, blob_slot: &str, wav: Arc<Vec<u8>>) 
             kind: Some(AttachmentKind::Audio),
             title: None,
             chart_part: None,
+            url: None,
+            source: None,
         },
     }
 }
@@ -4752,8 +5253,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             text,
             wav,
         } => {
-            tokio::spawn(send_message(
-                shared.clone(),
+            enqueue_send(
+                shared,
                 chat_id,
                 message_id,
                 text,
@@ -4765,7 +5266,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 None,
                 Vec::new(),
-            ));
+            );
         }
         ClientCommand::Transcribe {
             project_id,
@@ -5002,9 +5503,51 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .post_json("/chats/dm", json!({ "handle": handle }))
                     .await
                 {
-                    Ok(_) => {
+                    Ok(v) => {
+                        // A draft's first message is sent the moment the app sees the DM
+                        // listed, and the refresh opens the DM's room only after that: hold
+                        // those sends until the room is there.
+                        let new_dm = serde_json::from_value::<PeopleChatDto>(v)
+                            .ok()
+                            .map(|dto| dto.id)
+                            .filter(|id| {
+                                !id.is_empty() && !shared.docs.lock().unwrap().contains_key(id)
+                            });
+                        if let Some(id) = &new_dm {
+                            shared
+                                .pending_new_chats
+                                .lock()
+                                .unwrap()
+                                .entry(id.clone())
+                                .or_default();
+                        }
                         if let Err(err) = refresh_registry(&shared).await {
                             shared.diagnostic("refresh", format!("{err:#}"));
+                        }
+                        let Some(id) = new_dm else {
+                            return;
+                        };
+                        let queued = shared
+                            .pending_new_chats
+                            .lock()
+                            .unwrap()
+                            .remove(&id)
+                            .unwrap_or_default();
+                        for q in queued {
+                            enqueue_send(
+                                &shared,
+                                id.clone(),
+                                q.message_id,
+                                q.text,
+                                q.attachments,
+                                q.voice_wav,
+                                q.command,
+                                q.answer,
+                                q.reply_to,
+                                q.forwarded,
+                                q.reply_ref,
+                                q.mentions,
+                            );
                         }
                     }
                     Err(err) => {
@@ -5116,35 +5659,6 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 let _ = room.cmds.send(RoomCmd::Typing(active));
             }
         }
-        ClientCommand::AddAgent {
-            chat_id,
-            project_id,
-        } => {
-            let shared = shared.clone();
-            tokio::spawn(async move {
-                match shared
-                    .post_json(
-                        &format!("/chats/{chat_id}/agents"),
-                        json!({ "project_id": project_id }),
-                    )
-                    .await
-                {
-                    Ok(_) => {
-                        if let Err(err) = refresh_registry(&shared).await {
-                            shared.diagnostic("refresh", format!("{err:#}"));
-                        }
-                    }
-                    Err(err) => {
-                        let _ = shared
-                            .events
-                            .send(SyncEvent::PeopleError(UserError::classify(
-                                "add the agent",
-                                &err,
-                            )));
-                    }
-                }
-            });
-        }
         ClientCommand::RemoveAgent {
             chat_id,
             project_id,
@@ -5243,6 +5757,26 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         .events
                         .send(SyncEvent::PeopleError(UserError::classify(
                             "remove them",
+                            &err,
+                        )));
+                }
+                let _ = refresh_registry(&shared).await;
+            });
+        }
+        ClientCommand::SetMemberRole {
+            chat_id,
+            user_id,
+            role,
+        } => {
+            let shared = shared.clone();
+            let path = format!("/chats/{chat_id}/members/{user_id}");
+            let role = role.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared.put_json(&path, json!({ "role": role })).await {
+                    let _ = shared
+                        .events
+                        .send(SyncEvent::PeopleError(UserError::classify(
+                            "change their role",
                             &err,
                         )));
                 }
@@ -5589,8 +6123,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             reply_ref,
             mentions,
         } => {
-            tokio::spawn(send_message(
-                shared.clone(),
+            enqueue_send(
+                shared,
                 chat_id,
                 message_id,
                 text,
@@ -5602,7 +6136,68 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 reply_ref,
                 mentions,
-            ));
+            );
+        }
+        ClientCommand::SendMedia {
+            chat_id,
+            message_id,
+            pick,
+            reply_to,
+        } => {
+            enqueue_send(
+                shared,
+                chat_id,
+                message_id,
+                String::new(),
+                vec![Outgoing::from_pick(pick)],
+                None,
+                "send",
+                None,
+                reply_to,
+                None,
+                None,
+                Vec::new(),
+            );
+        }
+        ClientCommand::GifSearch { query, pos } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let page = gif_search(&shared, &query, pos.as_deref()).await;
+                let _ = shared
+                    .events
+                    .send(SyncEvent::GifResults { query, pos, page });
+            });
+        }
+        ClientCommand::StickerPacks => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let packs = match shared.get_json("/stickers/packs").await {
+                    Ok(v) => serde_json::from_value::<Vec<StickerPack>>(v["packs"].clone())
+                        .map_err(|e| log::warn!("sticker packs: bad JSON: {e}"))
+                        .ok(),
+                    Err(err) => {
+                        log::warn!("sticker packs: {err:#}");
+                        None
+                    }
+                };
+                let _ = shared.events.send(SyncEvent::StickerPacks { packs });
+            });
+        }
+        ClientCommand::GifShare { id, query } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let _ = shared
+                    .http
+                    .post(format!(
+                        "{}/gif/share?id={}&q={}",
+                        shared.http_url,
+                        crate::auth::url_encode(&id),
+                        crate::auth::url_encode(&query)
+                    ))
+                    .bearer_auth(shared.token())
+                    .send()
+                    .await;
+            });
         }
         ClientCommand::Forward {
             chat_id,
@@ -5611,8 +6206,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             attachment,
             text,
         } => {
-            tokio::spawn(send_message(
-                shared.clone(),
+            enqueue_send(
+                shared,
                 chat_id,
                 message_id,
                 text,
@@ -5627,7 +6222,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 None,
                 Vec::new(),
-            ));
+            );
         }
         ClientCommand::ForwardMessage {
             chat_id,
@@ -5645,8 +6240,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     attachment,
                 })
                 .collect();
-            tokio::spawn(send_message(
-                shared.clone(),
+            enqueue_send(
+                shared,
                 chat_id,
                 message_id,
                 text,
@@ -5662,7 +6257,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }),
                 None,
                 Vec::new(),
-            ));
+            );
         }
         ClientCommand::Steer {
             chat_id,
@@ -5670,8 +6265,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             text,
             reply_to,
         } => {
-            tokio::spawn(send_message(
-                shared.clone(),
+            enqueue_send(
+                shared,
                 chat_id,
                 message_id,
                 text,
@@ -5683,7 +6278,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 None,
                 Vec::new(),
-            ));
+            );
         }
         ClientCommand::Answer {
             chat_id,
@@ -5693,8 +6288,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             value,
         } => {
             let answer = question_id.map(|qid| (qid, value.unwrap_or(json!(null))));
-            tokio::spawn(send_message(
-                shared.clone(),
+            enqueue_send(
+                shared,
                 chat_id,
                 message_id,
                 text,
@@ -5706,7 +6301,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 None,
                 Vec::new(),
-            ));
+            );
         }
         ClientCommand::Stop { chat_id } => {
             let docs = shared.docs.lock().unwrap();
@@ -5756,15 +6351,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let me = format!("user:{}", shared.me_id());
             let docs = shared.docs.lock().unwrap();
             if let Some(doc) = docs.get(&chat_id) {
+                let base = arbos_core::doc::normalize_reaction_emoji(&emoji);
                 let already = doc
                     .index_of(&message_id)
                     .and_then(|ix| doc.read_message(ix))
                     .map(|m| {
-                        m.reactions
-                            .get(&emoji)
-                            .and_then(|bucket| bucket.get(&me))
-                            .copied()
-                            .unwrap_or(false)
+                        m.reactions.iter().any(|(e, bucket)| {
+                            arbos_core::doc::normalize_reaction_emoji(e) == base
+                                && bucket.get(&me).copied().unwrap_or(false)
+                        })
                     })
                     .unwrap_or(false);
                 let on = !already;
@@ -5812,6 +6407,61 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     shared.fail_with(error);
                 }
             });
+        }
+        ClientCommand::RemoveLinkPreview {
+            chat_id,
+            message_id,
+        } => {
+            // Same shape as a delete: the relay decides (`DELETE …/messages/{id}/preview`)
+            // and the change comes back as a relay-signed row.
+            let project_id = shared
+                .chats
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|c| c.id == chat_id)
+                .map(|c| c.project_id.clone())
+                .unwrap_or_else(|| chat_id.clone());
+            let is_people = shared.is_people(&chat_id);
+            let room = room::room_path(&project_id, &chat_id, is_people);
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .delete(&format!("/room/{room}/messages/{message_id}/preview"))
+                    .await
+                {
+                    let error = match err.downcast_ref::<RelayError>() {
+                        Some(e) if e.status == 403 => UserError::of(
+                            "remove the preview",
+                            ErrorClass::Refused {
+                                message: Some(
+                                    "You can only remove previews on your own messages.".into(),
+                                ),
+                            },
+                            format!("{err:#}"),
+                        ),
+                        _ => UserError::classify("remove the preview", &err),
+                    };
+                    shared.fail_with(error);
+                }
+            });
+        }
+        ClientCommand::EditMessage {
+            chat_id,
+            message_id,
+            text,
+        } => {
+            // Same path as the iPhone: write `edit_message_text` into the local
+            // chat doc; peers see the body via room sync (no HTTP edit).
+            let docs = shared.docs.lock().unwrap();
+            if let Some(doc) = docs.get(&chat_id) {
+                if let Err(e) = doc
+                    .core
+                    .transact(|d| d.edit_message_text(&message_id, &text))
+                {
+                    eprintln!("relay: edit message: {e:#}");
+                }
+            }
         }
         ClientCommand::Approve {
             chat_id,
@@ -6097,8 +6747,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             chat: chat.clone(),
                         });
                         for ((real_id, _), q) in targets.into_iter().zip(queued) {
-                            tokio::spawn(send_message(
-                                shared.clone(),
+                            enqueue_send(
+                                &shared,
                                 real_id,
                                 q.message_id,
                                 q.text,
@@ -6110,7 +6760,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                                 q.forwarded,
                                 q.reply_ref,
                                 q.mentions,
-                            ));
+                            );
                         }
                     }
                     Err(err) => {
@@ -6159,6 +6809,24 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         });
                     }
                     Err(err) => shared.fail("fork the chat", &err),
+                }
+            });
+        }
+        ClientCommand::SetPins { pins } => {
+            // Optimistic: the list is cached and shown now; the relay's answer (cleaned,
+            // capped) replaces it, and a refusal re-reads the stored list.
+            shared.with_store(|s| s.put_json(store::KEY_PINS, &pins));
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                match shared.put_json("/me/pins", json!({ "pins": pins })).await {
+                    Ok(v) => match serde_json::from_value::<PinsDto>(v) {
+                        Ok(dto) => apply_pins(&shared, dto.pins, Some(dto.cap as usize)),
+                        Err(err) => shared.diagnostic("pins", format!("{err:#}")),
+                    },
+                    Err(err) => {
+                        shared.diagnostic("pins", format!("{err:#}"));
+                        refresh_pins(&shared).await;
+                    }
                 }
             });
         }
@@ -6968,6 +7636,243 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
+        ClientCommand::ConnectAgent {
+            name,
+            transport,
+            avatar_color_index,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let mut body = json!({ "name": name, "transport": transport });
+                if let Some(i) = avatar_color_index {
+                    body["avatar_color_index"] = json!(i);
+                }
+                match shared.post_json("/outside-agents", body).await {
+                    Ok(v) => {
+                        let _ = shared.events.send(SyncEvent::OutsideAgentKey {
+                            project_id: v["agent"]["project_id"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_owned(),
+                            name: v["agent"]["name"].as_str().unwrap_or(&name).to_owned(),
+                            transport: v["agent"]["transport"]
+                                .as_str()
+                                .unwrap_or(&transport)
+                                .to_owned(),
+                            key: v["key"].as_str().unwrap_or_default().to_owned(),
+                            link: v["link"].as_str().unwrap_or_default().to_owned(),
+                            relay_url: v["relay_url"].as_str().unwrap_or_default().to_owned(),
+                            chat_id: v["chat_id"].as_str().map(str::to_owned),
+                            rotated: false,
+                        });
+                        if let Err(err) = refresh_registry(&shared).await {
+                            shared.diagnostic("refresh", format!("{err:#}"));
+                        }
+                    }
+                    Err(err) => shared.fail("connect the agent", &err),
+                }
+            });
+        }
+        ClientCommand::OutsideAgentStatus { project_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Ok(v) = shared
+                    .get_json(&format!("/outside-agents/{project_id}"))
+                    .await
+                {
+                    if let Ok(info) =
+                        serde_json::from_value::<crate::model::OutsideInfo>(v["agent"].clone())
+                    {
+                        let _ = shared
+                            .events
+                            .send(SyncEvent::OutsideAgentStatus { project_id, info });
+                    }
+                }
+            });
+        }
+        ClientCommand::OutsideAgentWakeSet {
+            project_id,
+            url,
+            auth,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let mut body = serde_json::Map::new();
+                let field = |v: Option<String>| {
+                    v.map(|s| {
+                        if s.trim().is_empty() {
+                            Value::Null
+                        } else {
+                            Value::String(s)
+                        }
+                    })
+                };
+                if let Some(u) = field(url) {
+                    body.insert("wake_url".into(), u);
+                }
+                if let Some(a) = field(auth) {
+                    body.insert("wake_auth".into(), a);
+                }
+                let result = shared
+                    .patch_json(
+                        &format!("/outside-agents/{project_id}"),
+                        Value::Object(body),
+                    )
+                    .await;
+                let error = match &result {
+                    Ok(v) => {
+                        if let Ok(info) =
+                            serde_json::from_value::<crate::model::OutsideInfo>(v["agent"].clone())
+                        {
+                            let _ = shared.events.send(SyncEvent::OutsideAgentStatus {
+                                project_id: project_id.clone(),
+                                info,
+                            });
+                        }
+                        None
+                    }
+                    Err(e) => Some(short_relay_error(e)),
+                };
+                let _ = shared
+                    .events
+                    .send(SyncEvent::OutsideAgentWakeSaved { project_id, error });
+            });
+        }
+        ClientCommand::OutsideAgentWakeTest { project_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let result = shared
+                    .post_json(
+                        &format!("/outside-agents/{project_id}/wake/test"),
+                        json!({}),
+                    )
+                    .await;
+                let (ok, text) = match result {
+                    Ok(v) => {
+                        let ok = v["ok"].as_bool().unwrap_or(false);
+                        let text = if ok {
+                            match v["status"].as_u64() {
+                                Some(s) => format!("Delivered · HTTP {s}"),
+                                None => "Delivered".to_owned(),
+                            }
+                        } else {
+                            v["error"]
+                                .as_str()
+                                .map(|e| format!("Failed · {e}"))
+                                .unwrap_or_else(|| "Failed".to_owned())
+                        };
+                        (ok, text)
+                    }
+                    Err(e) => (false, short_relay_error(&e)),
+                };
+                let _ = shared.events.send(SyncEvent::OutsideAgentStatus {
+                    project_id: project_id.clone(),
+                    info: match shared
+                        .get_json(&format!("/outside-agents/{project_id}"))
+                        .await
+                        .ok()
+                        .and_then(|v| serde_json::from_value(v["agent"].clone()).ok())
+                    {
+                        Some(info) => info,
+                        None => {
+                            let _ = shared.events.send(SyncEvent::OutsideAgentWakeTested {
+                                project_id,
+                                ok,
+                                text,
+                            });
+                            return;
+                        }
+                    },
+                });
+                let _ = shared.events.send(SyncEvent::OutsideAgentWakeTested {
+                    project_id,
+                    ok,
+                    text,
+                });
+            });
+        }
+        ClientCommand::OutsideAgentRotate { project_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                match shared
+                    .post_json(&format!("/outside-agents/{project_id}/rotate"), json!({}))
+                    .await
+                {
+                    Ok(v) => {
+                        let _ = shared.events.send(SyncEvent::OutsideAgentKey {
+                            project_id: project_id.clone(),
+                            name: v["agent"]["name"].as_str().unwrap_or_default().to_owned(),
+                            transport: v["agent"]["transport"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_owned(),
+                            key: v["key"].as_str().unwrap_or_default().to_owned(),
+                            link: v["link"].as_str().unwrap_or_default().to_owned(),
+                            relay_url: v["relay_url"].as_str().unwrap_or_default().to_owned(),
+                            chat_id: None,
+                            rotated: true,
+                        });
+                        if let Ok(info) =
+                            serde_json::from_value::<crate::model::OutsideInfo>(v["agent"].clone())
+                        {
+                            let _ = shared
+                                .events
+                                .send(SyncEvent::OutsideAgentStatus { project_id, info });
+                        }
+                    }
+                    Err(err) => shared.fail("rotate the key", &err),
+                }
+            });
+        }
+        ClientCommand::OutsideAgentScope {
+            project_id,
+            scope,
+            on,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let body = json!({ "scopes": { scope: on } });
+                match shared
+                    .patch_json(&format!("/outside-agents/{project_id}"), body)
+                    .await
+                {
+                    Ok(v) => {
+                        if let Ok(info) =
+                            serde_json::from_value::<crate::model::OutsideInfo>(v["agent"].clone())
+                        {
+                            let _ = shared
+                                .events
+                                .send(SyncEvent::OutsideAgentStatus { project_id, info });
+                        }
+                    }
+                    Err(err) => shared.fail("change what the agent may do", &err),
+                }
+            });
+        }
+        ClientCommand::OutsideAgentRevoke { project_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .delete(&format!("/outside-agents/{project_id}"))
+                    .await
+                {
+                    shared.fail("revoke the agent's access", &err);
+                    return;
+                }
+                if let Ok(v) = shared
+                    .get_json(&format!("/outside-agents/{project_id}"))
+                    .await
+                {
+                    if let Ok(info) =
+                        serde_json::from_value::<crate::model::OutsideInfo>(v["agent"].clone())
+                    {
+                        let _ = shared
+                            .events
+                            .send(SyncEvent::OutsideAgentStatus { project_id, info });
+                    }
+                }
+            });
+        }
         ClientCommand::DeleteProject { project_id } => {
             let shared = shared.clone();
             tokio::spawn(async move {
@@ -7190,6 +8095,48 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
+        ClientCommand::FetchCopyBlobs {
+            project_id,
+            request,
+            keys,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                // Every blob at once; one that fails leaves a hole, the rest still copy.
+                let fetches = keys.iter().map(|key| {
+                    let shared = shared.clone();
+                    let project_id = project_id.clone();
+                    let key = key.clone();
+                    async move {
+                        let mut attempt = 0u32;
+                        loop {
+                            match fetch_blob_bytes(&shared, &project_id, &key).await {
+                                Ok((mime, bytes)) => {
+                                    break Some(CopyBlob {
+                                        key,
+                                        mime,
+                                        bytes: Arc::new(bytes),
+                                    })
+                                }
+                                Err(err) => {
+                                    let text = format!("{err:#}");
+                                    if diagnostics::is_transient(&text) && attempt < 2 {
+                                        attempt += 1;
+                                        sleep(Duration::from_millis(400 * u64::from(attempt)))
+                                            .await;
+                                        continue;
+                                    }
+                                    shared.diagnostic("copy", format!("{key}: {text}"));
+                                    break None;
+                                }
+                            }
+                        }
+                    }
+                });
+                let blobs = futures::future::join_all(fetches).await;
+                let _ = shared.events.send(SyncEvent::CopyBlobs { request, blobs });
+            });
+        }
         ClientCommand::DownloadAttachment {
             project_id,
             key,
@@ -7224,13 +8171,22 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         } => {
             let shared = shared.clone();
             tokio::spawn(async move {
+                let mut opened_path = None;
                 match fetch_blob_bytes(&shared, &project_id, &key).await {
                     Ok((_, bytes)) => {
                         let dir = std::env::temp_dir().join("arbos-media");
                         let _ = tokio::fs::create_dir_all(&dir).await;
                         let path = dir.join(safe_name(&name));
                         match tokio::fs::write(&path, &bytes).await {
-                            Ok(()) => crate::ui::attachments::open_with_system(&path, quick_look),
+                            Ok(()) => {
+                                // Videos play inline on macOS (AVPlayerView); Quick Look
+                                // and non-mac always hand the file to the system.
+                                let open_external = quick_look || !cfg!(target_os = "macos");
+                                if open_external {
+                                    crate::ui::attachments::open_with_system(&path, quick_look);
+                                }
+                                opened_path = Some(path);
+                            }
                             Err(err) => shared.fail(&format!("open {name}"), &err),
                         }
                     }
@@ -7239,7 +8195,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         shared.fail(&format!("open {name}"), &err);
                     }
                 }
-                let _ = shared.events.send(SyncEvent::AttachmentOpened { key });
+                let _ = shared.events.send(SyncEvent::AttachmentOpened {
+                    key,
+                    path: opened_path,
+                });
             });
         }
         ClientCommand::RefreshConnectors => {
@@ -7319,7 +8278,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         ClientCommand::SecretsRefresh => {
             let shared = shared.clone();
             tokio::spawn(async move {
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
             });
         }
         ClientCommand::DevicesRefresh => {
@@ -7407,7 +8366,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     approval_id,
                     result,
                 });
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
             });
         }
         ClientCommand::SecretAdd { item } => {
@@ -7436,7 +8395,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     }
                     Err(err) => shared.fail("save the secret", &err),
                 }
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
             });
         }
         ClientCommand::SecretPatch { id, body } => {
@@ -7445,7 +8404,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 if let Err(err) = shared.patch_json(&format!("/secrets/{id}"), body).await {
                     shared.fail("save the secret", &err);
                 }
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
             });
         }
         ClientCommand::SecretReplaceValue { id, body } => {
@@ -7457,7 +8416,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     ),
                     Err(err) => shared.fail("replace the value", &err),
                 }
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
             });
         }
         ClientCommand::SecretDelete { id } => {
@@ -7466,7 +8425,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 if let Err(err) = shared.delete(&format!("/secrets/{id}")).await {
                     shared.fail("delete the secret", &err);
                 }
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
             });
         }
         ClientCommand::SecretAccess {
@@ -7487,7 +8446,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 {
                     shared.fail("change who may use it", &err);
                 }
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
                 refresh_project_secrets(&shared, &project_id).await;
             });
         }
@@ -7500,7 +8459,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 {
                     shared.fail("revoke the access", &err);
                 }
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
             });
         }
         ClientCommand::SecretPerson {
@@ -7521,7 +8480,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 {
                     shared.fail("change that person's access", &err);
                 }
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
             });
         }
         ClientCommand::SecretPeopleAdd { id, handles } => {
@@ -7538,7 +8497,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         shared.fail(&format!("add @{handle}"), &err);
                     }
                 }
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
             });
         }
         ClientCommand::SecretPersonRemove { id, user_id } => {
@@ -7550,7 +8509,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 {
                     shared.fail("remove that person", &err);
                 }
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
             });
         }
         ClientCommand::SecretsPause { paused } => {
@@ -7562,7 +8521,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 {
                     shared.fail("change the pause", &err);
                 }
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
             });
         }
         ClientCommand::SecretDecide {
@@ -7597,7 +8556,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     }
                     Err(err) => shared.fail("answer the request", &err),
                 }
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
             });
         }
         ClientCommand::VaultConnect {
@@ -7641,7 +8600,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         });
                     }
                 }
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
             });
         }
         ClientCommand::VaultAccess {
@@ -7660,7 +8619,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 {
                     shared.fail("change the vault access", &err);
                 }
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
                 refresh_project_secrets(&shared, &project_id).await;
             });
         }
@@ -7676,7 +8635,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 {
                     shared.fail("save the item name", &err);
                 }
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
             });
         }
         ClientCommand::VaultReplaceToken { id, token } => {
@@ -7704,7 +8663,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         });
                     }
                 }
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
             });
         }
         ClientCommand::VaultDisconnect { id } => {
@@ -7713,7 +8672,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 if let Err(err) = shared.delete(&format!("/vaults/{id}")).await {
                     shared.fail("disconnect the vault", &err);
                 }
-                refresh_secrets(&shared).await;
+                refresh_secrets(&shared, SecretsWhy::Asked).await;
             });
         }
         ClientCommand::RoutinesRefresh { project_id } => {
@@ -8237,17 +9196,74 @@ async fn refresh_connectors(shared: &Arc<Shared>) {
     }
 }
 
+/// Why a secrets refresh runs: a person asked (the pane opened, Refresh, after a save — the
+/// pane's note shows a failure) or the 15 s poll, which is quiet about failures (the
+/// connection pill is the one place a link fault shows) and backs off while they continue.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SecretsWhy {
+    Asked,
+    Poll,
+}
+
+/// How many poll ticks to skip after `failures` failures in a row: 1, 2, 4, 8, 16, 20 (15 s
+/// ticks → the poll asks every 30 s, 1 min, 2 min, 4 min, 5 min, 5 min…). Zero while healthy.
+pub(crate) fn secrets_poll_skip_after(failures: u32) -> u32 {
+    match failures {
+        0 => 0,
+        1 => 1,
+        2 => 2,
+        3 => 4,
+        4 => 8,
+        5 => 16,
+        _ => 20,
+    }
+}
+
+/// The poll's turn: runs the refresh unless the streak says to skip this tick.
+async fn poll_secrets(shared: &Arc<Shared>) {
+    let skip = shared.secrets_poll_skip.load(Ordering::SeqCst);
+    if skip > 0 {
+        shared.secrets_poll_skip.store(skip - 1, Ordering::SeqCst);
+        return;
+    }
+    refresh_secrets(shared, SecretsWhy::Poll).await;
+}
+
 /// Settings → Secrets: `GET /secrets` + `GET /secrets/requests` → one view (D83). Never values.
-async fn refresh_secrets(shared: &Arc<Shared>) {
-    let (overview, requests) = tokio::join!(
+/// One fetch at a time: a second call while one is in flight does nothing (the running one
+/// delivers the view).
+async fn refresh_secrets(shared: &Arc<Shared>, why: SecretsWhy) {
+    if shared
+        .secrets_inflight
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    let outcome = tokio::join!(
         shared.get_json("/secrets"),
         shared.get_json("/secrets/requests")
     );
-    let (overview, requests) = match (overview, requests) {
-        (Ok(o), Ok(r)) => (o, r),
+    shared.secrets_inflight.store(false, Ordering::SeqCst);
+    let (overview, requests) = match outcome {
+        (Ok(o), Ok(r)) => {
+            shared.secrets_poll_failures.store(0, Ordering::SeqCst);
+            shared.secrets_poll_skip.store(0, Ordering::SeqCst);
+            (o, r)
+        }
         (Err(err), _) | (_, Err(err)) => {
-            if !format!("{err:#}").contains("HTTP 404") {
-                shared.fail("load your secrets", &err);
+            if format!("{err:#}").contains("HTTP 404") {
+                return;
+            }
+            match why {
+                SecretsWhy::Asked => shared.fail("load your secrets", &err),
+                SecretsWhy::Poll => {
+                    let failures = shared.secrets_poll_failures.fetch_add(1, Ordering::SeqCst) + 1;
+                    shared
+                        .secrets_poll_skip
+                        .store(secrets_poll_skip_after(failures), Ordering::SeqCst);
+                    shared.diagnostic("secrets-poll", format!("{err:#}"));
+                }
             }
             return;
         }
@@ -8313,11 +9329,34 @@ async fn refresh_shell_grants(shared: &Arc<Shared>, project_id: &str) {
             });
         }
         Err(err) => {
-            if !format!("{err:#}").contains("HTTP 404") {
-                shared.fail("load the shell approvals", &err);
+            if let Some(event) = shell_grants_failed(project_id, &err) {
+                let _ = shared.events.send(event);
             }
         }
     }
+}
+
+/// What a failed shell-approvals load becomes. Shell approvals are the owner's: a viewer of
+/// someone else's agent (a guest, a connected agent run by another account) gets 403
+/// `not_owner`, which is the expected answer — the pane just has none, no toast. A 404 (older
+/// relay) says nothing; anything else is a real failure and is told.
+pub(super) fn shell_grants_failed(project_id: &str, err: &anyhow::Error) -> Option<SyncEvent> {
+    let not_ours = err
+        .downcast_ref::<RelayError>()
+        .is_some_and(|e| e.status == 403 && e.kind == "not_owner");
+    if not_ours {
+        return Some(SyncEvent::ShellGrants {
+            project_id: project_id.to_string(),
+            items: Vec::new(),
+        });
+    }
+    if format!("{err:#}").contains("HTTP 404") {
+        return None;
+    }
+    Some(SyncEvent::Failure {
+        error: UserError::classify("load the shell approvals", err),
+        retry: None,
+    })
 }
 
 /// Marker in a `run_session` error chain: the WebSocket never opened (TCP,
@@ -8382,6 +9421,19 @@ fn link_fault(err: &anyhow::Error) -> LinkState {
         }
     }
     LinkState::Reconnecting
+}
+
+/// What the registry poll tells the connection pill after a failed refresh: a fresh socket /
+/// resolver fault (`Offline` / `RelayDown`) goes up as it is; anything else is a verdict of
+/// `Live` when the relay answered something within the last two polls (the link is fine, the
+/// refresh tripped on content), and no verdict at all when it did not (nothing new to say —
+/// the earlier state stands until a fault or an answer).
+fn registry_link_verdict(fault: LinkState, answered_recently: bool) -> Option<LinkState> {
+    match fault {
+        LinkState::Offline | LinkState::RelayDown => Some(fault),
+        _ if answered_recently => Some(LinkState::Live),
+        _ => None,
+    }
 }
 
 /// Socket-level verdict: no route / no DNS is this Mac being offline; a refusal
@@ -8469,6 +9521,60 @@ mod generate_failure_tests {
             draft.sentence(),
             "Couldn't generate the image. Generate is not on this relay yet; upload a picture instead."
         );
+    }
+}
+
+#[cfg(test)]
+mod snapshot_coalesce_tests {
+    use super::{catch_up_snapshot_times, snapshot_emit_times, CATCH_UP_SNAPSHOT_WINDOW_MS};
+
+    #[test]
+    fn catch_up_events_at_0_10_50_120_produce_two_snapshots() {
+        assert_eq!(
+            catch_up_snapshot_times(&[0, 10, 50, 120], CATCH_UP_SNAPSHOT_WINDOW_MS),
+            vec![80, 200]
+        );
+    }
+
+    #[test]
+    fn after_live_each_list_changed_emits_at_once() {
+        let events = [(0, false), (10, false), (50, false), (120, false)];
+        assert_eq!(
+            snapshot_emit_times(&events, CATCH_UP_SNAPSHOT_WINDOW_MS),
+            vec![0, 10, 50, 120]
+        );
+    }
+
+    #[test]
+    fn catch_up_end_flushes_pending_then_live_emits_at_once() {
+        // Catch-up burst, then live: pending window flushes at the live
+        // transition, then each live event is its own snapshot.
+        let events = [
+            (0, true),
+            (10, true),
+            (50, true),
+            (100, false),
+            (110, false),
+        ];
+        assert_eq!(
+            snapshot_emit_times(&events, CATCH_UP_SNAPSHOT_WINDOW_MS),
+            vec![100, 110]
+        );
+    }
+
+    /// Perf-rig style: 2 000 backfilled rows must not produce 2 000 snapshots.
+    #[test]
+    fn two_thousand_backfilled_rows_produce_well_under_two_thousand_snapshots() {
+        let events: Vec<u64> = (0..2_000).collect();
+        let emits = catch_up_snapshot_times(&events, CATCH_UP_SNAPSHOT_WINDOW_MS);
+        assert!(
+            emits.len() < 50,
+            "expected well under 2 000 snapshots, got {}",
+            emits.len()
+        );
+        assert!(!emits.is_empty());
+        // Trailing edge of the first window, then every window_ms thereafter.
+        assert_eq!(emits.first().copied(), Some(CATCH_UP_SNAPSHOT_WINDOW_MS));
     }
 }
 
@@ -8625,5 +9731,156 @@ mod refused_retry_tests {
             json!({ "chat_id": "dm-1", "by_handle": "sam" }),
         );
         assert_eq!(refusal_nudge_chat(&deleted), None);
+    }
+}
+
+/// [feedback toast-stack-mac-2026-10-27]: a failing 15 s poll asks less and less often
+/// instead of failing — and toasting — every tick.
+/// [feedback archived-chat-stays-archived-2026-10-29]: a refresh never brings back a hidden
+/// people chat, and an (un)archive made on this Mac during the refresh wins.
+#[cfg(test)]
+mod people_archive_tests {
+    use super::align_people_archive;
+    use crate::model::{Chat, ChatKind, Project, SpaceKind};
+
+    fn space(id: &str, kind: SpaceKind, archived_at: Option<u64>) -> Project {
+        Project {
+            id: id.into(),
+            kind,
+            archived_at,
+            ..Project::default()
+        }
+    }
+
+    fn chat(id: &str, archived_at: Option<u64>) -> Chat {
+        Chat {
+            id: id.into(),
+            project_id: id.into(),
+            title: String::new(),
+            is_pinned: true,
+            is_system: false,
+            unread: false,
+            unread_count: 0,
+            last_message_at: 0,
+            archived_at,
+            kind: ChatKind::Chat,
+            participants: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn people_rows_follow_their_merged_chat_and_agents_keep_their_own_mark() {
+        let mut projects = vec![
+            space("dm", SpaceKind::Dm, None),
+            space("grp", SpaceKind::Group, Some(5)),
+            space("agent", SpaceKind::Project, Some(7)),
+        ];
+        let merged = vec![chat("dm", Some(9)), chat("grp", None), chat("agent", None)];
+        align_people_archive(&mut projects, &merged);
+        assert_eq!(projects[0].archived_at, Some(9), "archived DM stays hidden");
+        assert_eq!(projects[1].archived_at, None, "unarchived group comes back");
+        assert_eq!(
+            projects[2].archived_at,
+            Some(7),
+            "agents use the space archive"
+        );
+    }
+}
+
+/// [feedback shell-approvals-403-quiet-2026-10-29]: opening someone else's agent hides its
+/// shell approvals quietly; every other failure still reaches the user.
+#[cfg(test)]
+mod shell_grants_failed_tests {
+    use super::{shell_grants_failed, RelayError, SyncEvent};
+    use reqwest::StatusCode;
+
+    fn relay(status: u16, kind: &str, message: &str) -> anyhow::Error {
+        let body = serde_json::json!({ "error": { "type": kind, "message": message } });
+        RelayError::from_body(
+            StatusCode::from_u16(status).expect("status"),
+            &body.to_string(),
+        )
+        .into()
+    }
+
+    fn is_toast(event: Option<SyncEvent>) -> bool {
+        matches!(event, Some(SyncEvent::Failure { .. }))
+    }
+
+    #[test]
+    fn not_owner_hides_the_approvals_without_a_toast() {
+        let err =
+            relay(403, "not_owner", "not your project").context("GET /projects/p1/shell-grants");
+        match shell_grants_failed("p1", &err) {
+            Some(SyncEvent::ShellGrants { project_id, items }) => {
+                assert_eq!(project_id, "p1");
+                assert!(items.is_empty());
+            }
+            _ => panic!("403 not_owner must be an empty list, not a failure"),
+        }
+    }
+
+    #[test]
+    fn real_failures_still_surface() {
+        for (status, kind) in [
+            (403, "forbidden"),
+            (401, "unauthorized"),
+            (400, "bad_request"),
+            (500, "internal"),
+        ] {
+            let err = relay(status, kind, "refused");
+            assert!(is_toast(shell_grants_failed("p1", &err)), "{status} {kind}");
+        }
+        assert!(is_toast(shell_grants_failed(
+            "p1",
+            &anyhow::anyhow!("connection reset").context("GET /projects/p1/shell-grants")
+        )));
+    }
+
+    #[test]
+    fn an_older_relay_without_the_route_says_nothing() {
+        assert!(shell_grants_failed("p1", &relay(404, "not_found", "no route")).is_none());
+    }
+}
+
+#[cfg(test)]
+mod secrets_poll_tests {
+    use super::secrets_poll_skip_after;
+
+    #[test]
+    fn a_failing_poll_backs_off_to_five_minutes_and_a_success_resets_it() {
+        // Ticks skipped after n failures in a row: 15 s ticks → asks at 30 s, 1, 2, 4, 5 min…
+        assert_eq!(
+            (0..8).map(secrets_poll_skip_after).collect::<Vec<_>>(),
+            vec![0, 1, 2, 4, 8, 16, 20, 20]
+        );
+        // Longest gap between two asks: (20 + 1) × 15 s ≈ 5 min.
+        assert!((secrets_poll_skip_after(99) + 1) * 15 <= 5 * 60 + 15);
+    }
+}
+
+/// [feedback stale-offline-pill-mac-2026-10-27]: the pill's Offline never outlives the relay's
+/// next answer.
+#[cfg(test)]
+mod registry_link_tests {
+    use super::{registry_link_verdict, LinkState};
+
+    #[test]
+    fn a_fresh_fault_goes_up_and_an_odd_error_after_an_answer_clears_a_stale_one() {
+        assert_eq!(
+            registry_link_verdict(LinkState::Offline, true),
+            Some(LinkState::Offline)
+        );
+        assert_eq!(
+            registry_link_verdict(LinkState::RelayDown, false),
+            Some(LinkState::RelayDown)
+        );
+        // One project's 404 / bad JSON after the relay answered: the link is Live.
+        assert_eq!(
+            registry_link_verdict(LinkState::Reconnecting, true),
+            Some(LinkState::Live)
+        );
+        // The same with no answer at all this tick says nothing new.
+        assert_eq!(registry_link_verdict(LinkState::Reconnecting, false), None);
     }
 }

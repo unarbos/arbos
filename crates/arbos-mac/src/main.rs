@@ -5,12 +5,14 @@ mod audio;
 mod auth;
 mod calls;
 mod chat_search;
+mod draft_dm;
 mod image_picker;
 mod jobtabs;
 mod model;
 mod onboarding;
 mod palette;
 mod panic_log;
+mod pasteboard;
 mod search;
 mod search_index;
 mod sign_in;
@@ -40,11 +42,56 @@ use crate::ui::theme::{
 use crate::ui::transcript;
 use crate::ui::widgets;
 
+/// Open the GPUI platform. On Linux, gpui_linux unwraps when `DISPLAY` is set but the
+/// X11 client cannot connect (`Failed to initialize X11 client`); catch that and exit
+/// with a clear message instead of aborting into the silent-diagnostic panic path
+/// ([feedback app-01M64QW84JQHHWHMWS2CZ6Z92T]).
+fn open_platform() -> gpui::Application {
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        // Swallow the unwrap panic's default stderr dump; we print our own line below.
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let opened =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(gpui_platform::application));
+        std::panic::set_hook(previous);
+        match opened {
+            Ok(app) => app,
+            Err(_) => {
+                let display = std::env::var("DISPLAY").unwrap_or_default();
+                let hint = if display.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (DISPLAY={display})")
+                };
+                eprintln!(
+                    "Arbos could not open a display{hint}: the X11 (or Wayland) connection failed."
+                );
+                eprintln!(
+                    "Start a working display server, or unset DISPLAY / WAYLAND_DISPLAY, then try again."
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    {
+        gpui_platform::application()
+    }
+}
+
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     // Before any thread or window: a panic that would end as a bare SIGABRT leaves its
     // message and backtrace in ~/Library/Logs/Arbos/panic.log (reported on the next launch).
+    // On Linux the platform open itself can unwrap-panic when DISPLAY is set but X11 is
+    // unreachable; open that first (and exit cleanly) so a broken display does not file a
+    // silent diagnostic.
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     panic_log::install();
+    // rustls has two crypto backends linked (ring via tokio-tungstenite/reqwest,
+    // aws-lc-rs via matrix). It refuses to guess; install ring before any TLS.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let handle = runtime.handle().clone();
 
@@ -57,7 +104,9 @@ fn main() {
     type JoinHook = Rc<RefCell<Option<(gpui::AsyncApp, gpui::Entity<AppState>)>>>;
     let join_hook: JoinHook = Rc::new(RefCell::new(None));
     let pending_joins: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
-    let app = gpui_platform::application().with_assets(crate::ui::icons::Assets);
+    let app = open_platform().with_assets(crate::ui::icons::Assets);
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    panic_log::install();
     {
         let (hook, pending) = (join_hook.clone(), pending_joins.clone());
         app.on_open_urls(move |urls| {
@@ -116,6 +165,7 @@ fn main() {
         cx.set_global(Theme::for_pref(pref, surface, cx));
         cx.set_reduce_motion(motion::system_reduce_motion());
         PulseClock::init(cx);
+        ui::working::WorkingClock::init(cx);
         bind_keys(cx);
         set_menus(cx);
 
@@ -262,6 +312,15 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-right", composer::SelectWordRight, input),
         KeyBinding::new("alt-shift-left", composer::SelectWordLeft, input),
         KeyBinding::new("alt-shift-right", composer::SelectWordRight, input),
+        // Caret chords of NSTextView ([feedback composer-caret-shortcuts-2026-10-27],
+        // Jacob): ⌘← / ⌘→ = start / end of the *visual* (wrapped) line
+        // (`moveToLeftEndOfLine:` / `moveToRightEndOfLine:`), ⌘↑ / ⌘↓ = start /
+        // end of the whole draft (`moveToBeginningOfDocument:` /
+        // `moveToEndOfDocument:`), ⇧ extends the selection the same way
+        // (`…AndModifySelection:`), ⌘⌫ deletes to the visual line's start
+        // (`deleteToBeginningOfLine:`). All in the "ComposerInput" context only:
+        // with the composer unfocused the chords fall through to whatever else
+        // binds them (nothing today).
         KeyBinding::new("home", composer::Home, input),
         KeyBinding::new("end", composer::End, input),
         KeyBinding::new("shift-home", composer::SelectHome, input),
@@ -270,6 +329,11 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-right", composer::End, input),
         KeyBinding::new("cmd-shift-left", composer::SelectHome, input),
         KeyBinding::new("cmd-shift-right", composer::SelectEnd, input),
+        KeyBinding::new("cmd-up", composer::DocumentStart, input),
+        KeyBinding::new("cmd-down", composer::DocumentEnd, input),
+        KeyBinding::new("cmd-shift-up", composer::SelectDocumentStart, input),
+        KeyBinding::new("cmd-shift-down", composer::SelectDocumentEnd, input),
+        KeyBinding::new("cmd-backspace", composer::DeleteToLineStart, input),
         KeyBinding::new("cmd-a", composer::SelectAll, input),
         KeyBinding::new("ctrl-a", composer::SelectAll, input),
         KeyBinding::new("cmd-v", composer::Paste, input),
@@ -302,8 +366,23 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-}", shell::NextTab, None),
         KeyBinding::new("ctrl-{", shell::PrevTab, None),
         KeyBinding::new("ctrl-}", shell::NextTab, None),
+        // Braces need ⌥ on German, French, Spanish, Italian and the Nordic
+        // layouts, so `cmd-{` / `cmd-}` cannot be typed there ([feedback
+        // mention-hotkey-layout-2026-10-28] audit). ⌃⇥ / ⌃⇧⇥ are the
+        // layout-independent macOS tab chords (Safari, Terminal, Xcode).
+        KeyBinding::new("ctrl-tab", shell::NextTab, None),
+        KeyBinding::new("ctrl-shift-tab", shell::PrevTab, None),
         KeyBinding::new("ctrl-t", shell::NewTab, None),
         KeyBinding::new("cmd-b", shell::ToggleRail, None),
+        // Chat-Markdown chords ([feedback chat-markdown-composer-2026-10-27]):
+        // ⌘B / ⌘I / ⌘⇧X wrap the selection in `**` / `*` / `~~` (or unwrap it)
+        // while the composer is focused; blurred, ⌘B keeps toggling the sidebar
+        // (the binding above) — Jacob's default, vetoable. Bound after it: a
+        // later binding wins when both match, and this one matches only in the
+        // "ComposerInput" context.
+        KeyBinding::new("cmd-b", composer::Bold, input),
+        KeyBinding::new("cmd-i", composer::Italic, input),
+        KeyBinding::new("cmd-shift-x", composer::Strike, input),
         KeyBinding::new("ctrl-b", shell::ToggleRail, None),
         // App-wide search (Jacob 2026-10-24): ⌘⇧F opens the command palette,
         // ⌘K is its alias (free before this).
@@ -347,9 +426,11 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-8", palette_ui::Pick8, Some("Palette")),
         KeyBinding::new("cmd-9", palette_ui::Pick9, Some("Palette")),
         KeyBinding::new("escape", shell::Escape, None),
-        // Media viewer: ← → page through the album (Esc closes via the shell).
+        // Media viewer: ← → page through the album (Esc closes via the shell); ⌘C
+        // copies the open picture ([feedback copy-image-messages-mac-2026-10-27]).
         KeyBinding::new("left", media_viewer::Prev, Some("MediaViewer")),
         KeyBinding::new("right", media_viewer::Next, Some("MediaViewer")),
+        KeyBinding::new("cmd-c", media_viewer::CopyItem, Some("MediaViewer")),
         KeyBinding::new("cmd-q", shell::Quit, None),
         // Send Feedback moved off ⌘⇧F when the palette took it (2026-10-24).
         KeyBinding::new("cmd-alt-f", feedback::SendFeedback, None),
@@ -449,9 +530,155 @@ mod keymap_tests {
         });
     }
 
+    /// The caret chords ([feedback composer-caret-shortcuts-2026-10-27]) are
+    /// the focused composer's; outside it nothing takes them (no chat-list or
+    /// transcript binding swallows ⌘↑ / ⌘↓ before the input).
+    #[gpui::test]
+    fn caret_chords_route_to_the_focused_composer_only(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            bind_keys(cx);
+            let mut composer = gpui::KeyContext::default();
+            composer.add("ComposerInput");
+            let root = gpui::KeyContext::default();
+            let keymap = cx.key_bindings();
+            let first = |keys: &str, stack: &[gpui::KeyContext]| {
+                let stroke = Keystroke::parse(keys).expect("keystroke");
+                keymap
+                    .borrow()
+                    .bindings_for_input(&[stroke], stack)
+                    .0
+                    .first()
+                    .map(|b| b.action().name().to_string())
+            };
+            let chords = [
+                ("cmd-up", "composer::DocumentStart"),
+                ("cmd-down", "composer::DocumentEnd"),
+                ("cmd-left", "composer::Home"),
+                ("cmd-right", "composer::End"),
+                ("cmd-shift-up", "composer::SelectDocumentStart"),
+                ("cmd-shift-down", "composer::SelectDocumentEnd"),
+                ("cmd-shift-left", "composer::SelectHome"),
+                ("cmd-shift-right", "composer::SelectEnd"),
+                ("cmd-backspace", "composer::DeleteToLineStart"),
+                ("alt-left", "composer::WordLeft"),
+                ("alt-right", "composer::WordRight"),
+            ];
+            for (keys, action) in chords {
+                assert_eq!(
+                    first(keys, std::slice::from_ref(&composer)).as_deref(),
+                    Some(action),
+                    "{keys} in the composer"
+                );
+                assert_eq!(
+                    first(keys, std::slice::from_ref(&root)),
+                    None,
+                    "{keys} outside the composer is nobody's"
+                );
+            }
+        });
+    }
+
+    /// ⌘B / ⌘I / ⌘⇧X format the focused composer's selection ([feedback
+    /// chat-markdown-composer-2026-10-27]); with the composer blurred ⌘B is
+    /// still the sidebar toggle and ⌘I / ⌘⇧X are nobody's.
+    #[gpui::test]
+    fn format_chords_are_the_focused_composers_and_cmd_b_toggles_the_rail_outside(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            bind_keys(cx);
+            let mut composer = gpui::KeyContext::default();
+            composer.add("ComposerInput");
+            let root = gpui::KeyContext::default();
+            let keymap = cx.key_bindings();
+            let first = |keys: &str, stack: &[gpui::KeyContext]| {
+                let stroke = Keystroke::parse(keys).expect("keystroke");
+                keymap
+                    .borrow()
+                    .bindings_for_input(&[stroke], stack)
+                    .0
+                    .first()
+                    .map(|b| b.action().name().to_string())
+            };
+            for (keys, action) in [
+                ("cmd-b", "composer::Bold"),
+                ("cmd-i", "composer::Italic"),
+                ("cmd-shift-x", "composer::Strike"),
+            ] {
+                assert_eq!(
+                    first(keys, std::slice::from_ref(&composer)).as_deref(),
+                    Some(action),
+                    "{keys} in the composer"
+                );
+            }
+            assert_eq!(
+                first("cmd-b", std::slice::from_ref(&root)).as_deref(),
+                Some("shell::ToggleRail"),
+                "⌘B outside the composer still toggles the sidebar"
+            );
+            assert_eq!(first("cmd-i", std::slice::from_ref(&root)), None);
+            assert_eq!(first("cmd-shift-x", std::slice::from_ref(&root)), None);
+        });
+    }
+
     #[gpui::test]
     fn send_feedback_moved_to_cmd_alt_f(cx: &mut TestAppContext) {
         assert_eq!(actions_for(cx, "cmd-alt-f"), vec!["feedback::SendFeedback"]);
+    }
+
+    /// Non-US layouts ([feedback mention-hotkey-layout-2026-10-28], Scout):
+    /// GPUI's macOS layer delivers German ⌃⌥L — one of that layout's two ways
+    /// to type `@` — as a bare `ctrl-alt-l` with no character, so no binding
+    /// may claim it (the composer types the layout's character instead,
+    /// `composer::layout_chord_tests`); ⌥L arrives as `alt-l` carrying `@`
+    /// and must stay unbound too, so the platform types it. Every letter chord
+    /// is matched on the character the layout reports under ⌘, so ⌘B / ⌘I /
+    /// ⌘⇧X / ⌘F / ⌘⇧F / ⌘K resolve the same way from a QWERTZ or AZERTY
+    /// keyboard; only braces move under ⌥ there, hence ⌃⇥ / ⌃⇧⇥ for tabs.
+    #[gpui::test]
+    fn non_us_at_sign_chords_are_nobodys_and_tabs_have_layout_free_chords(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            bind_keys(cx);
+            let mut composer = gpui::KeyContext::default();
+            composer.add("ComposerInput");
+            let root = gpui::KeyContext::default();
+            let keymap = cx.key_bindings();
+            let first = |keys: &str, stack: &[gpui::KeyContext]| {
+                let stroke = Keystroke::parse(keys).expect("keystroke");
+                keymap
+                    .borrow()
+                    .bindings_for_input(&[stroke], stack)
+                    .0
+                    .first()
+                    .map(|b| b.action().name().to_string())
+            };
+            for keys in ["ctrl-alt-l", "alt-l->@", "alt-g->@", "alt-2->@"] {
+                assert_eq!(first(keys, std::slice::from_ref(&composer)), None, "{keys}");
+                assert_eq!(first(keys, std::slice::from_ref(&root)), None, "{keys}");
+            }
+            for (keys, action) in [
+                ("cmd-b", "composer::Bold"),
+                ("cmd-i", "composer::Italic"),
+                ("cmd-shift-x", "composer::Strike"),
+                ("cmd-f", "chat_search::Open"),
+                ("cmd-shift-f", "shell::OpenPalette"),
+                ("cmd-k", "shell::OpenPalette"),
+            ] {
+                assert_eq!(
+                    first(keys, std::slice::from_ref(&composer)).as_deref(),
+                    Some(action),
+                    "{keys}"
+                );
+            }
+            assert_eq!(
+                first("ctrl-tab", std::slice::from_ref(&root)).as_deref(),
+                Some("shell::NextTab")
+            );
+            assert_eq!(
+                first("ctrl-shift-tab", std::slice::from_ref(&root)).as_deref(),
+                Some("shell::PrevTab")
+            );
+        });
     }
 
     #[gpui::test]

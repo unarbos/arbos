@@ -15,8 +15,9 @@ use gpui::{
 use crate::app::{ProfilePage, ServerSheet};
 use crate::model::{Person, ServerChannel, ServerInfo};
 use crate::ui::glass;
-use crate::ui::icons::icon;
+use crate::ui::highlight;
 use crate::ui::people;
+use crate::ui::sf_symbols;
 use crate::ui::shell::Shell;
 use crate::ui::sidebar::server_picture;
 use crate::ui::theme::{Theme, TEXT_BODY, TEXT_SMALL};
@@ -25,6 +26,9 @@ use super::pane::{self, Hero, Picture, ProfilePane, Section};
 use super::{editable_name, hero_picture, kit, list_row, HeroClick, HERO_AVATAR};
 
 pub(super) const TABS: [&str; 3] = ["Channels", "Members", "Settings"];
+
+/// The Members tab's one add row (people only — servers hold no agents).
+pub(crate) const ADD_MEMBERS_ID: &str = "server-add-members";
 
 /// Owner first, then admins, then members, each group by handle.
 fn sorted_members(server: &ServerInfo) -> Vec<Person> {
@@ -131,7 +135,7 @@ pub(super) fn page(
         name,
         badge: None,
         subtitle: Some(subtitle.into()),
-        subtitle_color: theme.text_muted,
+        subtitle_color: theme.label_muted(),
         subtitle_click: None,
         subtitle_element: None,
         editor: None,
@@ -206,7 +210,7 @@ fn channels_tab(
                 theme,
             )
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .group(kit::HOT)
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.open_server_sheet(
                     ServerSheet::NewChannel {
@@ -247,11 +251,11 @@ fn channels_tab(
                             .size(px(kit::AVATAR))
                             .flex_shrink_0()
                             .rounded(px(10.0))
-                            .bg(theme.surface_2)
+                            .bg(theme.control_fill())
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(icon("hash", 18.0, theme.text_muted)),
+                            .child(sf_symbols::glyph("number", 18.0, theme.label_muted())),
                     )
                     .child(
                         div()
@@ -262,7 +266,7 @@ fn channels_tab(
                             .flex()
                             .items_center()
                             .rounded(px(8.0))
-                            .bg(theme.field)
+                            .bg(theme.field_fill())
                             .border_1()
                             .border_color(theme.primary)
                             .text_size(px(TEXT_BODY))
@@ -298,7 +302,7 @@ fn channels_tab(
                 );
             if !is_general {
                 let (sid, cid) = (server.id.clone(), ch.id.clone());
-                let group = SharedString::from(format!("channel-row-{key}"));
+                let group = SharedString::from(kit::HOT);
                 controls = controls.child(
                     div()
                         .id(ElementId::Name(SharedString::from(format!(
@@ -312,8 +316,8 @@ fn channels_tab(
                         .justify_center()
                         .opacity(0.0)
                         .group_hover(group, |s| s.opacity(1.0))
-                        .hover(|s| s.bg(theme.surface_2))
-                        .child(icon("xmark", 11.0, theme.text_muted))
+                        .map(|el| highlight::button(el, theme))
+                        .child(sf_symbols::glyph("xmark", 11.0, theme.label_muted()))
                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
@@ -331,20 +335,19 @@ fn channels_tab(
         let rename_name = ch.name.clone();
         let rename_id = ch.id.clone();
         list.push(
-            kit::row(
+            kit::row_state(
                 ElementId::Name(SharedString::from(format!("profile-channel-{key}"))),
-                kit::Leading::Glyph("hash"),
+                kit::Leading::Glyph("number"),
                 ch.name.clone(),
                 subtitle,
                 None,
                 trailing,
                 false,
+                is_selected,
                 theme,
             )
-            .group(SharedString::from(format!("channel-row-{key}")))
-            .when(is_selected, |el| el.bg(theme.surface_2))
+            .group(kit::HOT)
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
             .on_click(
                 cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                     if can_admin && event.click_count() >= 2 {
@@ -396,9 +399,8 @@ fn channels_tab(
                 .flex()
                 .items_center()
                 .rounded_full()
-                .bg(theme.field)
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
+                .map(|el| highlight::washed(el, theme.field_fill(), theme))
                 .text_size(px(TEXT_SMALL))
                 .text_color(theme.text)
                 .child("Unarchive")
@@ -411,7 +413,7 @@ fn channels_tab(
             rows.push(
                 kit::row(
                     ElementId::Name(SharedString::from(format!("channel-archived-{}", ch.id))),
-                    kit::Leading::Glyph("archive"),
+                    kit::Leading::Glyph("archivebox"),
                     ch.name.clone(),
                     ch.restricted.then(|| "Admins only post".into()),
                     None,
@@ -450,8 +452,8 @@ fn members_tab(
         let sid = server.id.clone();
         list.push(
             kit::row(
-                "server-add-members",
-                kit::Leading::Glyph("person-plus"),
+                ADD_MEMBERS_ID,
+                kit::Leading::Glyph("person.badge.plus"),
                 "Add members",
                 None,
                 None,
@@ -459,8 +461,9 @@ fn members_tab(
                 false,
                 theme,
             )
+            .debug_selector(|| ADD_MEMBERS_ID.into())
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .group(kit::HOT)
             .on_click(cx.listener(move |this, _, _, cx| {
                 let sid = sid.clone();
                 this.state
@@ -490,7 +493,7 @@ fn members_tab(
             !is_me && m.role != "owner" && (is_owner || (can_admin && m.role != "admin"));
         let promotable = is_owner && !is_me && m.role != "owner";
         let trailing = (removable || promotable).then(|| {
-            let group = SharedString::from(format!("member-row-{key}"));
+            let group = SharedString::from(kit::HOT);
             let mut controls = div().flex().items_center().gap(px(4.0)).flex_shrink_0();
             if promotable {
                 let (sid, uid) = (server.id.clone(), m.id.clone());
@@ -511,14 +514,14 @@ fn members_tab(
                             el.opacity(0.0)
                                 .group_hover(group.clone(), |s| s.opacity(1.0))
                         })
-                        .hover(|s| s.bg(theme.surface_2))
-                        .child(icon(
-                            "crown",
+                        .map(|el| highlight::button(el, theme))
+                        .child(sf_symbols::glyph(
+                            "crown.fill",
                             12.0,
                             if is_admin {
                                 theme.warn
                             } else {
-                                theme.text_muted
+                                theme.label_muted()
                             },
                         ))
                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -546,8 +549,8 @@ fn members_tab(
                         .justify_center()
                         .opacity(0.0)
                         .group_hover(group, |s| s.opacity(1.0))
-                        .hover(|s| s.bg(theme.surface_2))
-                        .child(icon("xmark", 11.0, theme.text_muted))
+                        .map(|el| highlight::button(el, theme))
+                        .child(sf_symbols::glyph("xmark", 11.0, theme.label_muted()))
                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
@@ -565,13 +568,12 @@ fn members_tab(
                 people::avatar(images[i].clone(), m, kit::AVATAR, theme).into_any_element(),
                 title,
                 subtitle,
-                theme.text_muted,
+                theme.label_muted(),
                 trailing,
                 theme,
             )
-            .group(SharedString::from(format!("member-row-{key}")))
+            .group(kit::HOT)
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
             .on_click(cx.listener(move |this, _, _, cx| {
                 let handle = handle.clone();
                 this.push_profile(
@@ -702,8 +704,8 @@ fn settings_tab(
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
-            .child(icon("xmark", 11.0, theme.text_muted))
+            .map(|el| highlight::button(el, theme))
+            .child(sf_symbols::glyph("xmark", 11.0, theme.label_muted()))
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
@@ -782,7 +784,7 @@ fn settings_tab(
             theme,
         )
         .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
+        .group(kit::HOT)
         .on_click(cx.listener(move |this, _, _, cx| {
             let sid = sid.clone();
             let (expires, single) = (this.invite_expires, this.invite_single_use);
@@ -844,7 +846,7 @@ fn leave_footer(
             .child(
                 div()
                     .text_size(px(TEXT_SMALL))
-                    .text_color(theme.text_muted)
+                    .text_color(theme.label_muted())
                     .child(note),
             )
             .child(

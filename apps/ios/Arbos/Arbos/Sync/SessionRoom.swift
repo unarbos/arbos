@@ -211,6 +211,26 @@ final class SessionRoom {
         drain()
     }
 
+    /// This connection stands refused (`not_available`): sends queue until an ACK, a reconnect
+    /// or `retryRefused()` clears it.
+    var isPushRefused: Bool { session.pushRefused() }
+
+    /// The unACKed batches this room still has to deliver (test surface).
+    var pendingBatches: [(String, Data)] { session.pending().map { ($0.batchId, $0.bytes) } }
+
+    /// The condition behind a refusal may have changed — a people-chat event for this room
+    /// (members, settings, a lifted mute) or the user unblocked someone. The session resends
+    /// every pending batch now with its original batch id (the relay answers `dup` for what
+    /// it already holds) and drops the refusal; the next ACK clears the notice. Nothing is sent
+    /// while the room is not refused, and nudges inside two seconds collapse ([feedback 2005]).
+    @discardableResult
+    func retryRefused() -> Bool {
+        guard !stopped else { return false }
+        let sent = session.retryRefused(nowMs: sessionNowMs())
+        drain()
+        return sent
+    }
+
     /// Scene returned from `.background` (lock unlock). iOS often leaves
     /// URLSession WebSockets half-dead: a dial stays on Syncing… forever, or a
     /// "live" socket never errors and stops delivering rows. `recreateListedRooms`
@@ -677,6 +697,26 @@ struct PushRefusalWhy: Equatable {
     var byHandle: String?
     var byName: String?
 
-    /// The plain sentence the chat shows.
-    var sentence: String { BlockedState.refusalSentence(reason: reason, name: byName, handle: byHandle) }
+    /// The plain sentence the chat shows. Pass `silencedUntilMs` when `reason` is `silenced`.
+    func sentence(silencedUntilMs: Int64? = nil) -> String {
+        BlockedState.refusalSentence(
+            reason: reason, name: byName, handle: byHandle, silencedUntilMs: silencedUntilMs
+        )
+    }
+}
+
+/// Which pushes nudge a refused room to resend ([feedback 2005]): the ones that change who may
+/// post into the chat (its settings, a lifted mute, a member who left or joined). A plain
+/// message carries no such change, and nothing else names a chat the sender can post into.
+enum RefusedSendRetry {
+    static func chatToRetry(_ event: PushEventDto) -> String? {
+        let id: String?
+        switch event {
+        case .peopleChatUpdated(let p): id = p.chat_id
+        case .peopleMemberAdded(let p): id = p.chat_id
+        case .peopleMemberRemoved(let p): id = p.chat_id
+        default: id = nil
+        }
+        return id.flatMap { $0.isEmpty ? nil : $0 }
+    }
 }

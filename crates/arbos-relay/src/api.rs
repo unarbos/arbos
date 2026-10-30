@@ -24,8 +24,12 @@ use crate::state::{AppState, AuthMode};
 
 pub(crate) type ApiResult = Result<Response, (StatusCode, String)>;
 
+/// A handler's 500. Logged here (the route, user and latency follow in the request layer's
+/// `request failed` line): until #2120 a listing 500 left no trace in the journal at all.
 pub(crate) fn internal(e: impl std::fmt::Display) -> (StatusCode, String) {
-    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    let message = e.to_string();
+    tracing::error!(error = %message, "internal error");
+    (StatusCode::INTERNAL_SERVER_ERROR, message)
 }
 
 /// `GET /healthz` body (also used for fixtures).
@@ -133,9 +137,10 @@ pub async fn pair(State(state): State<AppState>, Json(b): Json<PairBody>) -> Api
     .into_response())
 }
 
-/// `GET /devices` — the caller's own devices (the admin token sees every account's). Until
+/// `GET /devices` — the caller's own live devices (the admin token sees every account's). Until
 /// 2026-10-26 this listed every device of every user to any signed-in device, and
 /// `DELETE /devices/{id}` revoked any of them: one test account could log every other user out.
+/// Device tokens see only non-revoked rows of their own user (same list as `/auth/devices`).
 pub async fn list_devices(State(state): State<AppState>, principal: Principal) -> ApiResult {
     if principal.is_box() {
         return Err((
@@ -144,7 +149,7 @@ pub async fn list_devices(State(state): State<AppState>, principal: Principal) -
         ));
     }
     let devices = match principal.user_id() {
-        Some(uid) => state.db.devices_of_user(uid).map_err(internal)?,
+        Some(uid) => state.db.live_devices_of_user(uid).map_err(internal)?,
         None => state.db.list_devices().map_err(internal)?,
     };
     Ok(Json(devices).into_response())
@@ -484,7 +489,12 @@ pub async fn list_projects(State(state): State<AppState>, principal: Principal) 
         }
         Principal::Device { user_id, .. } | Principal::Box { user_id } => {
             let device = matches!(principal, Principal::Device { .. });
-            for p in state.db.projects_of_user(user_id).map_err(internal)? {
+            let mut mine = state.db.projects_of_user(user_id).map_err(internal)?;
+            if !device {
+                // A box never serves an outside agent (#2140).
+                mine = crate::outside::served(&state, mine);
+            }
+            for p in mine {
                 let mut dto = project_dto(&state, &p).await;
                 dto.shared = Some(false);
                 dto.my_role = Some("owner".into());
@@ -555,18 +565,21 @@ pub async fn get_project(
         .map_err(internal)?;
     // The box polls this every 3 s; a changed marker tells it to refetch `/skills/index` (F5).
     let skills_rev = state.db.skills_rev(Some(&p.id)).map_err(internal)?;
-    Ok(Json(
-        serde_json::to_value(GetProjectResponseDto {
-            project: project_dto(&state, &p).await,
-            chats,
-            box_state: bs,
-            box_since: since,
-            spend_today: serde_json::to_value(today).unwrap_or(Value::Null),
-            skills_rev,
-        })
-        .expect("GetProjectResponseDto"),
-    )
-    .into_response())
+    let mut v = serde_json::to_value(GetProjectResponseDto {
+        project: project_dto(&state, &p).await,
+        chats,
+        box_state: bs,
+        box_since: since,
+        spend_today: serde_json::to_value(today).unwrap_or(Value::Null),
+        skills_rev,
+    })
+    .expect("GetProjectResponseDto");
+    // An outside agent (#2140): its connection, for the apps' Details pane. Extra key beside
+    // the DTO so the typeshared Swift/Mac decoders are untouched.
+    if let Ok(Some(a)) = state.db.outside_agent(&p.id) {
+        v["outside"] = a.json(Some(&p));
+    }
+    Ok(Json(v).into_response())
 }
 
 /// A model id the proxy can serve: `vendor/name`, no spaces. Picker labels ("Claude Fable 5.1")
@@ -965,18 +978,18 @@ pub async fn chat_history(
         .box_for_project(&id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no box".to_owned()))?;
-    let Some(url) = sb.box_url else {
+    let Some(url) = sb.box_url.clone() else {
         return Err((StatusCode::CONFLICT, "box has no url yet".into()));
     };
     // One box per user: the workspace is named in the path.
-    let mut req = state
-        .http
-        .get(format!("{url}/w/{id}/history/{chat}"))
-        .query(&q);
-    if let Some(t) = &sb.preview_token {
-        req = req.header("x-daytona-preview-token", t);
-    }
-    match req.send().await {
+    let sent = boxes::send_to_box(&state, &sb, || {
+        state
+            .http
+            .get(format!("{url}/w/{id}/history/{chat}"))
+            .query(&q)
+    })
+    .await;
+    match sent {
         Ok(r) if r.status().is_success() => Ok((
             [("content-type", "application/json")],
             r.bytes().await.unwrap_or_default(),
@@ -1714,6 +1727,12 @@ pub async fn create_chat(
         forked_from: fork_from.map(|c| c.id),
     };
     state.db.insert_chat(&chat).map_err(internal)?;
+    // The box opens the new room from this push (its 3 s listing is the fallback) and a
+    // sleeping box wakes: the first message is usually seconds away (#2120).
+    if !crate::outside::is_outside(&state, &p.id) {
+        boxes::chat_created(&state, &chat);
+        boxes::ensure_awake(&state, &p.user_id, "api").await;
+    }
     Ok(Json(
         serde_json::to_value(CreateChatResponseDto {
             chat: chat_dto(&chat),
@@ -1798,6 +1817,12 @@ pub async fn start(
         .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
     if !state.allows(&principal, &p.id) || principal.is_box() {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
+    }
+    if state.upgrading.lock().await.contains_key(&p.user_id) {
+        return Err((
+            StatusCode::CONFLICT,
+            "the computer is being upgraded; it starts when the upgrade ends".into(),
+        ));
     }
     boxes::start_box(&state, &p.user_id)
         .await
@@ -1953,7 +1978,10 @@ pub async fn box_hello(
             }
         }
     }
-    let projects = state.db.projects_of_user(user_id).map_err(internal)?;
+    let projects = crate::outside::served(
+        &state,
+        state.db.projects_of_user(user_id).map_err(internal)?,
+    );
     let owner = owner_json(&state, user_id);
     let mut workspaces = Vec::new();
     for p in &projects {
@@ -1977,7 +2005,10 @@ pub async fn box_projects(State(state): State<AppState>, principal: Principal) -
         return Err((StatusCode::FORBIDDEN, "box only".into()));
     };
     boxes::box_seen_http(&state, user_id).await;
-    let projects = state.db.projects_of_user(user_id).map_err(internal)?;
+    let projects = crate::outside::served(
+        &state,
+        state.db.projects_of_user(user_id).map_err(internal)?,
+    );
     let owner = owner_json(&state, user_id);
     let mut out = Vec::new();
     for p in &projects {
@@ -2353,6 +2384,101 @@ mod primary_chat_tests {
         )
         .await;
         assert_eq!(missing.err().map(|(s, _)| s), Some(StatusCode::NOT_FOUND));
+    }
+
+    /// #2120: a new chat tab reaches its box inside the create request — a `chat_open` push on
+    /// the project queue (what agentd opens the room from) and a wake of a sleeping box — and a
+    /// person's first row into the room re-arms the push once while no box socket is on it.
+    #[tokio::test]
+    async fn new_chat_tells_the_box_to_open_it_at_once() {
+        let state = test_state(AuthMode::Github);
+        let (alice, dev) = person(&state, 1);
+        let project = project_of(&state, &alice, "Hezbola");
+        let _ = state.db.take_pushes(&project).unwrap();
+        assert_eq!(
+            state.box_state(&alice).await.0,
+            arbos_core::wire::BoxState::Asleep
+        );
+
+        let r = create_chat(
+            State(state.clone()),
+            dev,
+            Path(project.clone()),
+            Json(CreateChatBody {
+                title: None,
+                kind: None,
+                fork_from: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let bytes = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let chat_id = v["chat"]["id"].as_str().unwrap().to_owned();
+
+        let pushes = state.db.take_pushes(&project).unwrap();
+        let opens: Vec<&Value> = pushes
+            .iter()
+            .filter(|(_, k, _)| k == boxes::CHAT_OPEN_PUSH)
+            .map(|(_, _, p)| p)
+            .collect();
+        assert_eq!(opens.len(), 1, "{pushes:?}");
+        assert_eq!(opens[0]["chat_id"], json!(chat_id));
+        assert_eq!(opens[0]["project_id"], json!(project));
+        assert_eq!(opens[0]["reason"], "created");
+        assert_eq!(opens[0]["title"], "New chat");
+        assert_eq!(
+            state.box_state(&alice).await.0,
+            arbos_core::wire::BoxState::Waking,
+            "a sleeping box is woken for the new chat"
+        );
+        assert!(state
+            .db
+            .due_wake_jobs()
+            .unwrap()
+            .iter()
+            .any(|(u, _, _)| u == &alice));
+
+        // The first row lands before the box has a socket on the room: one `rows_pending`
+        // push, not one per row; none once the box is in the room.
+        let room = state
+            .room(&arbos_core::wire::room_name(&project, &chat_id))
+            .await;
+        let chat = crate::notify::ChatRef::project(&project, &chat_id);
+        let agents = [boxes::ServingAgent {
+            project_id: project.clone(),
+            owner: alice.clone(),
+        }];
+        assert_eq!(
+            boxes::after_person_row(&state, &room, &chat, &agents).await,
+            1
+        );
+        assert_eq!(
+            boxes::after_person_row(&state, &room, &chat, &agents).await,
+            0
+        );
+        let pushes = state.db.take_pushes(&project).unwrap();
+        assert_eq!(pushes.len(), 1);
+        assert_eq!(pushes[0].1, boxes::CHAT_OPEN_PUSH);
+        assert_eq!(pushes[0].2["reason"], "rows_pending");
+        assert_eq!(pushes[0].2["chat_id"], json!(chat_id));
+        assert_eq!(
+            pushes[0].2["title"], "New chat",
+            "the chat row rides along so the box does not reset it"
+        );
+        assert!(pushes[0].2["created_at"].as_i64().unwrap() > 0);
+        room.box_joined(&alice);
+        assert_eq!(
+            boxes::after_person_row(&state, &room, &chat, &agents).await,
+            0
+        );
+        assert!(state.db.take_pushes(&project).unwrap().is_empty());
+        room.box_left(&alice);
+        assert!(!room.has_box(&alice));
+        assert_eq!(
+            boxes::after_person_row(&state, &room, &chat, &agents).await,
+            1
+        );
     }
 
     /// Sidebar archive (Jacob 2026-10-23): per user, hides the row, never deletes.

@@ -9,15 +9,15 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     actions, canvas, div, list, prelude::*, px, Animation, AnimationExt, AnyElement, App, Bounds,
-    Context, Div, Entity, FontWeight, ListAlignment, ListScrollEvent, ListState, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, SharedString, Stateful,
-    TextRun, Window,
+    BoxShadow, Context, Div, Entity, FontWeight, ListAlignment, ListScrollEvent, ListState,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, SharedString,
+    Stateful, TextRun, Window,
 };
 
 use crate::app::{AppEvent, AppState, DetailsTarget};
 use crate::model::{
-    now_ms, Attachment, AttachmentKind, Chat, Id, Message, MessageStatus, Part, Person, Project,
-    ReplyRef, Role, SpaceKind, StatusKind, TurnKind,
+    now_ms, Attachment, AttachmentKind, Chat, Id, LinkPreview, Message, MessageStatus, Part,
+    Person, Project, ReplyRef, Role, SpaceKind, StatusKind, TurnKind,
 };
 use crate::ui::approve::{approval_card, ApprovalView};
 use crate::ui::attachments;
@@ -25,9 +25,11 @@ use crate::ui::avatars;
 use crate::ui::cards;
 use crate::ui::chat_search;
 use crate::ui::frost::edge_faded;
-use crate::ui::icons::icon;
+use crate::ui::glass::WindowDragPress;
+use crate::ui::highlight;
+use crate::ui::identity;
 use crate::ui::markdown::{
-    self, has_fenced_code, inline_plain, inline_spans, polish_assistant_prose, split_blocks, Block,
+    self, inline_plain, inline_spans, polish_assistant_prose, split_blocks, Block,
 };
 use crate::ui::math;
 use crate::ui::mention::{self, Mentions};
@@ -36,10 +38,12 @@ use crate::ui::people;
 use crate::ui::profile_target;
 use crate::ui::secret_card::SecretOfferCard;
 use crate::ui::select::{BubbleAt, BubbleSelectable, LinkIcons, Selectable, Span, TextSelection};
+use crate::ui::sf_symbols;
 use crate::ui::theme::{
     Theme, BUBBLE_PAD_X, BUBBLE_PAD_Y, BUBBLE_RADIUS, CHAT_BODY, CHAT_LINE_HEIGHT, COLUMN_MARGIN,
     COMPOSER_HEIGHT, COMPOSER_WIDTH, LINE_HEIGHT, PLUS_BUTTON, TEXT_SMALL, TEXT_TINY,
 };
+use crate::ui::urlwrap;
 use crate::ui::veil::Veil;
 use crate::ui::widgets::QuestionCard;
 use serde_json::Value;
@@ -144,12 +148,76 @@ pub(crate) fn people_cap(slot_width: f32) -> f32 {
 }
 /// A new time stamp line whenever messages are this far apart.
 const STAMP_GAP_MS: u64 = 60 * 60 * 1000;
+/// Grouped messages (Jacob, 2026-10-28, [feedback grouped-messages-mac-2026-10-28]):
+/// consecutive messages from one sender this close together form one **run** —
+/// the name and the disc show once, on the run's first message; the later
+/// messages sit under its text with the avatar column empty and the 6 pt
+/// in-run gap between them. The run breaks when the sender changes, when this
+/// window passes between two messages, at a date stamp or a system line, and
+/// at a bubble that carries a reply quote (it starts a run of its own). People
+/// and agents group alike, my own messages too. Mirrored by the iPhone's
+/// `Transcript.runWindowMs` (the row builders live in the two clients, not in
+/// `arbos_core`): keep the two in step.
+pub const RUN_WINDOW_MS: u64 = 2 * 60 * 1000;
 /// Vertical rhythm measured from Grok Bot's Mac app (parity it.36, 2 px/pt):
-/// consecutive bubbles of one sender sit 6 pt apart, a change of sender opens
-/// 20 pt, a time stamp has 20 pt above and 24 below, and the last message keeps
-/// 54 pt clear of the composer.
+/// consecutive bubbles of one run sit 6 pt apart, a new run opens 20 pt, a time
+/// stamp has 20 pt above and 24 below, and the last message keeps 54 pt clear
+/// of the composer.
 pub(crate) const ROW_GAP_HALF: f32 = 3.0;
 pub(crate) const TURN_GAP_EXTRA: f32 = 20.0 - 2.0 * ROW_GAP_HALF;
+/// The gap between two bubbles of one run, and the gap a new run opens — the
+/// numbers the rhythm tests pin.
+#[cfg(test)]
+pub(crate) const RUN_GAP: f32 = 2.0 * ROW_GAP_HALF;
+#[cfg(test)]
+pub(crate) const TURN_GAP: f32 = TURN_GAP_EXTRA + 2.0 * ROW_GAP_HALF;
+
+/// The tail of the sender run the row builder is in: who spoke last and when
+/// (`created_at`, ms). `None` after a date stamp, a system line or a hidden fold.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RunTail {
+    pub sender: String,
+    pub at: u64,
+}
+
+/// Whether a message from `sender` at `at` continues the run `tail` ends: the
+/// same sender, within [`RUN_WINDOW_MS`] of the run's last message, and no
+/// reply quote on the new bubble (`quoted`). Rows without a clock never group.
+pub(crate) fn continues_run(tail: Option<&RunTail>, sender: &str, at: u64, quoted: bool) -> bool {
+    let Some(tail) = tail else {
+        return false;
+    };
+    !quoted
+        && tail.sender == sender
+        && at > 0
+        && tail.at > 0
+        && at.abs_diff(tail.at) <= RUN_WINDOW_MS
+}
+
+/// Whether the message's bubble draws a reply quote — a person's `replyRef` /
+/// `replyTo`; an agent's `replyTo`, else `inReplyTo` in an attributed chat (a
+/// people-chat reply or another Project's row, the fallback the row builder
+/// uses). A quoted bubble names its sender and starts its own run.
+fn carries_quote(message: &Message) -> bool {
+    let non_empty = |id: Option<&str>| id.is_some_and(|id| !id.is_empty());
+    match message.role {
+        Role::User => {
+            message
+                .reply_ref
+                .as_ref()
+                .is_some_and(|r| !r.chat_id.is_empty() && !r.message_id.is_empty())
+                || non_empty(message.reply_to.as_deref())
+        }
+        Role::Assistant | Role::Project => {
+            let in_people =
+                message.sender.starts_with("agent:") && message.asked_by_handle.is_some();
+            let attributed = message.role == Role::Project || in_people;
+            non_empty(message.reply_to.as_deref())
+                || (attributed && non_empty(message.in_reply_to.as_deref()))
+        }
+        Role::System => false,
+    }
+}
 /// Measured glyph-to-bubble, like the reference: the stamp's 13 pt line box
 /// carries ~4 pt of its own above and ~7 below the glyphs (measured).
 const STAMP_PAD_TOP: f32 = 20.0 - ROW_GAP_HALF - 4.0;
@@ -371,9 +439,18 @@ pub fn reply_ref_label(r: &ReplyRef) -> String {
 /// file when there is no prose.
 pub fn one_line(text: &str) -> String {
     let mut out = String::new();
-    for block in split_blocks(text) {
+    one_line_blocks(split_blocks(text), &mut out);
+    out
+}
+
+fn one_line_blocks(blocks: Vec<Block>, out: &mut String) {
+    for block in blocks {
         let pieces: Vec<String> = match block {
             Block::Paragraph(text) | Block::Heading { text, .. } => vec![text],
+            Block::Quote(inner) => {
+                one_line_blocks(inner, out);
+                continue;
+            }
             Block::Bullets(items) | Block::Numbered(items) => items,
             Block::Code { code, .. } => vec![code],
             Block::Table { header, rows } => header
@@ -382,6 +459,7 @@ pub fn one_line(text: &str) -> String {
                 .collect(),
             Block::Math { source } => vec![math::plain(&source)],
             Block::Chart { spec, .. } => vec![crate::ui::chart_card::one_line_title(&spec)],
+            Block::LinkPreview { preview, .. } => vec![preview.one_line()],
         };
         for piece in pieces {
             // Spans are joined before splitting so "`site/launch/`;" stays one
@@ -395,7 +473,6 @@ pub fn one_line(text: &str) -> String {
             }
         }
     }
-    out
 }
 
 /// `line` cut to `max_chars` on a word boundary with an ellipsis; shorter
@@ -441,7 +518,7 @@ pub(crate) fn forwarded_header(by: String, text_color: gpui::Hsla) -> Stateful<D
         .items_center()
         .gap(px(6.0))
         .min_w_0()
-        .child(icon("forward", 12.0, muted))
+        .child(sf_symbols::glyph("arrowshape.turn.up.right", 12.0, muted))
         .child(
             div()
                 .min_w_0()
@@ -480,11 +557,15 @@ pub enum RowKind {
         sender_label: Option<String>,
         /// Another person's bubble carries their name inside it, at the top, when
         /// the chat names its senders (group / channel, see [`names_senders`]) and
-        /// the sender changed (Grok Bot's group style for the run).
+        /// the message starts a run (Grok Bot's group style for the run).
         named: bool,
         /// Another person in a people chat (D72): left bubble with their
         /// avatar and handle instead of my right bubble.
         from: Option<Person>,
+        /// Draw `from`'s disc on the avatar column: the run's first message only; a
+        /// message that continues the run keeps the column empty
+        /// ([feedback grouped-messages-mac-2026-10-28]).
+        disc: bool,
         /// "9:41 PM", revealed at the bubble's outer edge on hover only.
         time: Option<String>,
         /// My own messages: pending → failed / sent → seen, shown as the
@@ -501,6 +582,10 @@ pub enum RowKind {
         /// "Secret saved as NAME" ghost — muted fill, key glyph, no text to select or copy.
         /// The secret's name.
         ghost: Option<String>,
+        /// The relay's link preview for this message, drawn as a card under the text
+        /// (or as the whole bubble when the text was only the link): `(part id, preview)`
+        /// ([feedback link-embeds-mac-2026-10-27]).
+        preview: Option<Box<(String, LinkPreview)>>,
     },
     Markdown {
         block: Block,
@@ -527,6 +612,9 @@ pub enum RowKind {
         /// First block of a message whose sender is named, in a chat that names
         /// its senders: the agent's name sits inside this bubble, at the top.
         named: bool,
+        /// The message starts its run: its last block draws the disc. A message
+        /// that continues the run keeps the lane empty on every block.
+        disc: bool,
     },
     /// A finished reply with no words, cards or attachments: one plain line in the
     /// agent's bubble. `name` is the row's `senderName`; the agent id in `seed` resolves
@@ -539,6 +627,8 @@ pub enum RowKind {
         /// People / group reply: quote of the user message this would have answered.
         quote: Option<Quote>,
         named: bool,
+        /// The message starts its run (draws the disc), as on a `Markdown` row.
+        disc: bool,
     },
     /// Centered muted time line ("Today 9:39 PM").
     Stamp {
@@ -559,8 +649,9 @@ pub enum RowKind {
         reactions: Vec<(String, Vec<String>)>,
         /// Under my right-hand bubble (chips align right).
         mine: bool,
-        /// Under another person's bubble (chips clear the avatar column).
-        indent: bool,
+        /// The bubble sits after the sender's avatar lane (people chats: another
+        /// person, or an agent in a group), so the chips start at its left edge.
+        lane: bool,
     },
     /// Grok's hand-off line: "Messaged ◉ A" / "N messages with ◉ A, ◉ B and ◉ C".
     Handoff {
@@ -588,14 +679,18 @@ pub enum RowKind {
         /// The sender's name above the card (first card of the message only; the
         /// message's text bubble, if any, then carries no name).
         named: bool,
-        /// Draw the disc: on the message's last row only — its text bubble when it has
-        /// one, else its last card; earlier cards keep the lane free (the agent bubble's
-        /// rule: the disc at the bottom of the run).
+        /// Draw the disc: on the last row of a message that starts its run — its text
+        /// bubble when it has one, else its last card; earlier cards and every card of
+        /// a message that continues the run keep the lane free.
         disc: bool,
         /// The message's clock label, hover-only like a bubble's.
         time: Option<String>,
         /// The message's "Forwarded from …" line, drawn on the card.
         forwarded_from: Option<String>,
+        /// A reply's quote header above the first card of the message — a picture
+        /// reply quotes like a text one ([feedback picture-reply-quote-mac-2026-10-28]);
+        /// the caption bubble under it then carries none.
+        quote: Option<Quote>,
     },
     /// S8: the agent asked a question.
     AskUser {
@@ -715,6 +810,20 @@ const JUMP_ARRIVE_FROM_ALPHA: f32 = 0.35;
 pub const RAIL_BUTTON: f32 = 24.0;
 pub const RAIL_GLYPH: f32 = 16.0;
 pub const RAIL_GAP: f32 = 2.0;
+/// The Glass capsule's inset on every side of the rail's buttons. The same
+/// inset all round keeps each button's round hover wash inside the capsule's
+/// rim and concentric with its rounded ends ([feedback hover-bar-highlight-mac-2026-10-29]).
+pub const RAIL_PLATE_PAD: f32 = 2.0;
+
+/// A reaction chip under a bubble (iPhone `reactionChips`: 14 pt emoji, 12 pt
+/// medium count, 8 pt side pads, 4 pt vertical pads, 1 pt rim). The height is
+/// fixed rather than derived from the emoji's line box: the glyph comes from
+/// a fallback font whose metrics must never size the chip, and nothing about
+/// the pointer may change the box ([feedback reaction-pill-hover-jitter-2026-10-28]).
+pub const REACTION_CHIP_HEIGHT: f32 = 26.0;
+pub const REACTION_CHIP_PAD_X: f32 = 8.0;
+pub const REACTION_CHIP_EMOJI: f32 = 14.0;
+pub const REACTION_CHIP_COUNT: f32 = 12.0;
 
 /// Right-click or the rail's ⋯: the shell opens the message menu there.
 /// The rail's smiley: the shell opens the reaction capsule there.
@@ -748,6 +857,11 @@ pub struct Transcript {
     chat_id: Option<Id>,
     list: ListState,
     pub(crate) rows: Vec<Row>,
+    /// Per-message built rows (#1405 / feedback app-01M5Z3QPDA5BRE84SAPADXX05V,
+    /// addendum app-01M5Z3T4F4KAMTWA7YKW3CP58H): a send or streaming upsert
+    /// rebuilds one message, not the whole transcript — keeps scrolling and
+    /// reply/menu gestures responsive after send (Mac has no swipe-to-reply).
+    row_cache: MessageRowCache,
     /// Who `@handle` resolves to in this chat's bubbles (mention chips),
     /// rebuilt with the rows.
     mentions: Rc<Mentions>,
@@ -815,6 +929,26 @@ struct Measured {
     viewport: Bounds<Pixels>,
 }
 
+/// Hover tip on a reaction chip: who used that emoji (iPhone `reactionSenders`).
+/// Floats above the list so the row's height never changes on hover.
+struct ReactionSendersTip(SharedString);
+
+impl Render for ReactionSendersTip {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx);
+        div()
+            .px(px(8.0))
+            .py(px(4.0))
+            .rounded(px(6.0))
+            .bg(theme.surface_2)
+            .border_1()
+            .border_color(theme.border)
+            .text_size(px(TEXT_TINY))
+            .text_color(theme.text)
+            .child(self.0.clone())
+    }
+}
+
 impl Transcript {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let list = ListState::new(0, ListAlignment::Bottom, px(OVERDRAW_PX));
@@ -841,6 +975,7 @@ impl Transcript {
             chat_id: None,
             list,
             rows: Vec::new(),
+            row_cache: MessageRowCache::default(),
             mentions: Mentions::empty(),
             link_icons: LinkIcons::empty(),
             pane_open: false,
@@ -993,15 +1128,24 @@ impl Transcript {
     /// last, in transcript order whichever way the drag went, one blank line
     /// between messages (what Grok's copy gives).
     fn copy_selection(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        let span = self.selection.read(cx).span();
+        if let Some(message_id) = span
+            .as_ref()
+            .and_then(|span| self.whole_bubble_with_attachments(span, cx))
+        {
+            self.copy_message(&message_id, cx);
+            return;
+        }
         let text = {
             let selection = self.selection.read(cx);
-            match selection.span() {
+            match span {
                 Some(span) if !span.one_bubble() => copy_across(&span, &self.bubble_texts(cx)),
                 _ => selection.selected_text(),
             }
         };
         if let Some(text) = text {
-            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+            // The URLs' wrap hints stay in the app.
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(urlwrap::plain(&text)));
         }
     }
 
@@ -1122,6 +1266,21 @@ impl Transcript {
     #[cfg(test)]
     pub(crate) fn row_frame(&self, row_id: &str) -> Option<Bounds<Pixels>> {
         self.measured.borrow().rows.get(row_id).copied()
+    }
+
+    /// The bubble the pointer is over right now (its hover key) — what the
+    /// hover rail and the time are drawn for. `None` when nothing is hovered.
+    #[cfg(test)]
+    pub(crate) fn hovered_bubble(&self) -> Option<String> {
+        self.hover.over.as_ref().map(|(key, _)| key.clone())
+    }
+
+    /// Where the list is scrolled to (item index, pixels into it), for a
+    /// test to compare before and after an input.
+    #[cfg(test)]
+    pub(crate) fn scroll_position(&self) -> (usize, f32) {
+        let top = self.list.logical_scroll_top();
+        (top.item_ix, f32::from(top.offset_in_item))
     }
 
     /// The first row of a message from a new sender opens the turn gap; a
@@ -1394,7 +1553,19 @@ impl Transcript {
             state.active_chat(),
             state.selected_channel.is_some(),
         );
+        // A group, a DM or a server channel: every row there names who wrote it, so a
+        // wordless one that does not is a blank line from no one. A shared project chat's
+        // agent rows say a bare `agent` by design.
+        let people_space = state.selected_channel.is_some()
+            || state
+                .selected()
+                .is_some_and(|p| matches!(p.kind, SpaceKind::Group | SpaceKind::Dm));
+        if chat_changed {
+            self.row_cache.clear();
+        }
         self.chat_id = chat_id;
+        // Clone the Rc so the row-cache mut borrow does not conflict.
+        let mentions = Rc::clone(&self.mentions);
         // People I blocked: their rows fold into one hidden line for me (the relay's
         // `blockedSenders` hint, else my block list by id) — groups only; a DM with them has
         // the composer bar instead ([feedback blocked-state-mac-2026-10-26]).
@@ -1403,30 +1574,27 @@ impl Transcript {
             .filter(|p| p.is_people_group())
             .map(|p| state.hidden_senders_in(p))
             .unwrap_or_default();
-        let new_rows = build_rows_hiding(
+        let new_rows = build_rows_with_cache(
             &messages,
             show_details,
             speech,
             &me_id,
             &thumb_keys,
-            &self.mentions,
+            &mentions,
             multi_party,
+            people_space,
+            &mut self.row_cache,
             &hidden_senders,
         );
         self.multi_party = multi_party;
         self.people = people;
-        // A sender change opens the turn gap. So does every new assistant /
-        // project message — consecutive replies from the same agent (quick ack
-        // then the answer, or two answers in a row) must not read as one bubble
-        // (#1447 / doug-merged-reply-bubbles).
-        self.turn_starts = messages
-            .windows(2)
-            .filter(|w| {
-                (w[0].role, &w[0].sender) != (w[1].role, &w[1].sender)
-                    || matches!(w[1].role, Role::Assistant | Role::Project)
-            })
-            .map(|w| w[1].id.clone())
-            .collect();
+        // A new sender run opens the turn gap: a sender change, more than
+        // `RUN_WINDOW_MS` since the run's last message, a quoted reply, a system
+        // line or a date stamp in between. Messages inside a run — a person's
+        // quick lines, an agent's follow-up bubbles, my own — sit 6 pt apart
+        // (Jacob, 2026-10-28, [feedback grouped-messages-mac-2026-10-28];
+        // supersedes #1447's gap on every agent message).
+        self.turn_starts = self.row_cache.run_starts.clone();
 
         // Veils: observe text growth of live markdown rows.
         for row in &new_rows {
@@ -1544,39 +1712,89 @@ impl Transcript {
         cx.notify();
     }
 
-    /// Plain text of a message in this chat, for copy / control-click.
-    fn message_plain(&self, message_id: &Id, cx: &App) -> Option<String> {
+    /// The message a selection bubble key (`<message>#text`, `<row>.u`, see
+    /// `bubble_texts`) belongs to.
+    fn message_of_bubble(&self, key: &str) -> Option<Id> {
+        self.rows.iter().find_map(|row| {
+            let row_key = match &row.kind {
+                RowKind::Markdown { .. } | RowKind::NoAnswer { .. } => {
+                    format!("{}#text", row.message_id)
+                }
+                RowKind::User { .. } => format!("{}.u", row.id),
+                _ => return None,
+            };
+            (row_key == key).then(|| row.message_id.clone())
+        })
+    }
+
+    /// ⌘C with a whole bubble selected (triple-click, select-all in it) on a message
+    /// that carries pictures or files: the whole message, pictures included, is what
+    /// the user means ([feedback copy-image-messages-mac-2026-10-27]). `Some(id)`
+    /// names that message; `None` keeps the plain text copy.
+    fn whole_bubble_with_attachments(
+        &self,
+        span: &crate::ui::select::Span,
+        cx: &App,
+    ) -> Option<Id> {
+        if !span.one_bubble() {
+            return None;
+        }
+        let whole = span.start_index == 0
+            && span.end_index >= span.start.text.trim_end().len()
+            && !span.start.text.trim().is_empty();
+        if !whole {
+            return None;
+        }
+        let message_id = self.message_of_bubble(&span.start.key)?;
         let chat_id = self.chat_id.as_ref()?;
         self.state
             .read(cx)
             .messages
             .get(chat_id)
-            .and_then(|list| list.iter().find(|m| m.id == *message_id))
-            .map(|m| m.plain_text())
+            .and_then(|list| list.iter().find(|m| m.id == message_id))
+            .and_then(|m| m.body())
+            .filter(|b| !b.attachments.is_empty())
+            .map(|_| message_id)
     }
 
+    /// Copy of a message — the bubble menu's Copy, control-click, ⌘C on a whole
+    /// bubble: the whole message through `AppState::copy_message` (its text and
+    /// every picture / file it carries, [feedback copy-image-messages-mac-2026-10-27];
+    /// before, only `plain_text()` went out and a picture message copied nothing).
+    /// The bubble reads "Copied" for [`COPY_FEEDBACK_MS`] when it has anything to copy.
     pub(crate) fn copy_message(&mut self, message_id: &Id, cx: &mut Context<Self>) {
-        if let Some(text) = self.message_plain(message_id, cx) {
-            if !text.is_empty() {
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-                self.copied_feedback = Some((message_id.clone(), Instant::now()));
-                cx.notify();
-                cx.spawn(async move |this, cx| {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(COPY_FEEDBACK_MS))
-                        .await;
-                    let _ = this.update(cx, |this, cx| {
-                        if this.copied_feedback.as_ref().is_some_and(|(_, at)| {
-                            at.elapsed() >= Duration::from_millis(COPY_FEEDBACK_MS)
-                        }) {
-                            this.copied_feedback = None;
-                            cx.notify();
-                        }
-                    });
-                })
-                .detach();
-            }
+        let Some(chat_id) = self.chat_id.clone() else {
+            return;
+        };
+        let has_body = self
+            .state
+            .read(cx)
+            .messages
+            .get(&chat_id)
+            .and_then(|list| list.iter().find(|m| m.id == *message_id))
+            .is_some_and(|m| m.body().is_some());
+        self.state
+            .update(cx, |s, cx| s.copy_message(&chat_id, message_id, cx));
+        if !has_body {
+            return;
         }
+        self.copied_feedback = Some((message_id.clone(), Instant::now()));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(COPY_FEEDBACK_MS))
+                .await;
+            let _ =
+                this.update(cx, |this, cx| {
+                    if this.copied_feedback.as_ref().is_some_and(|(_, at)| {
+                        at.elapsed() >= Duration::from_millis(COPY_FEEDBACK_MS)
+                    }) {
+                        this.copied_feedback = None;
+                        cx.notify();
+                    }
+                });
+        })
+        .detach();
     }
 
     /// A code card's Copy pill: the block's text to the clipboard and the pill
@@ -1601,14 +1819,89 @@ impl Transcript {
     }
 
     /// The code cards' Copy wiring for this frame.
+    /// `code_copy` for one message: Remove preview is offered where the relay would let this
+    /// user delete the message (the same #1526 rule the bubble menu uses).
+    fn code_copy_for(&self, message_id: &Id, cx: &Context<Self>) -> CodeCopy {
+        let mut copy = self.code_copy(cx);
+        copy.moderates = self.chat_id.as_ref().is_some_and(|chat| {
+            let state = self.state.read(cx);
+            let space_id = state.space_of_chat(chat);
+            match (
+                state.project(&space_id),
+                state.messages_of(chat).iter().find(|m| &m.id == message_id),
+            ) {
+                (Some(space), Some(message)) => crate::model::may_delete_message(
+                    space,
+                    &state.me_id(),
+                    &state.me_handle(),
+                    message,
+                ),
+                _ => false,
+            }
+        });
+        copy
+    }
+
     fn code_copy(&self, cx: &Context<Self>) -> CodeCopy {
         let this = cx.entity().downgrade();
         let hover = this.clone();
         let save_state = self.state.clone();
         let expand_state = self.state.clone();
         let chat_id = self.chat_id.clone();
+        let links = {
+            // The preview pictures this chat has decoded (keys `lp-…`), snapshotted here so
+            // the cards need no app context at paint time.
+            let thumbs: Rc<HashMap<String, std::sync::Arc<gpui::RenderImage>>> = Rc::new(
+                self.state
+                    .read(cx)
+                    .thumbnails
+                    .iter()
+                    .filter(|(k, _)| k.starts_with("lp-") || k.starts_with("li-"))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            );
+            // The relay's host icons (`AppState::link_icon`), same snapshot idea.
+            let host_icons: Rc<
+                HashMap<
+                    String,
+                    (
+                        std::sync::Arc<gpui::RenderImage>,
+                        crate::ui::link_tile::Tone,
+                    ),
+                >,
+            > = Rc::new({
+                let state = self.state.read(cx);
+                state
+                    .link_icons
+                    .keys()
+                    .filter_map(|h| {
+                        state
+                            .link_icon(h)
+                            .map(|(img, tone)| (h.clone(), (img.clone(), tone)))
+                    })
+                    .collect()
+            });
+            let open_state = self.state.clone();
+            let remove_state = self.state.clone();
+            let remove_chat = self.chat_id.clone();
+            Rc::new(crate::ui::link_card::LinkUi {
+                thumbnail: Rc::new(move |key| thumbs.get(key).cloned()),
+                host_icon: Rc::new(move |host| host_icons.get(host).cloned()),
+                on_open: Rc::new(move |url, _, cx| {
+                    open_state.update(cx, |s, cx| s.open_link(&url, cx));
+                }),
+                on_remove: Rc::new(move |message_id, _, cx| {
+                    if let Some(chat) = remove_chat.clone() {
+                        remove_state
+                            .update(cx, |s, cx| s.remove_link_preview(chat, message_id, cx));
+                    }
+                }),
+            })
+        };
         CodeCopy {
             copied: copied_pill(&self.code_copied, Instant::now()),
+            links: Some(links),
+            moderates: false,
             on_copy: Some(Rc::new(move |id, code, _, cx| {
                 let _ = this.update(cx, |t, cx| t.copy_code(id, code, cx));
             })),
@@ -1699,7 +1992,7 @@ impl Transcript {
             .items_center()
             .gap(px(6.0))
             .min_w_0()
-            .child(icon("bubble", 12.0, muted))
+            .child(sf_symbols::glyph("bubble.left", 12.0, muted))
             .child(
                 div()
                     .min_w_0()
@@ -1797,15 +2090,31 @@ impl Transcript {
         });
         // Keep the checkmark readable even if the pointer leaves mid-feedback.
         let more_opacity = if just_copied { 1.0 } else { opacity };
-        let more_glyph = if just_copied { "check" } else { "ellipsis" };
+        let more_glyph = if just_copied { "checkmark" } else { "ellipsis" };
+        // On Glass the three sit in one capsule over the desktop; the capsule
+        // fades as a whole, so the buttons inside carry only what differs
+        // from it (the smiley and reply keep fading under a held checkmark).
+        let plate = theme.rail_plate();
+        let glyph_color = if plate.is_some() {
+            theme.text
+        } else {
+            theme.text_muted
+        };
+        let (group_opacity, opacity, more_opacity) = match plate {
+            Some(_) if just_copied => (1.0, opacity, 1.0),
+            Some(_) => (opacity, 1.0, 1.0),
+            None => (1.0, opacity, more_opacity),
+        };
         let more_color = if just_copied {
             theme.online
         } else {
-            theme.text_muted
+            glyph_color
         };
         let btn = |id: SharedString, glyph: &'static str, opacity: f32, color: gpui::Hsla| {
             div()
                 .id(id)
+                .debug_selector(move || format!("rail-button#{glyph}"))
+                // A fixed box; the hover wash is paint only (`highlight::button`).
                 .size(px(RAIL_BUTTON))
                 .flex_shrink_0()
                 .flex()
@@ -1814,19 +2123,37 @@ impl Transcript {
                 .rounded_full()
                 .cursor_pointer()
                 .opacity(opacity)
-                .hover(|s| s.bg(theme.surface_2))
-                .child(icon(glyph, RAIL_GLYPH, color))
+                .map(|el| highlight::button(el, theme))
+                .child(sf_symbols::glyph(glyph, RAIL_GLYPH, color))
         };
         div()
             .flex()
             .items_center()
             .gap(px(RAIL_GAP))
+            .when_some(plate, |el, plate| {
+                el.debug_selector(|| "rail-plate".into())
+                    .h(px(RAIL_BUTTON + 2.0 * RAIL_PLATE_PAD))
+                    .p(px(RAIL_PLATE_PAD))
+                    .rounded_full()
+                    .opacity(group_opacity)
+                    // Every row carries a rail; only a revealed one paints its plate.
+                    .when(group_opacity > 0.0, |el| {
+                        el.bg(highlight::over(plate, theme.control_fill()))
+                            .shadow(vec![
+                                BoxShadow::new(px(0.0), px(0.0), theme.pane_card_rim())
+                                    .spread_radius(px(1.0))
+                                    .inset(),
+                                BoxShadow::new(px(0.0), px(1.0), gpui::hsla(0.0, 0.0, 0.0, 0.28))
+                                    .blur_radius(px(3.0)),
+                            ])
+                    })
+            })
             .child(
                 btn(
                     SharedString::from(format!("{row_id}#react")),
-                    "face-smile",
+                    "face.smiling",
                     opacity,
-                    theme.text_muted,
+                    glyph_color,
                 )
                 .on_click(cx.listener(
                     move |_, event: &gpui::ClickEvent, _, cx| {
@@ -1843,9 +2170,9 @@ impl Transcript {
             .child(
                 btn(
                     SharedString::from(format!("{row_id}#reply")),
-                    "reply",
+                    "arrowshape.turn.up.left",
                     opacity,
-                    theme.text_muted,
+                    glyph_color,
                 )
                 .on_click(cx.listener(move |_, _, _, cx| {
                     if let Some(chat_id) = chat_id.clone() {
@@ -2119,12 +2446,10 @@ impl Transcript {
             .items_center()
             .gap(px(6.0))
             .child(
-                div()
-                    .text_size(px(CHAT_BODY))
+                identity::name(name, CHAT_BODY)
                     .line_height(px(CHAT_LINE_HEIGHT))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(color)
-                    .child(name),
+                    .text_color(color),
             )
             .when(agent, |el| {
                 el.child(
@@ -2144,6 +2469,50 @@ impl Transcript {
             })
     }
 
+    /// Display name for a reaction sender id (`user:…` / `agent:…`), matching
+    /// the iPhone's `reactionSenderLabel` ("You" for self). Shown in the chip's
+    /// floating tip so the reaction row never grows on hover.
+    fn reaction_sender_label(&self, sender: &str, me: &str, cx: &App) -> String {
+        if sender == me {
+            return "You".into();
+        }
+        if let Some(m) = self.mentions.by_id(sender) {
+            return m.name.clone();
+        }
+        let state = self.state.read(cx);
+        if let Some(id) = sender.strip_prefix("agent:") {
+            if let Some(p) = state.project(id) {
+                return p.name.clone();
+            }
+            for space in state.projects.iter().filter(|p| p.is_people()) {
+                if let Some(a) = space.agents.iter().find(|a| a.project_id == id) {
+                    return a.name.clone();
+                }
+            }
+        }
+        if let Some(id) = sender.strip_prefix("user:") {
+            if id == state.me_id() {
+                return "You".into();
+            }
+            if let Some(p) = state
+                .projects
+                .iter()
+                .flat_map(|p| p.people.iter())
+                .chain(state.people_results.iter())
+                .chain(state.people_directory.iter())
+                .find(|p| p.id == id)
+            {
+                return p.display_name();
+            }
+        }
+        sender
+            .split_once(':')
+            .map(|(_, bare)| bare)
+            .filter(|b| !b.is_empty())
+            .unwrap_or(sender)
+            .to_string()
+    }
+
     /// One assistant bubble block (the Markdown row and the no-answer line share it).
     #[allow(clippy::too_many_arguments)]
     fn markdown_bubble(
@@ -2160,6 +2529,7 @@ impl Transcript {
         lane: Option<String>,
         quote: Option<Quote>,
         named: bool,
+        disc: bool,
         rail_centre: Option<Pixels>,
         now: Instant,
         theme: &Theme,
@@ -2251,7 +2621,7 @@ impl Transcript {
                     now,
                     theme,
                     &selectable.bubble(format!("{message_id}#text"), bubble_text.text),
-                    &self.code_copy(cx),
+                    &self.code_copy_for(message_id, cx),
                 ),
             ));
         // Every block row of the reply shares one hover key, so the rail shows
@@ -2274,10 +2644,12 @@ impl Transcript {
                 .children(hover_time)
         });
         let bubble = bubble.children(hover_rail);
-        // People chats: the sender's disc at the bubble's bottom-left on
-        // the last block; earlier blocks keep the lane free (mocks a/f).
+        // People chats: the sender's disc at the bubble's bottom-left on the
+        // last block of the run's first message; earlier blocks, and every
+        // block of a message that continues the run, keep the lane free
+        // (mocks a/f; grouped messages, Jacob 2026-10-28).
         let disc = lane.as_deref().map(|seed| {
-            if last {
+            if last && disc {
                 // The disc is the same profile target as the name.
                 let (agent_name, _, _, agent_pid) = self.agent_identity(seed, "Agent", cx);
                 div()
@@ -2368,11 +2740,13 @@ impl Transcript {
                 sender_label,
                 from,
                 named,
+                disc,
                 time,
                 delivery,
                 quote,
                 forwarded_from,
                 ghost,
+                preview,
             } => {
                 // My bubble is dark in both appearances: white text, a
                 // stronger highlight than the soft one on the grey bubbles.
@@ -2393,16 +2767,42 @@ impl Transcript {
                 // Triple-backtick fences render as code cards (same as agent
                 // replies); other text stays plain so "# heading" is still literal.
                 // Bare `http(s)://…` URLs are still accented and clickable.
+                let code_copy = self.code_copy_for(&row.message_id, cx);
+                let link_only = text.is_empty() && preview.is_some();
                 let body = match &ghost {
                     Some(name) => secret_ghost_body(name, from.as_ref(), &theme),
+                    None if link_only => div().into_any_element(),
                     None => user_message_body(
                         &row.id,
                         &text,
                         text_color,
                         &theme,
                         &bubble_selectable,
-                        &self.code_copy(cx),
+                        &code_copy,
                     ),
+                };
+                // The link preview card under the text — or as the bubble's whole body
+                // when the message was only the link ([feedback link-embeds-mac-2026-10-27]).
+                let body = match &preview {
+                    Some(p) => {
+                        let card = crate::ui::link_card::card(
+                            &row.id,
+                            &row.message_id,
+                            &p.1,
+                            &theme,
+                            code_copy.links.as_ref(),
+                            crate::ui::link_card::Place {
+                                own: from.is_none(),
+                                removable: code_copy.moderates,
+                            },
+                        );
+                        let mut col = div().flex().flex_col().w_full();
+                        if !link_only {
+                            col = col.child(body).child(div().h(px(8.0)));
+                        }
+                        col.child(card).into_any_element()
+                    }
+                    None => body,
                 };
                 // Someone else's bubble in a group / channel: their name inside
                 // it (their colour); the time is hover-only; my own bubble carries
@@ -2458,6 +2858,8 @@ impl Transcript {
                     }))
                     .px(px(BUBBLE_PAD_X))
                     .py(px(BUBBLE_PAD_Y))
+                    // A card-only bubble keeps a tight even inset around the card.
+                    .when(link_only, |b| b.px(px(6.0)).py(px(6.0)))
                     .rounded(px(BUBBLE_RADIUS))
                     .bg(theme.bubble)
                     .text_color(theme.bubble_text())
@@ -2496,30 +2898,32 @@ impl Transcript {
                                 self.hover_row(&row.id, &row.id, now, window, cx);
                             let actions =
                                 self.hover_rail(&row.id, &row.message_id, reveal, &theme, cx);
+                            // The disc on the run's first message only; a message
+                            // that continues the run keeps the column empty so its
+                            // bubble still aligns under the text (grouped messages).
+                            let disc_el = if disc {
+                                // The disc is the same profile target as the name.
+                                profile_target::attach(
+                                    div()
+                                        .id(SharedString::from(format!("{}#disc", row.id)))
+                                        .debug_selector(|| format!("disc#{}", row.id))
+                                        .flex_shrink_0()
+                                        .child(people::avatar(image, &person, SENDER_DISC, &theme)),
+                                    &self.state,
+                                    person_page(self, &person, cx),
+                                    &person.display_name(),
+                                    cx,
+                                )
+                                .into_any_element()
+                            } else {
+                                div().w(px(SENDER_DISC)).flex_shrink_0().into_any_element()
+                            };
                             row_el
                                 .justify_start()
                                 .items_end()
                                 .pl(px(AVATAR_COLUMN_INSET))
                                 .gap(px(SENDER_DISC_GAP))
-                                .child(
-                                    // The disc is the same profile target as the name.
-                                    profile_target::attach(
-                                        div()
-                                            .id(SharedString::from(format!("{}#disc", row.id)))
-                                            .debug_selector(|| format!("disc#{}", row.id))
-                                            .flex_shrink_0()
-                                            .child(people::avatar(
-                                                image,
-                                                &person,
-                                                SENDER_DISC,
-                                                &theme,
-                                            )),
-                                        &self.state,
-                                        person_page(self, &person, cx),
-                                        &person.display_name(),
-                                        cx,
-                                    ),
-                                )
+                                .child(disc_el)
                                 .child(
                                     div()
                                         .flex_1()
@@ -2528,6 +2932,9 @@ impl Transcript {
                                         .items_center()
                                         .child(
                                             bubble
+                                                .debug_selector(|| {
+                                                    format!("person-bubble#{}", row.id)
+                                                })
                                                 .bg(theme.bubble_assistant)
                                                 .text_color(theme.text)
                                                 .border_l_2()
@@ -2579,7 +2986,13 @@ impl Transcript {
                                     (delivery == Delivery::Pending)
                                         .then(|| pending_glyph(&theme).mr(px(8.0))),
                                 )
-                                .child(own_bubble(bubble, delivery))
+                                .child(own_bubble(
+                                    // One selector per element: a ghost keeps "secret-ghost".
+                                    bubble.when(ghost.is_none(), |b| {
+                                        b.debug_selector(|| format!("own-bubble#{}", row.id))
+                                    }),
+                                    delivery,
+                                ))
                         })
                         .into_any_element()
                 }
@@ -2595,6 +3008,7 @@ impl Transcript {
                 lane,
                 quote,
                 named,
+                disc,
             } => {
                 let rail_centre = (last && !live)
                     .then(|| self.bubble_rail_centre(ix))
@@ -2612,6 +3026,7 @@ impl Transcript {
                     lane,
                     quote,
                     named,
+                    disc,
                     rail_centre,
                     now,
                     &theme,
@@ -2627,6 +3042,7 @@ impl Transcript {
                 lane,
                 quote,
                 named,
+                disc,
             } => {
                 let hint = name.as_deref().unwrap_or("Agent");
                 let (resolved, _, _, _) = self.agent_identity(&seed, hint, cx);
@@ -2650,6 +3066,7 @@ impl Transcript {
                     lane,
                     quote,
                     named,
+                    disc,
                     None,
                     now,
                     &theme,
@@ -2714,14 +3131,24 @@ impl Transcript {
             RowKind::Reactions {
                 reactions,
                 mine,
-                indent,
+                lane,
             } => {
                 // iPhone parity: small capsules under the bubble, mine tinted;
-                // click toggles my reaction on that emoji.
+                // click toggles my reaction. Hover shows who used that emoji
+                // in a floating tip (iPhone `reactionSenders`) — never an
+                // in-flow names row, which grew/shrunk the message and made
+                // the list jump while the pointer sat on the chip
+                // ([feedback app-01M61440FP54FHVZ69QWEVD844]).
                 let me = format!("user:{}", self.state.read(cx).me_id());
                 let chat_id = self.chat_id.clone().unwrap_or_default();
-                let mut chips = div().flex().flex_wrap().gap(px(4.0));
-                for (emoji, senders) in reactions {
+                let chips_selector: SharedString = format!("reactions#{}", row.message_id).into();
+                let mut chips = div()
+                    .debug_selector(move || chips_selector.to_string())
+                    .flex()
+                    .flex_wrap()
+                    .when(mine, |el| el.justify_end())
+                    .gap(px(4.0));
+                for (emoji, senders) in &reactions {
                     let on = senders.contains(&me);
                     let (state, chat, message_id, e) = (
                         self.state.clone(),
@@ -2729,32 +3156,53 @@ impl Transcript {
                         row.message_id.clone(),
                         emoji.clone(),
                     );
+                    let names: SharedString = senders
+                        .iter()
+                        .map(|s| self.reaction_sender_label(s, &me, cx))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                        .into();
+                    let accent_soft = Theme::with_alpha(theme.accent, 0.22);
+                    let accent_edge = Theme::with_alpha(theme.accent, 0.55);
+                    // Hover is paint only (the token's wash over the chip's own
+                    // fill): the border, the pads, the fixed height and the
+                    // count's weight are the same at rest and under the pointer,
+                    // so the chip's box never moves ([feedback
+                    // reaction-pill-hover-jitter-2026-10-28], `reaction_chip_tests`).
+                    let fill = if on {
+                        accent_soft
+                    } else {
+                        theme.bubble_assistant
+                    };
+                    let selector: SharedString = format!("reaction-chip#{emoji}").into();
                     chips = chips.child(
                         div()
                             .id(SharedString::from(format!("{}#{}", row.id, emoji)))
+                            .debug_selector(move || selector.to_string())
                             .flex()
                             .items_center()
                             .gap(px(3.0))
-                            .px(px(8.0))
-                            .py(px(4.0))
+                            .h(px(REACTION_CHIP_HEIGHT))
+                            .px(px(REACTION_CHIP_PAD_X))
                             .rounded_full()
-                            .bg(if on {
-                                Theme::with_alpha(theme.accent, 0.22)
-                            } else {
-                                theme.bubble_assistant
-                            })
                             .border_1()
-                            .border_color(if on {
-                                Theme::with_alpha(theme.accent, 0.55)
-                            } else {
-                                theme.border
-                            })
+                            .border_color(if on { accent_edge } else { theme.border })
                             .cursor_pointer()
-                            .child(div().text_size(px(14.0)).child(emoji.clone()))
+                            .map(|el| highlight::washed(el, fill, &theme))
+                            .tooltip(move |_, cx| {
+                                cx.new(|_| ReactionSendersTip(names.clone())).into()
+                            })
+                            .child(
+                                div()
+                                    .text_size(px(REACTION_CHIP_EMOJI))
+                                    .line_height(px(REACTION_CHIP_EMOJI))
+                                    .child(emoji.clone()),
+                            )
                             .when(senders.len() > 1, |el| {
                                 el.child(
                                     div()
-                                        .text_size(px(12.0))
+                                        .text_size(px(REACTION_CHIP_COUNT))
+                                        .line_height(px(REACTION_CHIP_COUNT))
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(theme.text_muted)
                                         .child(senders.len().to_string()),
@@ -2769,11 +3217,14 @@ impl Transcript {
                     );
                 }
                 div()
+                    .debug_selector(|| "reaction-row".into())
                     .w_full()
                     .flex()
                     .when(mine, |el| el.justify_end())
                     .when(!mine, |el| el.justify_start())
-                    .when(indent, |el| el.pl(px(2.0)))
+                    // The bubble's own left edge: after the avatar lane when its row
+                    // has one (`SENDER_LANE`, grouped continuations included).
+                    .when(lane && !mine, |el| el.pl(px(SENDER_LANE)))
                     .mt(px(-2.0))
                     .pb(px(ROW_GAP_HALF))
                     .child(chips)
@@ -2799,14 +3250,17 @@ impl Transcript {
                 disc,
                 time,
                 forwarded_from,
+                quote,
             } => {
-                let preview = match attachment.blob_ref.as_ref() {
+                // The blob `ref`, or `url:<url>` for a picked GIF that lives with its
+                // provider (ARB-544) — the sync layer fetches either.
+                let preview = match attachment.preview_key() {
                     None => attachments::Preview::Unavailable,
                     Some(k) => {
                         let state = self.state.read(cx);
-                        match state.card_thumbnail(k) {
+                        match state.card_thumbnail(&k) {
                             Some(image) => attachments::Preview::Ready(image),
-                            None if state.thumbnails_failed.contains(k) => {
+                            None if state.thumbnails_failed.contains(&k) => {
                                 attachments::Preview::Unavailable
                             }
                             None => attachments::Preview::Loading,
@@ -2823,6 +3277,12 @@ impl Transcript {
                         });
                     }) as attachments::OpenFn
                 });
+                // A reply's quote header above the first card, the same one a text
+                // bubble carries ([feedback picture-reply-quote-mac-2026-10-28]).
+                let quote_header = quote.map(|q| {
+                    self.quote_header(&row.id, q, theme.text, cx)
+                        .into_any_element()
+                });
                 // Same reply · copy rail and right-click menu as text bubbles
                 // (feedback app-01M5N8ZQVWC63V54HM70D9SJ4H): an image / file
                 // row was a bare card with no way to reply.
@@ -2837,6 +3297,7 @@ impl Transcript {
                         &attachment,
                         preview,
                         forwarded_from.as_deref(),
+                        quote_header,
                         open,
                         self.state.clone(),
                         &theme,
@@ -3277,6 +3738,18 @@ impl Render for Transcript {
                     if this.selection.read(cx).is_dragging() {
                         return;
                     }
+                    // The header and its drag catchment float over the list: a
+                    // press there is the window's to move. While AppKit drags the
+                    // window the pointer keeps jittering against the lagging frame,
+                    // and as a drag-scroll each jitter broke or restored the pin,
+                    // so the presence row blinked ([feedback
+                    // mac-typing-line-drag-flicker-2026-10-29]).
+                    if cx
+                        .try_global::<WindowDragPress>()
+                        .is_some_and(|press| press.start.is_some())
+                    {
+                        return;
+                    }
                     this.begin_drag_scroll(event.position);
                 }),
             )
@@ -3329,13 +3802,12 @@ impl Render for Transcript {
                                 .items_center()
                                 .justify_center()
                                 .rounded_full()
-                                .bg(theme.card())
                                 .border_1()
                                 .border_color(theme.border_strong)
                                 .shadow_md()
                                 .cursor_pointer()
-                                .hover(|s| s.bg(theme.surface_2))
-                                .child(icon("arrow-down", 15.0, theme.text))
+                                .map(|el| highlight::washed(el, theme.card(), &theme))
+                                .child(sf_symbols::glyph("arrow.down", 15.0, theme.text))
                                 .on_click(cx.listener(|this, _, _, cx| this.jump_to_latest(cx)))
                                 .with_animation(
                                     "jump-in",
@@ -3404,6 +3876,7 @@ pub fn speaker_label(cached: bool, failed: bool) -> &'static str {
 fn block_text_len(block: &Block) -> usize {
     match block {
         Block::Paragraph(t) | Block::Heading { text: t, .. } => t.len(),
+        Block::Quote(inner) => inner.iter().map(|b| block_text_len(b) + 1).sum(),
         Block::Bullets(items) | Block::Numbered(items) => items.iter().map(|s| s.len() + 1).sum(),
         Block::Code { code, .. } => code.len(),
         Block::Table { header, rows } => {
@@ -3412,6 +3885,7 @@ fn block_text_len(block: &Block) -> usize {
         }
         Block::Math { source } => source.len(),
         Block::Chart { table, .. } => table.len(),
+        Block::LinkPreview { preview, .. } => preview.title.len(),
     }
 }
 
@@ -3582,7 +4056,7 @@ fn pending_glyph(theme: &Theme) -> Div {
         .items_center()
         .justify_center()
         .debug_selector(|| "own-bubble-pending-glyph".into())
-        .child(icon("hourglass", 12.0, theme.text_muted))
+        .child(sf_symbols::glyph("hourglass", 12.0, theme.text_muted))
 }
 
 /// The mark beside a bubble the relay refused: the red glyph, always visible, outside the
@@ -3596,7 +4070,11 @@ fn failed_glyph(theme: &Theme) -> Div {
         .items_center()
         .debug_selector(|| "own-bubble-failed-glyph".into())
         // error-ui: exception failed-bubble-mark (the glyph is the mark, not a message)
-        .child(icon("exclamation", RAIL_GLYPH, theme.danger))
+        .child(sf_symbols::glyph(
+            "exclamationmark.circle",
+            RAIL_GLYPH,
+            theme.danger,
+        ))
 }
 
 /// A text block that is really machine output (a JSON object/array) is not
@@ -3609,15 +4087,130 @@ fn is_json_block(block: &Block) -> bool {
         }
         Block::Code { .. }
         | Block::Heading { .. }
+        | Block::Quote(_)
         | Block::Bullets(_)
         | Block::Numbered(_)
         | Block::Table { .. }
         | Block::Math { .. }
-        | Block::Chart { .. } => return false,
+        | Block::Chart { .. }
+        | Block::LinkPreview { .. } => return false,
     };
     let t = text.trim();
     (t.starts_with('{') || t.starts_with('['))
         && serde_json::from_str::<serde_json::Value>(t).is_ok()
+}
+
+/// Built rows for one message, keyed by a render version so a streaming
+/// upsert rebuilds only that message (#1405 /
+/// feedback app-01M5Z3QPDA5BRE84SAPADXX05V,
+/// addendum app-01M5Z3T4F4KAMTWA7YKW3CP58H).
+#[derive(Default)]
+pub struct MessageRowCache {
+    entries: HashMap<Id, CachedMessageRows>,
+    /// How many messages were built (not served from the cache) on the
+    /// last [`build_rows_with_cache`] call. Tests assert a streaming edit
+    /// rebuilds one message, not the whole transcript.
+    pub built: usize,
+    /// The messages that start a sender run on the last call (see
+    /// [`RUN_WINDOW_MS`]): their first row opens the turn gap. Rebuilt on
+    /// every call, cache hits included.
+    pub run_starts: HashSet<Id>,
+}
+
+struct CachedMessageRows {
+    version: u64,
+    rows: Vec<Row>,
+    last_stamp_at: u64,
+    run_tail: Option<RunTail>,
+    run_start: bool,
+}
+
+impl MessageRowCache {
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.built = 0;
+        self.run_starts.clear();
+    }
+}
+
+/// Fingerprint of the fields that change a message's rows: text, parts,
+/// status, completed time, reactions, and the stamp / sender-run context
+/// (plus speech / details / thumbs / width-class flags).
+#[allow(clippy::too_many_arguments)]
+fn message_render_version(
+    message: &Message,
+    last_stamp_at: u64,
+    continues_run: bool,
+    is_last_reply: bool,
+    show_details: bool,
+    speech: &SpeechRows<'_>,
+    me_id: &str,
+    thumb_keys: &HashSet<&str>,
+    names_senders: bool,
+    // Width class: multi-party layout changes who gets a name caption.
+    width_class: u8,
+) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    message.id.hash(&mut h);
+    std::mem::discriminant(&message.role).hash(&mut h);
+    message.sender.hash(&mut h);
+    std::mem::discriminant(&message.status).hash(&mut h);
+    message.pending.hash(&mut h);
+    message.created_at.hash(&mut h);
+    message.completed_at.hash(&mut h);
+    message.hidden.hash(&mut h);
+    message.worker.hash(&mut h);
+    message.greeting.hash(&mut h);
+    message.waiting_user.hash(&mut h);
+    message.waiting_approval.hash(&mut h);
+    message.plain_text().hash(&mut h);
+    for (emoji, people) in &message.reactions {
+        emoji.hash(&mut h);
+        for (who, on) in people {
+            who.hash(&mut h);
+            on.hash(&mut h);
+        }
+    }
+    // Parts: Debug covers every variant; thumb presence is mixed in so a
+    // late-decoded preview reloads the attachment row.
+    for p in &message.parts {
+        format!("{p:?}").hash(&mut h);
+        if let Part::Attachment { attachment, .. } = p {
+            attachment
+                .blob_ref
+                .as_deref()
+                .is_some_and(|k| thumb_keys.contains(k))
+                .hash(&mut h);
+        }
+    }
+    message.sender_name.hash(&mut h);
+    message.sender_handle.hash(&mut h);
+    message.sender_avatar.hash(&mut h);
+    message.sender_avatar_color.hash(&mut h);
+    message.sender_icon.hash(&mut h);
+    message.in_reply_to.hash(&mut h);
+    message.reply_to.hash(&mut h);
+    message.forwarded_from.hash(&mut h);
+    message.agent_reply_to.hash(&mut h);
+    message.asked_by_handle.hash(&mut h);
+    message.owner_handle.hash(&mut h);
+    message.routine_name.hash(&mut h);
+    message.activity.hash(&mut h);
+    format!("{:?}", message.turn).hash(&mut h);
+    format!("{:?}", message.reply_ref).hash(&mut h);
+    format!("{:?}", message.job).hash(&mut h);
+    last_stamp_at.hash(&mut h);
+    continues_run.hash(&mut h);
+    is_last_reply.hash(&mut h);
+    show_details.hash(&mut h);
+    speech.enabled.hash(&mut h);
+    speech.voice_mode.hash(&mut h);
+    speech.spoken.contains(&message.id).hash(&mut h);
+    speech.failed.contains_key(&message.id).hash(&mut h);
+    me_id.hash(&mut h);
+    names_senders.hash(&mut h);
+    width_class.hash(&mut h);
+    h.finish()
 }
 
 /// The transcript shows only what the agent said and made: prose, files,
@@ -3629,8 +4222,8 @@ fn is_json_block(block: &Block) -> bool {
 /// mixed into row versions so a late thumbnail reloads the picture row.
 /// `names_senders` landed from a parallel feedback; keep it a plain arg
 /// rather than a one-off options struct.
-#[allow(clippy::too_many_arguments)]
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub fn build_rows(
     messages: &[Message],
     show_details: bool,
@@ -3654,6 +4247,8 @@ pub fn build_rows(
 
 /// [`build_rows`] with the senders I blocked (`user:<id>` keys): their messages fold into
 /// one [`RowKind::Hidden`] line per run instead of bubbles, and carry no date stamp.
+/// Production sync goes through [`build_rows_with_cache`] (same fold, plus the row cache).
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn build_rows_hiding(
     messages: &[Message],
@@ -3665,6 +4260,38 @@ pub fn build_rows_hiding(
     names_senders: bool,
     hidden_senders: &HashSet<String>,
 ) -> Vec<Row> {
+    let mut cache = MessageRowCache::default();
+    build_rows_with_cache(
+        messages,
+        show_details,
+        speech,
+        me_id,
+        thumb_keys,
+        mentions,
+        names_senders,
+        false,
+        &mut cache,
+        hidden_senders,
+    )
+}
+
+/// Like [`build_rows`], but reuses per-message rows whose render version is
+/// unchanged. A streaming upsert then rebuilds one message, not all of them.
+/// Blocked senders fold into [`RowKind::Hidden`] the same way as [`build_rows_hiding`].
+#[allow(clippy::too_many_arguments)]
+pub fn build_rows_with_cache(
+    messages: &[Message],
+    show_details: bool,
+    speech: SpeechRows<'_>,
+    me_id: &str,
+    thumb_keys: &HashSet<&str>,
+    mentions: &Mentions,
+    names_senders: bool,
+    people_space: bool,
+    cache: &mut MessageRowCache,
+    hidden_senders: &HashSet<String>,
+) -> Vec<Row> {
+    cache.built = 0;
     let mine = |m: &Message| {
         m.sender == "user" || m.sender.is_empty() || m.sender == format!("user:{me_id}")
     };
@@ -3678,23 +4305,30 @@ pub fn build_rows_hiding(
         .iter()
         .rposition(|m| m.role == Role::Assistant && !m.is_streaming());
     let mut last_stamp_at: u64 = 0;
-    // Who spoke last in a people chat: a bubble carries its sender's name only when
-    // the sender changed or a date stamp broke the run (Grok Bot's group style), and
-    // only in chats that name their senders at all (`names_senders`).
-    let mut prev_sender: Option<String> = None;
+    // The sender run the builder is in (who spoke last, when): a message that
+    // continues it draws no name and no disc and sits in the tight in-run gap; a
+    // date stamp, a system line or a hidden fold ends it ([feedback
+    // grouped-messages-mac-2026-10-28]). Names only in chats that name their
+    // senders at all (`names_senders`).
+    let mut run_tail: Option<RunTail> = None;
+    cache.run_starts.clear();
     // The stamp pushed for the current message, with the state it replaced. A
     // message that then draws nothing — a hidden job / worker row, a stream
     // with no words yet — takes its stamp back, so no date line hangs over
     // empty space above the status row ([feedback status-row-gap-mac-2026-10-26]).
-    let mut pending_stamp: Option<(usize, u64, Option<String>)> = None;
+    let mut pending_stamp: Option<(usize, u64, Option<RunTail>)> = None;
+    let width_class = u8::from(names_senders);
+    let mut keep: HashSet<Id> = HashSet::new();
     for (mix, message) in messages.iter().enumerate() {
+        keep.insert(message.id.clone());
         retract_dangling_stamp(
             &mut rows,
             &mut pending_stamp,
             &mut last_stamp_at,
-            &mut prev_sender,
+            &mut run_tail,
         );
         // Someone I blocked: fold the run into one hidden line, no bubble, no stamp.
+        // Cross-message fold — do not serve from the per-message row cache.
         if message.role == Role::User && hidden_senders.contains(&message.sender) {
             match rows.last_mut() {
                 Some(Row {
@@ -3720,13 +4354,53 @@ pub fn build_rows_hiding(
                     },
                 }),
             }
-            prev_sender = None;
+            run_tail = None;
             continue;
         }
+        if people_space && message.is_senderless_blank() {
+            continue;
+        }
+        let is_last_reply = last_reply == Some(mix);
+        // Does this message continue the run? Decided before the stamp below:
+        // a stamp only lands when the hour gap passed, which is past the run
+        // window anyway.
+        let continues = continues_run(
+            run_tail.as_ref(),
+            &message.sender,
+            message.created_at,
+            carries_quote(message),
+        );
+        let run_start = !continues;
+        let version = message_render_version(
+            message,
+            last_stamp_at,
+            continues,
+            is_last_reply,
+            show_details,
+            &speech,
+            me_id,
+            thumb_keys,
+            names_senders,
+            width_class,
+        );
+        if let Some(hit) = cache.entries.get(&message.id) {
+            if hit.version == version {
+                rows.extend(hit.rows.iter().cloned());
+                last_stamp_at = hit.last_stamp_at;
+                run_tail = hit.run_tail.clone();
+                if hit.run_start {
+                    cache.run_starts.insert(message.id.clone());
+                }
+                pending_stamp = None;
+                continue;
+            }
+        }
+        cache.built += 1;
+        let start = rows.len();
         let streaming = message.is_streaming();
         if message.created_at > 0 && message.created_at.saturating_sub(last_stamp_at) > STAMP_GAP_MS
         {
-            pending_stamp = Some((rows.len(), last_stamp_at, prev_sender.take()));
+            pending_stamp = Some((rows.len(), last_stamp_at, run_tail.take()));
             last_stamp_at = message.created_at;
             let label = crate::ui::sidebar::stamp_label(message.created_at);
             rows.push(Row {
@@ -3751,10 +4425,22 @@ pub fn build_rows_hiding(
                 });
                 // `@handle` → `@Display Name` so the chip shows the name and a copy
                 // carries it (mention chips, Oct 23).
-                let text = match &ghost {
+                let mut text = match &ghost {
                     Some(name) => format!("Secret saved as {name}"),
                     None => mentions.display(&message.plain_text()),
                 };
+                // The link preview card; a message that was only the link shows the card
+                // alone (iMessage's rule), the full URL stays one hover away on the card.
+                let preview = ghost
+                    .is_none()
+                    .then(|| link_preview_of(message))
+                    .flatten()
+                    .map(|(id, p)| Box::new((id.clone(), p.clone())));
+                if let Some(p) = &preview {
+                    if is_link_only(&text, &p.1) {
+                        text = String::new();
+                    }
+                }
                 let attachment_parts: Vec<(String, Attachment)> = message
                     .parts
                     .iter()
@@ -3791,9 +4477,7 @@ pub fn build_rows_hiding(
                 } else {
                     sender_caption(message)
                 };
-                let named = names_senders
-                    && from.is_some()
-                    && prev_sender.as_deref() != Some(message.sender.as_str());
+                let named = names_senders && from.is_some() && run_start;
                 // Image preview / file card rows (same cards as agent attachments).
                 let is_mine = from.is_none();
                 // A media-viewer forward's whole text is the "Forwarded from …" line:
@@ -3823,8 +4507,31 @@ pub fn build_rows_hiding(
                 let show_text = !text.is_empty()
                     && !(has_image && is_generic_media_label(&text))
                     && legacy_hint.is_none();
+                // A cross-chat reply (Reply in DM) quotes its own snapshot; an in-chat
+                // reply quotes the row it points at. A forward never quotes. With
+                // attachments the quote sits once, above the first card, so a picture
+                // reply keeps its reply — with or without a caption ([feedback
+                // picture-reply-quote-mac-2026-10-28]: a wordless picture had no bubble
+                // to carry it and the reply vanished).
+                let quote = if forwarded_by.is_some() || legacy_hint.is_some() {
+                    None
+                } else {
+                    message
+                        .reply_ref
+                        .as_ref()
+                        .filter(|r| !r.chat_id.is_empty() && !r.message_id.is_empty())
+                        .map(Quote::for_reply_ref)
+                        .or_else(|| {
+                            message
+                                .reply_to
+                                .as_deref()
+                                .filter(|id| !id.is_empty())
+                                .map(|id| Quote::for_reply(id, messages))
+                        })
+                };
                 for (ix, (part_id, attachment)) in attachment_parts.iter().enumerate() {
                     let forwarded = forwarded.clone().filter(|_| ix == 0);
+                    let quote = quote.clone().filter(|_| ix == 0);
                     let has_thumb = attachment
                         .blob_ref
                         .as_deref()
@@ -3833,7 +4540,7 @@ pub fn build_rows_hiding(
                     // their name on the first card when the run changes sender.
                     let sender = from.clone().map(AttachmentSender::Person);
                     let card_named = named && ix == 0;
-                    let disc = !show_text && ix + 1 == attachment_parts.len();
+                    let disc = run_start && !show_text && ix + 1 == attachment_parts.len();
                     rows.push(Row {
                         version: hash_version(
                             &(
@@ -3847,6 +4554,7 @@ pub fn build_rows_hiding(
                                 from.as_ref().map(|p| &p.handle),
                                 card_named,
                                 disc,
+                                &quote,
                             ),
                             false,
                         ),
@@ -3861,24 +4569,13 @@ pub fn build_rows_hiding(
                             disc,
                             time: clock_label(message.created_at),
                             forwarded_from: forwarded.clone(),
+                            quote,
                         },
                     });
                 }
-                if show_text || attachment_parts.is_empty() {
-                    // A cross-chat reply (Reply in DM) quotes its own snapshot;
-                    // an in-chat reply quotes the row it points at.
-                    let quote = message
-                        .reply_ref
-                        .as_ref()
-                        .filter(|r| !r.chat_id.is_empty() && !r.message_id.is_empty())
-                        .map(Quote::for_reply_ref)
-                        .or_else(|| {
-                            message
-                                .reply_to
-                                .as_deref()
-                                .filter(|id| !id.is_empty())
-                                .map(|id| Quote::for_reply(id, messages))
-                        });
+                if show_text || attachment_parts.is_empty() || preview.is_some() {
+                    // The quote is on the first card when the message has any.
+                    let quote = quote.filter(|_| attachment_parts.is_empty());
                     let delivery = delivery_state(message, is_mine);
                     // The label is on the first card when the message has any.
                     let forwarded_from = forwarded_by.filter(|_| attachment_parts.is_empty());
@@ -3892,6 +4589,9 @@ pub fn build_rows_hiding(
                                 delivery,
                                 &forwarded_from,
                                 &ghost,
+                                &preview,
+                                run_start,
+                                named,
                             ),
                             false,
                         ),
@@ -3903,18 +4603,20 @@ pub fn build_rows_hiding(
                             from,
                             // The first card already names the sender.
                             named: named && attachment_parts.is_empty(),
+                            disc: run_start,
                             time: clock_label(message.created_at),
                             delivery,
                             quote,
                             forwarded_from,
                             ghost,
+                            preview,
                         },
                     });
                 }
                 if message.status == MessageStatus::Queued {
                     queued = true;
                 }
-                push_reactions(&mut rows, message, mine(message));
+                push_reactions(&mut rows, message, is_mine, !is_mine);
             }
             Role::System => {
                 // Call lines and membership notices ("Jacob added Home, hjkb and
@@ -3937,7 +4639,7 @@ pub fn build_rows_hiding(
                         message_id: message.id.clone(),
                         kind: RowKind::Stamp { label: line },
                     });
-                    prev_sender = None;
+                    run_tail = None;
                 }
             }
             Role::Assistant | Role::Project => {
@@ -4088,14 +4790,13 @@ pub fn build_rows_hiding(
                     lane = Some(message.sender.clone());
                 }
                 // Group / channel: the agent's name sits inside its first bubble (the
-                // name resolves at render time from the seed, like the disc). Each
-                // people-chat reply names its sender (#1447): consecutive answers from
-                // the same agent must not merge into one unnamed run. A stream with no
-                // words yet has no bubble, so it shows no name either (the presence row
-                // says who is working).
-                let sender_named = names_senders
-                    && lane.is_some()
-                    && (agent_speaker || prev_sender.as_deref() != Some(message.sender.as_str()));
+                // name resolves at render time from the seed, like the disc) when the
+                // message starts a run. Agents group like people (Jacob, 2026-10-28,
+                // supersedes #1447's name-on-every-reply): a reply that quotes the ask
+                // starts its own run and is named; a quick follow-up within the window
+                // is not. A stream with no words yet has no bubble, so it shows no name
+                // either (the presence row says who is working).
+                let sender_named = names_senders && lane.is_some() && run_start;
                 let last_text_part = message
                     .parts
                     .iter()
@@ -4118,6 +4819,7 @@ pub fn build_rows_hiding(
                     .iter()
                     .filter(|p| matches!(p, Part::Chart { .. }))
                     .count();
+                let link_preview = link_preview_of(message).map(|(id, _)| id.clone());
                 let total_blocks: usize = polished
                     .iter()
                     .map(|(_, text)| {
@@ -4127,7 +4829,8 @@ pub fn build_rows_hiding(
                             .count()
                     })
                     .sum::<usize>()
-                    + chart_parts;
+                    + chart_parts
+                    + usize::from(link_preview.is_some());
                 let fill = total_blocks > 1;
                 // Every block of every text part is one bubble for selection.
                 let bubble_blocks: Vec<Block> = polished
@@ -4186,7 +4889,15 @@ pub fn build_rows_hiding(
                                 name_taken |= named;
                                 rows.push(Row {
                                     version: hash_version(
-                                        &(&block, first, last, fill, &reply_quote, named),
+                                        &(
+                                            &block,
+                                            first,
+                                            last,
+                                            fill,
+                                            &reply_quote,
+                                            named,
+                                            run_start,
+                                        ),
                                         live,
                                     ),
                                     id: format!("{}#{}.{}", message.id, id, bix),
@@ -4202,6 +4913,7 @@ pub fn build_rows_hiding(
                                         lane: lane.clone(),
                                         quote: if first { reply_quote.clone() } else { None },
                                         named,
+                                        disc: run_start,
                                     },
                                 });
                                 block_ix += 1;
@@ -4225,7 +4937,7 @@ pub fn build_rows_hiding(
                             name_taken |= named;
                             rows.push(Row {
                                 version: hash_version(
-                                    &(&block, first, last, fill, &reply_quote, named),
+                                    &(&block, first, last, fill, &reply_quote, named, run_start),
                                     false,
                                 ),
                                 id: format!("{}#{}", message.id, id),
@@ -4241,10 +4953,50 @@ pub fn build_rows_hiding(
                                     lane: lane.clone(),
                                     quote: if first { reply_quote.clone() } else { None },
                                     named,
+                                    disc: run_start,
                                 },
                             });
                             block_ix += 1;
                         }
+                        // The link preview card: one block under the prose
+                        // ([feedback link-embeds-mac-2026-10-27]); hidden once the sender
+                        // removed it (`preview: "off"`) or the switch is off.
+                        Part::LinkPreview { id, preview }
+                            if link_preview.as_deref() == Some(id.as_str()) =>
+                        {
+                            had_prose = true;
+                            let first = block_ix == 0;
+                            let last = block_ix + 1 == total_blocks;
+                            let block = Block::LinkPreview {
+                                part_id: id.clone(),
+                                preview: preview.clone(),
+                            };
+                            let bubble = BubbleText::single(block_plain(&block, false));
+                            let named = sender_named && first;
+                            rows.push(Row {
+                                version: hash_version(
+                                    &(&block, first, last, fill, &reply_quote, named, run_start),
+                                    false,
+                                ),
+                                id: format!("{}#{}", message.id, id),
+                                message_id: message.id.clone(),
+                                kind: RowKind::Markdown {
+                                    block,
+                                    live: false,
+                                    bubble,
+                                    first,
+                                    last,
+                                    fill,
+                                    time: clock_label(message.created_at),
+                                    lane: lane.clone(),
+                                    quote: if first { reply_quote.clone() } else { None },
+                                    named,
+                                    disc: run_start,
+                                },
+                            });
+                            block_ix += 1;
+                        }
+                        Part::LinkPreview { .. } => {}
                         // The chart's fallback picture: an older app shows it, this one
                         // draws the chart instead.
                         Part::Attachment { attachment, .. }
@@ -4262,9 +5014,10 @@ pub fn build_rows_hiding(
                             // photo in Arbonites drew as a bare picture before).
                             let card_named = sender_named && !name_taken;
                             name_taken |= card_named;
-                            // The disc goes on the message's last row: its text bubble
-                            // when it has words, else its last card.
-                            let disc = total_blocks == 0 && Some(pix) == last_card_part;
+                            // The disc goes on the last row of a message that starts its
+                            // run: its text bubble when it has words, else its last card.
+                            let disc =
+                                run_start && total_blocks == 0 && Some(pix) == last_card_part;
                             rows.push(Row {
                                 version: hash_version(
                                     &(
@@ -4292,6 +5045,7 @@ pub fn build_rows_hiding(
                                     disc,
                                     time: clock_label(message.created_at),
                                     forwarded_from: None,
+                                    quote: None,
                                 },
                             })
                         }
@@ -4472,6 +5226,7 @@ pub fn build_rows_hiding(
                             lane: lane.clone(),
                             quote: reply_quote.clone(),
                             named: sender_named,
+                            disc: run_start,
                         },
                         None => RowKind::NoAnswer {
                             seed: message.sender.clone(),
@@ -4480,6 +5235,7 @@ pub fn build_rows_hiding(
                             lane: lane.clone(),
                             quote: reply_quote.clone(),
                             named: sender_named,
+                            disc: run_start,
                         },
                     };
                     rows.push(Row {
@@ -4490,6 +5246,7 @@ pub fn build_rows_hiding(
                                 errors.first().map(|(_, _, text)| text),
                                 &reply_quote,
                                 sender_named,
+                                run_start,
                             ),
                             false,
                         ),
@@ -4527,7 +5284,7 @@ pub fn build_rows_hiding(
                     });
                 }
                 if !streaming {
-                    push_reactions(&mut rows, message, false);
+                    push_reactions(&mut rows, message, false, lane.is_some());
                 }
                 // Speaker (F11): every reply whose speech is cached or failed,
                 // plus the newest finished reply while voice mode is on.
@@ -4571,19 +5328,50 @@ pub fn build_rows_hiding(
                 }
             }
         }
-        if rows.len() > rows_before_message {
-            prev_sender = Some(message.sender.clone());
+        // A message that drew rows is the run's new tail; one that drew nothing
+        // (a hidden job, a stream with no words yet) neither starts nor continues
+        // a run, and is never a turn start.
+        let drew = rows.len() > rows_before_message;
+        if drew {
+            run_tail = Some(RunTail {
+                sender: message.sender.clone(),
+                at: message.created_at,
+            });
+            if run_start {
+                cache.run_starts.insert(message.id.clone());
+            }
         }
+        // Finalize a no-content message's stamp now so the cached slice is
+        // complete (same outcome as retract on the next turn).
+        if !drew {
+            retract_dangling_stamp(
+                &mut rows,
+                &mut pending_stamp,
+                &mut last_stamp_at,
+                &mut run_tail,
+            );
+        }
+        cache.entries.insert(
+            message.id.clone(),
+            CachedMessageRows {
+                version,
+                rows: rows[start..].to_vec(),
+                last_stamp_at,
+                run_tail: run_tail.clone(),
+                run_start: drew && run_start,
+            },
+        );
     }
     retract_dangling_stamp(
         &mut rows,
         &mut pending_stamp,
         &mut last_stamp_at,
-        &mut prev_sender,
+        &mut run_tail,
     );
+    cache.entries.retain(|id, _| keep.contains(id));
     // Who is working is the presence row over the composer (`ui::presence`),
     // not a transcript row: one notice per agent, never a caption plus a line.
-    let _ = (running, queued, last_stamp_at, prev_sender);
+    let _ = (running, queued, last_stamp_at, run_tail);
     // Trailing clearance: scrolls with the list so mid-thread bubbles can
     // reach the composer, while the pinned end still keeps 54 pt above it.
     if !rows.is_empty() {
@@ -4602,34 +5390,34 @@ pub fn build_rows_hiding(
 /// clock and the sender run to what they were before it.
 fn retract_dangling_stamp(
     rows: &mut Vec<Row>,
-    pending: &mut Option<(usize, u64, Option<String>)>,
+    pending: &mut Option<(usize, u64, Option<RunTail>)>,
     last_stamp_at: &mut u64,
-    prev_sender: &mut Option<String>,
+    run_tail: &mut Option<RunTail>,
 ) {
-    if let Some((ix, at, sender)) = pending.take() {
+    if let Some((ix, at, tail)) = pending.take() {
         if rows.len() == ix + 1 && matches!(rows[ix].kind, RowKind::Stamp { .. }) {
             rows.pop();
             *last_stamp_at = at;
-            *prev_sender = sender;
+            *run_tail = tail;
         }
     }
 }
 
-/// One chips row under a message that carries reactions.
-fn push_reactions(rows: &mut Vec<Row>, message: &Message, mine: bool) {
+/// One chips row under a message that carries reactions. `mine` and `lane` are
+/// the ones its bubble was laid out with, so the chips share its edge.
+fn push_reactions(rows: &mut Vec<Row>, message: &Message, mine: bool, lane: bool) {
     let reactions = message.reaction_list();
     if reactions.is_empty() {
         return;
     }
-    let indent = message.role == Role::User && !mine;
     rows.push(Row {
-        version: hash_version(&(&reactions, mine, indent), false),
+        version: hash_version(&(&reactions, mine, lane), false),
         id: format!("{}#reactions", message.id),
         message_id: message.id.clone(),
         kind: RowKind::Reactions {
             reactions,
             mine,
-            indent,
+            lane,
         },
     });
 }
@@ -4664,7 +5452,9 @@ struct Segment {
 fn block_segments(block: &Block, literal: bool) -> Vec<Segment> {
     let inline = |t: &str| {
         if literal {
-            t.to_string()
+            // As typed, except that bare URLs carry their wrap hints (as
+            // `plain_text` draws them).
+            urlwrap::hint_bare_urls(t)
         } else {
             inline_plain(t)
         }
@@ -4674,6 +5464,21 @@ fn block_segments(block: &Block, literal: bool) -> Vec<Segment> {
         Block::Paragraph(text) | Block::Heading { text, .. } => {
             vec![seg(String::new(), inline(text))]
         }
+        // A quote's blocks follow one another one newline apart, as the
+        // bubble's blocks do.
+        Block::Quote(inner) => inner
+            .iter()
+            .enumerate()
+            .flat_map(|(i, b)| {
+                let mut segs = block_segments(b, literal);
+                if i > 0 {
+                    if let Some(first) = segs.first_mut() {
+                        first.lead.insert(0, '\n');
+                    }
+                }
+                segs
+            })
+            .collect(),
         Block::Bullets(items) => items
             .iter()
             .enumerate()
@@ -4721,6 +5526,8 @@ fn block_segments(block: &Block, literal: bool) -> Vec<Segment> {
         )],
         // A copy of the bubble carries the chart's data as its markdown table.
         Block::Chart { table, .. } => vec![seg(String::new(), table.clone())],
+        // A copy of the bubble carries the card as its title and site.
+        Block::LinkPreview { preview, .. } => vec![seg(String::new(), preview.one_line())],
     }
 }
 
@@ -4728,10 +5535,11 @@ fn block_segments(block: &Block, literal: bool) -> Vec<Segment> {
 /// hands its `Selectable::bubble`: the text as typed, or its blocks when it
 /// carries a fenced code block.
 fn user_bubble_plain(text: &str) -> String {
-    if has_fenced_code(text) {
-        bubble_plain(&split_blocks(text), true)
+    let blocks = split_blocks(text);
+    if is_plain_paragraph(&blocks) {
+        urlwrap::hint_bare_urls(text)
     } else {
-        text.to_string()
+        bubble_plain(&blocks, false)
     }
 }
 
@@ -4844,7 +5652,8 @@ fn plain_text(
             }
             let url: String = chars[i..url_end].iter().collect();
             let start = full.len();
-            links.push((start..start + url.len(), url.clone()));
+            // `text` already carries the wrap hints; the target never does.
+            links.push((start..start + url.len(), urlwrap::plain(&url)));
             runs.push(TextRun {
                 len: url.len(),
                 font: font.clone(),
@@ -4890,7 +5699,7 @@ fn secret_ghost_body(name: &str, from: Option<&Person>, theme: &Theme) -> AnyEle
         .flex()
         .items_center()
         .gap(px(7.0))
-        .child(icon("key", 13.0, theme.text_muted))
+        .child(sf_symbols::glyph("key", 13.0, theme.text_muted))
         .child(
             div()
                 .flex()
@@ -4906,6 +5715,25 @@ fn secret_ghost_body(name: &str, from: Option<&Person>, theme: &Theme) -> AnyEle
         .into_any_element()
 }
 
+/// The message's link preview, when the global switch is on and the sender has not removed
+/// it ([feedback link-embeds-mac-2026-10-27]).
+pub fn link_preview_of(message: &Message) -> Option<(&Id, &LinkPreview)> {
+    if !crate::ui::link_card::enabled() {
+        return None;
+    }
+    message.link_preview()
+}
+
+/// Was the message nothing but the link the card stands for? Then the card is the bubble.
+pub fn is_link_only(text: &str, preview: &LinkPreview) -> bool {
+    let t = text.trim();
+    !t.is_empty()
+        && !t.contains(char::is_whitespace)
+        && (t == preview.url.trim()
+            || t == preview.canonical_url.trim()
+            || t.trim_end_matches('/') == preview.url.trim().trim_end_matches('/'))
+}
+
 fn user_message_body(
     row_id: &str,
     text: &str,
@@ -4915,50 +5743,48 @@ fn user_message_body(
     copy: &CodeCopy,
 ) -> AnyElement {
     let key = format!("{row_id}.u");
-    if !has_fenced_code(text) {
-        let bubble = selectable.bubble(key, text.to_string());
-        return plain_text(text, color, theme, &bubble, 0);
-    }
     let blocks = split_blocks(text);
-    let bubble = selectable.bubble(key, bubble_plain(&blocks, true));
-    let offsets = block_offsets(&blocks, true);
+    // A typed message with no formatting at all stays one plain element: the
+    // text as typed, bare URLs linked ([`user_bubble_plain`]).
+    if is_plain_paragraph(&blocks) {
+        let text = urlwrap::hint_bare_urls(text);
+        let bubble = selectable.bubble(key, text.clone());
+        return plain_text(&text, color, theme, &bubble, 0);
+    }
+    let bubble = selectable.bubble(key, bubble_plain(&blocks, false));
+    let offsets = block_offsets(&blocks, false);
     // Same as `render_block`: no `min_w_0`, so the quote header above never
     // sets this column's width.
     let mut col = div().flex().flex_col().gap(px(6.0)).w_full();
     for (i, block) in blocks.iter().enumerate() {
         let id = format!("{row_id}.u{i}");
-        let at = offsets[i];
-        col = match block {
-            Block::Code { lang, code } => col.child(code_fence_card(
-                &id,
-                lang,
-                code,
-                color,
-                theme,
-                &bubble,
-                at,
-                None,
-                Instant::now(),
-                copy,
-            )),
-            // Prose, lists and tables stay literal in a typed bubble (a
-            // "# heading" is still a "# heading"); one element per block.
-            Block::Paragraph(_)
-            | Block::Heading { .. }
-            | Block::Bullets(_)
-            | Block::Numbered(_)
-            | Block::Table { .. }
-            | Block::Math { .. }
-            | Block::Chart { .. } => col.child(plain_text(
-                &block_plain(block, true),
-                color,
-                theme,
-                &bubble,
-                at,
-            )),
-        };
+        col = col.child(render_block_in(
+            &id,
+            block,
+            color,
+            offsets[i],
+            None,
+            Instant::now(),
+            theme,
+            &bubble,
+            copy,
+        ));
     }
     col.into_any_element()
+}
+
+/// Whether a typed message renders exactly as typed: one paragraph whose
+/// inline runs carry no style (links aside — `plain_text` draws those).
+fn is_plain_paragraph(blocks: &[Block]) -> bool {
+    match blocks {
+        [Block::Paragraph(text)] => inline_spans(text).iter().all(|s| {
+            let mut style = s.style;
+            style.link = false;
+            style == markdown::InlineStyle::default() && s.icon.is_none()
+        }),
+        [] => true,
+        _ => false,
+    }
 }
 
 /// Inline-markdown prose as one selectable element. `veil_offset` is where
@@ -4975,7 +5801,9 @@ fn styled_text(
     bubble: &BubbleSelectable,
     at: usize,
 ) -> AnyElement {
-    let (full, runs, links, icons) = inline_runs(text, base_color, theme);
+    let (full, runs, links, icons, spoilers) = inline_runs(text, base_color, theme, at, &|start| {
+        bubble.spoiler_revealed(start)
+    });
     let runs = match veil {
         Some(veil) => apply_veil(runs, &veil.spans(now), veil_offset),
         None => runs,
@@ -4984,6 +5812,7 @@ fn styled_text(
         .text(at, full, runs)
         .with_links(links)
         .with_icons(icons)
+        .with_spoilers(spoilers)
         .into_any_element()
 }
 
@@ -5002,22 +5831,38 @@ pub fn link_icon_placeholder(theme: &Theme) -> gpui::Hsla {
 type Links = Vec<(std::ops::Range<usize>, String)>;
 /// Icon cells of the named links (element-local bytes of the cell → site host).
 type Icons = Vec<(std::ops::Range<usize>, String)>;
+/// Spoiler ranges (element-local bytes → where the spoiler starts in the bubble).
+type Spoilers = Vec<(std::ops::Range<usize>, usize)>;
 
-/// The rendered text, its styled runs, its link ranges and its icon cells for
-/// inline markdown `text` (`**bold**`, `*italic*`, `` `code` ``, links). A
-/// named link's cell ([`markdown::LINK_ICON_CELL`]) is an unpainted run — the
-/// site's picture goes there at paint time — and the link's click range
-/// covers cell and name.
+/// A hidden spoiler's fill: a solid pill in the muted ink; open, a faint wash.
+pub fn spoiler_fill(color: gpui::Hsla, theme: &Theme, revealed: bool) -> gpui::Hsla {
+    let ink = muted_of(color, theme);
+    Theme::with_alpha(ink, if revealed { 0.16 } else { 0.9 })
+}
+
+/// The rendered text, its styled runs, its link ranges, its icon cells and
+/// its spoiler ranges for inline markdown `text` (`**bold**`, `*italic*`,
+/// `~~strike~~`, `||spoiler||`, `` `code` ``, links). A named link's cell
+/// ([`markdown::LINK_ICON_CELL`]) is an unpainted run — the site's picture
+/// goes there at paint time — and the link's click range covers cell and
+/// name. A spoiler the viewer has not opened (`revealed(start)` is false for
+/// its start byte in the bubble's plain text) paints as a solid pill with its
+/// text invisible; `at` is where `text` starts in the bubble's plain text.
 fn inline_runs(
     text: &str,
     base_color: gpui::Hsla,
     theme: &Theme,
-) -> (String, Vec<TextRun>, Links, Icons) {
+    at: usize,
+    revealed: &dyn Fn(usize) -> bool,
+) -> (String, Vec<TextRun>, Links, Icons, Spoilers) {
     let spans = inline_spans(text);
     let mut full = String::new();
     let mut runs: Vec<TextRun> = Vec::new();
     let mut links: Links = Vec::new();
     let mut icons: Icons = Vec::new();
+    let mut spoilers: Spoilers = Vec::new();
+    // Where each spoiler's first run starts (element-local), by its index.
+    let mut spoiler_starts: HashMap<u16, usize> = HashMap::new();
     let sans = sans_font(theme);
     let mono = gpui::Font {
         family: theme.font_mono.into(),
@@ -5058,29 +5903,37 @@ fn inline_runs(
                 text_len -= cell;
             }
         }
+        let mut color = if style.link { theme.accent } else { base_color };
+        let mut background = style.code.then_some(theme.code_bg);
+        let mut underline = style.link.then(|| gpui::UnderlineStyle {
+            color: Some(Theme::with_alpha(theme.accent, 0.6)),
+            thickness: px(1.0),
+            wavy: false,
+        });
+        if style.spoiler != 0 {
+            let first = *spoiler_starts.entry(style.spoiler).or_insert(start);
+            let open = revealed(at + first);
+            spoilers.push((start..start + span.text.len(), at + first));
+            background = Some(spoiler_fill(base_color, theme, open));
+            if !open {
+                color = gpui::transparent_black();
+                underline = None;
+            }
+        }
         runs.push(TextRun {
             len: text_len,
             font,
-            color: if style.link { theme.accent } else { base_color },
-            background_color: if style.code {
-                Some(theme.code_bg)
-            } else {
-                None
-            },
-            underline: if style.link {
-                Some(gpui::UnderlineStyle {
-                    color: Some(Theme::with_alpha(theme.accent, 0.6)),
-                    thickness: px(1.0),
-                    wavy: false,
-                })
-            } else {
-                None
-            },
-            strikethrough: None,
+            color,
+            background_color: background,
+            underline,
+            strikethrough: style.strike.then(|| gpui::StrikethroughStyle {
+                thickness: px(1.0),
+                color: Some(color),
+            }),
         });
         full.push_str(&span.text);
     }
-    (full, runs, links, icons)
+    (full, runs, links, icons, spoilers)
 }
 
 /// Split runs at chunk boundaries and multiply alpha in (zeron veil.rs).
@@ -5145,6 +5998,40 @@ fn render_block(
     bubble: &BubbleSelectable,
     copy: &CodeCopy,
 ) -> AnyElement {
+    render_block_in(
+        row_id, block, theme.text, at, veil, now, theme, bubble, copy,
+    )
+}
+
+/// The quote bar's width and the gap to the quoted text (Grok Bot: a thin
+/// muted bar, the text inset and muted).
+pub const QUOTE_BAR: f32 = 3.0;
+pub const QUOTE_GAP: f32 = 10.0;
+
+/// A muted version of the bubble's text colour: the theme's muted ink on the
+/// agent's grey bubble, the same ink at lower alpha on my accent bubble.
+fn muted_of(color: gpui::Hsla, theme: &Theme) -> gpui::Hsla {
+    if color == theme.text {
+        theme.text_muted
+    } else {
+        Theme::with_alpha(color, 0.72)
+    }
+}
+
+/// One block in `color` (the bubble's ink: `theme.text` on an agent's bubble,
+/// the white of my own).
+#[allow(clippy::too_many_arguments)]
+fn render_block_in(
+    row_id: &str,
+    block: &Block,
+    color: gpui::Hsla,
+    at: usize,
+    veil: Option<&Veil>,
+    now: Instant,
+    theme: &Theme,
+    bubble: &BubbleSelectable,
+    copy: &CodeCopy,
+) -> AnyElement {
     // No `min_w_0` here. Inside a flex-column bubble (a quote header stacked
     // over the text, #1447) taffy sizes the column from its items, and an
     // item with `min-width: 0` contributes nothing to that width — the bubble
@@ -5155,7 +6042,7 @@ fn render_block(
     // the bubble itself keeps `min_w_0`). `layout_tests::a_quoted_bubble_…`.
     let base = div()
         .w_full()
-        .text_color(theme.text)
+        .text_color(color)
         .text_size(px(CHAT_BODY))
         .line_height(px(CHAT_LINE_HEIGHT));
     // Where each selectable element's text starts in the bubble's plain text.
@@ -5167,10 +6054,11 @@ fn render_block(
         starts.push(pos);
         pos += s.text.len();
     }
+    let muted = muted_of(color, theme);
     match block {
         Block::Paragraph(text) => base
             .child(styled_text(
-                text, theme.text, theme, veil, now, 0, bubble, starts[0],
+                text, color, theme, veil, now, 0, bubble, starts[0],
             ))
             .into_any_element(),
         Block::Heading { level, text } => {
@@ -5182,9 +6070,37 @@ fn render_block(
             base.text_size(px(size))
                 .font_weight(STRONG_WEIGHT)
                 .pt(px(6.0))
+                .debug_selector(move || format!("heading-{level}"))
                 .child(styled_text(
-                    text, theme.text, theme, veil, now, 0, bubble, starts[0],
+                    text, color, theme, veil, now, 0, bubble, starts[0],
                 ))
+                .into_any_element()
+        }
+        // `> quoted`: a thin bar, the blocks inset and muted; a quote inside
+        // a quote draws its own bar inside this one.
+        Block::Quote(inner) => {
+            let mut col = div().flex_1().min_w_0().flex().flex_col().gap(px(6.0));
+            let mut inner_at = at;
+            for (i, b) in inner.iter().enumerate() {
+                let id = format!("{row_id}.q{i}");
+                col = col.child(render_block_in(
+                    &id, b, muted, inner_at, None, now, theme, bubble, copy,
+                ));
+                inner_at += block_plain(b, false).len() + 1;
+            }
+            base.flex()
+                .items_stretch()
+                .gap(px(QUOTE_GAP))
+                .debug_selector(|| "quote-block".into())
+                .child(
+                    div()
+                        .w(px(QUOTE_BAR))
+                        .flex_shrink_0()
+                        .rounded_full()
+                        .bg(Theme::with_alpha(muted, 0.55))
+                        .debug_selector(|| "quote-bar".into()),
+                )
+                .child(col)
                 .into_any_element()
         }
         Block::Bullets(items) | Block::Numbered(items) => {
@@ -5204,7 +6120,7 @@ fn render_block(
                     .flex_shrink_0()
                     .flex()
                     .items_center()
-                    .text_color(theme.text_muted)
+                    .text_color(muted)
                     .debug_selector(move || format!("list-marker-{i}"));
                 let marker = if numbered {
                     marker.child(format!("{}.", i + 1))
@@ -5216,7 +6132,7 @@ fn render_block(
                             .size(px(BULLET_DOT))
                             .flex_shrink_0()
                             .rounded_full()
-                            .bg(theme.text_muted)
+                            .bg(muted)
                             .debug_selector(move || format!("list-bullet-{i}")),
                     )
                 };
@@ -5231,7 +6147,7 @@ fn render_block(
                                 .min_w_0()
                                 .debug_selector(move || format!("list-text-{i}"))
                                 .child(styled_text(
-                                    item, theme.text, theme, veil, now, offset, bubble, starts[i],
+                                    item, color, theme, veil, now, offset, bubble, starts[i],
                                 )),
                         ),
                 );
@@ -5247,8 +6163,9 @@ fn render_block(
             // markdown-tables-mac-2026-10-25]: the Lima table showed raw
             // `[…](https://…)` in every first column).
             let cell = |text: &str, head: bool, ri: usize, i: usize, start: usize| {
-                let color = if head { theme.text } else { theme.text_muted };
-                let (full, mut runs, links, icons) = inline_runs(text, color, theme);
+                let color = if head { color } else { muted };
+                let (full, mut runs, links, icons, spoilers) =
+                    inline_runs(text, color, theme, start, &|s| bubble.spoiler_revealed(s));
                 if head {
                     for run in &mut runs {
                         if run.font.weight < FontWeight::SEMIBOLD {
@@ -5271,7 +6188,8 @@ fn render_block(
                         bubble
                             .text(start, full, runs)
                             .with_links(links)
-                            .with_icons(icons),
+                            .with_icons(icons)
+                            .with_spoilers(spoilers),
                     )
             };
             // Taffy sizes a nested flex column from its cells' text, not their
@@ -5324,15 +6242,31 @@ fn render_block(
             .into_any_element()
         }
         Block::Code { lang, code } => code_fence_card(
-            row_id, lang, code, theme.text, theme, bubble, starts[0], veil, now, copy,
+            row_id, lang, code, color, theme, bubble, starts[0], veil, now, copy,
         ),
         Block::Chart { part_id, spec, .. } => {
             crate::ui::chart_card::card(row_id, part_id, spec, theme, copy)
         }
+        // A link preview card under the prose: an agent's or another person's bubble, so
+        // never "own"; removable when this chat is mine to moderate.
+        Block::LinkPreview { preview, .. } => {
+            let message_id = row_id.split('#').next().unwrap_or(row_id);
+            crate::ui::link_card::card(
+                row_id,
+                message_id,
+                preview,
+                theme,
+                copy.links.as_ref(),
+                crate::ui::link_card::Place {
+                    own: false,
+                    removable: copy.moderates,
+                },
+            )
+        }
         // Display math: typeset, a size up, centred on its own line (KaTeX's
         // display mode in Grok Bot).
         Block::Math { source } => {
-            let (full, runs) = math_runs(source, theme.text, theme);
+            let (full, runs) = math_runs(source, color, theme);
             let runs = match veil {
                 Some(veil) => apply_veil(runs, &veil.spans(now), 0),
                 None => runs,
@@ -5448,6 +6382,12 @@ pub struct CodeCopy {
     /// The chart cards' actions (hover repaint, Save PNG, Expand); Copy data goes through
     /// `on_copy` with the card's own square id ([feedback chart-bubble-mac-2026-10-26]).
     pub chart: Option<Rc<crate::ui::chart_card::ChartUi>>,
+    /// The link preview cards' wiring (pictures, open, Remove preview)
+    /// ([feedback link-embeds-mac-2026-10-27]).
+    pub links: Option<Rc<crate::ui::link_card::LinkUi>>,
+    /// I moderate this chat (my own project, or a group I own): Remove preview shows on
+    /// others' cards too.
+    pub moderates: bool,
 }
 
 /// How long the Copy pill reads "Copied" (Jacob: ~1.5 s).
@@ -5718,15 +6658,17 @@ fn copy_pill(row_id: &str, code: &str, theme: &Theme, copy: &CodeCopy) -> AnyEle
         .bg(base)
         .text_color(fg)
         .when(!copied, |el| {
+            // hover-fill: exception code-card
             el.hover(move |s| s.bg(hover_bg).text_color(hover_fg))
+                // hover-fill: exception code-card
                 .active(move |s| s.bg(down_bg).text_color(down_fg))
         })
         .child(if copied {
             div()
                 .debug_selector(|| "copy-check".into())
-                .child(icon("check", 13.0, fg))
+                .child(sf_symbols::glyph("checkmark", 13.0, fg))
         } else {
-            div().child(icon("copy", 13.0, fg))
+            div().child(sf_symbols::glyph("doc.on.doc", 13.0, fg))
         })
         .on_click(move |_, window, cx| {
             if let Some(on_copy) = &on_copy {
@@ -5907,6 +6849,34 @@ mod selection_tests {
         assert_eq!(bubble_plain(&one, true), "not a heading");
     }
 
+    /// A typed bubble's plain text — what its selection reads — is the text
+    /// its elements draw: bare URLs carry their wrap hints in both, with and
+    /// without a code fence, and every block still starts at its offset.
+    #[test]
+    fn user_bubble_plain_text_hints_its_urls_like_the_elements_draw_them() {
+        let typed = "see https://a.io/x/y now";
+        assert_eq!(user_bubble_plain(typed), urlwrap::hint_bare_urls(typed));
+        assert_ne!(user_bubble_plain(typed), typed, "the hints are in");
+        assert_eq!(urlwrap::plain(&user_bubble_plain(typed)), typed);
+
+        let fenced = "see https://a.io/x/y\n\n```sh\ncurl https://a.io/x/y\n```\n\nhttps://b.io/z";
+        let blocks = split_blocks(fenced);
+        let text = bubble_plain(&blocks, true);
+        assert_eq!(user_bubble_plain(fenced), text);
+        assert!(
+            text.contains(&urlwrap::breakable("https://b.io/z")),
+            "prose URLs are hinted"
+        );
+        assert!(
+            text.contains("curl https://a.io/x/y"),
+            "code is as typed: {text:?}"
+        );
+        for (block, at) in blocks.iter().zip(block_offsets(&blocks, true)) {
+            let plain = block_plain(block, true);
+            assert_eq!(&text[at..at + plain.len()], plain, "block at {at}");
+        }
+    }
+
     #[test]
     fn table_cells_pad_to_the_header() {
         let block = Block::Table {
@@ -5945,7 +6915,8 @@ mod selection_tests {
             markdown::LINK_ICON_CELL
         )));
         let theme = Theme::dark(crate::ui::theme::Surface::Matte);
-        let (text, runs, links, icons) = inline_runs(&rows[0][0], theme.text_muted, &theme);
+        let (text, runs, links, icons, _) =
+            inline_runs(&rows[0][0], theme.text_muted, &theme, 0, &|_| false);
         let cell = markdown::LINK_ICON_CELL;
         assert_eq!(text, format!("{cell}Librería El Virrey"));
         assert_eq!(
@@ -6285,6 +7256,7 @@ mod selection_tests {
                     });
                 })),
                 chart: None,
+                ..Default::default()
             };
             div().w(px(600.0)).child(render_block(
                 "m1#t.0",
@@ -7626,8 +8598,8 @@ mod transcript_smoke_tests {
         }
     }
 
-    struct Host {
-        transcript: Entity<Transcript>,
+    pub(super) struct Host {
+        pub(super) transcript: Entity<Transcript>,
     }
 
     impl Render for Host {
@@ -7641,7 +8613,7 @@ mod transcript_smoke_tests {
 
     const LONG_REPLY: &str = "Arbos, from where I sat:\n\n**What worked**\n- Authority held: three guest agents deferred to the owner's call every time.\n- The handoff lines read cleanly; nobody asked who was speaking.\n\n**What did not**\n- The group lost the thread twice when two agents answered at once.\n- One attachment never rendered on the phone.\n\nTell me which of these you want first.";
 
-    fn message(id: &str, role: &str, text: &str, at: u64) -> Message {
+    pub(super) fn message(id: &str, role: &str, text: &str, at: u64) -> Message {
         serde_json::from_value(serde_json::json!({
             "id": id,
             "chatId": "c1",
@@ -7676,7 +8648,7 @@ mod transcript_smoke_tests {
     }
 
     /// `mount` over any message list (the long-chat tests).
-    fn mount_with(
+    pub(super) fn mount_with(
         cx: &mut TestAppContext,
         messages: Vec<Message>,
     ) -> (
@@ -7784,6 +8756,53 @@ mod transcript_smoke_tests {
                 assert!(c.value_input.read(cx).text().is_empty());
             });
         });
+    }
+
+    /// An expanded link card under a long line (v0.6.310 proof shot, the YouTube row): the
+    /// bubble is as wide as the sentence, the card stops at 400 pt, and the card's title
+    /// wraps there — the card must still be tall enough for its own footer.
+    #[gpui::test]
+    fn expanded_link_card_under_a_long_line_keeps_its_footer(cx: &mut TestAppContext) {
+        let t = 1_700_000_000_000u64;
+        let mut m = message(
+            "m2",
+            "user",
+            "this one explains the render pipeline better than the docs, worth the ten minutes https://www.youtube.com/watch?v=aqz-KE-bpKQ",
+            t + 2_000,
+        );
+        m.parts.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "lp", "kind": "link_preview", "specVersion": 1,
+                "url": "https://www.youtube.com/watch?v=aqz-KE-bpKQ",
+                "canonicalUrl": "https://www.youtube.com/watch?v=aqz-KE-bpKQ",
+                "provider": "youtube", "providerName": "YouTube", "type": "video",
+                "title": "Big Buck Bunny 60fps 4K - Official Blender Foundation Short Film",
+                "description": "Blender", "facts": ["Blender"], "siteHost": "www.youtube.com",
+                "image": { "ref": "lp-yt.jpg", "width": 1280, "height": 720, "mime": "image/jpeg", "art": false },
+                "layout": "expanded", "fetchedAt": t
+            }))
+            .expect("preview part"),
+        );
+        let (_rt, _state, transcript) = mount_with(
+            cx,
+            vec![message("m1", "user", "How did the review go?", t), m],
+        );
+        let (_view, vcx) = cx.add_window_view(|_, _| Host {
+            transcript: transcript.clone(),
+        });
+        vcx.run_until_parked();
+        let card = vcx.debug_bounds("link-card").expect("the card draws");
+        let text = vcx
+            .debug_bounds("link-text")
+            .expect("the card's text block draws");
+        assert!(
+            card.size.width <= px(crate::ui::link_card::CARD_MAX_WIDTH + 0.5),
+            "the card stops at its width: {card:?}"
+        );
+        assert!(
+            text.bottom() + px(crate::ui::link_card::CARD_PAD) <= card.bottom() + px(0.5),
+            "the text block (title, line, footer) fits inside the card: text {text:?} card {card:?}"
+        );
     }
 
     /// 2026-10-26, Mac 0.6.268: a row the code did not expect aborted the app at every
@@ -8045,6 +9064,419 @@ mod transcript_smoke_tests {
             "a nearby jump glides; the landing cue is for the long way"
         );
     }
+
+    /// Grouped messages ([feedback grouped-messages-mac-2026-10-28]), drawn by the real
+    /// transcript in a people group: Bob's second line 30 s later has no disc and no name
+    /// but keeps the lane (its bubble's left edge is the first bubble's), and sits in the
+    /// 6 pt in-run gap; Sam's line opens the 20 pt turn gap with a disc and a name.
+    #[gpui::test]
+    fn a_run_shows_one_disc_and_opens_no_turn_gap(cx: &mut TestAppContext) {
+        let t = 1_700_000_000_000u64;
+        let person = |id: &str, who: &str, text: &str, at: u64| -> Message {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "chatId": "c1", "role": "user", "sender": format!("user:gh_{who}"),
+                "senderHandle": who, "senderName": who, "status": "done",
+                "createdAt": at, "completedAt": at,
+                "parts": [{ "id": format!("{id}-t"), "kind": "text", "text": text }],
+            }))
+            .expect("message")
+        };
+        let (_rt, state, transcript) = mount_with(
+            cx,
+            vec![
+                person("m1", "bob", "hi all", t),
+                person("m2", "bob", "two", t + 30_000),
+                person("m3", "sam", "hey", t + 60_000),
+            ],
+        );
+        // A people group: the chat names its senders and draws their discs.
+        state.update(cx, |s, cx| {
+            s.projects[0].kind = SpaceKind::Group;
+            cx.notify();
+        });
+        transcript.update(cx, |t, cx| t.sync(cx));
+        let (_view, vcx) = cx.add_window_view(|_, _| Host {
+            transcript: transcript.clone(),
+        });
+        vcx.run_until_parked();
+        let disc1 = vcx
+            .debug_bounds("disc#m1#user")
+            .expect("Bob's first line has his disc");
+        assert!(
+            vcx.debug_bounds("disc#m2#user").is_none(),
+            "Bob's second line, inside the run, draws no disc"
+        );
+        let disc3 = vcx
+            .debug_bounds("disc#m3#user")
+            .expect("Sam starts a run: disc");
+        assert_eq!(
+            disc1.origin.x, disc3.origin.x,
+            "discs share the avatar column"
+        );
+        let mut bubble = |id: &str| {
+            let sel: &'static str = Box::leak(format!("person-bubble#{id}#user").into_boxed_str());
+            vcx.debug_bounds(sel)
+                .unwrap_or_else(|| panic!("bubble {id} drawn"))
+        };
+        let b1 = bubble("m1");
+        let b2 = bubble("m2");
+        let b3 = bubble("m3");
+        assert_eq!(b1.origin.x, b2.origin.x, "the continuation keeps the lane");
+        assert_eq!(b2.origin.x, b3.origin.x);
+        let gap = |a: Bounds<Pixels>, b: Bounds<Pixels>| {
+            f32::from(b.origin.y - (a.origin.y + a.size.height))
+        };
+        assert_eq!(gap(b1, b2), 2.0 * ROW_GAP_HALF, "in-run gap: 6 pt");
+        assert_eq!(
+            gap(b2, b3),
+            2.0 * ROW_GAP_HALF + TURN_GAP_EXTRA,
+            "a new run opens the 20 pt turn gap"
+        );
+        // One name line taller: the run's first bubble names Bob, the second does not.
+        assert_eq!(
+            f32::from(b1.size.height - b2.size.height),
+            CHAT_LINE_HEIGHT + NAME_TO_TEXT_GAP,
+            "the continuation carries no name"
+        );
+        assert_eq!(
+            b3.size.height, b1.size.height,
+            "Sam's first bubble is named like Bob's"
+        );
+    }
+}
+
+#[cfg(test)]
+mod reaction_chip_tests {
+    //! Hover on a reaction chip, on the hover rail's smiley and on a capsule
+    //! cell changes paint, never geometry: the same box at rest, under the
+    //! pointer and after it left ([feedback reaction-pill-hover-jitter-2026-10-28];
+    //! Scout, 2026-10-28: "the emoji reaction pill still twitches on hover").
+    use gpui::{point, Bounds, Modifiers, Pixels, TestAppContext};
+
+    use super::transcript_smoke_tests::{message, mount_with, Host};
+    use super::*;
+
+    fn same_box(rest: Bounds<Pixels>, now: Bounds<Pixels>, what: &str) {
+        let d = |a: Pixels, b: Pixels| (f32::from(a) - f32::from(b)).abs();
+        assert!(
+            d(rest.origin.x, now.origin.x) < 0.01
+                && d(rest.origin.y, now.origin.y) < 0.01
+                && d(rest.size.width, now.size.width) < 0.01
+                && d(rest.size.height, now.size.height) < 0.01,
+            "{what} moved: at rest {rest:?}, now {now:?}"
+        );
+    }
+
+    fn away() -> Point<Pixels> {
+        point(px(2.0), px(2.0))
+    }
+
+    /// A user line with Sam's 👍 and an agent reply with a ❤️ held by two
+    /// people, me among them (the count drawn, the accent fill on).
+    fn seed(cx: &mut TestAppContext) -> (tokio::runtime::Runtime, Entity<Transcript>) {
+        let t = 1_700_000_000_000u64;
+        let mut mine = message(
+            "m1",
+            "user",
+            "Here now. Paste what you have and I'll read it.",
+            t,
+        );
+        mine.reactions
+            .entry("👍".into())
+            .or_default()
+            .insert("user:sam".into(), true);
+        let mut reply = message("m2", "assistant", "Sending in a sec.", t + 2_000);
+        let (rt, state, transcript) = mount_with(cx, vec![mine, reply.clone()]);
+        let me = state.read_with(cx, |s, _| format!("user:{}", s.me_id()));
+        let held = reply.reactions.entry("❤️".into()).or_default();
+        held.insert(me, true);
+        held.insert("user:sam".into(), true);
+        state.update(cx, |s, cx| {
+            let rows = s.messages.get_mut("c1").expect("chat");
+            rows.pop();
+            rows.push(reply);
+            cx.notify();
+        });
+        transcript.update(cx, |t, cx| t.sync(cx));
+        (rt, transcript)
+    }
+
+    #[gpui::test]
+    fn a_reaction_chip_keeps_its_box_under_the_pointer(cx: &mut TestAppContext) {
+        let (_rt, transcript) = seed(cx);
+        let (_view, vcx) = cx.add_window_view(|_, _| Host { transcript });
+        vcx.run_until_parked();
+        for sel in ["reaction-chip#👍", "reaction-chip#❤️"] {
+            vcx.simulate_mouse_move(away(), None, Modifiers::default());
+            vcx.run_until_parked();
+            let rest = vcx
+                .debug_bounds(sel)
+                .unwrap_or_else(|| panic!("{sel} drawn at rest"));
+            let row = vcx
+                .debug_bounds("reaction-row")
+                .expect("the chips row draws");
+            assert!(
+                (f32::from(rest.size.height) - REACTION_CHIP_HEIGHT).abs() < 0.01,
+                "{sel}: the chip is {:?} tall, not the fixed {REACTION_CHIP_HEIGHT}",
+                rest.size.height
+            );
+            vcx.simulate_mouse_move(rest.center(), None, Modifiers::default());
+            vcx.run_until_parked();
+            same_box(
+                rest,
+                vcx.debug_bounds(sel).expect("chip under the pointer"),
+                sel,
+            );
+            same_box(
+                row,
+                vcx.debug_bounds("reaction-row")
+                    .expect("row under the pointer"),
+                "the chips row",
+            );
+            vcx.simulate_mouse_move(away(), None, Modifiers::default());
+            vcx.run_until_parked();
+            same_box(
+                rest,
+                vcx.debug_bounds(sel).expect("chip after the pointer left"),
+                sel,
+            );
+        }
+    }
+
+    struct SizedHost {
+        transcript: Entity<Transcript>,
+        width: f32,
+    }
+
+    impl Render for SizedHost {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(self.width))
+                .h(px(900.0))
+                .bg(gpui::black())
+                .child(self.transcript.clone())
+        }
+    }
+
+    /// Chips sit right under their own bubble, on its leading edge, in a people group:
+    /// the first line of Bob's run (disc), its grouped continuation (empty lane — Scout's
+    /// "let me add him lol" 🥹 drew at the column's far left on v0.6.350), my own line
+    /// (right edge) and an agent in the group (its lane), at a narrow and a wide window
+    /// ([feedback reaction-chip-anchor-mac-2026-10-29]).
+    #[gpui::test]
+    fn chips_sit_under_their_own_bubble_on_its_leading_edge(cx: &mut TestAppContext) {
+        let t = 1_700_000_000_000u64;
+        let msg = |id: &str, role: &str, sender: &str, handle: &str, text: &str, at: u64| {
+            let mut m: Message = serde_json::from_value(serde_json::json!({
+                "id": id, "chatId": "c1", "role": role, "sender": sender,
+                "senderHandle": handle, "senderName": handle, "status": "done",
+                "createdAt": at, "completedAt": at,
+                "parts": [{ "id": format!("{id}-t"), "kind": "text", "text": text }],
+            }))
+            .expect("message");
+            m.reactions
+                .entry("🥹".into())
+                .or_default()
+                .insert("user:gh_sam".into(), true);
+            m
+        };
+        let (_rt, state, transcript) = mount_with(cx, Vec::new());
+        let me = state.read_with(cx, |s, _| format!("user:{}", s.me_id()));
+        state.update(cx, |s, cx| {
+            s.projects[0].kind = SpaceKind::Group;
+            let rows = s.messages.entry("c1".into()).or_default();
+            rows.clear();
+            rows.extend([
+                msg(
+                    "m1",
+                    "user",
+                    "user:gh_bob",
+                    "bob",
+                    "hes already on the app",
+                    t,
+                ),
+                msg(
+                    "m2",
+                    "user",
+                    "user:gh_bob",
+                    "bob",
+                    "let me add him lol",
+                    t + 30_000,
+                ),
+                msg("m3", "user", &me, "me", "nice", t + 60_000),
+                msg(
+                    "m4",
+                    "assistant",
+                    "agent:a1",
+                    "helper",
+                    "Added.",
+                    t + 90_000,
+                ),
+            ]);
+            cx.notify();
+        });
+        transcript.update(cx, |t, cx| t.sync(cx));
+        for width in [520.0_f32, 1400.0] {
+            let (_view, vcx) = cx.add_window_view(|_, _| SizedHost {
+                transcript: transcript.clone(),
+                width,
+            });
+            vcx.run_until_parked();
+            let mut bounds = |sel: String| {
+                let sel: &'static str = Box::leak(sel.into_boxed_str());
+                vcx.debug_bounds(sel)
+                    .unwrap_or_else(|| panic!("{width} pt: {sel} drawn"))
+            };
+            let column = bounds("chat-column".into());
+            assert!(
+                f32::from(column.size.width) <= width,
+                "{width} pt: the column follows the window"
+            );
+            let bubbles = [
+                ("m1", bounds("person-bubble#m1#user".into()), false),
+                ("m2", bounds("person-bubble#m2#user".into()), false),
+                ("m3", bounds("own-bubble#m3#user".into()), true),
+                ("m4", bounds("chat-bubble-assistant".into()), false),
+            ];
+            for (id, bubble, mine) in bubbles {
+                let chips = bounds(format!("reactions#{id}"));
+                let below = f32::from(chips.origin.y - (bubble.origin.y + bubble.size.height));
+                assert!(
+                    (0.0..=8.0).contains(&below),
+                    "{width} pt {id}: chips start {below} pt below their bubble"
+                );
+                if mine {
+                    let right = |b: Bounds<Pixels>| f32::from(b.origin.x + b.size.width);
+                    assert!(
+                        (right(chips) - right(bubble)).abs() < 0.5,
+                        "{width} pt {id}: my chips end at {} but my bubble at {}",
+                        right(chips),
+                        right(bubble)
+                    );
+                } else {
+                    assert!(
+                        (f32::from(chips.origin.x) - f32::from(bubble.origin.x)).abs() < 0.5,
+                        "{width} pt {id}: chips start at x {:?} but the bubble at x {:?}",
+                        chips.origin.x,
+                        bubble.origin.x
+                    );
+                }
+            }
+        }
+    }
+
+    /// The count and the emoji come from different fonts; neither sizes the chip.
+    #[gpui::test]
+    fn every_chip_is_the_same_height(cx: &mut TestAppContext) {
+        let (_rt, transcript) = seed(cx);
+        let (_view, vcx) = cx.add_window_view(|_, _| Host { transcript });
+        vcx.run_until_parked();
+        let one = vcx.debug_bounds("reaction-chip#👍").expect("👍 drawn");
+        let two = vcx.debug_bounds("reaction-chip#❤️").expect("❤️ drawn");
+        assert!(
+            (f32::from(one.size.height) - f32::from(two.size.height)).abs() < 0.01,
+            "a chip with a count ({:?}) is not as tall as one without ({:?})",
+            two.size.height,
+            one.size.height
+        );
+        assert!(
+            two.size.width > one.size.width,
+            "the count widens the chip, nothing else changes"
+        );
+    }
+
+    /// The rail's smiley beside the agent reply: a fixed 24 pt box whether the
+    /// pointer is on the bubble or on the button, and the bubble beside it
+    /// does not move either.
+    #[gpui::test]
+    fn the_rail_smiley_keeps_its_box_under_the_pointer(cx: &mut TestAppContext) {
+        let (_rt, transcript) = seed(cx);
+        let (_view, vcx) = cx.add_window_view(|_, _| Host { transcript });
+        vcx.run_until_parked();
+        let bubble = vcx
+            .debug_bounds("chat-bubble-assistant")
+            .expect("the agent bubble draws");
+        vcx.simulate_mouse_move(bubble.center(), None, Modifiers::default());
+        vcx.run_until_parked();
+        let smiley = vcx
+            .debug_bounds("rail-button#face.smiling")
+            .expect("the rail's smiley draws beside the hovered bubble");
+        assert!(
+            (f32::from(smiley.size.width) - RAIL_BUTTON).abs() < 0.01
+                && (f32::from(smiley.size.height) - RAIL_BUTTON).abs() < 0.01,
+            "the smiley is {:?}, not {RAIL_BUTTON} square",
+            smiley.size
+        );
+        vcx.simulate_mouse_move(smiley.center(), None, Modifiers::default());
+        vcx.run_until_parked();
+        same_box(
+            smiley,
+            vcx.debug_bounds("rail-button#face.smiling")
+                .expect("smiley under the pointer"),
+            "the rail's smiley",
+        );
+        same_box(
+            bubble,
+            vcx.debug_bounds("chat-bubble-assistant")
+                .expect("bubble while its rail is hovered"),
+            "the bubble beside the hovered rail",
+        );
+    }
+
+    struct Cells;
+
+    impl Render for Cells {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(px(8.0))
+                .child(crate::ui::reactions::cell(
+                    "react-👍",
+                    div().text_size(px(22.0)).child("👍"),
+                    true,
+                    &theme,
+                    |_, _, _| {},
+                ))
+                .child(crate::ui::reactions::cell(
+                    "react-more",
+                    div().size(px(20.0)),
+                    false,
+                    &theme,
+                    |_, _, _| {},
+                ))
+        }
+    }
+
+    /// The capsule's cells — a held emoji and the add-emoji ☺+ — are fixed boxes too.
+    #[gpui::test]
+    fn capsule_cells_keep_their_box_under_the_pointer(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::dark(crate::ui::theme::Surface::Matte)));
+        let (_view, vcx) = cx.add_window_view(|_, _| Cells);
+        vcx.run_until_parked();
+        for sel in ["reaction-cell#react-👍", "reaction-cell#react-more"] {
+            let rest = vcx
+                .debug_bounds(sel)
+                .unwrap_or_else(|| panic!("{sel} drawn"));
+            vcx.simulate_mouse_move(rest.center(), None, Modifiers::default());
+            vcx.run_until_parked();
+            same_box(
+                rest,
+                vcx.debug_bounds(sel).expect("cell under the pointer"),
+                sel,
+            );
+            vcx.simulate_mouse_move(away(), None, Modifiers::default());
+            vcx.run_until_parked();
+            same_box(
+                rest,
+                vcx.debug_bounds(sel).expect("cell after the pointer left"),
+                sel,
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -8135,9 +9567,13 @@ mod cross_bubble_copy_tests {
         );
     }
 
+    /// A typed bubble's selectable text is what it renders: a heading reads
+    /// without its `#` ([feedback chat-markdown-mac-2026-10-27]), `#hashtag`
+    /// and plain lines as typed, a fenced block as its code.
     #[test]
-    fn a_user_bubble_is_selectable_as_typed() {
-        assert_eq!(user_bubble_plain("# not a heading"), "# not a heading");
+    fn a_user_bubble_is_selectable_as_rendered() {
+        assert_eq!(user_bubble_plain("# a heading"), "a heading");
+        assert_eq!(user_bubble_plain("#hashtag stays"), "#hashtag stays");
         assert_eq!(
             user_bubble_plain("see\n```rs\nlet x = 1;\n```"),
             "see\nlet x = 1;"
@@ -8170,12 +9606,15 @@ mod link_icon_tests {
         assert_eq!(links.len(), 3);
         assert_eq!(links[0].text, format!("{cell}El Virrey"));
         assert_eq!(links[0].icon.as_deref(), Some("www.elvirrey.com"));
-        assert_eq!(links[1].text, "https://x.com/a", "a bare URL has no cell");
+        // Bare URLs (and a URL as its own label) have no cell; their text
+        // carries the wrap hints (`urlwrap`), their target never does.
+        assert_eq!(urlwrap::plain(&links[1].text), "https://x.com/a");
+        assert_eq!(links[1].text, urlwrap::breakable("https://x.com/a"));
+        assert_eq!(links[1].href.as_deref(), Some("https://x.com/a"));
         assert_eq!(links[1].icon, None);
-        assert_eq!(
-            links[2].text, "https://y.com",
-            "a URL as its own label has no cell"
-        );
+        assert_eq!(urlwrap::plain(&links[2].text), "https://y.com");
+        assert_eq!(links[2].text, urlwrap::breakable("https://y.com"));
+        assert_eq!(links[2].href.as_deref(), Some("https://y.com"));
         assert_eq!(links[2].icon, None);
         assert_eq!(
             markdown::link_host("https://user@Sub.Example.com:8443/p?q#f").as_deref(),
@@ -8249,7 +9688,8 @@ mod link_icon_tests {
         assert_eq!(items.len(), 7);
         let theme = Theme::dark(crate::ui::theme::Surface::Matte);
         for item in items {
-            let (text, runs, links, icons) = inline_runs(item, theme.text, &theme);
+            let (text, runs, links, icons, _) =
+                inline_runs(item, theme.text, &theme, 0, &|_| false);
             assert!(text.starts_with(markdown::LINK_ICON_CELL), "{text}");
             assert_eq!(icons.len(), 1);
             assert_eq!(icons[0].1, "nypost.com");
@@ -8335,7 +9775,8 @@ mod markdown_tests {
     #[test]
     fn strong_runs_are_bold() {
         let theme = Theme::dark(crate::ui::theme::Surface::Matte);
-        let (text, runs, _, _) = inline_runs("Surf **gear** list", theme.text, &theme);
+        let (text, runs, _, _, _) =
+            inline_runs("Surf **gear** list", theme.text, &theme, 0, &|_| false);
         assert_eq!(text, "Surf gear list");
         let weights: Vec<(usize, FontWeight)> =
             runs.iter().map(|r| (r.len, r.font.weight)).collect();
@@ -8435,6 +9876,222 @@ mod markdown_tests {
     fn list_plain_text_keeps_its_markers() {
         let block = Block::Bullets(vec!["a".into(), "b".into()]);
         assert_eq!(block_plain(&block, false), "• a\n• b");
+    }
+}
+
+#[cfg(test)]
+mod chat_markdown_tests {
+    //! Jacob, 2026-10-27 ([feedback chat-markdown-mac-2026-10-27]): "allow these
+    //! common chat highlighting stuff for users to use > etc." Grok Bot renders a
+    //! typed `> hello` as a quote block; the Mac composer sent it as raw text.
+    //! Typed bubbles now go through the shared grammar (quotes, headings, lists,
+    //! code cards, bold / italic / strike / spoiler / code / links), and plain
+    //! text still renders as typed.
+    use gpui::{point, TestAppContext};
+
+    use super::*;
+
+    /// A typed `> hello` is a quote; `>5` and a lone `>` are text.
+    #[test]
+    fn a_typed_quote_is_a_quote_block_and_a_glued_angle_is_text() {
+        assert_eq!(
+            split_blocks("> hello\nthat is what the quote looks like now"),
+            vec![
+                Block::Quote(vec![Block::Paragraph("hello".into())]),
+                Block::Paragraph("that is what the quote looks like now".into()),
+            ]
+        );
+        assert_eq!(
+            split_blocks("> a\n>> b"),
+            vec![Block::Quote(vec![
+                Block::Paragraph("a".into()),
+                Block::Quote(vec![Block::Paragraph("b".into())]),
+            ])]
+        );
+        for text in [">5 means more than five", ">", "a > b"] {
+            assert_eq!(split_blocks(text), vec![Block::Paragraph(text.into())]);
+        }
+    }
+
+    /// The plain text of a typed bubble: as typed when nothing formats, the
+    /// rendered words (markers gone, list markers kept) otherwise.
+    #[test]
+    fn typed_bubble_plain_text() {
+        assert_eq!(
+            user_bubble_plain("snake_case 2*3*4 jacob_s@example.com $5"),
+            "snake_case 2*3*4 jacob_s@example.com $5"
+        );
+        assert!(is_plain_paragraph(&split_blocks("hello https://a.com/x_y")));
+        assert!(!is_plain_paragraph(&split_blocks("> hello")));
+        assert!(!is_plain_paragraph(&split_blocks("**hello**")));
+        assert_eq!(user_bubble_plain("> **hi**\n- a\n- b"), "hi\n• a\n• b");
+        assert_eq!(
+            block_plain(
+                &Block::Quote(vec![
+                    Block::Paragraph("q".into()),
+                    Block::Bullets(vec!["a".into()])
+                ]),
+                false
+            ),
+            "q\n• a"
+        );
+        // Every segment's start is where its text sits in the bubble's text.
+        let blocks = split_blocks("> one\n> two\n\nafter ~~x~~");
+        let plain = bubble_plain(&blocks, false);
+        let offsets = block_offsets(&blocks, false);
+        assert_eq!(plain, "one\ntwo\nafter x");
+        assert_eq!(&plain[offsets[1]..], "after x");
+    }
+
+    /// `~~strike~~` strikes through; a `||spoiler||` paints as a pill with the
+    /// glyphs invisible until the viewer opens it, and its range is clickable.
+    #[test]
+    fn strike_and_spoiler_runs() {
+        let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+        let (text, runs, _, _, spoilers) =
+            inline_runs("a ~~gone~~ ||secret|| b", theme.text, &theme, 10, &|_| {
+                false
+            });
+        assert_eq!(text, "a gone secret b");
+        assert!(runs[1].strikethrough.is_some(), "{runs:?}");
+        assert!(runs[0].strikethrough.is_none());
+        let pill = &runs[3];
+        assert_eq!(pill.len, "secret".len());
+        assert_eq!(pill.color.a, 0.0, "hidden glyphs");
+        assert_eq!(
+            pill.background_color,
+            Some(spoiler_fill(theme.text, &theme, false))
+        );
+        assert_eq!(
+            spoilers,
+            vec![(7..13, 17)],
+            "range in the element, start in the bubble"
+        );
+        let (_, runs, _, _, _) =
+            inline_runs("a ~~gone~~ ||secret|| b", theme.text, &theme, 10, &|at| {
+                at == 17
+            });
+        assert_eq!(runs[3].color, theme.text, "open: readable");
+        assert_eq!(
+            runs[3].background_color,
+            Some(spoiler_fill(theme.text, &theme, true))
+        );
+        // A spoiler with styled parts is one spoiler: every run shares its start.
+        let (_, _, _, _, spoilers) = inline_runs("||**a** b||", theme.text, &theme, 0, &|_| false);
+        assert_eq!(spoilers, vec![(0..1, 0), (1..3, 0)]);
+    }
+
+    struct QuoteBubble {
+        selection: Entity<TextSelection>,
+    }
+
+    const QUOTED: &str = "> hello there\n\nthe ||butler|| did it";
+
+    impl gpui::Render for QuoteBubble {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+            let selectable = Selectable::new(&self.selection, theme.accent_soft, cx);
+            let blocks = split_blocks(QUOTED);
+            let bubble = selectable.bubble("u#text", bubble_plain(&blocks, false));
+            let offsets = block_offsets(&blocks, false);
+            let mut col = div()
+                .w(px(400.0))
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .debug_selector(|| "test-block".into());
+            for (i, block) in blocks.iter().enumerate() {
+                col = col.child(render_block_in(
+                    &format!("u{i}"),
+                    block,
+                    theme.text,
+                    offsets[i],
+                    None,
+                    Instant::now(),
+                    &theme,
+                    &bubble,
+                    &CodeCopy::default(),
+                ));
+            }
+            div().w(px(500.0)).h(px(300.0)).p(px(20.0)).child(col)
+        }
+    }
+
+    /// Rendered: the quote bar is 3 pt wide at the block's left, the quoted
+    /// text starts `QUOTE_GAP` after it; a click on the spoiler opens it for
+    /// this viewer, a second click hides it again.
+    #[gpui::test]
+    fn a_quote_draws_its_bar_and_a_click_opens_a_spoiler(cx: &mut TestAppContext) {
+        let selection = cx.update(|cx| cx.new(TextSelection::new));
+        let (_view, vcx) = cx.add_window_view(|_, _| QuoteBubble {
+            selection: selection.clone(),
+        });
+        vcx.run_until_parked();
+        let block = vcx.debug_bounds("test-block").expect("block drawn");
+        let bar = vcx.debug_bounds("quote-bar").expect("quote bar drawn");
+        assert_eq!(f32::from(bar.size.width), QUOTE_BAR);
+        assert!(
+            (f32::from(bar.left() - block.left())).abs() <= 0.5,
+            "bar at the left"
+        );
+        assert!(
+            f32::from(bar.size.height) >= CHAT_LINE_HEIGHT - 1.0,
+            "the bar spans the quoted line: {bar:?}"
+        );
+        let quote = vcx.debug_bounds("quote-block").expect("quote drawn");
+        assert!(f32::from(quote.size.height) >= CHAT_LINE_HEIGHT - 1.0);
+
+        // The second paragraph: "the ||butler|| did it" — click inside "butler".
+        let plain = bubble_plain(&split_blocks(QUOTED), false);
+        let start = plain.find("butler").expect("spoiler text in the bubble");
+        let revealed = |vcx: &gpui::VisualTestContext| {
+            selection.read_with(vcx, |s, _| s.spoiler_revealed(&("u#text".into(), start)))
+        };
+        assert!(!revealed(vcx), "hidden at first");
+        let para = quote.bottom() + px(6.0);
+        let line_h = vcx.update(|window, _| window.line_height());
+        // "the " is four glyphs in; the pill starts after them.
+        let x = block.left() + px(40.0);
+        vcx.simulate_click(point(x, para + line_h / 2.0), gpui::Modifiers::default());
+        vcx.run_until_parked();
+        assert!(revealed(vcx), "one click opens the spoiler");
+        vcx.simulate_click(point(x, para + line_h / 2.0), gpui::Modifiers::default());
+        vcx.run_until_parked();
+        assert!(!revealed(vcx), "a second click hides it again");
+        assert!(cx.opened_url().is_none(), "nothing opened in the browser");
+    }
+
+    /// Headings, lists, fences and links a user types render as blocks; the
+    /// one-line preview and the link hosts see inside quotes.
+    #[test]
+    fn typed_formats_split_into_blocks() {
+        let blocks = split_blocks(
+            "# Title\n> [Docs](https://docs.arbos.life/x)\n- a\n1. b\n```py\nx = 1\n```\n**done**",
+        );
+        assert_eq!(blocks.len(), 6, "{blocks:?}");
+        assert!(matches!(blocks[0], Block::Heading { level: 1, .. }));
+        assert!(matches!(blocks[1], Block::Quote(_)));
+        assert!(matches!(blocks[2], Block::Bullets(_)));
+        assert!(matches!(blocks[3], Block::Numbered(_)));
+        assert!(matches!(blocks[4], Block::Code { .. }));
+        assert_eq!(
+            one_line("> **hello** there\n\n||secret||"),
+            "hello there secret"
+        );
+        assert_eq!(
+            markdown::link_hosts("> see [Docs](https://docs.arbos.life/x)"),
+            vec!["docs.arbos.life".to_string()]
+        );
+        // A named link's label keeps its styles and its one icon cell.
+        let spans = inline_spans("[**Bold** link](https://arbos.life/a)");
+        assert_eq!(spans.len(), 2);
+        assert!(spans[0].text.starts_with(markdown::LINK_ICON_CELL) && spans[0].style.bold);
+        assert_eq!(spans[0].icon.as_deref(), Some("arbos.life"));
+        assert!(spans[1].icon.is_none() && spans[1].style.link);
     }
 }
 
@@ -8880,8 +10537,9 @@ mod system_line_tests {
         );
     }
 
-    /// #1447: consecutive people-chat replies from the same agent each get a sender
-    /// caption and a quote of the message they answer — not one merged run.
+    /// #1447, as grouped messages keep it: consecutive people-chat replies from the same
+    /// agent each quote the message they answer, and a quoted bubble starts its own run —
+    /// so each is named. (Unquoted follow-ups group; see `grouping_tests`.)
     #[test]
     fn consecutive_agent_replies_each_name_and_quote() {
         let t = 1_700_000_000_000u64;
@@ -8972,8 +10630,8 @@ mod system_line_tests {
     }
 
     /// Jacob, 2026-10-23: the sender's name sits inside the bubble in group chats and
-    /// channels — people when the sender changed, agents on every reply (#1447) — and
-    /// never on my own bubble.
+    /// channels — on the first bubble of a run (people and agents alike; these agent
+    /// replies each quote the ask, so each starts a run) — and never on my own bubble.
     #[test]
     fn group_and_channel_bubbles_name_their_sender_but_not_mine() {
         let t = 1_700_000_000_000u64;
@@ -9041,6 +10699,107 @@ mod system_line_tests {
             [(None, false), (Some("Sam Rivera".into()), false)],
             "the forward header is trimmed and a forward never quotes"
         );
+    }
+
+    /// A user message whose parts are a picture then `text` (the send shape), replying
+    /// to `reply_to`.
+    fn picture_reply(sender: &str, text: &str, reply_to: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": format!("m-{at}"),
+            "chatId": "chat_testing",
+            "role": "user",
+            "sender": sender,
+            "senderHandle": "bob",
+            "status": "done",
+            "createdAt": at,
+            "replyTo": reply_to,
+            "parts": [
+                { "id": format!("a-{at}"), "kind": "attachment",
+                  "attachment": { "name": "IMG_0042.jpeg", "mime": "image/jpeg", "ref": "blob-42" } },
+                { "id": format!("p-{at}"), "kind": "text", "text": text },
+            ],
+        }))
+        .expect("picture reply")
+    }
+
+    /// Per row: `("attachment" | "user", quote text)`.
+    fn quotes(rows: &[Row]) -> Vec<(&str, Option<String>)> {
+        rows.iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::Attachment { quote, .. } => {
+                    Some(("attachment", quote.as_ref().map(|q| q.text.clone())))
+                }
+                RowKind::User { quote, .. } => {
+                    Some(("user", quote.as_ref().map(|q| q.text.clone())))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Tester bug ([feedback picture-reply-quote-mac-2026-10-28]): a reply that carries a
+    /// picture lost its quote — a wordless picture had no bubble to hold it, and a captioned
+    /// picture drew it under the picture. The quote now sits above the first card, once;
+    /// the caption bubble stays plain; a text reply to a picture quotes the file's name.
+    #[test]
+    fn picture_replies_quote_above_the_first_card() {
+        let t = 1_700_000_000_000u64;
+        let original = message("user", "user:gh_bob", "look at this", t);
+        let wordless = picture_reply("user:gh_me", "", &original.id, t + 1_000);
+        let captioned = picture_reply("user:gh_me", "same here", &original.id, t + 2_000);
+        let mut to_picture = message("user", "user:gh_bob", "nice shot", t + 3_000);
+        to_picture.reply_to = Some(wordless.id.clone());
+        let messages = [original, wordless, captioned, to_picture];
+        let (spoken, failed) = (HashSet::new(), HashMap::new());
+        let rows = build_rows(
+            &messages,
+            false,
+            speech(&spoken, &failed),
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+        );
+        assert_eq!(
+            quotes(&rows),
+            [
+                ("user", None),
+                ("attachment", Some("look at this".into())),
+                ("attachment", Some("look at this".into())),
+                ("user", None),
+                ("user", Some("IMG_0042.jpeg".into())),
+            ],
+            "{rows:?}"
+        );
+    }
+
+    /// A forwarded picture keeps its forward header and never quotes, on the card or
+    /// the caption.
+    #[test]
+    fn forwarded_picture_never_quotes() {
+        let t = 1_700_000_000_000u64;
+        let original = message("user", "user:gh_bob", "look at this", t);
+        let mut forwarded = picture_reply("user:gh_me", "caption", &original.id, t + 1_000);
+        forwarded.forwarded_from = Some("Sam Rivera".into());
+        let messages = [original, forwarded];
+        let (spoken, failed) = (HashSet::new(), HashMap::new());
+        let rows = build_rows(
+            &messages,
+            false,
+            speech(&spoken, &failed),
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+        );
+        assert_eq!(
+            quotes(&rows),
+            [("user", None), ("attachment", None), ("user", None)]
+        );
+        assert!(rows.iter().any(|r| matches!(
+            &r.kind,
+            RowKind::Attachment { forwarded_from: Some(f), .. } if f.ends_with("Sam Rivera")
+        )));
     }
 
     /// … and a 1:1 chat (me ↔ person, me ↔ agent) labels nobody, and carries no
@@ -9207,6 +10966,436 @@ mod system_line_tests {
             "me ↔ agent keeps Grok's widths"
         );
         assert!(!people_chat(None, None, false));
+    }
+}
+
+#[cfg(test)]
+mod grouping_tests {
+    //! Grouped messages (Jacob, 2026-10-28, [feedback grouped-messages-mac-2026-10-28]):
+    //! consecutive messages from one sender within `RUN_WINDOW_MS` form a run — the name
+    //! and the disc once, on the first message; the later ones under its text with the
+    //! avatar column empty and the 6 pt in-run gap. The run breaks on a sender change,
+    //! on the window passing, at a system line or a date stamp, and at a reply quote.
+    use std::collections::{HashMap, HashSet};
+
+    use super::*;
+
+    fn message(id: &str, role: &str, sender: &str, text: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "chatId": "chat_group",
+            "role": role,
+            "sender": sender,
+            "senderHandle": if sender.starts_with("user:") { sender.trim_start_matches("user:gh_") } else { "" },
+            "status": "done",
+            "createdAt": at,
+            "parts": [{ "id": format!("p-{id}"), "kind": "text", "text": text }],
+        }))
+        .expect("message")
+    }
+
+    fn person(id: &str, who: &str, text: &str, at: u64) -> Message {
+        message(id, "user", &format!("user:gh_{who}"), text, at)
+    }
+
+    /// A people-chat agent reply with no `inReplyTo` (a follow-up bubble of a
+    /// multi-message answer): quotes nothing.
+    fn agent(id: &str, text: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "chatId": "chat_group",
+            "role": "assistant",
+            "sender": "agent:doug",
+            "senderName": "Doug",
+            "senderHandle": "doug",
+            "askedByHandle": "jacob",
+            "status": "done",
+            "createdAt": at,
+            "parts": [{ "id": format!("p-{id}"), "kind": "text", "text": text }],
+        }))
+        .expect("agent reply")
+    }
+
+    fn rows_of(messages: &[Message], names_senders: bool) -> (Vec<Row>, HashSet<Id>) {
+        let (spoken, failed) = (HashSet::new(), HashMap::new());
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        let mut cache = MessageRowCache::default();
+        let rows = build_rows_with_cache(
+            messages,
+            false,
+            speech,
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            names_senders,
+            names_senders,
+            &mut cache,
+            &HashSet::new(),
+        );
+        (rows, cache.run_starts)
+    }
+
+    /// `(text, named, disc)` for every bubble from someone else, `("agent", named, disc)`
+    /// for an agent's first block, `("mine", false, false)` for mine.
+    fn shape(rows: &[Row]) -> Vec<(String, bool, bool)> {
+        rows.iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::User {
+                    text,
+                    named,
+                    disc,
+                    from: Some(_),
+                    ..
+                } => Some((text.clone(), *named, *disc)),
+                RowKind::User { from: None, .. } => Some(("mine".into(), false, false)),
+                RowKind::Markdown {
+                    first: true,
+                    named,
+                    disc,
+                    lane,
+                    ..
+                } => Some((
+                    if lane.is_some() { "agent" } else { "agent-1:1" }.into(),
+                    *named,
+                    *disc,
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    const T: u64 = 1_700_000_000_000;
+
+    /// Arbonites, 2026-10-28 (01M627S7…, 01M627VG…): a box wrote a hand-off row and a job
+    /// row into a group with bare `sender: "agent"` and no words. A group draws neither — no
+    /// "Messaged ◉ Bob" line from no one, no empty bubble — and Bob's run is not broken; a
+    /// 1:1 agent chat keeps its hand-off line, and an attributed one still draws in a group.
+    #[test]
+    fn senderless_blank_rows_draw_nothing_in_a_group() {
+        let blank = |id: &str, extra: serde_json::Value, at: u64| -> Message {
+            let mut v = serde_json::json!({
+                "id": id,
+                "chatId": "chat_group",
+                "role": "assistant",
+                "sender": "agent",
+                "status": "done",
+                "createdAt": at,
+                "parts": [{ "id": format!("p-{id}"), "kind": "text", "text": "" }],
+            });
+            v.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value(v).expect("blank row")
+        };
+        let handoff = serde_json::json!({
+            "turn": { "kind": "spawn" },
+            "subagentName": "Bob",
+            "handoffMessages": 1,
+        });
+        let messages = vec![
+            person("m1", "bob", "morning", T),
+            blank("h1", handoff.clone(), T + 1_000),
+            blank("u1", serde_json::json!({ "role": "user" }), T + 1_500),
+            person("m2", "bob", "anyone around?", T + 2_000),
+            agent("m3", "Here.", T + 3_000),
+        ];
+        let (rows, _) = rows_of(&messages, true);
+        assert!(
+            rows.iter()
+                .all(|r| !matches!(r.kind, RowKind::Handoff { .. })
+                    && r.message_id != "h1"
+                    && r.message_id != "u1"),
+            "{:?}",
+            rows.iter().map(|r| &r.id).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            shape(&rows),
+            vec![
+                ("morning".into(), true, true),
+                ("anyone around?".into(), false, false),
+                ("agent".into(), true, true),
+            ]
+        );
+
+        let (rows, _) = rows_of(&[blank("h1", handoff.clone(), T)], false);
+        assert!(rows
+            .iter()
+            .any(|r| matches!(r.kind, RowKind::Handoff { .. })));
+        let mut named = blank("h2", handoff, T);
+        named.sender = "agent:doug".into();
+        let (rows, _) = rows_of(&[named], true);
+        assert!(rows
+            .iter()
+            .any(|r| matches!(r.kind, RowKind::Handoff { .. })));
+    }
+
+    #[test]
+    fn the_window_is_two_minutes_and_the_gaps_are_groks() {
+        assert_eq!(RUN_WINDOW_MS, 120_000, "a couple of minutes = 2 min");
+        assert_eq!(RUN_GAP, 6.0, "bubbles of one run sit 6 pt apart (Grok Mac)");
+        assert_eq!(
+            TURN_GAP, 20.0,
+            "a new run opens 20 pt (Grok Mac), unchanged"
+        );
+    }
+
+    #[test]
+    fn continues_run_rule() {
+        let tail = RunTail {
+            sender: "user:gh_bob".into(),
+            at: T,
+        };
+        assert!(continues_run(Some(&tail), "user:gh_bob", T + 1_000, false));
+        assert!(
+            continues_run(Some(&tail), "user:gh_bob", T + RUN_WINDOW_MS, false),
+            "exactly the window still groups"
+        );
+        assert!(
+            !continues_run(Some(&tail), "user:gh_bob", T + RUN_WINDOW_MS + 1, false),
+            "one ms past the window breaks"
+        );
+        assert!(
+            !continues_run(Some(&tail), "user:gh_sam", T + 1_000, false),
+            "another sender breaks"
+        );
+        assert!(
+            !continues_run(Some(&tail), "user:gh_bob", T + 1_000, true),
+            "a reply quote breaks"
+        );
+        assert!(
+            !continues_run(None, "user:gh_bob", T + 1_000, false),
+            "no run yet"
+        );
+        assert!(
+            !continues_run(Some(&tail), "user:gh_bob", 0, false),
+            "a row without a clock never groups"
+        );
+        assert!(
+            continues_run(Some(&tail), "user:gh_bob", T - 30_000, false),
+            "a clock a little behind the run's (another device) still groups"
+        );
+    }
+
+    #[test]
+    fn same_sender_within_the_window_continues_the_run() {
+        let messages = [
+            person("m1", "bob", "hi all", T),
+            person("m2", "bob", "two", T + 30_000),
+            person("m3", "bob", "three", T + 90_000),
+        ];
+        let (rows, starts) = rows_of(&messages, true);
+        assert_eq!(
+            shape(&rows),
+            [
+                ("hi all".into(), true, true),
+                ("two".into(), false, false),
+                ("three".into(), false, false),
+            ],
+            "name and disc once, on the run's first message"
+        );
+        assert_eq!(
+            starts,
+            HashSet::from(["m1".to_string()]),
+            "one turn gap, at the top"
+        );
+        // The later rows still keep the lane (the `from` person) so the bubble aligns
+        // under the first one's text.
+        assert!(rows
+            .iter()
+            .all(|r| !matches!(r.kind, RowKind::User { from: None, .. })));
+    }
+
+    #[test]
+    fn a_sender_change_or_the_window_passing_starts_a_new_run() {
+        let messages = [
+            person("m1", "bob", "a", T),
+            person("m2", "sam", "b", T + 10_000),
+            person("m3", "sam", "c", T + 10_000 + RUN_WINDOW_MS + 1),
+            person("m4", "bob", "d", T + 10_000 + RUN_WINDOW_MS + 2_000),
+        ];
+        let (rows, starts) = rows_of(&messages, true);
+        assert_eq!(
+            shape(&rows),
+            [
+                ("a".into(), true, true),
+                ("b".into(), true, true),
+                ("c".into(), true, true),
+                ("d".into(), true, true),
+            ]
+        );
+        assert_eq!(starts.len(), 4);
+    }
+
+    #[test]
+    fn a_system_line_a_date_stamp_or_a_quote_breaks_the_run() {
+        let mut quoted = person("m5", "bob", "re: that", T + 3_000);
+        quoted.reply_to = Some("m1".into());
+        let messages = [
+            person("m1", "bob", "a", T),
+            message("s1", "system", "system", "Jacob added Doug", T + 1_000),
+            person("m2", "bob", "b", T + 2_000),
+            quoted,
+            person("m6", "bob", "after the quote", T + 4_000),
+            // An hour later: the date stamp lands and breaks the run (the window has
+            // passed anyway).
+            person("m7", "bob", "next hour", T + 2 * STAMP_GAP_MS),
+        ];
+        let (rows, starts) = rows_of(&messages, true);
+        assert_eq!(
+            shape(&rows),
+            [
+                ("a".into(), true, true),
+                ("b".into(), true, true),
+                ("re: that".into(), true, true),
+                ("after the quote".into(), false, false),
+                ("next hour".into(), true, true),
+            ],
+            "the quoted bubble starts a run of its own; the next line joins it"
+        );
+        // The system line keeps its own turn gap above (as before), so it counts as a start.
+        assert_eq!(
+            starts,
+            HashSet::from([
+                "m1".to_string(),
+                "s1".to_string(),
+                "m2".to_string(),
+                "m5".to_string(),
+                "m7".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn agents_group_like_people_unless_they_quote() {
+        let mut quoting = agent("a3", "answering the ask", T + 40_000);
+        quoting.in_reply_to = Some("m1".into());
+        let messages = [
+            person("m1", "jacob", "ask", T),
+            agent("a1", "first part", T + 10_000),
+            agent("a2", "second part", T + 20_000),
+            quoting,
+            agent("a4", "and a note", T + 50_000),
+        ];
+        let (rows, starts) = rows_of(&messages, true);
+        assert_eq!(
+            shape(&rows),
+            [
+                ("ask".into(), true, true),
+                ("agent".into(), true, true),
+                ("agent".into(), false, false),
+                ("agent".into(), true, true),
+                ("agent".into(), false, false),
+            ],
+            "an unquoted follow-up continues the agent's run; a quoted reply starts one"
+        );
+        assert_eq!(
+            starts,
+            HashSet::from(["m1".to_string(), "a1".to_string(), "a3".to_string()])
+        );
+    }
+
+    #[test]
+    fn my_own_messages_group_too_and_a_dm_groups_its_discs() {
+        let messages = [
+            person("m1", "me", "one", T),
+            person("m2", "me", "two", T + 5_000),
+            person("m3", "bob", "hey", T + 10_000),
+            person("m4", "bob", "you there?", T + 20_000),
+        ];
+        // A DM names nobody but still shows the disc once per run.
+        let (rows, starts) = rows_of(&messages, false);
+        assert_eq!(
+            shape(&rows),
+            [
+                ("mine".into(), false, false),
+                ("mine".into(), false, false),
+                ("hey".into(), false, true),
+                ("you there?".into(), false, false),
+            ]
+        );
+        assert_eq!(
+            starts,
+            HashSet::from(["m1".to_string(), "m3".to_string()]),
+            "my second line sits in the in-run gap; Bob's run opens the turn gap once"
+        );
+    }
+
+    #[test]
+    fn an_agent_in_its_own_chat_groups_its_bubbles() {
+        // 1:1 agent chat (no lane): a quick ack and the answer within the window are one
+        // run — one turn gap, then 6 pt (supersedes #1447's gap on every agent message).
+        let messages = [
+            message("m1", "user", "user", "chart the weather", T),
+            message("a1", "assistant", "box:1", "On it.", T + 5_000),
+            message("a2", "assistant", "box:1", "Here is the chart.", T + 60_000),
+            message(
+                "a3",
+                "assistant",
+                "box:1",
+                "Late addendum.",
+                T + 60_000 + RUN_WINDOW_MS + 1,
+            ),
+        ];
+        let (rows, starts) = rows_of(&messages, false);
+        assert_eq!(
+            shape(&rows),
+            [
+                ("mine".into(), false, false),
+                ("agent-1:1".into(), false, true),
+                ("agent-1:1".into(), false, false),
+                ("agent-1:1".into(), false, true),
+            ]
+        );
+        assert_eq!(
+            starts,
+            HashSet::from(["m1".to_string(), "a1".to_string(), "a3".to_string()])
+        );
+    }
+
+    #[test]
+    fn the_row_cache_keeps_run_starts_on_a_hit() {
+        let messages = [
+            person("m1", "bob", "a", T),
+            person("m2", "bob", "b", T + 1_000),
+            person("m3", "sam", "c", T + 2_000),
+        ];
+        let (spoken, failed) = (HashSet::new(), HashMap::new());
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        let mut cache = MessageRowCache::default();
+        let build = |cache: &mut MessageRowCache| {
+            build_rows_with_cache(
+                &messages,
+                false,
+                speech,
+                "gh_me",
+                &HashSet::new(),
+                &Mentions::empty(),
+                true,
+                true,
+                cache,
+                &HashSet::new(),
+            )
+        };
+        let first = build(&mut cache);
+        assert_eq!(cache.built, 3);
+        let second = build(&mut cache);
+        assert_eq!(cache.built, 0, "every message served from the cache");
+        assert_eq!(shape(&first), shape(&second));
+        assert_eq!(
+            cache.run_starts,
+            HashSet::from(["m1".to_string(), "m3".to_string()]),
+            "run starts are rebuilt from the cached entries"
+        );
     }
 }
 
@@ -9667,6 +11856,97 @@ mod delivery_tests {
         );
     }
 
+    #[test]
+    fn row_cache_returns_cached_rows_and_rebuilds_only_the_changed_message() {
+        let t = 1_700_000_000_000u64;
+        let mut messages = vec![
+            mine("a", t),
+            mine("b", t + 1_000),
+            message("c", "assistant", "agent:x", "streaming", false, t + 2_000),
+        ];
+        // Give the streaming reply some text so it draws a bubble.
+        if let Some(Part::Text { text, .. }) = messages[2].parts.get_mut(0) {
+            *text = "hel".into();
+        }
+        let spoken = HashSet::new();
+        let failed = HashMap::new();
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        let mut cache = MessageRowCache::default();
+        let first = build_rows_with_cache(
+            &messages,
+            false,
+            speech,
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+            false,
+            &mut cache,
+            &HashSet::new(),
+        );
+        assert_eq!(cache.built, 3, "cold build walks every message");
+
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        let again = build_rows_with_cache(
+            &messages,
+            false,
+            speech,
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+            false,
+            &mut cache,
+            &HashSet::new(),
+        );
+        assert_eq!(
+            cache.built, 0,
+            "unchanged messages are served from the cache"
+        );
+        let ids = |rows: &[Row]| -> Vec<(String, u64)> {
+            rows.iter().map(|r| (r.id.clone(), r.version)).collect()
+        };
+        assert_eq!(ids(&first), ids(&again));
+
+        // Streaming upsert: only the last message's text changes.
+        if let Some(Part::Text { text, .. }) = messages[2].parts.get_mut(0) {
+            *text = "hello".into();
+        }
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        let updated = build_rows_with_cache(
+            &messages,
+            false,
+            speech,
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+            false,
+            &mut cache,
+            &HashSet::new(),
+        );
+        assert_eq!(
+            cache.built, 1,
+            "a streaming upsert rebuilds only the changed message"
+        );
+        assert_ne!(ids(&again), ids(&updated));
+    }
+
     /// The three states as the row draws them: one bubble per state, no
     /// caption anywhere, and the red "! Retry" only beside a failed bubble.
     struct OwnBubbles;
@@ -9820,6 +12100,50 @@ mod reply_in_dm_tests {
             sender_handle: "unconst".into(),
             text: text.into(),
         }
+    }
+
+    /// A server channel's member row names its sender the way a group's does — by display
+    /// name, from the roster-filled `senderName` — and only falls back to the handle when
+    /// no name is known ([feedback server-member-names-2026-10-28]; Affinity: "referred to
+    /// as our handles instead of our usernames in server").
+    #[test]
+    fn a_channel_member_row_renders_the_display_name_not_the_handle() {
+        let t = 1_700_000_000_000u64;
+        let channel = "!general:arbos.life";
+        let mut named = row(channel, "c1", "user:test_01scout", "A", "yo", t);
+        named.sender_name = Some("Scout".into());
+        let nameless = row(channel, "c2", "user:test_01z", "Z", "me", t + 1_000);
+        let (spoken, failed) = (HashSet::new(), HashMap::new());
+        let rows = build_rows(
+            &[named, nameless],
+            false,
+            SpeechRows {
+                enabled: false,
+                spoken: &spoken,
+                failed: &failed,
+                voice_mode: false,
+            },
+            "test_01ME",
+            &HashSet::new(),
+            &Mentions::empty(),
+            true,
+        );
+        let labels: Vec<(String, bool)> = rows
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::User {
+                    from: Some(p),
+                    named,
+                    ..
+                } => Some((p.display_name(), *named)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            vec![("Scout".to_string(), true), ("Z".to_string(), true)],
+            "Scout's bubble is labelled Scout; a member with no known name keeps the handle"
+        );
     }
 
     /// `build_rows` alone: a `replyRef` row quotes its snapshot and names the chat; a
@@ -10492,6 +12816,7 @@ mod chart_tests {
                     }),
                     on_expand: Rc::new(move |part_id, _, _, _| expanded.borrow_mut().push(part_id)),
                 })),
+                ..Default::default()
             };
             div()
                 .w(px(536.0))
@@ -10606,5 +12931,366 @@ mod chart_tests {
         assert!(v2.copied_now());
         v2.copied_at = Some(now_ms() - crate::ui::chart_viewer::COPIED_MS - 1);
         assert!(!v2.copied_now());
+    }
+}
+
+/// Link previews ([feedback link-embeds-mac-2026-10-27]): the `link_preview` part parses,
+/// becomes a card under the text (or the whole bubble for a bare link), is hidden by
+/// `preview: "off"` and the global switch, and the card draws its parts.
+#[cfg(test)]
+mod link_preview_tests {
+    use super::*;
+
+    fn part(extra: serde_json::Value) -> serde_json::Value {
+        let mut v = serde_json::json!({
+            "id": "lp", "kind": "link_preview", "specVersion": 1,
+            "url": "https://open.spotify.com/track/7eiYNCojnoUVnz14kjBcQH?si=163bbf4a6caf4b39",
+            "canonicalUrl": "https://open.spotify.com/track/7eiYNCojnoUVnz14kjBcQH",
+            "provider": "spotify", "providerName": "Spotify", "type": "song",
+            "title": "Midnight City", "subtitle": "M83 · Hurry Up, We're Dreaming",
+            "facts": ["Song", "4:03"], "siteHost": "open.spotify.com",
+            "image": { "ref": "lp-abc.jpg", "width": 300, "height": 300, "mime": "image/jpeg", "art": true },
+            "layout": "compact", "fetchedAt": 1_700_000_000_000u64
+        });
+        if let Some(o) = extra.as_object() {
+            for (k, val) in o {
+                v[k] = val.clone();
+            }
+        }
+        v
+    }
+
+    fn user_message(text: &str, preview_field: Option<&str>) -> Message {
+        let mut m = serde_json::json!({
+            "id": "m1", "chatId": "c1", "role": "user", "sender": "user:gh_me", "status": "done",
+            "createdAt": 1_700_000_001_000u64,
+            "parts": [ { "id": "t", "kind": "text", "text": text }, part(serde_json::json!({})) ],
+        });
+        if let Some(p) = preview_field {
+            m["preview"] = serde_json::json!(p);
+        }
+        serde_json::from_value(m).expect("message")
+    }
+
+    fn rows_of(m: Message) -> Vec<Row> {
+        let spoken = HashSet::new();
+        let failed = HashMap::new();
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        build_rows(
+            &[m],
+            false,
+            speech,
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+        )
+    }
+
+    /// The global Link previews switch is process-wide: the tests that read or flip it take
+    /// this lock so the parallel runner cannot interleave them.
+    fn switch_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn user_row(rows: &[Row]) -> (String, Option<Box<(String, LinkPreview)>>) {
+        rows.iter()
+            .find_map(|r| match &r.kind {
+                RowKind::User { text, preview, .. } => Some((text.clone(), preview.clone())),
+                _ => None,
+            })
+            .expect("a user row")
+    }
+
+    #[test]
+    fn the_part_parses_and_unknown_fields_are_ignored() {
+        let m = user_message("x", None);
+        let Part::LinkPreview { id, preview } = &m.parts[1] else {
+            panic!("link preview part")
+        };
+        assert_eq!(id, "lp");
+        assert_eq!(preview.provider, "spotify");
+        assert_eq!(preview.kind, "song");
+        assert_eq!(preview.title, "Midnight City");
+        assert_eq!(preview.facts, ["Song", "4:03"]);
+        assert_eq!(
+            preview.image.as_ref().map(|i| i.blob_ref.as_str()),
+            Some("lp-abc.jpg")
+        );
+        assert!(preview.image.as_ref().is_some_and(|i| i.art));
+        assert_eq!(preview.site_host.as_deref(), Some("open.spotify.com"));
+        assert!(preview.site_icon.is_none(), "reserved for the shared tile");
+        assert!(!preview.expanded());
+        assert_eq!(preview.one_line(), "Midnight City — Spotify");
+        let m: Message = serde_json::from_value(serde_json::json!({
+            "id": "m9", "role": "user", "status": "done",
+            "parts": [ { "id": "z", "kind": "link_preview", "title": "T", "newerField": { "a": 1 } } ],
+        }))
+        .unwrap();
+        assert!(matches!(&m.parts[0], Part::LinkPreview { preview, .. } if preview.title == "T"));
+    }
+
+    #[test]
+    fn text_plus_link_keeps_the_text_and_a_bare_link_becomes_the_card() {
+        let _switch = switch_lock();
+        let (text, preview) = user_row(&rows_of(user_message(
+            "listen to this https://open.spotify.com/track/7eiYNCojnoUVnz14kjBcQH?si=163bbf4a6caf4b39",
+            None,
+        )));
+        assert!(text.starts_with("listen to this https://"), "{text}");
+        assert!(preview.is_some());
+
+        let (text, preview) = user_row(&rows_of(user_message(
+            "https://open.spotify.com/track/7eiYNCojnoUVnz14kjBcQH?si=163bbf4a6caf4b39",
+            None,
+        )));
+        assert_eq!(text, "", "a bare link shows the card alone");
+        assert_eq!(preview.as_ref().map(|p| p.0.as_str()), Some("lp"));
+
+        // The canonical form of the same link counts as bare too.
+        let (text, _) = user_row(&rows_of(user_message(
+            "https://open.spotify.com/track/7eiYNCojnoUVnz14kjBcQH",
+            None,
+        )));
+        assert_eq!(text, "");
+    }
+
+    #[test]
+    fn preview_off_and_the_global_switch_hide_the_card() {
+        let _switch = switch_lock();
+        let (text, preview) = user_row(&rows_of(user_message(
+            "https://open.spotify.com/track/7eiYNCojnoUVnz14kjBcQH",
+            Some("off"),
+        )));
+        assert!(preview.is_none());
+        assert!(text.starts_with("https://"), "the plain link is back");
+
+        crate::ui::link_card::set_enabled(false);
+        let (_, preview) = user_row(&rows_of(user_message(
+            "https://open.spotify.com/track/7eiYNCojnoUVnz14kjBcQH",
+            None,
+        )));
+        crate::ui::link_card::set_enabled(true);
+        assert!(preview.is_none());
+    }
+
+    #[test]
+    fn an_agents_link_preview_is_the_bubbles_last_block() {
+        let _switch = switch_lock();
+        let m: Message = serde_json::from_value(serde_json::json!({
+            "id": "m2", "chatId": "c1", "role": "assistant", "sender": "box:1", "status": "done",
+            "createdAt": 1_700_000_002_000u64,
+            "parts": [
+                { "id": "t", "kind": "text", "text": "Mira posted the count this morning: https://x.com/mira/status/1" },
+                part(serde_json::json!({ "provider": "x", "providerName": "X", "type": "post", "title": "Mira Kaplan", "subtitle": "@mirakaplan", "description": "Subnet 120 just crossed 1,000 validators.", "facts": ["Oct 27, 2026"], "image": serde_json::Value::Null, "layout": "compact" })),
+            ],
+        }))
+        .unwrap();
+        let rows = rows_of(m);
+        let kinds: Vec<String> = rows
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::Markdown {
+                    block, first, last, ..
+                } => Some(format!(
+                    "{}:{}{}",
+                    match block {
+                        Block::LinkPreview { .. } => "link",
+                        Block::Paragraph(_) => "para",
+                        _ => "other",
+                    },
+                    if *first { "F" } else { "" },
+                    if *last { "L" } else { "" }
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kinds, ["para:F", "link:L"], "{kinds:?}");
+        let row = rows
+            .iter()
+            .find(|r| r.id == "m2#lp")
+            .expect("the card's row");
+        if let RowKind::Markdown {
+            block: Block::LinkPreview { preview, .. },
+            bubble,
+            ..
+        } = &row.kind
+        {
+            assert_eq!(preview.kind, "post");
+            assert_eq!(
+                bubble.text.as_ref(),
+                "Mira Kaplan — X",
+                "a copy carries title and site"
+            );
+        } else {
+            panic!("link block");
+        }
+    }
+
+    #[test]
+    fn is_link_only_matches_the_typed_or_canonical_url_alone() {
+        let p = LinkPreview {
+            url: "https://a.test/x?si=1".into(),
+            canonical_url: "https://a.test/x".into(),
+            ..Default::default()
+        };
+        assert!(is_link_only("https://a.test/x?si=1", &p));
+        assert!(is_link_only("  https://a.test/x  ", &p));
+        assert!(is_link_only("https://a.test/x?si=1/", &p));
+        assert!(!is_link_only("see https://a.test/x?si=1", &p));
+        assert!(!is_link_only("", &p));
+    }
+
+    struct Host {
+        selection: Entity<TextSelection>,
+        removable: bool,
+        own: bool,
+        expanded: bool,
+        opened: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+        removed: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    }
+
+    impl gpui::Render for Host {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+            let mut v = part(serde_json::json!({}));
+            if self.expanded {
+                v["layout"] = serde_json::json!("expanded");
+                v["type"] = serde_json::json!("video");
+                v["duration"] = serde_json::json!("18:24");
+                v["image"] = serde_json::json!({ "ref": "lp-yt.jpg", "width": 1280, "height": 720, "mime": "image/jpeg", "art": false });
+            }
+            let preview: LinkPreview = serde_json::from_value(v).unwrap();
+            let _ = Selectable::new(&self.selection, theme.accent_soft, cx);
+            let opened = self.opened.clone();
+            let removed = self.removed.clone();
+            let ui = Rc::new(crate::ui::link_card::LinkUi {
+                thumbnail: Rc::new(|_| None),
+                host_icon: Rc::new(|_| None),
+                on_open: Rc::new(move |url, _, _| opened.borrow_mut().push(url)),
+                on_remove: Rc::new(move |mid, _, _| removed.borrow_mut().push(mid)),
+            });
+            div()
+                .w(px(536.0))
+                .debug_selector(|| "link-host".into())
+                .child(crate::ui::link_card::card(
+                    "m1#user",
+                    "m1",
+                    &preview,
+                    &theme,
+                    Some(&ui),
+                    crate::ui::link_card::Place {
+                        own: self.own,
+                        removable: self.removable,
+                    },
+                ))
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn host(
+        cx: &mut gpui::TestAppContext,
+        removable: bool,
+        expanded: bool,
+    ) -> (
+        Entity<Host>,
+        &mut gpui::VisualTestContext,
+        std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+        std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    ) {
+        cx.update(|cx| {
+            let theme = crate::ui::theme::Theme::for_pref(
+                crate::ui::theme::AppearancePref::Dark,
+                crate::ui::theme::Surface::Matte,
+                cx,
+            );
+            cx.set_global(theme);
+        });
+        let opened = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let removed = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let (o, r) = (opened.clone(), removed.clone());
+        let (view, vcx) = cx.add_window_view(move |_, cx| Host {
+            selection: cx.new(TextSelection::new),
+            removable,
+            own: true,
+            expanded,
+            opened: o,
+            removed: r,
+        });
+        vcx.run_until_parked();
+        (view, vcx, opened, removed)
+    }
+
+    #[gpui::test]
+    fn the_compact_card_is_capped_at_400_with_56pt_art_and_opens_on_click(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_view, vcx, opened, removed) = host(cx, true, false);
+        let card = vcx.debug_bounds("link-card").expect("card drawn");
+        assert_eq!(
+            f32::from(card.size.width),
+            crate::ui::link_card::CARD_MAX_WIDTH,
+            "capped, not the 536 pt bubble"
+        );
+        let art = vcx.debug_bounds("link-art").expect("art");
+        assert_eq!(f32::from(art.size.width), crate::ui::link_card::ART);
+        assert_eq!(f32::from(art.size.height), crate::ui::link_card::ART);
+        vcx.debug_bounds("link-footer").expect("footer");
+        vcx.debug_bounds("link-tile")
+            .expect("the site-icon tile slot");
+        assert!(
+            vcx.debug_bounds("link-media").is_none(),
+            "compact: no picture on top"
+        );
+        let remove = vcx
+            .debug_bounds("link-remove")
+            .expect("× present on a removable card");
+        assert!(f32::from(remove.size.width) == crate::ui::link_card::REMOVE_DISC);
+        // A click on the text opens the canonical link.
+        let text = vcx.debug_bounds("link-text").unwrap();
+        vcx.simulate_click(text.center(), gpui::Modifiers::default());
+        vcx.run_until_parked();
+        assert_eq!(
+            opened.borrow().as_slice(),
+            ["https://open.spotify.com/track/7eiYNCojnoUVnz14kjBcQH"]
+        );
+        assert!(removed.borrow().is_empty());
+        // A click on the × removes and does not open.
+        vcx.simulate_click(remove.center(), gpui::Modifiers::default());
+        vcx.run_until_parked();
+        assert_eq!(removed.borrow().as_slice(), ["m1"]);
+        assert_eq!(opened.borrow().len(), 1, "the × swallows its click");
+    }
+
+    #[gpui::test]
+    fn the_expanded_card_puts_the_picture_on_top_with_play_and_duration(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_view, vcx, _, _) = host(cx, false, true);
+        let card = vcx.debug_bounds("link-card").expect("card");
+        let media = vcx.debug_bounds("link-media").expect("picture on top");
+        assert_eq!(
+            f32::from(media.size.height),
+            crate::ui::link_card::MEDIA_HEIGHT
+        );
+        assert!(
+            (f32::from(card.size.width) - f32::from(media.size.width)).abs() <= 2.0,
+            "the picture spans the card inside its hairline"
+        );
+        let text = vcx.debug_bounds("link-text").unwrap();
+        assert!(text.top() >= media.bottom(), "text under the picture");
+        vcx.debug_bounds("link-play").expect("▶ on a video");
+        vcx.debug_bounds("link-duration").expect("duration chip");
+        assert!(vcx.debug_bounds("link-art").is_none());
+        assert!(
+            vcx.debug_bounds("link-remove").is_none(),
+            "no × when not removable"
+        );
     }
 }

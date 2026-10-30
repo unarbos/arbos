@@ -19,8 +19,9 @@ use crate::app::AppState;
 use crate::chat_search::Sender;
 use crate::ui::avatars;
 use crate::ui::glass;
-use crate::ui::icons::icon;
+use crate::ui::highlight;
 use crate::ui::select::SearchMarks;
+use crate::ui::sf_symbols;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, TEXT_SMALL};
 
@@ -126,6 +127,11 @@ pub fn bar(shell: &Shell, cx: &mut Context<Shell>) -> Option<AnyElement> {
         .pl(px(metrics::INSET))
         .pr(px(metrics::INSET_RIGHT))
         .cursor_text()
+        // The bar owns the pointer over its box like the palette's panel
+        // ([feedback search-popup-swallows-hover-2026-10-28]): nothing under
+        // it hovers, and a wheel over it never reaches the transcript.
+        .occlude()
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
         .on_mouse_down(
             gpui::MouseButton::Left,
             cx.listener(|this, _, window, cx| {
@@ -134,7 +140,11 @@ pub fn bar(shell: &Shell, cx: &mut Context<Shell>) -> Option<AnyElement> {
                 cx.stop_propagation();
             }),
         )
-        .child(icon("search", metrics::GLYPH, theme.text_muted));
+        .child(sf_symbols::glyph(
+            "magnifyingglass",
+            metrics::GLYPH,
+            theme.text_muted,
+        ));
 
     if let Some(sender) = search.query.sender.clone() {
         bar = bar.child(pinned_chip(&sender, &theme, cx));
@@ -184,7 +194,7 @@ pub fn bar(shell: &Shell, cx: &mut Context<Shell>) -> Option<AnyElement> {
         .child(
             nav(
                 "chat-search-prev",
-                "chevron-left",
+                "chevron.left",
                 has_hits || pages,
                 &theme,
             )
@@ -193,7 +203,7 @@ pub fn bar(shell: &Shell, cx: &mut Context<Shell>) -> Option<AnyElement> {
             })),
         )
         .child(
-            nav("chat-search-next", "chevron-right", has_hits, &theme).on_click(cx.listener(
+            nav("chat-search-next", "chevron.right", has_hits, &theme).on_click(cx.listener(
                 |this, _, _, cx| {
                     this.state.update(cx, |s, cx| s.chat_search_step(1, cx));
                 },
@@ -205,14 +215,13 @@ pub fn bar(shell: &Shell, cx: &mut Context<Shell>) -> Option<AnyElement> {
                 .size(px(metrics::CLOSE))
                 .ml(px(6.0))
                 .rounded_full()
-                .bg(theme.text_muted)
                 .flex()
                 .items_center()
                 .justify_center()
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.text))
+                .map(|el| highlight::washed(el, theme.text_muted, &theme))
                 .debug_selector(|| "chat-search-close".into())
-                .child(icon("xmark", 9.0, theme.bg))
+                .child(sf_symbols::glyph("xmark", 9.0, theme.bg))
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.close_chat_search(window, cx);
@@ -222,6 +231,9 @@ pub fn bar(shell: &Shell, cx: &mut Context<Shell>) -> Option<AnyElement> {
 
     let bar = glass::header_surface(bar, &theme);
     let bar = glass::header_frost(metrics::RADIUS, bar);
+    // A click anywhere outside the bar closes it without being swallowed
+    // (`Shell::click_outside`, capture phase, against these bounds).
+    let bounds = shell.chat_search_bounds.clone();
     Some(
         div()
             .w_full()
@@ -231,6 +243,9 @@ pub fn bar(shell: &Shell, cx: &mut Context<Shell>) -> Option<AnyElement> {
             .mb(px(metrics::BELOW))
             .px(px(16.0))
             .debug_selector(|| "chat-search-row".into())
+            .on_children_prepainted(move |children, _, _| {
+                bounds.set(children.first().copied());
+            })
             .child(bar)
             .into_any_element(),
     )
@@ -245,13 +260,10 @@ fn nav(id: &'static str, glyph: &str, on: bool, theme: &Theme) -> Stateful<gpui:
         .flex()
         .items_center()
         .justify_center()
-        .when(on, |el| {
-            el.cursor_pointer()
-                .hover(|s| s.bg(Theme::with_alpha(theme.text, 0.10)))
-        })
+        .when(on, |el| highlight::button(el.cursor_pointer(), theme))
         .debug_selector(move || id.into())
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(icon(
+        .child(sf_symbols::glyph(
             glyph,
             metrics::NAV_GLYPH,
             if on { theme.text } else { theme.text_faint },
@@ -288,7 +300,7 @@ fn pinned_chip(sender: &Sender, theme: &Theme, cx: &mut Context<Shell>) -> AnyEl
     chip_base("chat-search-sender", sender, theme)
         .bg(Theme::with_alpha(theme.accent, metrics::CHIP_ALPHA))
         .text_color(theme.accent)
-        .child(icon("xmark", 9.0, theme.accent))
+        .child(sf_symbols::glyph("xmark", 9.0, theme.accent))
         .cursor_pointer()
         .on_click(cx.listener(|this, _, window, cx| {
             this.state
@@ -544,6 +556,128 @@ mod tests {
         assert!(
             state.read_with(&*vcx, |s, _| s.highlight_message.is_none()),
             "marks gone"
+        );
+    }
+
+    /// ⌘F is a toggle ([feedback search-toggle-click-outside-mac-2026-10-27]):
+    /// pressed on the open bar — with the field focused — it closes it like
+    /// ✕ / Esc: marks gone, composer focused. ⌘⇧F toggles the palette the
+    /// same way, and the two never stack.
+    #[gpui::test]
+    fn cmd_f_and_cmd_shift_f_toggle_their_search_closed_again(cx: &mut TestAppContext) {
+        let (_rt, _cmds, state, shell, vcx) = mount(cx);
+        vcx.dispatch_action(super::Open);
+        settle(&state, &shell, vcx);
+        vcx.simulate_input("canvas");
+        settle(&state, &shell, vcx);
+        assert!(state.read_with(&*vcx, |s, _| s.highlight_message.is_some()));
+        let field = shell.read_with(&*vcx, |sh, cx| {
+            sh.chat_search_input.read(cx).focus_handle(cx)
+        });
+        assert!(
+            vcx.update(|window, _| field.is_focused(window)),
+            "the field has the keyboard"
+        );
+        // ⌘F again, from inside the field: the chord reaches the shell, the bar closes.
+        vcx.dispatch_action(super::Open);
+        settle(&state, &shell, vcx);
+        assert!(
+            !state.read_with(&*vcx, |s, _| s.chat_search_open()),
+            "⌘F closes the open bar"
+        );
+        assert!(vcx.debug_bounds("chat-search-bar").is_none());
+        assert!(
+            state.read_with(&*vcx, |s, _| s.highlight_message.is_none()),
+            "marks cleared"
+        );
+        let composer = shell.read_with(&*vcx, |sh, cx| {
+            sh.composer.read(cx).input.read(cx).focus_handle(cx)
+        });
+        assert!(
+            vcx.update(|window, _| composer.is_focused(window)),
+            "the composer types again"
+        );
+
+        // The palette: ⌘⇧F opens, ⌘⇧F (field focused) closes.
+        vcx.dispatch_action(crate::ui::shell::OpenPalette);
+        settle(&state, &shell, vcx);
+        assert!(shell.read_with(&*vcx, |sh, _| sh.palette.open));
+        assert!(vcx.debug_bounds("palette-panel").is_some());
+        vcx.dispatch_action(crate::ui::shell::OpenPalette);
+        settle(&state, &shell, vcx);
+        assert!(
+            !shell.read_with(&*vcx, |sh, _| sh.palette.open),
+            "⌘⇧F closes the open palette"
+        );
+        assert!(vcx.debug_bounds("palette-panel").is_none());
+        assert!(vcx.update(|window, _| composer.is_focused(window)));
+    }
+
+    /// A click outside the bar closes it and is not swallowed: the sidebar's
+    /// "+" disc under that very click opens its sheet. A click inside the bar
+    /// keeps it. The palette: the same, through its see-through backdrop.
+    #[gpui::test]
+    fn a_click_outside_closes_the_bar_or_palette_and_still_lands_on_its_target(
+        cx: &mut TestAppContext,
+    ) {
+        let (_rt, _cmds, state, shell, vcx) = mount(cx);
+        // The palette: a click in the panel keeps it; a click on the "+" disc
+        // through the see-through backdrop dismisses it AND opens the sheet.
+        vcx.dispatch_action(crate::ui::shell::OpenPalette);
+        settle(&state, &shell, vcx);
+        let field = vcx
+            .debug_bounds("palette-field")
+            .expect("palette field drawn");
+        vcx.simulate_click(field.center(), gpui::Modifiers::default());
+        settle(&state, &shell, vcx);
+        assert!(
+            shell.read_with(&*vcx, |sh, _| sh.palette.open),
+            "a click in the panel keeps it"
+        );
+        let plus = vcx
+            .debug_bounds("sidebar-new")
+            .expect("+ disc drawn under the backdrop");
+        vcx.simulate_click(plus.center(), gpui::Modifiers::default());
+        settle(&state, &shell, vcx);
+        assert!(
+            !shell.read_with(&*vcx, |sh, _| sh.palette.open),
+            "click outside dismisses the palette"
+        );
+        assert!(
+            state.read_with(&*vcx, |s, _| s.new_chat_open),
+            "the + under the click still opened"
+        );
+        // Sheet away, keyboard back on the composer (the sheet's field left the tree).
+        state.update(vcx, |s, cx| s.close_new_chat(cx));
+        vcx.update(|window, cx| {
+            shell.update(cx, |sh, cx| {
+                crate::ui::composer::Composer::focus(&sh.composer, window, cx)
+            })
+        });
+        settle(&state, &shell, vcx);
+
+        // The bar, same rule.
+        vcx.dispatch_action(super::Open);
+        settle(&state, &shell, vcx);
+        vcx.simulate_input("canvas");
+        settle(&state, &shell, vcx);
+        let count = vcx.debug_bounds("chat-search-count").expect("count drawn");
+        vcx.simulate_click(count.center(), gpui::Modifiers::default());
+        settle(&state, &shell, vcx);
+        assert!(
+            state.read_with(&*vcx, |s, _| s.chat_search_open()),
+            "a click in the bar keeps it"
+        );
+        let plus = vcx.debug_bounds("sidebar-new").expect("+ disc drawn");
+        vcx.simulate_click(plus.center(), gpui::Modifiers::default());
+        settle(&state, &shell, vcx);
+        assert!(
+            !state.read_with(&*vcx, |s, _| s.chat_search_open()),
+            "click outside closes the bar"
+        );
+        assert!(
+            state.read_with(&*vcx, |s, _| s.new_chat_open),
+            "the + under the click still opened"
         );
     }
 

@@ -21,8 +21,9 @@ use crate::ui::composer::ComposerInput;
 use crate::ui::error_note;
 use crate::ui::frost::{frosted, MENU_BLUR};
 use crate::ui::glass;
-use crate::ui::icons::icon;
+use crate::ui::highlight::{self, Shape};
 use crate::ui::profiles::kit;
+use crate::ui::sf_symbols;
 use crate::ui::theme::{Theme, PANEL_RADIUS, RAIL_WIDTH, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
 pub enum SecretsEvent {
@@ -580,6 +581,9 @@ impl SecretsPanel {
             .min_h(px(52.0))
             .px(px(16.0))
             .py(px(8.0))
+            // Lights for rows that join `kit::HOT` (vault / secret rows, the
+            // switch rows); a plain detail row never does.
+            .child(highlight::layer(false, Shape::Nested(PANEL_RADIUS), theme))
             .child(kit::hairline_below(theme))
             .child(glass::icon_tile(glyph, theme).when(dim, |el| el.opacity(0.55)))
             .child(
@@ -625,7 +629,7 @@ impl SecretsPanel {
             .text_size(px(TEXT_BODY))
             .text_color(theme.text)
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), theme))
             .child(
                 div()
                     .size(px(30.0))
@@ -635,7 +639,7 @@ impl SecretsPanel {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(icon("plus", 15.0, theme.text)),
+                    .child(sf_symbols::glyph("plus", 15.0, theme.text)),
             )
             .child(label)
     }
@@ -669,7 +673,7 @@ impl SecretsPanel {
             .text_size(px(TEXT_BODY))
             .text_color(if danger { theme.danger } else { theme.text })
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), theme))
             .child(label.into())
     }
 
@@ -718,14 +722,13 @@ impl SecretsPanel {
             .h(px(26.0))
             .px(px(10.0))
             .rounded_full()
-            .bg(theme.field)
             .flex()
             .items_center()
             .text_size(px(TEXT_TINY))
             .font_weight(FontWeight::MEDIUM)
             .text_color(if danger { theme.danger } else { theme.text })
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .map(|el| highlight::washed(el, theme.field, theme))
             .child(label.into())
     }
 
@@ -737,7 +740,7 @@ impl SecretsPanel {
     ) -> Stateful<Div> {
         let _ = id;
         row.cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .group(kit::HOT)
             .child(glass::switch(on, theme))
     }
 
@@ -849,7 +852,7 @@ impl SecretsPanel {
         let paused = view.paused;
         let pause_row = Self::row(
             "secrets-pause",
-            "pause",
+            "pause.fill",
             "Pause all secrets",
             None,
             false,
@@ -920,8 +923,8 @@ impl SecretsPanel {
                         theme,
                     )
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme.surface_2))
-                    .child(icon("chevron-right", 13.0, theme.text_faint))
+                    .group(kit::HOT)
+                    .child(sf_symbols::glyph("chevron.right", 13.0, theme.text_faint))
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.go(Page::Vault(vid.clone()), cx)),
                     ),
@@ -972,8 +975,8 @@ impl SecretsPanel {
                     theme,
                 )
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
-                .child(icon("chevron-right", 13.0, theme.text_faint))
+                .group(kit::HOT)
+                .child(sf_symbols::glyph("chevron.right", 13.0, theme.text_faint))
                 .on_click(
                     cx.listener(move |this, _, _, cx| this.go(Page::Secret(sid.clone()), cx)),
                 ),
@@ -1175,11 +1178,8 @@ impl SecretsPanel {
         let ask = s.ask_every_time;
         let sid_ask = sid.clone();
         g = g.child(
-            glass::row("Ask every time", theme)
-                .id("secret-ask")
+            glass::hot_row("secret-ask", "Ask every time", theme)
                 .border_b_0()
-                .cursor_pointer()
-                .hover(|st| st.bg(theme.surface_2))
                 .child(glass::switch(ask, theme))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let id = sid_ask.clone();
@@ -1276,7 +1276,7 @@ impl SecretsPanel {
                     .relative()
                     .child(kit::hairline_below(theme))
                     .cursor_pointer()
-                    .hover(|st| st.bg(theme.surface_2))
+                    .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), theme))
                     .child(avatar)
                     .child(
                         div()
@@ -1422,7 +1422,7 @@ impl SecretsPanel {
                     .relative()
                     .child(kit::hairline_below(theme))
                     .cursor_pointer()
-                    .hover(|st| st.bg(theme.surface_2))
+                    .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), theme))
                     .child(avatars::element(
                         &d.user_id,
                         &d.display_name(),
@@ -2013,7 +2013,9 @@ impl SecretsPanel {
                         .text_color(if on { theme.on_primary } else { theme.text })
                         .cursor_pointer()
                         .child(s.env.clone())
-                        .when(on, |el| el.child(icon("check", 11.0, theme.on_primary)))
+                        .when(on, |el| {
+                            el.child(sf_symbols::glyph("checkmark", 11.0, theme.on_primary))
+                        })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let picked = &mut this.agent_picker.picked;
                             if let Some(i) = picked.iter().position(|x| *x == sid) {
@@ -2276,7 +2278,7 @@ impl SecretsPanel {
                     .relative()
                     .child(kit::hairline_below(theme))
                     .cursor_pointer()
-                    .hover(|st| st.bg(theme.surface_2))
+                    .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), theme))
                     .child(avatar)
                     .child(
                         div()
@@ -2405,7 +2407,7 @@ impl SecretsPanel {
                     .relative()
                     .child(kit::hairline_below(theme))
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme.surface_2))
+                    .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), theme))
                     .child(
                         div()
                             .flex_1()

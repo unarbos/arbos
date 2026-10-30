@@ -37,6 +37,7 @@ mod rpc_child;
 mod selfref;
 mod settings;
 mod silence;
+mod sites;
 mod skills;
 mod status;
 mod store;
@@ -72,29 +73,24 @@ enum Cmd {
     Boot,
     /// Print the effective configuration (secrets masked).
     Config,
-    /// Run the labelled group-chat fixture through the responder decision (Jev decision model
-    /// and the LLM router) and report accuracy, latency, tokens and cost. Needs
-    /// OPENROUTER_API_KEY, or ARBOS_RELAY_URL + ARBOS_BOX_TOKEN for the relay proxy.
+    /// Replay a labelled group-chat fixture through the respond judge and report exact-set
+    /// accuracy, per-agent precision/recall, silence and exactly-one accuracy, a threshold
+    /// sweep, latency, tokens and cost. Needs OPENROUTER_API_KEY, or ARBOS_RELAY_URL +
+    /// ARBOS_BOX_TOKEN for the relay proxy.
     EvalResponders {
-        /// Fixture path (default: crates/arbos-agentd/tests/fixtures/group-responders.json).
+        /// Fixture path (default: the real-Arbonites set).
         #[arg(
             long,
-            default_value = "crates/arbos-agentd/tests/fixtures/group-responders.json"
+            default_value = "crates/arbos-agentd/tests/fixtures/respond-gate-arbonites.json"
         )]
         fixture: String,
-        /// `jev`, `llm`, or `both`.
-        #[arg(long, default_value = "both")]
-        provider: String,
         /// Decision-model id (default typesafe/jev-1.14).
         #[arg(long)]
         scorer: Option<String>,
-        /// Chat model for the `llm` router.
-        #[arg(long, default_value = "anthropic/claude-haiku-5.5")]
-        llm_model: String,
-        /// Yes-probability threshold for `jev` (default 0.5).
+        /// Confidence threshold (default the gate's own).
         #[arg(long)]
         threshold: Option<f64>,
-        /// Run every case this many times (latency spread).
+        /// Run every case this many times (latency spread, determinism check).
         #[arg(long, default_value_t = 1)]
         repeat: usize,
         /// Write the JSON report here instead of stdout.
@@ -158,18 +154,14 @@ async fn main() -> Result<()> {
         }
         Cmd::EvalResponders {
             fixture,
-            provider,
             scorer,
-            llm_model,
             threshold,
             repeat,
             out,
         } => {
             eval::run(eval::EvalArgs {
                 fixture,
-                provider,
                 scorer,
-                llm_model,
                 threshold,
                 repeat,
                 out,
@@ -428,22 +420,57 @@ async fn boot() -> Result<()> {
         let sup2 = sup.clone();
         let cfg2 = cfg.clone();
         tokio::spawn(async move {
+            let mut poll_failures: u32 = 0;
+            // The client itself carries the bounds (connect and whole-request), not only the
+            // per-call wrapper: a response that hangs after its headers is what stalled the
+            // pass for 9 minutes (#2127); the pool is pinned per connection to one request.
+            let poll_client = reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(crate::workspace::REGISTRY_CALL_TIMEOUT)
+                .pool_max_idle_per_host(1)
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new());
             loop {
                 tokio::time::sleep(Duration::from_secs(3)).await;
-                let Ok(r) = reqwest::Client::new()
+                // A failed listing names itself once per streak (#2127: a 9-minute gap with
+                // no line anywhere), and is bounded so a hang cannot hold the next pass.
+                let r = match poll_client
                     .get(format!("{}/box/projects", cfg2.relay_url))
                     .bearer_auth(&cfg2.box_token)
+                    .timeout(crate::workspace::REGISTRY_CALL_TIMEOUT)
                     .send()
                     .await
-                else {
-                    continue;
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        poll_failures += 1;
+                        if poll_failures == 1 {
+                            tracing::warn!(error = %e, "registry poll: request failed");
+                        }
+                        continue;
+                    }
                 };
                 if !r.status().is_success() {
+                    poll_failures += 1;
+                    if poll_failures == 1 {
+                        tracing::warn!(status = %r.status(), "registry poll: relay refused the listing");
+                    }
                     continue;
                 }
-                let Ok(v) = r.json::<Value>().await else {
-                    continue;
+                let v = match r.json::<Value>().await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        poll_failures += 1;
+                        if poll_failures == 1 {
+                            tracing::warn!(error = %e, "registry poll: bad listing");
+                        }
+                        continue;
+                    }
                 };
+                if poll_failures > 0 {
+                    tracing::info!(failures = poll_failures, "registry poll: listing back");
+                    poll_failures = 0;
+                }
                 sup2.apply_listing(&v).await;
             }
         });

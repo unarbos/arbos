@@ -1,0 +1,17 @@
+{
+ "id": "r6-compare-with-caveat",
+ "lane": "a",
+ "category": "research",
+ "title": "Compare two things and say what could not be checked",
+ "turns": [
+  {
+   "prompt": "Which has the larger population right now, Costa Rica or Panama, by roughly how much, and what source are you going by? If your numbers are from different years, say so.",
+   "timeout_s": 240,
+   "reply_regex": "(?i)costa rica",
+   "rubric": {
+    "criteria": "Pass if the reply names Costa Rica as larger (≈5.1–5.3 M vs ≈4.4–4.6 M), gives an approximate difference, names at least one concrete source (site, dataset or organisation), and flags any year mismatch or that it could not verify live. Fail if the answer is wrong, has no source, or invents precision (exact counts to the person) without a source.",
+    "min": 3
+   }
+  }
+ ]
+}

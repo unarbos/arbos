@@ -135,7 +135,7 @@ enum PaneKit {
 enum PaneLeading {
     case none
     /// Apple-style 30 pt icon tile (settings rows); `dot` = machine state.
-    case tile(String, dot: Color? = nil)
+    case tile(String, mark: StatusMark? = nil)
     /// A 36 pt picture (people, agents, groups).
     case avatar(AnyView)
     /// A 36 pt box with a glyph in it (Add members, files).
@@ -160,7 +160,16 @@ struct PaneCard<Rows: View>: View {
                     .padding(.leading, PaneKit.inset)
             }
             _VariadicView.Tree(PaneCardLayout(separator: theme.separator, inset: separatorInset)) { rows() }
-                .background(RoundedRectangle(cornerRadius: PaneKit.radius, style: .continuous).fill(theme.bubbleAssistant))
+                // Glass: a translucent wash with a hairline rim; Matte: the solid grey as before
+                // ([feedback right-pane-glass-cards-ios-2026-10-28], the Mac's `kit::card`).
+                .background(
+                    RoundedRectangle(cornerRadius: PaneKit.radius, style: .continuous)
+                        .fill(theme.paneCardFill)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: PaneKit.radius, style: .continuous)
+                                .strokeBorder(theme.paneCardRim, lineWidth: 1)
+                        )
+                )
             if let footer {
                 Text(footer)
                     .font(theme.font(Theme.tiny))
@@ -258,7 +267,7 @@ struct PaneRow: View {
         switch leading {
         case .none:
             EmptyView()
-        case .tile(let icon, let dot):
+        case .tile(let icon, let mark):
             ZStack(alignment: .bottomTrailing) {
                 RoundedRectangle(cornerRadius: 7.5, style: .continuous)
                     .fill(theme.isDark ? Color(hex: "#5C5C60")! : Color(hex: "#6E6E73")!)
@@ -268,10 +277,14 @@ struct PaneRow: View {
                             .font(theme.font(15, weight: .semibold))
                             .foregroundStyle(.white)
                     )
-                if let dot {
-                    Circle().fill(dot).frame(width: 9, height: 9)
-                        .overlay(Circle().strokeBorder(theme.bubbleAssistant, lineWidth: 1.5))
-                        .offset(x: 3, y: 3)
+                if let mark {
+                    // The machine mark on the tile's corner — never a coloured dot (2026-10-27).
+                    ZStack {
+                        Circle().fill(theme.bubbleAssistant)
+                        StatusMarkView(mark: mark, size: 8)
+                    }
+                    .frame(width: 13, height: 13)
+                    .offset(x: 3, y: 3)
                 }
             }
         case .avatar(let view):
@@ -329,28 +342,75 @@ struct PaneSectionTitle: View {
     }
 }
 
-/// The one capsule tab pill (Profile | Settings, Links | Groups, Members | Library).
+/// The tab pill's numbers: Grok's 30-ish chip (`Controls.Exception.filterChips`) and the
+/// band a tap reaches around it.
+enum PaneTabsMetrics {
+    /// The drawn capsule.
+    static let pill: CGFloat = 32
+    /// Label → capsule end.
+    static let labelPad: CGFloat = 16
+    /// Between two capsules; half of it is hit area on either side so the row tiles.
+    static let gap: CGFloat = 4
+    /// Hit band above and below the capsule when the caller gives none: the whole tab is
+    /// Apple's 44 pt tall ([feedback iphone-filter-tab-taps-2026-10-28]).
+    static let hitBand: CGFloat = 6
+    static var hitHeight: CGFloat { pill + 2 * hitBand }
+}
+
+/// The one capsule tab pill (Profile | Settings, Links | Groups, Members | Library; Home's
+/// All | Agents | People | Servers).
+///
+/// Every tab takes a tap over its WHOLE area — capsule, the band above and below it and half
+/// the gap to its neighbours — not only over the glyphs of its label. Jacob, 2026-10-28
+/// (TestFlight 202610281148575584): "can't click All". A `.plain` Button hit-tests only what
+/// its label draws: an unselected tab's capsule is `.clear`, so its hit area was the text's
+/// own box (≈ 22 × 20 pt for "All"); the selected one reached its 32 pt capsule. Now the
+/// label carries the band and `.contentShape(Rectangle())`; the drawn pill is unchanged.
 struct PaneTabs: View {
     @Environment(\.theme) private var theme
     let tabs: [String]
     @Binding var selected: String
+    /// Hit band over the capsule (Home passes its chrome's 8).
+    var hitAbove: CGFloat = PaneTabsMetrics.hitBand
+    /// Hit band under the capsule (Home passes its chrome's 4).
+    var hitBelow: CGFloat = PaneTabsMetrics.hitBand
 
     // Redesign mocks b/g (same kit as the Mac): bare labels, the current one
     // on a capsule, centred — no track, no border.
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 0) {
             ForEach(tabs, id: \.self) { t in
                 Button { withAnimation(.snappy(duration: 0.2)) { selected = t } } label: {
                     Text(t)
                         .font(theme.font(Theme.body, weight: selected == t ? .semibold : .regular))
                         .foregroundStyle(selected == t ? theme.text : theme.muted)
-                        .padding(.horizontal, 16).frame(height: 32)
+                        .padding(.horizontal, PaneTabsMetrics.labelPad).frame(height: PaneTabsMetrics.pill)
                         .background(Capsule().fill(selected == t ? theme.bubbleAssistant : .clear))
+                        .padding(.horizontal, PaneTabsMetrics.gap / 2)
+                        .padding(.top, hitAbove)
+                        .padding(.bottom, hitBelow)
+                        // `.interaction` so the padded band is the real hit target, not only
+                        // the accessibility frame (UITests were missing the bottom corners of
+                        // Home's All tab — feedback app-01M61EZD0GJ2XGV1EW4SCVXENK / filter taps).
+                        .contentShape(.interaction, Rectangle())
+                        .overlay { hitRectOverlay }
                 }
                 .buttonStyle(.plain)
+                .accessibilityAddTraits(selected == t ? .isSelected : [])
             }
         }
         .frame(maxWidth: .infinity)
+    }
+
+    /// Rig only (`ARBOS_HIT_RECTS=1`): strokes the tab's hit area so a shot shows what a tap reaches.
+    @ViewBuilder
+    private var hitRectOverlay: some View {
+        if DebugHooks.hitRects {
+            Rectangle()
+                .strokeBorder(Color.green, lineWidth: 1.5)
+                .background(Color.green.opacity(0.12))
+                .allowsHitTesting(false)
+        }
     }
 }
 
@@ -596,11 +656,17 @@ struct ProfileLinkRow: View {
     }
 }
 
-/// The tab pill at the pane's insets (profile pages lay out edge to edge).
+/// The tab pill at the pane's insets (profile pages lay out edge to edge). The hit band
+/// above and below the pill lies in the header stack's gaps (18 over, 4 + 18 under), so the
+/// pane's layout does not move: the band is taken back here.
 struct ProfileTabs: View {
     let tabs: [String]
     @Binding var selected: String
-    var body: some View { PaneTabs(tabs: tabs, selected: $selected).padding(.horizontal, PaneKit.inset) }
+    var body: some View {
+        PaneTabs(tabs: tabs, selected: $selected)
+            .padding(.vertical, -PaneTabsMetrics.hitBand)
+            .padding(.horizontal, PaneKit.inset)
+    }
 }
 
 /// Last-seen text: the relay's `online`/`last_seen_at` (§9) merged with the
@@ -805,10 +871,34 @@ struct ChatItemsList: View {
     private func rowLabel(_ item: ChatItem) -> some View {
         let when = Date(timeIntervalSince1970: Double(item.at) / 1000).formatted(date: .abbreviated, time: .omitted)
         return PaneRow(
-            leading: .glyph(item.kind == .voice ? "waveform" : item.kind == .link ? "link" : "doc.fill"),
+            leading: item.kind == .link
+                ? .avatar(AnyView(LinkRowTile(url: item.url)))
+                : .glyph(item.kind == .voice ? "waveform" : "doc.fill"),
             title: item.title,
             subtitle: item.kind == .link ? item.subtitle : "\(item.fromHandle.map { "@\($0) · " } ?? "")\(when)"
         )
+    }
+}
+
+/// A Links row's leading tile: the brand mark for a known host, else the relay's icon for the
+/// host once `LinkIcons` has it (asked for here, once), else the host's letter
+/// ([feedback link-icons-ios-tile-2026-10-27]; before, every link row drew the same `link`
+/// glyph). Observes the icon store so the tile fills in when the picture arrives.
+struct LinkRowTile: View {
+    @ObservedObject private var icons = LinkIcons.shared
+    let url: URL?
+    var size: CGFloat = PaneKit.avatar
+
+    /// The host an icon is keyed by at the relay: lower-case, `www.` kept, no port.
+    static func iconHost(_ url: URL?) -> String {
+        url?.host?.lowercased() ?? ""
+    }
+
+    var body: some View {
+        let host = Self.iconHost(url)
+        let brand = url.flatMap(LinkBrand.of(url:))
+        let picture = brand == nil && !host.isEmpty ? icons.picture(for: host) : nil
+        LinkTile(url: url, host: host, picture: picture, size: size)
     }
 }
 
@@ -829,6 +919,11 @@ enum BlockRow {
     }
 
     static func title(blocked: Bool) -> String { blocked ? "Unblock" : "Block user" }
+
+    /// The Block confirm: "Block @x?" · what it does · Cancel · Block (red).
+    static func blockConfirm(handle: String) -> ConfirmSpec {
+        ConfirmSpec(title: "Block @\(handle)?", message: "They cannot message you or add you to chats.", action: "Block")
+    }
 }
 
 struct UserProfileView: View {
@@ -903,19 +998,17 @@ struct UserProfileView: View {
             .scrollIndicators(.visible)
             ProfileTopBar(screen: .personPage) { EmptyView() }
         }
-        .confirmationDialog("Block @\(person.handle)?", isPresented: $confirmBlock, titleVisibility: .visible) {
-            Button("Block", role: .destructive) {
-                // The pane stays open: the row flips to Unblock once the relay lists them.
-                if let m = dm?.humans.first(where: isPeer) { model.block(m) } else { model.block(handle: peerHandle) }
-            }
-        } message: { Text("They cannot message you or add you to chats.") }
-        .confirmationDialog(BlockedState.confirmTitle(handle: person.handle), isPresented: $confirmUnblock, titleVisibility: .visible) {
-            Button(BlockedState.unblock) {
-                // The pane stays open: the chip and the row go once the relay's list comes back.
-                if let entry = blockedEntry { model.unblock(entry) }
-            }
-        } message: { Text(BlockedState.confirmNote) }
+        .confirm(BlockRow.blockConfirm(handle: person.handle), isPresented: $confirmBlock) {
+            // The pane stays open: the row flips to Unblock once the relay lists them.
+            if let m = dm?.humans.first(where: isPeer) { model.block(m) } else { model.block(handle: peerHandle) }
+        }
+        .confirm(BlockedState.unblockConfirm(handle: person.handle), isPresented: $confirmUnblock) {
+            // The pane stays open: the chip and the row go once the relay's list comes back.
+            if let entry = blockedEntry { model.unblock(entry) }
+        }
         .task {
+            // Rig: `ARBOS_PANEL_TAB=Groups` lands on that tab (screenshot rig, as the group page).
+            if let t = DebugHooks.panelTab, PaneKinds.person.contains(t) { tab = t }
             await model.refreshBlocks()
             await model.refreshPeople()
             let id = model.personId(handle: person.handle) ?? person.id
@@ -967,10 +1060,17 @@ struct UserProfileView: View {
         if groups.isEmpty && sharedProjects.isEmpty {
             return [.empty("No groups in common yet.")]
         }
+        // The group's own picture through the resolver, like the home row and search —
+        // the placeholder only when it has none ([feedback group-row-avatar-ios-2026-10-27]).
         var rows: [AnyView] = groups.map { g in
             AnyView(
                 Button { dismiss(); model.open(peopleChat: g) } label: {
-                    PaneRow(leading: .glyph("person.2.fill"), title: g.title, subtitle: "\(g.humans.count) members", chevron: true)
+                    PaneRow(
+                        leading: .avatar(AnyView(GroupAvatar(chat: g, model: model, size: PaneKit.avatar))),
+                        title: g.title,
+                        subtitle: "\(g.humans.count) members",
+                        chevron: true
+                    )
                 }
                 .buttonStyle(.plain)
             )
@@ -1093,6 +1193,13 @@ struct GroupProfileView: View {
         return people?.humans.first(where: { $0.id == model.user?.id })?.role == "owner"
     }
 
+    /// May I change the group's name, picture and description? Owner and admins only —
+    /// the relay refuses everyone else (`PATCH /chats/{id}` 403 since 2026-10-27, after
+    /// members renamed Arbonites), so Edit group hides for plain members.
+    private var canEditGroupSettings: Bool {
+        projectId == nil && people?.isGroup == true && canManageMembers
+    }
+
     /// My human row in this people group (for mute/ban rights).
     private var myMember: ChatMember? {
         people?.humans.first(where: { $0.id == model.user?.id })
@@ -1150,7 +1257,17 @@ struct GroupProfileView: View {
                 title: muted ? "Unmute notifications" : "Mute notifications",
                 subtitle: model.peopleMuteSubtitle(chatId)
             )
-        }.buttonStyle(.plain))
+        }
+        .buttonStyle(.plain)
+        // A menu of durations on its own row: anchored to the control, so it stays a dialog.
+        .confirmationDialog("Mute notifications", isPresented: $showMuteOptions, titleVisibility: .visible) { // confirm: anchored
+            ForEach(ChatMuteDuration.allCases) { duration in
+                Button(duration.title) { model.mutePeopleChat(chatId, for: duration) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("No banners from this group for the time you pick.")
+        })
         return [.card([row], separatorInset: PaneKit.separatorInset(.tile("")))]
     }
 
@@ -1212,114 +1329,49 @@ struct GroupProfileView: View {
         withSheets(withDialogs(mainStack))
     }
 
+    /// The confirms, centred alerts (`Confirm.swift`). The two menus — mute durations, a
+    /// member's actions — sit on their own rows (`muteFooter`, `memberRow`), anchored.
     private func withDialogs<Content: View>(_ content: Content) -> some View {
         content
-            .confirmationDialog(
-                "Mute notifications",
-                isPresented: $showMuteOptions,
-                titleVisibility: .visible
-            ) {
-                ForEach(ChatMuteDuration.allCases) { duration in
-                    Button(duration.title) { model.mutePeopleChat(chatId, for: duration) }
-                }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("No banners from this group for the time you pick.")
-            }
-            .confirmationDialog(
-                pendingRemoveName.map { "Remove \($0) from \(title)?" } ?? "Remove from chat?",
-                isPresented: Binding(
-                    get: { pendingRemoveId != nil },
-                    set: { if !$0 { pendingRemoveId = nil; pendingRemoveName = nil } }
-                ),
-                titleVisibility: .visible
-            ) {
-                Button("Remove", role: .destructive) {
-                    if let id = pendingRemoveId {
-                        if rows.first(where: { $0.id == id })?.agent != nil {
-                            model.removeAgent(chatId: chatId, projectId: id)
-                        } else {
-                            model.removeMember(chatId: chatId, userId: id, ban: false)
-                        }
-                    }
-                    pendingRemoveId = nil
-                    pendingRemoveName = nil
-                }
-                Button("Cancel", role: .cancel) {
-                    pendingRemoveId = nil
-                    pendingRemoveName = nil
-                }
-            } message: {
-                Text("They can be added again later.")
-            }
-            .confirmationDialog(
-                pendingBanName.map { "Ban \($0) from \(title)?" } ?? "Ban from chat?",
-                isPresented: Binding(
-                    get: { pendingBanId != nil },
-                    set: { if !$0 { pendingBanId = nil; pendingBanName = nil } }
-                ),
-                titleVisibility: .visible
-            ) {
-                Button("Ban", role: .destructive) {
-                    if let id = pendingBanId {
-                        model.removeMember(chatId: chatId, userId: id, ban: true)
-                    }
-                    pendingBanId = nil
-                    pendingBanName = nil
-                }
-                Button("Cancel", role: .cancel) {
-                    pendingBanId = nil
-                    pendingBanName = nil
-                }
-            } message: {
-                Text("They are removed and cannot rejoin.")
-            }
-            .confirmationDialog(
-                "Leave \(title)?",
-                isPresented: $confirmLeave,
-                titleVisibility: .visible
-            ) {
-                Button("Leave group chat", role: .destructive) {
-                    model.leavePeopleChat(chatId)
-                    dismiss()
-                }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("You leave the group. It stays for everyone else.")
-            }
-            .confirmationDialog(
-                "Delete \(title)?",
-                isPresented: $confirmDelete,
-                titleVisibility: .visible
-            ) {
-                Button("Delete group chat", role: .destructive) {
-                    model.deletePeopleChat(chatId)
-                    dismiss()
-                }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("Deletes the group for everyone in it.")
-            }
-            .confirmationDialog(
-                memberActions.map { $0.displayName } ?? "Member",
-                isPresented: Binding(
-                    get: { memberActions != nil },
-                    set: { if !$0 { memberActions = nil } }
-                ),
-                titleVisibility: .visible
-            ) {
-                Button("Send private message") {
-                    guard let handle = memberActions?.handle else { return }
-                    memberActions = nil
-                    Task {
-                        if await model.openDM(handle: handle) != nil { dismiss() }
+            .confirm(ConfirmSpec(
+                title: pendingRemoveName.map { "Remove \($0) from \(title)?" } ?? "Remove from chat?",
+                message: "They can be added again later.", action: "Remove"
+            ), isPresented: Binding(
+                get: { pendingRemoveId != nil },
+                set: { if !$0 { pendingRemoveId = nil; pendingRemoveName = nil } }
+            )) {
+                if let id = pendingRemoveId {
+                    if rows.first(where: { $0.id == id })?.agent != nil {
+                        model.removeAgent(chatId: chatId, projectId: id)
+                    } else {
+                        model.removeMember(chatId: chatId, userId: id, ban: false)
                     }
                 }
-                Button("View profile") {
-                    if let p = memberActions { model.showProfile(.user(p)) }
-                    memberActions = nil
+                pendingRemoveId = nil
+                pendingRemoveName = nil
+            }
+            .confirm(ConfirmSpec(
+                title: pendingBanName.map { "Ban \($0) from \(title)?" } ?? "Ban from chat?",
+                message: "They are removed and cannot rejoin.", action: "Ban"
+            ), isPresented: Binding(
+                get: { pendingBanId != nil },
+                set: { if !$0 { pendingBanId = nil; pendingBanName = nil } }
+            )) {
+                if let id = pendingBanId {
+                    model.removeMember(chatId: chatId, userId: id, ban: true)
                 }
-                Button("Cancel", role: .cancel) { memberActions = nil }
+                pendingBanId = nil
+                pendingBanName = nil
+            }
+            .confirm(ConfirmSpec(title: "Leave \(title)?", message: "You leave the group. It stays for everyone else.",
+                                 action: "Leave group chat"), isPresented: $confirmLeave) {
+                model.leavePeopleChat(chatId)
+                dismiss()
+            }
+            .confirm(ConfirmSpec(title: "Delete \(title)?", message: "Deletes the group for everyone in it.",
+                                 action: "Delete group chat"), isPresented: $confirmDelete) {
+                model.deletePeopleChat(chatId)
+                dismiss()
             }
     }
 
@@ -1461,11 +1513,17 @@ struct GroupProfileView: View {
     }
 
     /// The hero picture: the agent's leaf for a shared project; the group's
-    /// cluster or picked image (tap → the edit sheet) for a people group.
+    /// cluster or picked image for a people group — tap → the edit sheet for the
+    /// owner and admins, full-size view (when there is a picture) for everyone else.
     @ViewBuilder private var heroPicture: some View {
         if let project {
             ViewablePicture(name: project.name, url: model.projectImageURL(project)?.absoluteString) {
                 AgentAvatar(project: project, theme: theme, size: PaneKit.heroAvatar, idle: true)
+            }
+        } else if !canEditGroupSettings {
+            ViewablePicture(name: people?.title ?? "", url: groupImageURL) {
+                AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL, leaf: people?.leafPick, neutralName: people?.isNeutralAvatar == true ? people?.title : nil)
+                    .frame(width: PaneKit.heroAvatar, height: PaneKit.heroAvatar)
             }
         } else {
             Button { showEdit = true } label: {
@@ -1489,19 +1547,27 @@ struct GroupProfileView: View {
             }
             .buttonStyle(.plain)),
         ]
-        // People groups: description lives in Edit group (same sheet as name + picture).
+        // People groups: description lives in Edit group (same sheet as name + picture) for
+        // the owner and admins; plain members read it (no row while it is empty).
         if projectId == nil, people?.isGroup == true {
             let desc = people?.description ?? ""
-            list.append(AnyView(Button { showEdit = true } label: {
-                PaneRow(
-                    leading: .glyph("text.alignleft"),
-                    title: "Description",
-                    value: desc.isEmpty ? "Add a description" : desc,
-                    chevron: true
-                )
+            if canEditGroupSettings {
+                list.append(AnyView(Button { showEdit = true } label: {
+                    PaneRow(
+                        leading: .glyph("text.alignleft"),
+                        title: "Description",
+                        value: desc.isEmpty ? "Add a description" : desc,
+                        chevron: true
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(desc.isEmpty ? "Add a description" : "Edit description")))
+            } else if !desc.isEmpty {
+                list.append(AnyView(
+                    PaneRow(leading: .glyph("text.alignleft"), title: "Description", value: desc)
+                        .accessibilityLabel("Description: \(desc)")
+                ))
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel(desc.isEmpty ? "Add a description" : "Edit description")))
         }
         // People groups only (not a shared project): one-tap share of the invite link.
         if project == nil, people?.kind == "group" {
@@ -1794,6 +1860,25 @@ struct GroupProfileView: View {
                 }
             }
         }
+        // A tapped member's actions (Send private message, View profile): a menu on its own
+        // row, anchored to the control, so it stays a dialog.
+        .confirmationDialog(r.person.displayName, isPresented: Binding( // confirm: anchored
+            get: { memberActions?.id == r.person.id },
+            set: { if !$0 { memberActions = nil } }
+        ), titleVisibility: .visible) {
+            Button("Send private message") {
+                let handle = r.person.handle
+                memberActions = nil
+                Task {
+                    if await model.openDM(handle: handle) != nil { dismiss() }
+                }
+            }
+            Button("View profile") {
+                model.showProfile(.user(r.person))
+                memberActions = nil
+            }
+            Button("Cancel", role: .cancel) { memberActions = nil }
+        }
     }
 
     private func memberRowSubtitle(_ r: Row, member: ChatMember?, isSilenced: Bool) -> String {
@@ -1803,16 +1888,8 @@ struct GroupProfileView: View {
             parts.append(rights)
         }
         if isSilenced {
-            if let until = member?.silencedUntil {
-                let date = Date(timeIntervalSince1970: TimeInterval(until) / 1000)
-                let f = DateFormatter()
-                f.doesRelativeDateFormatting = true
-                f.dateStyle = .short
-                f.timeStyle = .short
-                parts.append("Muted until \(f.string(from: date))")
-            } else {
-                parts.append("Muted")
-            }
+            let now = Int64(Date().timeIntervalSince1970 * 1000)
+            parts.append(BlockedState.mutedUntilLabel(untilMs: member?.silencedUntil, nowMs: now))
         }
         return parts.joined(separator: " · ")
     }
@@ -2223,79 +2300,45 @@ struct ServerProfileView: View {
             } message: {
                 Text("Letters, digits and dashes.")
             }
-            .confirmationDialog(
-                deletingChannel.map { "Delete #\($0.name)?" } ?? "Delete channel?",
-                isPresented: Binding(
-                    get: { deletingChannel != nil },
-                    set: { if !$0 { deletingChannel = nil } }
-                ),
-                titleVisibility: .visible
-            ) {
-                Button("Delete channel", role: .destructive) {
-                    if let c = deletingChannel { Task { await model.deleteChannel(c) } }
-                    deletingChannel = nil
-                }
-                Button("Cancel", role: .cancel) { deletingChannel = nil }
-            } message: {
-                Text("Its messages go for everyone in the server.")
+            .confirm(item: $deletingChannel, spec: { c in
+                ConfirmSpec(title: "Delete #\(c.name)?", message: "Its messages go for everyone in the server.", action: "Delete channel")
+            }) { c in
+                Task { await model.deleteChannel(c) }
             }
     }
 
     private func memberDialogs<V: View>(_ v: V) -> some View {
         v
-            .confirmationDialog(
-                removingMember.map { "Remove @\($0.handle)?" } ?? "Remove member?",
-                isPresented: Binding(
-                    get: { removingMember != nil },
-                    set: { if !$0 { removingMember = nil } }
-                ),
-                titleVisibility: .visible
-            ) {
-                Button("Remove", role: .destructive) {
-                    if let m = removingMember { Task { await model.removeServerMember(serverId: serverId, userId: m.id, ban: false) } }
-                    removingMember = nil
-                }
-                Button("Cancel", role: .cancel) { removingMember = nil }
-            } message: {
-                Text("They can join again with the invite link.")
+            .confirm(item: $removingMember, spec: { m in
+                ConfirmSpec(title: "Remove @\(m.handle)?", message: "They can join again with the invite link.", action: "Remove")
+            }) { m in
+                Task { await model.removeServerMember(serverId: serverId, userId: m.id, ban: false) }
             }
-            .confirmationDialog(
-                banningMember.map { "Ban @\($0.handle)?" } ?? "Ban member?",
-                isPresented: Binding(
-                    get: { banningMember != nil },
-                    set: { if !$0 { banningMember = nil } }
-                ),
-                titleVisibility: .visible
-            ) {
-                Button("Ban", role: .destructive) {
-                    if let m = banningMember { Task { await model.removeServerMember(serverId: serverId, userId: m.id, ban: true) } }
-                    banningMember = nil
-                }
-                Button("Cancel", role: .cancel) { banningMember = nil }
-            } message: {
-                Text("They are removed and the invite link no longer works for them.")
+            .confirm(item: $banningMember, spec: { m in
+                ConfirmSpec(title: "Ban @\(m.handle)?", message: "They are removed and the invite link no longer works for them.", action: "Ban")
+            }) { m in
+                Task { await model.removeServerMember(serverId: serverId, userId: m.id, ban: true) }
             }
     }
 
     private func serverDialogs<V: View>(_ v: V) -> some View {
         v
-            .confirmationDialog("Leave \(server?.name ?? "this server")?", isPresented: $confirmLeave, titleVisibility: .visible) {
-                Button("Leave", role: .destructive) {
-                    Task {
-                        if await model.leaveServer(serverId) { dismiss() }
-                    }
+            .confirm(ConfirmSpec(title: "Leave \(server?.name ?? "this server")?", message: "You can come back with an invite link.",
+                                 action: "Leave"), isPresented: $confirmLeave) {
+                Task {
+                    if await model.leaveServer(serverId) { dismiss() }
                 }
-            } message: { Text("You can come back with an invite link.") }
-            .confirmationDialog("Delete \(server?.name ?? "this server")?", isPresented: $confirmDelete, titleVisibility: .visible) {
-                Button("Delete server", role: .destructive) {
-                    Task {
-                        if await model.deleteServer(serverId) { dismiss() }
-                    }
+            }
+            .confirm(ConfirmSpec(title: "Delete \(server?.name ?? "this server")?", message: "Every channel and message goes, for everyone.",
+                                 action: "Delete server"), isPresented: $confirmDelete) {
+                Task {
+                    if await model.deleteServer(serverId) { dismiss() }
                 }
-            } message: { Text("Every channel and message goes, for everyone.") }
-            .confirmationDialog("Reset the invite link?", isPresented: $confirmReset, titleVisibility: .visible) {
-                Button("Reset link", role: .destructive) { Task { await model.resetServerInvite(serverId) } }
-            } message: { Text("The old link stops working. People already in stay.") }
+            }
+            .confirm(ConfirmSpec(title: "Reset the invite link?", message: "The old link stops working. People already in stay.",
+                                 action: "Reset link"), isPresented: $confirmReset) {
+                Task { await model.resetServerInvite(serverId) }
+            }
     }
 
     // MARK: Channels
@@ -2619,27 +2662,9 @@ struct GroupEditSheet: View {
                 .padding(.top, 28)
             }
             .background(theme.bg)
-            .navigationTitle("Edit group")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(theme.bg, for: .navigationBar)
-            .toolbarBackground(.visible, for: .navigationBar)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Cancel") { dismiss() }.foregroundStyle(theme.text)
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { Task { await save() } } label: {
-                        Text(saving ? "Saving…" : "Save")
-                            .font(theme.font(Theme.small, weight: .semibold))
-                            .foregroundStyle(theme.onPrimary)
-                            .padding(.horizontal, 12).frame(height: 32)
-                            .background(Capsule().fill(theme.primary))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(saving)
-                    .opacity(saving ? 0.55 : 1)
-                }
-            }
+            .sheetHeader(title: "Edit group", onLeading: { dismiss() },
+                         action: saving ? "Saving…" : "Save", actionEnabled: !saving,
+                         onAction: { Task { await save() } })
             .onAppear {
                 name = people?.title ?? ""
                 descriptionText = people?.description ?? ""
@@ -2726,6 +2751,8 @@ enum PaneKinds {
     static let person = ["Links", "Groups"]
     static let ownProfile = ["Profile", "Settings"]
     static let agent = ["Details", "Library", "Computer"]
+    /// A connected (outside) agent has no Arbos machine (#2142).
+    static let outsideAgent = ["Details", "Library"]
     static let group = ["Members", "Library"]
     static let server = ["Channels", "Members", "Settings"]
     static let channel = ["Profile", "Settings"]
@@ -2933,16 +2960,10 @@ struct ChannelProfileView: View {
             Button("Save") { if let c = channel { Task { await model.setChannelTopic(c, topic: topicDraft) } } }
             Button("Cancel", role: .cancel) { }
         }
-        .confirmationDialog(
-            channel.map { "Delete #\($0.name)?" } ?? "Delete channel?",
-            isPresented: $confirmDelete, titleVisibility: .visible
-        ) {
-            Button("Delete", role: .destructive) {
-                if let c = channel { Task { if await model.deleteChannel(c) { dismiss() } } }
-            }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            Text("Deletes the channel and its messages for everyone in the server.")
+        .confirm(ConfirmSpec(title: channel.map { "Delete #\($0.name)?" } ?? "Delete channel?",
+                             message: "Deletes the channel and its messages for everyone in the server.", action: "Delete"),
+                 isPresented: $confirmDelete) {
+            if let c = channel { Task { if await model.deleteChannel(c) { dismiss() } } }
         }
     }
 

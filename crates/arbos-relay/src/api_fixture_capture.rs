@@ -771,6 +771,9 @@ fn push_fixture_events() -> Vec<(&'static str, PushEventDto)> {
                 sender: sender.clone(),
                 project_id: None,
                 text: None,
+                chat_kind: None,
+                chat_title: None,
+                chat_image_key: None,
             }),
         ),
         (
@@ -977,6 +980,16 @@ fn push_fixture_events() -> Vec<(&'static str, PushEventDto)> {
                 chat_id: "people_dm".into(),
                 project_id: "people".into(),
                 badge: 2,
+            }),
+        ),
+        (
+            "push_pins_changed.json",
+            PushEventDto::PinsChanged(arbos_core::api::PinsChangedPayloadDto {
+                pins: vec![
+                    "agent:01FIXTUREAGENT".into(),
+                    "chat:people_dm".into(),
+                    "server:01FIXTURESERVER".into(),
+                ],
             }),
         ),
     ]

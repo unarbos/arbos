@@ -657,7 +657,61 @@ pub(crate) fn member_chat(
     Ok((me, cm))
 }
 
-fn handle_of(state: &AppState, user_id: &str) -> String {
+/// What `PATCH /chats/{id}` and the group's avatar Generate answer to a member who is neither
+/// owner nor admin. One plain sentence: the clients show it as-is.
+pub(crate) const SETTINGS_ADMIN_ONLY: &str =
+    "Only the group's owner and admins can change its name, picture and description.";
+
+/// The chat, if the caller may change its settings (name, picture, description, leaf): the
+/// owner or an admin. Everyone else — plain members, agents' boxes, non-members, the admin
+/// token — gets 403, and every attempt leaves an audit row (`settings_audit`).
+///
+/// Why: until 2026-10-27 any live human member could rename a group or swap its picture
+/// (D72 "fully permissive"); members of Arbonites did exactly that.
+pub(crate) fn settings_chat(
+    state: &AppState,
+    principal: &Principal,
+    chat_id: &str,
+    fields: &[&str],
+) -> Result<(String, ChatWithMembers), Box<Response>> {
+    let slot = format!("{PEOPLE_ACL_PREFIX}{chat_id}");
+    let (me, cm) = match member_chat(state, principal, chat_id) {
+        Ok(v) => v,
+        Err(r) => {
+            let reason = match principal {
+                Principal::Device { .. } => "not_member",
+                Principal::Box { .. } | Principal::Admin => "devices_only",
+            };
+            crate::settings_audit::record(
+                state, &slot, "chat", chat_id, principal, None, fields, false, reason,
+            );
+            return Err(r);
+        }
+    };
+    let role = my_role(&cm, &me);
+    let allowed = matches!(role, Some("owner") | Some("admin"));
+    crate::settings_audit::record(
+        state,
+        &slot,
+        "chat",
+        chat_id,
+        principal,
+        role,
+        fields,
+        allowed,
+        if allowed { "ok" } else { "admin_only" },
+    );
+    if !allowed {
+        return Err(Box::new(api_error(
+            StatusCode::FORBIDDEN,
+            "admin_only",
+            SETTINGS_ADMIN_ONLY,
+        )));
+    }
+    Ok((me, cm))
+}
+
+pub fn handle_of(state: &AppState, user_id: &str) -> String {
     state
         .db
         .user_card(user_id)
@@ -1176,16 +1230,44 @@ fn safe_image_key(k: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == ':')
 }
 
-/// `PATCH /chats/{id} {"title"?, "image_key"?, "description"?}` — any human member can
-/// name the group, set an optional picture (uploaded first via `PUT /blob/people:{id}/…`),
-/// and set an optional description.
+/// The settings fields a `PATCH /chats/{id}` body touches, for the audit row.
+fn patched_fields(b: &PatchChatBody) -> Vec<&'static str> {
+    let mut fields = Vec::new();
+    if b.title.is_some() {
+        fields.push("title");
+    }
+    if b.image_key.is_some() {
+        fields.push("image_key");
+    }
+    if b.avatar_leaf.is_some() || b.avatar_leaf_color.is_some() {
+        fields.push("avatar_leaf");
+    }
+    if b.description.is_some() {
+        fields.push("description");
+    }
+    fields
+}
+
+/// `PATCH /chats/{id} {"title"?, "image_key"?, "description"?}` — the group's owner and
+/// admins name the group, set an optional picture (uploaded first via
+/// `PUT /blob/people:{id}/…`), and set an optional description. Any other member gets 403
+/// (`settings_chat`); an empty body is a read any member may do.
 pub async fn chat_patch(
     State(state): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
     Json(b): Json<PatchChatBody>,
 ) -> Response {
-    let (me, cm) = match member_chat(&state, &principal, &id) {
+    let fields = patched_fields(&b);
+    if fields.is_empty() {
+        return match member_chat(&state, &principal, &id) {
+            Ok((me, cm)) => {
+                Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response()
+            }
+            Err(r) => *r,
+        };
+    }
+    let (me, cm) = match settings_chat(&state, &principal, &id, &fields) {
         Ok(v) => v,
         Err(r) => return *r,
     };
@@ -1193,9 +1275,6 @@ pub async fn chat_patch(
         Ok(l) => l,
         Err((st, msg)) => return api_error(st, "bad_leaf", msg),
     };
-    if b.title.is_none() && b.image_key.is_none() && leaf.is_none() && b.description.is_none() {
-        return Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response();
-    }
     let title = b.title.as_ref().map(|t| {
         let trimmed = t.trim();
         if trimmed.is_empty() {
@@ -1309,7 +1388,8 @@ pub async fn chat_read(
     // Read here = cleared everywhere else: the other devices drop the chat's banners and
     // take the new badge (`/me/pushes` now; the APNs badge alert while push is on).
     let device = device_of(&principal);
-    crate::notify::clear_on_read(&state, &me, &device, &chat_ref).await;
+    let read_upto = format!("seq:{}", b.seq.max(0));
+    crate::notify::clear_on_read(&state, &me, &device, &chat_ref, &read_upto).await;
     crate::notify::badge_refresh(&state, &me, &device).await;
     StatusCode::NO_CONTENT.into_response()
 }
@@ -1605,6 +1685,7 @@ pub async fn agent_add(
     // The notice row goes out first (ARB-393): every device in the room sees "<me> added
     // <agent>" as soon as the membership row exists, before the box wake, the pushes and the
     // Matrix mirror have had their turn.
+    crate::outside::on_membership(&state, &project.id, &id, true);
     let line = notices::added_line(
         &notices::person_name(&state, &me),
         std::slice::from_ref(&project.name),
@@ -1809,6 +1890,7 @@ pub async fn agent_remove(
             by_handle: handle_of(&state, &me),
         }),
     );
+    crate::outside::on_membership(&state, &project_id, &id, false);
     let line = notices::removed_line(
         &notices::person_name(&state, &me),
         &[notices::agent_name(&state, &project_id)],
@@ -1995,6 +2077,7 @@ pub async fn member_add(
         }
         names.push(project.name.clone());
         subjects.push(notices::subject_agent(&project.id));
+        crate::outside::on_membership(&state, &project.id, &id, true);
     }
     if cm.chat.kind == "dm" {
         let _ = state.db.set_people_chat_kind(&id, "group");
@@ -3634,11 +3717,67 @@ pub fn sender_gate(
     })
 }
 
+/// The agents in a people chat, with the user whose box serves each (soft-deleted agents are
+/// gone already: `project()` is `None` for them).
+pub fn serving_agents(state: &AppState, cm: &ChatWithMembers) -> Vec<crate::boxes::ServingAgent> {
+    let mut agents: Vec<crate::boxes::ServingAgent> = cm
+        .members
+        .iter()
+        .filter_map(|m| m.project_id())
+        // Outside agents are served by the relay, not by a box (#2140).
+        .filter(|pid| !crate::outside::is_outside(state, pid))
+        .filter_map(|pid| state.db.project(pid).ok().flatten())
+        .map(|p| crate::boxes::ServingAgent {
+            project_id: p.id,
+            owner: p.user_id,
+        })
+        .collect();
+    agents.sort_by(|a, b| a.project_id.cmp(&b.project_id));
+    agents.dedup();
+    agents
+}
+
+/// `@handle` tokens in `text` that name a member of the chat, as the row's `mentions`
+/// (`agent:<project>` by the agent's slug, `user:<id>` by the person's handle) — what the
+/// apps' autocomplete writes, for a message posted through `POST /chats/{id}/messages`.
+pub fn resolve_mentions(state: &AppState, cm: &ChatWithMembers, text: &str) -> Vec<String> {
+    let mut by_handle: Vec<(String, String)> = Vec::new();
+    for m in &cm.members {
+        if let Some(pid) = m.project_id() {
+            if let Ok(Some(p)) = state.db.project(pid) {
+                by_handle.push((agent_slug(&p.name), format!("agent:{pid}")));
+            }
+        } else if let Some(uid) = m.user_id() {
+            if let Ok(Some(card)) = state.db.user_card(uid) {
+                if !card.handle.is_empty() {
+                    by_handle.push((card.handle.to_lowercase(), format!("user:{uid}")));
+                }
+            }
+        }
+    }
+    let mut out: Vec<String> = Vec::new();
+    for token in text.split(|c: char| {
+        c.is_whitespace() || matches!(c, ',' | ':' | ';' | '!' | '?' | '(' | ')' | '"' | '\'')
+    }) {
+        let Some(handle) = token.strip_prefix('@') else {
+            continue;
+        };
+        let handle = handle.trim_end_matches('.').to_lowercase();
+        if let Some((_, member)) = by_handle.iter().find(|(h, _)| *h == handle) {
+            if !out.contains(member) {
+                out.push(member.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Gates a person's row into a people chat and returns the agents whose boxes it must reach.
 pub fn on_room_push(
     state: &AppState,
     principal: &Principal,
     chat_id: &str,
-) -> Result<Vec<String>, PushRefused> {
+) -> Result<Vec<crate::boxes::ServingAgent>, PushRefused> {
     let Principal::Device { user_id, .. } = principal else {
         return Ok(Vec::new()); // boxes (agents) are metered by their owner's credits, not here
     };
@@ -3679,17 +3818,24 @@ pub fn on_room_push(
         }
     }
     let (head, _) = state.db.room_activity(&room_of(chat_id)).unwrap_or((0, 0));
-    let event = PushEventDto::PeopleMessage(PeopleMessagePayloadDto {
-        chat_id: chat_id.to_owned(),
-        from: format!("user:{user_id}"),
-        from_handle: handle_of(state, user_id),
-        seq: head + 1,
-        sender: crate::notify::Sender::user(state, user_id).dto(),
-        project_id: None,
-        text: None,
-    });
+    let sender_dto = crate::notify::Sender::user(state, user_id).dto();
+    let from_handle = handle_of(state, user_id);
     let chat_ref = crate::notify::ChatRef::people(chat_id);
     for other in humans.iter().filter(|u| *u != user_id) {
+        // Group name per recipient (an untitled group is the *other* members' handles).
+        let meta = crate::notify::chat_meta(state, &chat_ref, other);
+        let event = PushEventDto::PeopleMessage(PeopleMessagePayloadDto {
+            chat_id: chat_id.to_owned(),
+            from: format!("user:{user_id}"),
+            from_handle: from_handle.clone(),
+            seq: head + 1,
+            sender: sender_dto.clone(),
+            project_id: None,
+            text: None,
+            chat_kind: Some(meta.kind.to_owned()),
+            chat_title: meta.title,
+            chat_image_key: meta.image_key,
+        });
         // A member who blocked the sender hears nothing of this row (hidden for them alone).
         if state.db.blocks(other, user_id).unwrap_or(false) {
             continue;
@@ -3718,16 +3864,7 @@ pub fn on_room_push(
             }
         }
     }
-    let mut owners: Vec<String> = cm
-        .members
-        .iter()
-        .filter_map(|m| m.project_id())
-        .filter_map(|pid| state.db.project(pid).ok().flatten())
-        .map(|p| p.user_id)
-        .collect();
-    owners.sort();
-    owners.dedup();
-    Ok(owners)
+    Ok(serving_agents(state, &cm))
 }
 
 /// Notify every human member except `skip`.
@@ -5400,6 +5537,382 @@ pub(crate) mod tests_support {
             })
             .expect("pinned chat");
         project.id
+    }
+}
+
+#[cfg(test)]
+mod settings_permission_tests {
+    //! Who may change a people chat's name, picture, description and leaf (P0 2026-10-27):
+    //! owner and admins yes; plain members, agents' boxes, non-members and the admin token
+    //! no — 403 `admin_only`, the value untouched, one audit row per attempt.
+
+    use axum::extract::{Path, State};
+    use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+    use axum::Json;
+    use bytes::Bytes;
+
+    use super::tests_support::{dm, person, project_of};
+    use super::*;
+    use crate::blobs;
+    use crate::image_sniff::samples;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    /// A group of the owner, one admin, one member and one agent; plus a stranger.
+    struct Cast {
+        chat: String,
+        owner: Principal,
+        admin: Principal,
+        member: Principal,
+        agent: Principal,
+        stranger: Principal,
+    }
+
+    fn cast(state: &AppState, seed: i64) -> Cast {
+        let (owner, owner_dev) = person(state, seed);
+        let (admin, admin_dev) = person(state, seed + 1);
+        let (member, member_dev) = person(state, seed + 2);
+        let (_, stranger_dev) = person(state, seed + 3);
+        let chat = PeopleChat {
+            id: ulid(),
+            kind: "group".into(),
+            created_by: owner.clone(),
+            created_at: now_ms(),
+            title: Some("Arbonites".into()),
+            image_key: None,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
+            description: Some("the original".into()),
+        };
+        state.db.insert_people_chat(&chat).expect("chat");
+        for (uid, role) in [(&owner, "owner"), (&admin, "admin"), (&member, "member")] {
+            state
+                .db
+                .add_member(&chat.id, &format!("user:{uid}"), role, &owner, &json!({}))
+                .expect("member");
+        }
+        let project = project_of(state, &member, "Scout");
+        state
+            .db
+            .add_member(
+                &chat.id,
+                &format!("agent:{project}"),
+                "agent",
+                &owner,
+                &json!({}),
+            )
+            .expect("agent member");
+        Cast {
+            chat: chat.id,
+            owner: owner_dev,
+            admin: admin_dev,
+            member: member_dev,
+            agent: Principal::Box { user_id: member },
+            stranger: stranger_dev,
+        }
+    }
+
+    fn body() -> PatchChatBody {
+        PatchChatBody {
+            title: None,
+            image_key: None,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
+            description: None,
+        }
+    }
+
+    async fn patch(state: &AppState, who: &Principal, chat: &str, b: PatchChatBody) -> StatusCode {
+        chat_patch(
+            State(state.clone()),
+            who.clone(),
+            Path(chat.to_owned()),
+            Json(b),
+        )
+        .await
+        .status()
+    }
+
+    async fn upload(state: &AppState, who: &Principal, chat: &str, key: &str) {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
+        let r = blobs::put(
+            State(state.clone()),
+            who.clone(),
+            Path((format!("{PEOPLE_ACL_PREFIX}{chat}"), key.to_owned())),
+            headers,
+            Bytes::copy_from_slice(samples::PNG),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+    }
+
+    fn chat_row(state: &AppState, chat: &str) -> PeopleChat {
+        state.db.people_chat(chat).unwrap().unwrap()
+    }
+
+    fn audit_rows(state: &AppState, chat: &str) -> Vec<Value> {
+        state
+            .db
+            .audit(&format!("{PEOPLE_ACL_PREFIX}{chat}"), 1000)
+            .unwrap()
+    }
+
+    /// Every field × every principal: only the owner and the admin change anything.
+    #[tokio::test]
+    async fn group_settings_are_owner_and_admin_only_per_field() {
+        let state = test_state(AuthMode::Github);
+        let c = cast(&state, 7100);
+        // Members may upload into the group's slot (attachments live there too); the
+        // picture is the PATCH, and that is what is gated.
+        upload(&state, &c.member, &c.chat, "member.png").await;
+        upload(&state, &c.owner, &c.chat, "owner.png").await;
+
+        type Make = Box<dyn Fn() -> PatchChatBody>;
+        let fields: Vec<(&str, Make)> = vec![
+            (
+                "title",
+                Box::new(|| PatchChatBody {
+                    title: Some("Test".into()),
+                    ..body()
+                }),
+            ),
+            (
+                "image_key",
+                Box::new(|| PatchChatBody {
+                    image_key: Some("member.png".into()),
+                    ..body()
+                }),
+            ),
+            (
+                "description",
+                Box::new(|| PatchChatBody {
+                    description: Some("hijacked".into()),
+                    ..body()
+                }),
+            ),
+            (
+                "avatar_leaf",
+                Box::new(|| PatchChatBody {
+                    avatar_leaf: Some(Some(1)),
+                    avatar_leaf_color: Some(Some(2)),
+                    ..body()
+                }),
+            ),
+        ];
+        let denied: [(&str, &Principal); 4] = [
+            ("member", &c.member),
+            ("agent", &c.agent),
+            ("stranger", &c.stranger),
+            ("admin-token", &Principal::Admin),
+        ];
+        let before = chat_row(&state, &c.chat);
+        for (field, make) in &fields {
+            for (who, principal) in denied {
+                assert_eq!(
+                    patch(&state, principal, &c.chat, make()).await,
+                    StatusCode::FORBIDDEN,
+                    "{who} changing {field}"
+                );
+            }
+            let after = chat_row(&state, &c.chat);
+            assert_eq!(after.title, before.title, "{field}: title untouched");
+            assert_eq!(
+                after.image_key, before.image_key,
+                "{field}: picture untouched"
+            );
+            assert_eq!(
+                after.description, before.description,
+                "{field}: description untouched"
+            );
+            assert_eq!(
+                after.avatar_leaf, before.avatar_leaf,
+                "{field}: leaf untouched"
+            );
+        }
+        // 4 fields × 4 denied principals, every one audited as refused.
+        let rows = audit_rows(&state, &c.chat);
+        assert_eq!(rows.len(), 16);
+        assert!(rows.iter().all(|r| r["allowed"] == false));
+        assert_eq!(
+            rows.iter().filter(|r| r["reason"] == "admin_only").count(),
+            4,
+            "the plain member is the admin_only case"
+        );
+        assert!(rows
+            .iter()
+            .any(|r| r["principal"].as_str().unwrap().starts_with("box:")
+                && r["reason"] == "devices_only"));
+        assert!(rows
+            .iter()
+            .any(|r| r["reason"] == "not_member" && r["fields"][0] == "title"));
+
+        // The admin and the owner succeed, field by field.
+        assert_eq!(
+            patch(
+                &state,
+                &c.admin,
+                &c.chat,
+                PatchChatBody {
+                    title: Some("Arbonites Admin".into()),
+                    ..body()
+                }
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            patch(
+                &state,
+                &c.owner,
+                &c.chat,
+                PatchChatBody {
+                    image_key: Some("owner.png".into()),
+                    description: Some("by the owner".into()),
+                    avatar_leaf: Some(Some(3)),
+                    avatar_leaf_color: Some(Some(4)),
+                    ..body()
+                }
+            )
+            .await,
+            StatusCode::OK
+        );
+        let now = chat_row(&state, &c.chat);
+        assert_eq!(now.title.as_deref(), Some("Arbonites Admin"));
+        assert_eq!(now.image_key.as_deref(), Some("owner.png"));
+        assert_eq!(now.description.as_deref(), Some("by the owner"));
+        assert_eq!((now.avatar_leaf, now.avatar_leaf_color), (Some(3), Some(4)));
+        let rows = audit_rows(&state, &c.chat);
+        assert_eq!(rows.len(), 18);
+        let ok: Vec<&Value> = rows.iter().filter(|r| r["allowed"] == true).collect();
+        assert_eq!(ok.len(), 2);
+        assert_eq!(ok[0]["role"], "admin");
+        assert_eq!(ok[0]["fields"], json!(["title"]));
+        assert_eq!(ok[1]["role"], "owner");
+        assert_eq!(
+            ok[1]["fields"],
+            json!(["image_key", "avatar_leaf", "description"])
+        );
+        assert!(ok[1]["device_id"].is_string());
+    }
+
+    /// The 403 carries the one sentence the clients show.
+    #[tokio::test]
+    async fn the_refusal_is_one_plain_sentence() {
+        let state = test_state(AuthMode::Github);
+        let c = cast(&state, 7200);
+        let r = chat_patch(
+            State(state.clone()),
+            c.member.clone(),
+            Path(c.chat.clone()),
+            Json(PatchChatBody {
+                title: Some("Test".into()),
+                ..body()
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        let bytes = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["error"]["type"], "admin_only");
+        assert_eq!(v["error"]["message"], SETTINGS_ADMIN_ONLY);
+    }
+
+    /// An empty body is a read: any member gets the chat back, nothing is audited; a
+    /// stranger still gets 403.
+    #[tokio::test]
+    async fn an_empty_patch_is_a_read_for_members() {
+        let state = test_state(AuthMode::Github);
+        let c = cast(&state, 7300);
+        assert_eq!(
+            patch(&state, &c.member, &c.chat, body()).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            patch(&state, &c.stranger, &c.chat, body()).await,
+            StatusCode::FORBIDDEN
+        );
+        assert!(audit_rows(&state, &c.chat).is_empty());
+    }
+
+    /// A member promoted to admin may edit; demoted back, may not.
+    #[tokio::test]
+    async fn promotion_opens_and_demotion_closes_the_settings() {
+        let state = test_state(AuthMode::Github);
+        let c = cast(&state, 7400);
+        let member_id = match &c.member {
+            Principal::Device { user_id, .. } => user_id.clone(),
+            _ => unreachable!(),
+        };
+        let rename = || PatchChatBody {
+            title: Some("Renamed".into()),
+            ..body()
+        };
+        assert_eq!(
+            patch(&state, &c.member, &c.chat, rename()).await,
+            StatusCode::FORBIDDEN
+        );
+        state
+            .db
+            .set_member_role(&c.chat, &format!("user:{member_id}"), "admin")
+            .unwrap();
+        assert_eq!(
+            patch(&state, &c.member, &c.chat, rename()).await,
+            StatusCode::OK
+        );
+        state
+            .db
+            .set_member_role(&c.chat, &format!("user:{member_id}"), "member")
+            .unwrap();
+        assert_eq!(
+            patch(&state, &c.member, &c.chat, rename()).await,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    /// A DM has two owners: both may set its fields; a third person and a box may not.
+    #[tokio::test]
+    async fn dm_fields_follow_the_same_rule() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 7500);
+        let (bob, bob_dev) = person(&state, 7501);
+        let (_, carol_dev) = person(&state, 7502);
+        let chat = dm(&state, &alice, &bob);
+        let describe = |t: &str| PatchChatBody {
+            description: Some(t.into()),
+            ..body()
+        };
+        assert_eq!(
+            patch(&state, &alice_dev, &chat, describe("ours")).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            patch(&state, &bob_dev, &chat, describe("ours too")).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            patch(&state, &carol_dev, &chat, describe("mine")).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            patch(
+                &state,
+                &Principal::Box {
+                    user_id: bob.clone()
+                },
+                &chat,
+                describe("the box")
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            chat_row(&state, &chat).description.as_deref(),
+            Some("ours too")
+        );
+        let rows = audit_rows(&state, &chat);
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows.iter().filter(|r| r["allowed"] == true).count(), 2);
     }
 }
 

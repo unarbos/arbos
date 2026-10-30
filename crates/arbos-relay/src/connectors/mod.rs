@@ -917,6 +917,8 @@ mod tests {
             box_conns: Arc::new(Mutex::new(HashMap::new())),
             wake_started: Arc::new(Mutex::new(HashMap::new())),
             last_client_push: Arc::new(Mutex::new(HashMap::new())),
+            decisions_cache: Arc::new(std::sync::Mutex::new(Default::default())),
+            decisions_inflight: Arc::new(Mutex::new(HashMap::new())),
             stale_bounces: Arc::new(Mutex::new(HashMap::new())),
             conn_seq: Arc::new(AtomicU64::new(0)),
             relay_key: Arc::new(crypto::RelayKey::derive("test-key")),
@@ -933,6 +935,9 @@ mod tests {
             presence_seen: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             activity: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             box_http_seen: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            fresh_preview_tokens: Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             turn_running: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             evicted: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             fleet_pressure: Arc::new(tokio::sync::Mutex::new(None)),

@@ -15,6 +15,7 @@ use gpui::{
 use crate::app::AppState;
 use crate::onboarding::{Onboarding, Stage};
 use crate::ui::motion::PulseClock;
+use crate::ui::sf_symbols;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, BUBBLE_RADIUS, COLUMN_MARGIN, HEADER_HEIGHT, TEXT_BODY, TEXT_SMALL};
 use crate::ui::transcript::{assistant_cap, COLUMN_MAX_WIDTH};
@@ -284,7 +285,7 @@ pub fn render(
                         .text_size(px(TEXT_BODY))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme.text)
-                        .child(crate::ui::icons::icon("window", 14.0, theme.text))
+                        .child(sf_symbols::glyph("macwindow", 14.0, theme.text))
                         .child(o.stage.title()),
                 )
                 .when_some(o.error.clone(), |el, err| {

@@ -296,6 +296,14 @@ struct PeopleChat: Identifiable, Equatable {
         humans.first { $0.id != me } ?? humans.first
     }
 
+    /// Who the empty composer names ("Message …") when nobody is picked: a DM's other person
+    /// (also a DM that gained agents, like the header pill), otherwise the chat's own name —
+    /// never one member of a group ("Message Arbonites", not "Message Jacob").
+    func composerName(me: String?) -> String {
+        if !isGroup || kind == "dm", let other = counterpart(me: me) { return other.displayName }
+        return title
+    }
+
     var lockLabel: String {
         lockState == "people_only" ? "People only" : "Visible to \(agents.map { "@\($0.ownerHandle ?? "owner")" }.joined(separator: ", "))'s agent"
     }
@@ -350,6 +358,32 @@ extension PeopleChat {
             NSLog("PeopleChatDto: \(error)")
             return nil
         }
+    }
+}
+
+/// The Add members picker's one agent section ([feedback add-your-agent-row-removal-ios-2026-10-27];
+/// the Mac's `people::AGENTS_SECTION_LABEL` / `others_agents_in` are the twin): titled "Agents",
+/// my agents first (pickable), then the other members' agents already in the chat — greyed,
+/// already in; only their owner adds or removes them — so the section is the chat's whole agent
+/// roster. The separate "Add agent" / "Add your agent" rows are gone on both platforms.
+enum AddMembersAgents {
+    static let sectionTitle = "Agents"
+    static let peopleTitle = "People"
+
+    /// The other members' agents already in `chat` (not mine — mine are the pickable rows),
+    /// by name, narrowed by what was typed (name or @handle). Nothing outside Add members.
+    static func others(in chat: PeopleChat?, meId: String?, query: String) -> [ChatMember] {
+        guard let chat else { return [] }
+        let needle = query.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "@")).lowercased()
+        return chat.agents
+            .filter { $0.ownerId == nil || $0.ownerId != meId }
+            .filter { needle.isEmpty || $0.displayName.lowercased().contains(needle) || $0.handle.lowercased().contains(needle) }
+            .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+    }
+
+    /// The row's second line for another member's agent: `@handle · run by @owner`.
+    static func note(for agent: ChatMember) -> String? {
+        agent.ownerHandle.map { "run by @\($0)" }
     }
 }
 

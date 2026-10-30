@@ -9,6 +9,7 @@
 
 pub mod agent_avatar;
 pub mod avatar_master;
+pub mod chat_send_queue;
 pub mod credentials;
 pub mod diagnostics;
 pub mod doc;
@@ -52,6 +53,56 @@ pub struct PushRefusal {
     pub by_name: Option<String>,
 }
 
+/// "Muted until 14:30" when the end is later today, "Muted until Oct 30, 14:30" on any
+/// other day, "Muted" with no end. HH:MM is 24-hour local time in `tz`.
+pub fn muted_until_label<Tz: chrono::TimeZone>(until_ms: Option<i64>, now_ms: i64, tz: Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let Some(until_ms) = until_ms else {
+        return "Muted".into();
+    };
+    let Some(until) = tz.timestamp_millis_opt(until_ms).single() else {
+        return "Muted".into();
+    };
+    let Some(now) = tz.timestamp_millis_opt(now_ms).single() else {
+        return "Muted".into();
+    };
+    if until.date_naive() == now.date_naive() {
+        format!("Muted until {}", until.format("%H:%M"))
+    } else {
+        format!("Muted until {}", until.format("%b %-d, %H:%M"))
+    }
+}
+
+/// Clear a timed admin mute once `now_ms` is at or past the end. Also drops a
+/// `push_refused` entry whose reason is `silenced`. Returns true when something changed.
+pub fn clear_silence_if_expired(
+    project: &mut Project,
+    push_refused: &mut HashMap<Id, PushRefusal>,
+    now_ms: i64,
+) -> bool {
+    if !project.silenced {
+        return false;
+    }
+    let Some(until) = project.silenced_until else {
+        return false;
+    };
+    if until > now_ms {
+        return false;
+    }
+    let chat_id = project.id.clone();
+    project.silenced = false;
+    project.silenced_until = None;
+    if push_refused
+        .get(&chat_id)
+        .is_some_and(|w| w.reason.as_deref() == Some("silenced"))
+    {
+        push_refused.remove(&chat_id);
+    }
+    true
+}
+
 impl PushRefusal {
     pub fn code(code: &str) -> Self {
         Self {
@@ -84,8 +135,26 @@ impl PushRefusal {
     }
 
     /// The plain sentence the chat-level note shows (Jacob 2026-10-26): who stands in the
-    /// way and what to do; the generic line for anything else.
-    pub fn sentence(&self) -> String {
+    /// way and what to do; the generic line for anything else. `silenced_until_ms` is the
+    /// active chat's end time for the mute line ([feedback app-01M61GZ5B66VCSKF40458KH3DP]).
+    pub fn sentence(&self, silenced_until_ms: Option<i64>) -> String {
+        self.sentence_at(
+            silenced_until_ms,
+            chrono::Local::now().timestamp_millis(),
+            chrono::Local,
+        )
+    }
+
+    /// Same as [`Self::sentence`], with a fixed clock and time zone (tests).
+    pub fn sentence_at<Tz: chrono::TimeZone>(
+        &self,
+        silenced_until_ms: Option<i64>,
+        now_ms: i64,
+        tz: Tz,
+    ) -> String
+    where
+        Tz::Offset: std::fmt::Display,
+    {
         match (self.reason.as_deref(), self.who()) {
             (Some("blocked_by"), Some(who)) => format!("{who} has blocked you in this chat."),
             (Some("blocked_by"), None) => "Someone in this chat has blocked you.".to_string(),
@@ -96,7 +165,10 @@ impl PushRefusal {
                 "Couldn't post: you've blocked someone in this chat. Unblock to post.".to_string()
             }
             (Some("silenced"), _) => {
-                "You're muted in this chat, so your messages aren't being delivered.".to_string()
+                format!(
+                    "{}. Your messages aren't being delivered.",
+                    muted_until_label(silenced_until_ms, now_ms, tz)
+                )
             }
             _ => "Messages in this chat aren't being delivered right now. We'll keep trying."
                 .to_string(),
@@ -110,6 +182,37 @@ pub enum SyncEvent {
     /// No device token for this relay yet: show the pairing screen.
     NeedsPairing {
         relay_url: String,
+    },
+    /// An outside agent's key (#2141), shown once on the reveal sheet: after a connect or a
+    /// rotate.
+    OutsideAgentKey {
+        project_id: Id,
+        name: String,
+        transport: String,
+        key: String,
+        link: String,
+        relay_url: String,
+        /// The agent's 1:1 chat (connect only).
+        chat_id: Option<Id>,
+        rotated: bool,
+    },
+    /// The connection of an outside agent, polled while the reveal sheet is up and on the
+    /// Details pane.
+    OutsideAgentStatus {
+        project_id: Id,
+        info: crate::model::OutsideInfo,
+    },
+    /// The Wake URL form was saved (`PATCH /outside-agents/{id}`); `error` is the relay's
+    /// short reason when it refused.
+    OutsideAgentWakeSaved {
+        project_id: Id,
+        error: Option<String>,
+    },
+    /// "Send test wake" came back: `text` is "Delivered · HTTP 200" or the short error.
+    OutsideAgentWakeTested {
+        project_id: Id,
+        ok: bool,
+        text: String,
     },
     /// Who is signed in (`/auth/token` or `/me`); `None` after sign-out.
     Account(Option<AccountView>),
@@ -182,6 +285,17 @@ pub enum SyncEvent {
         call: Call,
         sender: Sender,
     },
+    /// A message in a server channel (`channel_message` push from the relay's Matrix push
+    /// gateway): the banner source for servers, which never pass through the chat docs.
+    ChannelMessage {
+        server_id: String,
+        server_name: String,
+        channel_id: String,
+        channel_name: String,
+        room_id: String,
+        sender: Sender,
+        text: Option<String>,
+    },
     /// A call ended (push, or my `leave` answered `ended: true`).
     CallEnded(CallEnded),
     /// A call in one of my chats ended and I never joined (`call_missed` push).
@@ -215,6 +329,14 @@ pub enum SyncEvent {
     ChatArchived {
         chat_id: Id,
         archived_at: Option<u64>,
+    },
+    /// My sidebar pins, top first (`GET /me/pins`, the local cache at launch, a
+    /// `pins_changed` push from another device, or the relay's answer to `SetPins`):
+    /// row keys `agent:<project>` / `chat:<people chat>` / `server:<server>`; `cap` is
+    /// the relay's limit ([feedback sidebar-pinning-mac-2026-10-28]).
+    Pins {
+        pins: Vec<String>,
+        cap: usize,
     },
     /// `notifications_cleared` push: I read `chat_id` on another device. This Mac drops the
     /// chat's delivered banners, stops showing it unread and re-badges; `badge` is the relay's
@@ -327,6 +449,16 @@ pub enum SyncEvent {
         key: String,
         bytes: Arc<Vec<u8>>,
     },
+    /// Picker (ARB-544): a page of GIF results for `query` (empty = trending), or why none.
+    GifResults {
+        query: String,
+        pos: Option<String>,
+        page: crate::model::GifPage,
+    },
+    /// Picker: the relay's sticker packs (`None` when the relay could not be reached).
+    StickerPacks {
+        packs: Option<Vec<crate::model::StickerPack>>,
+    },
     /// The site icon for the named links to `host` (relay `GET /link-icon?domain=`): a
     /// 64×64 PNG, or `None` when the site has none (the bubbles keep the placeholder).
     LinkIcon {
@@ -338,14 +470,25 @@ pub enum SyncEvent {
     ThumbnailFailed {
         key: String,
     },
+    /// Copy of a message ([feedback copy-image-messages-mac-2026-10-27]): the original
+    /// bytes of every attachment `ClientCommand::FetchCopyBlobs` asked for, in the asked
+    /// order; a blob that could not be fetched is `None` in its slot. `request` is the
+    /// command's.
+    CopyBlobs {
+        request: u64,
+        blobs: Vec<Option<CopyBlob>>,
+    },
     /// An attachment landed in ~/Downloads (F10); the app reveals it.
     AttachmentSaved {
         path: PathBuf,
     },
     /// Play / Quick Look from the media viewer finished fetching `key` (handed
-    /// to macOS, or failed with a notice) — the viewer's spinner stops.
+    /// to macOS, or failed with a notice) — the viewer's spinner stops. `path`
+    /// is the temp file when the fetch wrote one (videos play from it inline
+    /// on macOS; [feedback app-01M6147S9TPNBQA7KSDEY0K8C4]).
     AttachmentOpened {
         key: String,
+        path: Option<PathBuf>,
     },
     /// Relay link state (S14), app-wide and coarse.
     Link(Link),
@@ -533,6 +676,15 @@ pub enum PictureSource {
     Key(String),
 }
 
+/// One fetched attachment of a Copy (`SyncEvent::CopyBlobs`): the relay's `content-type`
+/// and the bytes as uploaded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CopyBlob {
+    pub key: String,
+    pub mime: String,
+    pub bytes: Arc<Vec<u8>>,
+}
+
 /// Something the user did; the source writes it into the doc / outbox.
 #[derive(Clone, Debug)]
 pub enum ClientCommand {
@@ -570,11 +722,6 @@ pub enum ClientCommand {
         chat_id: Id,
         active: bool,
     },
-    /// `POST /chats/{id}/agents {project_id}` (own project only).
-    AddAgent {
-        chat_id: Id,
-        project_id: Id,
-    },
     /// `DELETE /chats/{id}/agents/{project_id}` (owner of that project).
     RemoveAgent {
         chat_id: Id,
@@ -591,6 +738,12 @@ pub enum ClientCommand {
     RemoveMember {
         chat_id: Id,
         user_id: String,
+    },
+    /// `PUT /chats/{id}/members/{user_id} {"role": "admin" | "member"}` (group owner).
+    SetMemberRole {
+        chat_id: Id,
+        user_id: String,
+        role: String,
     },
     /// `POST /chats/{id}/leave`.
     LeaveChat {
@@ -731,6 +884,18 @@ pub enum ClientCommand {
         chat_id: Id,
         message_id: Id,
     },
+    /// Replace an own message's text in the chat doc (`edit_message_text`).
+    EditMessage {
+        chat_id: Id,
+        message_id: Id,
+        text: String,
+    },
+    /// Remove a message's link preview for everyone (`preview: "off"` on the row, the part
+    /// dropped; the relay decides with the delete rule) ([feedback link-embeds-mac-2026-10-27]).
+    RemoveLinkPreview {
+        chat_id: Id,
+        message_id: Id,
+    },
     /// S18: decide an approval card (`approve` / `reject` commands, `arbos_core::approval`).
     Approve {
         chat_id: Id,
@@ -767,6 +932,12 @@ pub enum ClientCommand {
     ArchiveChat {
         chat_id: Id,
         archived: bool,
+    },
+    /// Replace my sidebar pins (`PUT /me/pins {pins}`): the whole list, top first —
+    /// one command for pin, unpin and reorder. The relay's answer comes back as
+    /// `SyncEvent::Pins` ([feedback sidebar-pinning-mac-2026-10-28]).
+    SetPins {
+        pins: Vec<String>,
     },
     /// Rename a chat tab (`PATCH /projects/{id}/chats/{chat}` + a `retitle`
     /// command in the chat doc so the box's local index matches).
@@ -879,6 +1050,44 @@ pub enum ClientCommand {
     DeleteProject {
         project_id: Id,
     },
+    /// Connect an outside agent (#2141): `POST /outside-agents {name, transport}` →
+    /// [`SyncEvent::OutsideAgentKey`] (the key, shown once) and a registry refresh.
+    ConnectAgent {
+        name: String,
+        /// `acp` | `grok` | `custom`.
+        transport: String,
+        avatar_color_index: Option<u8>,
+    },
+    /// `GET /outside-agents/{id}` → [`SyncEvent::OutsideAgentStatus`].
+    OutsideAgentStatus {
+        project_id: Id,
+    },
+    /// `POST /outside-agents/{id}/rotate` → [`SyncEvent::OutsideAgentKey`] (fresh key).
+    OutsideAgentRotate {
+        project_id: Id,
+    },
+    /// `DELETE /outside-agents/{id}` (revoke the key; the agent stays) → status refresh.
+    OutsideAgentRevoke {
+        project_id: Id,
+    },
+    /// `PATCH /outside-agents/{id} {scopes: {name: on}}` — one switch of the Can card →
+    /// [`SyncEvent::OutsideAgentStatus`] with the effective set.
+    OutsideAgentScope {
+        project_id: Id,
+        scope: String,
+        on: bool,
+    },
+    /// `PATCH /outside-agents/{id} {wake_url, wake_auth}`: `None` leaves a field alone, an
+    /// empty string clears it → [`SyncEvent::OutsideAgentWakeSaved`] + a status refresh.
+    OutsideAgentWakeSet {
+        project_id: Id,
+        url: Option<String>,
+        auth: Option<String>,
+    },
+    /// `POST /outside-agents/{id}/wake/test` → [`SyncEvent::OutsideAgentWakeTested`].
+    OutsideAgentWakeTest {
+        project_id: Id,
+    },
     /// Delete a people chat I own (`DELETE /chats/{id}`).
     DeletePeopleChat {
         chat_id: Id,
@@ -947,10 +1156,40 @@ pub enum ClientCommand {
         key: String,
         save: bool,
     },
-    /// Fetch an image attachment's bytes for the inline thumbnail (F10).
+    /// Fetch an image attachment's bytes for the inline thumbnail (F10). Keys that start
+    /// with `url:` (a picked GIF) or `sticker:` (a relay-hosted sticker) are fetched
+    /// through the relay's picker endpoints instead of `/blob` (ARB-544).
     FetchThumbnail {
         project_id: Id,
         key: String,
+    },
+    /// Picker (ARB-544): one tap sends a sticker or a GIF as its own message.
+    SendMedia {
+        chat_id: Id,
+        message_id: Id,
+        pick: crate::model::MediaPick,
+        reply_to: Option<String>,
+    },
+    /// Picker: search the GIF provider through the relay (`q` empty = trending).
+    GifSearch {
+        query: String,
+        pos: Option<String>,
+    },
+    /// Picker: the relay's sticker-pack manifest.
+    StickerPacks,
+    /// Picker: tell the provider a GIF was sent (ranking signal; never an error).
+    GifShare {
+        id: String,
+        query: String,
+    },
+    /// Copy of a message: the full original bytes of every attachment in `keys` (blob
+    /// slot `project_id`), answered together as `SyncEvent::CopyBlobs { request, .. }`
+    /// ([feedback copy-image-messages-mac-2026-10-27]). Never a thumbnail: the
+    /// pasteboard gets what the sender uploaded.
+    FetchCopyBlobs {
+        project_id: Id,
+        request: u64,
+        keys: Vec<String>,
     },
     /// Fetch the site icon the bubbles draw before named links to `host`.
     FetchLinkIcon {
@@ -962,8 +1201,9 @@ pub enum ClientCommand {
         key: String,
         name: String,
     },
-    /// Media viewer: fetch `key` to a temp file and hand it to macOS — Quick
-    /// Look (`qlmanage -p`) for files, the default app (QuickTime Player) for video.
+    /// Media viewer: fetch `key` to a temp file. Files open in Quick Look
+    /// (`qlmanage -p`); videos play inline in the viewer on macOS (elsewhere
+    /// the default app) — [feedback app-01M6147S9TPNBQA7KSDEY0K8C4].
     OpenAttachment {
         project_id: Id,
         key: String,
@@ -1546,7 +1786,8 @@ mod collective_tests {
 #[cfg(test)]
 mod push_refusal_tests {
     //! The chat-level note's words for a refused push ([feedback blocked-state-relay-2026-10-26]).
-    use super::PushRefusal;
+    use super::{muted_until_label, PushRefusal};
+    use chrono::{FixedOffset, TimeZone};
 
     fn blocked(reason: &str, name: Option<&str>) -> PushRefusal {
         PushRefusal {
@@ -1557,19 +1798,72 @@ mod push_refusal_tests {
         }
     }
 
+    fn utc() -> FixedOffset {
+        FixedOffset::east_opt(0).expect("UTC")
+    }
+
+    #[test]
+    fn muted_until_label_shapes() {
+        let tz = utc();
+        let now = tz
+            .with_ymd_and_hms(2026, 10, 28, 12, 0, 0)
+            .single()
+            .expect("now")
+            .timestamp_millis();
+        let later_today = tz
+            .with_ymd_and_hms(2026, 10, 28, 14, 30, 0)
+            .single()
+            .expect("later")
+            .timestamp_millis();
+        let other_day = tz
+            .with_ymd_and_hms(2026, 10, 30, 14, 30, 0)
+            .single()
+            .expect("other")
+            .timestamp_millis();
+        assert_eq!(
+            muted_until_label(Some(later_today), now, tz),
+            "Muted until 14:30"
+        );
+        assert_eq!(
+            muted_until_label(Some(other_day), now, tz),
+            "Muted until Oct 30, 14:30"
+        );
+        assert_eq!(muted_until_label(None, now, tz), "Muted");
+    }
+
     #[test]
     fn the_sentence_names_who_stands_in_the_way() {
         assert_eq!(
-            blocked("blocked_by", Some("Sam Rivera")).sentence(),
+            blocked("blocked_by", Some("Sam Rivera")).sentence(None),
             "Sam Rivera has blocked you in this chat."
         );
         assert_eq!(
-            blocked("blocked_by", None).sentence(),
+            blocked("blocked_by", None).sentence(None),
             "@sam has blocked you in this chat."
         );
         assert_eq!(
-            blocked("blocks_member", Some("Sam Rivera")).sentence(),
+            blocked("blocks_member", Some("Sam Rivera")).sentence(None),
             "Couldn't post: you've blocked Sam Rivera, who is in this chat. Unblock to post."
+        );
+        let tz = utc();
+        let now = tz
+            .with_ymd_and_hms(2026, 10, 28, 12, 0, 0)
+            .single()
+            .expect("now")
+            .timestamp_millis();
+        let until = tz
+            .with_ymd_and_hms(2026, 10, 28, 14, 30, 0)
+            .single()
+            .expect("until")
+            .timestamp_millis();
+        assert_eq!(
+            PushRefusal {
+                code: "not_available".into(),
+                reason: Some("silenced".into()),
+                ..Default::default()
+            }
+            .sentence_at(Some(until), now, tz),
+            "Muted until 14:30. Your messages aren't being delivered."
         );
         assert_eq!(
             PushRefusal {
@@ -1577,8 +1871,8 @@ mod push_refusal_tests {
                 reason: Some("silenced".into()),
                 ..Default::default()
             }
-            .sentence(),
-            "You're muted in this chat, so your messages aren't being delivered."
+            .sentence_at(None, now, tz),
+            "Muted. Your messages aren't being delivered."
         );
     }
 
@@ -1593,7 +1887,7 @@ mod push_refusal_tests {
             },
         ] {
             assert_eq!(
-                why.sentence(),
+                why.sentence(None),
                 "Messages in this chat aren't being delivered right now. We'll keep trying."
             );
         }
@@ -1603,8 +1897,44 @@ mod push_refusal_tests {
                 by_handle: Some(String::new()),
                 ..Default::default()
             }
-            .sentence(),
+            .sentence(None),
             "Someone in this chat has blocked you."
         );
+    }
+
+    #[test]
+    fn a_timed_mute_clears_once_the_clock_passes_the_end() {
+        use crate::model::Project;
+        use std::collections::HashMap;
+
+        let mut project = Project {
+            id: "g1".into(),
+            silenced: true,
+            silenced_until: Some(1_000),
+            ..Project::default()
+        };
+        let mut refused = HashMap::from([(
+            "g1".into(),
+            PushRefusal {
+                code: "not_available".into(),
+                reason: Some("silenced".into()),
+                ..Default::default()
+            },
+        )]);
+        assert!(!super::clear_silence_if_expired(
+            &mut project,
+            &mut refused,
+            999
+        ));
+        assert!(project.silenced);
+        assert!(refused.contains_key("g1"));
+        assert!(super::clear_silence_if_expired(
+            &mut project,
+            &mut refused,
+            1_000
+        ));
+        assert!(!project.silenced);
+        assert!(project.silenced_until.is_none());
+        assert!(!refused.contains_key("g1"));
     }
 }

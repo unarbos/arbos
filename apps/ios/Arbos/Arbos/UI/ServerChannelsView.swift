@@ -7,13 +7,17 @@ import ArbosFFI
 import SwiftUI
 
 /// A server in the home list: the D79 initials disc, the name, the newest line
-/// across its channels, the time, the unread dot (rule 1 — no counts or badges).
+/// across its channels, the time, the unread count pill (never a dot — Jacob 2026-10-27).
 struct ServerRow: View {
     @Environment(\.theme) private var theme
     let server: Server
     let preview: String
     let time: String
     let unread: Bool
+    var unreadCount: Int = 0
+    /// In the Pinned section ([feedback sidebar-pinning-ios-2026-10-28]): the muted
+    /// `pin.fill` before the time, as on agent and people rows.
+    var pinned: Bool = false
 
     var body: some View {
         HStack(spacing: 15) {
@@ -25,6 +29,12 @@ struct ServerRow: View {
                         .foregroundStyle(theme.text)
                         .lineLimit(1)
                     Spacer()
+                    if pinned {
+                        Image(systemName: "pin.fill")
+                            .font(theme.font(11, weight: .semibold))
+                            .foregroundStyle(theme.muted)
+                            .accessibilityLabel("Pinned")
+                    }
                     Text(time)
                         .font(theme.font(Theme.small))
                         .foregroundStyle(theme.muted)
@@ -38,7 +48,7 @@ struct ServerRow: View {
                         .lineLimit(1)
                     Spacer(minLength: 0)
                     if unread {
-                        Circle().fill(theme.unread).frame(width: Theme.unreadDot, height: Theme.unreadDot)
+                        UnreadMark(count: unreadCount)
                     }
                 }
             }
@@ -57,6 +67,7 @@ struct ChannelRow: View {
     let preview: String
     let time: String
     let unread: Bool
+    var unreadCount: Int = 0
 
     var body: some View {
         HStack(spacing: 15) {
@@ -92,7 +103,7 @@ struct ChannelRow: View {
                         .lineLimit(1)
                     Spacer(minLength: 0)
                     if unread {
-                        Circle().fill(theme.unread).frame(width: Theme.unreadDot, height: Theme.unreadDot)
+                        UnreadMark(count: unreadCount)
                     }
                 }
             }
@@ -143,7 +154,8 @@ struct ServerChannelsView: View {
                                        restricted: model.channelRestricted(channel),
                                        preview: model.channelPreview(channel),
                                        time: HomeView.timeLabel(ms: model.channelActivity(channel)),
-                                       unread: model.channelUnread(channel))
+                                       unread: model.channelUnread(channel),
+                                       unreadCount: model.channelUnreadCount(channel))
                         }
                         .buttonStyle(.borderless)
                         // Long-press (the Mac's right-click): Archive for everyone; Delete for
@@ -168,30 +180,23 @@ struct ServerChannelsView: View {
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
             .background(theme.bg)
+        .claimFailures("join-server", ["join the server"])
             .refreshable { await model.refreshServers() }
             .rigListScroll(proxy, ids: server?.liveChannels.map(\.id) ?? [])
             }
             ListTopFade(screen: .serverChannels)
             header
         }
-        // Custom back chevron; swipe right (edge pop or anywhere) goes back to Home —
-        // `BackSwipe.swift`, the same rules as every chat screen.
+        // Custom back chevron; the system's edge pop, or a swipe right anywhere, goes back
+        // to Home — `BackSwipe.swift`, the same rules as every chat screen.
         .backSwipeToPop()
         .sheet(isPresented: $showNewChannel) {
             NewChannelSheet(serverId: serverId).environmentObject(model).environment(\.theme, theme)
         }
-        .confirmationDialog(
-            deletingChannel.map { "Delete #\($0.name)?" } ?? "Delete channel?",
-            isPresented: Binding(get: { deletingChannel != nil }, set: { if !$0 { deletingChannel = nil } }),
-            titleVisibility: .visible
-        ) {
-            Button("Delete", role: .destructive) {
-                if let c = deletingChannel { Task { _ = await model.deleteChannel(c) } }
-                deletingChannel = nil
-            }
-            Button("Cancel", role: .cancel) { deletingChannel = nil }
-        } message: {
-            Text("Deletes the channel and its messages for everyone in the server.")
+        .confirm(item: $deletingChannel, spec: { c in
+            ConfirmSpec(title: "Delete #\(c.name)?", message: "Deletes the channel and its messages for everyone in the server.", action: "Delete")
+        }) { c in
+            Task { _ = await model.deleteChannel(c) }
         }
         // `AppModel.forgetServer` empties the path when the server goes (deleted, left, removed).
     }
@@ -257,7 +262,6 @@ struct NewChannelSheet: View {
     @State private var name = ""
     @State private var restricted = false
     @State private var creating = false
-    @State private var errorText: String?
     @FocusState private var focused: Bool
 
     private var slug: String { AppModel.channelSlug(name) }
@@ -266,6 +270,9 @@ struct NewChannelSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 22) {
+                    // The sheet's note: under the header, before the first field.
+                    SheetErrorNote(id: "new-channel-error", onTryAgain: create)
+                        .padding(.horizontal, 16)
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Channel name").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                         HStack(spacing: 6) {
@@ -293,39 +300,14 @@ struct NewChannelSheet: View {
                                 trailing: AnyView(Toggle("", isOn: $restricted).labelsHidden().tint(theme.primary)))
                     }
 
-                    if let errorText {
-                        Text(errorText)
-                            .font(theme.font(Theme.small))
-                            .foregroundStyle(theme.danger)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 20)
-                    }
                     Color.clear.frame(height: 24)
                 }
                 .padding(.top, 28)
             }
             .background(theme.bg)
-            .navigationTitle("New channel")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(theme.bg, for: .navigationBar)
-            .toolbarBackground(.visible, for: .navigationBar)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Cancel") { dismiss() }.foregroundStyle(theme.text)
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { create() } label: {
-                        Text(creating ? "Creating…" : "Create")
-                            .font(theme.font(Theme.small, weight: .semibold))
-                            .foregroundStyle(theme.onPrimary)
-                            .padding(.horizontal, 12).frame(height: 32)
-                            .background(Capsule().fill(theme.primary))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(slug.isEmpty || creating)
-                    .opacity(slug.isEmpty || creating ? 0.45 : 1)
-                }
-            }
+            .sheetHeader(title: "New channel", onLeading: { dismiss() },
+                         action: creating ? "Creating…" : "Create", actionEnabled: !slug.isEmpty && !creating,
+                         onAction: { create() })
             .onAppear { focused = true }
         }
         .tint(theme.text)
@@ -334,21 +316,18 @@ struct NewChannelSheet: View {
         .presentationBackground(theme.bg)
         .presentationCornerRadius(28)
         .preferredColorScheme(theme.isDark ? .dark : .light)
+        .claimFailures("new-channel", ["create the channel"])
     }
 
     private func create() {
         guard !slug.isEmpty, !creating else { return }
         creating = true
-        errorText = nil
         Task {
             if let c = await model.createChannel(serverId: serverId, name: slug, restricted: restricted) {
                 dismiss()
                 model.open(channel: c)
-            } else {
-                // Copy onto this screen: RootView's alert is behind the sheet.
-                errorText = model.notice?.text ?? "Could not create the channel."
-                model.notice = nil
             }
+            // A refusal is the claimed failure, drawn by the note at the top of the sheet.
             creating = false
         }
     }
@@ -365,7 +344,6 @@ struct JoinServerView: View {
     @State private var joining = false
     @State private var searching = false
     @State private var openHits: [Server] = []
-    @State private var errorText: String?
     @FocusState private var focused: Bool
 
     /// The code at the end of `https://…/join/<code>` or `arbos://server/<code>`, or the bare code.
@@ -420,11 +398,9 @@ struct JoinServerView: View {
             .disabled(code.isEmpty || joining || (!looksLikeInvite && openHits.isEmpty))
             .opacity(code.isEmpty || joining || (!looksLikeInvite && openHits.isEmpty) ? 0.45 : 1)
             .padding(.horizontal, 24)
-            if let errorText {
-                Text(errorText)
-                    .font(theme.font(Theme.small)).foregroundStyle(theme.danger)
-                    .multilineTextAlignment(.center).padding(.horizontal, 36)
-            }
+            // The note: under the Join button, before the open-server list — the shared element.
+            SheetErrorNote(id: "join-server-error", onTryAgain: join)
+                .padding(.horizontal, 24)
             if !openHits.isEmpty {
                 VStack(spacing: 0) {
                     ForEach(Array(openHits.enumerated()), id: \.element.id) { i, s in
@@ -467,13 +443,9 @@ struct JoinServerView: View {
         if looksLikeInvite {
             guard !code.isEmpty else { return }
             joining = true
-            errorText = nil
             Task {
                 if await model.joinServer(code: code) {
                     onDone()
-                } else {
-                    errorText = model.notice?.text ?? "Could not join the server."
-                    model.notice = nil
                 }
                 joining = false
             }
@@ -485,13 +457,9 @@ struct JoinServerView: View {
     private func joinOpen(_ s: Server) {
         guard !joining else { return }
         joining = true
-        errorText = nil
         Task {
             if await model.joinOpenServer(s.id) {
                 onDone()
-            } else {
-                errorText = model.notice?.text ?? "Could not join the server."
-                model.notice = nil
             }
             joining = false
         }

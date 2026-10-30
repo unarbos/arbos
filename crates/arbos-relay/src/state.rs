@@ -165,6 +165,36 @@ pub struct Room {
     /// Rebuilt chat doc for covered-push checks and ROWS_DONE's version vector. Dropped when the
     /// room has no sockets left.
     pub doc_cache: std::sync::Mutex<Option<RoomDocCache>>,
+    /// Box users (owners) with a live socket on this room: a row from a person reaches their
+    /// agent live only through such a socket; without one the box is told to open the room
+    /// (`boxes::after_person_row`, #2120).
+    pub boxes: std::sync::Mutex<HashMap<String, u32>>,
+}
+
+impl Room {
+    pub fn box_joined(&self, user_id: &str) {
+        *self
+            .boxes
+            .lock()
+            .unwrap()
+            .entry(user_id.to_owned())
+            .or_insert(0) += 1;
+    }
+
+    pub fn box_left(&self, user_id: &str) {
+        let mut b = self.boxes.lock().unwrap();
+        if let Some(n) = b.get_mut(user_id) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                b.remove(user_id);
+            }
+        }
+    }
+
+    /// Does `user_id`'s box have a socket open on this room right now?
+    pub fn has_box(&self, user_id: &str) -> bool {
+        self.boxes.lock().unwrap().contains_key(user_id)
+    }
 }
 
 /// How the relay tells its room sockets that it is about to go down on purpose (a deploy, an
@@ -174,6 +204,12 @@ pub struct Room {
 pub struct RestartSignal {
     pub closing: tokio::sync::watch::Sender<bool>,
     pub open_sockets: std::sync::atomic::AtomicUsize,
+    /// A planned restart is under way: no box upgrade or repair may start (#2262). Set and read
+    /// under the `upgrading` lock so a run cannot slip in between the check and the restart.
+    pub box_work_frozen: std::sync::atomic::AtomicBool,
+    /// Users whose `create_box` is between its first row write and the new sandbox id landing
+    /// in the row, with the start time (#2262: a restart in that window orphaned a sandbox).
+    pub creating: std::sync::Mutex<HashMap<String, i64>>,
 }
 
 impl Default for RestartSignal {
@@ -181,6 +217,8 @@ impl Default for RestartSignal {
         Self {
             closing: tokio::sync::watch::Sender::new(false),
             open_sockets: std::sync::atomic::AtomicUsize::new(0),
+            box_work_frozen: std::sync::atomic::AtomicBool::new(false),
+            creating: std::sync::Mutex::new(HashMap::new()),
         }
     }
 }
@@ -188,6 +226,40 @@ impl Default for RestartSignal {
 impl RestartSignal {
     pub fn is_closing(&self) -> bool {
         *self.closing.borrow()
+    }
+
+    pub fn box_work_frozen(&self) -> bool {
+        self.box_work_frozen
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Marks one `create_box` as in flight for as long as it lives; dropped on every exit path,
+/// including a cancelled task.
+pub struct CreatingGuard {
+    restart: Arc<RestartSignal>,
+    user_id: String,
+}
+
+impl CreatingGuard {
+    pub fn new(restart: &Arc<RestartSignal>, user_id: &str) -> Self {
+        restart
+            .creating
+            .lock()
+            .expect("creating lock")
+            .insert(user_id.to_owned(), arbos_core::ids::now_ms());
+        Self {
+            restart: restart.clone(),
+            user_id: user_id.to_owned(),
+        }
+    }
+}
+
+impl Drop for CreatingGuard {
+    fn drop(&mut self) {
+        if let Ok(mut m) = self.restart.creating.lock() {
+            m.remove(&self.user_id);
+        }
     }
 }
 
@@ -208,6 +280,15 @@ pub struct AppState {
     pub wake_started: Arc<Mutex<HashMap<String, i64>>>,
     /// user_id → ms of the last client row; rows pushed while a box was dying must re-wake it.
     pub last_client_push: Arc<Mutex<HashMap<String, i64>>>,
+    /// `POST /proxy/decisions` answers by request hash (`proxy::DecisionsCache`): every box in
+    /// a people room asks the judge the same question about one message, and one answer for
+    /// all of them is what makes their verdicts agree.
+    pub decisions_cache: Arc<std::sync::Mutex<crate::proxy::DecisionsCache>>,
+    /// Identical decision requests in flight at the same moment (the three agents of one box
+    /// judge a message within milliseconds of each other): one per-key lock so the first
+    /// call fills the cache and the rest read it, instead of three upstream calls with three
+    /// different answers (2026-10-28 06:30: two takers for one "any of you" ask).
+    pub decisions_inflight: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     /// user_id → wakes that produced no hello within the deadline (stale-box detector).
     pub stale_bounces: Arc<Mutex<HashMap<String, u32>>>,
     pub conn_seq: Arc<std::sync::atomic::AtomicU64>,
@@ -243,6 +324,9 @@ pub struct AppState {
     /// user_id → last HTTP call from that user's box (`/box/hello`, `/box/projects`,
     /// `/box/keepalive`). A box with no project opens no room socket; this is its heartbeat.
     pub box_http_seen: Arc<Mutex<HashMap<String, i64>>>,
+    /// sandbox_id → the Daytona preview token learned after the row's one got a 401
+    /// (`boxes::send_to_box`). Memory only: the row is rewritten only by a start the relay finishes.
+    pub fresh_preview_tokens: Arc<Mutex<HashMap<String, String>>>,
     /// Users whose box said "turn running" in its last keepalive, with the time (D89: eviction skips them).
     pub turn_running: Arc<Mutex<HashMap<String, i64>>>,
     /// Sandboxes evicted under host pressure (D89), with the time; only the user's own activity wakes them.
@@ -339,6 +423,7 @@ impl AppState {
                     replicas: Default::default(),
                     health_cache: std::sync::Mutex::new(None),
                     doc_cache: std::sync::Mutex::new(None),
+                    boxes: std::sync::Mutex::new(HashMap::new()),
                 })
             })
             .clone()
@@ -573,6 +658,8 @@ pub(crate) mod test_support {
             box_conns: Arc::new(Mutex::new(HashMap::new())),
             wake_started: Arc::new(Mutex::new(HashMap::new())),
             last_client_push: Arc::new(Mutex::new(HashMap::new())),
+            decisions_cache: Arc::new(std::sync::Mutex::new(Default::default())),
+            decisions_inflight: Arc::new(Mutex::new(HashMap::new())),
             conn_seq: Arc::new(AtomicU64::new(0)),
             relay_key: Arc::new(RelayKey::derive("test-key")),
             jwt_key: Arc::new(RelayKey::derive("test-key").subkey("jwt")),
@@ -589,6 +676,7 @@ pub(crate) mod test_support {
             presence_seen: Arc::new(Mutex::new(HashMap::new())),
             activity: Arc::new(Mutex::new(HashMap::new())),
             box_http_seen: Arc::new(Mutex::new(HashMap::new())),
+            fresh_preview_tokens: Arc::new(Mutex::new(HashMap::new())),
             turn_running: Arc::new(Mutex::new(HashMap::new())),
             evicted: Arc::new(Mutex::new(HashMap::new())),
             fleet_pressure: Arc::new(Mutex::new(None)),

@@ -35,6 +35,7 @@ async fn healthz(State(b): State<B>) -> Response {
             "ok": ok,
             "user": w.cfg.run_as.as_ref().map(|r| r.user.clone()),
             "pi": w.agent.pi_ready.load(std::sync::atomic::Ordering::SeqCst),
+            "pi_parked": w.agent.pi_parked.load(std::sync::atomic::Ordering::SeqCst),
             "extension": w.agent.ext_loaded.load(std::sync::atomic::Ordering::SeqCst),
             "mcp_port": w.cfg.mcp_port,
             "started_at": w.started_at,

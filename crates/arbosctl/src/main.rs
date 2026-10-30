@@ -356,6 +356,10 @@ enum ChatCmd {
         /// §6.2): `{"chatId","projectId","messageId","chatTitle","sender","senderName","senderHandle","text"}`.
         #[arg(long = "reply-ref")]
         reply_ref: Option<String>,
+        /// Attach a file (a picture, a PDF, …): uploaded to the chat's blob slot first, then sent
+        /// as an attachment part beside the text (the apps' shape).
+        #[arg(long = "attach")]
+        attach: Option<std::path::PathBuf>,
     },
     /// Answer the agent's open question with a structured value (question widgets).
     Answer {
@@ -565,6 +569,29 @@ enum AdminCmd {
         action: String,
         user: Option<String>,
     },
+    /// Agent-hosted sites (#2060): `list`; `takedown <user> <app> [--reason …]` (410 at the edge,
+    /// owner cannot republish); `restore <user> <app>`; `purge <user> <app>`; `events [--since <ms>]`;
+    /// `quota <user> [--max-sites N] [--max-bytes N] [--block|--unblock]`; `move <user> <new-prefix>`
+    /// (old address 301s for 30 days).
+    Sites {
+        #[arg(value_parser = ["list", "takedown", "restore", "purge", "events", "quota", "move"])]
+        action: String,
+        user: Option<String>,
+        /// App name (takedown/restore/purge) or the new prefix (move).
+        arg: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long)]
+        since: Option<i64>,
+        #[arg(long)]
+        max_sites: Option<i64>,
+        #[arg(long)]
+        max_bytes: Option<i64>,
+        #[arg(long)]
+        block: bool,
+        #[arg(long)]
+        unblock: bool,
+    },
 }
 
 #[tokio::main]
@@ -692,8 +719,13 @@ async fn main() -> Result<()> {
                 timeout,
                 reply_to,
                 reply_ref,
+                attach,
             } => {
                 let project = resolve_project(&relay, &project).await?;
+                let attachment = match attach {
+                    Some(path) => Some(upload_attachment(&relay, &project, &chat, &path).await?),
+                    None => None,
+                };
                 let reply_ref = match reply_ref {
                     Some(j) => Some(
                         serde_json::from_str::<arbos_core::doc::ReplyRef>(&j)
@@ -708,6 +740,7 @@ async fn main() -> Result<()> {
                     &text,
                     reply_to.as_deref(),
                     reply_ref.as_ref(),
+                    attachment.as_ref(),
                     stream,
                     timeout,
                 )
@@ -1099,6 +1132,82 @@ async fn main() -> Result<()> {
                     };
                     println!("{}", serde_json::to_string_pretty(&v)?);
                 }
+                AdminCmd::Sites {
+                    action,
+                    user,
+                    arg,
+                    reason,
+                    since,
+                    max_sites,
+                    max_bytes,
+                    block,
+                    unblock,
+                } => {
+                    let need_user = || {
+                        user.clone()
+                            .ok_or_else(|| anyhow::anyhow!("{action} needs a user id"))
+                    };
+                    let need_arg = |what: &str| {
+                        arg.clone()
+                            .ok_or_else(|| anyhow::anyhow!("{action} needs {what}"))
+                    };
+                    let v = match action.as_str() {
+                        "takedown" => {
+                            let (u, a) = (need_user()?, need_arg("an app name")?);
+                            admin
+                                .post(
+                                    &format!("/admin/sites/{u}/{a}/takedown"),
+                                    &serde_json::json!({ "reason": reason }),
+                                )
+                                .await?
+                        }
+                        "restore" => {
+                            let (u, a) = (need_user()?, need_arg("an app name")?);
+                            admin
+                                .post(
+                                    &format!("/admin/sites/{u}/{a}/restore"),
+                                    &serde_json::json!({}),
+                                )
+                                .await?
+                        }
+                        "purge" => {
+                            let (u, a) = (need_user()?, need_arg("an app name")?);
+                            admin.delete(&format!("/admin/sites/{u}/{a}")).await?
+                        }
+                        "events" => {
+                            admin
+                                .get(&format!("/admin/sites/events?since={}", since.unwrap_or(0)))
+                                .await?
+                        }
+                        "quota" => {
+                            let u = need_user()?;
+                            let blocked = if block {
+                                Some(true)
+                            } else if unblock {
+                                Some(false)
+                            } else {
+                                None
+                            };
+                            admin
+                                .put(
+                                    &format!("/admin/sites/quota/{u}"),
+                                    &serde_json::json!({ "max_sites": max_sites, "max_bytes": max_bytes, "publish_blocked": blocked }),
+                                )
+                                .await?
+                        }
+                        "move" => {
+                            let (u, p) = (need_user()?, need_arg("the new prefix")?);
+                            admin
+                                .post(
+                                    &format!("/admin/sites/move/{u}"),
+                                    &serde_json::json!({ "prefix": p }),
+                                )
+                                .await?
+                        }
+                        _ => admin.get("/admin/sites").await?,
+                    };
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
                 AdminCmd::Waitlist { action, user } => {
                     let v = match action.as_str() {
                         "admit" => {
@@ -1417,7 +1526,7 @@ async fn groups(cfg: &mut Config, relay: &Relay, cmd: GroupCmd, as_json: bool) -
             wait,
         } => {
             let host = resolve_project(relay, &host).await?;
-            room::send(cfg, &host, &chat, &text, None, None, stream, 600).await?;
+            room::send(cfg, &host, &chat, &text, None, None, None, stream, 600).await?;
             if stream && wait > 0 {
                 // The other Projects answer after the host's own reply; keep the room open.
                 room::stream(cfg, &host, &chat, false, wait).await?;
@@ -1610,4 +1719,68 @@ async fn resolve_project(relay: &Relay, id_or_name: &str) -> Result<String> {
         .and_then(Value::as_str)
         .map(str::to_owned)
         .ok_or_else(|| anyhow!("no such project {id_or_name}"))
+}
+
+/// Upload `path` to the chat's blob slot (`people:<chat>` for people chats, the project id
+/// otherwise) and return the attachment object the row carries (`{name, mime, kind, ref, bytes,
+/// width, height}`), as the apps write it.
+async fn upload_attachment(
+    relay: &client::Relay,
+    project: &str,
+    chat: &str,
+    path: &std::path::Path,
+) -> Result<serde_json::Value> {
+    use sha2::Digest;
+    let bytes =
+        std::fs::read(path).map_err(|e| anyhow::anyhow!("--attach {}: {e}", path.display()))?;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".to_owned());
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let (mime, kind) = match ext.as_str() {
+        "png" => ("image/png", "image"),
+        "jpg" | "jpeg" => ("image/jpeg", "image"),
+        "gif" => ("image/gif", "gif"),
+        "webp" => ("image/webp", "image"),
+        "heic" => ("image/heic", "image"),
+        "pdf" => ("application/pdf", "file"),
+        "txt" | "md" => ("text/plain", "file"),
+        "mp4" | "mov" => ("video/mp4", "video"),
+        _ => ("application/octet-stream", "file"),
+    };
+    let key: String = sha2::Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let slot = if project == "people" {
+        format!("people:{chat}")
+    } else {
+        project.to_owned()
+    };
+    let size = bytes.len();
+    let (w, h) = png_size(&bytes).unzip();
+    relay
+        .put_bytes(&format!("/blob/{slot}/{key}"), mime, bytes)
+        .await?;
+    let mut a =
+        serde_json::json!({ "name": name, "mime": mime, "kind": kind, "ref": key, "bytes": size });
+    if let (Some(w), Some(h)) = (w, h) {
+        a["width"] = serde_json::json!(w);
+        a["height"] = serde_json::json!(h);
+    }
+    Ok(a)
+}
+
+/// Width and height of a PNG from its IHDR (other formats: unknown).
+fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 24 || &bytes[..8] != b"\x89PNG\r\n\x1a\n" {
+        return None;
+    }
+    let w = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
+    let h = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
+    Some((w, h))
 }

@@ -18,7 +18,12 @@ STALL_S = 90
 
 
 def text_of(row):
-    return "\n".join(p.get("text", "") for p in row.get("parts", []) if p.get("kind") == "text").strip()
+    """What the user reads in a row: its text parts, plus the question of an `ask_user` card (the agent's
+    words when it stops to ask — d1 on 0.1.141 answered "clean up" with a question card and no text)."""
+    parts = row.get("parts", [])
+    out = [p.get("text", "") for p in parts if p.get("kind") == "text"]
+    out += [f"[asks] {p.get('question') or p.get('text') or ''}" for p in parts if p.get("kind") == "question" and (p.get("question") or p.get("text"))]
+    return "\n".join(out).strip()
 
 
 def rows_after(doc, user_msg_id):
@@ -114,6 +119,7 @@ def send_turn(project, chat_id, prompt, timeout_s, reject_approvals=True, on_row
     first_row_at = None
     over = False
     repaired = False
+    resync = False
     if on_poll:
         # a tight first stretch for checks with a short deadline (the steer's working-row change)
         for _ in range(max(1, int(tight_s / 0.5))):
@@ -124,7 +130,11 @@ def send_turn(project, chat_id, prompt, timeout_s, reject_approvals=True, on_row
     while time.time() < deadline:
         # repair once: the stream saw assistant text but the replica shows no assistant rows
         stuck = watcher.first_text_at is not None and not rows and time.time() - t0 - watcher.first_text_at > 20
-        doc = rl.chat_dump(project, chat_id, reset=(stuck and not repaired))
+        # a stall also re-syncs the replica from the relay: run 12 (h5 t3, p1) kept a row
+        # "streaming" long after the relay had it cancelled/done (status edits lost across a
+        # relay restart or a cancelled-and-redone turn), so the finish was never seen
+        doc = rl.chat_dump(project, chat_id, reset=(stuck and not repaired) or resync)
+        resync = False
         if stuck and not repaired:
             repaired = True
         if user_msg_id is None:
@@ -151,6 +161,7 @@ def send_turn(project, chat_id, prompt, timeout_s, reject_approvals=True, on_row
         elif time.time() - last_change > STALL_S and rows and not turn_over(rows):
             stalls += 1
             last_change = time.time()
+            resync = True
         if rows and turn_over(rows) and not pending_approvals(doc):
             over = True
             break

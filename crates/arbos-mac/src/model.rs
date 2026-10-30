@@ -4,6 +4,8 @@
 
 use std::collections::HashSet;
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 pub use arbos_core::doc::ReplyRef;
@@ -82,9 +84,19 @@ pub struct Project {
     /// API §9: `machine {state, class, snapshot, always_on, …}` of the agent's box.
     #[serde(default)]
     pub machine_info: Option<ProjectMachine>,
+    /// A connected (outside) agent (#2141): its brain runs elsewhere, the relay hosts the
+    /// member. `GET /projects/{id}` carries this beside the DTO; `None` = a native agent.
+    #[serde(default)]
+    pub outside: Option<OutsideInfo>,
     /// People chats: my `me.muted` on the relay (synced across devices).
     #[serde(default)]
     pub muted: bool,
+    /// People group: an admin muted me from posting (`me.silenced`).
+    #[serde(default)]
+    pub silenced: bool,
+    /// When my admin mute ends (ms). `None` while silenced = until unmuted.
+    #[serde(default)]
+    pub silenced_until: Option<i64>,
     /// Sidebar archive (2026-10-23): hidden from the list for me, on every
     /// device (the relay's per-user flag); the agent keeps running.
     #[serde(default)]
@@ -130,6 +142,10 @@ pub struct Project {
     /// chat ([feedback blocked-state-mac-2026-10-26]): their rows are hidden for me alone.
     #[serde(default)]
     pub blocked_senders: Vec<String>,
+    /// People chat: my membership role on the relay (`me.role`: `owner`, `admin` or
+    /// `member`); `None` when the relay did not say (fixture, older cache).
+    #[serde(default)]
+    pub my_role: Option<String>,
 }
 
 /// One row of an agent's "Who may message X" card (`message_grants` on the project).
@@ -170,6 +186,150 @@ pub struct Voice {
     pub description: Option<String>,
     #[serde(default, deserialize_with = "null_to_empty")]
     pub sample_url: String,
+}
+
+/// The connection of an outside agent, as `GET /outside-agents/{id}` / the project detail
+/// report it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct OutsideInfo {
+    /// `connected` | `away` | `never` | `revoked`.
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub connected: bool,
+    /// `acp` | `grok` | `custom`.
+    #[serde(default)]
+    pub transport: String,
+    /// `asp/1`.
+    #[serde(default)]
+    pub protocol: String,
+    #[serde(default)]
+    pub last_seen_at: Option<i64>,
+    #[serde(default)]
+    pub connected_at: Option<i64>,
+    /// The nine switches (spec §4.3), effective values: `"files.read" → true`.
+    #[serde(default)]
+    pub scopes: std::collections::HashMap<String, bool>,
+    /// The Wake URL (`agent.wake`), absent on a relay without it.
+    #[serde(default)]
+    pub wake: Option<WakeInfo>,
+}
+
+/// An outside agent's Wake URL as the relay reports it: the URL is shown back, the
+/// `Authorization` value never is (`auth_set` only).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct WakeInfo {
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub url_set: bool,
+    #[serde(default)]
+    pub auth_set: bool,
+    /// `Authorization`.
+    #[serde(default)]
+    pub header: String,
+    #[serde(default)]
+    pub last: Option<WakeLast>,
+}
+
+/// The last nudge the relay sent to the Wake URL.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct WakeLast {
+    #[serde(default)]
+    pub at: i64,
+    #[serde(default)]
+    pub status: Option<u16>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+impl WakeLast {
+    /// "Delivered · HTTP 200 · 12 s ago" / "Failed · HTTP 500: boom · 3 min ago".
+    pub fn line(&self, now: i64) -> String {
+        let when = ago_seconds(now, self.at);
+        match (&self.error, self.status) {
+            (None, Some(s)) => format!("Delivered · HTTP {s} · {when}"),
+            (None, None) => format!("Delivered · {when}"),
+            (Some(e), _) => format!("Failed · {e} · {when}"),
+        }
+    }
+}
+
+/// "12 s ago", "3 min ago", "2 h ago", "4 d ago" — the connection lines' clock, with seconds
+/// (unlike [`ago`], which starts at "just now").
+fn ago_seconds(now: i64, t: i64) -> String {
+    let s = ((now - t).max(0) / 1000).max(0);
+    if s < 60 {
+        format!("{s} s ago")
+    } else if s < 3600 {
+        format!("{} min ago", s / 60)
+    } else if s < 86_400 {
+        format!("{} h ago", s / 3600)
+    } else {
+        format!("{} d ago", s / 86_400)
+    }
+}
+
+/// The switches of the Can card, in the mockup's order: wire name, title, subtitle.
+pub const OUTSIDE_SCOPES: [(&str, &str, Option<&str>); 9] = [
+    (
+        "chat.read",
+        "Read messages",
+        Some("in chats it is a member of"),
+    ),
+    ("chat.post", "Post, edit and delete its own messages", None),
+    ("chat.react", "React", None),
+    ("presence", "Show typing and status", None),
+    (
+        "approval.request",
+        "Ask you to approve actions",
+        Some("approval cards in chat"),
+    ),
+    (
+        "secret.use",
+        "Use your secrets",
+        Some("by name only, never the value"),
+    ),
+    ("members.manage", "Add members or agents", None),
+    (
+        "files.read",
+        "Open files shared in chat",
+        Some("pictures, files, GIFs it was sent"),
+    ),
+    ("calls.join", "Join voice calls", None),
+];
+
+impl OutsideInfo {
+    /// A switch's value; a relay without scopes yet reads as the spec defaults.
+    pub fn scope(&self, name: &str) -> bool {
+        self.scopes.get(name).copied().unwrap_or(matches!(
+            name,
+            "chat.read" | "chat.post" | "chat.react" | "presence" | "approval.request"
+        ))
+    }
+
+    /// The transport as the Details pane names it.
+    pub fn transport_label(&self) -> &'static str {
+        match self.transport.as_str() {
+            "acp" => "ACP · on your Mac",
+            "grok" => "Grok · HTTPS",
+            _ => "Custom · HTTPS / WebSocket",
+        }
+    }
+
+    /// "Connected · 12 s ago", "Away · 40 min ago", "Waiting for the first heartbeat",
+    /// "Disconnected".
+    pub fn status_line(&self, now: i64) -> String {
+        let ago = |t: i64| ago_seconds(now, t);
+        match (self.status.as_str(), self.last_seen_at) {
+            ("revoked", _) => "Disconnected".to_owned(),
+            ("connected", Some(t)) => format!("Connected · {}", ago(t)),
+            ("connected", None) => "Connected".to_owned(),
+            ("away", Some(t)) => format!("Away · {}", ago(t)),
+            ("away", None) => "Away".to_owned(),
+            _ => "Waiting for the first heartbeat".to_owned(),
+        }
+    }
 }
 
 /// API §9 `project.machine`.
@@ -214,6 +374,20 @@ impl Project {
         self.kind == SpaceKind::Group
     }
 
+    /// May I change this group's name, picture and description? The owner and admins
+    /// only — the relay refuses everyone else (`PATCH /chats/{id}` 403 since
+    /// 2026-10-27, after members renamed Arbonites), so the controls hide for them.
+    /// Without a role from the relay only the owner (by handle) counts.
+    pub fn may_edit_group_settings(&self, me_handle: &str) -> bool {
+        if !self.is_people_group() {
+            return false;
+        }
+        match self.my_role.as_deref() {
+            Some(role) => role == "owner" || role == "admin",
+            None => self.owner_handle.as_deref() == Some(me_handle),
+        }
+    }
+
     /// Shown as a group page: a people group or a project with other humans in it.
     pub fn is_groupish(&self) -> bool {
         self.is_people_group() || (!self.is_people() && (self.shared || !self.people.is_empty()))
@@ -246,6 +420,14 @@ impl Project {
     /// Is this agent (by its project id) already in the space?
     pub fn has_agent(&self, project_id: &str) -> bool {
         self.agents.iter().any(|a| a.project_id == project_id)
+    }
+
+    /// True while an admin mute still blocks posting (honours timed `silenced_until`).
+    pub fn is_silenced_now(&self, now_ms: i64) -> bool {
+        if !self.silenced {
+            return false;
+        }
+        !matches!(self.silenced_until, Some(until) if until <= now_ms)
     }
 }
 
@@ -1230,6 +1412,8 @@ pub enum AttachmentKind {
     Sheet,
     Pdf,
     Audio,
+    /// A picker sticker (ARB-544): drawn at a fixed size with no bubble.
+    Sticker,
     #[serde(other)]
     File,
 }
@@ -1244,6 +1428,7 @@ impl AttachmentKind {
             AttachmentKind::Sheet => "Spreadsheet",
             AttachmentKind::Pdf => "PDF",
             AttachmentKind::Audio => "Audio",
+            AttachmentKind::Sticker => "Sticker",
             AttachmentKind::File => "File",
         }
     }
@@ -1276,6 +1461,89 @@ impl AttachmentKind {
     }
 }
 
+/// Where a GIF / sticker came from. Written on the attachment as
+/// `{ provider, id, pageUrl }`; old messages and pastes have none.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentSource {
+    pub provider: String,
+    pub id: String,
+    pub page_url: String,
+}
+
+/// One GIF the relay's search returned (`GET /gif/search` item): the grid shows `preview`,
+/// the message carries `url` + `source`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GifItem {
+    pub id: String,
+    pub title: String,
+    pub width: u32,
+    pub height: u32,
+    pub url: String,
+    pub preview: GifPreview,
+    pub page_url: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GifPreview {
+    pub url: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// A page of GIF results, or why there is none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GifPage {
+    Items {
+        items: Vec<GifItem>,
+        next: Option<String>,
+    },
+    /// The relay has no provider key (`503 gif_unavailable`).
+    Unavailable,
+    /// Our budget or the provider's rate limit (`429 gif_busy`).
+    Busy,
+    /// Anything else went wrong.
+    Failed,
+}
+
+/// One sticker pack of the relay's manifest (`GET /stickers/packs`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StickerPack {
+    pub id: String,
+    pub name: String,
+    pub publisher: String,
+    pub license: String,
+    pub license_url: String,
+    pub attribution: String,
+    pub animated: bool,
+    pub page_url: String,
+    pub mime: String,
+    pub items: Vec<StickerItem>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StickerItem {
+    pub id: String,
+    pub name: String,
+    pub emoji: String,
+    pub mime: String,
+    pub path: String,
+}
+
+/// What the picker sends with one tap (ARB-544): a sticker (bytes already fetched, stored in
+/// the chat slot like any picture) or a GIF (provider URL, nothing stored).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MediaPick {
+    Sticker {
+        pack: Box<StickerPack>,
+        item: StickerItem,
+        bytes: Arc<Vec<u8>>,
+    },
+    Gif(Box<GifItem>),
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Attachment {
@@ -1296,12 +1564,42 @@ pub struct Attachment {
     /// ([feedback chart-bubble-mac-2026-10-26]).
     #[serde(default, rename = "chartPart", skip_serializing_if = "Option::is_none")]
     pub chart_part: Option<String>,
+    /// A picture that lives with its provider (a picked GIF, ARB-544): no `ref`, the bytes
+    /// come through the relay's pass-through (`GET /gif/media?u=`). See [`Self::preview_key`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// GIF-picker attribution; when set the bubble shows "via \<provider\>".
+    /// Boxed so [`Attachment`] stays small inside enums (Outgoing, library Entry).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<Box<AttachmentSource>>,
 }
+
+/// The thumbnail-cache key prefix for a provider-hosted picture (`url:<https://…>`); the
+/// sync layer fetches these through the relay's GIF pass-through instead of `/blob`.
+pub const URL_KEY_PREFIX: &str = "url:";
+/// The thumbnail-cache key prefix for a relay-hosted sticker (`sticker:<pack>/<id>`).
+pub const STICKER_KEY_PREFIX: &str = "sticker:";
 
 impl Attachment {
     pub fn kind(&self) -> AttachmentKind {
         self.kind
             .unwrap_or_else(|| AttachmentKind::from_name_and_mime(&self.name, &self.mime))
+    }
+
+    /// The key the picture's bytes are cached and fetched under: the blob `ref`, or
+    /// `url:<url>` for a provider-hosted GIF with no copy in the chat slot.
+    pub fn preview_key(&self) -> Option<String> {
+        self.blob_ref.clone().or_else(|| {
+            self.url
+                .as_ref()
+                .filter(|u| !u.is_empty())
+                .map(|u| format!("{URL_KEY_PREFIX}{u}"))
+        })
+    }
+
+    /// A picker sticker: fixed square, no bubble, no caption.
+    pub fn is_sticker(&self) -> bool {
+        self.kind() == AttachmentKind::Sticker
     }
 
     pub fn title(&self) -> &str {
@@ -1331,6 +1629,21 @@ impl Attachment {
     /// An image that should render as a picture in the transcript, not a file name.
     pub fn is_image(&self) -> bool {
         self.kind() == AttachmentKind::Image || self.mime.starts_with("image/")
+    }
+
+    /// The blob is still on its way up from this device (`local:` key): nothing
+    /// anyone can fetch from the relay yet.
+    pub fn is_uploading(&self) -> bool {
+        self.blob_ref
+            .as_deref()
+            .is_some_and(|k| k.starts_with("local:"))
+    }
+
+    /// The bytes can be fetched from the relay (`GET /blob/{slot}/{key}`).
+    pub fn is_on_relay(&self) -> bool {
+        self.blob_ref
+            .as_deref()
+            .is_some_and(|k| !k.is_empty() && !k.starts_with("local:"))
     }
 }
 
@@ -1506,8 +1819,105 @@ pub enum Part {
         #[serde(default)]
         fallback: Option<String>,
     },
+    /// Link preview ([feedback link-embeds-mac-2026-10-27], #2065): the card the relay
+    /// unfurled for the message's first bare URL. Read-only here; `preview: "off"` on the
+    /// message hides it.
+    LinkPreview {
+        id: Id,
+        #[serde(flatten)]
+        preview: Box<LinkPreview>,
+    },
     #[serde(other)]
     Unknown,
+}
+
+/// What a `link_preview` part carries (relay `unfurl.rs`, spec 1). Everything but `title` is
+/// optional; `facts` are pre-formatted footer strings in order.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkPreview {
+    #[serde(default)]
+    pub spec_version: u32,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub canonical_url: String,
+    /// `spotify` `youtube` `x` `github` `bluesky` `vimeo` `loom` `soundcloud` `apple_music`
+    /// `google_maps` `wikipedia` `arbos` `file` `web`.
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub provider_name: String,
+    /// `song` `album` … `pull_request` `issue` `repo` `article` `image` `file` `place` `page`.
+    #[serde(default, rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub subtitle: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub facts: Vec<String>,
+    /// `open` `merged` `closed` `draft`.
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub diff: Option<PreviewDiff>,
+    /// "18:24" on a video thumbnail.
+    #[serde(default)]
+    pub duration: Option<String>,
+    #[serde(default)]
+    pub image: Option<PreviewImage>,
+    /// The final host ("github.com"): the shared link-icon tile picks its mark by it.
+    #[serde(default)]
+    pub site_host: Option<String>,
+    /// Reserved for the shared link-icon tile (a blob in the chat's slot); unused here.
+    #[serde(default)]
+    pub site_icon: Option<PreviewImage>,
+    /// `compact` (art row) or `expanded` (media on top).
+    #[serde(default)]
+    pub layout: String,
+}
+
+impl LinkPreview {
+    pub fn expanded(&self) -> bool {
+        self.layout == "expanded" && self.image.is_some()
+    }
+
+    /// "<title> — <provider>" for quote headers and one-line previews.
+    pub fn one_line(&self) -> String {
+        if self.provider_name.is_empty() {
+            self.title.clone()
+        } else {
+            format!("{} — {}", self.title, self.provider_name)
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewImage {
+    #[serde(rename = "ref", default)]
+    pub blob_ref: String,
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+    #[serde(default)]
+    pub mime: String,
+    #[serde(default)]
+    pub art: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PreviewDiff {
+    #[serde(default)]
+    pub additions: u64,
+    #[serde(default)]
+    pub deletions: u64,
+    #[serde(default)]
+    pub files: u64,
 }
 
 fn open_state() -> QuestionState {
@@ -2087,6 +2497,10 @@ pub struct Message {
     /// the project; never read as the user's words.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub greeting: bool,
+    /// `"off"` once the sender removed the link preview for everyone (#2065); the
+    /// `link_preview` part, if any is still there, is not drawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
 }
 
 /// The reaction capsule's set, in Grok Bot's order (the iPhone's
@@ -2193,31 +2607,45 @@ impl Message {
 impl Message {
     /// Reactions as `(emoji, senders)`, palette order first, then the rest
     /// alphabetically; emojis nobody holds any more are dropped.
+    /// Skin-tone variants of the same base merge into one chip.
     pub fn reaction_list(&self) -> Vec<(String, Vec<String>)> {
-        let senders = |emoji: &str| -> Vec<String> {
-            self.reactions
-                .get(emoji)
-                .map(|people| {
-                    people
-                        .iter()
-                        .filter(|(sid, on)| !sid.is_empty() && **on)
-                        .map(|(sid, _)| sid.clone())
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
-        let mut out: Vec<(String, Vec<String>)> = REACTION_PALETTE
-            .iter()
-            .map(|e| (e.to_string(), senders(e)))
-            .filter(|(_, s)| !s.is_empty())
-            .collect();
-        out.extend(
-            self.reactions
-                .keys()
-                .filter(|e| !e.is_empty() && !REACTION_PALETTE.contains(&e.as_str()))
-                .map(|e| (e.clone(), senders(e)))
-                .filter(|(_, s)| !s.is_empty()),
-        );
+        use arbos_core::doc::normalize_reaction_emoji;
+        use std::collections::{BTreeMap, BTreeSet};
+        let mut by_base: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for (emoji, people) in &self.reactions {
+            if emoji.is_empty() {
+                continue;
+            }
+            let base = normalize_reaction_emoji(emoji);
+            if base.is_empty() {
+                continue;
+            }
+            let entry = by_base.entry(base).or_default();
+            for (sid, on) in people {
+                if *on && !sid.is_empty() {
+                    entry.insert(sid.clone());
+                }
+            }
+        }
+        let mut used = BTreeSet::new();
+        let mut out: Vec<(String, Vec<String>)> = Vec::new();
+        // Chip glyphs are the untoned base (matches core + iPhone orderedReactions).
+        for e in REACTION_PALETTE {
+            let base = normalize_reaction_emoji(e);
+            let Some(people) = by_base.get(&base) else {
+                continue;
+            };
+            if people.is_empty() || !used.insert(base.clone()) {
+                continue;
+            }
+            out.push((base, people.iter().cloned().collect()));
+        }
+        for (base, people) in &by_base {
+            if people.is_empty() || used.contains(base) {
+                continue;
+            }
+            out.push((base.clone(), people.iter().cloned().collect()));
+        }
         out
     }
 
@@ -2362,6 +2790,19 @@ impl Message {
             .any(|p| matches!(p, Part::Chart { id, .. } if id == part_id))
     }
 
+    /// The link preview the relay attached, unless the sender switched it off.
+    pub fn link_preview(&self) -> Option<(&Id, &LinkPreview)> {
+        if self.preview.as_deref() == Some("off") {
+            return None;
+        }
+        self.parts.iter().find_map(|p| match p {
+            Part::LinkPreview { id, preview } if !preview.title.trim().is_empty() => {
+                Some((id, &**preview))
+            }
+            _ => None,
+        })
+    }
+
     /// Open `question` parts of this message, newest last.
     pub fn open_questions(&self) -> impl DoubleEndedIterator<Item = &Part> {
         self.parts.iter().filter(|p| {
@@ -2407,6 +2848,36 @@ impl Message {
             }
         }
         out
+    }
+
+    /// A finished row with no words, nothing to look at and no named sender (`user:`,
+    /// `agent:`, `project:`): in a chat that names its senders it is a blank line from no
+    /// one (Arbonites, 2026-10-28: a box's hand-off row and job row, bare `sender: "agent"`).
+    pub fn is_senderless_blank(&self) -> bool {
+        matches!(self.role, Role::User | Role::Assistant)
+            && !self.is_streaming()
+            && !["user:", "agent:", "project:"]
+                .iter()
+                .any(|p| self.sender.starts_with(p))
+            && self.parts.iter().all(|p| match p {
+                Part::Text { text, .. } => text.trim().is_empty(),
+                Part::Reasoning { .. }
+                | Part::Status { .. }
+                | Part::SubagentResult { .. }
+                | Part::Unknown => true,
+                Part::Tool { .. }
+                | Part::Attachment { .. }
+                | Part::Error { .. }
+                | Part::Diff { .. }
+                | Part::File { .. }
+                | Part::Browser { .. }
+                | Part::Question { .. }
+                | Part::Skills { .. }
+                | Part::Approval { .. }
+                | Part::SecretRedacted { .. }
+                | Part::Chart { .. }
+                | Part::LinkPreview { .. } => false,
+            })
     }
 
     pub fn text_len(&self) -> usize {
@@ -2959,6 +3430,10 @@ pub struct DeviceView {
     pub created_at: i64,
     #[serde(default)]
     pub last_seen_at: Option<i64>,
+    /// Set once the device signed out or was revoked; such a row is no
+    /// longer a session and the Devices list leaves it out.
+    #[serde(default)]
+    pub revoked_at: Option<i64>,
     /// The device that made the request — this Mac.
     #[serde(default)]
     pub current: bool,
@@ -3984,6 +4459,7 @@ impl OptimisticNotice {
             }],
             hidden_parts: Vec::new(),
             greeting: false,
+            preview: None,
         }
     }
 
@@ -4259,6 +4735,52 @@ mod add_members_tests {
         let plan = add_members_plan(&g, "unarbos", &[person("gh_1", "allan")], &[]);
         assert_eq!(plan.chat_id, "chat_testing");
         assert!(plan.handles.is_empty() && plan.agent_ids.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod group_settings_permission_tests {
+    //! The group pane's edit controls (picture crayon, inline name) follow the relay's
+    //! rule: owner and admins only ([feedback group-settings-permissions-2026-10-27]).
+
+    use super::*;
+
+    fn group(my_role: Option<&str>, owner: &str) -> Project {
+        Project {
+            id: "g".into(),
+            kind: SpaceKind::Group,
+            owner_handle: Some(owner.into()),
+            my_role: my_role.map(str::to_owned),
+            ..Project::default()
+        }
+    }
+
+    #[test]
+    fn owner_and_admin_edit_members_do_not() {
+        assert!(group(Some("owner"), "me").may_edit_group_settings("me"));
+        assert!(group(Some("admin"), "alice").may_edit_group_settings("me"));
+        assert!(!group(Some("member"), "alice").may_edit_group_settings("me"));
+        // The relay's role wins over the handle match.
+        assert!(!group(Some("member"), "me").may_edit_group_settings("me"));
+    }
+
+    #[test]
+    fn without_a_role_only_the_owner_by_handle_edits() {
+        assert!(group(None, "me").may_edit_group_settings("me"));
+        assert!(!group(None, "alice").may_edit_group_settings("me"));
+        let mut unknown_owner = group(None, "alice");
+        unknown_owner.owner_handle = None;
+        assert!(!unknown_owner.may_edit_group_settings("me"));
+    }
+
+    #[test]
+    fn dms_and_projects_have_no_group_settings() {
+        let mut dm = group(Some("owner"), "me");
+        dm.kind = SpaceKind::Dm;
+        assert!(!dm.may_edit_group_settings("me"));
+        let mut project = group(Some("owner"), "me");
+        project.kind = SpaceKind::Project;
+        assert!(!project.may_edit_group_settings("me"));
     }
 }
 

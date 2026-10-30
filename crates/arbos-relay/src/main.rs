@@ -9,6 +9,8 @@ mod auth;
 mod avatar;
 mod avatar_image;
 mod blobs;
+#[cfg(test)]
+mod box_row_tests;
 mod boxes;
 mod browser;
 mod calls;
@@ -32,6 +34,7 @@ mod export;
 mod features;
 mod feedback;
 mod fleet;
+mod gifs;
 mod goals;
 mod groups;
 mod image_sniff;
@@ -45,7 +48,15 @@ mod migrate;
 mod moderation;
 mod notices;
 mod notify;
+mod outside;
+mod outside_log;
+mod outside_sidecar;
+mod outside_wake;
 mod people;
+mod perf;
+mod pins;
+#[cfg(test)]
+mod preview_token_tests;
 mod proxy;
 mod push;
 mod releases;
@@ -54,13 +65,20 @@ mod room_health;
 mod rooms;
 mod routines;
 mod secrets;
+mod settings_audit;
 mod shell_grants;
 mod signin;
+mod site_icons;
+mod sites;
 mod skills;
 mod smoke;
 mod state;
+mod stickers;
+mod unfurl;
 mod upgrade;
 mod upgrade_carry;
+#[cfg(test)]
+mod upgrade_rollback_tests;
 mod vault;
 mod vaults;
 mod voice;
@@ -330,6 +348,8 @@ async fn main() -> anyhow::Result<()> {
         box_conns: Arc::new(Mutex::new(HashMap::new())),
         wake_started: Arc::new(Mutex::new(HashMap::new())),
         last_client_push: Arc::new(Mutex::new(HashMap::new())),
+        decisions_cache: Arc::new(std::sync::Mutex::new(Default::default())),
+        decisions_inflight: Arc::new(Mutex::new(HashMap::new())),
         stale_bounces: Arc::new(Mutex::new(HashMap::new())),
         conn_seq: Arc::new(AtomicU64::new(0)),
         relay_key,
@@ -346,6 +366,7 @@ async fn main() -> anyhow::Result<()> {
         presence_seen: Arc::new(Mutex::new(HashMap::new())),
         activity: Arc::new(Mutex::new(HashMap::new())),
         box_http_seen: Arc::new(Mutex::new(HashMap::new())),
+        fresh_preview_tokens: Arc::new(Mutex::new(HashMap::new())),
         turn_running: Arc::new(Mutex::new(HashMap::new())),
         evicted: Arc::new(Mutex::new(HashMap::new())),
         fleet_pressure: Arc::new(Mutex::new(None)),
@@ -402,7 +423,9 @@ async fn main() -> anyhow::Result<()> {
     fleet::spawn_fleet_tasks(state.clone()).await;
     boxes::spawn_always_on(state.clone()).await;
     upgrade::spawn_history_sweeper(state.clone()).await;
+    boxes::spawn_sandboxless_box_check(state.clone()).await;
     secrets::spawn_sweeper(state.clone()).await;
+    outside::spawn_sweeper(state.clone()).await;
     calls::spawn_sweeper(state.clone()).await;
     images::spawn_health_probe(state.clone());
     matrix::worker::spawn(state.clone());
@@ -434,6 +457,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/avatars/{file}", get(signin::get_avatar))
         .route("/projects/{file}/avatar.jpg", get(images::project_avatar))
         .route("/me/pushes", get(people::me_pushes))
+        .route("/me/pins", get(pins::get_pins).put(pins::put_pins))
         .route("/me/unread", get(notify::me_unread))
         .route(
             "/me/notifications",
@@ -577,6 +601,33 @@ async fn main() -> anyhow::Result<()> {
             post(notify::register_push).delete(notify::unregister_push),
         )
         .route("/chats/{id}/notify", post(notify::notify_people_chat))
+        // Outside agents (#2140): owner side …
+        .route("/outside-agents", get(outside::list).post(outside::create))
+        .route(
+            "/outside-agents/{id}",
+            get(outside::get)
+                .patch(outside::patch)
+                .delete(outside::revoke),
+        )
+        .route("/outside-agents/{id}/rotate", post(outside::rotate))
+        .route("/outside-agents/{id}/wake/test", post(outside::wake_test))
+        // … and the agent side (bearer arbk_ key).
+        .route("/asp/me", get(outside::me))
+        .route("/asp/wake/test", post(outside::asp_wake_test))
+        .route("/asp/inbox", get(outside::inbox))
+        .route("/asp/events", post(outside::events))
+        .route("/asp/socket", get(outside::socket))
+        .route("/asp/files/{slot}/{key}", get(outside::file))
+        .route("/asp/chats/{id}/messages", get(outside::history))
+        .route("/asp/connect/{id}", get(outside::connect_page))
+        // Sidecar support (#2189): members, and the public texts an agent is handed.
+        .route("/asp/chats/{id}/members", get(outside_sidecar::members))
+        .route("/llms.txt", get(outside_sidecar::llms_txt))
+        .route("/agents/llms.txt", get(outside_sidecar::llms_txt))
+        .route("/sidecar/install.sh", get(outside_sidecar::install_sh))
+        // Session log (spec §13.3): the sidecar uploads, the owner reads.
+        .route("/asp/log", post(outside_log::upload))
+        .route("/outside-agents/{id}/log", get(outside_log::read))
         .route(
             "/projects/{project_id}/chats/{chat_id}/notify",
             post(notify::notify_project_chat),
@@ -636,6 +687,14 @@ async fn main() -> anyhow::Result<()> {
             post(people::member_unban),
         )
         .route("/box/people/{id}", get(people::box_people_chat))
+        .route(
+            "/box/people/{id}/gate",
+            post(room_health::post_gate_decision),
+        )
+        .route(
+            "/admin/room-health/{id}",
+            get(room_health::admin_room_health),
+        )
         .route(
             "/projects/{id}/members",
             get(people::project_members_list).post(people::project_member_add),
@@ -826,8 +885,22 @@ async fn main() -> anyhow::Result<()> {
             "/room/{project}/{chat}/messages/{message_id}",
             delete(moderation::delete_message),
         )
+        .route(
+            "/room/{project}/{chat}/messages/{message_id}/preview",
+            delete(moderation::remove_preview),
+        )
         .route("/blob/{project}/{key}", get(blobs::get).put(blobs::put))
         .route("/link-icon", get(link_icons::get))
+        .route("/unfurl/icon", get(site_icons::get))
+        // Emoji / stickers / GIFs picker (ARB-544): GIF search + media pass-through via
+        // KLIPY (key server-side only), relay-hosted open sticker packs.
+        .route("/gif/search", get(gifs::search))
+        .route("/gif/trending", get(gifs::trending))
+        .route("/gif/categories", get(gifs::categories))
+        .route("/gif/share", post(gifs::share))
+        .route("/gif/media", get(gifs::media))
+        .route("/stickers/packs", get(stickers::packs))
+        .route("/stickers/{pack}/{id}", get(stickers::get))
         .route("/feedback", post(feedback::submit))
         .route("/feedback/capture/{id}", post(feedback::device_capture))
         .route("/box/feedback/capture", post(feedback::box_capture_request))
@@ -835,11 +908,34 @@ async fn main() -> anyhow::Result<()> {
             "/box/feedback/capture/{id}",
             get(feedback::box_capture_status),
         )
+        .route("/perf/report", post(perf::submit))
+        .route("/admin/perf", get(perf::admin_list))
+        .route("/admin/perf/summary", get(perf::admin_summary))
+        .route("/admin/perf/{id}", get(perf::admin_item))
         .route("/admin/feedback", get(feedback::admin_list))
         .route("/admin/feedback/{id}/image", get(feedback::admin_image))
         .route(
             "/admin/feedback/{id}/issue",
             post(feedback::admin_set_issue),
+        )
+        // Agent-hosted sites (#2060): box publish API, owner list/unpublish, admin takedown.
+        .route("/sites", get(sites::list).delete(sites::unpublish_all))
+        .route("/sites/{app}", delete(sites::unpublish))
+        .route("/sites/{app}/begin", post(sites::begin))
+        .route("/sites/{app}/blob/{sha}", put(sites::put_blob))
+        .route("/sites/{app}/commit", post(sites::commit))
+        .route("/admin/sites", get(sites::admin_list))
+        .route("/admin/sites/events", get(sites::admin_events))
+        .route("/admin/sites/move/{user}", post(sites::admin_move))
+        .route("/admin/sites/quota/{user}", put(sites::admin_set_quota))
+        .route("/admin/sites/{user}/{app}", delete(sites::admin_purge))
+        .route(
+            "/admin/sites/{user}/{app}/takedown",
+            post(sites::admin_takedown),
+        )
+        .route(
+            "/admin/sites/{user}/{app}/restore",
+            post(sites::admin_restore),
         )
         .route("/bootstrap/{file}", get(blobs::bootstrap))
         .route("/proxy/v1/models", get(proxy::openai_models))
@@ -981,7 +1077,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/secrets/pause", post(secrets::admin_pause))
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
         .layer(tower_http::trace::TraceLayer::new_for_http())
-        .layer(axum::middleware::from_fn(
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
             api_error_layer::rewrite_plain_api_errors,
         ))
         .with_state(state.clone());

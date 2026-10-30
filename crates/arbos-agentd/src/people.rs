@@ -2,20 +2,26 @@
 //! people; it joins each one as a peer in the room `people/<chat_id>` (the relay admits the
 //! owner's box for it) and answers the humans there.
 //!
-//! Mention to reply (default): a human message is for this agent when its `mentions` carry
-//! `agent:<project>`, or the text says `@<slug>` (the Project's name as a handle), or the text
-//! opens with this agent's bare name/handle ("Bob?", "hey Bob …"), or it addresses agents
-//! collectively ("can the agents…", "hey agents"), or it replies to one of this agent's messages,
-//! or it says `@arbos` and this is the only agent in the chat; the owner can switch the agent to
-//! "every message". In a people **group** (`kind: group`, or more than one agent), when nothing
-//! addresses this agent, the decision model reads recent chat context and chooses whether this
-//! agent should reply (or stay quiet) so the right agent continues the thread — or none do. Each
-//! human message is labelled with the author's display name (falling back to bare handle) and role
-//! (`owner` | `guest`) in the prompt. The author is the row's `sender: user:<id>`, else the
-//! person whose device wrote it (the relay's box roster lists each member's device ids), else
-//! the only human in the chat; a row nobody can be matched to is "a member" with guest powers
-//! — the owner is never assumed (#1580). Guests may direct ordinary work; they may not use the
-//! owner's secrets unless the owner put them on that secret's People list. Agents
+//! Who answers is the judge's call (`responders.rs`), one call per human message, the same on
+//! every box in the room, with no keyword rule before it (Jacob, 2026-10-27: "the agents are
+//! getting better but still buggy" woke three agents because the text started with "the
+//! agents"). The judge sees the people (name + @handle), every agent (handle, role, how the
+//! text @mentions it), the last 12 lines, the message and the line it replies to, and says
+//! who it is for: one agent, any one agent, several, all, or nobody. The agent replies only on
+//! a confident yes (`decision_model.threshold`, 0.60). A bare name, a reply to the agent's
+//! bubble or a follow-up are signals in that state, never a verdict. A person's explicit
+//! @mention (typed `@handle` or a chip) is the exception: it always wakes every agent it names,
+//! whatever the judge says or when it fails (Jacob, 2026-10-28); a woken agent that was only
+//! named may still say nothing. The owner's `reply_policy: every_message` bypasses the judge.
+//! When the judge fails, an unmentioned message is silence. Silence posts nothing
+//! (`silence.rs`). An agent's own bubble never wakes another agent (#2207).
+//!
+//! Each human message is labelled with the author's display name (falling back to bare handle)
+//! and role (`owner` | `guest`) in the prompt. The author is the row's `sender: user:<id>`,
+//! else the person whose device wrote it (the relay's box roster lists each member's device
+//! ids), else the only human in the chat; a row nobody can be matched to is "a member" with
+//! guest powers — the owner is never assumed (#1580). Guests may direct ordinary work; they may
+//! not use the owner's secrets unless the owner put them on that secret's People list. Agents
 //! address people by display name, never `@handle`. The owner's credits pay; audit lines carry
 //! `asked_by`.
 
@@ -35,7 +41,7 @@ use crate::sync::SharedHost;
 /// The relay's project slot for people rooms.
 pub const PEOPLE_PROJECT: &str = "people";
 
-/// How many prior messages the reply gate sees (oldest → newest).
+/// How many prior messages the judge sees (oldest → newest).
 const RESPOND_RECENT_MAX: usize = 12;
 
 #[derive(Debug, Clone, Default)]
@@ -57,37 +63,6 @@ pub struct PeopleChatInfo {
 }
 
 impl PeopleChatInfo {
-    /// Other agents of this chat whose `@handle` (or `@slug` of the name) appears in `text`.
-    pub(crate) fn other_agents_mentioned(&self, text: &str, me: &str) -> Vec<String> {
-        let lower = text.to_lowercase();
-        let has = |token: &str| {
-            let t = format!("@{token}");
-            !token.is_empty()
-                && lower.match_indices(&t).any(|(i, _)| {
-                    let after = lower[i + t.len()..].chars().next();
-                    after.is_none_or(|c| !(c.is_alphanumeric() || c == '-' || c == '_'))
-                })
-        };
-        self.members
-            .iter()
-            .filter_map(|m| {
-                let id = m["member"].as_str()?.strip_prefix("agent:")?;
-                if format!("agent:{id}") == me {
-                    return None;
-                }
-                let handle = m["handle"].as_str().unwrap_or("").to_lowercase();
-                let name = m["project"]["name"]
-                    .as_str()
-                    .or_else(|| m["name"].as_str())
-                    .unwrap_or("")
-                    .trim()
-                    .to_lowercase()
-                    .replace(' ', "-");
-                (has(&handle) || has(&name)).then(|| id.to_owned())
-            })
-            .collect()
-    }
-
     fn agents(&self) -> usize {
         self.members
             .iter()
@@ -153,12 +128,24 @@ impl PeopleChatInfo {
         self.spoken_name_of(user_id)
     }
 
-    /// Human members by spoken name, for the responder decision's people roster.
+    /// Human members as `Name (@handle)` for the judge's people roster: a first name or an
+    /// @handle in the text that is a person's must never read as an agent's ("@A" is Scout,
+    /// not @affine).
     fn people_labels(&self) -> Vec<String> {
         self.members
             .iter()
             .filter(|m| m["member"].as_str().is_some_and(|s| s.starts_with("user:")))
-            .map(person_spoken_name)
+            .map(|m| {
+                let name = person_spoken_name(m);
+                match m["handle"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|h| !h.is_empty())
+                {
+                    Some(h) if !h.eq_ignore_ascii_case(&name) => format!("{name} (@{h})"),
+                    _ => name,
+                }
+            })
             .collect()
     }
 
@@ -294,261 +281,6 @@ fn message_spoken_name(msg: &MessageView, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_owned())
 }
 
-/// True when the message is aimed at people and names no agent (chip or `@handle`).
-///
-/// Person chips ("Call?" with a `user:` mention and no `@` in the prose) and a leading
-/// `@handle` ("@ken …", "Yo @ken") are for humans — the reply gate must not wake an agent.
-/// A mid-line `@person` alone ("Would you rent if @ken asked?") is a reference, not an
-/// address: leave the hard gate open so the group decision model can still pick an agent.
-fn addressed_only_to_people(msg: &MessageView) -> bool {
-    let Some(mentions) = msg.rest.get("mentions").and_then(Value::as_array) else {
-        return false;
-    };
-    // Typed mentions (#1538): a `user:` chip for the SENDER is not a people ping — nobody
-    // @-mentions themselves. It happens when an agent's slug equals the sender's own handle
-    // (Jacob @unarbos named an agent "unarbos"): the composer resolved `@unarbos` to the
-    // person, and the agent of that slug is who was meant. Other people's chips still are.
-    let sender = msg.rest.get("sender").and_then(Value::as_str).unwrap_or("");
-    let mut saw_person = false;
-    for m in mentions {
-        let Some(s) = m.as_str() else {
-            continue;
-        };
-        if s.starts_with("agent:") {
-            return false;
-        }
-        if s.starts_with("user:") && s != sender {
-            saw_person = true;
-        }
-    }
-    if !saw_person {
-        return false;
-    }
-    let text = msg.text();
-    // Chip / bare-name address: person mention with no `@` token in the prose.
-    if !text.contains('@') {
-        return true;
-    }
-    // Leading `@handle` (optional yo/hey/hi…) is still a people ping.
-    leading_address_token(&text).is_some_and(|t| t.starts_with('@'))
-}
-
-/// Leading token of the message (optional yo/hey/hi… greeting), lower-cased, punctuation stripped.
-fn leading_address_token(text: &str) -> Option<String> {
-    let mut lower = text.trim().to_lowercase();
-    if lower.is_empty() {
-        return None;
-    }
-    for g in ["yo ", "hey ", "hi ", "hello ", "ok ", "okay "] {
-        if let Some(rest) = lower.strip_prefix(g) {
-            lower = rest.to_owned();
-            break;
-        }
-    }
-    let first = lower
-        .split_whitespace()
-        .next()?
-        .trim_matches(|c| matches!(c, '.' | ',' | '!' | '?' | ':' | ';'));
-    if first.chars().count() < 2 {
-        return None;
-    }
-    Some(first.to_owned())
-}
-
-/// True when the prose `@`-mentions an agent in this chat (not a sticky chip mention alone).
-fn text_mentions_agent(msg: &MessageView, info: &PeopleChatInfo) -> bool {
-    let text = msg.text().to_lowercase();
-    let has = |token: &str| {
-        let t = format!("@{token}");
-        text.match_indices(&t).any(|(i, _)| {
-            let after = text[i + t.len()..].chars().next();
-            after.is_none_or(|c| !(c.is_alphanumeric() || c == '-' || c == '_'))
-        })
-    };
-    if !info.slug.is_empty() && has(&info.slug) {
-        return true;
-    }
-    for m in &info.members {
-        let Some(member) = m["member"].as_str() else {
-            continue;
-        };
-        if !member.starts_with("agent:") {
-            continue;
-        }
-        let handle = m["handle"].as_str().unwrap_or("").to_lowercase();
-        if !handle.is_empty() && has(&handle) {
-            return true;
-        }
-        // Same slug rule as iOS `mentionSlug`: lower-case, spaces → "-".
-        if let Some(name) = m["project"]["name"].as_str() {
-            let slug = name.to_lowercase().replace(' ', "-");
-            if !slug.is_empty() && has(&slug) {
-                return true;
-            }
-        }
-    }
-    info.agents() == 1 && has("arbos")
-}
-
-/// True when the prose addresses a human at the start by handle or display/first name
-/// ("Allan", "Allan?", "Allan. we are…", "Yo Allan") without needing `@`.
-fn text_names_people(msg: &MessageView, info: &PeopleChatInfo) -> bool {
-    let Some(token) = leading_address_token(&msg.text()) else {
-        return false;
-    };
-    let sender = msg.rest.get("sender").and_then(Value::as_str).unwrap_or("");
-    text_token_names_people_except(&token, info, true, sender)
-}
-
-/// True when the leading token is a human's `@handle` (not merely their display name).
-/// The sender's own handle does not count (#1538).
-fn text_names_people_by_handle(msg: &MessageView, info: &PeopleChatInfo) -> bool {
-    let Some(token) = leading_address_token(&msg.text()) else {
-        return false;
-    };
-    let sender = msg.rest.get("sender").and_then(Value::as_str).unwrap_or("");
-    text_token_names_people_except(&token, info, false, sender)
-}
-
-/// Does `token` name a human in the chat (by `@handle`, or by display / first name when
-/// allowed), ignoring the member `except` (the sender: "@unarbos" written by @unarbos is not a
-/// ping to themselves — #1538, an agent may carry that slug).
-fn text_token_names_people_except(
-    token: &str,
-    info: &PeopleChatInfo,
-    allow_display_name: bool,
-    except: &str,
-) -> bool {
-    for m in &info.members {
-        let Some(member) = m["member"].as_str() else {
-            continue;
-        };
-        if !member.starts_with("user:") || member == except {
-            continue;
-        }
-        let handle = m["handle"].as_str().unwrap_or("").to_lowercase();
-        if !handle.is_empty() && handle == token {
-            return true;
-        }
-        if !allow_display_name {
-            continue;
-        }
-        if let Some(name) = m["name"].as_str() {
-            let name = name.trim().to_lowercase();
-            if name == token {
-                return true;
-            }
-            if name
-                .split_whitespace()
-                .next()
-                .is_some_and(|first| first == token)
-            {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-/// True when the leading token matches any agent in the chat by handle or mention slug
-/// (project name lower-cased, spaces → "-"). Used so a human's display name that collides
-/// with an agent's `@slug` ("Arbos" when @unarbos is named Arbos and the agent is @arbos)
-/// does not silence the agent.
-fn text_names_any_agent_handle(msg: &MessageView, info: &PeopleChatInfo) -> bool {
-    let Some(token) = leading_address_token(&msg.text()) else {
-        return false;
-    };
-    for m in &info.members {
-        let Some(member) = m["member"].as_str() else {
-            continue;
-        };
-        if !member.starts_with("agent:") {
-            continue;
-        }
-        let handle = m["handle"].as_str().unwrap_or("").to_lowercase();
-        if !handle.is_empty() && handle == token {
-            return true;
-        }
-        let name = m["project"]["name"]
-            .as_str()
-            .or_else(|| m["name"].as_str())
-            .unwrap_or("")
-            .trim()
-            .to_lowercase();
-        if name.is_empty() {
-            continue;
-        }
-        if name == token || name.replace(' ', "-") == token {
-            return true;
-        }
-        if name
-            .split_whitespace()
-            .next()
-            .is_some_and(|first| first == token)
-        {
-            return true;
-        }
-    }
-    // Sole-agent `@arbos` alias also applies to bare "Arbos" / "arbos".
-    info.agents() == 1 && token == "arbos"
-}
-
-/// True when the prose addresses this agent at the start by handle, slug, or display/first name
-/// ("Bob", "Bob?", "hey Bob what do you think?") without needing `@`. A leading person
-/// `@handle` wins when the same token could match a human; a person's display name alone does
-/// not beat this agent's handle/slug (so "Arbos what is your name" wakes @arbos even when a
-/// human in the chat is also named Arbos).
-fn text_names_this_agent(msg: &MessageView, info: &PeopleChatInfo, project_id: &str) -> bool {
-    // Person @handle still wins ("catoneone …" when that is their handle).
-    if text_names_people_by_handle(msg, info) {
-        return false;
-    }
-    let Some(token) = leading_address_token(&msg.text()) else {
-        return false;
-    };
-    let me = format!("agent:{project_id}");
-    for m in &info.members {
-        let Some(member) = m["member"].as_str() else {
-            continue;
-        };
-        if member != me {
-            continue;
-        }
-        let handle = m["handle"].as_str().unwrap_or("").to_lowercase();
-        if !handle.is_empty() && handle == token {
-            return true;
-        }
-        if !info.slug.is_empty() && info.slug.eq_ignore_ascii_case(&token) {
-            return true;
-        }
-        let name = m["project"]["name"]
-            .as_str()
-            .or_else(|| m["name"].as_str())
-            .unwrap_or("")
-            .trim()
-            .to_lowercase();
-        if name.is_empty() {
-            continue;
-        }
-        if name == token {
-            return true;
-        }
-        // Same slug rule as iOS `mentionSlug`: lower-case, spaces → "-".
-        if name.replace(' ', "-") == token {
-            return true;
-        }
-        if name
-            .split_whitespace()
-            .next()
-            .is_some_and(|first| first == token)
-        {
-            return true;
-        }
-    }
-    // Sole-agent bare "arbos" — same alias as `@arbos` in `addressed`.
-    info.agents() == 1 && token == "arbos"
-}
-
 /// Agent project ids named by `mentions` (`agent:<id>`), in order, deduped.
 fn mentioned_agent_ids(msg: &MessageView) -> Vec<String> {
     let Some(mentions) = msg.rest.get("mentions").and_then(Value::as_array) else {
@@ -566,194 +298,16 @@ fn mentioned_agent_ids(msg: &MessageView) -> Vec<String> {
     out
 }
 
-/// Every agent project id in this people chat.
-fn chat_agent_ids(info: &PeopleChatInfo) -> Vec<String> {
-    let mut out = Vec::new();
-    for m in &info.members {
-        let Some(id) = m["member"].as_str().and_then(|s| s.strip_prefix("agent:")) else {
-            continue;
-        };
-        if !out.iter().any(|x| x == id) {
-            out.push(id.to_owned());
-        }
-    }
-    out
-}
-
-/// Agents this message is shared with (more than one must reply): collective phrases
-/// ("hey agents") or two-plus `agent:` mentions. Empty when only one agent is addressed
-/// (or none — the decision model path stays single-claim).
-pub fn people_shared_agent_ids(msg: &MessageView, info: &PeopleChatInfo) -> Vec<String> {
-    if text_addresses_agents_collectively(msg) {
-        return chat_agent_ids(info);
-    }
-    let mentioned = mentioned_agent_ids(msg);
-    if mentioned.len() > 1 {
-        // Agents named only as the object of a request to another agent ("@hezbola … with
-        // @doug-agent") owe no reply; the `send` must not stay `taken` waiting for them.
-        let text = msg.text();
-        let kept: Vec<String> = mentioned
-            .iter()
-            .filter(|id| {
-                let me = format!("agent:{id}");
-                let Some(m) = info
-                    .members
-                    .iter()
-                    .find(|m| m["member"].as_str() == Some(me.as_str()))
-                else {
-                    return true;
-                };
-                let handle = m["handle"].as_str().unwrap_or("");
-                let name = m["project"]["name"]
-                    .as_str()
-                    .or_else(|| m["name"].as_str())
-                    .unwrap_or("")
-                    .trim()
-                    .replace(' ', "-");
-                let role = mention_role(&text, handle).max(mention_role(&text, &name));
-                !(role == MentionRole::Object && another_agent_addressed(msg, info, id))
-            })
-            .cloned()
-            .collect();
-        return kept;
-    }
-    Vec::new()
-}
-
-/// "hey agents" / "can the agents…" / "all agents" — address every agent, no `@` required.
-fn text_addresses_agents_collectively(msg: &MessageView) -> bool {
-    let trimmed = msg.text().trim().to_lowercase();
-    if trimmed.is_empty() {
-        return false;
-    }
-    for g in [
-        "hey agents",
-        "hi agents",
-        "hello agents",
-        "yo agents",
-        "ok agents",
-        "okay agents",
-        "all agents",
-        "the agents",
-        "can the agents",
-        "can agents",
-    ] {
-        if trimmed == g {
-            return true;
-        }
-        for sep in [" ", ",", "!", "?", ":", "—", "-"] {
-            if trimmed.starts_with(&(g.to_owned() + sep)) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-/// True when the message explicitly addresses one or more agents in this chat — by `mentions`
-/// (`agent:<id>`), by `@slug` in the prose, or by an agent's bare name at the start — and this
-/// agent is not among them. Such a message belongs to the named agent(s): this agent stays
-/// silent, and the group decision model is not asked (it must never hand "@gigchadagent you
-/// still borked?" to hjkb).
-fn addressed_to_other_agents_only(
-    msg: &MessageView,
-    info: &PeopleChatInfo,
-    project_id: &str,
-) -> bool {
-    let me = format!("agent:{project_id}");
-    let mentioned = mentioned_agent_ids(msg);
-    if !mentioned.is_empty() {
-        return !mentioned.iter().any(|id| *id == project_id);
-    }
-    let text = msg.text().to_lowercase();
-    let has = |token: &str| {
-        let t = format!("@{token}");
-        text.match_indices(&t).any(|(i, _)| {
-            let after = text[i + t.len()..].chars().next();
-            after.is_none_or(|c| !(c.is_alphanumeric() || c == '-' || c == '_'))
-        })
-    };
-    let leading = leading_address_token(&msg.text());
-    let mut names_other = false;
-    for m in &info.members {
-        let Some(member) = m["member"].as_str() else {
-            continue;
-        };
-        if !member.starts_with("agent:") || member == me {
-            continue;
-        }
-        let handle = m["handle"].as_str().unwrap_or("").to_lowercase();
-        let name = m["project"]["name"]
-            .as_str()
-            .or_else(|| m["name"].as_str())
-            .unwrap_or("")
-            .trim()
-            .to_lowercase();
-        let slug = name.replace(' ', "-");
-        if (!handle.is_empty() && has(&handle)) || (!slug.is_empty() && has(&slug)) {
-            names_other = true;
-        }
-        if let Some(t) = &leading {
-            if (!handle.is_empty() && handle == *t)
-                || (!name.is_empty() && (name == *t || slug == *t))
-            {
-                names_other = true;
-            }
-        }
-    }
-    if !names_other {
-        return false;
-    }
-    // Named another agent and not this one (by any of the same rules).
-    !(text_mentions_this_agent(msg, info, project_id)
-        || text_names_this_agent(msg, info, project_id))
-}
-
-/// True when the prose `@`-mentions this agent (its slug or handle).
-fn text_mentions_this_agent(msg: &MessageView, info: &PeopleChatInfo, project_id: &str) -> bool {
-    let text = msg.text().to_lowercase();
-    if mention_is_object(&text, &info.slug.to_lowercase()) {
-        return false;
-    }
-    let has = |token: &str| {
-        let t = format!("@{token}");
-        text.match_indices(&t).any(|(i, _)| {
-            let after = text[i + t.len()..].chars().next();
-            after.is_none_or(|c| !(c.is_alphanumeric() || c == '-' || c == '_'))
-        })
-    };
-    if !info.slug.is_empty() && has(&info.slug) {
-        return true;
-    }
-    let me = format!("agent:{project_id}");
-    info.members.iter().any(|m| {
-        if m["member"].as_str() != Some(me.as_str()) {
-            return false;
-        }
-        let handle = m["handle"].as_str().unwrap_or("").to_lowercase();
-        let name = m["project"]["name"]
-            .as_str()
-            .or_else(|| m["name"].as_str())
-            .unwrap_or("")
-            .trim()
-            .to_lowercase();
-        (!handle.is_empty() && has(&handle)) || (!name.is_empty() && has(&name.replace(' ', "-")))
-    })
-}
-
-/// Leading person ping in the prose (or a people chip / leading `@handle`) and no agent `@`
-/// in the text. Sticky chip / reply-to agent mentions must not wake an agent for "Allan?".
-/// Mid-line `@person` alone is not a people ping — see `addressed_only_to_people`.
-/// A leading token that is an agent's handle/slug is for the agent — even when a human's
-/// display name collides ("Arbos" with @unarbos named Arbos and agent @arbos).
-fn people_ping_not_for_agents(msg: &MessageView, info: &PeopleChatInfo) -> bool {
-    if text_mentions_agent(msg, info) {
-        return false;
-    }
-    if text_names_any_agent_handle(msg, info) {
-        return false;
-    }
-    addressed_only_to_people(msg) || text_names_people(msg, info)
+/// A row the agent writes beside its answer, not as one: a background job's host row, a
+/// worker's spawn row, an agent-to-agent hand-off. It names its sender in a people chat
+/// ([`Agent::people_sender_fields`]) but never counts as the reply to the ask.
+pub(crate) fn is_control_row(m: &arbos_core::doc::MessageView) -> bool {
+    m.rest.get("job").is_some_and(|j| !j.is_null())
+        || m.rest.get("worker").and_then(Value::as_bool) == Some(true)
+        || m.rest
+            .get("agentMessage")
+            .and_then(|a| a.get("toProjectId"))
+            .is_some()
 }
 
 /// What a reply in a people chat carries: message fields for the clients.
@@ -802,6 +356,74 @@ pub struct PeopleState {
     owner_profile: Mutex<(Option<String>, Option<String>)>,
     /// The whole owner block as last seen (for the prompt's "Your owner" section).
     owner_full: Mutex<crate::identity::OwnerProfile>,
+    /// Judge verdicts by user message id: one call per message, whatever drives the command
+    /// (send, steer, retry, a catch-up re-gate). Bounded; see `GATE_CACHE_MAX`.
+    gate_cache: Mutex<GateCache>,
+}
+
+/// How many judged messages a box remembers (across its people chats).
+const GATE_CACHE_MAX: usize = 512;
+
+/// The judge's verdict on one message, as this agent's gate recorded it.
+#[derive(Debug, Clone)]
+pub struct GateVerdict {
+    pub wants: bool,
+    pub reason: String,
+    /// Every agent the judge picked plus every agent a person @mentioned (the shared-send
+    /// bookkeeping reads this).
+    pub chosen: Vec<String>,
+    /// Set when a person's explicit @mention woke this agent although the judge did not pick
+    /// it (unsure, another addressee, or no judge at all).
+    pub woken_by_mention: Option<MentionRole>,
+}
+
+impl GateVerdict {
+    /// A person's explicit @mention (typed `@handle` or a chip) always wakes every agent it
+    /// names; the judge can add agents but never veto a mentioned one (Jacob, Arbonites
+    /// 2026-10-28: "@bob talk to @bubble" judged `for=@bob (0.48) < 0.50` woke nobody).
+    fn honour_mentions(mut self, me: &str, my_role: MentionRole, mentioned: &[String]) -> Self {
+        for id in mentioned {
+            if !self.chosen.contains(id) {
+                self.chosen.push(id.clone());
+            }
+        }
+        if my_role != MentionRole::None && !self.wants {
+            self.wants = true;
+            self.reason = format!(
+                "{}; @mention {} by a person → reply (a person's @mention always wakes the agent)",
+                self.reason,
+                my_role.as_str()
+            );
+            self.woken_by_mention = Some(my_role);
+            if !self.chosen.iter().any(|c| c == me) {
+                self.chosen.push(me.to_owned());
+            }
+        }
+        self
+    }
+}
+
+#[derive(Default)]
+struct GateCache {
+    by_message: HashMap<String, GateVerdict>,
+    order: std::collections::VecDeque<String>,
+}
+
+impl GateCache {
+    fn get(&self, message_id: &str) -> Option<GateVerdict> {
+        self.by_message.get(message_id).cloned()
+    }
+
+    fn insert(&mut self, message_id: &str, v: GateVerdict) {
+        if self.by_message.insert(message_id.to_owned(), v).is_none() {
+            self.order.push_back(message_id.to_owned());
+        }
+        while self.order.len() > GATE_CACHE_MAX {
+            if let Some(old) = self.order.pop_front() {
+                self.by_message.remove(&old);
+            }
+        }
+    }
 }
 
 impl PeopleState {
@@ -860,6 +482,18 @@ impl PeopleState {
         *self.current.lock().expect("people") = chat_id.map(str::to_owned);
     }
 
+    /// The judge's verdict for a message this gate already decided, if any.
+    pub fn gate_verdict(&self, message_id: &str) -> Option<GateVerdict> {
+        self.gate_cache.lock().expect("people").get(message_id)
+    }
+
+    fn remember_verdict(&self, message_id: &str, v: GateVerdict) {
+        self.gate_cache
+            .lock()
+            .expect("people")
+            .insert(message_id, v);
+    }
+
     /// Test-only: seed a people-chat snapshot (e.g. rename + @handle refresh).
     #[cfg(test)]
     pub(crate) fn test_insert(&self, chat_id: &str, info: PeopleChatInfo) {
@@ -868,46 +502,6 @@ impl PeopleState {
             .expect("people")
             .insert(chat_id.to_owned(), info);
     }
-}
-
-/// "can you send a message to @testagent?" names @testagent as the *object* of a request made
-/// to someone else, not as the one asked. A mention right after "to" in a send / pass /
-/// forward / relay / message phrase is such an object (2026-10-24 00:48: TestAgent answered
-/// "Arbos, I am @testagent…" to a request meant for TestAgent2).
-pub(crate) fn mention_is_object(text_lower: &str, slug_lower: &str) -> bool {
-    if slug_lower.is_empty() {
-        return false;
-    }
-    let needle = format!("to @{slug_lower}");
-    text_lower.match_indices(&needle).any(|(i, _)| {
-        let after = text_lower[i + needle.len()..].chars().next();
-        let ends_token = after.is_none_or(|c| !(c.is_alphanumeric() || c == '-' || c == '_'));
-        let before = &text_lower[..i];
-        let verbs = [
-            "send",
-            "sending",
-            "sent",
-            "pass",
-            "passing",
-            "forward",
-            "forwarding",
-            "relay",
-            "relaying",
-            "message",
-            "messaging",
-            "msg",
-            "dm",
-            "a note",
-            "a message",
-            "word",
-        ];
-        ends_token
-            && verbs.iter().any(|v| {
-                before.rfind(v).is_some_and(|j| {
-                    before.len() - j <= 60 && !before[j..].contains(['.', '?', '!'])
-                })
-            })
-    })
 }
 
 /// Where an `@mention` of an agent sits in the sentence — the difference between being asked
@@ -1106,94 +700,6 @@ pub(crate) fn my_mention_role(
     role
 }
 
-/// True when some *other* agent of the chat is addressed by the prose (vocative @mention or a
-/// leading bare name). Used to tell "@hezbola … with @doug" (Doug is the object of a request to
-/// Hezbola) from "lunch with @doug?" (nobody else addressed; the decision model judges).
-fn another_agent_addressed(msg: &MessageView, info: &PeopleChatInfo, project_id: &str) -> bool {
-    let me = format!("agent:{project_id}");
-    let text = msg.text();
-    let leading = leading_address_token(&text);
-    for m in &info.members {
-        let Some(member) = m["member"].as_str() else {
-            continue;
-        };
-        if !member.starts_with("agent:") || member == me {
-            continue;
-        }
-        let handle = m["handle"].as_str().unwrap_or("").to_lowercase();
-        let name = m["project"]["name"]
-            .as_str()
-            .or_else(|| m["name"].as_str())
-            .unwrap_or("")
-            .trim()
-            .to_lowercase();
-        let slug = name.replace(' ', "-");
-        for h in [handle.as_str(), slug.as_str()] {
-            if h.is_empty() {
-                continue;
-            }
-            if mention_role(&text, h) == MentionRole::Addressed {
-                return true;
-            }
-            if leading.as_deref() == Some(h) {
-                return true;
-            }
-        }
-        if let Some(t) = &leading {
-            if !name.is_empty() && (name == *t || name.split_whitespace().next() == Some(t)) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-/// Is this human message for the agent `project_id` with the given slug and policy?
-pub fn addressed(
-    msg: &MessageView,
-    project_id: &str,
-    slug: &str,
-    only_agent: bool,
-    every_message: bool,
-    replied_to_mine: bool,
-) -> bool {
-    if msg.role != "user" {
-        return false;
-    }
-    let sender_is_human = msg
-        .rest
-        .get("sender")
-        .and_then(Value::as_str)
-        .is_none_or(|s| s.starts_with("user:") || s == "user");
-    if !sender_is_human {
-        return false;
-    }
-    if every_message || replied_to_mine {
-        return true;
-    }
-    let me = format!("agent:{project_id}");
-    let text = msg.text().to_lowercase();
-    if mention_is_object(&text, &slug.to_lowercase()) {
-        return false;
-    }
-    if msg
-        .rest
-        .get("mentions")
-        .and_then(Value::as_array)
-        .is_some_and(|a| a.iter().any(|m| m.as_str() == Some(me.as_str())))
-    {
-        return true;
-    }
-    let has = |token: &str| {
-        let t = format!("@{token}");
-        text.match_indices(&t).any(|(i, _)| {
-            let after = text[i + t.len()..].chars().next();
-            after.is_none_or(|c| !(c.is_alphanumeric() || c == '-' || c == '_'))
-        })
-    };
-    (!slug.is_empty() && has(slug)) || (only_agent && has("arbos"))
-}
-
 /// Recent human and agent lines before `up_to` as `[{from, text}]`, oldest first, for the
 /// responder decision and the group prelude. A human line is labelled with its author's display
 /// name (roster or row), else their handle, else `a member` — never the owner by default.
@@ -1258,87 +764,6 @@ pub(crate) fn recent_people_context_for(
         });
     }
     crate::truncate::build_window(chat_id, lines, max).0
-}
-
-/// An active exchange: this agent answered this person moments ago, and nobody else took the
-/// thread since. Their next un-mentioned line ("Who is in this chat?", "How many messages are
-/// there?") is for the agent — the decision model must not get a vote on it (2026-10-23 23:53,
-/// Arbonites: jev scored the follow-ups 0.29 and 0.47 against a 0.50 bar; #1573).
-pub const FOLLOW_UP_WINDOW_MS: i64 = 3 * 60 * 1000;
-/// How many rows back the agent's last reply may sit for the thread to still be "active".
-pub const FOLLOW_UP_MESSAGES: usize = 8;
-
-/// Is `user_msg_id` a direct follow-up in an active exchange between its sender and `me`
-/// (`agent:<project_id>`)? True when, within the last [`FOLLOW_UP_MESSAGES`] rows and
-/// [`FOLLOW_UP_WINDOW_MS`], the newest agent reply is this agent's and it answered the same
-/// person; false as soon as another agent replied or was @mentioned in between.
-pub(crate) fn follow_up_in_active_exchange(
-    messages: &[MessageView],
-    user_msg_id: &str,
-    me: &str,
-) -> bool {
-    let Some(i) = messages.iter().position(|m| m.id == user_msg_id) else {
-        return false;
-    };
-    let msg = &messages[i];
-    if msg.role != "user" {
-        return false;
-    }
-    let sender = msg.rest.get("sender").and_then(Value::as_str).unwrap_or("");
-    if sender.is_empty() || sender.starts_with("agent:") || sender.starts_with("project:") {
-        return false;
-    }
-    let at = msg
-        .rest
-        .get("createdAt")
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
-    let sender_of = |id: &str| -> Option<String> {
-        messages
-            .iter()
-            .find(|m| m.id == id)
-            .and_then(|m| m.rest.get("sender").and_then(Value::as_str))
-            .map(str::to_owned)
-    };
-    let start = i.saturating_sub(FOLLOW_UP_MESSAGES);
-    for m in messages[start..i].iter().rev() {
-        if m.role == "assistant" {
-            let from = m.rest.get("sender").and_then(Value::as_str).unwrap_or("");
-            if from != me {
-                // Another agent has the thread.
-                return false;
-            }
-            let reply_at = m.rest.get("createdAt").and_then(Value::as_i64).unwrap_or(0);
-            if at - reply_at > FOLLOW_UP_WINDOW_MS {
-                return false;
-            }
-            // My reply must have been to this same person (or to nobody in particular).
-            return match m
-                .rest
-                .get("inReplyTo")
-                .and_then(Value::as_str)
-                .and_then(sender_of)
-            {
-                Some(asked_by) => asked_by == sender,
-                None => true,
-            };
-        }
-        if m.role == "user"
-            && m.rest
-                .get("mentions")
-                .and_then(Value::as_array)
-                .is_some_and(|a| {
-                    a.iter().any(|v| {
-                        v.as_str()
-                            .is_some_and(|s| s.starts_with("agent:") && s != me)
-                    })
-                })
-        {
-            // Someone called another agent in between: the thread is theirs now.
-            return false;
-        }
-    }
-    false
 }
 
 impl Agent {
@@ -1425,11 +850,15 @@ impl Agent {
                     .await
                 {
                     Ok(_) => {
-                        if !full {
-                            // Added (or re-added) while running: the room's past is not ours.
-                            self.sync.mark_late_join(&chat_id).await;
+                        // The relay's membership time is the line: rows issued after it are
+                        // work even when they landed before this box opened the room (a group
+                        // created with its first message already in it, #2127/#2120). Only
+                        // without that time does "now" stand in for it.
+                        match people_join_marks(full, joined_at) {
+                            JoinMarks::JoinedAt(at) => self.sync.mark_joined_at(&chat_id, at).await,
+                            JoinMarks::LateJoinNow => self.sync.mark_late_join(&chat_id).await,
+                            JoinMarks::None => {}
                         }
-                        self.sync.mark_joined_at(&chat_id, joined_at).await;
                         tracing::info!(chat = %chat_id, late = !full, joined_at, "joined a people chat");
                     }
                     Err(e) => tracing::warn!(chat = %chat_id, error = %e, "people room"),
@@ -1459,6 +888,9 @@ impl Agent {
     }
 
     /// Fetch one people chat from the relay (after a `people_agent_added` push) and join it.
+    /// Open one people chat's room on the relay's word (a `people_agent_added` or
+    /// `people_chat_open` push): fetch its membership and join with the relay's joined_at as
+    /// the line, so the row that triggered the push is work, not history.
     pub async fn join_people_chat(self: &std::sync::Arc<Self>, chat_id: &str) -> Result<()> {
         let r = self
             .http_client()
@@ -1517,12 +949,14 @@ impl Agent {
                 && m.status != "cancelled"
                 && m.rest.get("inReplyTo").and_then(Value::as_str) == Some(user_msg_id)
                 && m.rest.get("sender").and_then(Value::as_str) == Some(me.as_str())
+                && !is_control_row(m)
         })
     }
 
-    /// Shared people `send` still waiting on another addressed agent: leave the command `taken`
-    /// so their box can claim it. False when this is not a multi-agent address, or every named
-    /// agent has already replied (or there is no message).
+    /// Shared people `send` still waiting on another chosen agent: leave the command `taken` so
+    /// their box can claim it. The judge's chosen set says who owes a reply; false when it
+    /// picked one agent (or none), when every chosen agent has already replied, or when this
+    /// box never judged the message (a restart in between).
     pub async fn people_shared_send_open(
         &self,
         chat_id: &str,
@@ -1532,17 +966,13 @@ impl Agent {
         if user_msg_id.is_empty() || !self.people.is_people_chat(chat_id) {
             return false;
         }
-        let Some(info) = self.people.info(chat_id) else {
+        let Some(verdict) = self.people.gate_verdict(user_msg_id) else {
             return false;
         };
-        let h = host.lock().await;
-        let Some(msg) = h.doc.message(user_msg_id) else {
-            return false;
-        };
-        let shared = people_shared_agent_ids(&msg, &info);
-        if shared.len() <= 1 {
+        if verdict.chosen.len() <= 1 {
             return false;
         }
+        let h = host.lock().await;
         let replied: std::collections::HashSet<String> = h
             .doc
             .messages()
@@ -1560,18 +990,22 @@ impl Agent {
                     .map(str::to_owned)
             })
             .collect();
-        shared.iter().any(|id| !replied.contains(id))
+        verdict.chosen.iter().any(|id| !replied.contains(id))
     }
 
-    /// Should this `send` command drive a turn here? People chats route by mention; a message
-    /// not for this agent is left alone (its command stays pending for whoever it is for). In a
-    /// group, an unaddressed message still asks the decision model — with recent chat context —
-    /// whether this agent should reply.
+    /// Should this command drive a turn here? Every human message in a people chat goes to
+    /// the judge (`responders.rs`): one call, the same on every box in the room, no rule before
+    /// it. A message not for this agent is left alone (its command stays pending for whoever
+    /// it is for). The verdict is cached per message, so a steer, a retry or a catch-up re-gate
+    /// of the same message costs nothing.
     pub async fn people_wants(&self, chat_id: &str, host: &SharedHost, user_msg_id: &str) -> bool {
         let Some(info) = self.people.info(chat_id) else {
             return true;
         };
-        let (wants, reason) = self.people_gate(chat_id, host, user_msg_id, &info).await;
+        if let Some(v) = self.people.gate_verdict(user_msg_id) {
+            return v.wants;
+        }
+        let verdict = self.people_gate(chat_id, host, user_msg_id, &info).await;
         // The decision is part of the agent's record (`GET /projects/{id}/inspect`, kind
         // `gate`): "why did bob answer / stay quiet" is the first question in every routing bug.
         let _ = self.store.t3_append(
@@ -1581,40 +1015,48 @@ impl Agent {
             "gate",
             Some("system"),
             &format!(
-                "gate {}: {reason}",
-                if wants { "reply" } else { "skip" }
+                "gate {}: {}",
+                if verdict.wants { "reply" } else { "skip" },
+                verdict.reason
             ),
             Some(&json!({
-                "message_id": user_msg_id, "reply": wants, "reason": reason,
+                "message_id": user_msg_id, "reply": verdict.wants, "reason": verdict.reason,
+                "chosen": verdict.chosen,
                 "me": self.cfg.project_id, "handle": self.identity.handle(),
                 "reply_policy": info.settings["reply_policy"], "agents": info.agents(), "group": info.is_group(),
             })),
         );
-        wants
+        if !user_msg_id.is_empty() {
+            self.people.remember_verdict(user_msg_id, verdict.clone());
+        }
+        verdict.wants
     }
 
-    /// The mention gate proper: the decision and the rule that made it.
+    /// The gate proper: the judge's verdict for this agent, with the reason that made it.
     async fn people_gate(
         &self,
         chat_id: &str,
         host: &SharedHost,
         user_msg_id: &str,
         info: &PeopleChatInfo,
-    ) -> (bool, &'static str) {
-        let (msg, replied_to_mine, recent, follow_up) = {
+    ) -> GateVerdict {
+        let silent = |reason: String| GateVerdict {
+            wants: false,
+            reason,
+            chosen: Vec::new(),
+            woken_by_mention: None,
+        };
+        let mine = |reason: String| GateVerdict {
+            wants: true,
+            reason,
+            chosen: vec![self.cfg.project_id.clone()],
+            woken_by_mention: None,
+        };
+        let (msg, recent, reply_to) = {
             let h = host.lock().await;
             let Some(msg) = h.doc.message(user_msg_id) else {
-                return (false, "message not in the doc");
+                return silent("message not in the doc".into());
             };
-            let me = format!("agent:{}", self.cfg.project_id);
-            let replied_to_mine = msg
-                .rest
-                .get("replyTo")
-                .and_then(Value::as_str)
-                .and_then(|id| h.doc.message(id))
-                // Sender only: the device id `box:<sandbox>` is shared by every agent of the
-                // box, so another agent's row would read as mine (TestAgent / TestAgent2).
-                .is_some_and(|m| m.rest.get("sender").and_then(Value::as_str) == Some(me.as_str()));
             let all = h.doc.messages();
             let handles = agent_handles(info, &self.cfg.project_id, &self.identity.handle());
             let recent = recent_people_context_for(
@@ -1625,27 +1067,54 @@ impl Agent {
                 chat_id,
                 &handles,
             );
-            let follow_up = follow_up_in_active_exchange(&all, user_msg_id, &me);
-            (msg, replied_to_mine, recent, follow_up)
+            // The quoted line, labelled like a recent line: the judge sees whom the message
+            // answers and what it answers to.
+            let reply_to = msg
+                .rest
+                .get("replyTo")
+                .and_then(Value::as_str)
+                .and_then(|id| h.doc.message(id))
+                .map(|r| {
+                    let from = if r.role == "assistant" {
+                        format!(
+                            "@{} (agent)",
+                            r.rest
+                                .get("senderHandle")
+                                .and_then(Value::as_str)
+                                .unwrap_or("agent")
+                        )
+                    } else {
+                        author_spoken(&r, info, info.author_of(&r).as_deref())
+                    };
+                    json!({ "from": from, "text": crate::truncate::clip_marked(&r.text(), 500, &r.id, None) })
+                });
+            (msg, recent, reply_to)
         };
-        let every = info.settings["reply_policy"].as_str() == Some("every_message");
-        // Bare person name / people-only address in the prose ("Allan?", "Ken") wins over a
-        // sticky agent chip or reply-to, unless the text @-mentions an agent or the policy is
-        // every_message. The decision model must not wake bob for a ping meant for Allan.
-        if !every && people_ping_not_for_agents(&msg, info) {
-            return (false, "ping for a person, not for agents");
-        }
-        // Another agent's row that @mentions me (its box pushed the send; `dispatch_agent_mentions`).
+        // An agent's bubble never wakes another agent, whatever it says: "@lane-a" in lane-b's
+        // prose (quoting the user, explaining what it could do) is not a send (#2207, long-task
+        // h4: the judge chose lane-b alone, then lane-a answered the dispatched mention). The
+        // only agent-to-agent path is the `send_message` tool (teammate send, 2026-10-23 rule).
         if msg.role == "assistant" {
-            let from = msg.rest.get("sender").and_then(Value::as_str).unwrap_or("");
-            let me = format!("agent:{}", self.cfg.project_id);
-            if from.starts_with("agent:")
-                && from != me
-                && text_mentions_this_agent(&msg, info, &self.cfg.project_id)
-            {
-                return (true, "mentioned by another agent in the chat");
-            }
-            return (false, "another agent's row, not addressed to me");
+            return silent(
+                "another agent's row: agents reach each other only through send_message".into(),
+            );
+        }
+        let sender_is_human = msg
+            .rest
+            .get("sender")
+            .and_then(Value::as_str)
+            .is_none_or(|s| s.starts_with("user:") || s == "user");
+        if msg.role != "user" || !sender_is_human {
+            return silent("not a human row".into());
+        }
+        // The owner's explicit setting, not a heuristic.
+        if info.settings["reply_policy"].as_str() == Some("every_message") {
+            return mine("reply_policy every_message".into());
+        }
+        let raw_text = msg.text();
+        let text = crate::truncate::clip_marked(&raw_text, 4000, &msg.id, None);
+        if text.trim().is_empty() {
+            return silent("empty message".into());
         }
         // Prefer the live identity handle over a stale people-chat snapshot (#1481).
         let slug = {
@@ -1656,132 +1125,19 @@ impl Agent {
                 live
             }
         };
-        if addressed(
-            &msg,
-            &self.cfg.project_id,
-            &slug,
-            info.agents() == 1,
-            every,
-            replied_to_mine,
-        ) {
-            if every {
-                return (true, "reply_policy every_message");
-            }
-            if replied_to_mine {
-                return (true, "reply to my message");
-            }
-            // An @mention is a consideration signal, not an obligation: being talked about
-            // ("@hezbola can you communicate directly with @doug-agent?") is not being asked.
-            match my_mention_role(&msg, info, &self.cfg.project_id, &slug) {
-                MentionRole::Addressed | MentionRole::None => {
-                    return (true, "addressed to me (mention, @handle or sole agent)");
-                }
-                MentionRole::Object
-                    if another_agent_addressed(&msg, info, &self.cfg.project_id) =>
-                {
-                    return (
-                        false,
-                        "mentioned as the object of a request to another agent",
-                    );
-                }
-                MentionRole::Object | MentionRole::Referenced => {
-                    // Mentioned, but the sentence does not ask me: the decision model judges
-                    // with the mention role in view. Fail-open is the old behaviour (reply).
-                    return match self
-                        .people_decide_respond_opt(chat_id, info, &msg, &recent)
-                        .await
-                    {
-                        Some(true) => (true, "mentioned and the respond decision model chose me"),
-                        Some(false) => (false, "mentioned but not asked (respond decision model)"),
-                        None => (
-                            true,
-                            "mentioned; decision unavailable, replying (fail-open)",
-                        ),
-                    };
-                }
-            }
-        }
-        // Bare agent name / collective address ("Bob?", "hey Bob …", "can the agents respond?")
-        // — same as an @mention, including in DMs where the decision model does not run.
-        if text_names_this_agent(&msg, info, &self.cfg.project_id) {
-            return (true, "text names me");
-        }
-        if text_addresses_agents_collectively(&msg) {
-            return (true, "text addresses the agents collectively");
-        }
-        // Addressed to another agent by mention, @slug or name: theirs, not ours — even when
-        // that agent is silent, and even for a steer while this agent's own turn is running.
-        if addressed_to_other_agents_only(&msg, info, &self.cfg.project_id) {
-            return (false, "addressed to another agent only");
-        }
-        // A person chip or leading @handle with no agent address is for humans — stay quiet
-        // even in a group (the decision model must not wake an agent to decline a call meant
-        // for Ken). Mid-line @person references alone still reach the decision model.
-        if addressed_only_to_people(&msg) {
-            return (false, "addressed to people only");
-        }
-        // @mentions set the order, never a filter: a direct follow-up from the person this
-        // agent just answered is answered, in context, without asking the decision model.
-        if follow_up {
-            return (true, "follow-up in an active exchange with me");
-        }
-        if !info.is_group() {
-            return (false, "unaddressed in a DM");
-        }
-        let chosen = self
-            .people_decide_respond(chat_id, info, &msg, &recent)
-            .await;
-        (
-            chosen,
-            if chosen {
-                "respond decision model chose me"
-            } else {
-                "respond decision model did not choose me"
-            },
-        )
-    }
-
-    /// Responder decision for an unaddressed human message in a people group (`responders.rs`):
-    /// one state naming every agent in the chat (handle + description) with the recent
-    /// transcript, one yes/no probability per agent; this agent replies when its own answer
-    /// reaches the threshold. Every box in the chat asks the same question over the same state,
-    /// so the agents agree on who continues the thread. Fail-open: the LLM router, then stay quiet
-    /// (the previous default for an unaddressed message).
-    async fn people_decide_respond(
-        &self,
-        chat_id: &str,
-        info: &PeopleChatInfo,
-        msg: &MessageView,
-        recent: &[Value],
-    ) -> bool {
-        self.people_decide_respond_opt(chat_id, info, msg, recent)
-            .await
-            .unwrap_or(false)
-    }
-
-    /// `people_decide_respond` with the failure case kept apart: `None` when every provider
-    /// failed, so the caller picks its own fail-open default.
-    async fn people_decide_respond_opt(
-        &self,
-        chat_id: &str,
-        info: &PeopleChatInfo,
-        msg: &MessageView,
-        recent: &[Value],
-    ) -> Option<bool> {
-        let raw_text = msg.text();
-        let text = crate::truncate::clip_marked(&raw_text, 4000, &msg.id, None);
-        if text.trim().is_empty() {
-            return Some(false);
-        }
-        let chips = mentioned_agent_ids(msg);
-        let asker = author_spoken(msg, info, info.author_of(msg).as_deref());
-        let me = self.cfg.project_id.as_str();
-        let candidates: Vec<Candidate> = info
+        let my_role = my_mention_role(&msg, info, &self.cfg.project_id, &slug);
+        let chips = mentioned_agent_ids(&msg);
+        let asker = author_spoken(&msg, info, info.author_of(&msg).as_deref());
+        let mut candidates: Vec<Candidate> = info
             .members
             .iter()
             .filter_map(|m| {
                 let id = m["member"].as_str()?.strip_prefix("agent:")?;
-                let handle = m["handle"].as_str().unwrap_or(id);
+                let handle = if id == self.cfg.project_id {
+                    slug.as_str()
+                } else {
+                    m["handle"].as_str().unwrap_or(id)
+                };
                 let role = m["description"]
                     .as_str()
                     .filter(|d| !d.trim().is_empty())
@@ -1808,93 +1164,121 @@ impl Agent {
                 })
             })
             .collect();
-        if !candidates.iter().any(|c| c.id == me) {
-            return Some(false);
+        // Agent-id order on every box: the tie-break depends on it.
+        candidates.sort_by(|a, b| a.id.cmp(&b.id));
+        if !candidates.iter().any(|c| c.id == self.cfg.project_id) {
+            return silent("not a member of this chat's roster".into());
         }
+        let mentioned: Vec<String> = candidates
+            .iter()
+            .filter(|c| {
+                c.mentioned_as.is_some()
+                    || (c.id == self.cfg.project_id && my_role != MentionRole::None)
+            })
+            .map(|c| c.id.clone())
+            .collect();
         let room = Room {
             kind: "people_group",
             chat_id: chat_id.to_owned(),
             title: info.kind.clone(),
             from: asker,
             text,
-            recent: recent.to_vec(),
+            recent,
             candidates,
             people: info.people_labels(),
+            reply_to,
         };
         match self.decide_responders(&room).await {
             Ok(d) => {
                 self.log_responder_decision(&room, &msg.id, Ok(&d), None);
-                Some(d.chose(me))
+                let wants = d.chose(&self.cfg.project_id);
+                let verdict = GateVerdict {
+                    wants,
+                    reason: d.reason_for(&self.cfg.project_id, &room),
+                    chosen: d.chosen.clone(),
+                    woken_by_mention: None,
+                }
+                .honour_mentions(&self.cfg.project_id, my_role, &mentioned);
+                self.report_gate_decision(chat_id, &msg.id, &verdict, Some(&d));
+                verdict
             }
-            Err(errors) => {
-                self.log_responder_decision(&room, &msg.id, Err(&errors), Some(("SKIP", &[])));
+            Err(e) => {
+                let error = e.to_string();
                 // A budget refusal is not an outage: say so once in the chat and stop asking
                 // the model for every message until the block lapses (`budget.rs`).
-                if let Some(e) = errors
-                    .iter()
-                    .find(|e| crate::budget::Refusal::classify(e).is_some())
-                {
-                    self.note_budget_refusal(chat_id, e, false).await;
+                if crate::budget::Refusal::classify(&error).is_some() {
+                    self.note_budget_refusal(chat_id, &error, false).await;
                 }
-                None
+                // No second model. Unmentioned: silence (fail closed). Mentioned by a person:
+                // woken, like every @mention (fail open).
+                let verdict = GateVerdict {
+                    wants: false,
+                    reason: if my_role == MentionRole::None {
+                        format!("judge failed: {error}; unmentioned → silent (fail closed)")
+                    } else {
+                        format!("judge failed: {error}")
+                    },
+                    chosen: Vec::new(),
+                    woken_by_mention: None,
+                }
+                .honour_mentions(&self.cfg.project_id, my_role, &mentioned);
+                let action = if verdict.wants { "REPLY" } else { "NONE" };
+                self.log_responder_decision(
+                    &room,
+                    &msg.id,
+                    Err(&error),
+                    Some((action, &verdict.chosen)),
+                );
+                self.report_gate_decision(chat_id, &msg.id, &verdict, None);
+                verdict
             }
         }
     }
 
-    /// My reply in a people chat @mentions another agent of the chat: push a `send` for the
-    /// row so that agent's gate sees it (an agent's bubble is not a command; nothing woke
-    /// TestAgent when TestAgent2 wrote "@testagent, Arbos asked me to pass this on", 2026-10-24
-    /// 00:48). One hop only: a reply to a human's message dispatches; a reply to another
-    /// agent's row does not, so two agents cannot ping-pong.
-    pub async fn dispatch_agent_mentions(
-        self: &std::sync::Arc<Self>,
+    /// Tell the relay what this gate decided (`POST /box/people/{chat}/gate`), so room health
+    /// (`GET /admin/room-health/{chat}`, `GET /chats/{id}/health`) can show every agent's
+    /// decision and reason per message. Fire-and-forget; a relay without the route (404) is
+    /// fine.
+    fn report_gate_decision(
+        &self,
         chat_id: &str,
-        host: &SharedHost,
         user_msg_id: &str,
-        reply_msg_id: &str,
-        text: &str,
+        verdict: &GateVerdict,
+        decision: Option<&crate::responders::ResponderDecision>,
     ) {
-        let Some(info) = self.people.info(chat_id) else {
-            return;
-        };
-        let me = format!("agent:{}", self.cfg.project_id);
-        let targets = info.other_agents_mentioned(text, &me);
-        if targets.is_empty() {
-            return;
-        }
-        let mut h = host.lock().await;
-        let from_human = h.doc.message(user_msg_id).is_some_and(|m| {
-            m.rest
-                .get("sender")
-                .and_then(Value::as_str)
-                .is_none_or(|s| s.starts_with("user:") || s == "user")
+        let body = json!({
+            "message_id": user_msg_id,
+            "agent_id": self.cfg.project_id,
+            "handle": self.identity.handle(),
+            "decision": if verdict.wants { "reply" } else { "silent" },
+            "reason": verdict.reason,
+            "chosen": verdict.chosen,
+            "confidence": decision.map(|d| d.confidence),
+            "addressee": decision.map(|d| d.addressee.clone()),
+            "model": decision.map(|d| d.model.clone()),
+            "latency_ms": decision.map(|d| d.latency_ms),
+            "cost_usd": decision.and_then(|d| d.cost_usd),
+            "at": now_ms(),
         });
-        if !from_human {
-            tracing::info!(
-                chat_id,
-                ?targets,
-                "agent mention not dispatched: my turn was itself a reply to an agent (one hop)"
-            );
-            return;
-        }
-        let cmd_id = h.doc.push_command(
-            "send",
-            json!({ "messageId": reply_msg_id, "agentMention": true, "from": me }),
-            &self.cfg.device_id,
-        );
-        h.mark_seen(&cmd_id);
-        tracing::info!(chat_id, ?targets, cmd = %cmd_id, "agent mention dispatched as a send for the named agents");
-        let _ = self.store.t3_append(
-            chat_id,
-            None,
-            Some(chat_id),
-            "agent_mention",
-            Some("system"),
-            &format!("my reply @mentions {} agent(s); send pushed", targets.len()),
-            Some(&json!({ "message_id": reply_msg_id, "targets": targets, "command_id": cmd_id })),
-        );
+        let url = format!("{}/box/people/{chat_id}/gate", self.cfg.relay_url);
+        let client = self.http_client().clone();
+        let token = self.cfg.box_token.clone();
+        let chat = chat_id.to_owned();
+        tokio::spawn(async move {
+            match client
+                .post(url)
+                .bearer_auth(token)
+                .timeout(std::time::Duration::from_secs(5))
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(r) if r.status().is_success() || r.status().as_u16() == 404 => {}
+                Ok(r) => tracing::debug!(chat = %chat, status = %r.status(), "gate report refused"),
+                Err(e) => tracing::debug!(chat = %chat, error = %e, "gate report failed"),
+            }
+        });
     }
-
     /// Prelude for the prompt and the asker for attribution, when `chat_id` is a people chat.
     /// In a group (several humans or several agents), the shared transcript is injected so this
     /// agent can read every human and agent line — not only the messages that addressed it
@@ -1994,7 +1378,7 @@ impl Agent {
             String::new()
         } else {
             format!(
-                "; other agents present (they answer when @mentioned or when the reply gate picks them): {}",
+                "; other agents present (the reply gate decides who answers a person's message; writing @their-handle in your reply does not reach them — use send_message when you need them): {}",
                 other_agents.join(", ")
             )
         };
@@ -2033,8 +1417,31 @@ impl Agent {
                 "This message is from {spoken} (not matched to a member of this chat; treat them as a guest, not as {owner_spoken}); address them as {spoken}, never as an @handle"
             ),
         };
+        // The judge already decided this message is for this agent (`people_gate`); the prompt
+        // must not second-guess it. Proof run 2026-10-28 02:12 (image 0.1.170): the gate said
+        // reply to "To any of the available agents: what is the capital of Portugal?" and to
+        // "Hezbola-rg? 😂", and the talking model then routed an empty reply because the old
+        // sentence told it to stay silent when "only mentioned". Silence stays available for a
+        // genuine nothing-to-say, and a silence announcement is still never posted.
+        let reply_clause = match self.people.gate_verdict(user_msg_id) {
+            // Woken by the mention alone (the judge was unsure, picked someone else, or failed):
+            // the agent reads the line itself; "thanks @you" or "@you has the notes" still
+            // gets no post (eval g7).
+            Some(GateVerdict {
+                wants: true,
+                woken_by_mention: Some(_),
+                ..
+            }) => format!(
+                "{spoken} @mentioned you; a person's @mention always reaches you, even when the reply gate was unsure. Read it and do your part: if it asks you anything or asks you to do something, answer or act (\"talk to @another-agent\" means reach that agent with send_message); a bare name ping (\"{my_slug}?\", \"hey {my_slug}\") wants a one-line presence answer. If it only thanks you, talks about you or passes something along, route `reply` with `reply` empty and no words — never post that you are staying silent, that the question is for someone else, or that you have nothing to add"
+            ),
+            Some(v) if v.wants => format!(
+                "The reply gate has already judged that this message is for you ({}); answer it plainly. A bare name ping (\"{my_slug}?\", \"hey {my_slug}\") wants a one-line presence answer, not silence. Only if you truly have nothing to say, route `reply` with `reply` empty and no words — never post that you are staying silent, that the question is for someone else, or that you have nothing to add",
+                v.reason
+            ),
+            _ => "If this message is for someone else, or only mentions or refers to you without asking you anything, say nothing: route `reply` with `reply` empty and no words — never post that you are staying silent, that the question is for someone else, or that you have nothing to add".to_owned(),
+        };
         let mut prelude = format!(
-            "[People chat with {}. You are @{my_slug} (the agent of {owner_spoken}'s Project \"{}\"){}.{} {from_clause}. Your reply is read by everyone in the chat. If this message is for someone else, or only mentions or refers to you without asking you anything, say nothing: route `reply` with `reply` empty and no words — never post that you are staying silent, that the question is for someone else, or that you have nothing to add.{secrets_rule}]\n",
+            "[People chat with {}. You are @{my_slug} (the agent of {owner_spoken}'s Project \"{}\"){}.{} {from_clause}. Your reply is read by everyone in the chat. {reply_clause}.{secrets_rule}]\n",
             people.join(", "),
             self.cfg.project_id,
             others_clause,
@@ -2048,6 +1455,36 @@ impl Agent {
         }
         prelude.push('\n');
         Some(prelude)
+    }
+
+    /// The recent lines of people chat `chat_id`, rendered for a prompt, when this agent is a
+    /// member of it: what another agent's `send_message` from that chat was about (Arbonites
+    /// 2026-10-28: Bubble's "Jacob asked me to talk to you" reached Bob with nothing of the group,
+    /// so Bob asked "What's on Jacob's mind?"). `None` for chats this agent is not in — a
+    /// sender's room is never shown to a non-member.
+    pub(crate) async fn people_chat_window(&self, chat_id: &str) -> Option<String> {
+        let info = self.people.info(chat_id)?;
+        let host = self.sync.host(chat_id).await?;
+        let handles = agent_handles(&info, &self.cfg.project_id, &self.identity.handle());
+        let recent = {
+            let h = host.lock().await;
+            recent_people_context_for(
+                &h.doc.messages(),
+                "",
+                RESPOND_RECENT_MAX,
+                &info,
+                chat_id,
+                &handles,
+            )
+        };
+        if recent.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "{}{}",
+            crate::truncate::render_window(&recent),
+            crate::truncate::window_note(chat_id)
+        ))
     }
 
     /// Projects together (D72 step 3): in this Project's own chats, a message written by a guest
@@ -2326,6 +1763,21 @@ impl Agent {
         Some(ReplyAttribution { fields })
     }
 
+    /// Who wrote a row in a people chat, without the asker and reply fields: what a control row
+    /// (an agent-to-agent hand-off, a job's host row) carries so no reader sees a line from a
+    /// bare `agent` (Arbonites, 2026-10-28), while it still does not count as the answer.
+    pub fn people_sender_fields(&self, chat_id: &str) -> Option<Vec<(&'static str, Value)>> {
+        let attr = self.people_reply_fields(chat_id)?;
+        Some(
+            attr.fields
+                .into_iter()
+                .filter(|(k, _)| {
+                    !matches!(*k, "askedBy" | "askedByHandle" | "inReplyTo" | "replyTo")
+                })
+                .collect(),
+        )
+    }
+
     /// The agent was removed while answering here: abort that turn.
     async fn handle_people_stop(self: &std::sync::Arc<Self>, chat_id: &str) -> Result<()> {
         let running = self
@@ -2341,6 +1793,28 @@ impl Agent {
     }
 }
 
+/// What a freshly opened people room is told about its past (#2127/#2120). `full` = the room
+/// came from the boot/registry listing; `joined_at` = the relay's membership time (0 = unknown).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum JoinMarks {
+    /// Commands issued before the relay's membership time are never run; everything after it is.
+    JoinedAt(i64),
+    /// No membership time from the relay and the add came while running: "now" is the line.
+    LateJoinNow,
+    /// A listing at boot with no membership time: the room's whole past is replayed as usual.
+    None,
+}
+
+pub(crate) fn people_join_marks(full: bool, joined_at: i64) -> JoinMarks {
+    if joined_at > 0 {
+        JoinMarks::JoinedAt(joined_at)
+    } else if !full {
+        JoinMarks::LateJoinNow
+    } else {
+        JoinMarks::None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Mention routing: which human messages a shared agent answers.
@@ -2348,6 +1822,20 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// #2127/#2120: a push that opens a people room must not discard the row that caused it —
+    /// the relay's joined_at is the line, "now" only when the relay gave none.
+    #[test]
+    fn a_push_join_keeps_rows_issued_after_the_membership_time() {
+        // people_agent_added / people_chat_open push, relay knows when we joined
+        assert_eq!(people_join_marks(false, 1_700), JoinMarks::JoinedAt(1_700));
+        // boot/registry listing, relay knows
+        assert_eq!(people_join_marks(true, 1_700), JoinMarks::JoinedAt(1_700));
+        // push with no membership time: the old rule, now is the line
+        assert_eq!(people_join_marks(false, 0), JoinMarks::LateJoinNow);
+        // boot listing with no membership time: nothing to mark
+        assert_eq!(people_join_marks(true, 0), JoinMarks::None);
+    }
 
     pub(super) fn msg(text: &str, extra: Value) -> MessageView {
         let mut rest = json!({ "sender": "user:gh_2", "senderHandle": "sam" });
@@ -2366,389 +1854,6 @@ mod tests {
     }
 
     const P: &str = "01HPROJ";
-
-    #[test]
-    fn mention_routing() {
-        // Resolved mention from the composer.
-        assert!(addressed(
-            &msg("hey", json!({ "mentions": ["agent:01HPROJ"] })),
-            P,
-            "research",
-            false,
-            false,
-            false
-        ));
-        assert!(!addressed(
-            &msg("hey", json!({ "mentions": ["agent:OTHER"] })),
-            P,
-            "research",
-            false,
-            false,
-            false
-        ));
-        // Text mention by slug, with word boundary.
-        assert!(addressed(
-            &msg("@research what do you think?", json!({})),
-            P,
-            "research",
-            false,
-            false,
-            false
-        ));
-        assert!(addressed(
-            &msg("ping @Research!", json!({})),
-            P,
-            "research",
-            false,
-            false,
-            false
-        ));
-        assert!(!addressed(
-            &msg("@research-2 is another one", json!({})),
-            P,
-            "research",
-            false,
-            false,
-            false
-        ));
-        assert!(!addressed(
-            &msg("no mention here", json!({})),
-            P,
-            "research",
-            false,
-            false,
-            false
-        ));
-        // @arbos only when this is the only agent in the chat.
-        assert!(addressed(
-            &msg("@arbos help", json!({})),
-            P,
-            "research",
-            true,
-            false,
-            false
-        ));
-        assert!(!addressed(
-            &msg("@arbos help", json!({})),
-            P,
-            "research",
-            false,
-            false,
-            false
-        ));
-        // Reply-to one of my messages, or the every-message policy.
-        assert!(addressed(
-            &msg("and this?", json!({})),
-            P,
-            "research",
-            false,
-            false,
-            true
-        ));
-        assert!(addressed(
-            &msg("anything", json!({})),
-            P,
-            "research",
-            false,
-            true,
-            false
-        ));
-        // Agents' and other roles' messages never drive a turn.
-        let mut from_agent = msg("@research", json!({}));
-        from_agent.rest["sender"] = json!("agent:OTHER");
-        assert!(!addressed(&from_agent, P, "research", true, true, true));
-        let mut assistant = msg("@research", json!({}));
-        assistant.role = "assistant".into();
-        assert!(!addressed(&assistant, P, "research", true, true, true));
-        // Person-only mentions: chip (no @ in prose) or leading @handle — for humans.
-        assert!(addressed_only_to_people(&msg(
-            "Call?",
-            json!({ "mentions": ["user:gh_ken"] })
-        )));
-        assert!(addressed_only_to_people(&msg(
-            "@ken Call?",
-            json!({ "mentions": ["user:gh_ken"] })
-        )));
-        assert!(addressed_only_to_people(&msg(
-            "Yo @ken",
-            json!({ "mentions": ["user:gh_ken"] })
-        )));
-        // Mid-line @person is a reference, not a people-only address.
-        assert!(!addressed_only_to_people(&msg(
-            "Would you rent a machine if @kenobijon asked ?",
-            json!({ "mentions": ["user:kenobijon"] })
-        )));
-        assert!(!addressed_only_to_people(&msg(
-            "can you see @jo?",
-            json!({ "mentions": ["user:jo"] })
-        )));
-        assert!(!addressed_only_to_people(&msg(
-            "Call?",
-            json!({ "mentions": ["user:gh_ken", "agent:01HPROJ"] })
-        )));
-        assert!(!addressed_only_to_people(&msg("Call?", json!({}))));
-        assert!(!addressed_only_to_people(&msg(
-            "hey",
-            json!({ "mentions": ["agent:01HPROJ"] })
-        )));
-
-        // Leading person name — even with a sticky agent mention — is for humans.
-        let info = PeopleChatInfo {
-            members: vec![
-                json!({ "member": "user:allan", "handle": "catoneone", "name": "Allan" }),
-                json!({ "member": "agent:01HPROJ", "handle": "bob" }),
-            ],
-            slug: "bob".into(),
-            kind: "dm".into(),
-            ..Default::default()
-        };
-        assert_eq!(leading_address_token("Allan?").as_deref(), Some("allan"));
-        assert_eq!(
-            leading_address_token("Allan. we are adding the notifications").as_deref(),
-            Some("allan")
-        );
-        assert_eq!(leading_address_token("Yo Allan").as_deref(), Some("allan"));
-        assert_eq!(
-            leading_address_token("can you see @jo?").as_deref(),
-            Some("can")
-        );
-        assert!(text_names_people(&msg("Allan?", json!({})), &info));
-        assert!(people_ping_not_for_agents(
-            &msg("Allan?", json!({ "mentions": ["agent:01HPROJ"] })),
-            &info
-        ));
-        // Mid-line person @handle keeps a sticky agent (bob still answers about @jo).
-        assert!(!people_ping_not_for_agents(
-            &msg(
-                "can you see @jo?",
-                json!({ "mentions": ["user:jo", "agent:01HPROJ"] })
-            ),
-            &info
-        ));
-        // Mid-line @person with no agent address is also not a people ping — the group
-        // decision model may still wake an agent (e.g. follow-up that names a human).
-        assert!(!people_ping_not_for_agents(
-            &msg(
-                "Would you rent a machine if @kenobijon asked ?",
-                json!({ "mentions": ["user:kenobijon"] })
-            ),
-            &info
-        ));
-        assert!(!people_ping_not_for_agents(
-            &msg(
-                "@bob what about Allan?",
-                json!({ "mentions": ["agent:01HPROJ"] })
-            ),
-            &info
-        ));
-        assert!(!people_ping_not_for_agents(
-            &msg("what's 2+2?", json!({ "mentions": ["agent:01HPROJ"] })),
-            &info
-        ));
-
-        // Bare agent name — same as @bob (DM + group). Person @handle still wins on collision;
-        // a person's display name alone does not beat the agent handle/slug.
-        assert!(text_names_this_agent(&msg("Bob?", json!({})), &info, P));
-        assert!(text_names_this_agent(
-            &msg("hey Bob what do you think?", json!({})),
-            &info,
-            P
-        ));
-        assert!(!text_names_this_agent(&msg("Allan?", json!({})), &info, P));
-        assert!(!text_names_this_agent(
-            &msg("can you see @jo?", json!({})),
-            &info,
-            P
-        ));
-        assert!(!text_names_this_agent(
-            &msg("Bob?", json!({})),
-            &info,
-            "OTHER"
-        ));
-        assert!(text_addresses_agents_collectively(&msg(
-            "can the agents respond?",
-            json!({})
-        )));
-        assert!(text_addresses_agents_collectively(&msg(
-            "hey agents",
-            json!({})
-        )));
-        assert!(!text_addresses_agents_collectively(&msg(
-            "Allan?",
-            json!({})
-        )));
-
-        // Display-name collision: human @unarbos named "Arbos", agent @arbos — bare "Arbos"
-        // is a clear agent reference (and `@arbos` already works via the sole-agent alias).
-        let arbos_chat = PeopleChatInfo {
-            members: vec![
-                json!({ "member": "user:unarbos", "handle": "unarbos", "name": "Arbos" }),
-                json!({ "member": "user:const", "handle": "const", "name": "Const" }),
-                json!({
-                    "member": "agent:01HPROJ",
-                    "handle": "arbos",
-                    "project": { "name": "Arbos" }
-                }),
-            ],
-            slug: "arbos".into(),
-            kind: "group".into(),
-            ..Default::default()
-        };
-        assert!(text_names_people(
-            &msg("Arbos what is your name", json!({})),
-            &arbos_chat
-        ));
-        assert!(!text_names_people_by_handle(
-            &msg("Arbos what is your name", json!({})),
-            &arbos_chat
-        ));
-        assert!(text_names_any_agent_handle(
-            &msg("Arbos what is your name", json!({})),
-            &arbos_chat
-        ));
-        assert!(!people_ping_not_for_agents(
-            &msg("Arbos what is your name", json!({})),
-            &arbos_chat
-        ));
-        assert!(!people_ping_not_for_agents(
-            &msg("Arbos", json!({})),
-            &arbos_chat
-        ));
-        assert!(!people_ping_not_for_agents(
-            &msg("Hey Arbos", json!({})),
-            &arbos_chat
-        ));
-        assert!(text_names_this_agent(
-            &msg("Arbos what is your name", json!({})),
-            &arbos_chat,
-            P
-        ));
-        assert!(text_names_this_agent(
-            &msg("Arbos", json!({})),
-            &arbos_chat,
-            P
-        ));
-        assert!(text_names_this_agent(
-            &msg("Hey Arbos", json!({})),
-            &arbos_chat,
-            P
-        ));
-        // Person @handle still silences the agent.
-        assert!(people_ping_not_for_agents(
-            &msg("unarbos?", json!({})),
-            &arbos_chat
-        ));
-        assert!(!text_names_this_agent(
-            &msg("unarbos?", json!({})),
-            &arbos_chat,
-            P
-        ));
-
-        // Shared address: collective phrase → every agent; two @mentions → those two.
-        let group = PeopleChatInfo {
-            members: vec![
-                json!({ "member": "agent:01HPROJ", "handle": "bob" }),
-                json!({ "member": "agent:OTHER", "handle": "arbos" }),
-                json!({ "member": "user:gh_2", "handle": "sam" }),
-            ],
-            slug: "bob".into(),
-            kind: "group".into(),
-            ..Default::default()
-        };
-        let shared = people_shared_agent_ids(&msg("Hey agents? Say hi", json!({})), &group);
-        assert_eq!(shared.len(), 2);
-        assert!(shared.contains(&"01HPROJ".to_string()));
-        assert!(shared.contains(&"OTHER".to_string()));
-        let two = people_shared_agent_ids(
-            &msg(
-                "hi",
-                json!({ "mentions": ["agent:01HPROJ", "agent:OTHER"] }),
-            ),
-            &group,
-        );
-        assert_eq!(two.len(), 2);
-        assert!(people_shared_agent_ids(
-            &msg("hi", json!({ "mentions": ["agent:01HPROJ"] })),
-            &group
-        )
-        .is_empty());
-    }
-
-    /// Arbonites, 2026-10-23 (#vault-approval-card): "@gigchadagent you still borked?" reached
-    /// hjkb as a steer while its own turn ran, and hjkb answered. A message that names another
-    /// agent — by resolved mention, by @slug, or by its bare name at the start — is that agent's
-    /// alone: this agent stays silent and the decision model is not asked. Naming this agent too
-    /// (both, or "hey agents") still counts as addressed.
-    #[test]
-    fn message_for_another_agent_is_not_ours() {
-        let arbonites = PeopleChatInfo {
-            members: vec![
-                json!({ "member": "agent:01HPROJ", "handle": "hjkb", "project": { "name": "hjkb" } }),
-                json!({ "member": "agent:GIG", "handle": "gigchadagent", "project": { "name": "GigChadAgent" } }),
-                json!({ "member": "user:gh_2", "handle": "unarbos", "name": "Arbos" }),
-            ],
-            slug: "hjkb".into(),
-            kind: "group".into(),
-            ..Default::default()
-        };
-        // Resolved mention of the other agent (what the Mac composer sends).
-        assert!(addressed_to_other_agents_only(
-            &msg(
-                "@gigchadagent you still borked?",
-                json!({ "mentions": ["agent:GIG"] })
-            ),
-            &arbonites,
-            P
-        ));
-        // Prose-only @slug of the other agent; bare name at the start; the display-name slug.
-        assert!(addressed_to_other_agents_only(
-            &msg("hey @gigchadagent use your engy key", json!({})),
-            &arbonites,
-            P
-        ));
-        assert!(addressed_to_other_agents_only(
-            &msg("GigChadAgent, are you there?", json!({})),
-            &arbonites,
-            P
-        ));
-        assert!(addressed_to_other_agents_only(
-            &msg("ping @GigChadAgent", json!({})),
-            &arbonites,
-            P
-        ));
-        // Both named, or this agent named: not "other only".
-        assert!(!addressed_to_other_agents_only(
-            &msg("hi", json!({ "mentions": ["agent:GIG", "agent:01HPROJ"] })),
-            &arbonites,
-            P
-        ));
-        assert!(!addressed_to_other_agents_only(
-            &msg("@gigchadagent and @hjkb both try", json!({})),
-            &arbonites,
-            P
-        ));
-        assert!(!addressed_to_other_agents_only(
-            &msg("@hjkb try to use that engy key now", json!({})),
-            &arbonites,
-            P
-        ));
-        // Nobody named (plain group chatter) — the decision model may still run.
-        assert!(!addressed_to_other_agents_only(
-            &msg("done yet?", json!({})),
-            &arbonites,
-            P
-        ));
-        // A mid-line reference to the other agent, with no address to anyone, is chatter too
-        // ("ive borked @gigchadagent in this chat it seems" names it — theirs, not ours).
-        assert!(addressed_to_other_agents_only(
-            &msg(
-                "ive borked @gigchadagent in this chat it seems",
-                json!({ "mentions": ["agent:GIG"] })
-            ),
-            &arbonites,
-            P
-        ));
-    }
 
     /// #1580: a guest's row with no `sender: user:<id>` / `senderHandle` (older app, arbosctl)
     /// was read back as the owner's. The author comes from the row, its device, its handle, or
@@ -2843,56 +1948,43 @@ mod tests {
         assert_eq!(no_devices.author_of(&unknown), None);
     }
 
-    /// #1538: Jacob (@unarbos) named an agent "unarbos". The composer resolved `@unarbos` to
-    /// the person (`mentions=[user:…]`), which silenced every agent; typed resolution: a
-    /// `user:` chip for the sender is not a people ping, and the sender's own handle in the
-    /// prose does not count as naming a person — so the agent with that slug is addressed.
-    /// An `agent:` chip wakes the agent regardless; another person's chip still wins.
+    /// #1538: Jacob (@unarbos) named an agent "unarbos", and the composer resolved `@unarbos`
+    /// to the person. The mention classifier still reads `@unarbos` as a vocative for the agent
+    /// of that slug; the people roster the judge sees names the person as `Arbos (@unarbos)`,
+    /// so the collision is in front of the model instead of settled by a rule.
     #[test]
-    fn sender_own_handle_resolves_to_the_agent_of_that_slug() {
+    fn sender_own_handle_still_reads_as_a_mention_of_the_agent() {
         let arbonites = PeopleChatInfo {
             members: vec![
                 json!({ "member": "agent:01HPROJ", "handle": "unarbos", "project": { "name": "unarbos" } }),
                 json!({ "member": "user:gh_2", "handle": "unarbos", "name": "Arbos" }),
-                json!({ "member": "user:gh_9", "handle": "scout", "name": "Scout" }),
+                json!({ "member": "user:gh_9", "handle": "A", "name": "Scout" }),
             ],
             slug: "unarbos".into(),
             kind: "group".into(),
             ..Default::default()
         };
-        // The Mac resolved the slug to the sender themself.
         let m = msg(
             "@unarbos are you there?",
             json!({ "mentions": ["user:gh_2"] }),
         );
-        assert!(
-            !addressed_only_to_people(&m),
-            "a chip for the sender is not a people ping"
+        assert_eq!(
+            my_mention_role(&m, &arbonites, P, "unarbos"),
+            MentionRole::Addressed
         );
-        assert!(!text_names_people_by_handle(&m, &arbonites));
-        assert!(!people_ping_not_for_agents(&m, &arbonites));
-        assert!(
-            addressed(&m, P, "unarbos", false, false, false),
-            "the agent of that slug is addressed"
+        assert_eq!(
+            arbonites.people_labels(),
+            vec!["Arbos (@unarbos)".to_string(), "Scout (@A)".to_string()]
         );
-        // A typed agent chip wakes the agent, whoever shares the slug.
-        assert!(addressed(
-            &msg("hey", json!({ "mentions": ["agent:01HPROJ"] })),
-            P,
-            "unarbos",
-            false,
-            false,
-            false
-        ));
-        // Someone else pinging the person by chip: still the person's, not ours.
-        let other = msg(
-            "@unarbos can you look?",
-            json!({ "sender": "user:gh_9", "mentions": ["user:gh_2"] }),
-        );
-        assert!(addressed_only_to_people(&other));
-        assert!(
-            people_ping_not_for_agents(&other, &arbonites)
-                || text_mentions_agent(&other, &arbonites)
+        // A typed agent chip with no handle in the prose: referenced, for the judge to weigh.
+        assert_eq!(
+            my_mention_role(
+                &msg("hey", json!({ "mentions": ["agent:01HPROJ"] })),
+                &arbonites,
+                P,
+                "unarbos"
+            ),
+            MentionRole::Referenced
         );
     }
 
@@ -3146,24 +2238,77 @@ mod attribution_tests {
 
 #[cfg(test)]
 mod gate_record_tests {
-    //! Every mention-gate decision leaves a `gate` T3 row with its reason, so
-    //! `GET /projects/{id}/inspect` can answer "why did this agent stay quiet".
+    //! Every gate decision leaves a `gate` T3 row with the judge's reason, so
+    //! `GET /projects/{id}/inspect` can answer "why did this agent stay quiet"; the judge is
+    //! asked once per message; when it fails, unmentioned messages stay silent and mentioned
+    //! ones follow the one stated default.
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc as StdArc;
 
     use arbos_core::ids::ulid;
 
     use super::tests::msg;
     use super::*;
-    use crate::status::tests::test_agent;
+    use crate::status::tests::{test_agent, test_agent_with};
 
-    #[tokio::test]
-    async fn gate_decision_is_recorded_with_its_reason() {
-        let (agent, root) = test_agent().await;
-        let chat = "01TESTCHATGATERECORD000001";
+    /// A Decisions API that reads the message and answers like the judge would: `@doug …` is
+    /// for @doug, `@hjkb …` for @hjkb, "hey agents" for all, anything else for nobody.
+    fn mock_decisions(calls: StdArc<AtomicUsize>) -> axum::Router {
+        axum::Router::new().route(
+            "/proxy/decisions",
+            axum::routing::post(move |body: axum::body::Bytes| {
+                let calls = calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    let v: Value = serde_json::from_slice(&body).unwrap();
+                    let text = v["state"]["message"]["text"].as_str().unwrap_or("").to_lowercase();
+                    let names: Vec<String> = v["state"]["agents"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|a| a["name"].as_str().unwrap().to_owned())
+                        .collect();
+                    let mut probs = serde_json::Map::new();
+                    for n in &names {
+                        probs.insert(n.clone(), json!(0.0));
+                    }
+                    for opt in ["any one agent", "several agents", "all agents", "nobody"] {
+                        probs.insert(opt.into(), json!(0.0));
+                    }
+                    let pick = if text.starts_with("hey agents") {
+                        "all agents".to_owned()
+                    } else if let Some(n) = names.iter().find(|n| text.contains(n.as_str())) {
+                        n.clone()
+                    } else {
+                        "nobody".to_owned()
+                    };
+                    probs.insert(pick.clone(), json!(0.93));
+                    let mut answers = serde_json::Map::new();
+                    answers.insert(
+                        "addressee".into(),
+                        json!({ "type": "choice", "choice": pick, "probabilities": probs, "confidence": 0.93 }),
+                    );
+                    for (i, n) in names.iter().enumerate() {
+                        let p = if text.contains(n.as_str()) || text.starts_with("hey agents") { 0.9 } else { 0.1 };
+                        answers.insert(format!("reply_{i}"), json!({ "type": "noul", "noul": p }));
+                    }
+                    axum::Json(json!({
+                        "model": "typesafe/jev-1.14-test",
+                        "answers": answers,
+                        "usage": { "input_tokens": 600, "output_tokens": 80, "cost": 0.00003 }
+                    }))
+                }
+            }),
+        )
+    }
+
+    fn seed_group(agent: &Agent, chat: &str) {
         agent.people.chats.lock().expect("people").insert(
             chat.to_owned(),
             PeopleChatInfo {
                 members: vec![
-                    json!({ "member": "user:gh_2", "handle": "sam" }),
+                    json!({ "member": "user:gh_2", "handle": "sam", "name": "Sam" }),
                     json!({ "member": format!("agent:{}", agent.cfg.project_id), "handle": "doug" }),
                     json!({ "member": "agent:OTHER", "handle": "hjkb" }),
                 ],
@@ -3174,34 +2319,55 @@ mod gate_record_tests {
                 owner_address: None,
             },
         );
+    }
+
+    async fn append(host: &SharedHost, text: &str, mentions: Vec<String>) -> String {
+        let id = ulid();
+        let h = host.lock().await;
+        let opts = arbos_core::doc::UserMessageOpts {
+            mentions,
+            ..Default::default()
+        };
+        h.doc
+            .append_user_message(&id, text, "dev-mac", &opts)
+            .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn gate_decision_is_recorded_with_the_judges_reason_and_judged_once() {
+        let calls = StdArc::new(AtomicUsize::new(0));
+        let (agent, root) = test_agent_with(mock_decisions(calls.clone())).await;
+        let chat = "01TESTCHATGATERECORD000001";
+        seed_group(&agent, chat);
         let host = agent.sync.open_room(chat).await.unwrap();
-        let for_other = ulid();
-        let for_me = ulid();
-        {
-            let h = host.lock().await;
-            let opts = arbos_core::doc::UserMessageOpts {
-                mentions: vec!["agent:OTHER".into()],
-                ..Default::default()
-            };
-            h.doc
-                .append_user_message(&for_other, "@hjkb you still borked?", "dev-mac", &opts)
-                .unwrap();
-            let opts = arbos_core::doc::UserMessageOpts {
-                mentions: vec![format!("agent:{}", agent.cfg.project_id)],
-                ..Default::default()
-            };
-            h.doc
-                .append_user_message(&for_me, "@doug status?", "dev-mac", &opts)
-                .unwrap();
-        }
+        let me = format!("agent:{}", agent.cfg.project_id);
+        let for_other = append(&host, "@hjkb you still borked?", vec!["agent:OTHER".into()]).await;
+        let for_me = append(&host, "@doug status?", vec![me.clone()]).await;
+        let about = append(
+            &host,
+            "The agents are getting better but still buggy",
+            vec![],
+        )
+        .await;
+        let for_all = append(&host, "hey agents, who is here?", vec![]).await;
         assert!(!agent.people_wants(chat, &host, &for_other).await);
         assert!(agent.people_wants(chat, &host, &for_me).await);
+        assert!(!agent.people_wants(chat, &host, &about).await);
+        assert!(agent.people_wants(chat, &host, &for_all).await);
+        // Asked again (a steer, a retry, a catch-up): the cached verdict, no second call.
+        assert!(agent.people_wants(chat, &host, &for_me).await);
+        assert!(!agent.people_wants(chat, &host, &about).await);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            4,
+            "one judge call per message"
+        );
 
         let rows = agent.store.t3_after(0, Some(chat), 50).unwrap();
         let gates: Vec<&(crate::store::T3Row, Option<Value>)> =
             rows.iter().filter(|(r, _)| r.kind == "gate").collect();
-        assert_eq!(gates.len(), 2, "{rows:?}");
-        // Two rows in one millisecond sort by ulid, not by write order: pick by message id.
+        assert_eq!(gates.len(), 4, "{rows:?}");
         let by_msg = |id: &str| {
             gates
                 .iter()
@@ -3210,15 +2376,39 @@ mod gate_record_tests {
                 .expect("gate row for the message")
         };
         let (skip, skip_data) = by_msg(&for_other);
-        assert!(skip
-            .text
-            .starts_with("gate skip: addressed to another agent only"));
+        assert_eq!(
+            skip.text,
+            "gate skip: judge: for=@hjkb (0.93); not me → silent"
+        );
         let skip_data = skip_data.as_ref().expect("gate row carries its facts");
         assert_eq!(skip_data["reply"], false);
-        assert_eq!(skip_data["message_id"], for_other);
         assert_eq!(skip_data["handle"], "doug");
+        assert_eq!(skip_data["chosen"], json!(["OTHER"]));
         let (reply, _) = by_msg(&for_me);
-        assert!(reply.text.starts_with("gate reply: addressed to me"));
+        assert_eq!(
+            reply.text,
+            "gate reply: judge: for=@doug (0.93) ≥ 0.60 → reply"
+        );
+        let (quiet, _) = by_msg(&about);
+        assert_eq!(
+            quiet.text,
+            "gate skip: judge: for=nobody (0.93); me 0.10 → silent"
+        );
+        let (all, all_data) = by_msg(&for_all);
+        assert_eq!(
+            all.text,
+            "gate reply: judge: for=all agents (0.93) ≥ 0.60 → everyone replies"
+        );
+        assert_eq!(
+            all_data.as_ref().unwrap()["chosen"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        // The shared send stays open for @hjkb until it replies.
+        assert!(agent.people_shared_send_open(chat, &host, &for_all).await);
+        assert!(!agent.people_shared_send_open(chat, &host, &for_me).await);
         // The window honours the chat filter and the time cursor.
         assert!(agent
             .store
@@ -3230,159 +2420,389 @@ mod gate_record_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Jacob (2026-10-23 23:54, Arbonites): "@testagent who is in this chat" was answered, the
-    /// un-mentioned "How many messages are there?" ten seconds later was not (jev 0.47 < 0.50).
-    /// @mentions set the order, never a filter: a follow-up from the person the agent just
-    /// answered is for the agent, decision model or not.
-    #[test]
-    fn follow_up_in_an_active_exchange_is_for_me() {
-        const ME: &str = "agent:01HPROJ";
-        let t0 = 1_792_799_600_000_i64;
-        let row = |id: &str, role: &str, sender: &str, at: i64, extra: Value| {
-            let mut rest = json!({ "sender": sender, "createdAt": at });
-            if let (Some(r), Some(e)) = (rest.as_object_mut(), extra.as_object()) {
-                for (k, v) in e {
-                    r.insert(k.clone(), v.clone());
-                }
-            }
-            MessageView {
-                id: id.into(),
-                role: role.into(),
-                status: "done".into(),
-                parts: vec![json!({ "kind": "text", "text": "…" })],
-                rest,
-            }
-        };
-        let thread = vec![
-            row("q1", "user", "user:const", t0, json!({ "mentions": [ME] })),
-            row(
-                "a1",
-                "assistant",
-                ME,
-                t0 + 4_000,
-                json!({ "inReplyTo": "q1" }),
-            ),
-            row("q2", "user", "user:const", t0 + 14_000, json!({})),
-        ];
-        assert!(follow_up_in_active_exchange(&thread, "q2", ME));
-        // Someone else's question is not my follow-up.
-        let other = vec![
-            thread[0].clone(),
-            thread[1].clone(),
-            row("q2", "user", "user:sam", t0 + 14_000, json!({})),
-        ];
-        assert!(!follow_up_in_active_exchange(&other, "q2", ME));
-        // Another agent answered in between: the thread is theirs.
-        let taken = vec![
-            thread[0].clone(),
-            thread[1].clone(),
-            row("a2", "assistant", "agent:OTHER", t0 + 8_000, json!({})),
-            row("q2", "user", "user:const", t0 + 14_000, json!({})),
-        ];
-        assert!(!follow_up_in_active_exchange(&taken, "q2", ME));
-        // Another agent was called in between.
-        let called = vec![
-            thread[0].clone(),
-            thread[1].clone(),
-            row(
-                "q1b",
-                "user",
-                "user:const",
-                t0 + 8_000,
-                json!({ "mentions": ["agent:OTHER"] }),
-            ),
-            row("q2", "user", "user:const", t0 + 14_000, json!({})),
-        ];
-        assert!(!follow_up_in_active_exchange(&called, "q2", ME));
-        // Too late: the exchange is over.
-        let late = vec![
-            thread[0].clone(),
-            thread[1].clone(),
-            row(
-                "q2",
-                "user",
-                "user:const",
-                t0 + 4_000 + FOLLOW_UP_WINDOW_MS + 1,
-                json!({}),
-            ),
-        ];
-        assert!(!follow_up_in_active_exchange(&late, "q2", ME));
-        // Never answered anyone: nothing to follow up on.
-        let cold = vec![row("q2", "user", "user:const", t0, json!({}))];
-        assert!(!follow_up_in_active_exchange(&cold, "q2", ME));
-    }
-
-    /// 2026-10-24 00:48: "can you send a message to @testagent ?" woke TestAgent ("Arbos, I am
-    /// @testagent…") and "@testagent2 I want you to send a message to @testagent" woke both.
-    /// A mention after "to" in a send/pass/forward phrase is the object, not the addressee.
-    #[test]
-    fn mention_after_send_to_is_the_object_not_the_addressee() {
-        assert!(mention_is_object(
-            "can you send a message to @testagent ?",
-            "testagent"
-        ));
-        assert!(mention_is_object(
-            "@testagent2 i want you to send a message to @testagent",
-            "testagent"
-        ));
-        assert!(!mention_is_object(
-            "@testagent2 i want you to send a message to @testagent",
-            "testagent2"
-        ));
-        assert!(mention_is_object("pass this on to @doug please", "doug"));
-        assert!(!mention_is_object("@doug are you there?", "doug"));
-        assert!(!mention_is_object("talk to @doug, he knows", "doug"));
-        assert!(!mention_is_object(
-            "@testagent ok then ask testagent2 what his favorite sauce is",
-            "testagent"
-        ));
-        // Through the gate: TestAgent is not addressed by the relay request even though the
-        // composer resolved its mention; TestAgent2 is.
-        let m = msg(
-            "@testagent2 I want you to send a message to @testagent",
-            json!({ "mentions": ["agent:TA2", "agent:TA"] }),
-        );
-        assert!(!addressed(&m, "TA", "testagent", false, false, false));
-        assert!(addressed(&m, "TA2", "testagent2", false, false, false));
-        let m = msg(
-            "can you send a message to @testagent ?",
-            json!({ "mentions": ["agent:TA"] }),
-        );
-        assert!(!addressed(&m, "TA", "testagent", false, false, false));
-    }
-
-    /// An agent's bubble that @mentions another agent of the chat is dispatched as a `send`
-    /// by its box; the named agent's gate accepts it (one hop), nobody else's does.
-    #[test]
-    fn another_agents_mention_names_me() {
-        let info = PeopleChatInfo {
-            members: vec![
-                json!({ "member": "user:const", "handle": "const" }),
-                json!({ "member": "agent:TA", "handle": "testagent" }),
-                json!({ "member": "agent:TA2", "handle": "testagent2" }),
-            ],
-            slug: "testagent".into(),
-            kind: "group".into(),
-            ..Default::default()
-        };
-        let mut m = msg(
-            "@testagent, Arbos asked me to pass this on: please confirm.",
-            json!({ "sender": "agent:TA2", "senderHandle": "testagent2" }),
-        );
-        m.role = "assistant".into();
-        assert!(text_mentions_this_agent(&m, &info, "TA"));
-        assert_eq!(
-            info.other_agents_mentioned(&m.text(), "agent:TA2"),
-            vec!["TA".to_owned()]
+    /// No judge (the mock relay has no `/proxy/decisions`): an unmentioned message is silence;
+    /// every @mention by a person wakes the agent, vocative or not ("thanks @doug").
+    #[tokio::test]
+    async fn judge_failure_fails_closed_unless_mentioned() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATGATEFAILS0000001";
+        seed_group(&agent, chat);
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let me = format!("agent:{}", agent.cfg.project_id);
+        let plain = append(&host, "the agents are getting better", vec![]).await;
+        let vocative = append(&host, "@doug status", vec![me.clone()]).await;
+        let thanks = append(&host, "thanks @doug", vec![me.clone()]).await;
+        let asked = append(&host, "did you see this @doug?", vec![me.clone()]).await;
+        assert!(!agent.people_wants(chat, &host, &plain).await);
+        assert!(agent.people_wants(chat, &host, &vocative).await);
+        assert!(agent.people_wants(chat, &host, &thanks).await);
+        assert!(agent.people_wants(chat, &host, &asked).await);
+        let reasons: HashMap<String, String> = agent
+            .store
+            .t3_after(0, Some(chat), 50)
+            .unwrap()
+            .into_iter()
+            .filter(|(r, _)| r.kind == "gate")
+            .filter_map(|(r, d)| Some((d?["message_id"].as_str()?.to_owned(), r.text)))
+            .collect();
+        assert!(
+            reasons[&plain].contains("unmentioned → silent (fail closed)"),
+            "{reasons:?}"
         );
         assert!(
-            info.other_agents_mentioned("@testagent2 done", "agent:TA2")
-                .is_empty(),
-            "my own handle is not a target"
+            reasons[&vocative].contains("@mention addressed by a person → reply"),
+            "{reasons:?}"
         );
-        assert!(info
-            .other_agents_mentioned("nothing to see", "agent:TA2")
-            .is_empty());
+        assert!(
+            reasons[&thanks].contains("@mention object by a person → reply"),
+            "{reasons:?}"
+        );
+        assert!(
+            reasons[&asked].contains("by a person → reply"),
+            "{reasons:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// After a `reply` verdict the turn prelude tells the model the gate already decided and
+    /// to answer; without one it keeps the old "say nothing if not for you" sentence.
+    #[tokio::test]
+    async fn prelude_follows_the_judges_verdict() {
+        let calls = StdArc::new(AtomicUsize::new(0));
+        let (agent, root) = test_agent_with(mock_decisions(calls)).await;
+        let chat = "01TESTCHATGATEPRELUDE00001";
+        seed_group(&agent, chat);
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let me = format!("agent:{}", agent.cfg.project_id);
+        let asked = append(&host, "@doug what is the capital of Portugal?", vec![me]).await;
+        assert!(agent.people_wants(chat, &host, &asked).await);
+        let prelude = agent
+            .people_turn_context(chat, &host, &asked)
+            .await
+            .unwrap();
+        assert!(
+            prelude.contains("The reply gate has already judged that this message is for you (judge: for=@doug (0.93) ≥ 0.60 → reply); answer it plainly."),
+            "{prelude}"
+        );
+        assert!(prelude.contains("never post that you are staying silent"));
+        // 0.1.173 proof: "Hezbola-rg? 😂" passed the gate (0.81) and the talking model still routed
+        // an empty reply; a name ping is an ask for presence.
+        assert!(
+            prelude.contains("A bare name ping (\"doug?\", \"hey doug\") wants a one-line presence answer, not silence."),
+            "{prelude}"
+        );
+        let unjudged = append(&host, "morning", vec![]).await;
+        let prelude = agent
+            .people_turn_context(chat, &host, &unjudged)
+            .await
+            .unwrap();
+        assert!(
+            prelude.contains("If this message is for someone else"),
+            "{prelude}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The owner's `every_message` setting is not a heuristic: no judge call, every human
+    /// line is answered.
+    #[tokio::test]
+    async fn every_message_policy_skips_the_judge() {
+        let calls = StdArc::new(AtomicUsize::new(0));
+        let (agent, root) = test_agent_with(mock_decisions(calls.clone())).await;
+        let chat = "01TESTCHATGATEEVERY0000001";
+        seed_group(&agent, chat);
+        agent
+            .people
+            .chats
+            .lock()
+            .expect("people")
+            .get_mut(chat)
+            .unwrap()
+            .settings = json!({ "reply_policy": "every_message" });
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let plain = append(&host, "morning all", vec![]).await;
+        assert!(agent.people_wants(chat, &host, &plain).await);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #2207 (long-task h4, image 0.1.177): the judge chose lane-b alone for "@lane-b can you
+    /// communicate directly with @lane-a?", then lane-b's reply said "I can message @lane-a
+    /// directly …" and that bubble was dispatched as a `send` for lane-a, who answered. An
+    /// agent's row never wakes another agent — not by @handle, not by chip, not by reply —
+    /// whoever it names; agents reach each other only through `send_message`.
+    #[tokio::test]
+    async fn an_agents_bubble_never_wakes_another_agent() {
+        let calls = StdArc::new(AtomicUsize::new(0));
+        let (agent, root) = test_agent_with(mock_decisions(calls.clone())).await;
+        let chat = "01TESTCHATAGENTROW00000001";
+        seed_group(&agent, chat);
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let me = format!("agent:{}", agent.cfg.project_id);
+        let (vocative, chip, reply_to_mine) = {
+            let h = host.lock().await;
+            let mut ids = Vec::new();
+            for (text, mentions) in [
+                (
+                    "@doug, Arbos asked me to pass this on: please confirm.",
+                    vec![me.clone()],
+                ),
+                (
+                    "I can message doug directly and relay the answer here.",
+                    vec![me.clone()],
+                ),
+                ("Agreed with what @doug said above.", vec![]),
+            ] {
+                let id = ulid();
+                h.doc.start_assistant_message(&id, "q", "box:other");
+                h.doc.set_message_fields(
+                    &id,
+                    &[
+                        ("sender", json!("agent:OTHER")),
+                        ("senderHandle", json!("hjkb")),
+                        ("mentions", json!(mentions)),
+                    ],
+                );
+                let part = h.doc.add_text_part(&id, "text").unwrap();
+                h.doc.append_text(&id, &part, text);
+                h.doc
+                    .finish_message(&id, arbos_core::doc::MessageStatus::Done);
+                ids.push(id);
+            }
+            (ids[0].clone(), ids[1].clone(), ids[2].clone())
+        };
+        for id in [&vocative, &chip, &reply_to_mine] {
+            assert!(!agent.people_wants(chat, &host, id).await, "{id}");
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "no judge call for an agent's row"
+        );
+        let reasons: Vec<String> = agent
+            .store
+            .t3_after(0, Some(chat), 50)
+            .unwrap()
+            .into_iter()
+            .filter(|(r, _)| r.kind == "gate")
+            .map(|(r, _)| r.text)
+            .collect();
+        assert_eq!(reasons.len(), 3);
+        assert!(reasons.iter().all(|r| {
+            r == "gate skip: another agent's row: agents reach each other only through send_message"
+        }));
+        // And nothing was pushed as a command for the named agent.
+        assert!(host
+            .lock()
+            .await
+            .doc
+            .commands()
+            .iter()
+            .all(|c| c.payload.get("agentMention").is_none()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A judge that is never sure: the first @mentioned agent at 0.48 (under every threshold),
+    /// like the live call on "@bob talk to @bubble" (Arbonites 2026-10-28 21:48:14 UTC).
+    fn unsure_decisions(calls: StdArc<AtomicUsize>) -> axum::Router {
+        axum::Router::new().route(
+            "/proxy/decisions",
+            axum::routing::post(move |body: axum::body::Bytes| {
+                let calls = calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    let v: Value = serde_json::from_slice(&body).unwrap();
+                    let text = v["state"]["message"]["text"].as_str().unwrap_or("").to_lowercase();
+                    let names: Vec<String> = v["state"]["agents"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|a| a["name"].as_str().unwrap().to_owned())
+                        .collect();
+                    let first = names
+                        .iter()
+                        .filter_map(|n| text.find(n.as_str()).map(|i| (i, n.clone())))
+                        .min()
+                        .map(|(_, n)| n)
+                        .unwrap_or_else(|| "nobody".to_owned());
+                    let mut probs = serde_json::Map::new();
+                    for n in &names {
+                        probs.insert(n.clone(), json!(if *n == first { 0.48 } else { 0.15 }));
+                    }
+                    for opt in ["any one agent", "several agents", "all agents"] {
+                        probs.insert(opt.into(), json!(0.02));
+                    }
+                    probs.insert("nobody".into(), json!(if first == "nobody" { 0.48 } else { 0.2 }));
+                    let mut answers = serde_json::Map::new();
+                    answers.insert(
+                        "addressee".into(),
+                        json!({ "type": "choice", "choice": first, "probabilities": probs, "confidence": 0.48 }),
+                    );
+                    for i in 0..names.len() {
+                        answers.insert(format!("reply_{i}"), json!({ "type": "noul", "noul": 0.3 }));
+                    }
+                    axum::Json(json!({
+                        "model": "typesafe/jev-1.14-test",
+                        "answers": answers,
+                        "usage": { "input_tokens": 600, "output_tokens": 80, "cost": 0.00003 }
+                    }))
+                }
+            }),
+        )
+    }
+
+    /// Jacob, Arbonites 2026-10-28: "@bob talk to @bubble" woke nobody — the judge said
+    /// `for=@bob (0.48) < 0.50` and both boxes stayed silent. A person's explicit @mentions
+    /// wake every agent they name (addressed or object, typed or chip, judge unsure or down);
+    /// the same words in an agent's bubble still wake no one (#2207).
+    #[tokio::test]
+    async fn a_persons_mentions_wake_every_mentioned_agent() {
+        let calls = StdArc::new(AtomicUsize::new(0));
+        let (agent, root) = test_agent_with(unsure_decisions(calls.clone())).await;
+        let chat = "01TESTCHATMULTIMENTION0001";
+        let me_id = agent.cfg.project_id.clone();
+        let me = format!("agent:{me_id}");
+        agent.people.chats.lock().expect("people").insert(
+            chat.to_owned(),
+            PeopleChatInfo {
+                members: vec![
+                    json!({ "member": "user:gh_2", "handle": "sam", "name": "Sam" }),
+                    json!({ "member": me.clone(), "handle": "doug" }),
+                    json!({ "member": "agent:OTHER", "handle": "hjkb" }),
+                    json!({ "member": "agent:THIRD", "handle": "lane" }),
+                    json!({ "member": "agent:QUIET", "handle": "quiet" }),
+                ],
+                settings: json!({ "reply_policy": "mention" }),
+                owner_user: "gh_1".into(),
+                slug: "doug".into(),
+                kind: "group".into(),
+                owner_address: None,
+            },
+        );
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let chosen_of = |id: &str| {
+            let mut c = agent.people.gate_verdict(id).expect("judged").chosen;
+            c.sort();
+            c
+        };
+
+        // Addressed first, another agent as the object: both wake.
+        let me_first = append(
+            &host,
+            "@doug talk to @hjkb",
+            vec![me.clone(), "agent:OTHER".into()],
+        )
+        .await;
+        assert!(agent.people_wants(chat, &host, &me_first).await);
+        assert_eq!(
+            chosen_of(&me_first),
+            vec![me_id.clone(), "OTHER".to_owned()]
+        );
+
+        // This agent is the object of a request to someone else: still woken.
+        let me_object = append(
+            &host,
+            "@hjkb talk to @doug",
+            vec!["agent:OTHER".into(), me.clone()],
+        )
+        .await;
+        assert!(agent.people_wants(chat, &host, &me_object).await);
+        assert_eq!(
+            chosen_of(&me_object),
+            vec![me_id.clone(), "OTHER".to_owned()]
+        );
+
+        // Three agents in one line, one by chip only; the unmentioned fourth is not added.
+        let three = append(
+            &host,
+            "@hjkb and @lane, loop in doug please",
+            vec!["agent:OTHER".into(), "agent:THIRD".into(), me.clone()],
+        )
+        .await;
+        assert!(agent.people_wants(chat, &host, &three).await);
+        assert_eq!(
+            chosen_of(&three),
+            vec![me_id.clone(), "OTHER".to_owned(), "THIRD".to_owned()]
+        );
+
+        // Not mentioned among several mentions: the unsure judge's silence stands.
+        let others_only = append(
+            &host,
+            "@hjkb talk to @lane",
+            vec!["agent:OTHER".into(), "agent:THIRD".into()],
+        )
+        .await;
+        assert!(!agent.people_wants(chat, &host, &others_only).await);
+        assert_eq!(
+            chosen_of(&others_only),
+            vec!["OTHER".to_owned(), "THIRD".to_owned()]
+        );
+
+        let reasons: HashMap<String, String> = agent
+            .store
+            .t3_after(0, Some(chat), 50)
+            .unwrap()
+            .into_iter()
+            .filter(|(r, _)| r.kind == "gate")
+            .filter_map(|(r, d)| Some((d?["message_id"].as_str()?.to_owned(), r.text)))
+            .collect();
+        assert!(
+            reasons[&me_first].contains("< 0.60")
+                && reasons[&me_first].ends_with("@mention addressed by a person → reply (a person's @mention always wakes the agent)"),
+            "{reasons:?}"
+        );
+        assert!(
+            reasons[&me_object].contains("not me")
+                && reasons[&me_object].contains("@mention object by a person → reply"),
+            "{reasons:?}"
+        );
+
+        // The prelude says why the agent woke, how to reach the other agent, and that a line
+        // that only names it still gets no post.
+        for id in [&me_first, &me_object] {
+            let prelude = agent.people_turn_context(chat, &host, id).await.unwrap();
+            assert!(
+                prelude.contains("Sam @mentioned you; a person's @mention always reaches you"),
+                "{prelude}"
+            );
+            assert!(
+                prelude.contains("means reach that agent with send_message"),
+                "{prelude}"
+            );
+            assert!(
+                prelude.contains("never post that you are staying silent"),
+                "{prelude}"
+            );
+            assert!(!prelude.contains("has already judged"), "{prelude}");
+        }
+
+        // #2207 stays: the same words in another agent's bubble wake nobody, no judge call.
+        let before = calls.load(Ordering::SeqCst);
+        let agent_row = {
+            let h = host.lock().await;
+            let id = ulid();
+            h.doc.start_assistant_message(&id, "q", "box:other");
+            h.doc.set_message_fields(
+                &id,
+                &[
+                    ("sender", json!("agent:OTHER")),
+                    ("senderHandle", json!("hjkb")),
+                    ("mentions", json!([me.clone(), "agent:THIRD"])),
+                ],
+            );
+            let part = h.doc.add_text_part(&id, "text").unwrap();
+            h.doc.append_text(&id, &part, "@doug talk to @lane");
+            h.doc
+                .finish_message(&id, arbos_core::doc::MessageStatus::Done);
+            id
+        };
+        assert!(!agent.people_wants(chat, &host, &agent_row).await);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            before,
+            "no judge call for an agent's row"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Jacob, Arbonites 2026-10-26: "@hezbola can you communicate directly with @doug-agent?"
@@ -3489,10 +2909,6 @@ mod gate_record_tests {
             my_mention_role(&m, &group, "HEZ", "hezbola"),
             MentionRole::Addressed
         );
-        assert!(another_agent_addressed(&m, &group, "DOUG"));
-        assert!(!another_agent_addressed(&m, &group, "HEZ"));
-        // Only Hezbola is owed a reply; the shared `send` closes when Hezbola answers.
-        assert_eq!(people_shared_agent_ids(&m, &group), vec!["HEZ".to_string()]);
         // A chip with no @handle in the prose: referenced, the decision model judges.
         let chip_only = msg(
             "can you check with him?",
@@ -3502,12 +2918,10 @@ mod gate_record_tests {
             my_mention_role(&chip_only, &group, "DOUG", "doug-agent"),
             MentionRole::Referenced
         );
-        // Bare leading name counts as addressing the other agent too.
         let bare = msg(
             "Hezbola, can you check with @doug-agent?",
             json!({ "sender": "user:gh_1" }),
         );
-        assert!(another_agent_addressed(&bare, &group, "DOUG"));
         assert_eq!(
             my_mention_role(&bare, &group, "DOUG", "doug-agent"),
             MentionRole::Object

@@ -80,12 +80,53 @@ pub async fn close_and_drain(state: &AppState, drain: Duration) -> (usize, usize
     }
 }
 
+/// One box task a restart would cut short: an upgrade/repair (`upgrading`) or a create.
+pub async fn box_work_in_flight(state: &AppState) -> Vec<serde_json::Value> {
+    let mut out: Vec<serde_json::Value> = state
+        .upgrading
+        .lock()
+        .await
+        .iter()
+        .map(|(u, st)| json!({ "user_id": u, "kind": "upgrade", "phase": st.phase, "since": st.since }))
+        .collect();
+    out.extend(
+        state
+            .restart
+            .creating
+            .lock()
+            .expect("creating lock")
+            .iter()
+            .map(|(u, since)| json!({ "user_id": u, "kind": "create", "since": since })),
+    );
+    out
+}
+
+/// Stop new upgrades and repairs from starting (#2262), and return the box work already in
+/// flight. Holds the `upgrading` lock across the flag and the read, so no run starts between them.
+pub async fn freeze_box_work(state: &AppState) -> Vec<serde_json::Value> {
+    {
+        let _running = state.upgrading.lock().await;
+        state.restart.box_work_frozen.store(true, Ordering::SeqCst);
+    }
+    box_work_in_flight(state).await
+}
+
+pub fn thaw_box_work(state: &AppState) {
+    state.restart.box_work_frozen.store(false, Ordering::SeqCst);
+}
+
+/// How long SIGTERM waits for in-flight box work before exiting; systemd kills at 90 s.
+const SIGTERM_BOX_WORK_WAIT: Duration = Duration::from_secs(60);
+
 #[derive(Deserialize, Default)]
 pub struct RestartBody {
     /// Seconds between the `restart_soon` notice and the close (default 10, max 60; 0 = no notice).
     pub notice_s: Option<u64>,
     /// Seconds to wait for the sockets to close (default 5, max 30).
     pub drain_s: Option<u64>,
+    /// Restart even with a box upgrade or create in flight (default false: answer 409
+    /// `box_work_in_flight` and change nothing, so the caller retries later).
+    pub force: Option<bool>,
 }
 
 /// `POST /admin/restart {"notice_s": 10, "drain_s": 5}` — notice, 1012 close, drain; answers when
@@ -110,6 +151,23 @@ pub async fn admin_restart(
             "a restart is already in progress",
         );
     }
+    let in_flight = freeze_box_work(&state).await;
+    if !in_flight.is_empty() {
+        if b.force != Some(true) {
+            thaw_box_work(&state);
+            tracing::info!(in_flight = %serde_json::Value::from(in_flight.clone()), "planned restart: refused, box work in flight");
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": "box_work_in_flight",
+                    "message": "a box upgrade or create is in flight; retry when it ends (or send force)",
+                    "in_flight": in_flight,
+                })),
+            )
+                .into_response();
+        }
+        tracing::warn!(in_flight = %serde_json::Value::from(in_flight), "planned restart: forced with box work in flight");
+    }
     let t0 = Instant::now();
     let mut rooms = 0;
     if !notice.is_zero() {
@@ -133,6 +191,7 @@ pub async fn admin_restart(
         tokio::time::sleep(CLOSING_RESET).await;
         if st.restart.is_closing() {
             st.restart.closing.send_replace(false);
+            thaw_box_work(&st);
             tracing::warn!(
                 "planned restart: no restart came within {CLOSING_RESET:?}; serving sockets again"
             );
@@ -162,6 +221,7 @@ pub fn install_sigterm_handler(state: AppState) {
                 }
             };
         term.recv().await;
+        wait_for_box_work(&state, SIGTERM_BOX_WORK_WAIT).await;
         let (before, left) = close_and_drain(&state, DEFAULT_DRAIN).await;
         tracing::info!(
             sockets = before,
@@ -170,4 +230,21 @@ pub fn install_sigterm_handler(state: AppState) {
         );
         std::process::exit(0);
     });
+}
+
+/// Freeze new box work and wait up to `max` for what is in flight; whatever is still running
+/// after that is logged by user, so a box cut short can be found in the journal.
+async fn wait_for_box_work(state: &AppState, max: Duration) {
+    let deadline = Instant::now() + max;
+    let mut in_flight = freeze_box_work(state).await;
+    if !in_flight.is_empty() {
+        tracing::info!(in_flight = %serde_json::Value::from(in_flight.clone()), "SIGTERM: waiting for box work in flight");
+    }
+    while !in_flight.is_empty() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        in_flight = box_work_in_flight(state).await;
+    }
+    for w in &in_flight {
+        tracing::error!(user = %w["user_id"].as_str().unwrap_or(""), kind = %w["kind"].as_str().unwrap_or(""), phase = %w["phase"].as_str().unwrap_or(""), "SIGTERM: exiting with box work in flight; this box needs a look (#2262)");
+    }
 }

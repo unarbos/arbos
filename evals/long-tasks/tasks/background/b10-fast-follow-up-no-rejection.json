@@ -1,0 +1,32 @@
+{
+ "id": "b10-fast-follow-up-no-rejection",
+ "lane": "c",
+ "category": "background",
+ "title": "A message that lands while pi is still finishing the previous turn is queued or steered, never 'prompt rejected' (#2073)",
+ "regression": "#2073 (P0): the raw pi RPC error 'prompt rejected: Agent is already processing…' must never reach the chat; the follow-up gets a real answer; run 13: judge 1/5 for 'rewrote 1–10 instead of appending' with the file right and confirmed — rubric wording",
+ "turns": [
+  {
+   "prompt": "Write the numbers 1 to 5 to {D}/n.txt one per line, then tell me when it is written and ask whether I want 6 to 10 as well.",
+   "seed": "mkdir -p {D}",
+   "background": true,
+   "latency_max_s": 10,
+   "timeout_s": 60
+  },
+  {
+   "prompt": "yes",
+   "pre_wait_s": 0,
+   "timeout_s": 120,
+   "reply_regex": "\\b(10|ten)\\b|6 to 10|6–10",
+   "reply_regex_not": "(?i)(prompt rejected|already processing|streamingBehavior|followUp)",
+   "verify": "f={D}/n.txt; n=$(grep -c . $f 2>/dev/null || echo 0); echo \"SHOW lines=$n\"; [ \"$n\" -eq 10 ] && echo PASS || echo FAIL: $n lines",
+   "rubric": {
+    "criteria": "The user said 'yes' one second after the agent's first reply. Pass if the follow-up is treated as the answer to the agent's question (6 to 10 appended, confirmed in words). Fail if the chat shows any raw error ('prompt rejected', 'already processing', 'streamingBehavior'), if 'yes' is ignored, or if the agent asks the question again. The end state is what counts: n.txt holding 1 to 10 (verified programmatically) with a reply that confirms it passes, whether the agent appended 6–10 or rewrote the file.",
+    "min": 3
+   }
+  }
+ ],
+ "doc_checks": {
+  "forbid_text_regex": "(?i)(prompt rejected|Agent is already processing|streamingBehavior)",
+  "no_repeated_sentence": true
+ }
+}

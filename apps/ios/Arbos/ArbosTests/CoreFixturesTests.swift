@@ -64,11 +64,14 @@ final class CoreFixturesTests: XCTestCase {
                 XCTAssertFalse(msg.reactions.isEmpty, "row \(i) reactions", file: file, line: line)
                 for (emoji, people) in reactions {
                     guard let people = people as? [String: Any] else { continue }
-                    let got = msg.reactions.first { $0.emoji == emoji }
-                    XCTAssertNotNil(got, "row \(i) missing emoji \(emoji)", file: file, line: line)
+                    // Core stores the collapsed base (👍); chips must use that key, not a palette tone.
+                    let base = MessageReaction.normalizeEmoji(emoji)
+                    let got = msg.reactions.first { MessageReaction.sameBase($0.emoji, emoji) }
+                    XCTAssertNotNil(got, "row \(i) missing emoji \(base)", file: file, line: line)
+                    XCTAssertEqual(got?.emoji, base, "row \(i) chip key \(base)", file: file, line: line)
                     for (sender, flag) in people {
                         guard (flag as? Bool) == true else { continue }
-                        XCTAssertTrue(got?.senders.contains(sender) == true, "row \(i) \(emoji)/\(sender)", file: file, line: line)
+                        XCTAssertTrue(got?.senders.contains(sender) == true, "row \(i) \(base)/\(sender)", file: file, line: line)
                     }
                 }
             }
@@ -546,6 +549,7 @@ final class CoreFixturesTests: XCTestCase {
             "push_secrets_paused.json",
             "push_secret_expiring.json",
             "push_profile_updated.json",
+            "push_pins_changed.json",
         ]
         for name in names {
             let item = try XCTUnwrap(PushItem.parse(try apiFixtureJSON(name)), name)
@@ -878,5 +882,41 @@ final class CoreFixturesTests: XCTestCase {
             spendTodayUsd: 0,
             spendCapUsd: 0
         )
+    }
+
+    // MARK: Animated image frames (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG /
+    // app-01M61EZD0GJ2XGV1EW4SCVXENK)
+
+    /// GIF and animated WebP fixtures decode to 3 frames; a PNG stays still (`nil`).
+    /// The side helper keeps common reaction GIFs animated within the 48 MB budget;
+    /// only https page URLs become via-caption links.
+    func testAnimatedImageFramesFixtures() throws {
+        let gif = try fixtureData("anim_three.gif")
+        let gifFrames = try XCTUnwrap(AnimatedImageFrames.frames(from: gif))
+        XCTAssertEqual(gifFrames.images.count, 3)
+
+        let webp = try fixtureData("anim_three.webp")
+        let webpFrames = try XCTUnwrap(AnimatedImageFrames.frames(from: webp))
+        XCTAssertEqual(webpFrames.images.count, 3)
+
+        let png = try fixtureData("anim_still.png")
+        XCTAssertNil(AnimatedImageFrames.frames(from: png), "PNG is still")
+
+        XCTAssertEqual(AnimatedImageFrames.animationFrameSide(frameCount: 60, width: 480, height: 270), 480)
+        let side150 = try XCTUnwrap(AnimatedImageFrames.animationFrameSide(frameCount: 150, width: 480, height: 480))
+        XCTAssertGreaterThanOrEqual(side150, AnimatedImageFrames.sideFloor)
+        XCTAssertLessThanOrEqual(side150, AnimatedImageFrames.sideStart)
+        let side300 = try XCTUnwrap(AnimatedImageFrames.animationFrameSide(frameCount: 300, width: 1000, height: 1000))
+        XCTAssertGreaterThanOrEqual(side300, AnimatedImageFrames.sideFloor)
+        let scale = Double(side300) / 1000.0
+        let sw = max(Int((1000.0 * scale).rounded()), 1)
+        let sh = max(Int((1000.0 * scale).rounded()), 1)
+        XCTAssertLessThanOrEqual(300 * sw * sh * 4, AnimatedImageFrames.maxDecodedBytes)
+        XCTAssertNil(AnimatedImageFrames.animationFrameSide(frameCount: 301, width: 480, height: 270))
+
+        XCTAssertNotNil(AttachmentSource.httpsPageURL(from: "https://example.com/g/1"))
+        XCTAssertNil(AttachmentSource.httpsPageURL(from: "http://example.com/g/1"))
+        XCTAssertNil(AttachmentSource.httpsPageURL(from: "file:///tmp/x.gif"))
+        XCTAssertNil(AttachmentSource.httpsPageURL(from: "javascript:alert(1)"))
     }
 }

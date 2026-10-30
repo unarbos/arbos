@@ -33,10 +33,18 @@ impl DeviceRow {
     }
 }
 
-/// The rows, this Mac first, then the others as the relay orders them
-/// (oldest sign-in first).
+/// The devices that are still signed in. A row with `revoked_at` is a
+/// session that already ended (signed out here, from another device, or by
+/// the relay); it is not a device the user is logged in on, so it never
+/// reaches the list or its count.
+pub fn live(devices: &[DeviceView]) -> impl Iterator<Item = &DeviceView> {
+    devices.iter().filter(|d| d.revoked_at.is_none())
+}
+
+/// The rows, this Mac first, then the other live devices as the relay
+/// orders them (oldest sign-in first).
 pub fn rows(devices: &[DeviceView], now_ms: i64) -> Vec<DeviceRow> {
-    let mut out: Vec<DeviceRow> = devices.iter().map(|d| row(d, now_ms)).collect();
+    let mut out: Vec<DeviceRow> = live(devices).map(|d| row(d, now_ms)).collect();
     out.sort_by_key(|r| !r.current);
     out
 }
@@ -65,13 +73,13 @@ fn row(d: &DeviceView, now_ms: i64) -> DeviceRow {
 pub fn glyph_for(name: &str, kind: &str) -> &'static str {
     let n = name.to_lowercase();
     if kind == "reader" || n.contains("bot") {
-        "bot"
+        "server.rack"
     } else if n.contains("iphone") || n.contains("ipad") || n.contains("phone") {
-        "smartphone"
+        "iphone"
     } else if n.contains("imac") || n.contains("mac mini") || n.contains("studio") {
-        "desktop"
+        "desktopcomputer"
     } else {
-        "laptop"
+        "laptopcomputer"
     }
 }
 
@@ -151,11 +159,45 @@ mod tests {
             kind: kind.into(),
             created_at: now - 9 * 24 * 3_600_000,
             last_seen_at: seen_ago_ms.map(|a| now - a),
+            revoked_at: None,
             current,
         }
     }
 
+    fn revoked(mut d: DeviceView) -> DeviceView {
+        d.revoked_at = Some(NOW - 3_600_000);
+        d
+    }
+
     const NOW: i64 = 1_761_200_000_000;
+
+    #[test]
+    fn signed_out_devices_are_not_listed_or_counted_and_this_mac_stays_first() {
+        // What the relay used to hand back for a tester who signed four Macs
+        // out: live rows mixed with revoked ones, this Mac in the middle.
+        let list = vec![
+            dev("p1", "iPhone", "github", false, Some(5 * 24 * 3_600_000)),
+            revoked(dev("m1", "Mac (Mac)", "github", false, Some(0))),
+            revoked(dev("m2", "Mac (Mac)", "github", false, Some(0))),
+            dev("me", "Mac (Mac)", "github", true, Some(10_000)),
+            revoked(dev("m3", "Mac (Mac)", "github", false, Some(0))),
+            dev("p2", "iPhone", "github", false, Some(60_000)),
+        ];
+        let shown = rows(&list, NOW);
+        assert_eq!(
+            shown.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["me", "p1", "p2"],
+            "only live rows, this Mac first, then the relay's order"
+        );
+        assert_eq!(
+            live(&list).count(),
+            3,
+            "the Settings summary counts live devices"
+        );
+        let all_revoked = vec![revoked(dev("m1", "Mac (Mac)", "github", false, Some(0)))];
+        assert!(rows(&all_revoked, NOW).is_empty());
+        assert!(live(&all_revoked).next().is_none());
+    }
 
     #[test]
     fn the_list_renders_this_mac_first_and_marks_it() {
@@ -175,12 +217,12 @@ mod tests {
         );
         assert_eq!(rows.len(), 3);
         assert!(rows[0].current && rows[0].id == "a", "this Mac first");
-        assert_eq!(rows[0].glyph, "laptop");
+        assert_eq!(rows[0].glyph, "laptopcomputer");
         assert_eq!(rows[0].tag, None);
         assert!(rows[0].subtitle.starts_with("Active now · added "));
-        assert_eq!(rows[1].glyph, "smartphone");
+        assert_eq!(rows[1].glyph, "iphone");
         assert!(rows[1].subtitle.starts_with("2 h ago · added "));
-        assert_eq!(rows[2].glyph, "bot");
+        assert_eq!(rows[2].glyph, "server.rack");
         assert_eq!(rows[2].tag, Some("read-only"));
         assert!(rows[2].subtitle.starts_with("3 d ago · added "));
     }
@@ -231,12 +273,12 @@ mod tests {
 
     #[test]
     fn kinds_and_names_pick_glyphs_and_tags() {
-        assert_eq!(glyph_for("Jacob's iPhone", "github"), "smartphone");
-        assert_eq!(glyph_for("iPad", "github"), "smartphone");
-        assert_eq!(glyph_for("Jacob's iMac", "github"), "desktop");
-        assert_eq!(glyph_for("GrokBot-Arbos", "reader"), "bot");
-        assert_eq!(glyph_for("anything", "reader"), "bot");
-        assert_eq!(glyph_for("MacBook Air", "paircode"), "laptop");
+        assert_eq!(glyph_for("Jacob's iPhone", "github"), "iphone");
+        assert_eq!(glyph_for("iPad", "github"), "iphone");
+        assert_eq!(glyph_for("Jacob's iMac", "github"), "desktopcomputer");
+        assert_eq!(glyph_for("GrokBot-Arbos", "reader"), "server.rack");
+        assert_eq!(glyph_for("anything", "reader"), "server.rack");
+        assert_eq!(glyph_for("MacBook Air", "paircode"), "laptopcomputer");
         assert_eq!(kind_tag("github"), None);
         assert_eq!(kind_tag("reader"), Some("read-only"));
         assert_eq!(kind_tag("paircode"), Some("pair code"));

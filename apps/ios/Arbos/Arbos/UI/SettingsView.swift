@@ -26,7 +26,7 @@ struct SettingsView: View {
     @ObservedObject private var push = PushManager.shared
     @State private var confirmUnpair = false
     /// Connector errors — the root `notice` alert sits under this sheet and looks like a silent fail.
-    @State private var connectorError: String?
+    @State private var connectorError: UserError?
     /// The avatar picker (Generate | Upload, Reset) over my picture — the agents' sheet
     /// (Jacob, 2026-10-25); `ARBOS_SETTINGS_PAGE=avatar[-generate|-upload]` opens it (rig).
     @State private var showAvatarPicker: AvatarPickerTab?
@@ -103,13 +103,13 @@ struct SettingsView: View {
             }
             .toolbar(.hidden, for: .navigationBar)
             .navigationBarBackButtonHidden(true)
-            .confirmationDialog("Sign out?", isPresented: $confirmUnpair, titleVisibility: .visible) {
-                Button("Sign out", role: .destructive) {
-                    if model.tokens != nil { model.signOut() } else { model.unpair() }
-                    dismiss()
-                }
-            } message: {
-                Text(model.tokens != nil ? "This device is signed out of the relay; sign in with GitHub to come back." : "You will need a new pairing code to connect again.")
+            .confirm(ConfirmSpec(
+                title: "Sign out?",
+                message: model.tokens != nil ? "This device is signed out of the relay; sign in with GitHub to come back." : "You will need a new pairing code to connect again.",
+                action: "Sign out"
+            ), isPresented: $confirmUnpair) {
+                if model.tokens != nil { model.signOut() } else { model.unpair() }
+                dismiss()
             }
             .onAppear {
                 model.refreshConnectors()
@@ -130,24 +130,13 @@ struct SettingsView: View {
                     Task { await push.refreshStatus() }
                 }
             }
-            // Steal connector notices so they appear above this sheet, not under it.
-            .onChange(of: model.notice) { _, n in
-                guard let text = n?.text else { return }
-                let isConnector = text.hasPrefix("Connect ")
-                    || text.hasPrefix("Connectors:")
-                    || text.hasPrefix("Disconnect:")
-                    || text.hasPrefix("Could not update profile picture:")
-                guard isConnector else { return }
-                connectorError = text
-                model.notice = nil
-            }
-            .alert("Arbos", isPresented: Binding(
-                get: { connectorError != nil },
-                set: { if !$0 { connectorError = nil } }
-            )) {
-                Button("OK", role: .cancel) { connectorError = nil }
-            } message: {
-                Text(connectorError ?? "")
+            // The sheet's own toast layer (Jacob 2026-10-26): a failure while Settings is up —
+            // Connect, a picture save, a secret — is the shared note at the top of this sheet,
+            // not an alert and not a toast hidden under it.
+            .overlay(alignment: .top) {
+                ToastHost()
+                    .environmentObject(model)
+                    .environment(\.theme, theme)
             }
             .sheet(item: $showAvatarPicker) { initial in
                 AvatarPickerSheet(target: .me, initialTab: initial).environmentObject(model).environment(\.theme, theme)
@@ -223,7 +212,7 @@ struct SettingsView: View {
         out.append(.card(account, separatorInset: inset))
         out.append(.card([
             AnyView(NavigationLink { MachinePage(openAgent: openAgentFromSettings) } label: {
-                SettingsRow(icon: "desktopcomputer", title: "Machine", value: machineSummary, dot: machineDotColor(model.machine.state, theme: theme))
+                SettingsRow(icon: "desktopcomputer", title: "Machine", value: machineSummary, mark: machineMark(model.machine.state))
             }),
         ], separatorInset: inset))
         out.append(.footnote(model.machine.alwaysOn
@@ -322,7 +311,7 @@ struct SettingsView: View {
     // MARK: Row summaries
 
     private var devicesSummary: String? {
-        switch model.devices.count {
+        switch AuthDevice.visible(model.devices).count {
         case 0: return nil
         case 1: return "1 device"
         case let n: return "\(n) devices"
@@ -496,8 +485,8 @@ struct SettingsRow: View {
     let title: String
     var value: String? = nil
     var chevron: Bool = true
-    /// Small status dot drawn on the tile (machine state).
-    var dot: Color? = nil
+    /// The machine mark on the tile (spinner / fault / nothing — never a dot).
+    var mark: StatusMark? = nil
     /// Colour for the trailing value (red `Paused`).
     var valueTint: Color? = nil
 
@@ -506,7 +495,7 @@ struct SettingsRow: View {
     static let separatorInset: CGFloat = PaneKit.separatorInset(.tile(""))
 
     var body: some View {
-        PaneRow(leading: .tile(icon, dot: dot), title: title, value: value, valueTint: valueTint, chevron: chevron)
+        PaneRow(leading: .tile(icon, mark: mark), title: title, value: value, valueTint: valueTint, chevron: chevron)
     }
 }
 
@@ -678,13 +667,14 @@ struct MachinePage: View {
                                     ProgressView().controlSize(.mini).tint(theme.muted)
                                     Text("Restarting…")
                                 } else {
-                                    Circle().fill(machineDotColor(m.state, theme: theme)).frame(width: 8, height: 8)
+                                    // Spinner while it wakes, fault glyph on error, nothing at rest.
+                                    if let mark = machineMark(m.state) { StatusMarkView(mark: mark, size: 9) }
                                     Text(stateText(m))
                                 }
                             }
                         }
                     case .spec:
-                        SettingsValueRow("Spec", value: m.spec.isEmpty ? (model.machineError ?? "Not reported yet") : m.spec)
+                        SettingsValueRow("Spec", value: m.spec.isEmpty ? "Not reported yet" : m.spec)
                     case .machineTime:
                         if m.alwaysOn {
                             SettingsValueRow("Machine time today") {
@@ -917,7 +907,12 @@ struct MachineAgentRow: View {
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text(workspace.name).font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
-                Text(MachineMetrics.agentStatus(workspace)).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(1)
+                // A running workspace leads its status with the working spinner (the
+                // home rows' one, [feedback working-braille-spinner-ios-2026-10-27]).
+                HStack(spacing: 4) {
+                    if workspace.running { WorkingSpinner() }
+                    Text(MachineMetrics.agentStatus(workspace)).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(1)
+                }
             }
             Spacer(minLength: 8)
             // The numbers never wrap; the name column gives way (truncates) instead.
@@ -941,7 +936,8 @@ struct MachineAgentRow: View {
 struct ConnectorsPage: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
-    @Binding var connectorError: String?
+    @Binding var connectorError: UserError?
+    @State private var connectorErrorDetailsOpen = false
     /// Provider whose token paste field is open (`nil` = none).
     @State private var tokenFor: String?
     @State private var tokenDraft = ""
@@ -950,6 +946,10 @@ struct ConnectorsPage: View {
 
     var body: some View {
         SettingsPage(title: "Connected apps") {
+            // The page's note: under the page header, before the first card.
+            if let connectorError {
+                ErrorNote(id: "connector-error", error: connectorError, detailsOpen: $connectorErrorDetailsOpen)
+            }
             SettingsGroup(footer: "Connect Gmail, Calendar, Slack, GitHub, or Harness Comms so your agents can use them. Tokens stay on the relay; the agent asks before it sends.") {
                 ForEach(catalogProviders) { p in
                     connectorRow(p)
@@ -1059,7 +1059,8 @@ struct ConnectorsPage: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 9)
         .frame(minHeight: 56)
-        .confirmationDialog(
+        // On the connector's own row: anchored to the control, so it stays a dialog.
+        .confirmationDialog( // confirm: anchored
             "Disconnect \(disconnecting?.1 ?? "")?",
             isPresented: Binding(get: { disconnecting != nil && disconnecting?.1 == p.label },
                                  set: { if !$0 { disconnecting = nil } }),
@@ -1122,14 +1123,14 @@ struct ConnectorsPage: View {
         if !model.connectors.mock {
             if !model.connectors.loaded {
                 model.refreshConnectors()
-                connectorError = "Still loading connected apps. Try Connect again in a moment."
+                connectorError = UserError.refused("connect \(p.label)", "Still loading connected apps. Try Connect again in a moment.")
                 return
             }
             // Prefer the live catalog row (oauthConfigured) over a stale stand-in.
             let live = model.connectors.providers.first(where: { $0.provider == p.provider }) ?? p
             if !live.oauthConfigured {
-                connectorError = "Connect \(live.label): OAuth client not configured on the relay."
-                    + (live.acceptsToken ? " Use Token… with an API key or personal access token instead." : "")
+                connectorError = UserError.refused("connect \(live.label)", "The OAuth client is not configured on the relay."
+                    + (live.acceptsToken ? " Use Token… with an API key or personal access token instead." : ""))
                 return
             }
             model.connectConnector(provider: live.provider)
@@ -1179,17 +1180,18 @@ struct DevicesPage: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     @State private var pending: AuthDevice?
+    @State private var errorDetailsOpen = false
 
     private var rows: [AuthDevice] {
-        model.devices.sorted { a, b in a.current && !b.current }
+        AuthDevice.visible(model.devices)
     }
 
     var body: some View {
         SettingsPage(title: "Devices") {
             if let why = model.devicesError, model.devices.isEmpty {
-                SettingsGroup(footer: "\(why). Reopen Devices to try again.") {
-                    SettingsValueRow("Devices", value: "Could not load")
-                }
+                // The page's note: under the page header, before the first card.
+                ErrorNote(id: "devices-error", error: why, detailsOpen: $errorDetailsOpen,
+                          onTryAgain: { Task { await model.refreshDevices() } })
             } else if !model.devicesLoaded && model.devices.isEmpty {
                 Text("Loading…").font(theme.font(Theme.small)).foregroundStyle(theme.muted)
                     .frame(maxWidth: .infinity).padding(.top, 36)
@@ -1197,7 +1199,7 @@ struct DevicesPage: View {
                 Text("No devices yet").font(theme.font(Theme.small)).foregroundStyle(theme.muted)
                     .frame(maxWidth: .infinity).padding(.top, 36)
             } else {
-                SettingsGroup(footer: "Every GitHub sign-in is a device. Signing one out ends its session at once; it can sign in again. This iPhone signs out from the Settings tab.") {
+                SettingsGroup(footer: "Every GitHub sign-in is a device. Reinstalls of the same phone or Mac keep one row. Signing one out ends its session at once; it can sign in again. This iPhone signs out from the Settings tab.") {
                     ForEach(rows) { d in
                         PaneRow(
                             leading: .tile(d.glyph),
@@ -1212,16 +1214,10 @@ struct DevicesPage: View {
             }
         }
         .task { await model.refreshDevices() }
-        .confirmationDialog(
-            AuthDevice.confirmQuestion(pending?.displayName ?? ""),
-            isPresented: Binding(get: { pending != nil }, set: { if !$0 { pending = nil } }),
-            titleVisibility: .visible
-        ) {
-            Button("Sign out", role: .destructive) {
-                if let d = pending { model.revokeDevice(d.id) }
-                pending = nil
-            }
-            Button("Cancel", role: .cancel) { pending = nil }
+        .confirm(item: $pending, spec: { d in
+            ConfirmSpec(title: AuthDevice.confirmQuestion(d.displayName), message: nil, action: "Sign out")
+        }) { d in
+            model.revokeDevice(d.id)
         }
     }
 
@@ -1241,6 +1237,7 @@ struct DevicesPage: View {
                 Text("This iPhone").font(theme.font(Theme.small)).foregroundStyle(theme.muted).lineLimit(1).fixedSize()
             } else {
                 Button { pending = d } label: {
+                    // error-ui: exception destructive-action
                     Text("Sign out").font(theme.font(Theme.small)).foregroundStyle(theme.danger).lineLimit(1).fixedSize()
                 }
                 .buttonStyle(.borderless)
@@ -1286,10 +1283,14 @@ struct NotificationsPage: View {
 /// Who may add me to people groups — stops random spam-group adds.
 struct PrivacyPage: View {
     @EnvironmentObject private var model: AppModel
-    @State private var error: String?
+    @State private var error: UserError?
+    @State private var errorDetailsOpen = false
 
     var body: some View {
         SettingsPage(title: "Privacy") {
+            if let error {
+                ErrorNote(id: "privacy-error", error: error, detailsOpen: $errorDetailsOpen)
+            }
             SettingsGroup(
                 header: "Groups",
                 footer: "Controls who can put you in a group without asking. “People I message” means anyone you already have a direct chat with."
@@ -1301,20 +1302,12 @@ struct PrivacyPage: View {
                     ) {
                         Task {
                             if let err = await model.updateGroupAddPolicy(policy) {
-                                error = err
+                                error = UserError.refused("save the privacy setting", err)
                             }
                         }
                     }
                 }
             }
-        }
-        .alert("Arbos", isPresented: Binding(
-            get: { error != nil },
-            set: { if !$0 { error = nil } }
-        )) {
-            Button("OK", role: .cancel) { error = nil }
-        } message: {
-            Text(error ?? "")
         }
     }
 }
@@ -1338,6 +1331,12 @@ struct AppearancePage: View {
                         model.surfaceSetting = s.rawValue
                     }
                 }
+            }
+            // Link previews ([feedback link-embeds-ios-2026-10-27]): the cards under links in
+            // chat, on or off on this iPhone; off leaves every link plain.
+            SettingsGroup(header: "Link previews", footer: "A card with the title and picture under links in chat. Previews are fetched by Arbos, never by your phone.") {
+                SettingsChoiceRow(title: "On", selected: model.linkPreviews) { model.linkPreviews = true }
+                SettingsChoiceRow(title: "Off", selected: !model.linkPreviews) { model.linkPreviews = false }
             }
         }
     }
@@ -1422,6 +1421,7 @@ struct TextSizePage: View {
 struct AboutPage: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
+    @State private var perfDiagnostics = PerfDiagnostics.enabled
 
     private var protocolValue: String {
         let st = model.sharedRoomStats
@@ -1451,8 +1451,16 @@ struct AboutPage: View {
                     SettingsValueRow("Updates", value: "Up to date")
                 }
             }
+            // Opt-in MetricKit forwarding (`PerfDiagnostics`): off by default; anonymous.
+            SettingsGroup(footer: "Sends the scroll smoothness, hang, launch and memory numbers iOS collects for Arbos on this phone to the Arbos team. No account, device or message data goes with them.") {
+                SettingsValueRow("Share performance diagnostics") {
+                    Toggle("", isOn: $perfDiagnostics).labelsHidden().tint(theme.online)
+                        .accessibilityIdentifier("about-perf-diagnostics")
+                }
+            }
         }
         .task { await model.checkForUpdate() }
+        .onChange(of: perfDiagnostics) { _, on in PerfDiagnostics.enabled = on }
     }
 }
 
@@ -1471,7 +1479,8 @@ struct ProfileEditView: View {
     @State private var name: String = ""
     @State private var handle: String = ""
     @State private var busy = false
-    @State private var error: String?
+    @State private var error: UserError?
+    @State private var errorDetailsOpen = false
     @FocusState private var focus: Field?
 
     private enum Field { case name, handle }
@@ -1496,14 +1505,14 @@ struct ProfileEditView: View {
                             .frame(maxWidth: .infinity)
                     }
 
+                    // The form's note: above the fields (the shared element).
+                    if let error {
+                        ErrorNote(id: "profile-error", error: error, detailsOpen: $errorDetailsOpen,
+                                  onTryAgain: { Task { await save() } })
+                    }
+
                     nameField
                     handleField
-
-                    if let error {
-                        Text(error)
-                            .font(theme.font(Theme.small))
-                            .foregroundStyle(theme.danger)
-                    }
 
                     Text("Handle: letters, numbers, and hyphens · up to 39 characters.")
                         .font(theme.font(Theme.tiny))
@@ -1608,7 +1617,7 @@ struct ProfileEditView: View {
         error = nil
         defer { busy = false }
         if let msg = await model.updateProfile(name: name, handle: handle) {
-            error = msg
+            error = UserError.refused("save your profile", msg)
             return
         }
         dismiss()
@@ -1896,6 +1905,7 @@ struct GoalDetailPage: View {
                         Button(role: .destructive) { model.deleteGoal(goal) } label: {
                             Text("Delete goal")
                                 .font(theme.font(Theme.body))
+                                // error-ui: exception destructive-action
                                 .foregroundStyle(theme.danger)
                                 .frame(maxWidth: .infinity, minHeight: SettingsRow.height)
                                 .contentShape(Rectangle())

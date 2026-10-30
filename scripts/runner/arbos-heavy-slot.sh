@@ -43,6 +43,38 @@ GATE_QUEUE="$SLOTS_DIR/.gate-waiting"
 RIG_FAIR_AFTER_GATES="${ARBOS_HEAVY_RIG_FAIR_AFTER_GATES:-2}"
 RIG_FAIR_LEASE_S="${ARBOS_HEAVY_RIG_FAIR_LEASE_S:-900}"
 GATE_GRANTS="$SLOTS_DIR/.gate-grants"
+# Crowded rigs (17:41 Oct 27, coordinator: cap 1/1 for 50 min, 11 rig commands queued behind one waiting for a
+# slot, Jacob's evidence shots all stuck): when RIG_CROWD_N or more rigs are waiting, rigs get every other
+# turn (one gate grant between rig grants, same 15-min lease) instead of one in three. Rig waiters leave a
+# marker in RIG_QUEUE while they wait, like gate halves do in GATE_QUEUE.
+RIG_CROWD_N="${ARBOS_HEAVY_RIG_CROWD_N:-3}"
+RIG_QUEUE="$SLOTS_DIR/.rig-waiting"
+rigs_waiting() { local n=0 f; for f in "$RIG_QUEUE"/*; do [[ -f "$f" ]] || continue; if ps -p "$(basename "$f")" >/dev/null 2>&1; then n=$((n+1)); else rm -f "$f" 2>/dev/null; fi; done; echo "$n"; }
+# Rig queue order (18:39 Oct 27, coordinator): FIFO by wait start — a rig that arrived later never takes a grant
+# while an earlier one is still waiting. P0 rigs (names listed one per line in P0_RIGS, operator-set; a name
+# matches exactly or as a `<name>-…` prefix) are ahead of every other rig and hold the slot for P0_RIG_LEASE_S.
+# Rig markers carry "<wait-start-epoch> <name>".
+P0_RIGS="${ARBOS_HEAVY_P0_RIGS_FILE:-$SLOTS_DIR/.p0-rigs}"
+P0_RIG_LEASE_S="${ARBOS_HEAVY_P0_RIG_LEASE_S:-1800}"
+# p0_rank <name>: the rig's line number in P0_RIGS (1 = first; the file's order is the priority order — a
+# live-measurement P0 stays ahead of a recording P0), or 999 when the rig is not listed.
+p0_rank() { local n=$1 e i=0; [[ -f "$P0_RIGS" ]] || { echo 999; return; }; while read -r e; do [[ -z "$e" || "$e" == \#* ]] && continue; i=$((i+1)); [[ "$n" == "$e" || "$n" == "$e"-* ]] && { echo "$i"; return; }; done < "$P0_RIGS"; echo 999; }
+is_p0_rig() { [[ "$(p0_rank "$1")" != 999 ]]; }
+rig_ahead_of_me() {  # rig_ahead_of_me <my-pid> <my-start> <my-name>: 0 when another waiting rig is ahead in the queue
+  local me=$1 my_t0=$2 my_name=$3 f pid t0 name my_p0 p0
+  my_p0=$(p0_rank "$my_name")
+  for f in "$RIG_QUEUE"/*; do
+    [[ -f "$f" ]] || continue
+    pid=$(basename "$f"); [[ "$pid" == "$me" ]] && continue
+    ps -p "$pid" >/dev/null 2>&1 || { rm -f "$f" 2>/dev/null; continue; }
+    read -r t0 name < "$f" 2>/dev/null || continue
+    [[ "$t0" =~ ^[0-9]+$ ]] || { name=$t0; t0=0; }   # pre-FIFO marker: name only, counts as oldest
+    p0=$(p0_rank "$name")
+    (( p0 < my_p0 )) && return 0
+    (( p0 == my_p0 )) && (( t0 < my_t0 || ( t0 == my_t0 && pid < me ) )) && return 0
+  done
+  return 1
+}
 POLL_S=10
 
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
@@ -54,7 +86,40 @@ ensure_dir() {
 }
 
 is_gate_name() { [[ "$1" == gate-* ]]; }
-is_exempt_name() { [[ "$1" == mac-release* || "$1" == tf-archive* || "$1" == gate-* ]]; }
+is_release_name() { [[ "$1" == mac-release* || "$1" == tf-archive* ]]; }
+is_exempt_name() { is_release_name "$1" || [[ "$1" == gate-* ]]; }
+# Release / TestFlight lanes (18:00 Oct 27, coordinator: the Mac release jobs for v0.6.299 — carrying P0 #2075 —
+# sat 55 min while gate halves and rigs took the slot in turn): a release waiting RELEASE_PREEMPT_S takes the
+# NEXT grant ahead of gate halves and rigs; a hotfix release (name *hotfix*) takes it at once. Release waiters
+# leave "<start-epoch> <name>" in RELEASE_QUEUE/<pid>.
+RELEASE_PREEMPT_S="${ARBOS_HEAVY_RELEASE_PREEMPT_S:-600}"
+RELEASE_QUEUE="$SLOTS_DIR/.release-waiting"
+release_due() {  # 1 when some waiting release may preempt the next grant
+  local f pid start name now; now=$(date +%s)
+  for f in "$RELEASE_QUEUE"/*; do
+    [[ -f "$f" ]] || continue
+    pid=$(basename "$f"); ps -p "$pid" >/dev/null 2>&1 || { rm -f "$f" 2>/dev/null; continue; }
+    read -r start name < "$f" 2>/dev/null || continue
+    [[ "$name" == *hotfix* ]] && return 0
+    (( now - start >= RELEASE_PREEMPT_S )) && return 0
+  done
+  return 1
+}
+# A rig acquirer running under the shared GUI runner (a `bash cmd-*.sh` ancestor) gives up after
+# RIG_RUNNER_WAIT_MAX_S: the command file is copied to the back of the runner's FIFO (name sorts last) and the
+# acquire exits 75, so one rig's slot wait cannot hold every other rig's shots (18:00 Oct 27: 75 min, 15 queued).
+RIG_RUNNER_WAIT_MAX_S="${ARBOS_HEAVY_RIG_RUNNER_WAIT_MAX_S:-1200}"
+runner_cmd_file() {  # the cmd-*.sh an ancestor `bash` is executing (runner v2 runs it as cmd-*.sh.running), or nothing
+  # runner v2 also exports ARBOS_RUNNER_CMD=<path>; the ancestor walk is the fallback for the old runner.
+  if [[ -n "${ARBOS_RUNNER_CMD:-}" ]]; then echo "$ARBOS_RUNNER_CMD"; return 0; fi
+  local pid=$$ cmd
+  while (( pid > 1 )); do
+    cmd=$(ps -o command= -p "$pid" 2>/dev/null)
+    if [[ "$cmd" =~ (^|[[:space:]])bash[[:space:]]+(/Users/Shared/arbos-run/)?(cmd-[^[:space:]]+\.sh)(\.running)?([[:space:]]|$) ]]; then echo "/Users/Shared/arbos-run/${BASH_REMATCH[3]}${BASH_REMATCH[4]}"; return 0; fi
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' '); [[ -n "$pid" ]] || break
+  done
+  return 1
+}
 
 # live_slots: drop slots whose owner pid is dead or (rigs only) whose lease is over RIG_LEASE_MAX_S, print the
 # number that remain.
@@ -147,21 +212,49 @@ acquire() {
   done
   ensure_dir || { echo "$(ts) heavy-slot: cannot create $SLOTS_DIR; running uncapped" >&2; echo "none"; return 0; }
   limit=$MAX_SLOTS
-  (( priority )) && limit=$((MAX_SLOTS + PRIORITY_EXTRA))
+  # Release / TestFlight lanes count against the priority cap like gate halves (release.yml: "at most two of
+  # {gate Mac half, gate iOS half, TF archive, Mac release}"). Until 00:24 Oct 28 they used the base cap, so one
+  # gate half holding its slot kept a due release waiting for the whole half (Release 858b354df sat 14 min
+  # behind gate-ios 001406-12 on an idle box, load 6) — the preempt rule only decided who got the NEXT grant.
+  { (( priority )) || is_release_name "$name"; } && limit=$((MAX_SLOTS + PRIORITY_EXTRA))
+  # A P0 rig also counts against the priority cap: with gate batches back to back one half always holds the base
+  # slot, so a rig capped at MAX_SLOTS could only ever run between gate runs (outside-agents, 04:1x Oct 28).
+  ! is_exempt_name "$name" && is_p0_rig "$name" && limit=$((MAX_SLOTS + PRIORITY_EXTRA))
   t0=$(date +%s)
   local mark=""
   if is_gate_name "$name"; then
     mkdir -p "$GATE_QUEUE" 2>/dev/null; chmod 1777 "$GATE_QUEUE" 2>/dev/null || true
     mark="$GATE_QUEUE/$$"; echo "$owner" > "$mark" 2>/dev/null || mark=""
+  elif is_release_name "$name"; then
+    mkdir -p "$RELEASE_QUEUE" 2>/dev/null; chmod 1777 "$RELEASE_QUEUE" 2>/dev/null || true
+    mark="$RELEASE_QUEUE/$$"; echo "$t0 $name" > "$mark" 2>/dev/null || mark=""
+  elif ! is_exempt_name "$name"; then
+    mkdir -p "$RIG_QUEUE" 2>/dev/null; chmod 1777 "$RIG_QUEUE" 2>/dev/null || true
+    mark="$RIG_QUEUE/$$"; echo "$t0 $name" > "$mark" 2>/dev/null || mark=""
   fi
-  local fair=0
+  local runner_cmd=""; ! is_exempt_name "$name" && runner_cmd=$(runner_cmd_file || true)
+  local fair=0 fair_after
   while :; do
     n=$(live_slots)
     # Rig fair share: a rig may take the slot ahead of a queued gate half once RIG_FAIR_AFTER_GATES gate halves
-    # were granted in a row (short lease). Gate halves yield to a rig whose fair turn it is.
-    fair=0
-    if ! is_gate_name "$name" && ! is_exempt_name "$name" && (( $(cat "$GATE_GRANTS" 2>/dev/null || echo 0) >= RIG_FAIR_AFTER_GATES )); then fair=1; fi
-    if (( n < limit )) && { is_gate_name "$name" || ! gate_waiting || (( fair )); }; then
+    # were granted in a row (short lease); with RIG_CROWD_N or more rigs waiting, after a single gate grant.
+    fair=0; fair_after=$RIG_FAIR_AFTER_GATES
+    if ! is_gate_name "$name" && ! is_exempt_name "$name"; then
+      (( $(rigs_waiting) >= RIG_CROWD_N )) && fair_after=1
+      (( $(cat "$GATE_GRANTS" 2>/dev/null || echo 0) >= fair_after )) && fair=1
+    fi
+    # Grant order: a due release first (it preempts gate halves and rigs); then gate halves; rigs when no gate half
+    # waits or on their fair turn. A release not yet due still yields to a queued gate half, as before.
+    local self_due=0
+    if is_release_name "$name" && { [[ "$name" == *hotfix* ]] || (( $(date +%s) - t0 >= RELEASE_PREEMPT_S )); }; then self_due=1; fi
+    # Rigs: queue order first (P0 rigs ahead, then FIFO by wait start), then the gate / fair-share rules.
+    local my_turn=1
+    if ! is_exempt_name "$name" && rig_ahead_of_me "$$" "$t0" "$name"; then my_turn=0; fi
+    # P0 rigs (04:13 Oct 28, coordinator: outside-agents shots for Jacob's 14:00 deadline gave up after 1200 s
+    # behind queued gate halves) do not yield to a QUEUED gate half — the P0 class means "first in line", not
+    # "first among rigs"; a running half is never preempted, and a due release still goes first.
+    local p0=0; ! is_exempt_name "$name" && is_p0_rig "$name" && p0=1
+    if (( n < limit )) && (( my_turn )) && { (( self_due )) || { ! release_due && { is_gate_name "$name" || (( p0 )) || ! gate_waiting || (( fair )); }; }; }; then
       slot="$SLOTS_DIR/$(date +%s)-$$-${name//\//_}.slot"
       if mkdir "$slot" 2>/dev/null; then
         echo "$owner" > "$slot/pid"; echo "$name" > "$slot/name"; date -u +%s > "$slot/since"
@@ -176,11 +269,25 @@ acquire() {
             echo $(( $(cat "$GATE_GRANTS" 2>/dev/null || echo 0) + 1 )) > "$GATE_GRANTS" 2>/dev/null || true
           elif ! is_exempt_name "$name"; then
             echo 0 > "$GATE_GRANTS" 2>/dev/null || true
-            if (( fair )); then echo "$RIG_FAIR_LEASE_S" > "$slot/lease"; echo "$(ts) heavy-slot: $name took its fair-share turn (lease ${RIG_FAIR_LEASE_S}s) ahead of a queued gate half" >&2; fi
+            if (( fair )); then echo "$RIG_FAIR_LEASE_S" > "$slot/lease"; echo "$(ts) heavy-slot: $name took its fair-share turn (lease ${RIG_FAIR_LEASE_S}s, after $fair_after gate grant(s), $(rigs_waiting) rig(s) waiting) ahead of a queued gate half" >&2; fi
+            if is_p0_rig "$name"; then echo "$P0_RIG_LEASE_S" > "$slot/lease"; echo "$(ts) heavy-slot: $name is a P0 rig — first in the rig queue, lease ${P0_RIG_LEASE_S}s" >&2; fi
           fi
           echo "$slot"; return 0
         fi
       fi
+    fi
+    # A P0 rig is not requeued either: the requeue copy only puts the same series at the back of the runner
+    # (and the author's script runs on uncapped when the acquire exits 75 — cmd-outside-agents-02, 04:07).
+    if [[ -n "$runner_cmd" ]] && (( ! p0 )) && (( $(date +%s) - t0 >= RIG_RUNNER_WAIT_MAX_S )); then
+      local again orig; orig="${runner_cmd%.running}"; again="/Users/Shared/arbos-run/cmd-zz~requeued-$(date +%s)-$(basename "${orig%.sh}").sh"
+      if [[ -f "$runner_cmd" ]] && { printf '# requeued by arbos-heavy-slot at %s: %s waited %ss for a heavy slot under the shared runner (cap %s); original %s\n' "$(ts)" "$name" "$RIG_RUNNER_WAIT_MAX_S" "$limit" "$(basename "$runner_cmd")"; cat "$runner_cmd"; } > "$again" 2>/dev/null; then
+        echo "$(ts) heavy-slot: $name waited ${RIG_RUNNER_WAIT_MAX_S}s under the shared runner ($n busy); giving up — command requeued at the back as $(basename "$again")" >&2
+        logger -t arbos-heavy-slot "rig $name gave up its slot wait after ${RIG_RUNNER_WAIT_MAX_S}s; requeued $(basename "$again")" 2>/dev/null || true
+      else
+        echo "$(ts) heavy-slot: $name waited ${RIG_RUNNER_WAIT_MAX_S}s under the shared runner ($n busy); giving up (could not requeue $runner_cmd)" >&2
+      fi
+      [[ -n "$mark" ]] && rm -f "$mark" 2>/dev/null
+      echo none; return 75
     fi
     if (( $(date +%s) - t0 >= WAIT_MAX_S )); then
       # A real slot over the cap, so the boot guard and the reclaim rules still see this job.

@@ -3,7 +3,8 @@
 //! emoji picker. Opened from the smiley on a bubble's hover rail; a pick
 //! toggles my reaction on that message (`AppState::toggle_reaction`, a
 //! reaction row in the chat doc, synced like any other op) and closes it.
-//! The chips under the bubble (`RowKind::Reactions`) show the result.
+//! The chips under the bubble (`RowKind::Reactions`) show the result; hovering
+//! a chip lists who used that emoji (iPhone `reactionSenders`).
 
 use gpui::{
     div, point, prelude::*, px, size, Context, Div, Entity, Focusable, Pixels, Point, Size, Window,
@@ -11,7 +12,8 @@ use gpui::{
 
 use crate::model::{Id, REACTION_PALETTE};
 use crate::ui::composer::ComposerInput;
-use crate::ui::icons::icon;
+use crate::ui::highlight;
+use crate::ui::sf_symbols;
 use crate::ui::shell::Shell;
 use crate::ui::theme::Theme;
 
@@ -53,6 +55,13 @@ pub fn place(anchor: Point<Pixels>, size: Size<Pixels>, viewport: Size<Pixels>) 
     point(px(x), px(y))
 }
 
+/// Emoji outside the blocks `picked_emoji` takes whole that the system picker
+/// types bare, with no U+FE0F: ⌚ ⌛ ⏩ ⏪ ⏫ ⏬ ⏰ ⏳ ◽ ◾
+/// ([feedback full-picker-reaction-mac-2026-10-29]: those picks were dropped).
+const BARE_EMOJI: [u32; 10] = [
+    0x231A, 0x231B, 0x23E9, 0x23EA, 0x23EB, 0x23EC, 0x23F0, 0x23F3, 0x25FD, 0x25FE,
+];
+
 /// The first emoji in `text`, if the text starts with one: what the system
 /// picker (or a keyboard) typed into the pick field.
 pub fn picked_emoji(text: &str) -> Option<String> {
@@ -66,6 +75,7 @@ pub fn picked_emoji(text: &str) -> Option<String> {
             || (0x1F900..=0x1F9FF).contains(&u)
             || (0x2190..=0x21FF).contains(&u)
             || (0x3030..=0x303F).contains(&u)
+            || BARE_EMOJI.contains(&u)
             || u == 0x200D
             || u == 0xFE0F
     });
@@ -136,7 +146,7 @@ pub fn render(shell: &Shell, window: &Window, cx: &mut Context<Shell>) -> Option
             )
             .child(cell(
                 "react-pick-close",
-                icon("xmark", 14.0, theme.text_muted),
+                sf_symbols::glyph("xmark", 14.0, theme.text_muted),
                 false,
                 &theme,
                 cx.listener(|this, _, _, cx| {
@@ -145,7 +155,10 @@ pub fn render(shell: &Shell, window: &Window, cx: &mut Context<Shell>) -> Option
             ));
     } else {
         for emoji in REACTION_PALETTE {
-            let on = held.iter().any(|e| e == emoji);
+            let on = held.iter().any(|e| {
+                arbos_core::doc::normalize_reaction_emoji(e)
+                    == arbos_core::doc::normalize_reaction_emoji(emoji)
+            });
             let (chat, msg) = (chat_id.clone(), message_id.clone());
             bar = bar.child(cell(
                 format!("react-{emoji}"),
@@ -162,7 +175,7 @@ pub fn render(shell: &Shell, window: &Window, cx: &mut Context<Shell>) -> Option
             div()
                 .relative()
                 .size(px(20.0))
-                .child(icon("face-smile", 20.0, theme.text_muted))
+                .child(sf_symbols::glyph("face.smiling", 20.0, theme.text_muted))
                 .child(
                     div()
                         .absolute()
@@ -174,7 +187,7 @@ pub fn render(shell: &Shell, window: &Window, cx: &mut Context<Shell>) -> Option
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(icon("plus", 10.0, theme.text_muted)),
+                        .child(sf_symbols::glyph("plus", 10.0, theme.text_muted)),
                 ),
             false,
             &theme,
@@ -203,23 +216,35 @@ pub fn render(shell: &Shell, window: &Window, cx: &mut Context<Shell>) -> Option
     )
 }
 
-fn cell(
-    id: impl Into<gpui::ElementId>,
+pub(crate) fn cell(
+    id: impl Into<gpui::SharedString>,
     content: impl IntoElement,
     on: bool,
     theme: &Theme,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> gpui::Stateful<Div> {
+    // A fixed CELL box; hover is paint only — the token's wash, composited over
+    // the accent fill of a held emoji so the fill does not blink away under
+    // the pointer ([feedback reaction-pill-hover-jitter-2026-10-28]).
+    let id = id.into();
+    let selector = format!("reaction-cell#{id}");
     div()
         .id(id)
+        .debug_selector(move || selector.clone())
         .size(px(CELL))
+        .flex_shrink_0()
         .flex()
         .items_center()
         .justify_center()
         .rounded_full()
         .cursor_pointer()
-        .when(on, |el| el.bg(Theme::with_alpha(theme.accent, 0.22)))
-        .hover(|s| s.bg(theme.surface_2))
+        .map(|el| {
+            if on {
+                highlight::washed(el, Theme::with_alpha(theme.accent, 0.22), theme)
+            } else {
+                highlight::button(el, theme)
+            }
+        })
         .child(content)
         .on_click(on_click)
 }
@@ -352,5 +377,18 @@ mod tests {
         assert_eq!(picked_emoji("👍🏽").as_deref(), Some("👍🏽"));
         assert_eq!(picked_emoji("ok"), None);
         assert_eq!(picked_emoji(""), None);
+    }
+
+    #[test]
+    fn picked_emoji_takes_every_emoji_the_picker_types() {
+        for e in [
+            "⌚", "⌛", "⏩", "⏪", "⏫", "⏬", "⏰", "⏳", "◽", "◾", "©️", "‼️", "1️⃣", "#️⃣",
+            "↔️", "⌨️",
+        ] {
+            assert_eq!(picked_emoji(e).as_deref(), Some(e), "{e}");
+        }
+        for t in ["1", "#", "©", "⌘", "▪", "a"] {
+            assert_eq!(picked_emoji(t), None, "{t}");
+        }
     }
 }

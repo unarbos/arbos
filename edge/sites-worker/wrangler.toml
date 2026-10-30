@@ -1,0 +1,24 @@
+# Agent-hosted sites edge Worker (#2060). Deployed by scripts/deploy/sites-edge.sh with the
+# account API token read from the Arbos vault at deploy time; nothing secret lives here.
+name = "arbos-sites"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+workers_dev = false
+
+# The route `*.arbos.life/*` is created by scripts/deploy/sites-edge.sh with the zone token
+# (the account token that uploads the script has no zone Workers Routes permission).
+
+[[r2_buckets]]
+binding = "SITES"
+bucket_name = "arbos-sites"
+
+[vars]
+DOMAIN = "arbos.life"
+# subdomain | path | two-level — must match the relay's ARBOS_SITES_SCHEME.
+SCHEME = "subdomain"
+# "0" answers 503 for every site (sites off, landing untouched).
+SERVE = "1"
+ABUSE_EMAIL = "abuse@arbos.life"
+
+[observability]
+enabled = true

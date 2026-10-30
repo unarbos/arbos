@@ -13,6 +13,8 @@
 //! Provider config is env only: `ARBOS_GITHUB_CLIENT_ID` / `ARBOS_GITHUB_CLIENT_SECRET` (the
 //! `ARBOS_GITHUB_OAUTH_CLIENT_*` spellings work too), `ARBOS_PUBLIC_URL`, `ARBOS_JWT_KEY` (optional).
 
+use std::collections::HashMap;
+
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -510,6 +512,16 @@ pub async fn github_callback(
             );
         }
     }
+    // Reinstall / re-login: retire the previous live GitHub session that shared
+    // this device name so Settings → Devices does not pile up duplicates.
+    if let Ok(prev) = state
+        .db
+        .revoke_named_github_devices(&user.id, &flow.device_name, None)
+    {
+        for id in &prev {
+            crate::matrix::servers::revoke_device(&state, id).await;
+        }
+    }
     let device_id = ulid();
     let mut salt = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut salt);
@@ -703,19 +715,61 @@ pub async fn logout(State(state): State<AppState>, principal: Principal) -> Resp
     }
 }
 
-/// `GET /auth/devices` — the caller's devices (this one marked `current`).
-pub async fn devices_list(State(state): State<AppState>, principal: Principal) -> Response {
-    let Principal::Device { id, user_id, .. } = &principal else {
-        return api_error(
-            StatusCode::FORBIDDEN,
-            "forbidden",
-            "a signed-in device is required",
-        );
+/// `GET /auth/devices` — the caller's signed-in devices (this one marked `current`). Rows a
+/// sign-out or revoke already closed (`revoked_at` set) are left out: until 2026-10-28 they were
+/// listed too, so a tester who had signed four Macs out still saw "9 devices". Same-name GitHub
+/// reinstall leftovers are collapsed to one row (this device, or the most recently seen) so the
+/// list cannot look like other people's sessions. The admin token may read one account with
+/// `?user=<id>` and add `include_revoked=1` to see the closed rows (admin view does not collapse).
+pub async fn devices_list(
+    State(state): State<AppState>,
+    principal: Principal,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let (user_id, current_id, include_revoked) = match &principal {
+        Principal::Device { id, user_id, .. } => {
+            if let Ok(extra) = state.db.collapse_github_device_duplicates(user_id, id) {
+                for rid in &extra {
+                    crate::matrix::servers::revoke_device(&state, rid).await;
+                }
+            }
+            (user_id.clone(), Some(id.as_str()), false)
+        }
+        Principal::Admin => {
+            let Some(user) = q
+                .get("user")
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+            else {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "user",
+                    "admin: name the account with ?user=<id>",
+                );
+            };
+            let include = matches!(
+                q.get("include_revoked").map(|s| s.trim()),
+                Some("1" | "true")
+            );
+            (user, None, include)
+        }
+        Principal::Box { .. } => {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "a signed-in device is required",
+            );
+        }
     };
-    match state.db.devices_of_user(user_id) {
+    let list = if include_revoked {
+        state.db.devices_of_user(&user_id)
+    } else {
+        state.db.live_devices_of_user(&user_id)
+    };
+    match list {
         Ok(mut list) => {
             for d in &mut list {
-                let current = d["id"].as_str() == Some(id.as_str());
+                let current = d["id"].as_str() == current_id;
                 d["current"] = json!(current);
             }
             Json(list).into_response()
@@ -1459,6 +1513,176 @@ mod refresh_tests {
         assert!(!state.db.mark_refresh_rotated(&h).expect("second claim"));
         let row = state.db.refresh_row(&h).unwrap().unwrap();
         assert!(row.rotated_at.is_some());
+    }
+}
+
+#[cfg(test)]
+mod devices_list_tests {
+    //! `GET /auth/devices` shows the caller's own signed-in devices and nothing else: no other
+    //! account's rows, no rows a sign-out already closed.
+
+    use axum::body::to_bytes;
+    use axum::extract::{Query, State};
+    use axum::http::StatusCode;
+
+    use arbos_core::ids::ulid;
+
+    use super::*;
+    use crate::people::tests_support::person;
+    use crate::state::test_support::test_state;
+
+    async fn list(r: Response) -> (StatusCode, Vec<Value>) {
+        let status = r.status();
+        let bytes = to_bytes(r.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, v.as_array().cloned().unwrap_or_default())
+    }
+
+    fn query(pairs: &[(&str, &str)]) -> Query<HashMap<String, String>> {
+        Query(
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        )
+    }
+
+    fn second_device(state: &AppState, user: &str, name: &str) -> String {
+        let id = ulid();
+        state
+            .db
+            .insert_device(&id, name, &ulid(), user, "github")
+            .expect("device");
+        id
+    }
+
+    #[tokio::test]
+    async fn a_signed_out_device_leaves_the_list_and_other_accounts_never_enter_it() {
+        let state = test_state(AuthMode::Github);
+        let (user_a, dev_a) = person(&state, 1);
+        let (user_b, dev_b) = person(&state, 2);
+        let a_mac = second_device(&state, &user_a, "A's Mac");
+        let b_mac = second_device(&state, &user_b, "B's Mac");
+
+        let (status, rows) =
+            list(devices_list(State(state.clone()), dev_a.clone(), query(&[])).await).await;
+        assert_eq!(status, StatusCode::OK);
+        let ids: Vec<&str> = rows.iter().filter_map(|d| d["id"].as_str()).collect();
+        assert_eq!(ids.len(), 2, "A sees exactly A's two devices: {rows:?}");
+        assert!(ids.contains(&a_mac.as_str()));
+        assert!(
+            !ids.contains(&b_mac.as_str()),
+            "B's device never shows for A"
+        );
+        let current: Vec<bool> = rows.iter().map(|d| d["current"] == true).collect();
+        assert_eq!(
+            current.iter().filter(|c| **c).count(),
+            1,
+            "exactly one current row"
+        );
+
+        // A signs the Mac out: it is gone from A's list at once, A's current device stays.
+        assert!(state.db.revoke_device_fully(&a_mac).expect("revoke"));
+        let (_, rows) =
+            list(devices_list(State(state.clone()), dev_a.clone(), query(&[])).await).await;
+        assert_eq!(
+            rows.len(),
+            1,
+            "the signed-out Mac is no longer listed: {rows:?}"
+        );
+        assert_eq!(rows[0]["current"], true);
+        assert!(rows[0]["revoked_at"].is_null());
+
+        // A device caller cannot ask for the closed rows back.
+        let (_, rows) = list(
+            devices_list(
+                State(state.clone()),
+                dev_a.clone(),
+                query(&[("include_revoked", "1")]),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(rows.len(), 1, "include_revoked is admin-only");
+
+        // B is untouched by any of it.
+        let (_, rows) = list(devices_list(State(state.clone()), dev_b, query(&[])).await).await;
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|d| d["id"] != a_mac.as_str()));
+
+        // The admin reads one named account, closed rows only on request.
+        let r = devices_list(State(state.clone()), Principal::Admin, query(&[])).await;
+        assert_eq!(
+            r.status(),
+            StatusCode::BAD_REQUEST,
+            "admin must name the user"
+        );
+        let (status, rows) = list(
+            devices_list(
+                State(state.clone()),
+                Principal::Admin,
+                query(&[("user", user_a.as_str())]),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(rows.len(), 1);
+        assert!(rows.iter().all(|d| d["current"] == false));
+        let (_, rows) = list(
+            devices_list(
+                State(state.clone()),
+                Principal::Admin,
+                query(&[("user", user_a.as_str()), ("include_revoked", "1")]),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows.iter().filter(|d| !d["revoked_at"].is_null()).count(),
+            1,
+            "the admin view carries the revoked row with its timestamp"
+        );
+
+        // Box tokens still cannot list devices.
+        let r = devices_list(
+            State(state.clone()),
+            Principal::Box {
+                user_id: user_a.clone(),
+            },
+            query(&[]),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn same_name_reinstall_duplicates_collapse_on_list() {
+        let state = test_state(AuthMode::Github);
+        let (user_a, dev_a) = person(&state, 11);
+        let stale = second_device(&state, &user_a, "iPhone");
+        let newer = second_device(&state, &user_a, "iPhone");
+        state.db.touch_device(&newer).expect("touch");
+
+        let (status, rows) =
+            list(devices_list(State(state.clone()), dev_a.clone(), query(&[])).await).await;
+        assert_eq!(status, StatusCode::OK);
+        let ids: Vec<&str> = rows.iter().filter_map(|d| d["id"].as_str()).collect();
+        // Current device (dev_a) stays; of the two "iPhone" reinstalls only the
+        // most recently seen survives. The stale twin is revoked.
+        assert!(ids.contains(&newer.as_str()), "{rows:?}");
+        assert!(
+            !ids.contains(&stale.as_str()),
+            "stale same-name reinstall must leave the list: {rows:?}"
+        );
+        assert!(
+            state.db.device_status(&stale).unwrap().unwrap().1,
+            "stale twin is revoked, not merely hidden"
+        );
+        // A second list call is a no-op once collapsed.
+        let (_, rows2) = list(devices_list(State(state.clone()), dev_a, query(&[])).await).await;
+        assert_eq!(rows2.len(), rows.len());
     }
 }
 

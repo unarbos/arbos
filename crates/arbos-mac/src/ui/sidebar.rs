@@ -24,7 +24,7 @@
 use std::sync::Arc;
 
 use gpui::{
-    div, prelude::*, px, Context, CursorStyle, Div, DragMoveEvent, ElementId, Focusable as _,
+    div, prelude::*, px, AnyElement, App, Context, Div, DragMoveEvent, ElementId, Focusable as _,
     FontWeight, MouseButton, Render, RenderImage, SharedString, Window,
 };
 
@@ -33,29 +33,216 @@ use crate::model::{Id, MachineState, Message, Project, Role, ServerInfo};
 use crate::search;
 use crate::ui::avatars;
 use crate::ui::composer::Composer;
-use crate::ui::frost::edge_faded;
+use crate::ui::frost::{edge_faded, edge_faded_sides};
 use crate::ui::glass::{self, WindowDrag};
 use crate::ui::groups;
-use crate::ui::icons::icon;
+use crate::ui::highlight::{self, Shape};
 use crate::ui::identity;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
+use crate::ui::sf_symbols;
 use crate::ui::shell::{Shell, TRAFFIC_LIGHTS_INSET};
+use crate::ui::sidebar_fit;
+use crate::ui::split_handle;
 use crate::ui::theme::{
     Theme, AVATAR_ROW, CONTROL, CONTROL_GAP, CONTROL_GLYPH, CONTROL_GLYPH_WIDE, HEADER_HEIGHT,
-    PANEL_RADIUS, SIDEBAR_RESIZE_HANDLE, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
+    PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
 };
 
 /// Drag payload for the chat-list column's right-edge resize handle.
 #[derive(Clone)]
-struct SidebarResizeDrag;
+pub(crate) struct SidebarResizeDrag;
 
-struct SidebarResizeDragGhost;
+/// The drag's (empty) ghost; it holds the guard that keeps the handle's
+/// hairline in its drag state until GPUI drops the ghost at mouse up.
+struct SidebarResizeDragGhost {
+    _drag: split_handle::DragGuard,
+}
 
 impl Render for SidebarResizeDragGhost {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
     }
+}
+
+/// A pinned row being dragged to a new slot in the Pinned section ([feedback
+/// sidebar-pinning-mac-2026-10-28]). The row itself moves live in the list (the
+/// ghost under the pointer draws nothing); `to` is the slot under the pointer among
+/// the pinned rows the current filter shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PinDragState {
+    pub(crate) id: Id,
+    pub(crate) to: usize,
+}
+
+/// The drag's payload (GPUI's `on_drag` value).
+#[derive(Clone, Debug)]
+struct PinDrag {
+    id: Id,
+}
+
+struct PinDragGhost;
+
+impl Render for PinDragGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
+/// The "Pinned" label over the section: `TEXT_SMALL` medium in `text_muted` at the rows'
+/// text inset (the list's 8 + the row's 12), in a 26 pt band — the voice of the
+/// "Hidden chats · N ›" footer.
+pub(crate) const PINNED_HEADER_H: f32 = 26.0;
+/// The hairline band after the pinned rows: 1 pt `border` with 4 pt margins
+/// (`glass::MENU_DIVIDER_HEIGHT`).
+pub(crate) const PINNED_DIVIDER_H: f32 = glass::MENU_DIVIDER_HEIGHT;
+
+fn pinned_header(theme: &Theme) -> gpui::Stateful<Div> {
+    div()
+        .id("sidebar-pinned-header")
+        .debug_selector(|| "sidebar-pinned-header".into())
+        .flex_shrink_0()
+        .h(px(PINNED_HEADER_H))
+        .px(px(12.0))
+        .flex()
+        .items_center()
+        .text_size(px(TEXT_SMALL))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(theme.text_muted)
+        .child("Pinned")
+}
+
+fn pinned_divider(theme: &Theme) -> gpui::Stateful<Div> {
+    div()
+        .id("sidebar-pinned-divider")
+        .debug_selector(|| "sidebar-pinned-divider".into())
+        .flex_shrink_0()
+        .h(px(1.0))
+        .mx(px(12.0))
+        .my(px((PINNED_DIVIDER_H - 1.0) / 2.0))
+        .bg(theme.border)
+}
+
+/// The pinned row's mark before its time: SF `pin.fill` at 11 pt semibold in
+/// `text_muted` — the iPhone row's glyph.
+fn pin_mark(id: &Id, theme: &Theme) -> Div {
+    sf_symbols::symbol(
+        "pin.fill",
+        11.0,
+        sf_symbols::Weight::Semibold,
+        13.0,
+        theme.text_muted,
+    )
+    .debug_selector(|| format!("row-pin-{id}"))
+}
+
+/// The list as the drop target of a pin drag: every move picks the slot under the
+/// pointer from the pinned cards' recorded bounds, the drop (or a mouse-up anywhere)
+/// commits the previewed order through `AppState::reorder_pins`.
+fn pin_drop_target(list: gpui::Stateful<Div>, cx: &mut Context<Shell>) -> gpui::Stateful<Div> {
+    let weak = cx.weak_entity();
+    list.on_drag_move::<PinDrag>(cx.listener(|this, ev: &DragMoveEvent<PinDrag>, _, cx| {
+        let y = f32::from(ev.event.position.y);
+        let Some(drag) = this.pin_drag.clone() else {
+            return;
+        };
+        let to = this.pin_slot_at(&drag.id, y, cx);
+        if to != drag.to {
+            this.pin_drag = Some(PinDragState { id: drag.id, to });
+            cx.notify();
+        }
+    }))
+    .can_drop(|dragged, _, _| dragged.is::<PinDrag>())
+    .on_drop(cx.listener(|this, _: &PinDrag, _, cx| this.finish_pin_drag(cx)))
+    .child(
+        gpui::canvas(
+            |_, _, _| (),
+            move |_, _, window, _| {
+                let weak = weak.clone();
+                window.on_mouse_event(move |_: &gpui::MouseUpEvent, _, _, cx| {
+                    weak.update(cx, |this, cx| this.finish_pin_drag(cx)).ok();
+                });
+            },
+        )
+        .absolute()
+        .size(px(0.0)),
+    )
+}
+
+impl Shell {
+    /// Which slot among the shown pinned rows the pointer's `y` is over: the number of
+    /// *other* pinned cards whose centre is above it.
+    pub(crate) fn pin_slot_at(&self, dragged: &Id, y: f32, cx: &Context<Shell>) -> usize {
+        let state = self.state.read(cx);
+        let cards = &self.morph.borrow().cards;
+        state
+            .pins
+            .iter()
+            .filter_map(|k| AppState::pinned_space_id(k))
+            .filter(|id| *id != dragged.as_str())
+            .filter_map(|id| cards.get(id))
+            .filter(|b| f32::from(b.origin.y) + f32::from(b.size.height) / 2.0 < y)
+            .count()
+    }
+
+    /// Start dragging a pinned row (its current slot is where it starts).
+    pub(crate) fn begin_pin_drag(&mut self, id: Id, cx: &mut Context<Shell>) {
+        let (pinned, _) = list_sections(self, cx);
+        let to = pinned.iter().position(|e| e.id() == &id).unwrap_or(0);
+        self.pin_drag = Some(PinDragState { id, to });
+        self.row_menu = None;
+        cx.notify();
+    }
+
+    /// Drop: the order the list shows becomes the pin order (through the relay).
+    pub(crate) fn finish_pin_drag(&mut self, cx: &mut Context<Shell>) {
+        if self.pin_drag.is_none() {
+            return;
+        }
+        let (pinned, _) = list_sections(self, cx);
+        let shown: Vec<Id> = pinned.iter().map(|e| e.id().clone()).collect();
+        self.pin_drag = None;
+        self.state.update(cx, |s, cx| s.reorder_pins(&shown, cx));
+        cx.notify();
+    }
+}
+
+/// The column's right-edge resize handle — the expanded sidebar's and the
+/// rail's are the same element (`id`s differ), so one drag runs across the
+/// snap between them: `split_handle::right_edge`'s invisible band and
+/// hairline (col-resize cursor), the drag's start resets the gesture, every
+/// move goes to `AppState::drag_sidebar_edge` with the pointer's x
+/// ([feedback app-01M5MJ9Y91W9ZET71KTCE7PS65], [feedback sidebar-narrow-wrap-2026-10-27],
+/// minimal look [feedback sidebar-slide-handle-minimal-2026-10-28]).
+pub(crate) fn resize_handle(
+    id: &'static str,
+    theme: &Theme,
+    drag: &split_handle::DragState,
+    cx: &mut Context<Shell>,
+) -> gpui::Stateful<Div> {
+    // Both panes draw `border_r_1`: the hairline lands on that pixel.
+    split_handle::right_edge(id, theme, drag.active(), 1.0)
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_drag(SidebarResizeDrag, {
+            let shell = cx.entity().downgrade();
+            let drag = drag.clone();
+            move |_, _, _, cx| {
+                if let Some(shell) = shell.upgrade() {
+                    shell.update(cx, |this, cx| {
+                        this.state.update(cx, |s, _| s.begin_sidebar_edge_drag());
+                    });
+                }
+                let guard = drag.begin();
+                cx.new(|_| SidebarResizeDragGhost { _drag: guard })
+            }
+        })
+        .on_drag_move(
+            cx.listener(|this, ev: &DragMoveEvent<SidebarResizeDrag>, _, cx| {
+                // The column docks at the window's left, so mouse x is the width.
+                let x = f32::from(ev.event.position.x);
+                this.state.update(cx, |s, cx| s.drag_sidebar_edge(x, cx));
+            }),
+        )
 }
 
 /// The drag strip beside the traffic lights: Grok Bot's top band, the same
@@ -101,6 +288,8 @@ pub(crate) const FILTER_PAD_X: f32 = 10.0;
 /// there: 60 + 4 ([feedback topbar-grok-parity-2026-10-24]; was 44 + 6 = 50).
 pub(crate) const FILTER_TOP: f32 = 4.0;
 pub(crate) const FILTER_BOTTOM: f32 = 8.0;
+/// The side fade on the capsule row when it scrolls (a narrow column).
+pub(crate) const FILTER_FADE_BAND: f32 = 12.0;
 /// Server rows draw their picture as a rounded square (corner = this fraction
 /// of the size) so they read apart from the agent and people discs.
 pub(crate) const SERVER_PICTURE_CORNER: f32 = 11.0 / 36.0;
@@ -131,8 +320,13 @@ pub(crate) const FOOTER_ROW_PAD_Y: f32 = FOOTER_BOTTOM - (FOOTER_ROW_HEIGHT - FO
 /// The machine dot scales with the avatar (28 → 36 carried 7 / 11 to 9 / 13):
 /// a 9 pt dot in a 13 pt ring of the sidebar colour, 2 pt past the avatar's
 /// bottom-right edge.
+/// Measured pins; the mark's ring is drawn from `marks::corner_metrics(FOOTER_AVATAR)`
+/// (the same 9 / 13 / 2) — the numbers stay here for the footer tests.
+#[cfg(test)]
 pub(crate) const FOOTER_DOT: f32 = 9.0;
+#[cfg(test)]
 pub(crate) const FOOTER_DOT_RING: f32 = 13.0;
+#[cfg(test)]
 pub(crate) const FOOTER_DOT_OVERHANG: f32 = 2.0;
 
 /// Grok Bot's update button at the footer's right end
@@ -145,10 +339,6 @@ pub(crate) const FOOTER_DOT_OVERHANG: f32 = 2.0;
 pub(crate) const FOOTER_DISC: f32 = CONTROL;
 pub(crate) const FOOTER_DISC_INSET: f32 = STRIP_INSET;
 pub(crate) const FOOTER_DISC_GLYPH: f32 = 20.0;
-/// Hover / pressed: the solid fill lifted in lightness — brighter under the
-/// pointer, brighter still while down (the chip rule, [feedback mention-chips]).
-pub(crate) const DISC_HOVER_LIFT: f32 = 0.06;
-pub(crate) const DISC_PRESSED_LIFT: f32 = 0.12;
 /// While the disc works (download / install / relaunch) its fill pulses
 /// between this alpha and 1.
 pub(crate) const DISC_BUSY_ALPHA_MIN: f32 = 0.55;
@@ -224,9 +414,9 @@ impl StripControl {
     /// icon and takes [`CONTROL_GLYPH_WIDE`] for the same visible box.
     pub(crate) fn glyph(self) -> (&'static str, f32) {
         match self {
-            StripControl::Search => ("search", CONTROL_GLYPH),
+            StripControl::Search => ("magnifyingglass", CONTROL_GLYPH),
             StripControl::New => ("plus", CONTROL_GLYPH),
-            StripControl::Collapse => ("sidebar-left", CONTROL_GLYPH_WIDE),
+            StripControl::Collapse => ("sidebar.left", CONTROL_GLYPH_WIDE),
         }
     }
 }
@@ -485,22 +675,13 @@ pub fn stamp_label(ms: u64) -> String {
     }
 }
 
-pub fn machine_dot(state: MachineState, theme: &Theme) -> gpui::Hsla {
-    match state {
-        MachineState::Awake => theme.online,
-        MachineState::Waking => theme.warn,
-        MachineState::Error => theme.danger,
-        MachineState::Asleep | MachineState::Stopped | MachineState::Unknown => theme.text_faint,
-    }
-}
-
 /// My picture with the machine dot — the footer's 36 pt disc, drawn the same
 /// at the foot of the expanded list and of the collapsed rail.
 pub(crate) fn account_avatar(
     shell: &Shell,
     machine: MachineState,
     theme: &Theme,
-    cx: &Context<Shell>,
+    cx: &mut Context<Shell>,
 ) -> Div {
     let state = shell.state.read(cx);
     let picture = match state.account.as_ref() {
@@ -525,43 +706,30 @@ pub(crate) fn account_avatar(
         None => div()
             .size(px(FOOTER_AVATAR))
             .rounded_full()
-            .bg(theme.surface_2)
+            .bg(theme.control_fill())
             .flex()
             .items_center()
             .justify_center()
-            .child(icon("person", FOOTER_AVATAR / 2.0, theme.text)),
+            .child(sf_symbols::glyph(
+                "person.fill",
+                FOOTER_AVATAR / 2.0,
+                theme.text,
+            )),
     };
-    div()
-        .relative()
-        .size(px(FOOTER_AVATAR))
-        .flex_shrink_0()
-        .debug_selector(|| "sidebar-account-avatar".into())
-        .child(picture)
-        .child(
-            div()
-                .absolute()
-                .right(px(-FOOTER_DOT_OVERHANG))
-                .bottom(px(-FOOTER_DOT_OVERHANG))
-                .size(px(FOOTER_DOT_RING))
-                .rounded_full()
-                .bg(theme.sidebar)
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    div()
-                        .size(px(FOOTER_DOT))
-                        .rounded_full()
-                        .bg(Theme::with_alpha(
-                            machine_dot(machine, theme),
-                            if machine == MachineState::Waking {
-                                0.4 + 0.6 * PulseClock::phase(cx, 1100)
-                            } else {
-                                1.0
-                            },
-                        )),
-                ),
-        )
+    // The machine mark in front of the picture (`ui::marks::machine_corner`, its
+    // own paint layer), ringed in the sidebar colour. Never a coloured dot
+    // (Jacob, 2026-10-27): the spinner while the machine wakes, the red `!` on a
+    // fault, nothing at rest — then the bare picture in the same box.
+    crate::ui::marks::machine_corner(
+        FOOTER_AVATAR,
+        picture,
+        machine,
+        theme.sidebar,
+        |ring| ring.debug_selector(|| "dot-ring".into()),
+        theme,
+        cx,
+    )
+    .debug_selector(|| "sidebar-account-avatar".into())
 }
 
 pub(crate) struct RowView {
@@ -569,12 +737,16 @@ pub(crate) struct RowView {
     pub(crate) selected: bool,
     pub(crate) streaming: bool,
     pub(crate) unread: bool,
+    /// Missed messages across the space's tabs (≥ 1 whenever `unread`).
+    pub(crate) unread_count: usize,
     pub(crate) typing: bool,
     pub(crate) preview: String,
     pub(crate) time: String,
     pub(crate) person_image: Option<Arc<RenderImage>>,
     pub(crate) guests: people::PeopleWithAvatars,
-    pub(crate) avatar_state: avatars::AvatarState,
+    /// In the Pinned section ([feedback sidebar-pinning-mac-2026-10-28]): the row carries
+    /// the muted `pin.fill` before its time.
+    pub(crate) pinned: bool,
 }
 
 /// A server in the chat list (D88 rule 1): the same row as a group — disc, name, preview,
@@ -583,8 +755,10 @@ pub(crate) struct ServerRowView {
     pub(crate) server: ServerInfo,
     pub(crate) selected: bool,
     pub(crate) unread: bool,
+    pub(crate) unread_count: usize,
     pub(crate) preview: String,
     pub(crate) time: String,
+    pub(crate) pinned: bool,
 }
 
 /// One entry of the left list, chats and servers interleaved.
@@ -616,9 +790,24 @@ impl ListEntry {
         }
     }
 
-    pub(crate) fn typing(&self) -> bool {
+    pub(crate) fn unread_count(&self) -> usize {
         match self {
-            ListEntry::Chat(r) => r.typing,
+            ListEntry::Chat(r) => r.unread_count,
+            ListEntry::Server(r) => r.unread_count,
+        }
+    }
+
+    fn set_pinned(&mut self, pinned: bool) {
+        match self {
+            ListEntry::Chat(r) => r.pinned = pinned,
+            ListEntry::Server(r) => r.pinned = pinned,
+        }
+    }
+
+    /// The space's agent is working (the rail's spinner badge).
+    pub(crate) fn working(&self) -> bool {
+        match self {
+            ListEntry::Chat(r) => r.streaming,
             ListEntry::Server(_) => false,
         }
     }
@@ -649,10 +838,50 @@ impl ListEntry {
     }
 }
 
-/// The chat list's entries under the current filter, newest activity first —
-/// shared by the expanded list and the collapsed rail so both show the same
-/// rows in the same order.
+/// The chat list's entries under the current filter — the pinned rows first in the
+/// user's order, then the rest newest activity first — shared by the expanded list and
+/// the collapsed rail so both show the same rows in the same order.
 pub(crate) fn list_entries(shell: &Shell, cx: &Context<Shell>) -> Vec<ListEntry> {
+    let (mut pinned, rest) = list_sections(shell, cx);
+    pinned.extend(rest);
+    pinned
+}
+
+/// The list in two parts ([feedback sidebar-pinning-mac-2026-10-28]): the **Pinned**
+/// section — the rows of `AppState::pins` the current filter admits, in the pin order,
+/// never re-sorted by unread or activity — and the rest in today's order. While a pin
+/// is being dragged, the dragged row sits at the slot under the pointer. Hidden chats
+/// have no pinned part (an archived row is never pinned).
+pub(crate) fn list_sections(
+    shell: &Shell,
+    cx: &Context<Shell>,
+) -> (Vec<ListEntry>, Vec<ListEntry>) {
+    let rows = unsorted_entries(shell, cx);
+    let state = shell.state.read(cx);
+    let mut pinned: Vec<(usize, ListEntry)> = Vec::new();
+    let mut rest: Vec<ListEntry> = Vec::new();
+    for entry in rows {
+        match state.pin_index(entry.id()) {
+            Some(i) if !shell.hidden_open => pinned.push((i, entry)),
+            _ => rest.push(entry),
+        }
+    }
+    pinned.sort_by_key(|(i, _)| *i);
+    let mut pinned: Vec<ListEntry> = pinned.into_iter().map(|(_, e)| e).collect();
+    if let Some(drag) = &shell.pin_drag {
+        if let Some(from) = pinned.iter().position(|e| e.id() == &drag.id) {
+            let row = pinned.remove(from);
+            let to = drag.to.min(pinned.len());
+            pinned.insert(to, row);
+        }
+    }
+    for e in pinned.iter_mut() {
+        e.set_pinned(true);
+    }
+    (pinned, rest)
+}
+
+fn unsorted_entries(shell: &Shell, cx: &Context<Shell>) -> Vec<ListEntry> {
     let state = shell.state.read(cx);
     let selected = state.selected_project.clone();
     let hidden_mode = shell.hidden_open;
@@ -680,9 +909,11 @@ pub(crate) fn list_entries(shell: &Shell, cx: &Context<Shell>) -> Vec<ListEntry>
             ListEntry::Server(Box::new(ServerRowView {
                 selected,
                 unread: state.space_row(s).is_some_and(|r| r.unread > 0),
+                unread_count: state.space_row(s).map_or(0, |r| r.unread as usize),
                 preview: hit.reason.unwrap_or_else(|| server_preview(state, s)),
                 time: time_label(at),
                 server: s.clone(),
+                pinned: false,
             })),
         ));
     }
@@ -710,6 +941,11 @@ pub(crate) fn list_entries(shell: &Shell, cx: &Context<Shell>) -> Vec<ListEntry>
             selected: selected.as_deref() == Some(p.id.as_str()),
             streaming,
             unread: state.project_unread(&p.id) > 0,
+            unread_count: state
+                .visible_tabs(&p.id)
+                .iter()
+                .map(|c| c.missed_count())
+                .sum(),
             typing: !state.typing_in(&p.id).is_empty(),
             preview: hit.reason.unwrap_or_else(|| preview(state, p)),
             time: time_label(last_activity(state, p)),
@@ -721,8 +957,8 @@ pub(crate) fn list_entries(shell: &Shell, cx: &Context<Shell>) -> Vec<ListEntry>
                     (person, img)
                 })
                 .collect(),
-            avatar_state: state.avatar_state(&p.id),
             space: p.clone(),
+            pinned: false,
         };
         rows.push((
             (hit.kind, std::cmp::Reverse(last_activity(state, p))),
@@ -818,7 +1054,7 @@ fn server_preview(state: &AppState, server: &ServerInfo) -> String {
         .filter(|c| c.server_id == server.id && c.last_ts > 0)
         .max_by_key(|c| c.last_ts);
     match newest {
-        Some(c) => format!("{} · {}", c.name, channel_last_line(c)),
+        Some(c) => format!("{} · {}", c.name, channel_last_line(state, c)),
         None => state
             .space_row(server)
             .map(|s| s.last_text.clone())
@@ -827,13 +1063,38 @@ fn server_preview(state: &AppState, server: &ServerInfo) -> String {
     }
 }
 
-/// "Sam: hi" for a channel row.
-fn channel_last_line(row: &arbos_matrix::ChannelRow) -> String {
+/// "@sam: hi" for a channel row — a person by handle, as a group's `preview`
+/// labels them, "You" for my own row, an agent by name; a system line bare.
+/// The Matrix row's sender name is the handle for people
+/// (`arbos_matrix::message_row`), so it is never shown as if it were a name
+/// ([feedback server-member-names-2026-10-28]).
+fn channel_last_line(state: &AppState, row: &arbos_matrix::ChannelRow) -> String {
     let line = plain(row.last_text.lines().next().unwrap_or_default());
-    if row.last_sender_name.is_empty() {
+    let who = channel_preview_who(
+        &row.last_sender,
+        &row.last_sender_name,
+        &format!("user:{}", state.me_id()),
+    );
+    if who.is_empty() {
         line
     } else {
-        format!("{}: {line}", row.last_sender_name)
+        format!("{who}: {line}")
+    }
+}
+
+/// The label before a channel preview's text, from the newest row's member
+/// string and Matrix display name; `me` is my own member string.
+pub(crate) fn channel_preview_who(sender: &str, sender_name: &str, me: &str) -> String {
+    if sender.eq_ignore_ascii_case(me) {
+        return "You".into();
+    }
+    if sender_name.is_empty() || sender == "system" {
+        return String::new();
+    }
+    if sender.starts_with("user:") {
+        format!("@{sender_name}")
+    } else {
+        sender_name.to_owned()
     }
 }
 
@@ -879,7 +1140,9 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
 /// they are painted, which is what the overlay interpolates from.
 pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<Shell>) -> Div {
     let theme = Theme::of(cx).clone();
-    let rows = list_entries(shell, cx);
+    let (pinned_rows, rest_rows) = list_sections(shell, cx);
+    let pinned_count = pinned_rows.len();
+    let rows: Vec<ListEntry> = pinned_rows.into_iter().chain(rest_rows).collect();
     let snap = shell.morph.clone();
     let state = shell.state.read(cx);
     let machine = state.machine.shown_state();
@@ -915,7 +1178,7 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
     let round = |id: &'static str, control: StripControl, theme: &Theme| {
         let (glyph, size) = control.glyph();
         debug_assert_eq!(control.size(), crate::ui::theme::CONTROL);
-        glass::control_disc(id, glyph, size, theme)
+        glass::strip_disc(id, glyph, size, theme)
             .when(hide_morphing, |el| el.opacity(0.0))
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
     };
@@ -996,17 +1259,34 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
     let strip = strip.window_drag();
     // ----- filter: All · Agents · People · Servers (the iPhone home's PaneTabs) --
     // Bare labels, the selected one on a capsule, centred; no track, no border.
+    // Narrow column ([feedback sidebar-narrow-wrap-2026-10-27]): the capsules
+    // scroll horizontally under an edge fade when they do not fit, like Grok
+    // Bot's iPhone filter row — the first and last capsule carry `auto` side
+    // margins, which centre the set while there is room and resolve to 0 (a
+    // left-aligned, scrollable row) once there is not; the selected capsule
+    // is scrolled into view (`Shell::filter_scroll`) once per selection /
+    // width — not every frame, or a scroll back toward "All" is undone by the
+    // next paint (`sidebar_fit::FilterPin`, [feedback
+    // server-strip-scroll-2026-10-28]).
+    let filter_count = ListFilter::ALL.len();
+    if let Some(ix) = ListFilter::ALL.iter().position(|f| *f == filter) {
+        let measured = shell.filter_scroll.bounds().size.width > px(0.0);
+        if shell.filter_pin.take(ix, sidebar_width, measured) {
+            shell.filter_scroll.scroll_to_item(ix);
+        }
+    }
     let filter_bar = div()
         .id("sidebar-filter")
         .flex_shrink_0()
         .flex()
         .items_center()
-        .justify_center()
         .gap(px(FILTER_GAP))
         .pt(px(FILTER_TOP))
         .pb(px(FILTER_BOTTOM))
         .px(px(8.0))
-        .children(ListFilter::ALL.into_iter().map(|f| {
+        .overflow_x_scroll()
+        .track_scroll(&shell.filter_scroll)
+        .children(ListFilter::ALL.into_iter().enumerate().map(|(ix, f)| {
             let on = f == filter;
             div()
                 .id(ElementId::Name(SharedString::from(format!(
@@ -1016,16 +1296,30 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
                 .h(px(FILTER_HEIGHT))
                 .px(px(FILTER_PAD_X))
                 .flex()
+                .flex_shrink_0()
                 .items_center()
                 .justify_center()
+                .map(|mut el| {
+                    if ix == 0 {
+                        el.style().margin.left = Some(gpui::Length::Auto);
+                    }
+                    if ix + 1 == filter_count {
+                        el.style().margin.right = Some(gpui::Length::Auto);
+                    }
+                    el
+                })
                 .rounded_full()
                 .cursor_pointer()
-                .bg(if on {
-                    theme.bubble_assistant
-                } else {
-                    gpui::transparent_black()
+                // On: the bubble fill, Grok's (§ Chat-list filter); off: the
+                // highlight token's washes plus the label brightening.
+                .map(|el| {
+                    if on {
+                        highlight::washed(el, theme.filter_on_fill(), &theme)
+                    } else {
+                        let text = theme.text;
+                        highlight::button_with(el, &theme, move |s| s.text_color(text))
+                    }
                 })
-                .hover(move |s| if on { s } else { s.text_color(theme.text) })
                 .text_size(px(TEXT_BODY))
                 .font_weight(if on {
                     FontWeight::SEMIBOLD
@@ -1076,7 +1370,7 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(icon("hourglass", 14.0, theme.text)),
+                        .child(sf_symbols::glyph("hourglass", 14.0, theme.text)),
                 )
                 .child(
                     div()
@@ -1182,9 +1476,18 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
             );
         }
     }
-    for entry in rows {
+    // The Pinned section ([feedback sidebar-pinning-mac-2026-10-28]): a muted label, the
+    // pinned rows in the user's order, a hairline, then the rest. Zero pins → nothing of
+    // this is drawn and the list is exactly as before.
+    if pinned_count > 0 {
+        list = list.child(pinned_header(&theme));
+    }
+    for (index, entry) in rows.into_iter().enumerate() {
+        if pinned_count > 0 && index == pinned_count {
+            list = list.child(pinned_divider(&theme));
+        }
         // The row's card bounds feed the rail morph (the selected card shrinks
-        // into its 54 pt tile).
+        // into its 54 pt tile) and the pin drag (which slot the pointer is over).
         let snap_card = snap.clone();
         let card_id = entry.id().clone();
         let row = match entry {
@@ -1206,6 +1509,9 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
                 .child(row),
         );
     }
+    if pinned_count > 0 {
+        list = pin_drop_target(list, cx);
+    }
     if !hidden_mode && hidden_count > 0 {
         // Grok Bot's footer: muted "Hidden chats · N ›" under the list.
         list = list.child(
@@ -1221,9 +1527,9 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
                 .text_size(px(TEXT_SMALL))
                 .text_color(theme.text_muted)
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
+                .map(|el| highlight::row(el, false, Shape::Own, &theme))
                 .child(format!("Hidden chats · {hidden_count}"))
-                .child(icon("chevron-right", 12.0, theme.text_faint))
+                .child(sf_symbols::glyph("chevron.right", 12.0, theme.text_faint))
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.hidden_open = true;
@@ -1252,75 +1558,57 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
     // Grok Bot's footer avatar: 36 pt at x 13, 12 above the bottom edge
     // ([feedback footer-avatar-grok-size-2026-10-24]; the constants above).
     let snap_footer = snap.clone();
-    let account_row = footer_row_frame()
-        .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
-        .child(
-            div()
-                .flex_shrink_0()
-                .on_children_prepainted(move |bounds, _, _| {
-                    if let Some(b) = bounds.first() {
-                        snap_footer.borrow_mut().footer = Some(*b);
-                    }
-                })
-                .child(
-                    account_avatar(shell, machine, &theme, cx)
-                        .when(hide_morphing, |el| el.opacity(0.0)),
-                ),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .text_size(px(TEXT_SMALL + 1.0))
-                .text_color(theme.text)
-                .child(who),
-        )
-        // My avatar opens my profile and every setting in the right pane
-        // (three-pane rule, mockup g); a second click folds it away.
-        .on_mouse_down(
-            gpui::MouseButton::Left,
-            cx.listener(|this, _, window, cx| {
-                cx.stop_propagation();
-                this.menu_open = false;
-                let open = this.state.read(cx).profile == Some(crate::app::ProfilePage::Me);
-                if open {
-                    this.close_profile(window, cx);
-                } else {
-                    this.state.update(cx, |s, cx| {
-                        s.open_profile(crate::app::ProfilePage::Me, cx);
-                        s.set_profile_tab(1, cx);
-                    });
+    let account_row = highlight::row(
+        footer_row_frame().cursor_pointer(),
+        false,
+        Shape::Own,
+        &theme,
+    )
+    .child(
+        div()
+            .flex_shrink_0()
+            .on_children_prepainted(move |bounds, _, _| {
+                if let Some(b) = bounds.first() {
+                    snap_footer.borrow_mut().footer = Some(*b);
                 }
-                cx.notify();
-            }),
-        );
+            })
+            .child(
+                account_avatar(shell, machine, &theme, cx)
+                    .when(hide_morphing, |el| el.opacity(0.0)),
+            ),
+    )
+    .child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .text_size(px(TEXT_SMALL + 1.0))
+            .text_color(theme.text)
+            .child(who),
+    )
+    // My avatar opens my profile and every setting in the right pane
+    // (three-pane rule, mockup g); a second click folds it away.
+    .on_mouse_down(
+        gpui::MouseButton::Left,
+        cx.listener(|this, _, window, cx| {
+            cx.stop_propagation();
+            this.menu_open = false;
+            let open = this.state.read(cx).profile == Some(crate::app::ProfilePage::Me);
+            if open {
+                this.close_profile(window, cx);
+            } else {
+                this.state.update(cx, |s, cx| {
+                    s.open_profile(crate::app::ProfilePage::Me, cx);
+                    s.set_profile_tab(1, cx);
+                });
+            }
+            cx.notify();
+        }),
+    );
 
-    // Drag handle on the right edge: a slim hit target (col-resize cursor) that
-    // lets the user make the chat list slimmer or wider
-    // ([feedback app-01M5MJ9Y91W9ZET71KTCE7PS65]).
-    let resize = div()
-        .id("sidebar-resize")
-        .absolute()
-        .top_0()
-        .right_0()
-        .h_full()
-        .w(px(SIDEBAR_RESIZE_HANDLE))
-        .cursor(CursorStyle::ResizeColumn)
-        .hover(|s| s.bg(Theme::with_alpha(theme.primary, 0.45)))
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_drag(SidebarResizeDrag, |_, _, _, cx| {
-            cx.new(|_| SidebarResizeDragGhost)
-        })
-        .on_drag_move(
-            cx.listener(|this, ev: &DragMoveEvent<SidebarResizeDrag>, _, cx| {
-                // The column docks at the window's left, so mouse x is the width.
-                let width = f32::from(ev.event.position.x);
-                this.state
-                    .update(cx, |s, cx| s.set_sidebar_width(width, cx));
-            }),
-        );
+    // Drag handle on the right edge: slimmer or wider, and past the snap
+    // point the column collapses to the rail (`ui::sidebar_fit`).
+    let resize = resize_handle("sidebar-resize", &theme, &shell.split_drag, cx);
 
     let column = div()
         .relative()
@@ -1335,7 +1623,7 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
         .child(strip)
         // The filter belongs to the chat list, not to a server's channel list.
         .when(filter_shown(open_server.is_some()), |el| {
-            el.child(filter_bar)
+            el.child(edge_faded_sides(FILTER_FADE_BAND, filter_bar))
         })
         .child(match open_server.as_ref() {
             // Inside a server the left pane shows its channels (mockup h).
@@ -1403,6 +1691,17 @@ pub fn server_row_picture(server: &ServerInfo, state: &AppState, size: f32, them
 
 /// A server row (D88 rule 1): drawn like a group row — picture, name, time, last line,
 /// unread dot. No badge, no count, no disclosure. The picture is a rounded square.
+/// A pinned row can be dragged to another slot of the Pinned section: the drag's start
+/// records the row, the list (`pin_drop_target`) follows the pointer and commits.
+fn pin_draggable(el: gpui::Stateful<Div>, id: Id, cx: &mut Context<Shell>) -> gpui::Stateful<Div> {
+    let weak = cx.weak_entity();
+    el.on_drag(PinDrag { id }, move |drag, _, _, cx| {
+        let id = drag.id.clone();
+        weak.update(cx, |this, cx| this.begin_pin_drag(id, cx)).ok();
+        cx.new(|_| PinDragGhost)
+    })
+}
+
 fn render_server_row(
     row: ServerRowView,
     shell: &Shell,
@@ -1418,8 +1717,10 @@ fn render_server_row(
             server: row.server.clone(),
             selected: row.selected,
             unread: row.unread,
+            unread_count: row.unread_count,
             preview: String::new(),
             time: String::new(),
+            pinned: false,
         }))
         .picture(shell, AVATAR_ROW, theme, cx),
     );
@@ -1427,12 +1728,17 @@ fn render_server_row(
         server,
         selected,
         unread,
+        unread_count,
         preview,
         time,
+        pinned,
     } = row;
     let id: Id = server.id.clone();
     let menu_id: Id = server.id.clone();
     let ctrl_menu_id: Id = server.id.clone();
+    let drag_id: Id = server.id.clone();
+    let mark_id: Id = server.id.clone();
+    let lifted = shell.pin_drag.as_ref().is_some_and(|d| d.id == server.id);
     div()
         .id(ElementId::Name(SharedString::from(format!(
             "row-server-{}",
@@ -1444,18 +1750,14 @@ fn render_server_row(
         .px(px(12.0))
         .py(px(11.0))
         .rounded(px(PANEL_RADIUS - 4.0))
-        .bg(if selected && !hide_morphing {
-            theme.surface_2
-        } else {
-            gpui::transparent_black()
-        })
-        .hover(|s| {
-            s.bg(if selected {
-                theme.surface_2
+        .map(|el| {
+            if lifted {
+                highlight::lifted(el, theme)
             } else {
-                Theme::with_alpha(theme.surface_2, 0.55)
-            })
+                highlight::row(el, selected && !hide_morphing, Shape::Own, theme)
+            }
         })
+        .when(pinned, |el| pin_draggable(el, drag_id, cx))
         .cursor_pointer()
         .on_click(
             cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
@@ -1522,13 +1824,10 @@ fn render_server_row(
                                 .child(server.name.clone()),
                         )
                         .child(div().flex_1())
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .text_size(px(TEXT_TINY))
-                                .text_color(theme.text_muted)
-                                .child(time),
-                        ),
+                        .when(pinned, |el| el.child(pin_mark(&mark_id, theme)))
+                        .when_some(row_time_size(shell, cx), |el, size| {
+                            el.child(time_el(time, size, theme))
+                        }),
                 )
                 .child(
                     div()
@@ -1544,8 +1843,9 @@ fn render_server_row(
                                 .text_color(theme.text_muted)
                                 .child(preview),
                         )
+                        // Unread = the count pill, never a dot (Jacob, 2026-10-27).
                         .when(unread, |el| {
-                            el.child(div().size(px(8.0)).rounded_full().bg(theme.accent))
+                            el.child(crate::ui::marks::unread_pill(unread_count, theme))
                         }),
                 ),
         )
@@ -1588,7 +1888,7 @@ fn server_channels(
         .pb(px(10.0))
         .child(
             glass::circle("server-back-circle", 30.0, theme)
-                .child(icon("chevron-left", 14.0, theme.text))
+                .child(sf_symbols::glyph("chevron.left", 14.0, theme.text))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.state.update(cx, |s, cx| s.close_server_pane(cx));
                 })),
@@ -1645,7 +1945,7 @@ fn server_channels(
         let preview = room
             .as_ref()
             .filter(|r| r.last_ts > 0)
-            .map(channel_last_line)
+            .map(|r| channel_last_line(state, r))
             .unwrap_or_else(|| "No messages yet".into());
         let time = room
             .as_ref()
@@ -1669,18 +1969,7 @@ fn server_channels(
                 .px(px(12.0))
                 .py(px(11.0))
                 .rounded(px(PANEL_RADIUS - 4.0))
-                .bg(if selected {
-                    theme.surface_2
-                } else {
-                    gpui::transparent_black()
-                })
-                .hover(|s| {
-                    s.bg(if selected {
-                        theme.surface_2
-                    } else {
-                        Theme::with_alpha(theme.surface_2, 0.55)
-                    })
-                })
+                .map(|el| highlight::row(el, selected, Shape::Own, theme))
                 .cursor_pointer()
                 .child(
                     div()
@@ -1691,7 +1980,7 @@ fn server_channels(
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(icon("hash", 18.0, theme.text_muted)),
+                        .child(sf_symbols::glyph("number", 18.0, theme.text_muted)),
                 )
                 .child(
                     div()
@@ -1718,15 +2007,13 @@ fn server_channels(
                                         .text_color(theme.text)
                                         .child(ch.name.clone()),
                                 )
-                                .when(locked, |el| el.child(icon("lock", 11.0, theme.text_faint)))
+                                .when(locked, |el| {
+                                    el.child(sf_symbols::glyph("lock", 11.0, theme.text_faint))
+                                })
                                 .child(div().flex_1())
-                                .child(
-                                    div()
-                                        .flex_shrink_0()
-                                        .text_size(px(TEXT_TINY))
-                                        .text_color(theme.text_muted)
-                                        .child(time),
-                                ),
+                                .when_some(row_time_size(shell, cx), |el, size| {
+                                    el.child(time_el(time, size, theme))
+                                }),
                         )
                         .child(
                             div()
@@ -1743,7 +2030,10 @@ fn server_channels(
                                         .child(preview),
                                 )
                                 .when(unread, |el| {
-                                    el.child(div().size(px(8.0)).rounded_full().bg(theme.accent))
+                                    el.child(crate::ui::marks::unread_pill(
+                                        room.as_ref().map_or(1, |r| r.unread as usize),
+                                        theme,
+                                    ))
                                 }),
                         ),
                 )
@@ -1867,7 +2157,11 @@ pub fn channel_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     let mut body = div().flex().flex_col().gap(px(1.0)).child(
         glass::menu_row(
             "channel-menu-archive",
-            if archived { "tray-up" } else { "archive" },
+            if archived {
+                "tray.and.arrow.up"
+            } else {
+                "archivebox"
+            },
             if archived { "Unarchive" } else { "Archive" },
             false,
             &theme,
@@ -1902,6 +2196,26 @@ pub fn channel_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
 /// A row's picture wrapped for the rail morph: its resting bounds are recorded
 /// under the row's id every frame it is painted; while the morph runs the
 /// overlay paints it instead (`invisible` keeps the slot).
+/// The rows' time size at the column's width — `None` hides it: the name
+/// wins as the column narrows (`ui::sidebar_fit::row_time`,
+/// [feedback sidebar-narrow-wrap-2026-10-27]).
+fn row_time_size(shell: &Shell, cx: &Context<Shell>) -> Option<f32> {
+    match sidebar_fit::row_time(shell.state.read(cx).sidebar_width) {
+        sidebar_fit::RowTime::Full => Some(TEXT_TINY),
+        sidebar_fit::RowTime::Small => Some(sidebar_fit::TIME_SMALL_SIZE),
+        sidebar_fit::RowTime::Hidden => None,
+    }
+}
+
+fn time_el(time: String, size: f32, theme: &Theme) -> Div {
+    div()
+        .flex_shrink_0()
+        .text_size(px(size))
+        .text_color(theme.text_muted)
+        .debug_selector(|| "row-time".into())
+        .child(time)
+}
+
 fn recorded_picture(shell: &Shell, id: &Id, hide_morphing: bool, picture: Div) -> Div {
     let snap = shell.morph.clone();
     let id = id.clone();
@@ -1935,16 +2249,19 @@ fn render_row(
         selected,
         streaming,
         unread,
+        unread_count,
         typing,
         preview,
         time,
         person_image: _,
         guests: _,
-        avatar_state,
+        pinned,
     } = row;
     let id: Id = space.id.clone();
     let menu_id: Id = space.id.clone();
     let ctrl_menu_id: Id = space.id.clone();
+    let drag_id: Id = space.id.clone();
+    let lifted = shell.pin_drag.as_ref().is_some_and(|d| d.id == space.id);
     let can_rename = !space.is_guest() && !space.is_people();
     let renaming = shell
         .state
@@ -1952,18 +2269,23 @@ fn render_row(
         .renaming_project
         .as_ref()
         .is_some_and(|p| p == &space.id);
-    if typing || avatar_state != avatars::AvatarState::Idle {
-        PulseClock::request(cx);
-    }
-    let phase = PulseClock::phase(cx, 900);
+    // No pulse-clock request from a row any more: the typing pulse is gone
+    // (never a coloured dot — Jacob, 2026-10-27; "typing…" is the preview), and
+    // the old working-row request made the window redraw at 30 fps for nothing.
+    // The spinner has its own shared 11 fps ticker (`ui::working`).
 
     // Groups: the chat title (custom or member handles from the relay),
     // matching iOS PeopleRow. DMs: the other person's display name.
     let name = row_name(&space);
+    // The name wins over the time as the column narrows: the time shrinks,
+    // then hides, and the `@handle` goes first (`ui::sidebar_fit::row_time`,
+    // [feedback sidebar-narrow-wrap-2026-10-27]).
+    let handle_shown = sidebar_fit::handle_shown(shell.state.read(cx).sidebar_width);
     // A group row reads like an agent row: name and preview, no member count.
     let handle = space
         .person()
         .filter(|_| space.is_people() && !space.is_people_group())
+        .filter(|_| handle_shown)
         .map(|p| format!("@{}", p.handle));
     let preview = if typing {
         "typing…".to_string()
@@ -1982,20 +2304,14 @@ fn render_row(
         .px(px(12.0))
         .py(px(11.0))
         .rounded(px(PANEL_RADIUS - 4.0))
-        .bg(if selected && !hide_morphing {
-            theme.surface_2
-        } else {
-            gpui::transparent_black()
-        })
-        // Hover is a lighter tint of the selected fill in both modes (in light,
-        // the old white hover read brighter than the selected row).
-        .hover(|s| {
-            s.bg(if selected {
-                theme.surface_2
+        .map(|el| {
+            if lifted {
+                highlight::lifted(el, theme)
             } else {
-                Theme::with_alpha(theme.surface_2, 0.55)
-            })
+                highlight::row(el, selected && !hide_morphing, Shape::Own, theme)
+            }
         })
+        .when(pinned, |el| pin_draggable(el, drag_id, cx))
         .cursor_pointer()
         .on_click({
             let id = id.clone();
@@ -2080,10 +2396,8 @@ fn render_row(
                                 .child(shell.agent_name_input.clone())
                                 .into_any_element()
                         } else {
-                            div()
+                            identity::name(name, TEXT_BODY)
                                 .min_w_0()
-                                .truncate()
-                                .text_size(px(TEXT_BODY))
                                 .font_weight(if unread || streaming {
                                     FontWeight::SEMIBOLD
                                 } else {
@@ -2094,32 +2408,34 @@ fn render_row(
                                 } else {
                                     theme.text
                                 })
-                                .child(name)
                                 .into_any_element()
                         })
                         .when_some(handle, |el, h| {
+                            let handle_id = id.clone();
                             el.child(
                                 div()
                                     .flex_shrink_0()
                                     .text_size(px(TEXT_TINY))
                                     .text_color(theme.text_muted)
+                                    .debug_selector(move || format!("row-handle-{handle_id}"))
                                     .child(h),
                             )
                         })
                         .child(div().flex_1())
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .text_size(px(TEXT_TINY))
-                                .text_color(theme.text_muted)
-                                .child(time),
-                        ),
+                        .when(pinned, |el| el.child(pin_mark(&id, theme)))
+                        .when_some(row_time_size(shell, cx), |el, size| {
+                            el.child(
+                                time_el(time, size, theme)
+                                    .debug_selector(|| format!("row-time-{id}")),
+                            )
+                        }),
                 )
                 .child(
                     div()
                         .flex()
                         .items_center()
                         .gap(px(6.0))
+                        .debug_selector(|| format!("row-preview-line-{id}"))
                         .child(
                             div()
                                 .flex_1()
@@ -2129,22 +2445,76 @@ fn render_row(
                                 .text_color(theme.text_muted)
                                 .child(preview),
                         )
-                        // No "agent is working" dot on rows (Jacob, 2026-10-22): the
-                        // working state lives in the header / activity line. A person
-                        // typing keeps its green pulse; unread keeps its accent dot.
-                        .when(typing, |el| {
-                            el.child(
-                                div()
-                                    .size(px(7.0))
-                                    .rounded_full()
-                                    .bg(Theme::with_alpha(theme.online, 0.35 + 0.65 * phase)),
-                            )
-                        })
-                        .when(!typing && unread, |el| {
-                            el.child(div().size(px(8.0)).rounded_full().bg(theme.accent))
-                        }),
+                        // The status cell under the time (Jacob, 2026-10-27): the
+                        // braille spinner while the chat's agent works (one shared
+                        // ticker); the unread count pill; nothing for a person typing
+                        // (the preview says "typing…") or a quiet read chat. Never a
+                        // coloured dot.
+                        .children(row_status_cell(
+                            RowStatus::of(streaming, typing, unread),
+                            unread_count,
+                            &id,
+                            theme,
+                            cx,
+                        )),
                 ),
         )
+}
+
+/// What the status cell under a row's time shows (Jacob, 2026-10-27,
+/// [feedback working-braille-spinner-mac-2026-10-27] + [feedback
+/// neon-dots-mac-2026-10-27]). One cell, one mark, never a coloured dot: a
+/// person typing shows nothing in the cell (the spinner is the *agent's*
+/// working sign, never a human's; the preview reads "typing…"); the spinner
+/// while the chat's agent works; the unread **count pill** otherwise; a quiet
+/// read chat shows nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowStatus {
+    /// A person is typing: no mark in the cell (the preview carries it).
+    Typing,
+    /// The chat's agent is working: the braille spinner.
+    Working,
+    /// Unread messages: the count pill.
+    Unread,
+    /// Nothing.
+    Quiet,
+}
+
+impl RowStatus {
+    pub fn of(streaming: bool, typing: bool, unread: bool) -> Self {
+        // Typing draws nothing, so it never hides the spinner or the pill.
+        if streaming {
+            RowStatus::Working
+        } else if unread {
+            RowStatus::Unread
+        } else if typing {
+            RowStatus::Typing
+        } else {
+            RowStatus::Quiet
+        }
+    }
+}
+
+fn row_status_cell(
+    status: RowStatus,
+    unread_count: usize,
+    id: &Id,
+    theme: &Theme,
+    cx: &mut App,
+) -> Option<AnyElement> {
+    match status {
+        RowStatus::Typing | RowStatus::Quiet => None,
+        RowStatus::Working => Some(
+            crate::ui::working::glyph(theme, cx)
+                .debug_selector(|| format!("row-status-working-{id}"))
+                .into_any_element(),
+        ),
+        RowStatus::Unread => Some(
+            crate::ui::marks::unread_pill(unread_count, theme)
+                .debug_selector(|| format!("row-status-unread-{id}"))
+                .into_any_element(),
+        ),
+    }
 }
 
 /// The right-click menu of a sidebar row, anchored at the click. An agent
@@ -2192,11 +2562,34 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
     let archived = state.is_space_archived(&space_id);
+    // Pin / Unpin leads every row's menu ([feedback sidebar-pinning-mac-2026-10-28]):
+    // SF `pin` / `pin.slash`, the iPhone's names. At the cap the click says so.
+    let pinned = state.is_pinned(&space_id);
+    let pin_row = |theme: &Theme, cx: &mut Context<Shell>| {
+        let id = space_id.clone();
+        glass::menu_row(
+            "row-menu-pin",
+            if pinned { "pin.slash" } else { "pin" },
+            if pinned { "Unpin" } else { "Pin" },
+            false,
+            theme,
+        )
+        .debug_selector(|| "row-menu-pin".into())
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.row_menu = None;
+            let id = id.clone();
+            this.state.update(cx, |s, cx| s.set_pinned(id, !pinned, cx));
+        }))
+    };
     let archive_row = |theme: &Theme, cx: &mut Context<Shell>| {
         let id = space_id.clone();
         glass::menu_row(
             "row-menu-archive",
-            if archived { "tray-up" } else { "archive" },
+            if archived {
+                "tray.and.arrow.up"
+            } else {
+                "archivebox"
+            },
             if archived { "Unarchive" } else { "Archive" },
             false,
             theme,
@@ -2214,6 +2607,7 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
             .flex()
             .flex_col()
             .gap(px(1.0))
+            .child(pin_row(&theme, cx))
             .child(archive_row(&theme, cx));
         return Some(
             div()
@@ -2259,7 +2653,11 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     let is_group = space.is_people_group();
     let delete_action = row_delete(&space, &state.me_handle());
 
-    let mut body = div().flex().flex_col().gap(px(1.0));
+    let mut body = div()
+        .flex()
+        .flex_col()
+        .gap(px(1.0))
+        .child(pin_row(&theme, cx));
     if is_group {
         // Mockup f: the group row's menu is "Delete group" — plus Archive (2026-10-23).
         body = body
@@ -2294,22 +2692,27 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     // on the agent pane. A people row keeps Profile.
     if is_people {
         body = body.child(
-            glass::menu_row("row-menu-profile", "person", "Profile", false, &theme).on_click(
-                cx.listener(move |this, _, _, cx| {
-                    this.row_menu = None;
-                    let (page, id) = (profile_page.clone(), profile_id.clone());
-                    this.state.update(cx, |s, cx| {
-                        s.select_project(id, cx);
-                        s.open_profile(page, cx);
-                    });
-                }),
-            ),
+            glass::menu_row(
+                "row-menu-profile",
+                "person.crop.circle",
+                "Profile",
+                false,
+                &theme,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.row_menu = None;
+                let (page, id) = (profile_page.clone(), profile_id.clone());
+                this.state.update(cx, |s, cx| {
+                    s.select_project(id, cx);
+                    s.open_profile(page, cx);
+                });
+            })),
         );
     }
     body = body.child(
         glass::menu_row(
             "row-menu-mute",
-            if muted { "bell" } else { "bell-slash" },
+            if muted { "bell" } else { "bell.slash" },
             if muted { "Unmute" } else { "Mute" },
             false,
             &theme,
@@ -2322,13 +2725,18 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     );
     if can_fork {
         body = body.child(
-            glass::menu_row("row-menu-fork", "branch", "Fork", false, &theme).on_click(
-                cx.listener(move |this, _, _, cx| {
-                    this.row_menu = None;
-                    let id = fork_id.clone();
-                    this.state.update(cx, |s, cx| s.duplicate_project(id, cx));
-                }),
-            ),
+            glass::menu_row(
+                "row-menu-fork",
+                "arrow.triangle.branch",
+                "Fork",
+                false,
+                &theme,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.row_menu = None;
+                let id = fork_id.clone();
+                this.state.update(cx, |s, cx| s.duplicate_project(id, cx));
+            })),
         );
     }
     body = body.child(archive_row(&theme, cx));
@@ -2387,11 +2795,13 @@ pub(crate) fn confirm_button(
                 .hover(|s| s.opacity(0.88))
         })
         .when(!danger, |el| {
-            el.bg(theme.field)
-                .border_1()
-                .border_color(theme.field_border)
-                .text_color(theme.text)
-                .hover(|s| s.bg(theme.surface_2))
+            highlight::washed(
+                el.border_1()
+                    .border_color(theme.field_border)
+                    .text_color(theme.text),
+                theme.field,
+                theme,
+            )
         })
         .child(label)
 }
@@ -2493,7 +2903,7 @@ pub fn chat_menu(
         let rename_id = chat.id.clone();
         let rename_label = title.clone();
         body = body.child(
-            glass::menu_row("chat-menu-rename", "square-pencil", "Rename", false, &theme).on_click(
+            glass::menu_row("chat-menu-rename", "pencil", "Rename", false, &theme).on_click(
                 cx.listener(move |this, _, window, cx| {
                     this.chat_menu = None;
                     this.tab_menu_open = true;
@@ -2504,15 +2914,20 @@ pub fn chat_menu(
     }
     if can_fork {
         body = body.child(
-            glass::menu_row("chat-menu-fork", "branch", "Fork", false, &theme).on_click(
-                cx.listener(move |this, _, window, cx| {
-                    this.chat_menu = None;
-                    this.tab_menu_open = false;
-                    let id = fork_id.clone();
-                    this.state.update(cx, |s, cx| s.fork_chat(id, cx));
-                    Composer::focus(&this.composer, window, cx);
-                }),
-            ),
+            glass::menu_row(
+                "chat-menu-fork",
+                "arrow.triangle.branch",
+                "Fork",
+                false,
+                &theme,
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.chat_menu = None;
+                this.tab_menu_open = false;
+                let id = fork_id.clone();
+                this.state.update(cx, |s, cx| s.fork_chat(id, cx));
+                Composer::focus(&this.composer, window, cx);
+            })),
         );
     }
     if can_delete {
@@ -2587,13 +3002,8 @@ mod strip_tests {
     use crate::ui::shell::TRAFFIC_LIGHTS_INSET;
     use crate::ui::theme::{
         CONTROL, CONTROL_GAP, CONTROL_GLYPH, CONTROL_GLYPH_WIDE, CONTROL_LINE, HEADER_HEIGHT,
-        TRAFFIC_LIGHT_POSITION,
+        TRAFFIC_LIGHT_LINE, TRAFFIC_LIGHT_POSITION,
     };
-
-    /// The real lights' centre line: macOS 26 draws a 14 pt disc in the frame
-    /// GPUI places at `TRAFFIC_LIGHT_POSITION` (measured on the v0.6.213
-    /// build: position 14 → centre 21).
-    const TRAFFIC_LIGHT_LINE: f32 = TRAFFIC_LIGHT_POSITION + 7.0;
 
     /// Grok Bot's strip, measured on `ref-grok-round-search-plus.png` (project
     /// store, 2 px/pt, window top at image row 2) — Jacob 2026-10-24: "the
@@ -2791,24 +3201,33 @@ mod strip_tests {
         assert_eq!(STRIP_GAP, CONTROL_GAP);
         assert_eq!(STRIP_GAP, 8.0, "Grok's 16 px / 2 between discs");
         assert_eq!(STRIP_INSET, 12.0);
-        // The 24-grid icons: search and plus at CONTROL_GLYPH draw Grok's
-        // 14 / 13 pt marks within 1 px (0.75 × 19 = 14.25, 0.667 × 19 = 12.7);
-        // the collapse rect (20/24 of the grid) takes the narrower size for
-        // the same 14 pt box (0.833 × 17 = 14.2).
-        assert_eq!(StripControl::Search.glyph(), ("search", CONTROL_GLYPH));
+        // System symbols ([feedback sf-symbols-everywhere-mac-2026-10-28]): the
+        // magnifier and plus sit in the CONTROL_GLYPH box at GLYPH_POINT_RATIO of
+        // it (16 pt), medium weight — Apple's `magnifyingglass` inks ≈ 0.9 of its
+        // point size (14.5, Grok's 14), `plus` ≈ 0.8 (12.9, Grok's 13); the wider
+        // `sidebar.left` takes the narrower box for the same 14 pt mark.
+        assert_eq!(
+            StripControl::Search.glyph(),
+            ("magnifyingglass", CONTROL_GLYPH)
+        );
         assert_eq!(StripControl::New.glyph(), ("plus", CONTROL_GLYPH));
         assert_eq!(
             StripControl::Collapse.glyph(),
-            ("sidebar-left", CONTROL_GLYPH_WIDE)
+            ("sidebar.left", CONTROL_GLYPH_WIDE)
         );
-        let magnifier = 0.75 * CONTROL_GLYPH;
-        let plus = (16.0 / 24.0) * CONTROL_GLYPH;
-        let collapse = (20.0 / 24.0) * CONTROL_GLYPH_WIDE;
-        assert!((magnifier - 14.0).abs() <= 0.5, "magnifier box {magnifier}");
-        assert!((plus - 13.0).abs() <= 0.5, "plus box {plus}");
-        assert!((collapse - 14.0).abs() <= 0.5, "collapse box {collapse}");
-        let stroke = 2.0 / 24.0 * CONTROL_GLYPH;
-        assert!((stroke - 1.5).abs() <= 0.25, "stroke {stroke} (Grok 1.5)");
+        let point = crate::ui::sf_symbols::GLYPH_POINT_RATIO * CONTROL_GLYPH;
+        let magnifier = 0.9 * point;
+        let plus = 0.8 * point;
+        let collapse = 0.95 * crate::ui::sf_symbols::GLYPH_POINT_RATIO * CONTROL_GLYPH_WIDE;
+        assert!(
+            (magnifier - 14.0).abs() <= 0.75,
+            "magnifier mark {magnifier}"
+        );
+        assert!((plus - 13.0).abs() <= 0.5, "plus mark {plus}");
+        assert!((collapse - 14.0).abs() <= 0.5, "collapse mark {collapse}");
+        for name in ["magnifyingglass", "plus", "sidebar.left"] {
+            assert!(crate::ui::sf_symbols::is_registered(name), "{name}");
+        }
     }
 
     /// Inside a server there is no search; a member without admin rights has
@@ -2906,6 +3325,172 @@ mod strip_tests {
         assert_eq!(ListFilter::default(), ListFilter::All);
     }
 
+    /// The filter row as `render_with` builds it in a column too narrow for
+    /// the four capsules: a horizontal scroll under `scroll`, the selected
+    /// capsule pinned into view through `pin` — once per selection / width,
+    /// or on every frame when `pin_every_frame` (the behaviour before
+    /// [feedback server-strip-scroll-2026-10-28], kept here to show the test
+    /// tells the two apart).
+    struct NarrowFilter {
+        scroll: gpui::ScrollHandle,
+        pin: crate::ui::sidebar_fit::FilterPin,
+        pin_every_frame: bool,
+        selected: usize,
+        width: f32,
+    }
+
+    impl gpui::Render for NarrowFilter {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let measured = self.scroll.bounds().size.width > px(0.0);
+            if self.pin_every_frame || self.pin.take(self.selected, self.width, measured) {
+                self.scroll.scroll_to_item(self.selected);
+            }
+            let count = ListFilter::ALL.len();
+            let row = div()
+                .id("narrow-filter")
+                .debug_selector(|| "filter-row".into())
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .gap(px(super::FILTER_GAP))
+                .px(px(8.0))
+                .overflow_x_scroll()
+                .track_scroll(&self.scroll)
+                .children(ListFilter::ALL.into_iter().enumerate().map(|(ix, f)| {
+                    let sel: &'static str =
+                        Box::leak(format!("capsule-{}", f.label()).into_boxed_str());
+                    div()
+                        .h(px(FILTER_HEIGHT))
+                        .px(px(super::FILTER_PAD_X))
+                        .flex_shrink_0()
+                        .map(|mut el| {
+                            if ix == 0 {
+                                el.style().margin.left = Some(gpui::Length::Auto);
+                            }
+                            if ix + 1 == count {
+                                el.style().margin.right = Some(gpui::Length::Auto);
+                            }
+                            el
+                        })
+                        .debug_selector(move || sel.into())
+                        .child(f.label())
+                }));
+            div()
+                .w(px(self.width))
+                .h(px(120.0))
+                .flex()
+                .flex_col()
+                .child(row)
+        }
+    }
+
+    fn narrow_filter(scroll: &gpui::ScrollHandle, pin_every_frame: bool) -> NarrowFilter {
+        NarrowFilter {
+            scroll: scroll.clone(),
+            pin: Default::default(),
+            pin_every_frame,
+            selected: 3,
+            // Narrower than the four capsules need: the row scrolls.
+            width: 150.0,
+        }
+    }
+
+    /// Affinity, Arbonites, 2026-10-28 ("if on server cannot scroll back to
+    /// make 'all' visible again"; Scout confirmed): with Servers selected in
+    /// a narrow column the strip opens scrolled so Servers shows (All
+    /// clipped) — and after the user scrolls back, the offset must be able to
+    /// reach 0 with "All" fully in view, and stay there across repaints.
+    #[gpui::test]
+    fn the_strip_scrolls_back_to_all_and_stays_there(cx: &mut TestAppContext) {
+        let scroll = gpui::ScrollHandle::new();
+        let (view, vcx) = cx.add_window_view(|_, _| narrow_filter(&scroll, false));
+        // The pin lands on the frame after the one that measured the capsules.
+        for _ in 0..3 {
+            view.update(vcx, |_, cx| cx.notify());
+            vcx.run_until_parked();
+        }
+        let row = vcx.debug_bounds("filter-row").expect("the row");
+        let all = vcx.debug_bounds("capsule-All").expect("All");
+        let servers = vcx.debug_bounds("capsule-Servers").expect("Servers");
+        assert!(
+            f32::from(scroll.max_offset().x) > 0.0,
+            "the column is narrow enough for the row to scroll"
+        );
+        assert!(
+            f32::from(scroll.offset().x) < 0.0,
+            "opens pinned to the selected capsule: offset {:?}",
+            scroll.offset()
+        );
+        assert!(
+            servers.right() <= row.right() + px(0.5),
+            "Servers in view: {servers:?} in {row:?}"
+        );
+        assert!(all.left() < row.left(), "All clipped on the left: {all:?}");
+
+        // The user scrolls back to the start (what the wheel / trackpad does
+        // to the handle's offset), and the strip repaints.
+        scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+        view.update(vcx, |_, cx| cx.notify());
+        vcx.run_until_parked();
+        let row = vcx.debug_bounds("filter-row").expect("the row");
+        let all = vcx.debug_bounds("capsule-All").expect("All");
+        assert_eq!(
+            f32::from(scroll.offset().x),
+            0.0,
+            "the offset reaches 0 and holds across the repaint"
+        );
+        assert!(
+            all.left() >= row.left() && all.right() <= row.right(),
+            "All fully visible: {all:?} in {row:?}"
+        );
+        // And another frame (a hover, a notify) does not drag it back either.
+        view.update(vcx, |_, cx| cx.notify());
+        vcx.run_until_parked();
+        assert_eq!(f32::from(scroll.offset().x), 0.0, "still 0 a frame later");
+
+        // The same row pinned on every frame — the bug — snaps back to Servers.
+        let scroll = gpui::ScrollHandle::new();
+        let (view, vcx) = cx.add_window_view(|_, _| narrow_filter(&scroll, true));
+        for _ in 0..3 {
+            view.update(vcx, |_, cx| cx.notify());
+            vcx.run_until_parked();
+        }
+        assert!(f32::from(scroll.offset().x) < 0.0, "pinned to Servers");
+        scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+        view.update(vcx, |_, cx| cx.notify());
+        vcx.run_until_parked();
+        assert!(
+            f32::from(scroll.offset().x) < 0.0,
+            "pinning every frame undoes the scroll back (the old behaviour)"
+        );
+    }
+
+    /// The pin fires once per selection and once per width (after the handle
+    /// has a frame behind it); otherwise never.
+    #[test]
+    fn the_pin_fires_on_selection_and_width_changes_only() {
+        let pin = crate::ui::sidebar_fit::FilterPin::default();
+        assert!(pin.take(3, 220.0, false), "before the first frame: ask");
+        assert!(
+            pin.take(3, 220.0, false),
+            "…and keep asking until one can land"
+        );
+        assert!(pin.take(3, 220.0, true), "the first measured frame");
+        assert!(!pin.take(3, 220.0, true), "a repaint");
+        assert!(
+            !pin.take(3, 220.2, true),
+            "sub-pixel width noise is the same width"
+        );
+        assert!(pin.take(0, 220.0, true), "the selection moved");
+        assert!(!pin.take(0, 220.0, true));
+        assert!(pin.take(0, 260.0, true), "the column was resized");
+        assert!(!pin.take(0, 260.0, true));
+    }
+
     /// The filter stays in the sidebar unchanged (Jacob, search-palette item
     /// point 4): drawn whenever the chat list is, never inside a server.
     #[test]
@@ -2923,11 +3508,10 @@ mod footer_tests {
     use gpui::{div, prelude::*, px, TestAppContext};
 
     use super::{
-        footer_disc_frame, footer_frame, footer_row_frame, DISC_HOVER_LIFT, DISC_PRESSED_LIFT,
-        FOOTER_AVATAR, FOOTER_BOTTOM, FOOTER_DISC, FOOTER_DISC_GLYPH, FOOTER_DISC_INSET,
-        FOOTER_DOT, FOOTER_DOT_OVERHANG, FOOTER_DOT_RING, FOOTER_HEIGHT, FOOTER_INSET,
-        FOOTER_ROW_HEIGHT, FOOTER_ROW_INSET, FOOTER_ROW_PAD_X, FOOTER_ROW_PAD_Y, STRIP_BUTTON,
-        STRIP_GAP, STRIP_INSET,
+        footer_disc_frame, footer_frame, footer_row_frame, FOOTER_AVATAR, FOOTER_BOTTOM,
+        FOOTER_DISC, FOOTER_DISC_GLYPH, FOOTER_DISC_INSET, FOOTER_DOT, FOOTER_DOT_OVERHANG,
+        FOOTER_DOT_RING, FOOTER_HEIGHT, FOOTER_INSET, FOOTER_ROW_HEIGHT, FOOTER_ROW_INSET,
+        FOOTER_ROW_PAD_X, FOOTER_ROW_PAD_Y, STRIP_BUTTON, STRIP_GAP, STRIP_INSET,
     };
     use crate::ui::theme::{Theme, CONTROL, CONTROL_LINE, HEADER_HEIGHT};
 
@@ -2984,6 +3568,12 @@ mod footer_tests {
         assert_eq!(FOOTER_DOT_OVERHANG, 2.0);
         // 28 → 36 scaled the 7 / 11 dot to 9 / 14; the ring stays 2 pt.
         assert_eq!(FOOTER_DOT, (7.0f32 * 36.0 / 28.0).round());
+        // The mark's ring is drawn from `marks::corner_metrics`: the same numbers.
+        let m = crate::ui::marks::corner_metrics(FOOTER_AVATAR);
+        assert_eq!(
+            (m.glyph, m.ring, m.overhang),
+            (FOOTER_DOT, FOOTER_DOT_RING, FOOTER_DOT_OVERHANG)
+        );
     }
 
     /// The footer as `render` frames it, laid out for real at the bottom of a
@@ -3124,11 +3714,18 @@ mod footer_tests {
             let glyph: gpui::Rgba = theme.on_update_disc.into();
             assert_eq!(rgb_u32(fill), grok_disc::FILL, "disc fill");
             assert_eq!(rgb_u32(glyph), grok_disc::GLYPH_FILL, "glyph fill");
-            let hover = Theme::lighter(theme.update_disc, DISC_HOVER_LIFT);
-            let pressed = Theme::lighter(theme.update_disc, DISC_PRESSED_LIFT);
-            assert!(hover.l > theme.update_disc.l, "brighter under the pointer");
-            assert!(pressed.l > hover.l, "brighter still while pressed");
-            assert_eq!(hover.h, theme.update_disc.h, "same hue");
+            // Hover / pressed come from the highlight token: the text-colour
+            // wash over the blue — brighter in dark (white wash), darker in
+            // light (black wash) — one step, then one more.
+            let f = crate::ui::highlight::fills(&theme);
+            let hover = crate::ui::highlight::over(theme.update_disc, f.hover);
+            let pressed = crate::ui::highlight::over(theme.update_disc, f.pressed);
+            assert_ne!(hover, theme.update_disc, "changes under the pointer");
+            if theme.is_light() {
+                assert!(hover.l < theme.update_disc.l && pressed.l < hover.l);
+            } else {
+                assert!(hover.l > theme.update_disc.l && pressed.l > hover.l);
+            }
         }
     }
 
@@ -3320,5 +3917,840 @@ mod row_bounds_tests {
                 assert!(offset < -(ROW_H * 2.0), "the list scrolled ({offset})");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod channel_preview_tests {
+    //! A server row's "#general · …" preview labels a person as a group's preview does
+    //! (`@handle:`), me as "You", an agent by name — never a bare handle as if it were a
+    //! name ([feedback server-member-names-2026-10-28]; the tester's shot read "general ·
+    //! A: bug").
+    use super::channel_preview_who;
+
+    #[test]
+    fn the_preview_labels_people_like_a_group_does() {
+        let me = "user:test_01ME";
+        assert_eq!(channel_preview_who("user:test_01scout", "A", me), "@A");
+        assert_eq!(channel_preview_who("user:test_01me", "affinity", me), "You");
+        assert_eq!(channel_preview_who("agent:01COMMS", "Comms", me), "Comms");
+        assert_eq!(channel_preview_who("system", "", me), "");
+        assert_eq!(channel_preview_who("system", "launchcrew", me), "");
+        assert_eq!(channel_preview_who("", "", me), "", "no row yet");
+        // The fixture names its senders outright (no member string).
+        assert_eq!(channel_preview_who("", "Sami", me), "Sami");
+    }
+}
+
+#[cfg(test)]
+mod status_cell_tests {
+    use std::time::Duration;
+
+    use futures::future::BoxFuture;
+    use gpui::{AppContext as _, Bounds, Entity, Pixels, TestAppContext, VisualTestContext};
+    use tokio::sync::mpsc;
+
+    use super::RowStatus;
+    use crate::app::AppState;
+    use crate::model::{Chat, Message, Person, Project, SpaceKind};
+    use crate::sync::{ClientCommand, SyncEvent, SyncSource};
+    use crate::ui::marks::UNREAD_PILL_H;
+    use crate::ui::motion::PulseClock;
+    use crate::ui::shell::Shell;
+    use crate::ui::theme::{Surface, Theme};
+    use crate::ui::working::{WorkingClock, CELL_H, CELL_W, FRAME_MS};
+
+    struct Idle;
+
+    impl SyncSource for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            _commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    /// The rule as code: the agent's spinner beats unread, unread beats a
+    /// person typing (which draws nothing — the spinner is never a human's
+    /// sign), typing beats quiet.
+    #[test]
+    fn the_cell_shows_one_thing_in_this_order() {
+        assert_eq!(RowStatus::of(false, true, false), RowStatus::Typing);
+        assert_eq!(
+            RowStatus::of(false, true, true),
+            RowStatus::Unread,
+            "typing draws nothing, so it hides nothing"
+        );
+        assert_eq!(RowStatus::of(true, true, false), RowStatus::Working);
+        assert_eq!(RowStatus::of(true, false, true), RowStatus::Working);
+        assert_eq!(RowStatus::of(false, false, true), RowStatus::Unread);
+        assert_eq!(RowStatus::of(false, false, false), RowStatus::Quiet);
+        assert_eq!(CELL_W, 8.0, "the cell is the old dot's width");
+    }
+
+    fn message(id: &str, chat: &str, role: &str, status: &str, text: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "chatId": chat, "role": role, "sender": role, "status": status,
+            "createdAt": at, "completedAt": at,
+            "parts": [{ "id": format!("{id}-t"), "kind": "text", "text": text }],
+        }))
+        .expect("message")
+    }
+
+    fn chat(id: &str, project: &str, unread: bool, at: u64) -> Chat {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "project_id": project, "title": "Main", "is_pinned": true,
+            "is_system": false, "unread": unread, "last_message_at": at,
+        }))
+        .expect("chat")
+    }
+
+    fn person(id: &str, handle: &str, name: &str) -> Person {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "handle": handle, "name": name, "status": "active",
+        }))
+        .expect("person")
+    }
+
+    /// Four rows: an agent working (`working`), an agent with unread
+    /// (`unread`), a quiet read agent (`quiet`), a DM whose person is typing
+    /// (`dm`). The quiet one is selected so the others keep their state.
+    fn mount(
+        cx: &mut TestAppContext,
+    ) -> (
+        tokio::runtime::Runtime,
+        Entity<AppState>,
+        Entity<Shell>,
+        &mut VisualTestContext,
+    ) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| {
+            gpui_tokio::init_from_handle(cx, handle);
+            cx.set_global(Theme::dark(Surface::Matte));
+            if !cx.has_global::<PulseClock>() {
+                PulseClock::init(cx);
+            }
+            WorkingClock::init(cx);
+        });
+        let state = cx.new(|cx| AppState::new(Box::new(Idle), cx));
+        let now = crate::model::now_ms();
+        state.update(cx, |s, cx| {
+            for (pid, name, kind, people) in [
+                ("working", "Affine", SpaceKind::Project, vec![]),
+                ("unread", "Lium", SpaceKind::Project, vec![]),
+                ("quiet", "Arbos", SpaceKind::Project, vec![]),
+                (
+                    "dm",
+                    "Sam Rivera",
+                    SpaceKind::Dm,
+                    vec![person("gh_2", "sam", "Sam Rivera")],
+                ),
+            ] {
+                s.projects.push(Project {
+                    id: pid.into(),
+                    name: name.into(),
+                    kind,
+                    people,
+                    ..Project::default()
+                });
+                let room = format!("room-{pid}");
+                let at = now - 60_000;
+                let mut rows = vec![
+                    message(
+                        "u",
+                        &room,
+                        "user",
+                        "done",
+                        "Can you look at the surf report?",
+                        at,
+                    ),
+                    message("a", &room, "assistant", "done", "On it.", at + 1_000),
+                ];
+                if pid == "working" {
+                    rows.push(message(
+                        "w",
+                        &room,
+                        "assistant",
+                        "streaming",
+                        "",
+                        now - 2_000,
+                    ));
+                }
+                s.chats.insert(
+                    pid.into(),
+                    vec![chat(&room, pid, pid == "unread", at + 1_000)],
+                );
+                s.messages.insert(room.clone(), rows);
+                if pid == "dm" {
+                    // Typing marks are keyed by the space id (`typing_in(&p.id)`).
+                    s.typing
+                        .insert(pid.into(), vec![("sam".to_string(), now + 60_000)]);
+                }
+            }
+            s.selected_project = Some("quiet".into());
+            cx.notify();
+        });
+        let (shell, vcx) = cx.add_window_view(|window, cx| Shell::new(state.clone(), window, cx));
+        vcx.run_until_parked();
+        (rt, state, shell, vcx)
+    }
+
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() <= 0.5
+    }
+
+    fn right(b: Bounds<Pixels>) -> f32 {
+        f32::from(b.right())
+    }
+
+    fn centre_y(b: Bounds<Pixels>) -> f32 {
+        f32::from(b.origin.y) + f32::from(b.size.height) / 2.0
+    }
+
+    /// The spinner sits exactly where the dot sat: its right edge is the time
+    /// label's right edge (the unread dot's too), it is centred on the preview
+    /// line, and it is the fixed cell. The unread row keeps its accent dot,
+    /// the quiet row shows nothing, the typing DM keeps its green pulse.
+    #[gpui::test]
+    fn the_spinner_sits_under_the_time_where_the_dot_was(cx: &mut TestAppContext) {
+        let (_rt, _state, _shell, vcx) = mount(cx);
+        let spinner = vcx
+            .debug_bounds("row-status-working-working")
+            .expect("the working agent's row draws the spinner");
+        let time = vcx
+            .debug_bounds("row-time-working")
+            .expect("its time label");
+        let line = vcx
+            .debug_bounds("row-preview-line-working")
+            .expect("its preview line");
+        assert_eq!(f32::from(spinner.size.width), CELL_W, "cell width");
+        assert_eq!(f32::from(spinner.size.height), CELL_H, "cell height");
+        assert!(
+            close(right(spinner), right(time)),
+            "spinner right {} = time right {}",
+            right(spinner),
+            right(time)
+        );
+        assert!(
+            close(centre_y(spinner), centre_y(line)),
+            "spinner centre {} = preview line centre {}",
+            centre_y(spinner),
+            centre_y(line)
+        );
+        assert!(
+            f32::from(spinner.origin.y)
+                > f32::from(time.origin.y) + f32::from(time.size.height) - 1.0,
+            "under the time, not beside it"
+        );
+
+        let pill = vcx
+            .debug_bounds("row-status-unread-unread")
+            .expect("the unread agent's row shows the count pill (never a dot)");
+        assert_eq!(f32::from(pill.size.height), UNREAD_PILL_H);
+        assert!(
+            f32::from(pill.size.width) >= UNREAD_PILL_H,
+            "at least as wide as tall"
+        );
+        assert!(
+            close(
+                right(pill),
+                right(vcx.debug_bounds("row-time-unread").expect("time"))
+            ),
+            "the pill ends under its time too"
+        );
+        assert!(
+            close(right(pill), right(spinner)),
+            "pill and spinner share the right edge under the time"
+        );
+        assert!(
+            vcx.debug_bounds("row-status-working-unread").is_none(),
+            "an unread row that is not working shows no spinner"
+        );
+
+        assert!(vcx.debug_bounds("row-status-working-quiet").is_none());
+        assert!(vcx.debug_bounds("row-status-unread-quiet").is_none());
+
+        assert!(
+            vcx.debug_bounds("row-status-working-dm").is_none(),
+            "a person typing never shows the agent's spinner"
+        );
+        assert!(
+            vcx.debug_bounds("row-status-unread-dm").is_none(),
+            "a person typing shows no mark in the cell (the preview says typing…)"
+        );
+    }
+
+    /// One spinning row (the typing DM pulses, it does not spin), one ticker;
+    /// the cell's box never moves while the glyph turns; Reduce Motion keeps
+    /// the cell (still glyph) and no ticker.
+    #[gpui::test]
+    fn rows_share_one_ticker_and_the_cell_never_moves(cx: &mut TestAppContext) {
+        let (_rt, _state, _shell, vcx) = mount(cx);
+        let first = vcx
+            .debug_bounds("row-status-working-working")
+            .expect("spinner drawn");
+        let t = vcx.update(|_, cx| WorkingClock::trace(cx));
+        assert!(t.running, "spinners on screen → ticker running");
+        assert_eq!(t.starts, 1, "one ticker");
+        let ticks0 = t.ticks;
+        for _ in 0..10 {
+            vcx.executor()
+                .advance_clock(Duration::from_millis(FRAME_MS));
+            vcx.run_until_parked();
+            let b = vcx
+                .debug_bounds("row-status-working-working")
+                .expect("spinner drawn");
+            assert_eq!(b, first, "the cell's box is the same every frame");
+        }
+        let t = vcx.update(|_, cx| WorkingClock::trace(cx));
+        assert_eq!(t.starts, 1, "still one ticker");
+        assert_eq!(
+            t.ticks - ticks0,
+            10,
+            "ten frames for ten periods, not twenty"
+        );
+        assert_eq!(
+            t.drawn_last_frame, 1,
+            "one spinner cell on screen: the working agent's (the DM pulses)"
+        );
+        // The typing DM's pulse rides the 30 fps clock, so the window draws
+        // more than once per 90 ms period here; the ticker itself adds one.
+        assert!(t.draws_last_tick >= 1);
+
+        // Nobody typing: the ticker alone draws the Shell once per period.
+        _state.update(vcx, |s, cx| {
+            s.typing.clear();
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        for _ in 0..3 {
+            vcx.executor()
+                .advance_clock(Duration::from_millis(FRAME_MS));
+            vcx.run_until_parked();
+        }
+        let t = vcx.update(|_, cx| WorkingClock::trace(cx));
+        assert_eq!(t.drawn_last_frame, 1);
+        assert_eq!(
+            t.draws_last_tick, 1,
+            "the ticker alone draws the Shell once per period"
+        );
+        assert_eq!(t.starts, 1, "still the one ticker");
+
+        vcx.update(|_, cx| cx.set_reduce_motion(true));
+        for _ in 0..3 {
+            vcx.executor()
+                .advance_clock(Duration::from_millis(FRAME_MS));
+            vcx.run_until_parked();
+        }
+        assert_eq!(
+            vcx.debug_bounds("row-status-working-working"),
+            Some(first),
+            "Reduce Motion keeps the still glyph in the same cell"
+        );
+        let t = vcx.update(|_, cx| WorkingClock::trace(cx));
+        assert!(
+            !t.running,
+            "Reduce Motion: nothing asks for frames, the ticker parks"
+        );
+    }
+
+    /// Where a row's `@handle` sits against its own preview line — the one
+    /// measure that is the same for every DM row whatever its name is drawn with.
+    fn handle_offset(vcx: &mut VisualTestContext, id: &'static str) -> (f32, f32) {
+        let handle = vcx
+            .debug_bounds(match id {
+                "dm" => "row-handle-dm",
+                "dm-emoji" => "row-handle-dm-emoji",
+                "dm-mixed" => "row-handle-dm-mixed",
+                _ => unreachable!(),
+            })
+            .unwrap_or_else(|| panic!("{id}: the DM row shows its @handle"));
+        let line = vcx
+            .debug_bounds(match id {
+                "dm" => "row-preview-line-dm",
+                "dm-emoji" => "row-preview-line-dm-emoji",
+                "dm-mixed" => "row-preview-line-dm-mixed",
+                _ => unreachable!(),
+            })
+            .unwrap_or_else(|| panic!("{id}: its preview line"));
+        (
+            f32::from(line.origin.y) - f32::from(handle.origin.y),
+            f32::from(handle.size.height),
+        )
+    }
+
+    /// [feedback emoji-name-handle-offset-mac-2026-10-28]: a DM whose person is
+    /// named with one emoji (and one with a mixed name) draws its `@handle` at
+    /// the same height as a text name's — and the rows stay the same height.
+    #[gpui::test]
+    fn an_emoji_name_keeps_the_dm_rows_handle_where_text_names_have_it(cx: &mut TestAppContext) {
+        let (_rt, state, shell, vcx) = mount(cx);
+        let now = crate::model::now_ms();
+        state.update(vcx, |s, cx| {
+            for (pid, name, handle) in [
+                ("dm-emoji", "🧙🏽\u{200d}♂\u{fe0f}", "dawizzaa"),
+                ("dm-mixed", "Cato 🌳", "cato"),
+            ] {
+                s.projects.push(Project {
+                    id: pid.into(),
+                    name: name.into(),
+                    kind: SpaceKind::Dm,
+                    people: vec![person("gh_9", handle, name)],
+                    ..Project::default()
+                });
+                let room = format!("room-{pid}");
+                let at = now - 30_000;
+                s.chats
+                    .insert(pid.into(), vec![chat(&room, pid, false, at)]);
+                s.messages.insert(
+                    room.clone(),
+                    vec![message("u", &room, "user", "done", "Or even better", at)],
+                );
+            }
+            cx.notify();
+        });
+        for _ in 0..3 {
+            shell.update(vcx, |_, cx| cx.notify());
+            vcx.run_until_parked();
+        }
+        let text = handle_offset(vcx, "dm");
+        let emoji = handle_offset(vcx, "dm-emoji");
+        let mixed = handle_offset(vcx, "dm-mixed");
+        assert_eq!(
+            emoji, text,
+            "emoji name: handle offset / height as for text"
+        );
+        assert_eq!(
+            mixed, text,
+            "mixed name: handle offset / height as for text"
+        );
+        let row_h = |vcx: &mut VisualTestContext, sel: &'static str| {
+            f32::from(vcx.debug_bounds(sel).expect(sel).size.height)
+        };
+        let text_h = row_h(vcx, "row-preview-line-dm");
+        assert_eq!(row_h(vcx, "row-preview-line-dm-emoji"), text_h);
+        assert_eq!(row_h(vcx, "row-preview-line-dm-mixed"), text_h);
+    }
+}
+
+/// Sidebar pinning ([feedback sidebar-pinning-mac-2026-10-28]): the Pinned section and
+/// the pin list's rules, on the real Shell (headless) and on `AppState` alone.
+#[cfg(test)]
+mod pin_tests {
+    use std::sync::{Arc, Mutex};
+
+    use futures::future::BoxFuture;
+    use gpui::{AppContext as _, Bounds, Entity, Pixels, TestAppContext, VisualTestContext};
+    use tokio::sync::mpsc;
+
+    use super::ListFilter;
+    use crate::app::AppState;
+    use crate::model::{Person, Project, ServerInfo, SpaceKind};
+    use crate::sync::{ClientCommand, SyncEvent, SyncSource};
+    use crate::ui::motion::PulseClock;
+    use crate::ui::shell::Shell;
+    use crate::ui::theme::{Surface, Theme};
+    use crate::ui::working::WorkingClock;
+
+    type Commands = Arc<Mutex<Option<mpsc::UnboundedReceiver<ClientCommand>>>>;
+
+    /// Keeps the command channel so a test can read what the state sent (`SetPins`).
+    struct Recording(Commands);
+
+    impl SyncSource for Recording {
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            *self.0.lock().expect("commands slot") = Some(commands);
+            Box::pin(std::future::pending())
+        }
+    }
+
+    fn person(id: &str, handle: &str, name: &str) -> Person {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "handle": handle, "name": name, "status": "active",
+        }))
+        .expect("person")
+    }
+
+    /// Three agents (`arbos` selected, `lium`, `affine`), a DM (`dm`) and a server (`srv`).
+    fn seed(s: &mut AppState) {
+        for (pid, name, kind, people) in [
+            ("arbos", "Arbos", SpaceKind::Project, vec![]),
+            ("lium", "Lium", SpaceKind::Project, vec![]),
+            ("affine", "Affine", SpaceKind::Project, vec![]),
+            (
+                "dm",
+                "Sam Rivera",
+                SpaceKind::Dm,
+                vec![person("gh_2", "sam", "Sam Rivera")],
+            ),
+        ] {
+            s.projects.push(Project {
+                id: pid.into(),
+                name: name.into(),
+                kind,
+                people,
+                ..Project::default()
+            });
+        }
+        s.servers.push(ServerInfo {
+            id: "srv".into(),
+            name: "Launch week".into(),
+            ..ServerInfo::default()
+        });
+        s.servers_available = true;
+        s.selected_project = Some("arbos".into());
+    }
+
+    fn mount(
+        cx: &mut TestAppContext,
+    ) -> (
+        tokio::runtime::Runtime,
+        Commands,
+        Entity<AppState>,
+        Entity<Shell>,
+        &mut VisualTestContext,
+    ) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| {
+            gpui_tokio::init_from_handle(cx, handle);
+            cx.set_global(Theme::dark(Surface::Matte));
+            if !cx.has_global::<PulseClock>() {
+                PulseClock::init(cx);
+            }
+            WorkingClock::init(cx);
+        });
+        let commands: Commands = Arc::new(Mutex::new(None));
+        let state = cx.new(|cx| AppState::new(Box::new(Recording(commands.clone())), cx));
+        state.update(cx, |s, cx| {
+            seed(s);
+            cx.notify();
+        });
+        let (shell, vcx) = cx.add_window_view(|window, cx| Shell::new(state.clone(), window, cx));
+        vcx.run_until_parked();
+        // The source runs on tokio: a few turns so `Recording::run` stashes the receiver.
+        for _ in 0..3 {
+            rt.block_on(tokio::task::yield_now());
+        }
+        (rt, commands, state, shell, vcx)
+    }
+
+    fn top(b: Bounds<Pixels>) -> f32 {
+        f32::from(b.origin.y)
+    }
+
+    fn pins_of(state: &Entity<AppState>, cx: &mut TestAppContext) -> Vec<String> {
+        state.read_with(cx, |s, _| s.pins.clone())
+    }
+
+    fn sent_pins(commands: &Commands) -> Vec<Vec<String>> {
+        let mut out = Vec::new();
+        if let Some(rx) = commands.lock().expect("commands").as_mut() {
+            while let Ok(c) = rx.try_recv() {
+                if let ClientCommand::SetPins { pins } = c {
+                    out.push(pins);
+                }
+            }
+        }
+        out
+    }
+
+    #[gpui::test]
+    fn zero_pins_draws_no_section(cx: &mut TestAppContext) {
+        let (_rt, _cmds, _state, _shell, vcx) = mount(cx);
+        assert!(vcx.debug_bounds("sidebar-pinned-header").is_none());
+        assert!(vcx.debug_bounds("sidebar-pinned-divider").is_none());
+        for id in ["arbos", "lium", "affine", "dm", "srv"] {
+            assert!(
+                vcx.debug_bounds(Box::leak(format!("row-pin-{id}").into_boxed_str()))
+                    .is_none(),
+                "{id} carries no pin mark"
+            );
+        }
+        assert!(
+            vcx.debug_bounds("row-time-arbos").is_some(),
+            "the list is drawn"
+        );
+    }
+
+    #[gpui::test]
+    fn pinned_rows_lead_in_the_users_order_under_a_header(cx: &mut TestAppContext) {
+        let (_rt, _cmds, state, _shell, vcx) = mount(cx);
+        state.update(vcx, |s, cx| {
+            // The DM first, then the server, then an agent: not the activity order,
+            // not the kind order.
+            s.pins = vec!["chat:dm".into(), "server:srv".into(), "agent:affine".into()];
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        let header = vcx
+            .debug_bounds("sidebar-pinned-header")
+            .expect("the Pinned label");
+        let divider = vcx
+            .debug_bounds("sidebar-pinned-divider")
+            .expect("the hairline after the pins");
+        let dm = vcx.debug_bounds("row-pin-dm").expect("the DM's pin mark");
+        let srv = vcx
+            .debug_bounds("row-pin-srv")
+            .expect("the server's pin mark");
+        let affine = vcx
+            .debug_bounds("row-pin-affine")
+            .expect("Affine's pin mark");
+        let arbos = vcx.debug_bounds("row-time-arbos").expect("Arbos, unpinned");
+        let lium = vcx.debug_bounds("row-time-lium").expect("Lium, unpinned");
+        assert!(top(header) < top(dm), "header above the first pin");
+        assert!(
+            top(dm) < top(srv) && top(srv) < top(affine),
+            "the user's order"
+        );
+        assert!(top(affine) < top(divider), "hairline after the last pin");
+        assert!(
+            top(divider) < top(arbos) && top(divider) < top(lium),
+            "the rest below the hairline"
+        );
+        assert!(vcx.debug_bounds("row-pin-arbos").is_none());
+        assert!(vcx.debug_bounds("row-pin-lium").is_none());
+        assert_eq!(
+            f32::from(header.size.height),
+            super::PINNED_HEADER_H,
+            "header band"
+        );
+    }
+
+    #[gpui::test]
+    fn the_filter_shows_only_the_pins_it_admits(cx: &mut TestAppContext) {
+        let (_rt, _cmds, state, shell, vcx) = mount(cx);
+        state.update(vcx, |s, cx| {
+            s.pins = vec!["server:srv".into(), "agent:lium".into()];
+            cx.notify();
+        });
+        shell.update(vcx, |sh, cx| {
+            sh.list_filter = ListFilter::Agents;
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert!(vcx.debug_bounds("sidebar-pinned-header").is_some());
+        assert!(
+            vcx.debug_bounds("row-pin-lium").is_some(),
+            "the pinned agent"
+        );
+        assert!(
+            vcx.debug_bounds("row-pin-srv").is_none(),
+            "Agents never shows the pinned server"
+        );
+        state.update(vcx, |s, cx| {
+            s.pins = vec!["server:srv".into()];
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert!(
+            vcx.debug_bounds("sidebar-pinned-header").is_none(),
+            "no pin passes the filter → no section"
+        );
+        assert!(vcx.debug_bounds("sidebar-pinned-divider").is_none());
+        shell.update(vcx, |sh, cx| {
+            sh.list_filter = ListFilter::Servers;
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert!(
+            vcx.debug_bounds("row-pin-srv").is_some(),
+            "Servers shows it again"
+        );
+    }
+
+    #[gpui::test]
+    fn the_row_menu_leads_with_pin_then_unpin(cx: &mut TestAppContext) {
+        let (_rt, _cmds, state, shell, vcx) = mount(cx);
+        for id in ["lium", "dm", "srv"] {
+            shell.update(vcx, |sh, cx| {
+                sh.row_menu = Some((id.into(), gpui::point(gpui::px(40.0), gpui::px(200.0))));
+                cx.notify();
+            });
+            vcx.run_until_parked();
+            assert!(
+                vcx.debug_bounds("row-menu-pin").is_some(),
+                "{id}'s menu has the Pin row"
+            );
+        }
+        state.update(vcx, |s, cx| s.set_pinned("lium".into(), true, cx));
+        shell.update(vcx, |sh, cx| {
+            sh.row_menu = Some(("lium".into(), gpui::point(gpui::px(40.0), gpui::px(200.0))));
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert!(
+            vcx.debug_bounds("row-menu-pin").is_some(),
+            "Unpin in Pin's place"
+        );
+        assert!(state.read_with(vcx, |s, _| s.is_pinned("lium")));
+    }
+
+    #[gpui::test]
+    fn pins_land_on_top_stop_at_the_cap_and_go_to_the_relay(cx: &mut TestAppContext) {
+        let (_rt, cmds, state, _shell, vcx) = mount(cx);
+        vcx.run_until_parked();
+        state.update(vcx, |s, cx| {
+            s.set_pinned("lium".into(), true, cx);
+            s.set_pinned("dm".into(), true, cx);
+            s.set_pinned("srv".into(), true, cx);
+        });
+        assert_eq!(
+            pins_of(&state, vcx),
+            vec!["server:srv", "chat:dm", "agent:lium"],
+            "a new pin lands at the top"
+        );
+        assert_eq!(state.read_with(vcx, |s, _| s.pin_index("srv")), Some(0));
+        assert_eq!(
+            state.read_with(vcx, |s, _| s.pin_key("dm")).as_deref(),
+            Some("chat:dm")
+        );
+        assert_eq!(state.read_with(vcx, |s, _| s.pin_key("nope")), None);
+
+        state.update(vcx, |s, cx| {
+            s.pin_cap = 3;
+            s.set_pinned("affine".into(), true, cx);
+        });
+        assert_eq!(pins_of(&state, vcx).len(), 3, "the cap refuses the fourth");
+        assert!(
+            state.read_with(vcx, |s, _| s.notices.iter().any(|n| n
+                .error
+                .as_ref()
+                .is_some_and(|e| e.sentence().contains("pin up to 3")))),
+            "one sentence says why"
+        );
+
+        state.update(vcx, |s, cx| s.set_pinned("dm".into(), false, cx));
+        assert_eq!(pins_of(&state, vcx), vec!["server:srv", "agent:lium"]);
+
+        // Archiving a pinned row unpins it; deleting one does too.
+        state.update(vcx, |s, cx| s.set_space_archived("srv".into(), true, cx));
+        assert_eq!(pins_of(&state, vcx), vec!["agent:lium"]);
+        state.update(vcx, |s, cx| s.delete_project("lium".into(), cx));
+        assert!(pins_of(&state, vcx).is_empty());
+
+        let sent = sent_pins(&cmds);
+        assert_eq!(sent.len(), 6, "every change went to the relay: {sent:?}");
+        assert_eq!(sent[2], vec!["server:srv", "chat:dm", "agent:lium"]);
+        assert!(sent.last().is_some_and(Vec::is_empty));
+
+        // The relay's answer is the truth.
+        state.update(vcx, |s, cx| {
+            s.apply(
+                SyncEvent::Pins {
+                    pins: vec!["agent:arbos".into()],
+                    cap: 5,
+                },
+                cx,
+            )
+        });
+        assert_eq!(pins_of(&state, vcx), vec!["agent:arbos"]);
+        assert_eq!(state.read_with(vcx, |s, _| s.pin_cap), 5);
+    }
+
+    #[gpui::test]
+    fn reordering_keeps_hidden_pins_in_place(cx: &mut TestAppContext) {
+        let (_rt, _cmds, state, _shell, vcx) = mount(cx);
+        state.update(vcx, |s, cx| {
+            s.pins = vec![
+                "agent:lium".into(),
+                "server:srv".into(),
+                "agent:affine".into(),
+                "chat:dm".into(),
+            ];
+            // Under the Agents filter only Lium and Affine show; dragging Affine above Lium
+            // swaps the two and leaves the server and the DM where they were.
+            s.reorder_pins(&["affine".into(), "lium".into()], cx);
+        });
+        assert_eq!(
+            pins_of(&state, vcx),
+            vec!["agent:affine", "server:srv", "agent:lium", "chat:dm"]
+        );
+        // All filter: every pin shows; the DM dragged to the top.
+        state.update(vcx, |s, cx| {
+            s.reorder_pins(
+                &["dm".into(), "affine".into(), "srv".into(), "lium".into()],
+                cx,
+            )
+        });
+        assert_eq!(
+            pins_of(&state, vcx),
+            vec!["chat:dm", "agent:affine", "server:srv", "agent:lium"]
+        );
+    }
+
+    #[gpui::test]
+    fn a_pin_drag_previews_the_order_and_commits_on_drop(cx: &mut TestAppContext) {
+        let (_rt, cmds, state, shell, vcx) = mount(cx);
+        state.update(vcx, |s, cx| {
+            s.pins = vec!["agent:lium".into(), "chat:dm".into(), "server:srv".into()];
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        let _ = sent_pins(&cmds);
+        shell.update(vcx, |sh, cx| sh.begin_pin_drag("srv".into(), cx));
+        assert_eq!(
+            shell.read_with(vcx, |sh, _| sh.pin_drag.clone()),
+            Some(super::PinDragState {
+                id: "srv".into(),
+                to: 2
+            })
+        );
+        // The pointer over the first pinned card: the server previews at the top.
+        let first = vcx.debug_bounds("row-pin-lium").expect("Lium's card");
+        shell.update(vcx, |sh, cx| {
+            let to = sh.pin_slot_at(&"srv".into(), top(first) - 1.0, cx);
+            assert_eq!(to, 0, "above every other pinned card");
+            sh.pin_drag = Some(super::PinDragState {
+                id: "srv".into(),
+                to,
+            });
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        let srv = vcx.debug_bounds("row-pin-srv").expect("the server's mark");
+        let lium = vcx.debug_bounds("row-pin-lium").expect("Lium's mark");
+        assert!(
+            top(srv) < top(lium),
+            "the dragged row shows at the slot under the pointer"
+        );
+        assert_eq!(
+            pins_of(&state, vcx),
+            vec!["agent:lium", "chat:dm", "server:srv"],
+            "nothing stored until the drop"
+        );
+        shell.update(vcx, |sh, cx| sh.finish_pin_drag(cx));
+        assert_eq!(
+            pins_of(&state, vcx),
+            vec!["server:srv", "agent:lium", "chat:dm"]
+        );
+        assert!(shell.read_with(vcx, |sh, _| sh.pin_drag.clone()).is_none());
+        assert_eq!(
+            sent_pins(&cmds),
+            vec![vec!["server:srv", "agent:lium", "chat:dm"]]
+        );
+        shell.update(vcx, |sh, cx| sh.finish_pin_drag(cx));
+        assert!(sent_pins(&cmds).is_empty(), "a second drop is a no-op");
     }
 }

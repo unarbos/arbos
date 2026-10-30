@@ -22,7 +22,7 @@ use tokio::sync::mpsc;
 use tokio::time::sleep;
 
 use crate::model::{
-    AgentMember, Call, CallEnded, CallKind, LinkState, Machine, MachineState, Person,
+    AgentMember, Call, CallEnded, CallKind, LinkState, Machine, MachineState, MediaPick, Person,
     ProjectDocView, ReplyPolicy, ReplyRef, Sender, SpaceKind, ThreadInfo, Voice,
 };
 
@@ -32,15 +32,15 @@ use super::{
     ClientCommand, DraftPicture, PictureSource, PictureTarget, PushRefusal, SyncEvent, SyncSource,
 };
 use crate::model::{
-    new_id, now_ms, ApprovalRisk, ApprovalState, Attachment, AttachmentKind, BoxReport, BoxState,
-    BoxWorkspace, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelPlatformState,
-    ChannelsView, Chat, ChatKind, ChoiceOption, Connector, ConnectorAction, ConnectorProvider,
-    ConnectorStatus, ConnectorsView, DeviceView, Effort, FieldKind, FormField, Id, Job, JobRollout,
-    JobState, Link, LocalDevice, LocalView, Message, MessageStatus, Part, Project, QuestionState,
-    Role, RolloutEntry, RolloutKind, RolloutParent, Routine, RoutineRun, RoutineRunStatus,
-    RoutineTrigger, Secret, SecretActivity, SecretAgent, SecretDirector, SecretRequest,
-    SecretScope, SecretsView, ServerChannel, ServerInfo, Skill, StatusKind, ToolCall, ToolStatus,
-    TurnKind, Widget,
+    new_id, now_ms, ApprovalRisk, ApprovalState, Attachment, AttachmentKind, AttachmentSource,
+    BoxReport, BoxState, BoxWorkspace, ChannelBinding, ChannelPairing, ChannelPlatform,
+    ChannelPlatformState, ChannelsView, Chat, ChatKind, ChoiceOption, Connector, ConnectorAction,
+    ConnectorProvider, ConnectorStatus, ConnectorsView, DeviceView, Effort, FieldKind, FormField,
+    Id, Job, JobRollout, JobState, Link, LocalDevice, LocalView, Message, MessageStatus, Part,
+    Project, QuestionState, Role, RolloutEntry, RolloutKind, RolloutParent, Routine, RoutineRun,
+    RoutineRunStatus, RoutineTrigger, Secret, SecretActivity, SecretAgent, SecretDirector,
+    SecretRequest, SecretScope, SecretsView, ServerChannel, ServerInfo, Skill, StatusKind,
+    ToolCall, ToolStatus, TurnKind, Widget,
 };
 
 pub const STREAM_FRAME_MS: u64 = arbos_core::STREAM_COMMIT_MS;
@@ -104,6 +104,8 @@ struct Shared {
     /// `ARBOS_FIXTURE_JOBS=<n>`: the open background jobs the relay's activity
     /// record would list (duplex §2.4), per chat, with their hidden rows' ids.
     jobs: Mutex<Vec<FixtureJob>>,
+    /// My sidebar pins (row keys, top first) — the relay's `/me/pins` stand-in.
+    pins: Mutex<Vec<String>>,
 }
 
 /// One seeded job: the relay's row plus when it started (elapsed grows live)
@@ -160,6 +162,7 @@ impl SyncSource for FixtureSource {
                 voice_blobs: Mutex::new(HashMap::new()),
                 blocked: Mutex::new(Vec::new()),
                 jobs: Mutex::new(Vec::new()),
+                pins: Mutex::new(Vec::new()),
                 machine: Mutex::new(Machine {
                     // `ARBOS_FIXTURE_MACHINE=error|waking` seeds a banner state (screenshot rig).
                     state: match std::env::var("ARBOS_FIXTURE_MACHINE").as_deref() {
@@ -234,6 +237,7 @@ impl SyncSource for FixtureSource {
             emit_local(&shared);
             emit_secrets(&shared);
             emit_open_request(&shared);
+            emit_pins_hook(&shared);
             emit_servers_hook(&shared);
             let _ = events.send(SyncEvent::Link(Link::Live));
             emit_link_hook(&shared);
@@ -327,6 +331,8 @@ fn emit_servers_hook(shared: &Arc<Shared>) {
             member_count: 4 + i as u64,
             unread: u64::from(i == 0),
             last_text: text.to_string(),
+            // The fixture names its senders outright (no roster to resolve against).
+            last_sender: String::new(),
             last_sender_name: who.to_string(),
             last_ts,
             channel_ids: vec![format!("{id}-{channel}")],
@@ -340,6 +346,7 @@ fn emit_servers_hook(shared: &Arc<Shared>) {
             can_post: true,
             unread: u64::from(i == 0),
             last_text: text.to_string(),
+            last_sender: String::new(),
             last_sender_name: who.to_string(),
             last_ts,
             order: format!("{i}"),
@@ -392,7 +399,7 @@ fn emit_link_hook(shared: &Arc<Shared>) {
 }
 
 /// Screenshot rig for the shared error element ([feedback error-messages-mac-2026-10-26]):
-/// `ARBOS_RIG_FAILURE=toast|composer|delivery|machine|secrets|people` raises that surface's
+/// `ARBOS_RIG_FAILURE=toast|toast-repeat|toast-many|composer|delivery|machine|secrets|people` raises that surface's
 /// note 1.5 s after start (so the opened chat / pane is up): `toast` = an error toast (a
 /// download that timed out, with Try again); `composer` = the opened chat's last own message
 /// refused, offline; `delivery` = that chat's pushes refused; `machine` = the machine in error;
@@ -430,6 +437,40 @@ fn emit_failure_hook(shared: &Arc<Shared>) {
                 .collect()
         };
         match spec.as_str() {
+            // [feedback toast-stack-mac-2026-10-27]: Jacob's shape — the secrets poll failing
+            // with the resolver's words eight times in a row — and five distinct failures for
+            // the "N more" fold.
+            "toast-repeat" | "toast-many" => {
+                let offline = |path: &str| {
+                    anyhow::anyhow!(
+                        "error sending request for url (https://relay.arbos.life{path}): client error (Connect): dns error: failed to lookup address information: nodename nor servname provided, or not known"
+                    )
+                    .context(format!("GET {path}"))
+                };
+                if spec == "toast-repeat" {
+                    for _ in 0..8 {
+                        let _ = shared.events.send(SyncEvent::Failure {
+                            error: UserError::classify("load your secrets", &offline("/secrets")),
+                            retry: None,
+                        });
+                        sleep(Duration::from_millis(250)).await;
+                    }
+                } else {
+                    for (verb, path) in [
+                        ("load your secrets", "/secrets"),
+                        ("load the voices", "/voices"),
+                        ("download report-q3.pdf", "/blobs/x/report-q3.pdf"),
+                        ("save the secret", "/secrets"),
+                        ("load the devices", "/devices"),
+                    ] {
+                        let _ = shared.events.send(SyncEvent::Failure {
+                            error: UserError::classify(verb, &offline(path)),
+                            retry: None,
+                        });
+                        sleep(Duration::from_millis(250)).await;
+                    }
+                }
+            }
             "toast" => {
                 let raw = anyhow::anyhow!(
                     "error sending request for url (https://relay.arbos.life/blobs/x/report-q3.pdf): operation timed out"
@@ -1016,6 +1057,46 @@ fn emit_typing_hook(shared: &Arc<Shared>) {
     });
 }
 
+/// The relay's cap (Jacob 2026-10-28: five, no tiers).
+const FIXTURE_PIN_CAP: usize = 5;
+
+/// `ARBOS_RIG_PINS=<name or id>[,<name or id>…]` pins those sidebar rows at launch, top
+/// first (screenshot rigs, [feedback sidebar-pinning-mac-2026-10-28]). A name is matched
+/// against projects (agents, DMs, groups); a `server:<id>` key is passed through.
+fn emit_pins_hook(shared: &Arc<Shared>) {
+    let Ok(spec) = std::env::var("ARBOS_RIG_PINS") else {
+        return;
+    };
+    let projects = shared.projects.lock().unwrap();
+    let pins: Vec<String> = spec
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|name| {
+            if name.contains(':') {
+                return Some(name.to_owned());
+            }
+            projects
+                .iter()
+                .find(|p| p.id == name || p.name.eq_ignore_ascii_case(name))
+                .map(|p| {
+                    if p.is_people() {
+                        format!("chat:{}", p.id)
+                    } else {
+                        format!("agent:{}", p.id)
+                    }
+                })
+        })
+        .take(FIXTURE_PIN_CAP)
+        .collect();
+    drop(projects);
+    *shared.pins.lock().unwrap() = pins.clone();
+    let _ = shared.events.send(SyncEvent::Pins {
+        pins,
+        cap: FIXTURE_PIN_CAP,
+    });
+}
+
 /// `ARBOS_FIXTURE_OPEN=<project name or id>[/<chat id>]` opens that chat at
 /// launch (screenshot rigs; the iPhone has `ARBOS_OPEN_PROJECT` / `_CHAT`).
 fn emit_open_request(shared: &Arc<Shared>) {
@@ -1086,10 +1167,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::StartDm { .. }
         | ClientCommand::CreatePeopleGroup { .. }
         | ClientCommand::SetTyping { .. }
-        | ClientCommand::AddAgent { .. }
         | ClientCommand::RemoveAgent { .. }
         | ClientCommand::AddMembers { .. }
         | ClientCommand::RemoveMember { .. }
+        | ClientCommand::SetMemberRole { .. }
         | ClientCommand::LeaveChat { .. }
         | ClientCommand::BlockUser { .. }
         | ClientCommand::UnblockUser { .. }
@@ -1099,6 +1180,13 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::RemoveMessageGrant { .. }
         | ClientCommand::FetchAvatar { .. }
         | ClientCommand::DeleteProject { .. }
+        | ClientCommand::ConnectAgent { .. }
+        | ClientCommand::OutsideAgentStatus { .. }
+        | ClientCommand::OutsideAgentRotate { .. }
+        | ClientCommand::OutsideAgentRevoke { .. }
+        | ClientCommand::OutsideAgentScope { .. }
+        | ClientCommand::OutsideAgentWakeSet { .. }
+        | ClientCommand::OutsideAgentWakeTest { .. }
         | ClientCommand::DeletePeopleChat { .. }
         | ClientCommand::RenameGroup { .. }
         | ClientCommand::SetGroupImage { .. }
@@ -1130,6 +1218,17 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::ChannelLoadOlder { .. }
         | ClientCommand::ChannelSend { .. }
         | ClientCommand::ChannelMarkRead { .. } => {}
+        // The relay keeps the pin list and answers with it; the fixture echoes
+        // the list it was given, capped like the relay.
+        ClientCommand::SetPins { pins } => {
+            let mut pins = pins;
+            pins.truncate(FIXTURE_PIN_CAP);
+            *shared.pins.lock().unwrap() = pins.clone();
+            let _ = shared.events.send(SyncEvent::Pins {
+                pins,
+                cap: FIXTURE_PIN_CAP,
+            });
+        }
         // The relay keeps archive state; the fixture does the same so a chat
         // brought back from the "+" dropdown stays back when the list is re-sent.
         ClientCommand::ArchiveChat { chat_id, archived } => {
@@ -1239,6 +1338,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     kind: None,
                     title: None,
                     chart_part: None,
+                    url: None,
+                    source: None,
                 })
                 .collect();
             send_user(
@@ -1253,6 +1354,98 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 mentions,
             );
         }
+        ClientCommand::SendMedia {
+            chat_id,
+            message_id,
+            pick,
+            reply_to,
+        } => {
+            // The fixture has no relay: a sticker keeps its bytes under a `local:` key the
+            // optimistic echo already decoded; a GIF keeps its provider URL (fixture_png).
+            let attachment = match pick {
+                MediaPick::Sticker { pack, item, .. } => Attachment {
+                    name: format!("{}.png", item.id),
+                    source: Some(Box::new(AttachmentSource {
+                        provider: pack.name.clone(),
+                        id: format!("{}/{}", pack.id, item.id),
+                        page_url: pack.page_url.clone(),
+                    })),
+                    mime: item.mime,
+                    blob_ref: Some(format!("local:{message_id}")),
+                    bytes: None,
+                    kind: Some(AttachmentKind::Sticker),
+                    title: None,
+                    chart_part: None,
+                    url: None,
+                },
+                MediaPick::Gif(gif) => {
+                    let gif = *gif;
+                    Attachment {
+                        name: format!("{}.gif", gif.id),
+                        mime: "image/gif".into(),
+                        blob_ref: None,
+                        bytes: None,
+                        kind: Some(AttachmentKind::Image),
+                        title: None,
+                        chart_part: None,
+                        url: Some(gif.url),
+                        source: Some(Box::new(AttachmentSource {
+                            provider: "KLIPY".into(),
+                            id: gif.id,
+                            page_url: gif.page_url,
+                        })),
+                    }
+                }
+            };
+            send_user(
+                shared,
+                chat_id,
+                message_id,
+                String::new(),
+                vec![attachment],
+                reply_to,
+                None,
+                None,
+                Vec::new(),
+            );
+        }
+        ClientCommand::GifSearch { query, pos } => {
+            // Rig: a few fixture tiles so the GIFs tab has a grid to screenshot.
+            let items = (0..9)
+                .map(|i| crate::model::GifItem {
+                    id: format!("fixture-gif-{i}"),
+                    title: format!(
+                        "{} {}",
+                        if query.is_empty() {
+                            "trending"
+                        } else {
+                            query.as_str()
+                        },
+                        i + 1
+                    ),
+                    width: 220,
+                    height: if i % 3 == 1 { 160 } else { 220 },
+                    url: format!("https://static.klipy.com/fixture/{i}/full.gif"),
+                    preview: crate::model::GifPreview {
+                        url: format!("https://static.klipy.com/fixture/{i}/tiny.gif"),
+                        width: 220,
+                        height: if i % 3 == 1 { 160 } else { 220 },
+                    },
+                    page_url: "https://klipy.com".into(),
+                })
+                .collect();
+            let _ = shared.events.send(SyncEvent::GifResults {
+                query,
+                pos,
+                page: crate::model::GifPage::Items { items, next: None },
+            });
+        }
+        ClientCommand::StickerPacks => {
+            let _ = shared.events.send(SyncEvent::StickerPacks {
+                packs: Some(Vec::new()),
+            });
+        }
+        ClientCommand::GifShare { .. } => {}
         ClientCommand::Forward {
             chat_id,
             message_id,
@@ -1288,8 +1481,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let dir = std::env::temp_dir().join("arbos-media");
             let _ = std::fs::create_dir_all(&dir);
             let path = dir.join(name.replace('/', "_"));
+            let mut opened_path = None;
             match std::fs::write(&path, &bytes) {
-                Ok(()) => crate::ui::attachments::open_with_system(&path, quick_look),
+                Ok(()) => {
+                    let open_external = quick_look || !cfg!(target_os = "macos");
+                    if open_external {
+                        crate::ui::attachments::open_with_system(&path, quick_look);
+                    }
+                    opened_path = Some(path);
+                }
                 Err(err) => {
                     let _ = shared.events.send(SyncEvent::Failure {
                         error: UserError::from_text(format!("open {name}"), err.to_string()),
@@ -1297,7 +1497,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     });
                 }
             }
-            let _ = shared.events.send(SyncEvent::AttachmentOpened { key });
+            let _ = shared.events.send(SyncEvent::AttachmentOpened {
+                key,
+                path: opened_path,
+            });
         }
         ClientCommand::ForwardMessage {
             chat_id,
@@ -1361,6 +1564,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 kind: Some(AttachmentKind::Audio),
                 title: None,
                 chart_part: None,
+                url: None,
+                source: None,
             }];
             send_user(
                 shared,
@@ -1481,15 +1686,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let me = format!("user:{ME_ID}");
             let docs = shared.docs.lock().unwrap();
             if let Some(doc) = docs.get(&chat_id) {
+                let base = arbos_core::doc::normalize_reaction_emoji(&emoji);
                 let already = doc
                     .index_of(&message_id)
                     .and_then(|ix| doc.read_message(ix))
                     .map(|m| {
-                        m.reactions
-                            .get(&emoji)
-                            .and_then(|bucket| bucket.get(&me))
-                            .copied()
-                            .unwrap_or(false)
+                        m.reactions.iter().any(|(e, bucket)| {
+                            arbos_core::doc::normalize_reaction_emoji(e) == base
+                                && bucket.get(&me).copied().unwrap_or(false)
+                        })
                     })
                     .unwrap_or(false);
                 let on = !already;
@@ -1505,6 +1710,30 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let docs = shared.docs.lock().unwrap();
             if let Some(doc) = docs.get(&chat_id) {
                 let _ = doc.core.transact(|d| d.delete_message(&message_id));
+            }
+        }
+        ClientCommand::EditMessage {
+            chat_id,
+            message_id,
+            text,
+        } => {
+            let docs = shared.docs.lock().unwrap();
+            if let Some(doc) = docs.get(&chat_id) {
+                let _ = doc
+                    .core
+                    .transact(|d| d.edit_message_text(&message_id, &text));
+            }
+        }
+        ClientCommand::RemoveLinkPreview {
+            chat_id,
+            message_id,
+        } => {
+            let docs = shared.docs.lock().unwrap();
+            if let Some(doc) = docs.get(&chat_id) {
+                doc.core.transact(|d| {
+                    d.set_message_fields(&message_id, &[("preview", serde_json::json!("off"))]);
+                    d.remove_parts_of_kind(&message_id, "link_preview");
+                });
             }
         }
         ClientCommand::Approve {
@@ -1890,7 +2119,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 description,
                 owner_person: None,
                 machine_info: None,
+                outside: None,
                 muted: false,
+                silenced: false,
+                silenced_until: None,
                 archived_at: None,
                 primary_chat: None,
                 voice: None,
@@ -1904,6 +2136,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 avatar_version: 0,
                 message_grants: Vec::new(),
                 blocked_senders: Vec::new(),
+                my_role: None,
             });
             if let Some(url) = &image_url {
                 emit_avatar(shared, url);
@@ -1972,6 +2205,34 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 bytes: Arc::new(fixture_png(&key)),
                 key,
             });
+        }
+        ClientCommand::FetchCopyBlobs { request, keys, .. } => {
+            // The fixture's pictures are PNGs; a key that reads as a file gets a small text body.
+            let blobs = keys
+                .into_iter()
+                .map(|key| {
+                    let is_picture = key.ends_with(".png")
+                        || key.ends_with(".jpg")
+                        || key.ends_with(".jpeg")
+                        || key.contains("Screenshot")
+                        || key.starts_with("fixture-g")
+                        || key.starts_with("img-");
+                    let (mime, bytes) = if is_picture {
+                        ("image/png".to_owned(), fixture_png(&key))
+                    } else {
+                        (
+                            "text/plain".to_owned(),
+                            format!("Fixture attachment {key}.\n").into_bytes(),
+                        )
+                    };
+                    Some(super::CopyBlob {
+                        key,
+                        mime,
+                        bytes: Arc::new(bytes),
+                    })
+                })
+                .collect();
+            let _ = shared.events.send(SyncEvent::CopyBlobs { request, blobs });
         }
         ClientCommand::FetchLinkIcon { host } => {
             // The real icons of the fixture replies' sites (`assets/link-icons`), so the
@@ -2756,6 +3017,7 @@ pub fn seed_devices() -> Vec<DeviceView> {
             kind: "github".into(),
             created_at: now - 12 * 24 * 3_600_000,
             last_seen_at: Some(now - 20_000),
+            revoked_at: None,
             current: true,
         },
         DeviceView {
@@ -2764,6 +3026,7 @@ pub fn seed_devices() -> Vec<DeviceView> {
             kind: "github".into(),
             created_at: now - 9 * 24 * 3_600_000,
             last_seen_at: Some(now - 2 * 3_600_000),
+            revoked_at: None,
             current: false,
         },
         DeviceView {
@@ -2772,6 +3035,7 @@ pub fn seed_devices() -> Vec<DeviceView> {
             kind: "reader".into(),
             created_at: now - 6 * 24 * 3_600_000,
             last_seen_at: Some(now - 3 * 24 * 3_600_000),
+            revoked_at: None,
             current: false,
         },
     ]
@@ -3754,7 +4018,21 @@ const LIMA_REPLY: &[&str] = &[
 
 /// The reply to "Read the latest from the New York post" (agent Bubble, 2026-10-25, Jacob's
 /// screenshot): seven linked headlines as bullets, then one line of prose.
+/// Jacob's 2026-10-27 bubble (Mac v0.6.296): the URL wrapped as `https:/` | `/treatment-…`
+/// and would not open ([feedback link-click-mac-2026-10-27]).
+const LINK_REPLY: &str = "https://treatment-perfume-marble-tournaments.trycloudflare.com/jacob/competitors.html\n\nI checked it from outside and it loads. No zip or file card needed.";
+
 const NYPOST_REPLY: &str = "- [Syringe attack: lawyer claims mistaken identity](https://nypost.com/2026/10/25/us-news/syringe-attack-lawyer-claims-mistaken-identity/)\n- [Arrest story: a second Jewish victim minutes earlier](https://nypost.com/2026/10/25/us-news/arrest-story-second-jewish-victim-minutes-earlier/)\n- [Ex-NYPD cop charged in a George Washington Bridge killing, free on $1M bail](https://nypost.com/2026/10/25/us-news/ex-nypd-cop-charged-in-gw-bridge-killing-free-on-1m-bail/)\n- [Thomas Markle home search, child pornography, Philippine official’s comment](https://nypost.com/2026/10/25/world-news/thomas-markle-home-search-philippine-official-comment/)\n- [Musk says SpaceX cut Ukraine’s Starlink access](https://nypost.com/2026/10/25/business/musk-says-spacex-cut-ukraines-starlink-access/)\n- [Giants beat the Texans in overtime in J. J. McCarthy’s first start](https://nypost.com/2026/10/25/sports/giants-beat-texans-in-overtime-mccarthy-first-start/)\n- [McCarthy’s wife after that win](https://nypost.com/2026/10/25/sports/mccarthys-wife-after-that-win/)\n\nNo times or bylines were on the page text I read. Want one of these opened?";
+
+/// The chat-formatting sample sheet, my own bubble: one line per format, labelled
+/// ([feedback chat-markdown-mac-2026-10-27]). `ARBOS_FIXTURE_REPLY=markdown`.
+pub const MARKDOWN_SAMPLE_USER: &str = "> quote: a line that starts with \"> \"\n> second quoted line\n>> nested quote inside it\n\nbold: **bold text** · italic: *italic* and _italic_ · strike: ~~gone~~\ninline code: `cargo test -p arbos-core` · spoiler (click): ||the butler did it||\nlink: [Arbos docs](https://docs.arbos.life/formatting) · bare: https://arbos.life/x_y · mention: @sam · emoji: 🎉 👍🏽\n\n# Heading 1\n## Heading 2\n### Heading 3\n\n- bullet one\n- bullet **two**\n* star bullet\n\n1. first\n2. second\n\n```python\ndef hello(name):\n    return f\"hi {name}\"  # fenced, copyable\n```\n\nescapes: \\*not italic\\* \\> not a quote \\`not code\\`";
+
+/// The agent's answer on the sample sheet: the same grammar in a grey bubble.
+pub const MARKDOWN_SAMPLE_REPLY: &str = "> quote: what you sent, quoted back\n> with a second line\n\nEvery format renders the same on both sides: **bold**, *italic*, ~~strike~~, `code`, ||spoiler||, [a named link](https://docs.arbos.life/formatting) and https://arbos.life/x_y.\n\n## Heading 2 in a reply\n\n- list item with `code`\n- and a [link](https://arbos.life)\n\n1. numbered\n2. list\n\n```rust\nlet quoted = parse_blocks(\"> hello\");\n```\n\nMath stays math: $O(n^2)$, and prices stay prices: $5 and $10.";
+
+/// The must-not-mangle lines: plain text the grammar must leave exactly as typed.
+pub const MARKDOWN_SAMPLE_PLAIN: &str = "plain, must not change:\nsnake_case_word __init__ some_var_name\n2*3*4 = 24 and 5 * 3 = 15\nhttps://example.com/some_path_with_underscores\njacob_s@example.com\n>5 means more than five · a > b · lone > here\n<b>html</b> stays <i>text</i>\n#hashtag #1 fan C++ C# 100%\n** not bold ** · a*b · trailing* · *leading";
 
 /// The reply to "write bubble sort in python" from Jacob's 2026-10-26 10:50 Mac screenshot,
 /// byte for byte: a Python code card, then prose whose `$O(n^2)$` showed its dollars and
@@ -4684,6 +4962,17 @@ fn membership_notice(shared: &Arc<Shared>, chat_id: &str, text: &str) {
 }
 
 fn emit_shell_grants(shared: &Arc<Shared>, project_id: &str) {
+    // The relay answers someone else's agent (Sam's Studio, Sami's TestAgent) with 403 `not_owner`.
+    if [SHARED_STUDIO, PROJECT_TESTAGENT].contains(&project_id) {
+        let err = super::relay::RelayError::from_body(
+            reqwest::StatusCode::FORBIDDEN,
+            r#"{"error":{"type":"not_owner","message":"not your project"}}"#,
+        );
+        if let Some(event) = super::relay::shell_grants_failed(project_id, &err.into()) {
+            let _ = shared.events.send(event);
+        }
+        return;
+    }
     let items = shared
         .shell_grants
         .lock()
@@ -4850,6 +5139,15 @@ fn user_attachments(attachments: &[Attachment]) -> Vec<UserAttachment> {
                 .and_then(|k| serde_json::to_value(k).ok())
                 .and_then(|v| v.as_str().map(str::to_owned)),
             blob_ref: a.blob_ref.clone(),
+            url: a.url.clone(),
+            source: a
+                .source
+                .as_ref()
+                .map(|s| arbos_core::doc::AttachmentSource {
+                    provider: s.provider.clone(),
+                    id: s.id.clone(),
+                    page_url: s.page_url.clone(),
+                }),
         })
         .collect()
 }
@@ -5036,7 +5334,10 @@ fn seed_projects() -> Vec<Project> {
             description: None,
             owner_person: None,
             machine_info: None,
+            outside: None,
             muted: false,
+            silenced: false,
+            silenced_until: None,
             archived_at: None,
             primary_chat: None,
             voice: None,
@@ -5049,6 +5350,7 @@ fn seed_projects() -> Vec<Project> {
             avatar_version: 0,
             message_grants: Vec::new(),
             blocked_senders: Vec::new(),
+            my_role: None,
         },
         Project {
             id: PROJECT_COMMS.into(),
@@ -5073,7 +5375,10 @@ fn seed_projects() -> Vec<Project> {
             description: None,
             owner_person: None,
             machine_info: None,
+            outside: None,
             muted: false,
+            silenced: false,
+            silenced_until: None,
             archived_at: None,
             primary_chat: None,
             voice: None,
@@ -5086,6 +5391,7 @@ fn seed_projects() -> Vec<Project> {
             avatar_version: 0,
             message_grants: Vec::new(),
             blocked_senders: Vec::new(),
+            my_role: None,
         },
         Project {
             id: PROJECT_ARBOS.into(),
@@ -5110,7 +5416,10 @@ fn seed_projects() -> Vec<Project> {
             description: None,
             owner_person: None,
             machine_info: None,
+            outside: None,
             muted: false,
+            silenced: false,
+            silenced_until: None,
             archived_at: None,
             primary_chat: None,
             voice: None,
@@ -5123,6 +5432,7 @@ fn seed_projects() -> Vec<Project> {
             avatar_version: 0,
             message_grants: Vec::new(),
             blocked_senders: Vec::new(),
+            my_role: None,
         },
     ]
 }
@@ -5600,6 +5910,8 @@ fn attachment(name: &str, mime: &str, kind: AttachmentKind, title: &str, bytes: 
             kind: Some(kind),
             title: Some(title.into()),
             chart_part: None,
+            url: None,
+            source: None,
         },
     }
 }
@@ -5755,6 +6067,36 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
                     TurnKind::Reply,
                     MessageStatus::Done,
                     vec![text(NYPOST_REPLY)],
+                );
+            }
+            // `ARBOS_FIXTURE_REPLY=link`: Jacob's competitors-page turn — a bare URL
+            // long enough to wrap, then a line of prose ([feedback link-click-mac-2026-10-27]).
+            Ok("link") => {
+                s.user("Where is the competitors page?");
+                s.assistant(TurnKind::Reply, MessageStatus::Done, vec![text(LINK_REPLY)]);
+            }
+            // `ARBOS_FIXTURE_REPLY=markdown`: the chat-formatting sample sheet — every
+            // format in my own bubble, the agent's answer with the same, then the
+            // must-not-mangle lines ([feedback chat-markdown-mac-2026-10-27]).
+            Ok("markdown") => {
+                s.user(MARKDOWN_SAMPLE_USER);
+                s.assistant(
+                    TurnKind::Reply,
+                    MessageStatus::Done,
+                    vec![text(MARKDOWN_SAMPLE_REPLY)],
+                );
+                s.user(MARKDOWN_SAMPLE_PLAIN);
+            }
+            // `ARBOS_FIXTURE_REPLY=quote`: Jacob's report — "> hello" typed in the
+            // composer, and the agent quoting it back ([feedback chat-markdown-mac-2026-10-27]).
+            Ok("quote") => {
+                s.user("> hello\nthat is what the quote looks like now");
+                s.assistant(
+                    TurnKind::Reply,
+                    MessageStatus::Done,
+                    vec![text(
+                        "> hello\n\nYes — a `> ` line is a quote: inset, muted, with the bar. **Bold**, *italic*, ~~strike~~ and ||spoilers|| work too.",
+                    )],
                 );
             }
             // `ARBOS_FIXTURE_REPLY=math`: Jacob's bubble-sort turn — a Python code card,
@@ -6220,6 +6562,8 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
                 kind: Some(AttachmentKind::Audio),
                 title: None,
                 chart_part: None,
+                url: None,
+                source: None,
             }],
         );
         s.assistant(
@@ -6368,6 +6712,50 @@ fn sam() -> Person {
     person(SAM_ID, "sam", Some("Sam Rivera"), "member")
 }
 
+/// `ARBOS_FIXTURE_EMOJI_NAMES=1` ([feedback emoji-name-handle-offset-mac-2026-10-28]):
+/// a DM with someone whose display name is one emoji and a group that also has a
+/// mixed name, so every name + handle stack can be shot beside text names.
+fn emoji_names_seeded() -> bool {
+    std::env::var("ARBOS_FIXTURE_EMOJI_NAMES").is_ok_and(|v| v == "1")
+}
+
+/// `ARBOS_FIXTURE_CHIPS=1` ([feedback mention-chip-highlight-2026-10-28]): the
+/// group ends with someone else's and my own bubble, each with an agent and a
+/// person chip (mine has one inside a code span).
+fn mention_chips_seeded() -> bool {
+    std::env::var("ARBOS_FIXTURE_CHIPS").is_ok_and(|v| v == "1")
+}
+
+/// The emoji-only name (a mage with a skin tone and a ZWJ: one grapheme, four scalars).
+pub const MAGE_NAME: &str = "🧙🏽\u{200d}♂\u{fe0f}";
+pub const MAGE_HANDLE: &str = "dawizzaa";
+pub const DM_MAGE: &str = "01J9DMMAGE0000000000000000";
+pub const GROUP_EMOJI: &str = "01J9GROUPEMOJI000000000000";
+
+fn mage() -> Person {
+    person("gh_461", MAGE_HANDLE, Some(MAGE_NAME), "member")
+}
+
+fn cato() -> Person {
+    person("gh_462", "cato", Some("Cato 🌳"), "member")
+}
+
+fn emoji_names_group() -> Project {
+    let members = vec![
+        mage(),
+        cato(),
+        person("gh_458", "sara", Some("Sara Lind"), "member"),
+    ];
+    let mut space = people_space(GROUP_EMOJI, members[0].clone(), Vec::new());
+    space.kind = SpaceKind::Group;
+    space.name = "Emoji names".into();
+    space.icon = "E".into();
+    space.people = members;
+    space.owner_handle = Some(ME_HANDLE.into());
+    space.my_role = Some("owner".into());
+    space
+}
+
 /// The directory the new-chat sheet searches.
 fn directory() -> Vec<Person> {
     vec![
@@ -6403,7 +6791,10 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
         description: None,
         owner_person: None,
         machine_info: None,
+        outside: None,
         muted: false,
+        silenced: false,
+        silenced_until: None,
         archived_at: None,
         primary_chat: None,
         voice: None,
@@ -6416,6 +6807,7 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
         avatar_version: 0,
         message_grants: Vec::new(),
         blocked_senders: Vec::new(),
+        my_role: None,
     }
 }
 
@@ -6481,13 +6873,27 @@ fn launch_week() -> Project {
     space.icon = "L".into();
     space.people = members;
     space.owner_handle = Some(ME_HANDLE.into());
+    space.my_role = Some("owner".into());
+    // `ARBOS_FIXTURE_GROUP_ROLE=member|admin` (screenshot rig, [feedback
+    // group-settings-mac-2026-10-27]): I am that in "Launch week" and Sam owns it, so the
+    // pane can be shot as a plain member (no crayon, no name field) without a second account.
+    if let Ok(role) = std::env::var("ARBOS_FIXTURE_GROUP_ROLE") {
+        let role = role.trim().to_lowercase();
+        if role == "member" || role == "admin" {
+            if let Some(sam) = space.people.first_mut() {
+                sam.role = "owner".into();
+                space.owner_handle = Some(sam.handle.clone());
+            }
+            space.my_role = Some(role);
+        }
+    }
     space
 }
 
 fn seed_people_projects() -> Vec<Project> {
     let mut owner = sam();
     owner.role = "owner".into();
-    vec![
+    let mut out = vec![
         people_space(DM_SAM, sam(), Vec::new()),
         launch_week(),
         Project {
@@ -6513,7 +6919,10 @@ fn seed_people_projects() -> Vec<Project> {
             description: None,
             owner_person: None,
             machine_info: None,
+            outside: None,
             muted: false,
+            silenced: false,
+            silenced_until: None,
             archived_at: None,
             primary_chat: None,
             voice: None,
@@ -6526,11 +6935,42 @@ fn seed_people_projects() -> Vec<Project> {
             avatar_version: 0,
             message_grants: Vec::new(),
             blocked_senders: Vec::new(),
+            my_role: None,
         },
-    ]
+    ];
+    if emoji_names_seeded() {
+        out.push(people_space(DM_MAGE, mage(), Vec::new()));
+        out.push(emoji_names_group());
+    }
+    out
+}
+
+fn people_chat(id: &str, title: &str, minutes_ago: u64) -> Chat {
+    Chat {
+        id: id.into(),
+        project_id: id.into(),
+        title: title.into(),
+        is_pinned: true,
+        is_system: false,
+        kind: ChatKind::Chat,
+        participants: Vec::new(),
+        unread: false,
+        unread_count: 0,
+        last_message_at: now_ms().saturating_sub(minutes_ago * 60_000),
+        archived_at: None,
+    }
 }
 
 fn seed_people_chats() -> Vec<Chat> {
+    let mut out = seed_people_chats_base();
+    if emoji_names_seeded() {
+        out.push(people_chat(DM_MAGE, MAGE_HANDLE, 8));
+        out.push(people_chat(GROUP_EMOJI, "Emoji names", 30));
+    }
+    out
+}
+
+fn seed_people_chats_base() -> Vec<Chat> {
     vec![
         Chat {
             id: DM_SAM.into(),
@@ -6619,6 +7059,7 @@ fn human_message(chat_id: &str, who: &Person, text: &str, at: u64) -> Message {
         parts: vec![text_part(text)],
         hidden_parts: Vec::new(),
         greeting: false,
+        preview: None,
     }
 }
 
@@ -6760,6 +7201,24 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
         "Sending in a sec. Also: can we add your Arbos agent here so it can pull the numbers while we talk?",
         base + 150_000,
     ));
+    if std::env::var("ARBOS_FIXTURE_LINKS").is_ok_and(|v| v == "1") {
+        // Sam's Links tab ([feedback link-icons-mac-tile-2026-10-27] shots): a brand with a
+        // mono mark, one with a colour, X, and a site with no bundled mark.
+        for (i, text) in [
+            "The repo: https://github.com/unarbos/arbos",
+            "Launch playlist https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M?si=abc",
+            "Their post https://x.com/arbos/status/1982341234567890123",
+            "Background reading https://nypost.com/2026/10/25/business/musk-says-spacex-cut-ukraines-starlink-access/",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            insert_message_via_core(
+                &doc,
+                &human_message(DM_SAM, &sam(), text, base + 160_000 + i as u64 * 5_000),
+            );
+        }
+    }
     // The Launch week group's rows are built here so the DM can quote them
     // (`ARBOS_FIXTURE_REPLY_DM=1`, #1835: Reply in DM carries the original).
     let samir = person("gh_457", "samir", Some("Samir Haddad"), "member");
@@ -7106,7 +7565,55 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
             base + 455_000,
         ),
     );
+    if mention_chips_seeded() {
+        insert_message_via_core(
+            &group,
+            &human_message(
+                GROUP_LAUNCH,
+                &sara,
+                "@arbos and @sam, the embargo lifts at 9.",
+                base + 456_000,
+            ),
+        );
+        insert_message_via_core(
+            &group,
+            &human_message(
+                GROUP_LAUNCH,
+                &me(),
+                "Thanks @sara. @arbos, ask `@sam` for the list.",
+                base + 457_000,
+            ),
+        );
+    }
     out.push(group);
+    if emoji_names_seeded() {
+        let dm = ChatDoc::new(DM_MAGE, "people");
+        insert_message_via_core(
+            &dm,
+            &human_message(
+                DM_MAGE,
+                &mage(),
+                "Or even better, a wizard hat for everyone at launch.",
+                base + 500_000,
+            ),
+        );
+        out.push(dm);
+        let group = ChatDoc::new(GROUP_EMOJI, GROUP_EMOJI);
+        insert_message_via_core(
+            &group,
+            &human_message(GROUP_EMOJI, &mage(), "hello from the mage", base + 510_000),
+        );
+        insert_message_via_core(
+            &group,
+            &human_message(
+                GROUP_EMOJI,
+                &cato(),
+                "Trees for everyone, then.",
+                base + 520_000,
+            ),
+        );
+        out.push(group);
+    }
     out
 }
 
@@ -7443,6 +7950,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             space.people = members;
             space.pending = space.people.iter().any(|p| p.status == "invited");
             space.owner_handle = Some(ME_HANDLE.into());
+            space.my_role = Some("owner".into());
             shared.projects.lock().unwrap().push(space);
             shared.chats.lock().unwrap().push(Chat {
                 id: id.clone(),
@@ -7467,51 +7975,6 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             true
         }
         ClientCommand::SetTyping { .. } => true,
-        ClientCommand::AddAgent {
-            chat_id,
-            project_id,
-        } => {
-            let agent = {
-                let projects = shared.projects.lock().unwrap();
-                projects
-                    .iter()
-                    .find(|p| p.id == *project_id && !p.is_people())
-                    .map(|p| AgentMember {
-                        project_id: p.id.clone(),
-                        name: p.name.clone(),
-                        icon: p.icon.clone(),
-                        color: p.color.clone(),
-                        handle: Project::mention_slug(&p.name),
-                        owner_id: ME_ID.into(),
-                        owner_handle: ME_HANDLE.into(),
-                        reply_policy: ReplyPolicy::Mention,
-                        avatar: p.avatar.clone(),
-                        avatar_color: p.avatar_color.clone(),
-                        avatar_color_index: p.avatar_color_index,
-                        avatar_leaf: p.avatar_leaf,
-                        avatar_leaf_color: p.avatar_leaf_color,
-                        image_url: None,
-                        avatar_version: 0,
-                        description: None,
-                        model: None,
-                        owner: None,
-                    })
-            };
-            if let Some(agent) = agent {
-                let mut projects = shared.projects.lock().unwrap();
-                if let Some(space) = projects.iter_mut().find(|p| p.id == *chat_id) {
-                    if !space
-                        .agents
-                        .iter()
-                        .any(|a| a.project_id == agent.project_id)
-                    {
-                        space.agents.push(agent);
-                    }
-                }
-            }
-            emit_projects(shared);
-            true
-        }
         ClientCommand::RemoveAgent {
             chat_id,
             project_id,
@@ -7614,6 +8077,25 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             };
             if let Some(name) = removed {
                 membership_notice(shared, chat_id, &format!("{} removed {name}", ME_NAME));
+            }
+            emit_projects(shared);
+            true
+        }
+        ClientCommand::SetMemberRole {
+            chat_id,
+            user_id,
+            role,
+        } => {
+            if let Some(m) = shared
+                .projects
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .find(|p| p.id == *chat_id)
+                .and_then(|p| p.people.iter_mut().find(|x| x.id == *user_id))
+                .filter(|m| m.role != "owner")
+            {
+                m.role = role.clone();
             }
             emit_projects(shared);
             true

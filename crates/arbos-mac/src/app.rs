@@ -22,11 +22,12 @@ use crate::model::{
     MembershipNotice, NoticeSubject, OptimisticNotice, Person, Reachable, Sender, Voice,
 };
 use crate::model::{
-    new_id, now_ms, Attachment, AttachmentKind, BoxReport, BoxState, ChannelSel, ChannelsView,
-    Chat, ChatKind, ConnectorsView, DevicesView, Effort, Id, Job, JobRollout, Link, LinkState,
-    LocalView, Machine, Message, MessageBody, MessageStatus, NewSecret, Part, Project,
-    ProjectDocView, ProjectSecrets, QuestionState, ReplyRef, Role, Routine, RoutineRun,
-    RoutineTrigger, SecretDirector, SecretScope, SecretsView, ServerInfo, Skill, StatusKind,
+    new_id, now_ms, Attachment, AttachmentKind, AttachmentSource, BoxReport, BoxState, ChannelSel,
+    ChannelsView, Chat, ChatKind, ConnectorsView, DevicesView, Effort, GifPage, Id, Job,
+    JobRollout, Link, LinkState, LocalView, Machine, MediaPick, Message, MessageBody,
+    MessageStatus, NewSecret, Part, Project, ProjectDocView, ProjectSecrets, QuestionState,
+    ReplyRef, Role, Routine, RoutineRun, RoutineTrigger, SecretDirector, SecretScope, SecretsView,
+    ServerInfo, Skill, StatusKind, StickerPack,
 };
 use crate::palette;
 use crate::search;
@@ -44,6 +45,9 @@ const NOTIFY_TICK_MS: u64 = 5_000;
 /// → `activity.jobs[]`) while a job row is live or the drawer lists one —
 /// the design's "chip updates on the next poll" (duplex §2.4, stop ≤ 3 s).
 pub const JOBS_POLL_MS: u64 = 1_000;
+/// Sidebar pins the relay allows until `GET /me/pins` says otherwise (Jacob 2026-10-28:
+/// 5, no tiers; [feedback sidebar-pinning-mac-2026-10-28]).
+pub const PIN_CAP_DEFAULT: usize = 5;
 /// A link state must hold this long before the header pill shows it.
 pub const LINK_PILL_GRACE_MS: u64 = 1_200;
 /// The ring card and its sound give up after this long.
@@ -208,6 +212,25 @@ fn save_read_receipts(enabled: bool) {
     let _ = std::fs::write(read_receipts_path(), if enabled { "true" } else { "false" });
 }
 
+fn link_previews_path() -> std::path::PathBuf {
+    crate::sync::credentials::config_dir().join("link-previews")
+}
+
+/// Settings → Chat → Link previews, saved on this Mac; on unless switched off
+/// ([feedback link-embeds-mac-2026-10-27]).
+fn load_link_previews() -> bool {
+    std::fs::read_to_string(link_previews_path())
+        .ok()
+        .map(|s| s.trim() != "false")
+        .unwrap_or(true)
+}
+
+fn save_link_previews(enabled: bool) {
+    let dir = crate::sync::credentials::config_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(link_previews_path(), if enabled { "true" } else { "false" });
+}
+
 /// "3 min ago", "2 h ago", "yesterday", "5 days ago".
 pub fn ago_text(ms: u64) -> String {
     let s = ms / 1000;
@@ -277,18 +300,27 @@ pub struct FailureClaim {
     pub verbs: &'static [&'static str],
 }
 
-/// A toast in the top-right stack: an info notice (`error` none: "Forwarded to Studio") or a
-/// failure drawn by `ui::error_note` (Jacob, 2026-10-26). Info notices live 6 s, errors 10 s;
-/// the pointer on a toast holds it (`held`), a click on × or an info toast dismisses it.
+/// A toast in the one slot under the header pill: an info notice (`error` none: "Forwarded to
+/// Studio") or a failure drawn by `ui::error_note` (Jacob, 2026-10-26 / 2026-10-27). Info
+/// notices live 6 s, errors 10 s; the pointer on a toast holds it (`held`, at most
+/// [`NOTICE_HOLD_MAX_MS`] unless Details is open), × or a click on an info toast dismisses it.
+/// The same failure again while its toast stands does not add a toast: `count` goes up and the
+/// clock restarts (eight "Couldn't load your secrets" in a row were eight toasts on
+/// 2026-10-27 — never again). `id` is stable for the toast's life; `at` is its clock.
 #[derive(Clone, Debug)]
 pub struct Notice {
+    pub id: u64,
     pub text: String,
     pub at: u64,
     pub error: Option<UserError>,
     pub details_open: bool,
     pub held: bool,
+    /// Since when the pointer holds it (the hold has a cap).
+    pub held_since: u64,
     /// Try again re-issues this command.
     pub retry: Option<Box<ClientCommand>>,
+    /// How many times this same failure arrived while the toast stood (1 = once).
+    pub count: u32,
 }
 
 impl Notice {
@@ -299,10 +331,42 @@ impl Notice {
             NOTICE_TTL_MS
         }
     }
+
+    /// Still on screen at `now`: within its TTL, or held — a hold without Details open
+    /// lasts at most [`NOTICE_HOLD_MAX_MS`], so a pointer parked over the slot (or a hover
+    /// whose leave never arrived) cannot pin a toast forever.
+    pub fn live_at(&self, now: u64) -> bool {
+        if self.held
+            && (self.details_open || now.saturating_sub(self.held_since) < NOTICE_HOLD_MAX_MS)
+        {
+            return true;
+        }
+        now.saturating_sub(self.at) < self.ttl_ms()
+    }
+
+    /// Two toasts are the same failure when they would read the same sentence.
+    fn same_failure(&self, error: &UserError) -> bool {
+        self.error
+            .as_ref()
+            .is_some_and(|e| e.sentence() == error.sentence())
+    }
 }
 
 pub const NOTICE_TTL_MS: u64 = 6_000;
 pub const ERROR_NOTICE_TTL_MS: u64 = 10_000;
+/// A held toast (pointer on it, Details closed) is let go after this long.
+pub const NOTICE_HOLD_MAX_MS: u64 = 60_000;
+/// How many toasts the slot shows at once; older ones fold into one "N more" line
+/// (Jacob 2026-10-27: "max 2–3 visible, oldest collapses into a count").
+pub const NOTICE_VISIBLE_MAX: usize = 3;
+
+/// What the slot draws: the newest toasts, oldest first, and how many older ones are folded
+/// away behind them.
+#[derive(Clone, Debug, Default)]
+pub struct NoticeStack {
+    pub visible: Vec<Notice>,
+    pub folded: usize,
+}
 
 #[derive(Clone, Debug)]
 pub enum AppEvent {
@@ -357,6 +421,8 @@ impl ViewerItem {
                 kind: Some(AttachmentKind::Image),
                 title: None,
                 chart_part: None,
+                url: None,
+                source: None,
             },
             by: name.to_owned(),
             when: 0,
@@ -378,6 +444,9 @@ pub struct MediaViewer {
     pub forward_open: bool,
     /// Blob key being fetched for Play / Quick Look (one at a time).
     pub busy: Option<String>,
+    /// Temp file of the video playing inline in the viewer (macOS AVPlayerView;
+    /// [feedback app-01M6147S9TPNBQA7KSDEY0K8C4]). Cleared on close / page.
+    pub playing: Option<std::path::PathBuf>,
 }
 
 impl MediaViewer {
@@ -405,6 +474,14 @@ pub struct ForwardMessage {
     pub message_id: Id,
     /// The original sender's display name ("Forwarded from <by>").
     pub by: String,
+}
+
+/// A Copy whose attachment bytes are being fetched
+/// ([feedback copy-image-messages-mac-2026-10-27]): the body to lay out once they land.
+#[derive(Clone, Debug, PartialEq)]
+struct CopyRequest {
+    id: u64,
+    body: MessageBody,
 }
 
 /// The parts the optimistic row in the destination draws before the relay
@@ -513,10 +590,43 @@ pub struct ChatUi {
     /// Reply in DM: the message in another chat the next send here answers
     /// (its address + snapshot, written as `replyRef`). Exclusive with `reply_to`.
     pub reply_ref: Option<ReplyRef>,
+    /// Own message whose text is in the composer for an in-place edit
+    /// (iPhone `ChatView.editing`). Exclusive with `reply_to` / `reply_ref`.
+    pub editing: Option<Id>,
 }
 
 /// Rows per history page the shared Matrix client fetches (`arbos_matrix::client::HISTORY_PAGE`).
 const CHANNEL_PAGE: usize = 50;
+
+/// The Wake URL form on a connected agent's Connection card ([feedback
+/// outside-agents-wake-mac-2026-10-28]): what is in flight and the last outcome line.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WakeForm {
+    pub project_id: Id,
+    pub saving: bool,
+    pub sending: bool,
+    /// `(ok, text)` of the last Save or Send test wake, shown under the buttons.
+    pub note: Option<(bool, String)>,
+}
+
+/// The reveal sheet after Connect an agent (#2141): the key, shown once, and the live
+/// connection while the sheet is up.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConnectReveal {
+    pub project_id: Id,
+    pub name: String,
+    /// `acp` | `grok` | `custom`.
+    pub transport: String,
+    pub key: String,
+    pub link: String,
+    pub relay_url: String,
+    pub chat_id: Option<Id>,
+    /// After Rotate key…: the sheet says so instead of the first-time words.
+    pub rotated: bool,
+    pub status: Option<crate::model::OutsideInfo>,
+    /// Which Copy was pressed last ("key" | "link"), for the "Copied" tick.
+    pub copied: Option<&'static str>,
+}
 
 /// What the Create group screen (step 1) hands to the member picker (step 2).
 #[derive(Clone, Debug, PartialEq)]
@@ -588,7 +698,9 @@ pub struct AppState {
     /// the bar on the sender's bubbles. Absent = colourless picture → D79.
     pub accents: HashMap<String, arbos_core::avatar::Accent>,
     /// A DM just started from the sheet: select it when it arrives.
-    awaiting_dm: Option<String>,
+    pub(crate) awaiting_dm: Option<String>,
+    /// A DM with someone I have no chat with, not sent to yet: local only (`draft_dm`).
+    pub(crate) draft_dm: Option<crate::draft_dm::DraftDm>,
     /// Reply in DM: the cross-chat reply to arm once the DM opens (new DMs
     /// arrive from the relay a moment after `start_dm`).
     pending_dm_reply: Option<ReplyRef>,
@@ -649,14 +761,38 @@ pub struct AppState {
     /// Site icons for the bubbles' named links, by host: `Some` once the relay answered
     /// with a picture, `None` when the site has none; a host still loading is absent.
     pub link_icons: HashMap<String, Option<Arc<RenderImage>>>,
+    /// Each fetched link icon's tone (a dark transparent mark, a light one, or neither), so
+    /// the link tiles can flip their fill under it ([`crate::ui::link_tile`]).
+    pub link_icon_tones: HashMap<String, crate::ui::link_tile::Tone>,
     /// Link-icon fetches in flight or answered (never asked twice per session).
     link_icons_requested: HashSet<String>,
     /// Blob keys whose thumbnail fetch failed: the card says "No preview" instead of loading.
     pub thumbnails_failed: HashSet<String>,
+    /// Picker (ARB-544): the GIF results on screen — the query they answer and the page
+    /// (`None` while the first page is on its way).
+    pub gif_results: Option<(String, GifPage)>,
+    /// Picker: the query a GIF fetch is in flight for (a stale answer is dropped).
+    gif_query_pending: Option<String>,
+    /// Picker: the relay's sticker packs once fetched (`Some(None)` = the relay failed).
+    pub sticker_packs: Option<Option<Vec<StickerPack>>>,
+    /// Picker: the sticker-pack fetch is in flight or answered this session.
+    sticker_packs_requested: bool,
+    /// Picker: raw bytes of fetched stickers by `sticker:<pack>/<id>` key — a tap uploads
+    /// these into the chat slot (the thumbnail cache holds only the decoded picture).
+    sticker_raw: HashMap<String, Arc<Vec<u8>>>,
+    /// The Copy whose attachment bytes are on their way
+    /// ([feedback copy-image-messages-mac-2026-10-27]); a newer Copy replaces it and the
+    /// older answer is dropped by its `request` number.
+    copy_request: Option<CopyRequest>,
+    copy_request_seq: u64,
     pub notices: Vec<Notice>,
     /// Rooms whose pushes were refused (`not_available` / `blocked`) and why; the chat-level
     /// note draws the sentence. Cleared when that room's next ACK arrives.
     pub push_refused: HashMap<Id, PushRefusal>,
+    /// Last `silenced_until` we armed an end timer for (per people chat).
+    silence_until_armed: HashMap<Id, i64>,
+    /// Generation per chat so a re-armed silence-end timer makes the old one a no-op.
+    silence_until_gen: HashMap<Id, u64>,
     pub selected_project: Option<Id>,
     /// Bytes and chats kept on this Mac by the on-device store (Settings → About).
     pub store_usage: (i64, i64),
@@ -672,6 +808,12 @@ pub struct AppState {
     /// offline copy): off the tab strip, listed in the "+" dropdown, still open on
     /// the relay (history in context, memory and search), never badge or notify.
     pub archived_chats: HashSet<Id>,
+    /// My sidebar pins, top first — row keys `agent:<project>` / `chat:<people chat>` /
+    /// `server:<server>`, one list for every device through the relay (`/me/pins`;
+    /// [feedback sidebar-pinning-mac-2026-10-28]). The Pinned section draws them in this
+    /// order; `pin_cap` is the relay's limit (Jacob 2026-10-28: 5, no tiers).
+    pub pins: Vec<String>,
+    pub pin_cap: usize,
     /// Chat a home-search hit opened; kept visible while single-chat would hide it.
     search_chat: Option<Id>,
     /// Scroll the transcript to this `(chat_id, message_id)` once its rows exist.
@@ -695,6 +837,8 @@ pub struct AppState {
     /// Chat-list column width (pt). Dragged on the right edge; persisted in
     /// `<config>/sidebar_width` ([feedback app-01M5MJ9Y91W9ZET71KTCE7PS65]).
     pub sidebar_width: f32,
+    /// The running edge drag's state (`ui::sidebar_fit::EdgeDrag`).
+    pub sidebar_edge_drag: crate::ui::sidebar_fit::EdgeDrag,
     /// Below [`NARROW_WINDOW`](crate::ui::theme::NARROW_WINDOW) the sidebar
     /// auto-hides; the header toggle (or ⌘B) floats it over the chat instead.
     pub sidebar_overlay: bool,
@@ -710,6 +854,12 @@ pub struct AppState {
     /// Bubble menu → Forward: the message the "Forward to" picker is open for.
     pub forward_message: Option<ForwardMessage>,
     pub new_project_open: bool,
+    /// Connect an agent (#2141): the Create screen in its connect form is up.
+    pub connect_open: bool,
+    /// Connect an agent: the key reveal sheet, after the relay answered.
+    pub connect_reveal: Option<ConnectReveal>,
+    /// The Wake URL form of the connected agent whose pane is open.
+    pub wake_form: Option<WakeForm>,
     /// Debug: per-message "Show details" disclosures in the transcript.
     pub show_details: bool,
     /// The user's one machine (projects are workspaces on it).
@@ -796,6 +946,8 @@ pub struct AppState {
     /// Settings → Notifications: send and show Presence `{seen}` read receipts
     /// (`<config>/read_receipts.json`, default on).
     pub read_receipts: bool,
+    /// Settings → Chat → Link previews (this Mac).
+    pub link_previews: bool,
     /// People-chat read receipts: chat id → (peer handle → last seen message id).
     pub message_receipts: HashMap<Id, HashMap<String, Id>>,
     /// Last presence frame seen per handle (ms): "online" while fresh.
@@ -813,6 +965,10 @@ pub struct AppState {
     pending_relaunch: Option<arbos_update::client::Install>,
     /// Last composer keystroke (any chat): the "never mid-typing" guard for the relaunch.
     last_input_at: u64,
+    /// When the window last became focused. Auto-relaunch only counts time spent in
+    /// Arbos (D85 "while you are in Arbos" / "when you pause"), so a Spaces swipe
+    /// back after idle cannot be the restart edge.
+    became_active_at: u64,
     /// A version the automatic install already failed on: offer it in the rail, do not loop.
     auto_update_failed: Option<String>,
     /// Settings → This Mac (F9).
@@ -828,7 +984,7 @@ pub struct AppState {
     /// reason; the speaker row under that reply offers a retry. Scoped to the
     /// message, never shown as an app-wide banner.
     pub speech_failed: HashMap<Id, String>,
-    awaiting_new_project: bool,
+    pub awaiting_new_project: bool,
     /// Calls v1: live calls I know about per chat (the "On a call · Join" bar).
     pub calls_in_chat: HashMap<Id, Call>,
     /// Someone is calling me (ringing): the call and who started it.
@@ -884,6 +1040,8 @@ pub struct AppState {
     /// D88: rooms that already got their second page of history (one extra page per session,
     /// asked for when the first page came back full).
     pub channel_paged: HashSet<String>,
+    /// Servers whose member list was asked for this session (`want_server_rosters`).
+    pub server_rosters_requested: HashSet<Id>,
     /// D88: the channel open in the centre (clears `selected_project` for the transcript).
     pub selected_channel: Option<ChannelSel>,
     /// D88: the server whose channel list the left pane slid into.
@@ -1110,6 +1268,7 @@ impl AppState {
             avatars: HashMap::new(),
             accents: HashMap::new(),
             awaiting_dm: None,
+            draft_dm: None,
             pending_dm_reply: None,
             awaiting_group: None,
             invite_target: None,
@@ -1137,16 +1296,28 @@ impl AppState {
             thumbnails_trimmed: HashMap::new(),
             thumbnails_requested: HashSet::new(),
             link_icons: HashMap::new(),
+            link_icon_tones: HashMap::new(),
             link_icons_requested: HashSet::new(),
             thumbnails_failed: HashSet::new(),
+            gif_results: None,
+            gif_query_pending: None,
+            sticker_packs: None,
+            sticker_packs_requested: false,
+            sticker_raw: HashMap::new(),
+            copy_request: None,
+            copy_request_seq: 0,
             notices: Vec::new(),
             push_refused: HashMap::new(),
+            silence_until_armed: HashMap::new(),
+            silence_until_gen: HashMap::new(),
             selected_project: None,
             store_usage: (0, 0),
             active_tab: HashMap::new(),
             multi_chat: multi_chat_enabled(),
             last_chats: HashMap::new(),
             archived_chats: HashSet::new(),
+            pins: Vec::new(),
+            pin_cap: PIN_CAP_DEFAULT,
             search_chat: None,
             reveal_message: None,
             reveal_nonce: 0,
@@ -1157,6 +1328,7 @@ impl AppState {
             relay_link: (LinkState::Live, 0),
             rail_collapsed: crate::ui::theme::SidebarCollapsed::load(),
             sidebar_width: crate::ui::theme::SidebarWidth::load(),
+            sidebar_edge_drag: crate::ui::sidebar_fit::EdgeDrag::default(),
             sidebar_overlay: false,
             details_open: None,
             media_viewer: None,
@@ -1165,6 +1337,9 @@ impl AppState {
             chart_viewer_generation: 0,
             forward_message: None,
             new_project_open: false,
+            connect_open: false,
+            connect_reveal: None,
+            wake_form: None,
             show_details: false,
             machine: Machine::default(),
             connectors: ConnectorsView::default(),
@@ -1199,6 +1374,11 @@ impl AppState {
             renaming_project: None,
             muted: load_muted(),
             read_receipts: load_read_receipts(),
+            link_previews: {
+                let on = load_link_previews();
+                crate::ui::link_card::set_enabled(on);
+                on
+            },
             message_receipts: HashMap::new(),
             presence_seen: HashMap::new(),
             notify_prompt_answered: false,
@@ -1207,6 +1387,7 @@ impl AppState {
             update: update_state,
             pending_relaunch: None,
             last_input_at: 0,
+            became_active_at: now_ms(),
             auto_update_failed: None,
             local: LocalView::default(),
             voice_mode: false,
@@ -1244,6 +1425,7 @@ impl AppState {
             matrix_connected: false,
             channel_rows: HashMap::new(),
             channel_paged: HashSet::new(),
+            server_rosters_requested: HashSet::new(),
             selected_channel: None,
             open_server: None,
             server_sheet: None,
@@ -1276,8 +1458,9 @@ impl AppState {
             UpdateEvent::Available(available) => {
                 let available = *available;
                 self.update.last_checked_at = Some(now_ms());
-                // An installed build waiting for its relaunch outranks whatever the feed says now.
-                if !self.update.busy() && self.pending_relaunch.is_none() {
+                if self.pending_relaunch.is_some() {
+                    self.supersede_pending_install(available, cx);
+                } else if !self.update.busy() {
                     // Never offer a build that is not strictly newer than what is running.
                     if !arbos_update::version::is_newer(
                         &available.item.version,
@@ -1350,7 +1533,9 @@ impl AppState {
                     available,
                     deadline_ms: now_ms() + update::RELAUNCH_COUNTDOWN_MS,
                 };
-                self.pending_relaunch = Some(installed);
+                // A newer build installed over one that was already waiting keeps the watcher
+                // that is running for it.
+                let watching = self.pending_relaunch.replace(installed).is_some();
                 update::log(format!(
                     "auto-update: {version} installed; waiting for a safe moment to relaunch"
                 ));
@@ -1361,23 +1546,25 @@ impl AppState {
                     "Arbos {version} is installed — it restarts in a minute while you are in Arbos, \
                      or when you pause. Press the blue update button at the bottom of the chat list to do it at once."
                 ));
-                cx.spawn(async move |this, cx| loop {
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(1000))
-                        .await;
-                    let done = this.update(cx, |state, cx| {
-                        if state.pending_relaunch.is_none() {
-                            return true;
+                if !watching {
+                    cx.spawn(async move |this, cx| loop {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(1000))
+                            .await;
+                        let done = this.update(cx, |state, cx| {
+                            if state.pending_relaunch.is_none() {
+                                return true;
+                            }
+                            let relaunched = state.try_relaunch(cx);
+                            cx.notify();
+                            relaunched
+                        });
+                        if done.unwrap_or(true) {
+                            break;
                         }
-                        let relaunched = state.try_relaunch(cx);
-                        cx.notify();
-                        relaunched
-                    });
-                    if done.unwrap_or(true) {
-                        break;
-                    }
-                })
-                .detach();
+                    })
+                    .detach();
+                }
             }
             UpdateEvent::Failed(message) => {
                 if let Some(a) = self.update.available() {
@@ -1406,10 +1593,15 @@ impl AppState {
 
     /// Is this a moment the app may restart itself? Never in a call, right after a keystroke, or
     /// while another app has focus (relaunch would steal it). When Arbos is focused: after a pause
-    /// with no typing, or when the countdown is over.
+    /// with no typing, or when the countdown is over — both measured only for continuous focus,
+    /// so swiping back to an idle window is not the restart.
     fn relaunch_is_safe(&self) -> bool {
         let now = now_ms();
         if self.my_call.is_some() || self.incoming_call.is_some() {
+            return false;
+        }
+        // A newer build is being swapped into the bundle the relaunch would open.
+        if self.update.busy() {
             return false;
         }
         if !self.window_active {
@@ -1418,8 +1610,13 @@ impl AppState {
         if now.saturating_sub(self.last_input_at) < update::TYPING_GUARD_MS {
             return false;
         }
+        let focused_for = now.saturating_sub(self.became_active_at);
         let countdown_over = match &self.update.phase {
-            UpdatePhase::Installed { deadline_ms, .. } => now >= *deadline_ms,
+            UpdatePhase::Installed { deadline_ms, .. } => {
+                // Wall deadline alone used to fire on the focus-regain edge after time away.
+                // Require a full minute of continuous focus too ("while you are in Arbos").
+                now >= *deadline_ms && focused_for >= update::RELAUNCH_COUNTDOWN_MS
+            }
             UpdatePhase::Idle
             | UpdatePhase::Checking
             | UpdatePhase::UpToDate
@@ -1427,9 +1624,11 @@ impl AppState {
             | UpdatePhase::Downloading { .. }
             | UpdatePhase::Installing(_)
             | UpdatePhase::Restarting(_)
-            | UpdatePhase::Failed { .. } => true,
+            | UpdatePhase::Failed { .. } => focused_for >= update::RELAUNCH_COUNTDOWN_MS,
         };
-        now.saturating_sub(self.last_input_at) >= update::IDLE_RELAUNCH_MS || countdown_over
+        let paused = now.saturating_sub(self.last_input_at) >= update::IDLE_RELAUNCH_MS
+            && focused_for >= update::IDLE_RELAUNCH_MS;
+        paused || countdown_over
     }
 
     /// Relaunch into the pending install when it is safe; true when the relaunch was started.
@@ -1443,6 +1642,41 @@ impl AppState {
         update::log("auto-update: safe moment — relaunching");
         self.relaunch_into(installed, cx);
         true
+    }
+
+    /// A newer build announced while an older one waits for its relaunch (the app sat
+    /// unfocused while releases landed) is installed over it first, so the user gets one
+    /// restart into the newest build instead of one restart per release they missed.
+    /// Manual mode keeps the waiting build: the user already chose to restart into it.
+    fn supersede_pending_install(
+        &mut self,
+        available: arbos_update::client::Available,
+        cx: &mut Context<Self>,
+    ) {
+        let UpdatePhase::Installed {
+            available: waiting, ..
+        } = &self.update.phase
+        else {
+            return;
+        };
+        let version = available.item.version.clone();
+        if !self.update.auto
+            || self.auto_update_failed.as_deref() == Some(version.as_str())
+            || !arbos_update::version::is_newer(&version, &waiting.item.version)
+        {
+            return;
+        }
+        update::log(format!(
+            "auto-update: {version} supersedes the waiting {}; installing it before the relaunch",
+            waiting.item.version
+        ));
+        self.update.phase = UpdatePhase::Downloading {
+            available,
+            got: 0,
+            total: None,
+        };
+        let _ = self.update_commands.send(UpdateCommand::Install);
+        cx.notify();
     }
 
     /// One frame shows "Restarting", then the relauncher takes over.
@@ -1580,6 +1814,64 @@ impl AppState {
             assert!(text != "panic!", "test poison event");
         }
         match event {
+            SyncEvent::OutsideAgentKey {
+                project_id,
+                name,
+                transport,
+                key,
+                link,
+                relay_url,
+                chat_id,
+                rotated,
+            } => {
+                self.awaiting_new_project = false;
+                self.connect_reveal = Some(ConnectReveal {
+                    project_id: project_id.clone(),
+                    name,
+                    transport,
+                    key,
+                    link,
+                    relay_url,
+                    chat_id,
+                    rotated,
+                    status: None,
+                    copied: None,
+                });
+                self.poll_connect_status(cx);
+                cx.notify();
+            }
+            SyncEvent::OutsideAgentStatus { project_id, info } => {
+                if let Some(r) = self
+                    .connect_reveal
+                    .as_mut()
+                    .filter(|r| r.project_id == project_id)
+                {
+                    r.status = Some(info.clone());
+                }
+                if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
+                    p.outside = Some(info);
+                }
+                cx.notify();
+            }
+            SyncEvent::OutsideAgentWakeSaved { project_id, error } => {
+                let form = self.wake_form_mut(&project_id);
+                form.saving = false;
+                form.note = Some(match error {
+                    None => (true, "Saved".to_owned()),
+                    Some(e) => (false, e),
+                });
+                cx.notify();
+            }
+            SyncEvent::OutsideAgentWakeTested {
+                project_id,
+                ok,
+                text,
+            } => {
+                let form = self.wake_form_mut(&project_id);
+                form.sending = false;
+                form.note = Some((ok, text));
+                cx.notify();
+            }
             SyncEvent::NeedsPairing { relay_url } => {
                 let mode = self
                     .pairing
@@ -1671,6 +1963,23 @@ impl AppState {
                 reachable,
             } => self.on_call_ready(call, created, reachable, cx),
             SyncEvent::CallStarted { call, sender } => self.on_call_started(call, sender, cx),
+            SyncEvent::ChannelMessage {
+                server_id,
+                server_name,
+                channel_id,
+                channel_name,
+                room_id,
+                sender,
+                text,
+            } => self.notify_channel_message(
+                &server_id,
+                &server_name,
+                &channel_id,
+                &channel_name,
+                &room_id,
+                &sender,
+                text.as_deref(),
+            ),
             SyncEvent::FeedbackCapture {
                 request_id,
                 expires_at,
@@ -1730,6 +2039,7 @@ impl AppState {
                 if !self.new_chat_open && self.awaiting_dm.is_some() {
                     self.push_failure(err.clone(), None);
                 }
+                self.fail_draft_dm(&err, cx);
                 self.people_error = Some(error_note::Slot::new(err));
                 self.awaiting_dm = None;
                 self.awaiting_group = None;
@@ -1872,11 +2182,20 @@ impl AppState {
                 cx.notify();
             }
             SyncEvent::LinkIcon { host, png } => {
-                let image = png.and_then(|b| decode_image(&b)).map(Arc::new);
+                let rgba = png.and_then(|b| decode_rgba(&b));
+                let tone = rgba
+                    .as_ref()
+                    .map(crate::ui::link_tile::tone_of)
+                    .unwrap_or_default();
+                let image = rgba.and_then(bgra_frame).map(Arc::new);
+                self.link_icon_tones.insert(host.clone(), tone);
                 self.link_icons.insert(host, image);
                 cx.notify();
             }
             SyncEvent::Thumbnail { key, bytes } => {
+                if key.starts_with(crate::model::STICKER_KEY_PREFIX) {
+                    self.sticker_raw.insert(key.clone(), bytes.clone());
+                }
                 if let Some((image, trimmed)) = decode_image_pair(&bytes) {
                     self.thumbnails_failed.remove(&key);
                     match trimmed {
@@ -1909,15 +2228,35 @@ impl AppState {
                 }
                 cx.notify();
             }
+            SyncEvent::GifResults { query, pos, page } => {
+                self.gif_results_arrived(query, pos, page);
+                cx.notify();
+            }
+            SyncEvent::StickerPacks { packs } => {
+                self.sticker_packs = Some(packs);
+                cx.notify();
+            }
+            SyncEvent::CopyBlobs { request, blobs } => {
+                self.finish_copy(request, blobs, cx);
+            }
             SyncEvent::AttachmentSaved { path } => {
                 self.push_notice(format!("Saved to {}", path.display()));
                 crate::ui::attachments::reveal(&path);
                 cx.notify();
             }
-            SyncEvent::AttachmentOpened { key } => {
+            SyncEvent::AttachmentOpened { key, path } => {
                 if let Some(viewer) = self.media_viewer.as_mut() {
                     if viewer.busy.as_ref() == Some(&key) {
                         viewer.busy = None;
+                        // Video Play on macOS: keep the temp file and show it
+                        // inline (AVPlayerView) instead of handing off to QuickTime.
+                        if let Some(path) = path.filter(|_| {
+                            viewer
+                                .current()
+                                .is_some_and(|i| i.attachment.kind() == AttachmentKind::Video)
+                        }) {
+                            viewer.playing = Some(path);
+                        }
                     }
                 }
                 cx.notify();
@@ -1964,6 +2303,7 @@ impl AppState {
                 if refused {
                     // The chat-level note draws `why` until the room's next ACK.
                     self.push_refused.insert(chat_id, why);
+                    self.arm_silence_end_timers(cx);
                 } else {
                     self.push_refused.remove(&chat_id);
                     self.notices.retain(|n| n.text != DELIVERY);
@@ -2012,15 +2352,15 @@ impl AppState {
                     }
                 }
                 if let Some(handle) = self.awaiting_dm.clone() {
-                    if let Some(space) = projects
-                        .iter()
-                        .find(|p| p.is_people() && p.people.iter().any(|x| x.handle == handle))
-                    {
+                    if let Some(space) = projects.iter().find(|p| {
+                        p.kind == SpaceKind::Dm && p.people.iter().any(|x| x.handle == handle)
+                    }) {
                         self.awaiting_dm = None;
                         self.new_chat_open = false;
                         let id = space.id.clone();
                         self.projects = projects.clone();
-                        self.select_project(id, cx);
+                        self.select_project(id.clone(), cx);
+                        self.land_draft_dm(&handle, &id, cx);
                         self.arm_pending_dm_reply(cx);
                     }
                 }
@@ -2060,6 +2400,7 @@ impl AppState {
                     }
                 }
                 self.projects = projects;
+                self.arm_silence_end_timers(cx);
                 // Rig (screenshots without a pointer): `ARBOS_OPEN_SPACE=<space id>` selects that
                 // agent or people chat once it is known; `ARBOS_START_CALL=voice|video` then
                 // starts a call there, as the header's call button would.
@@ -2431,6 +2772,11 @@ impl AppState {
                 }
                 cx.notify();
             }
+            SyncEvent::Pins { pins, cap } => {
+                self.pins = pins;
+                self.pin_cap = cap.max(1);
+                cx.notify();
+            }
             SyncEvent::StoreUsage { bytes, chats } => {
                 self.store_usage = (bytes, chats);
                 cx.notify();
@@ -2564,6 +2910,14 @@ impl AppState {
                 {
                     c.archived_at = archived_at;
                 }
+                // A people chat is its own sidebar row: the row hides or returns with it.
+                if let Some(p) = self
+                    .projects
+                    .iter_mut()
+                    .find(|p| p.id == chat_id && p.is_people())
+                {
+                    p.archived_at = archived_at;
+                }
                 if let Some(project_id) = self.project_of_chat(&chat_id).map(|p| p.id.clone()) {
                     self.enforce_tab(&project_id);
                 }
@@ -2613,20 +2967,40 @@ impl AppState {
                 // agent's reply) arrive as a new snapshot, not an upsert: tell
                 // the notifier about the ones we have not seen. A chat's first
                 // snapshot is history, except what was written just now.
-                let seen: HashSet<Id> = self
-                    .messages
-                    .get(&chat_id)
-                    .map(|l| l.iter().map(|m| m.id.clone()).collect())
-                    .unwrap_or_default();
+                //
+                // Append-only catch-up snapshots (#1405 /
+                // feedback app-01M5Z3QPDA5BRE84SAPADXX05V): when the previous
+                // list is a prefix of the new one, skip building a HashSet of
+                // every id — the new suffix is exactly what arrived.
                 let first_load = !self.messages.contains_key(&chat_id);
                 let fresh_after = now_ms().saturating_sub(SNAPSHOT_FRESH_MS);
-                let arrived: Vec<Message> = messages
-                    .iter()
-                    .filter(|m| !seen.contains(&m.id))
-                    .filter(|m| !first_load || m.created_at >= fresh_after)
-                    .filter(|m| !m.is_streaming())
-                    .cloned()
-                    .collect();
+                let arrived: Vec<Message> = {
+                    let prev = self.messages.get(&chat_id);
+                    let append_only = prev.is_some_and(|old| {
+                        messages.len() >= old.len()
+                            && old.iter().zip(messages.iter()).all(|(a, b)| a.id == b.id)
+                    });
+                    if append_only {
+                        let old_len = prev.map(|p| p.len()).unwrap_or(0);
+                        messages[old_len..]
+                            .iter()
+                            .filter(|m| !first_load || m.created_at >= fresh_after)
+                            .filter(|m| !m.is_streaming())
+                            .cloned()
+                            .collect()
+                    } else {
+                        let seen: HashSet<Id> = prev
+                            .map(|l| l.iter().map(|m| m.id.clone()).collect())
+                            .unwrap_or_default();
+                        messages
+                            .iter()
+                            .filter(|m| !seen.contains(&m.id))
+                            .filter(|m| !first_load || m.created_at >= fresh_after)
+                            .filter(|m| !m.is_streaming())
+                            .cloned()
+                            .collect()
+                    }
+                };
                 self.messages.insert(chat_id.clone(), messages);
                 self.index_chat(&chat_id);
                 // Message counts decide an agent's primary chat (single-chat mode).
@@ -2971,7 +3345,12 @@ impl AppState {
     // ----- selectors -------------------------------------------------------
 
     pub fn project(&self, id: &str) -> Option<&Project> {
-        self.projects.iter().find(|p| p.id == id)
+        self.projects.iter().find(|p| p.id == id).or_else(|| {
+            self.draft_dm
+                .as_ref()
+                .filter(|d| d.id() == id)
+                .map(|d| &d.space)
+        })
     }
 
     pub fn selected(&self) -> Option<&Project> {
@@ -2984,6 +3363,12 @@ impl AppState {
         self.chats
             .get(project_id)
             .map(|v| v.as_slice())
+            .or_else(|| {
+                self.draft_dm
+                    .as_ref()
+                    .filter(|d| d.id() == project_id)
+                    .map(|d| d.chat.as_slice())
+            })
             .unwrap_or(&[])
     }
 
@@ -3359,10 +3744,16 @@ impl AppState {
     // ----- commands --------------------------------------------------------
 
     pub(crate) fn command(&self, cmd: ClientCommand) {
+        if crate::draft_dm::names_draft(&cmd) {
+            return;
+        }
         let _ = self.commands.send(cmd);
     }
 
     pub fn select_project(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        if !crate::draft_dm::is_draft(&project_id) {
+            self.drop_draft_dm();
+        }
         let switching = self.selected_project.as_deref() != Some(project_id.as_str())
             || self.selected_channel.is_some();
         // A chat replaces the channel in the centre (D88).
@@ -3860,7 +4251,10 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         self.search_chat = Some(chat_id.clone());
-        if self.archived_chats.remove(&chat_id) {
+        // An agent's previous chat comes back onto its tab strip; a people chat is a sidebar
+        // row, and opening one from Hidden chats or a search hit must leave it hidden.
+        let people = self.project(&project_id).is_some_and(|p| p.is_people());
+        if !people && self.archived_chats.remove(&chat_id) {
             self.command(ClientCommand::ArchiveChat {
                 chat_id: chat_id.clone(),
                 archived: false,
@@ -4070,6 +4464,265 @@ impl AppState {
         self.send_with(text, attachments, None, reply_to, false, mentions, cx);
     }
 
+    // ----- emoji / stickers / GIFs picker (ARB-544) --------------------------
+
+    /// One tap in the picker: the sticker or GIF goes out as its own message at once
+    /// (Jacob: "tap sends immediately"). The row shows at once — a sticker from the bytes
+    /// the picker already holds, a GIF through the relay pass-through — and the server's
+    /// frame with the same id replaces it.
+    pub fn send_media(&mut self, pick: MediaPick, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.active_chat_id() else {
+            return;
+        };
+        if crate::jobtabs::is_job_chat(&chat_id) || self.selected_channel.is_some() {
+            return;
+        }
+        if crate::draft_dm::is_draft(&chat_id) {
+            self.push_notice("Say hi first. Stickers and GIFs work once the chat has started.");
+            cx.notify();
+            return;
+        }
+        self.send_errors.remove(&chat_id);
+        let message_id = new_id();
+        let reply_to = {
+            let ui = self.chat_ui.entry(chat_id.clone()).or_default();
+            ui.reply_ref = None;
+            ui.editing = None;
+            ui.reply_to.take()
+        };
+        let att_id = new_id();
+        let attachment = match &pick {
+            MediaPick::Sticker { pack, item, bytes } => {
+                let key = format!("local:{att_id}");
+                if let Some((image, trimmed)) = decode_image_pair(bytes) {
+                    self.thumbnails.insert(key.clone(), Arc::new(image));
+                    if let Some(t) = trimmed {
+                        self.thumbnails_trimmed.insert(key.clone(), Arc::new(t));
+                    }
+                }
+                self.thumbnails_requested.insert(key.clone());
+                Attachment {
+                    name: format!(
+                        "{}.{}",
+                        item.id,
+                        if item.mime == "image/webp" {
+                            "webp"
+                        } else {
+                            "png"
+                        }
+                    ),
+                    mime: item.mime.clone(),
+                    blob_ref: Some(key),
+                    bytes: Some(bytes.len() as u64),
+                    kind: Some(AttachmentKind::Sticker),
+                    title: None,
+                    chart_part: None,
+                    url: None,
+                    source: Some(Box::new(AttachmentSource {
+                        provider: pack.name.clone(),
+                        id: format!("{}/{}", pack.id, item.id),
+                        page_url: pack.page_url.clone(),
+                    })),
+                }
+            }
+            MediaPick::Gif(gif) => {
+                let attachment = Attachment {
+                    name: format!("{}.gif", gif.id),
+                    mime: "image/gif".into(),
+                    blob_ref: None,
+                    bytes: None,
+                    kind: Some(AttachmentKind::Image),
+                    title: None,
+                    chart_part: None,
+                    url: Some(gif.url.clone()),
+                    source: Some(Box::new(AttachmentSource {
+                        provider: "KLIPY".into(),
+                        id: gif.id.clone(),
+                        page_url: gif.page_url.clone(),
+                    })),
+                };
+                if let Some(key) = attachment.preview_key() {
+                    self.request_fun_thumbnail(key);
+                }
+                attachment
+            }
+        };
+        let parts = vec![
+            Part::Attachment {
+                id: att_id,
+                attachment,
+            },
+            Part::Text {
+                id: new_id(),
+                text: String::new(),
+            },
+        ];
+        self.messages
+            .entry(chat_id.clone())
+            .or_default()
+            .push(Message {
+                id: message_id.clone(),
+                chat_id: chat_id.clone(),
+                role: Role::User,
+                sender: "user".into(),
+                status: MessageStatus::Queued,
+                turn: None,
+                decision: None,
+                subagent_id: None,
+                subagent_name: None,
+                handoff_messages: None,
+                notice: None,
+                worker: false,
+                job: None,
+                hidden: false,
+                agent_reply_to: None,
+                reactions: Default::default(),
+                in_reply_to: None,
+                routine_name: None,
+                sender_name: None,
+                sender_icon: None,
+                sender_handle: None,
+                sender_avatar: None,
+                sender_avatar_color: None,
+                mentions: Vec::new(),
+                reply_to: reply_to.clone(),
+                forwarded_from: None,
+                reply_ref: None,
+                asked_by_handle: None,
+                owner_handle: None,
+                usage: None,
+                return_contract: None,
+                waiting_user: false,
+                waiting_approval: false,
+                model: None,
+                effort: None,
+                created_at: now_ms(),
+                completed_at: None,
+                call_id: None,
+                activity: None,
+                pending: true,
+                parts,
+                hidden_parts: Vec::new(),
+                greeting: false,
+                preview: None,
+            });
+        if let MediaPick::Gif(gif) = &pick {
+            let query = self
+                .gif_results
+                .as_ref()
+                .map(|(q, _)| q.clone())
+                .unwrap_or_default();
+            self.command(ClientCommand::GifShare {
+                id: gif.id.clone(),
+                query,
+            });
+        }
+        self.command(ClientCommand::SendMedia {
+            chat_id: chat_id.clone(),
+            message_id,
+            pick,
+            reply_to,
+        });
+        cx.emit(AppEvent::TranscriptChanged { chat_id });
+        cx.notify();
+    }
+
+    /// Picker: ask the relay for GIFs matching `query` (empty = trending). The answer lands
+    /// in `gif_results`; an answer for an older query is dropped.
+    pub fn gif_search(&mut self, query: String, cx: &mut Context<Self>) {
+        let query = query.trim().to_owned();
+        if self
+            .gif_results
+            .as_ref()
+            .is_some_and(|(q, page)| *q == query && !matches!(page, GifPage::Failed))
+        {
+            return;
+        }
+        if self.gif_query_pending.as_deref() == Some(query.as_str()) {
+            return;
+        }
+        self.gif_query_pending = Some(query.clone());
+        self.gif_results = None;
+        self.command(ClientCommand::GifSearch { query, pos: None });
+        cx.notify();
+    }
+
+    /// Picker: the next page of the current GIF results, if there is one.
+    pub fn gif_more(&mut self, cx: &mut Context<Self>) {
+        let Some((
+            query,
+            GifPage::Items {
+                next: Some(pos), ..
+            },
+        )) = self.gif_results.clone()
+        else {
+            return;
+        };
+        if self.gif_query_pending.is_some() {
+            return;
+        }
+        self.gif_query_pending = Some(query.clone());
+        self.command(ClientCommand::GifSearch {
+            query,
+            pos: Some(pos),
+        });
+        cx.notify();
+    }
+
+    fn gif_results_arrived(&mut self, query: String, pos: Option<String>, page: GifPage) {
+        if self.gif_query_pending.as_deref() != Some(query.as_str()) {
+            return;
+        }
+        self.gif_query_pending = None;
+        match (pos, self.gif_results.take()) {
+            (Some(_), Some((q, GifPage::Items { mut items, next: _ }))) if q == query => {
+                if let GifPage::Items { items: more, next } = page {
+                    items.extend(more);
+                    self.gif_results = Some((query, GifPage::Items { items, next }));
+                } else {
+                    self.gif_results = Some((query, GifPage::Items { items, next: None }));
+                }
+            }
+            _ => self.gif_results = Some((query, page)),
+        }
+        if let Some((_, GifPage::Items { items, .. })) = &self.gif_results {
+            let keys: Vec<String> = items
+                .iter()
+                .map(|g| format!("{}{}", crate::model::URL_KEY_PREFIX, g.preview.url))
+                .collect();
+            for key in keys {
+                self.request_fun_thumbnail(key);
+            }
+        }
+    }
+
+    /// Picker: fetch the sticker-pack manifest once per session.
+    pub fn ensure_sticker_packs(&mut self, cx: &mut Context<Self>) {
+        if self.sticker_packs_requested {
+            return;
+        }
+        self.sticker_packs_requested = true;
+        self.command(ClientCommand::StickerPacks);
+        cx.notify();
+    }
+
+    /// Picker: fetch a sticker's or a GIF preview's bytes into the thumbnail cache
+    /// (`sticker:<pack>/<id>` / `url:<url>` keys; the sync layer routes them).
+    pub fn request_fun_thumbnail(&mut self, key: String) {
+        if !self.thumbnails_requested.insert(key.clone()) {
+            return;
+        }
+        self.command(ClientCommand::FetchThumbnail {
+            project_id: self.selected_project.clone().unwrap_or_default(),
+            key,
+        });
+    }
+
+    /// Picker: the raw bytes of a fetched sticker (`sticker:<pack>/<id>`), for a send.
+    pub fn sticker_bytes(&self, key: &str) -> Option<Arc<Vec<u8>>> {
+        self.sticker_raw.get(key).cloned()
+    }
+
     /// Guide: inject `text` into the agent's running turn instead of queuing a
     /// follow-up; `mentions` as for [`Self::send`].
     pub fn guide(
@@ -4092,6 +4745,7 @@ impl AppState {
         let ui = self.chat_ui.entry(chat_id).or_default();
         ui.reply_to = Some(message_id);
         ui.reply_ref = None;
+        ui.editing = None;
         cx.notify();
     }
 
@@ -4100,6 +4754,23 @@ impl AppState {
         if let Some(ui) = self.chat_ui.get_mut(chat_id) {
             ui.reply_to = None;
             ui.reply_ref = None;
+        }
+        cx.notify();
+    }
+
+    /// Bubble menu → Edit: put this own message's text in the composer.
+    pub fn begin_edit(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
+        let ui = self.chat_ui.entry(chat_id).or_default();
+        ui.editing = Some(message_id);
+        ui.reply_to = None;
+        ui.reply_ref = None;
+        cx.notify();
+    }
+
+    /// Clear the Editing chip above the composer.
+    pub fn clear_editing(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        if let Some(ui) = self.chat_ui.get_mut(chat_id) {
+            ui.editing = None;
         }
         cx.notify();
     }
@@ -4246,6 +4917,7 @@ impl AppState {
         self.pending_dm_reply = None;
         let ui = self.chat_ui.entry(dm_chat).or_default();
         ui.reply_to = None;
+        ui.editing = None;
         ui.reply_ref = Some(r);
         cx.notify();
     }
@@ -4277,7 +4949,7 @@ impl AppState {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn send_with(
+    pub(crate) fn send_with(
         &mut self,
         text: String,
         attachments: Vec<PathBuf>,
@@ -4315,6 +4987,7 @@ impl AppState {
                 ui.drop_started_at = Some(now_ms());
             }
             ui.reply_to = None;
+            ui.editing = None;
             // A cross-chat reply never carries an in-chat `replyTo` as well.
             ui.reply_ref.take().filter(|_| reply_to.is_none())
         };
@@ -4350,6 +5023,8 @@ impl AppState {
                     kind: None,
                     title: None,
                     chart_part: None,
+                    url: None,
+                    source: None,
                 };
                 if probe.is_image() {
                     if let Some((image, trimmed)) = decode_image_pair(&data) {
@@ -4376,6 +5051,8 @@ impl AppState {
                     kind: None,
                     title: None,
                     chart_part: None,
+                    url: None,
+                    source: None,
                 },
             });
         }
@@ -4390,6 +5067,8 @@ impl AppState {
                     kind: Some(AttachmentKind::Audio),
                     title: None,
                     chart_part: None,
+                    url: None,
+                    source: None,
                 },
             });
         }
@@ -4449,6 +5128,7 @@ impl AppState {
                 parts,
                 hidden_parts: Vec::new(),
                 greeting: false,
+                preview: None,
             });
         if answer {
             let question_id = self.open_plain_question_id(&chat_id);
@@ -4471,6 +5151,15 @@ impl AppState {
                 message_id,
                 text,
                 reply_to,
+            });
+        } else if crate::draft_dm::is_draft(&chat_id) {
+            self.queue_draft_send(crate::draft_dm::DraftSend {
+                text,
+                attachments,
+                voice_wav,
+                reply_to,
+                reply_ref,
+                mentions,
             });
         } else if let Some(wav) = voice_wav {
             self.command(ClientCommand::SendVoice {
@@ -5115,7 +5804,13 @@ impl AppState {
         if m.sender.is_empty() {
             m.sender = row.sender.clone();
         }
-        if m.sender_name.as_deref().is_none_or(str::is_empty) && !row.sender_name.is_empty() {
+        let person = m.sender.starts_with("user:");
+        // An agent's Matrix display name is its name; a person's is their handle, never
+        // their name ([feedback server-member-names-2026-10-28]) — see `fill_channel_sender`.
+        if !person
+            && m.sender_name.as_deref().is_none_or(str::is_empty)
+            && !row.sender_name.is_empty()
+        {
             m.sender_name = Some(row.sender_name.clone());
         }
         if m.created_at == 0 && row.created_at > 0 {
@@ -5130,8 +5825,121 @@ impl AppState {
         if m.sender.eq_ignore_ascii_case(&self.me_member()) {
             m.sender = self.me_member();
             m.sender_handle = Some(self.me_handle());
+        } else if person {
+            self.fill_channel_sender(&mut m);
         }
         Some(m)
+    }
+
+    /// Who a channel row is from, as the rosters know them: the servers' member lists (by
+    /// user id, then handle), then every people chat's members and the directory. A Matrix
+    /// row only names its sender by handle (`arbos_matrix::message_row`), so this is where
+    /// a channel bubble gets the display name a group bubble shows
+    /// ([feedback server-member-names-2026-10-28]; Affinity, Arbonites 2026-10-28: "we are
+    /// referred to as our handles instead of our usernames in server").
+    pub fn channel_sender(&self, sender: &str, handle: Option<&str>) -> Option<Person> {
+        let id = sender.strip_prefix("user:")?;
+        let handle = handle.filter(|h| !h.is_empty());
+        self.servers
+            .iter()
+            .flat_map(|s| s.members.iter())
+            .find(|p| {
+                (!p.id.is_empty() && p.id.eq_ignore_ascii_case(id))
+                    || handle.is_some_and(|h| p.handle.eq_ignore_ascii_case(h))
+            })
+            .cloned()
+            .or_else(|| handle.and_then(|h| self.person_by_handle(h)))
+            .or_else(|| {
+                self.people_directory
+                    .iter()
+                    .find(|p| p.id.eq_ignore_ascii_case(id))
+                    .cloned()
+            })
+    }
+
+    /// Fill a person's channel row from the roster: the display name (when the roster has
+    /// one), the picture (when the row carries none) and the relay's spelling of the user id
+    /// (the Matrix localpart is lower-case; the disc's gradient is seeded by the id, so a
+    /// bubble and the Members row would otherwise draw two colours for one person). Returns
+    /// whether anything changed.
+    fn fill_channel_sender(&self, m: &mut Message) -> bool {
+        let Some(p) = self.channel_sender(&m.sender, m.sender_handle.as_deref()) else {
+            return false;
+        };
+        let mut changed = false;
+        if !p.id.is_empty() {
+            let member = format!("user:{}", p.id);
+            if m.sender != member && m.sender.eq_ignore_ascii_case(&member) {
+                m.sender = member;
+                changed = true;
+            }
+        }
+        if m.sender_name.as_deref().is_none_or(str::is_empty) {
+            if let Some(name) = p.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+                m.sender_name = Some(name.to_owned());
+                changed = true;
+            }
+        }
+        if m.sender_avatar.as_deref().is_none_or(str::is_empty) && !p.avatar_url.is_empty() {
+            m.sender_avatar = Some(p.avatar_url.clone());
+            changed = true;
+        }
+        changed
+    }
+
+    /// A roster arrived (server members, the list): name the channel rows it now knows.
+    /// Decoded rows are kept, so a channel opened before its server's detail came back
+    /// would otherwise keep reading handles.
+    fn refresh_channel_senders(&mut self, cx: &mut Context<Self>) {
+        let rooms: Vec<Id> = self.channel_rows.keys().cloned().collect();
+        let mut changed_rooms = Vec::new();
+        let mut avatars = Vec::new();
+        for room_id in rooms {
+            let Some(rows) = self.channel_rows.get(&room_id) else {
+                continue;
+            };
+            let mut rows = rows.clone();
+            let mut changed = false;
+            for m in rows.iter_mut().filter(|m| {
+                m.sender.starts_with("user:")
+                    && (m.sender_name.as_deref().is_none_or(str::is_empty)
+                        || m.sender_avatar.as_deref().is_none_or(str::is_empty))
+            }) {
+                if self.fill_channel_sender(m) {
+                    changed = true;
+                    if let Some(url) = m.sender_avatar.clone().filter(|u| !u.is_empty()) {
+                        avatars.push(url);
+                    }
+                }
+            }
+            if changed {
+                self.channel_rows.insert(room_id.clone(), rows);
+                changed_rooms.push(room_id);
+            }
+        }
+        for url in avatars {
+            self.want_avatar(url);
+        }
+        for room_id in changed_rooms {
+            cx.emit(AppEvent::TranscriptChanged { chat_id: room_id });
+        }
+    }
+
+    /// Members come only with `GET /servers/{id}`: ask once per server per session for
+    /// any server the list brought without them, so channel bubbles and the list's
+    /// previews can name people from the first paint.
+    fn want_server_rosters(&mut self) {
+        let wanted: Vec<Id> = self
+            .servers
+            .iter()
+            .filter(|s| s.members.is_empty())
+            .map(|s| s.id.clone())
+            .filter(|id| !self.server_rosters_requested.contains(id))
+            .collect();
+        for server_id in wanted {
+            self.server_rosters_requested.insert(server_id.clone());
+            self.command(ClientCommand::ServerFetch { server_id });
+        }
     }
 
     /// Composer send in a channel: optimistic row (id = ULID) that the echo replaces.
@@ -5161,6 +5969,7 @@ impl AppState {
                 ui.drop_started_at = Some(now_ms());
             }
             ui.reply_to = None;
+            ui.editing = None;
         }
         let me = self.me_member();
         let handle = self.me_handle();
@@ -5215,6 +6024,7 @@ impl AppState {
                 }],
                 hidden_parts: Vec::new(),
                 greeting: false,
+                preview: None,
             });
         self.command(ClientCommand::ChannelSend {
             room_id: room_id.clone(),
@@ -5251,6 +6061,8 @@ impl AppState {
             self.drop_server(&id, cx);
         }
         self.want_member_avatars();
+        self.want_server_rosters();
+        self.refresh_channel_senders(cx);
         self.resolve_pending_channel(cx);
         self.apply_open_server_hook(cx);
         cx.notify();
@@ -5340,6 +6152,7 @@ impl AppState {
             None => self.servers.push(server),
         }
         self.want_member_avatars();
+        self.refresh_channel_senders(cx);
         self.resolve_pending_channel(cx);
         cx.notify();
     }
@@ -5355,6 +6168,7 @@ impl AppState {
             None => self.servers.push(server),
         }
         self.want_member_avatars();
+        self.want_server_rosters();
         self.enter_server(id, cx);
     }
 
@@ -5621,6 +6435,7 @@ impl AppState {
                 }],
                 hidden_parts: Vec::new(),
                 greeting: false,
+                preview: None,
             });
         self.command(ClientCommand::Answer {
             chat_id: chat_id.clone(),
@@ -6110,6 +6925,70 @@ impl AppState {
         cx.notify();
     }
 
+    /// Save an in-place edit of an own message's text (no new send). Peers see
+    /// the updated body via room sync, same as the iPhone's `editMessage`.
+    pub fn edit_message(
+        &mut self,
+        chat_id: Id,
+        message_id: Id,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        let trimmed = text.trim().to_string();
+        if message_id.is_empty() || trimmed.is_empty() {
+            return;
+        }
+        self.command(ClientCommand::EditMessage {
+            chat_id: chat_id.clone(),
+            message_id,
+            text: trimmed,
+        });
+        if let Some(ui) = self.chat_ui.get_mut(&chat_id) {
+            ui.editing = None;
+        }
+        cx.notify();
+    }
+
+    /// Bubble ⋯ / the card's × → Remove preview: the relay drops the message's link preview
+    /// for everyone (`preview: "off"`); the card goes at once here, the row follows.
+    pub fn remove_link_preview(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
+        if message_id.is_empty() {
+            return;
+        }
+        if let Some(m) = self
+            .messages
+            .get_mut(&chat_id)
+            .and_then(|list| list.iter_mut().find(|m| m.id == message_id))
+        {
+            m.preview = Some("off".into());
+        }
+        self.command(ClientCommand::RemoveLinkPreview {
+            chat_id,
+            message_id,
+        });
+        cx.notify();
+    }
+
+    /// A link in a bubble or a preview card was clicked: one seam for every chat link, so a
+    /// confirm step (#1522) slots in here for all of them at once. Today: the default opener.
+    pub fn open_link(&mut self, url: &str, cx: &mut Context<Self>) {
+        if url.trim().is_empty() {
+            return;
+        }
+        cx.open_url(url);
+    }
+
+    /// Settings → Chat → Link previews: cards on or off on this Mac.
+    pub fn set_link_previews(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.link_previews == enabled {
+            return;
+        }
+        self.link_previews = enabled;
+        crate::ui::link_card::set_enabled(enabled);
+        save_link_previews(enabled);
+        cx.notify();
+    }
+
     /// Retry on one of my bubbles the relay refused (`MessageStatus::Error`,
     /// see `MessageSendFailed`): the failed row goes, and its text + reply-to go
     /// out again as a new message through the normal send path (attachments
@@ -6386,6 +7265,55 @@ impl AppState {
         cx.notify();
     }
 
+    /// A drag of the column's right edge begins (expanded or rail): a fresh
+    /// gesture, so a width restored from the rail by an earlier drag no
+    /// longer holds the handle ([feedback sidebar-narrow-wrap-2026-10-27]).
+    pub fn begin_sidebar_edge_drag(&mut self) {
+        self.sidebar_edge_drag = crate::ui::sidebar_fit::EdgeDrag::begin(
+            (!self.rail_collapsed).then_some(self.sidebar_width),
+        );
+    }
+
+    /// Each move of that drag: the pointer's x is the width asked for. Past
+    /// the snap point the column collapses to the rail (the saved width is
+    /// kept); from the rail, crossing the snap width restores that width,
+    /// and the handle follows the pointer again once it passes it
+    /// (`ui::sidebar_fit::EdgeDrag`). The rail flip animates like the toggle;
+    /// short of the snap width a drag from the rail draws the morph at the
+    /// pointer, so every move that changes it is a frame.
+    pub fn drag_sidebar_edge(&mut self, x: f32, cx: &mut Context<Self>) {
+        use crate::ui::sidebar_fit::EdgeTarget;
+        let tracked = self.sidebar_edge_drag.track();
+        match self
+            .sidebar_edge_drag
+            .target(x, self.rail_collapsed, self.sidebar_width)
+        {
+            EdgeTarget::Rail { keep } => {
+                if !self.rail_collapsed {
+                    self.rail_collapsed = true;
+                    self.sidebar_overlay = false;
+                    crate::ui::theme::SidebarCollapsed::save(true);
+                    // The width to come back to is the one the drag began
+                    // from, not the minimum the handle passed on the way.
+                    self.set_sidebar_width(keep, cx);
+                    cx.notify();
+                }
+            }
+            EdgeTarget::Expanded(width) => {
+                if self.rail_collapsed {
+                    self.rail_collapsed = false;
+                    crate::ui::theme::SidebarCollapsed::save(false);
+                    cx.notify();
+                }
+                self.set_sidebar_width(width, cx);
+            }
+            EdgeTarget::Hold => {}
+        }
+        if self.sidebar_edge_drag.track() != tracked {
+            cx.notify();
+        }
+    }
+
     /// Drag on the chat-list column's right edge: set width and persist it.
     pub fn set_sidebar_width(&mut self, width: f32, cx: &mut Context<Self>) {
         let width = crate::ui::theme::SidebarWidth::clamp(width);
@@ -6627,6 +7555,13 @@ impl AppState {
             _ => None,
         };
         if let ProfilePage::Agent { project_id } = &page {
+            // A connected agent's Details: a fresh "Connected · N s ago" (#2141).
+            if self
+                .project(project_id)
+                .is_some_and(|p| p.outside.is_some())
+            {
+                self.refresh_outside_status(project_id.clone());
+            }
             self.command(ClientCommand::ShellGrantsRefresh {
                 project_id: project_id.clone(),
             });
@@ -6872,11 +7807,129 @@ impl AppState {
                 .count()
     }
 
+    // ---- Sidebar pins ([feedback sidebar-pinning-mac-2026-10-28]) ------------------------
+
+    /// The relay's row key for a sidebar space, or `None` for something the list does not
+    /// show: `agent:` for an agent (own or shared), `chat:` for a DM or a people group
+    /// (their space id is the chat id), `server:` for a server.
+    pub fn pin_key(&self, space_id: &str) -> Option<String> {
+        if let Some(p) = self.projects.iter().find(|p| p.id == space_id) {
+            return Some(if p.is_people() {
+                format!("chat:{space_id}")
+            } else {
+                format!("agent:{space_id}")
+            });
+        }
+        self.servers
+            .iter()
+            .any(|s| s.id == space_id)
+            .then(|| format!("server:{space_id}"))
+    }
+
+    /// The space a pin names, if it is in my list today.
+    pub fn pinned_space_id(key: &str) -> Option<&str> {
+        key.split_once(':')
+            .filter(|(kind, id)| matches!(*kind, "agent" | "chat" | "server") && !id.is_empty())
+            .map(|(_, id)| id)
+    }
+
+    pub fn is_pinned(&self, space_id: &str) -> bool {
+        self.pin_index(space_id).is_some()
+    }
+
+    /// Position in the Pinned section (0 = top), or `None` when not pinned.
+    pub fn pin_index(&self, space_id: &str) -> Option<usize> {
+        let key = self.pin_key(space_id)?;
+        self.pins.iter().position(|k| *k == key)
+    }
+
+    /// Pin (a new pin lands at the top, the iPhone's rule) or unpin a sidebar row, on
+    /// every device. At the cap the pin is refused with one sentence; archived rows come
+    /// back first (a pin is a row you see).
+    pub fn set_pinned(&mut self, space_id: Id, pinned: bool, cx: &mut Context<Self>) {
+        let Some(key) = self.pin_key(&space_id) else {
+            return;
+        };
+        let mut pins = self.pins.clone();
+        pins.retain(|k| *k != key);
+        if pinned {
+            if pins.len() >= self.pin_cap {
+                self.push_failure(
+                    UserError::of(
+                        "pin the chat",
+                        ErrorClass::Refused {
+                            message: Some(format!("You can pin up to {} chats.", self.pin_cap)),
+                        },
+                        "",
+                    ),
+                    None,
+                );
+                cx.notify();
+                return;
+            }
+            if self.is_space_archived(&space_id) {
+                self.set_space_archived(space_id.clone(), false, cx);
+            }
+            pins.insert(0, key);
+        }
+        self.store_pins(pins, cx);
+    }
+
+    /// Drop of a pin drag: `shown` is the Pinned section as the list drew it (the pinned
+    /// rows the filter admits, in their new order). Those pins take that order among
+    /// themselves; pins the filter hid keep their places.
+    pub fn reorder_pins(&mut self, shown: &[Id], cx: &mut Context<Self>) {
+        let shown_keys: Vec<String> = shown
+            .iter()
+            .filter_map(|id| self.pin_key(id))
+            .filter(|k| self.pins.contains(k))
+            .collect();
+        let mut next = shown_keys.iter().cloned();
+        let pins: Vec<String> = self
+            .pins
+            .iter()
+            .map(|k| {
+                if shown_keys.contains(k) {
+                    next.next().unwrap_or_else(|| k.clone())
+                } else {
+                    k.clone()
+                }
+            })
+            .collect();
+        self.store_pins(pins, cx);
+    }
+
+    fn unpin_if_pinned(&mut self, space_id: &str) {
+        let Some(key) = self.pin_key(space_id) else {
+            return;
+        };
+        if self.pins.contains(&key) {
+            self.pins.retain(|k| *k != key);
+            self.command(ClientCommand::SetPins {
+                pins: self.pins.clone(),
+            });
+        }
+    }
+
+    /// The new list, shown at once and sent to the relay (its answer is the truth).
+    fn store_pins(&mut self, pins: Vec<String>, cx: &mut Context<Self>) {
+        if pins == self.pins {
+            return;
+        }
+        self.pins = pins.clone();
+        self.command(ClientCommand::SetPins { pins });
+        cx.notify();
+    }
+
     /// Archive (hide) or unarchive a sidebar space for me, on every device.
     /// Nothing is deleted; an archived agent keeps running its routines. A
     /// people chat goes through the chat archive the relay already has.
     pub fn set_space_archived(&mut self, space_id: Id, archived: bool, cx: &mut Context<Self>) {
         let at = archived.then(now_ms);
+        if archived {
+            // A hidden row is not a pinned row (the iPhone's rule).
+            self.unpin_if_pinned(&space_id);
+        }
         if let Some(p) = self.projects.iter_mut().find(|p| p.id == space_id) {
             p.archived_at = at;
             let people = p.is_people();
@@ -7134,6 +8187,7 @@ impl AppState {
             slot: self.selected_project.clone().unwrap_or_default(),
             forward_open: false,
             busy: None,
+            playing: None,
         });
         self.media_viewer_generation += 1;
         cx.notify();
@@ -7173,6 +8227,7 @@ impl AppState {
             slot,
             forward_open: false,
             busy: None,
+            playing: None,
         });
         self.media_viewer_generation += 1;
         self.ensure_viewer_pictures();
@@ -7195,6 +8250,7 @@ impl AppState {
         let last = viewer.items.len() as i32 - 1;
         let next = (viewer.index as i32 + delta).clamp(0, last.max(0));
         if next as usize != viewer.index {
+            viewer.playing = None;
             viewer.index = next as usize;
             self.ensure_viewer_pictures();
             cx.notify();
@@ -7254,8 +8310,47 @@ impl AppState {
         cx.notify();
     }
 
-    /// Viewer → Play / Quick Look: fetch the bytes to a temp file and hand them
-    /// to macOS (`qlmanage -p` for files, `open` for video → QuickTime Player).
+    /// A Library row's Copy ([feedback copy-image-messages-mac-2026-10-27]): the
+    /// picture or file of that row, from the slot its chat's blobs live in (its
+    /// project, or the people chat itself; a channel row falls back to the selected space).
+    pub fn copy_viewer_item(&mut self, item: &ViewerItem, cx: &mut Context<Self>) {
+        let known = self
+            .chats
+            .values()
+            .any(|tabs| tabs.iter().any(|c| c.id == item.chat_id));
+        let slot = if known {
+            self.space_of_chat(&item.chat_id)
+        } else {
+            match self.selected_project.clone() {
+                Some(p) => p,
+                None => return,
+            }
+        };
+        let attachment = item.attachment.clone();
+        self.copy_attachment(slot, &attachment, cx);
+    }
+
+    /// Viewer → Copy (the pill, or ⌘C while the viewer is up): the open picture or
+    /// file on the pasteboard, original bytes under their own type
+    /// ([feedback copy-image-messages-mac-2026-10-27]).
+    pub fn media_viewer_copy(&mut self, cx: &mut Context<Self>) {
+        let Some(viewer) = self.media_viewer.as_ref() else {
+            return;
+        };
+        let Some(item) = viewer.items.get(viewer.index) else {
+            return;
+        };
+        if item.picture_url.is_some() || viewer.forward_open {
+            return;
+        }
+        let (slot, attachment) = (viewer.slot.clone(), item.attachment.clone());
+        self.copy_attachment(slot, &attachment, cx);
+    }
+
+    /// Viewer → Play / Quick Look: fetch the bytes to a temp file. Files open
+    /// in Quick Look; videos play inline in the viewer on macOS (AVPlayerView)
+    /// instead of handing off to QuickTime ([feedback
+    /// app-01M6147S9TPNBQA7KSDEY0K8C4]).
     pub fn media_viewer_open_external(&mut self, cx: &mut Context<Self>) {
         let Some(viewer) = self.media_viewer.as_mut() else {
             return;
@@ -7269,10 +8364,14 @@ impl AppState {
         if key.starts_with("local:") || viewer.busy.is_some() {
             return;
         }
+        if viewer.playing.is_some() && item.attachment.kind() == AttachmentKind::Video {
+            return;
+        }
         let quick_look = item.attachment.kind() != AttachmentKind::Video;
         let name = item.attachment.name.clone();
         let project_id = viewer.slot.clone();
         viewer.busy = Some(key.clone());
+        viewer.playing = None;
         self.command(ClientCommand::OpenAttachment {
             project_id,
             key,
@@ -7413,6 +8512,7 @@ impl AppState {
                 parts,
                 hidden_parts: Vec::new(),
                 greeting: false,
+                preview: None,
             });
         self.command(ClientCommand::Forward {
             chat_id: target.chat_id.clone(),
@@ -7563,6 +8663,7 @@ impl AppState {
                 parts,
                 hidden_parts: Vec::new(),
                 greeting: false,
+                preview: None,
             });
         self.command(ClientCommand::ForwardMessage {
             chat_id: target.chat_id.clone(),
@@ -7647,6 +8748,39 @@ impl AppState {
     ) {
         let Some(project) = self.project(&project_id) else {
             return;
+        };
+        // A message in a group (people group, shared project chat): the banner is titled
+        // with the group and the sender moves into the body — "Arbonites" / "Doug: Five." —
+        // with the group's picture; the same shape as the iPhone and the relay's APNs payload
+        // (Jacob 2026-10-27: "cannot tell which group a message came from"). A DM keeps the
+        // sender as the title.
+        let group = (kind.is_message() && project.is_groupish() && sender.is_some()).then(|| {
+            (
+                project.name.clone(),
+                project
+                    .image_url
+                    .as_deref()
+                    .and_then(|u| self.person_notification_png(u))
+                    .or_else(|| {
+                        crate::ui::avatars::notification_png(
+                            &project.id,
+                            &project.name,
+                            project.avatar_color_index,
+                            crate::ui::theme::system_is_dark(),
+                        )
+                    }),
+            )
+        });
+        let (detail, sender, image) = match group {
+            Some((group_name, group_image)) => {
+                let (title, body) = notify::group_frame(
+                    &group_name,
+                    sender.as_deref().unwrap_or_default(),
+                    &detail,
+                );
+                (body, Some(title), group_image.or(image))
+            }
+            None => (detail, sender, image),
         };
         let mut event = NotifyEvent::new(project.id.clone(), project.name.clone(), kind, detail);
         event.chat_id = chat_id.map(str::to_string);
@@ -7948,8 +9082,75 @@ impl AppState {
         self.sync_focus();
     }
 
-    /// A click on a notification: bring the window up and show that chat.
+    /// A server channel message (relay `channel_message` push, from the homeserver's push
+    /// rules — every member but the sender): a banner "<sender> in #channel" unless that
+    /// channel is on screen in a focused window or the server is muted. The coalescer keys
+    /// it under `server:<id>` so a busy server folds into "N updates in <server>".
+    #[allow(clippy::too_many_arguments)]
+    fn notify_channel_message(
+        &mut self,
+        server_id: &str,
+        server_name: &str,
+        channel_id: &str,
+        channel_name: &str,
+        room_id: &str,
+        sender: &crate::model::Sender,
+        text: Option<&str>,
+    ) {
+        let key = format!("server:{server_id}");
+        let visible = self.window_active
+            && self
+                .selected_channel
+                .as_ref()
+                .is_some_and(|c| c.server_id == server_id && c.channel_id == channel_id);
+        let gate = Gate {
+            streaming: false,
+            visible: visible || self.is_muted(&key),
+        };
+        let title = if sender.kind == "agent" || sender.handle.is_empty() {
+            sender.name.clone()
+        } else {
+            format!("@{}", sender.handle)
+        };
+        // Same shape as a group banner: title = where ("Server › #channel"), body = "Sender: text".
+        let (banner_title, body) = notify::channel_frame(server_name, channel_name, &title, text);
+        let mut event = NotifyEvent::new(
+            key,
+            server_name.to_string(),
+            NotifyKind::DirectMessage,
+            body,
+        );
+        event.chat_id = Some(room_id.to_string());
+        event.sender = Some(banner_title);
+        event.image = if sender.kind == "agent" {
+            crate::ui::avatars::notification_png(
+                &sender.id,
+                &sender.name,
+                sender.avatar_color_index,
+                crate::ui::theme::system_is_dark(),
+            )
+        } else if sender.avatar_url.is_empty() {
+            None
+        } else {
+            self.person_notification_png(&sender.avatar_url)
+        };
+        self.notifier.offer(event, now_ms(), gate);
+    }
+
+    /// A click on a notification: bring the window up and show that chat — or, for a
+    /// server channel banner (its id is the room id), that channel.
     pub fn open_chat_from_notification(&mut self, chat_id: Id, cx: &mut Context<Self>) {
+        let channel = self.servers.iter().find_map(|s| {
+            s.channels
+                .iter()
+                .find(|c| c.room_id.as_deref() == Some(chat_id.as_str()))
+                .map(|c| (s.id.clone(), c.id.clone()))
+        });
+        if let Some((server_id, channel_id)) = channel {
+            self.select_channel(server_id, channel_id, cx);
+            cx.activate(true);
+            return;
+        }
         let project_id = self
             .chats
             .values()
@@ -8028,6 +9229,9 @@ impl AppState {
     pub fn set_window_active(&mut self, active: bool, cx: &mut Context<Self>) {
         if self.window_active != active {
             self.window_active = active;
+            if active {
+                self.became_active_at = now_ms();
+            }
             self.sync_focus();
             if active {
                 if let Some(room_id) = self
@@ -8081,55 +9285,98 @@ impl AppState {
     }
 
     /// An info toast: something that worked or a plain status. Never a failure — that is
-    /// [`Self::push_failure`] (`error_ui_lint` keeps raw error strings out of here).
+    /// [`Self::push_failure`] (`error_ui_lint` keeps raw error strings out of here). The same
+    /// text again while its toast stands restarts that toast instead of adding one.
     pub fn push_notice(&mut self, text: impl Into<String>) {
-        let now = self.next_notice_at();
+        let text = text.into();
+        let now = self.prune_notices();
+        if let Some(n) = self
+            .notices
+            .iter_mut()
+            .find(|n| n.error.is_none() && n.text == text)
+        {
+            n.at = now;
+            n.count += 1;
+            return;
+        }
+        let id = self.next_notice_id(now);
         self.notices.push(Notice {
-            text: text.into(),
+            id,
+            text,
             at: now,
             error: None,
             details_open: false,
             held: false,
+            held_since: 0,
             retry: None,
+            count: 1,
         });
     }
 
     /// An error toast (the shared error element, 10 s, hover holds, Details + Copy, Try again
     /// re-issues `retry`). The surface that owns the action catches most failures first
-    /// (sheets, pane pages, the composer); this is for the rest.
+    /// (sheets, pane pages, the composer); this is for the rest. The same failure again while
+    /// its toast stands (same sentence) bumps the toast's count and restarts its clock — one
+    /// note per failure, however often it repeats.
     pub fn push_failure(&mut self, error: UserError, retry: Option<Box<ClientCommand>>) {
-        let now = self.next_notice_at();
+        let now = self.prune_notices();
+        if let Some(n) = self.notices.iter_mut().find(|n| n.same_failure(&error)) {
+            n.at = now;
+            n.count = n.count.saturating_add(1);
+            n.error = Some(error);
+            if retry.is_some() {
+                n.retry = retry;
+            }
+            return;
+        }
+        let id = self.next_notice_id(now);
         self.notices.push(Notice {
+            id,
             text: error.sentence(),
             at: now,
             error: Some(error),
             details_open: false,
             held: false,
+            held_since: 0,
             retry,
+            count: 1,
         });
     }
 
-    /// Drops the expired toasts and returns a unique `at` for the next one (`at` is its id:
-    /// two toasts pushed in the same millisecond must not share it).
-    fn next_notice_at(&mut self) -> u64 {
+    /// Drops the expired toasts; returns `now`.
+    fn prune_notices(&mut self) -> u64 {
         let now = now_ms();
-        self.notices
-            .retain(|n| n.held || now.saturating_sub(n.at) < n.ttl_ms());
-        let last = self.notices.iter().map(|n| n.at).max().unwrap_or(0);
+        self.notices.retain(|n| n.live_at(now));
+        now
+    }
+
+    /// A unique id for the next toast (`now`, or one past the newest id when two arrive in
+    /// the same millisecond).
+    fn next_notice_id(&self, now: u64) -> u64 {
+        let last = self.notices.iter().map(|n| n.id).max().unwrap_or(0);
         now.max(last + 1)
     }
 
     /// Click on × (or an info toast) removes it (download status / errors must not sit forever).
-    pub fn dismiss_notice(&mut self, at: u64) {
-        self.notices.retain(|n| n.at != at);
+    pub fn dismiss_notice(&mut self, id: u64) {
+        self.notices.retain(|n| n.id != id);
+    }
+
+    /// Clears the whole slot (the "N more" line's ×).
+    pub fn dismiss_all_notices(&mut self) {
+        self.notices.clear();
     }
 
     /// The pointer on a toast holds it; leaving restarts its clock.
-    pub fn hold_notice(&mut self, at: u64, held: bool) {
-        if let Some(n) = self.notices.iter_mut().find(|n| n.at == at) {
+    pub fn hold_notice(&mut self, id: u64, held: bool) {
+        let now = now_ms();
+        if let Some(n) = self.notices.iter_mut().find(|n| n.id == id) {
+            if held && !n.held {
+                n.held_since = now;
+            }
             n.held = held;
             if !held {
-                n.at = now_ms();
+                n.at = now;
             }
         }
     }
@@ -8159,33 +9406,49 @@ impl AppState {
         }
     }
 
-    pub fn toggle_notice_details(&mut self, at: u64) {
-        if let Some(n) = self.notices.iter_mut().find(|n| n.at == at) {
+    pub fn toggle_notice_details(&mut self, id: u64) {
+        let now = now_ms();
+        if let Some(n) = self.notices.iter_mut().find(|n| n.id == id) {
             n.details_open = !n.details_open;
+            if !n.held {
+                n.held_since = now;
+            }
             n.held = true;
         }
     }
 
     /// Try again on an error toast: re-issue its command and drop the toast.
-    pub fn retry_notice(&mut self, at: u64) {
+    pub fn retry_notice(&mut self, id: u64) {
         let retry = self
             .notices
             .iter()
-            .find(|n| n.at == at)
+            .find(|n| n.id == id)
             .and_then(|n| n.retry.clone());
-        self.dismiss_notice(at);
+        self.dismiss_notice(id);
         if let Some(cmd) = retry {
             self.command(*cmd);
         }
     }
 
+    /// Every toast still on screen, oldest first.
     pub fn live_notices(&self) -> Vec<Notice> {
         let now = now_ms();
         self.notices
             .iter()
-            .filter(|n| n.held || now.saturating_sub(n.at) < n.ttl_ms())
+            .filter(|n| n.live_at(now))
             .cloned()
             .collect()
+    }
+
+    /// What the slot draws: the newest [`NOTICE_VISIBLE_MAX`] toasts (oldest first) and the
+    /// number folded away above them.
+    pub fn notice_stack(&self) -> NoticeStack {
+        let live = self.live_notices();
+        let folded = live.len().saturating_sub(NOTICE_VISIBLE_MAX);
+        NoticeStack {
+            visible: live[folded..].to_vec(),
+            folded,
+        }
     }
 
     /// The composer's note for `chat`, if a send / attachment / recording failed there.
@@ -8288,6 +9551,66 @@ impl AppState {
             });
         })
         .detach();
+    }
+
+    /// For each silenced people chat with an end time: clear it if the clock has
+    /// passed, else arm one timer that clears `silenced` and a silenced
+    /// `push_refused` when it fires ([feedback app-01M61GZ5B66VCSKF40458KH3DP]).
+    fn arm_silence_end_timers(&mut self, cx: &mut Context<Self>) {
+        let now = now_ms() as i64;
+        let mut changed = false;
+        for p in &mut self.projects {
+            if crate::sync::clear_silence_if_expired(p, &mut self.push_refused, now) {
+                changed = true;
+                self.silence_until_armed.remove(&p.id);
+                self.silence_until_gen.remove(&p.id);
+            }
+        }
+        let to_arm: Vec<(Id, i64)> = self
+            .projects
+            .iter()
+            .filter(|p| p.silenced)
+            .filter_map(|p| p.silenced_until.map(|u| (p.id.clone(), u)))
+            .collect();
+        let armed: HashSet<_> = to_arm.iter().map(|(id, _)| id.clone()).collect();
+        self.silence_until_armed.retain(|id, _| armed.contains(id));
+        self.silence_until_gen.retain(|id, _| armed.contains(id));
+        for (chat_id, until) in to_arm {
+            if self.silence_until_armed.get(&chat_id) == Some(&until) {
+                continue;
+            }
+            self.silence_until_armed.insert(chat_id.clone(), until);
+            let gen = self.silence_until_gen.entry(chat_id.clone()).or_insert(0);
+            *gen = gen.wrapping_add(1);
+            let gen = *gen;
+            let wait_ms = until.saturating_sub(now).max(0) as u64;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(wait_ms))
+                    .await;
+                let _ = this.update(cx, |state, cx| {
+                    if state.silence_until_gen.get(&chat_id) != Some(&gen) {
+                        return;
+                    }
+                    let Some(p) = state.projects.iter_mut().find(|p| p.id == chat_id) else {
+                        return;
+                    };
+                    if crate::sync::clear_silence_if_expired(
+                        p,
+                        &mut state.push_refused,
+                        now_ms() as i64,
+                    ) {
+                        state.silence_until_armed.remove(&chat_id);
+                        state.silence_until_gen.remove(&chat_id);
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
+        if changed {
+            cx.notify();
+        }
     }
 
     /// Cancel on the pill: close the sheet (its block reports Cancelled) and
@@ -8935,9 +10258,7 @@ impl AppState {
             self.select_project(existing, cx);
             return;
         }
-        self.people_busy = true;
-        self.awaiting_dm = Some(handle.clone());
-        self.command(ClientCommand::StartDm { handle });
+        self.open_draft_dm(handle, cx);
         cx.notify();
     }
 
@@ -8990,6 +10311,12 @@ impl AppState {
         self.projects.iter().find(|p| p.id == pid)
     }
 
+    /// One of my agents into a people chat, the way the Add members picker
+    /// does it (optimistic "<me> added <agent>" line, then the batch
+    /// `AddMembers` call). Only the `ARBOS_RIG_ADD_AGENT` recording hook
+    /// calls it since the "Add agent" rows went ([feedback
+    /// add-your-agent-row-removal-mac-2026-10-27]); the picker goes through
+    /// [`Self::add_members_to_group`].
     pub fn add_agent(&mut self, chat_id: Id, project_id: Id, cx: &mut Context<Self>) {
         let names: Vec<String> = self
             .projects
@@ -9002,9 +10329,10 @@ impl AppState {
             id: project_id.clone(),
         }];
         self.show_membership_notice(&chat_id, &names, subjects, cx);
-        self.command(ClientCommand::AddAgent {
+        self.command(ClientCommand::AddMembers {
             chat_id,
-            project_id,
+            handles: Vec::new(),
+            agent_ids: vec![project_id],
         });
         cx.notify();
     }
@@ -9098,6 +10426,32 @@ impl AppState {
         cx.notify();
     }
 
+    /// Group owner: make a member an admin, or an admin a member again. The pane shows
+    /// the new role at once; the relay's list confirms it.
+    pub fn set_people_member_role(
+        &mut self,
+        chat_id: Id,
+        user_id: String,
+        role: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(m) = self
+            .projects
+            .iter_mut()
+            .find(|p| p.id == chat_id)
+            .and_then(|p| p.people.iter_mut().find(|m| m.id == user_id))
+            .filter(|m| m.role != "owner")
+        {
+            m.role = role.to_owned();
+        }
+        self.command(ClientCommand::SetMemberRole {
+            chat_id,
+            user_id,
+            role: role.to_owned(),
+        });
+        cx.notify();
+    }
+
     pub fn leave_chat(&mut self, chat_id: Id, cx: &mut Context<Self>) {
         if self.selected_project.as_deref() == Some(chat_id.as_str()) {
             self.selected_project = None;
@@ -9120,6 +10474,7 @@ impl AppState {
         self.chat_ui.remove(&chat_id);
         self.chats.remove(&chat_id);
         self.archived_chats.remove(&chat_id);
+        self.unpin_if_pinned(&chat_id);
         self.projects.retain(|p| p.id != chat_id);
         self.muted.remove(&chat_id);
         self.command(ClientCommand::LeaveChat { chat_id });
@@ -9278,6 +10633,161 @@ impl AppState {
         cx.notify();
     }
 
+    /// Connect an outside agent (#2141): the relay makes the project and mints the key; the
+    /// reveal sheet opens on [`SyncEvent::OutsideAgentKey`].
+    pub fn connect_agent(
+        &mut self,
+        name: String,
+        transport: &str,
+        avatar_color_index: Option<u8>,
+        cx: &mut Context<Self>,
+    ) {
+        self.connect_open = false;
+        self.awaiting_new_project = true;
+        self.command(ClientCommand::ConnectAgent {
+            name,
+            transport: transport.to_owned(),
+            avatar_color_index,
+        });
+        self.push_notice("Connecting…");
+        cx.notify();
+    }
+
+    /// While the reveal sheet is up, ask the relay every 3 s whether the agent has checked in.
+    fn poll_connect_status(&mut self, cx: &mut Context<Self>) {
+        let Some(project_id) = self.connect_reveal.as_ref().map(|r| r.project_id.clone()) else {
+            return;
+        };
+        self.command(ClientCommand::OutsideAgentStatus {
+            project_id: project_id.clone(),
+        });
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(3))
+                .await;
+            let go = this.update(cx, |state, _| match state.connect_reveal.as_ref() {
+                Some(r) if r.project_id == project_id => {
+                    state.command(ClientCommand::OutsideAgentStatus {
+                        project_id: project_id.clone(),
+                    });
+                    true
+                }
+                _ => false,
+            });
+            if !matches!(go, Ok(true)) {
+                break;
+            }
+        })
+        .detach();
+    }
+
+    /// Done / × on the reveal sheet: the key is gone from the screen; open the agent's chat.
+    pub fn close_connect_reveal(&mut self, cx: &mut Context<Self>) {
+        if let Some(r) = self.connect_reveal.take() {
+            if !r.rotated {
+                if let Some(p) = self.projects.iter().find(|p| p.id == r.project_id) {
+                    let id = p.id.clone();
+                    self.select_project(id, cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Details pane → Key → Rotate key…: a fresh key, the old one stops at once.
+    pub fn rotate_outside_key(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        self.command(ClientCommand::OutsideAgentRotate { project_id });
+        cx.notify();
+    }
+
+    /// Details pane → Key → Revoke access.
+    pub fn revoke_outside_agent(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        self.command(ClientCommand::OutsideAgentRevoke { project_id });
+        cx.notify();
+    }
+
+    /// Details pane → Can → a switch: one scope on or off (`PATCH /outside-agents/{id}`). The
+    /// row flips at once; the relay's answer confirms the effective set.
+    pub fn set_outside_scope(
+        &mut self,
+        project_id: Id,
+        scope: &str,
+        on: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
+            if let Some(o) = p.outside.as_mut() {
+                o.scopes.insert(scope.to_owned(), on);
+            }
+        }
+        self.command(ClientCommand::OutsideAgentScope {
+            project_id,
+            scope: scope.to_owned(),
+            on,
+        });
+        cx.notify();
+    }
+
+    /// Details pane: refresh the connection line when the pane opens on an outside agent.
+    pub fn refresh_outside_status(&mut self, project_id: Id) {
+        self.command(ClientCommand::OutsideAgentStatus { project_id });
+    }
+
+    /// The Wake URL form for this agent; a form left over from another agent is replaced.
+    fn wake_form_mut(&mut self, project_id: &Id) -> &mut WakeForm {
+        if self
+            .wake_form
+            .as_ref()
+            .is_none_or(|f| &f.project_id != project_id)
+        {
+            self.wake_form = Some(WakeForm {
+                project_id: project_id.clone(),
+                ..Default::default()
+            });
+        }
+        self.wake_form.as_mut().expect("just set")
+    }
+
+    /// Connection card → Wake URL → Save: an empty URL clears the URL and the header value
+    /// together; an empty header value with a URL keeps the stored value (it is never shown
+    /// back, so leaving the field blank means "unchanged").
+    pub fn save_wake_url(
+        &mut self,
+        project_id: Id,
+        url: String,
+        auth: String,
+        cx: &mut Context<Self>,
+    ) {
+        let url = url.trim().to_owned();
+        let auth = auth.trim().to_owned();
+        let (url, auth) = if url.is_empty() {
+            (Some(String::new()), Some(String::new()))
+        } else {
+            (Some(url), (!auth.is_empty()).then_some(auth))
+        };
+        let form = self.wake_form_mut(&project_id);
+        form.saving = true;
+        form.note = None;
+        self.command(ClientCommand::OutsideAgentWakeSet {
+            project_id,
+            url,
+            auth,
+        });
+        cx.notify();
+    }
+
+    /// Connection card → Wake URL → Send test wake.
+    pub fn send_test_wake(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        let form = self.wake_form_mut(&project_id);
+        if form.sending {
+            return;
+        }
+        form.sending = true;
+        form.note = None;
+        self.command(ClientCommand::OutsideAgentWakeTest { project_id });
+        cx.notify();
+    }
+
     /// Grok / iPhone "Fork": a new agent with the same look and workspace
     /// context (files + memory). Own agents only; chat history stays empty.
     pub fn duplicate_project(&mut self, project_id: Id, cx: &mut Context<Self>) {
@@ -9378,6 +10888,7 @@ impl AppState {
         }
         self.active_tab.remove(&project_id);
         self.last_chats.remove(&project_id);
+        self.unpin_if_pinned(&project_id);
         self.projects.retain(|p| p.id != project_id);
         self.muted.remove(&project_id);
         self.command(ClientCommand::DeleteProject { project_id });
@@ -9397,6 +10908,7 @@ impl AppState {
         self.chat_ui.remove(&chat_id);
         self.chats.remove(&chat_id);
         self.archived_chats.remove(&chat_id);
+        self.unpin_if_pinned(&chat_id);
         self.projects.retain(|p| p.id != chat_id);
         self.muted.remove(&chat_id);
         self.command(ClientCommand::DeletePeopleChat { chat_id });
@@ -9479,6 +10991,135 @@ impl AppState {
         cx.notify();
     }
 
+    /// Copy of a whole message — the bubble menu, control-click, ⌘C on a whole
+    /// bubble ([feedback copy-image-messages-mac-2026-10-27]): its body
+    /// (`Message::body`, the accessor Forward reads too) as [`crate::pasteboard`] lays
+    /// it out. Words alone land at once; a message with pictures or files first fetches
+    /// their original bytes from the relay (never the thumbnail) and writes the
+    /// pasteboard when they are in. Says what happened when nothing could be copied.
+    pub fn copy_message(&mut self, chat_id: &Id, message_id: &Id, cx: &mut Context<Self>) {
+        let Some(message) = self
+            .messages
+            .get(chat_id)
+            .and_then(|ms| ms.iter().find(|m| m.id == *message_id))
+        else {
+            return;
+        };
+        let Some(body) = message.body() else {
+            self.push_notice(if message.has_uploading_attachment() {
+                "Still uploading — try again in a moment"
+            } else {
+                "Nothing to copy"
+            });
+            cx.notify();
+            return;
+        };
+        let slot = self.space_of_chat(chat_id);
+        self.copy_body(slot, body, cx);
+    }
+
+    /// Copy of one attachment on its own — the media viewer's Copy, the Library's
+    /// row menu: the picture (or file) without the message's words.
+    pub fn copy_attachment(&mut self, slot: Id, attachment: &Attachment, cx: &mut Context<Self>) {
+        if !attachment.is_on_relay() {
+            self.push_notice(if attachment.is_uploading() {
+                "Still uploading — try again in a moment"
+            } else {
+                "Nothing to copy"
+            });
+            cx.notify();
+            return;
+        }
+        let body = MessageBody {
+            text: String::new(),
+            attachments: vec![attachment.clone()],
+            charts: Vec::new(),
+        };
+        self.copy_body(slot, body, cx);
+    }
+
+    fn copy_body(&mut self, slot: Id, body: MessageBody, cx: &mut Context<Self>) {
+        if body.attachments.is_empty() {
+            let items =
+                crate::pasteboard::plan(&body.text, &[], &crate::pasteboard::copied_files_dir());
+            crate::pasteboard::write(&items, cx);
+            self.copy_request = None;
+            return;
+        }
+        self.copy_request_seq += 1;
+        let request = self.copy_request_seq;
+        let keys: Vec<String> = body
+            .attachments
+            .iter()
+            .filter_map(|a| a.blob_ref.clone())
+            .collect();
+        self.copy_request = Some(CopyRequest { id: request, body });
+        self.command(ClientCommand::FetchCopyBlobs {
+            project_id: slot,
+            request,
+            keys,
+        });
+        cx.notify();
+    }
+
+    /// The blobs of a Copy came back: lay the items out and write the pasteboard.
+    fn finish_copy(
+        &mut self,
+        request: u64,
+        blobs: Vec<Option<crate::sync::CopyBlob>>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pending) = self.copy_request.take_if(|p| p.id == request) else {
+            return;
+        };
+        let fetched: Vec<crate::pasteboard::Fetched> = pending
+            .body
+            .attachments
+            .iter()
+            .zip(blobs)
+            .filter_map(|(attachment, blob)| {
+                let blob = blob?;
+                // The relay's content-type unless it is the generic one; then the row's.
+                let generic =
+                    blob.mime.is_empty() || blob.mime.starts_with("application/octet-stream");
+                Some(crate::pasteboard::Fetched {
+                    name: attachment.name.clone(),
+                    mime: if generic {
+                        attachment.mime.clone()
+                    } else {
+                        blob.mime.clone()
+                    },
+                    bytes: blob.bytes.as_ref().clone(),
+                })
+            })
+            .collect();
+        let missing = pending.body.attachments.len() - fetched.len();
+        let items = crate::pasteboard::plan(
+            &pending.body.text,
+            &fetched,
+            &crate::pasteboard::copied_files_dir(),
+        );
+        let written = crate::pasteboard::write(&items, cx);
+        if !written {
+            self.push_notice("Couldn't copy — the picture didn't download. Try again.");
+        } else if missing > 0 {
+            self.push_notice(if missing == 1 {
+                "Copied — one picture didn't download".to_owned()
+            } else {
+                format!("Copied — {missing} pictures didn't download")
+            });
+        } else {
+            let pictures = fetched.len();
+            self.push_notice(match (pictures, pending.body.text.is_empty()) {
+                (1, true) => "Copied the picture".to_owned(),
+                (1, false) => "Copied the picture and its text".to_owned(),
+                (n, true) => format!("Copied {n} pictures"),
+                (n, false) => format!("Copied {n} pictures and the text"),
+            });
+        }
+        cx.notify();
+    }
+
     /// Ask the source for the site icon of every named link in `messages` that has not been
     /// asked for yet ([feedback link-icons-mac-2026-10-25]): the hosts of `[Name](https://…)`
     /// in prose, lists and table cells of agent and people rows alike.
@@ -9489,12 +11130,28 @@ impl AppState {
                     continue;
                 };
                 for host in crate::ui::markdown::link_hosts(text) {
-                    if self.link_icons_requested.insert(host.clone()) {
-                        self.command(ClientCommand::FetchLinkIcon { host });
-                    }
+                    self.want_link_icon(host);
                 }
             }
         }
+    }
+
+    /// Ask the source for one host's site icon, once per session (the bubbles' named links,
+    /// the link tiles of the Links tab, the Library and search).
+    pub(crate) fn want_link_icon(&mut self, host: String) {
+        if host.is_empty() {
+            return;
+        }
+        if self.link_icons_requested.insert(host.clone()) {
+            self.command(ClientCommand::FetchLinkIcon { host });
+        }
+    }
+
+    /// The fetched icon for a host and its tone, once the relay answered with a picture.
+    pub fn link_icon(&self, host: &str) -> Option<(&Arc<RenderImage>, crate::ui::link_tile::Tone)> {
+        let image = self.link_icons.get(host)?.as_ref()?;
+        let tone = self.link_icon_tones.get(host).copied().unwrap_or_default();
+        Some((image, tone))
     }
 
     /// Ask the source for the bytes of every image attachment in a chat that has no thumbnail yet.
@@ -9563,13 +11220,44 @@ impl AppState {
         };
         for message in messages {
             for part in &message.parts {
-                let Part::Attachment { attachment, .. } = part else {
-                    continue;
+                // A link preview's picture lives in the chat's slot like an attachment's; its
+                // site icon too, and a host without one is asked of the relay (the shared tile).
+                let key = match part {
+                    Part::LinkPreview { preview, .. } => {
+                        if let Some(icon) = preview
+                            .site_icon
+                            .as_ref()
+                            .filter(|i| !i.blob_ref.is_empty())
+                        {
+                            if self.thumbnails_requested.insert(icon.blob_ref.clone()) {
+                                self.command(ClientCommand::FetchThumbnail {
+                                    project_id: project_id.clone(),
+                                    key: icon.blob_ref.clone(),
+                                });
+                            }
+                        } else if let Some(host) =
+                            preview.site_host.clone().filter(|h| !h.is_empty())
+                        {
+                            if crate::ui::link_tile::Brand::for_host(&host).is_none() {
+                                self.want_link_icon(host);
+                            }
+                        }
+                        match preview.image.as_ref().map(|i| i.blob_ref.clone()) {
+                            Some(k) if !k.is_empty() => Some(k),
+                            _ => None,
+                        }
+                    }
+                    Part::Attachment { attachment, .. }
+                        if matches!(
+                            attachment.kind(),
+                            AttachmentKind::Image | AttachmentKind::Sticker
+                        ) =>
+                    {
+                        attachment.preview_key()
+                    }
+                    _ => None,
                 };
-                if attachment.kind() != AttachmentKind::Image {
-                    continue;
-                }
-                let Some(key) = attachment.blob_ref.clone() else {
+                let Some(key) = key else {
                     continue;
                 };
                 // Optimistic send stores a decoded preview under `local:…`.
@@ -10130,6 +11818,11 @@ impl AppState {
             return;
         };
         if self.my_call.is_some() {
+            return;
+        }
+        if crate::draft_dm::is_draft(&space_id) {
+            self.push_notice("Say hi first, then call.".to_string());
+            cx.notify();
             return;
         }
         // Already a live call here: join it instead of starting another.
@@ -10823,9 +12516,68 @@ fn mime_for_path(path: &std::path::Path) -> &'static str {
     }
 }
 
-/// PNG/JPEG/GIF/WebP/ICO → BGRA frame for GPUI (`RenderImage` is BGRA).
+/// PNG/JPEG/GIF/WebP/ICO → BGRA frame(s) for GPUI (`RenderImage` is BGRA).
+/// GIF and animated WebP keep every frame (capped); other formats stay one frame.
 pub fn decode_image(bytes: &[u8]) -> Option<RenderImage> {
-    decode_rgba(bytes).and_then(bgra_frame)
+    match decode_pixels(bytes)? {
+        DecodedPixels::Animated(frames) => bgra_frames(frames),
+        DecodedPixels::Still(rgba) => bgra_frame(rgba),
+    }
+}
+
+/// Decode `bytes` for a small tile: the longer side shrinks to `max_side`
+/// device pixels (never enlarged). The composer's staged thumbnails use it so
+/// a pasted Retina screenshot does not sit in GPU memory at full size.
+/// Animated GIF/WebP use the first frame only (the tile does not animate).
+pub fn decode_thumbnail(bytes: &[u8], max_side: u32) -> Option<RenderImage> {
+    let img = decode_rgba(bytes)?;
+    // A macOS window capture (⌘⇧4 + space, "Copy") is the window plus its
+    // drop shadow on transparent padding; drawn Cover into a square tile the
+    // shadow reads as a second, darker tile behind the picture. The tile shows
+    // the opaque content only ([feedback composer-attachment-removal-2026-10-27]).
+    let img = match opaque_rect(&img) {
+        Some((x, y, w, h)) => image::imageops::crop_imm(&img, x, y, w, h).to_image(),
+        None => img,
+    };
+    let (w, h) = img.dimensions();
+    let long = w.max(h);
+    let img = if long <= max_side || long == 0 {
+        img
+    } else {
+        let scale = max_side as f32 / long as f32;
+        let nw = ((w as f32) * scale).round().max(1.0) as u32;
+        let nh = ((h as f32) * scale).round().max(1.0) as u32;
+        image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle)
+    };
+    bgra_frame(img)
+}
+
+/// Where the opaque content of `img` sits: the bounding box of pixels with
+/// alpha ≥ `OPAQUE_ALPHA` (a drop shadow is fainter than that), or `None`
+/// when the picture has no transparent margin worth cropping.
+pub fn opaque_rect(img: &image::RgbaImage) -> Option<(u32, u32, u32, u32)> {
+    const OPAQUE_ALPHA: u8 = 128;
+    let (w, h) = img.dimensions();
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0u32, 0u32);
+    for (x, y, p) in img.enumerate_pixels() {
+        if p.0[3] >= OPAQUE_ALPHA {
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x);
+            y1 = y1.max(y);
+        }
+    }
+    if x0 > x1 || y0 > y1 {
+        return None;
+    }
+    let (cw, ch) = (x1 - x0 + 1, y1 - y0 + 1);
+    if (cw, ch) == (w, h) {
+        return None;
+    }
+    Some((x0, y0, cw, ch))
 }
 
 /// Longest side kept for chat-bubble (and lightbox) bitmaps.
@@ -10852,13 +12604,22 @@ pub fn downscale_for_chat(img: image::RgbaImage) -> image::RgbaImage {
 /// must not become a white band in the bubble). The viewer shows the untrimmed
 /// picture. Both are capped to [`CHAT_IMAGE_MAX_SIDE`] so the transcript can
 /// scroll without holding full-resolution textures.
+/// Animated GIF/WebP skip the trim (every frame must stay aligned) and return
+/// a multi-frame [`RenderImage`].
 pub fn decode_image_pair(bytes: &[u8]) -> Option<(RenderImage, Option<RenderImage>)> {
-    let rgba = decode_rgba(bytes)?;
-    let trimmed = trim_rect(&rgba)
-        .map(|(x, y, w, h)| image::imageops::crop_imm(&rgba, x, y, w, h).to_image())
-        .map(downscale_for_chat);
-    let full = bgra_frame(downscale_for_chat(rgba))?;
-    Some((full, trimmed.and_then(bgra_frame)))
+    match decode_pixels(bytes)? {
+        DecodedPixels::Animated(frames) => {
+            let full = bgra_frames(frames)?;
+            Some((full, None))
+        }
+        DecodedPixels::Still(rgba) => {
+            let trimmed = trim_rect(&rgba)
+                .map(|(x, y, w, h)| image::imageops::crop_imm(&rgba, x, y, w, h).to_image())
+                .map(downscale_for_chat);
+            let full = bgra_frame(downscale_for_chat(rgba))?;
+            Some((full, trimmed.and_then(bgra_frame)))
+        }
+    }
 }
 
 /// Where the content of `img` sits once a uniform border is removed:
@@ -10926,20 +12687,259 @@ pub fn trim_rect(img: &image::RgbaImage) -> Option<(u32, u32, u32, u32)> {
     Some((left, top, cw, ch))
 }
 
-/// PNG/JPEG/GIF/WebP/ICO → RGBA pixels.
+/// Cap on GIF/WebP frames kept for a chat bubble (feedback
+/// app-01M5TGH18WV3QCK5KZT6XKG7FG / app-01M61EZD0GJ2XGV1EW4SCVXENK).
+/// Past this, only the first frame is shown.
+pub const ANIM_MAX_FRAMES: usize = 300;
+/// Cap on decoded RGBA bytes across all animation frames. Past this at the
+/// side floor, only the first frame is shown.
+pub const ANIM_MAX_DECODED_BYTES: usize = 48 * 1024 * 1024;
+/// Starting longer side for animation frames (never upscale past the canvas).
+pub const ANIM_SIDE_START: u32 = 480;
+/// Smallest longer side tried before falling back to the first frame.
+pub const ANIM_SIDE_FLOOR: u32 = 200;
+
+/// Target longer side for animation frames, or `None` → show the first frame
+/// only. Starts at [`ANIM_SIDE_START`] (capped to the canvas, never upscaled);
+/// shrinks until `frame_count × scaled_w × scaled_h × 4` fits in
+/// [`ANIM_MAX_DECODED_BYTES`]; floor [`ANIM_SIDE_FLOOR`]. More than
+/// [`ANIM_MAX_FRAMES`], or not fitting at the floor, means first-frame-only.
+/// At 200 px, 300 square frames always fit (feedback
+/// app-01M61EZD0GJ2XGV1EW4SCVXENK).
+pub fn animation_frame_side(frame_count: usize, width: u32, height: u32) -> Option<u32> {
+    if frame_count == 0 || frame_count > ANIM_MAX_FRAMES {
+        return None;
+    }
+    let width = width.max(1);
+    let height = height.max(1);
+    let long = width.max(height);
+    let start = ANIM_SIDE_START.min(long);
+    if anim_decoded_bytes(frame_count, width, height, ANIM_SIDE_FLOOR) > ANIM_MAX_DECODED_BYTES {
+        return None;
+    }
+    // Highest side in [FLOOR, start] that fits the budget.
+    let mut lo = ANIM_SIDE_FLOOR;
+    let mut hi = start;
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if anim_decoded_bytes(frame_count, width, height, mid) <= ANIM_MAX_DECODED_BYTES {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    Some(lo)
+}
+
+/// RGBA byte cost of `frame_count` frames scaled so the longer side is `side`.
+fn anim_decoded_bytes(frame_count: usize, width: u32, height: u32, side: u32) -> usize {
+    let long = width.max(height).max(1);
+    let scale = side as f64 / long as f64;
+    let sw = ((width as f64) * scale).round().max(1.0) as usize;
+    let sh = ((height as f64) * scale).round().max(1.0) as usize;
+    frame_count
+        .saturating_mul(sw)
+        .saturating_mul(sh)
+        .saturating_mul(4)
+}
+
+/// Shrink `img` so its longer side is at most `side` (never enlarged).
+fn downscale_to_side(img: image::RgbaImage, side: u32) -> image::RgbaImage {
+    let (w, h) = img.dimensions();
+    let long = w.max(h);
+    if side == 0 || long <= side {
+        return img;
+    }
+    let scale = side as f32 / long as f32;
+    let nw = ((w as f32) * scale).round().max(1.0) as u32;
+    let nh = ((h as f32) * scale).round().max(1.0) as u32;
+    image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle)
+}
+
+/// Re-scale already-decoded animation frames down to `side`.
+fn rescale_anim_frames(frames: Vec<image::Frame>, side: u32) -> Vec<image::Frame> {
+    frames
+        .into_iter()
+        .map(|frame| {
+            let delay = frame.delay();
+            let left = frame.left();
+            let top = frame.top();
+            image::Frame::from_parts(
+                downscale_to_side(frame.into_buffer(), side),
+                left,
+                top,
+                delay,
+            )
+        })
+        .collect()
+}
+
+fn frame_rgba_bytes(frame: &image::Frame) -> usize {
+    let (w, h) = frame.buffer().dimensions();
+    (w as usize).saturating_mul(h as usize).saturating_mul(4)
+}
+
+/// `page_url` is safe to open from a "via <provider>" caption: only `https`.
+pub fn is_https_page_url(url: &str) -> bool {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("https") {
+        return false;
+    }
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    !host.is_empty()
+}
+
+/// Still pixels, or every frame of an animation (already scaled, RGBA, with delays).
+enum DecodedPixels {
+    Still(image::RgbaImage),
+    Animated(Vec<image::Frame>),
+}
+
+/// GIF87a / GIF89a magic.
+fn looks_like_gif(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"GIF8")
+}
+
+/// RIFF....WEBP magic.
+fn looks_like_webp(bytes: &[u8]) -> bool {
+    bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP"
+}
+
+/// PNG/JPEG/GIF/WebP/ICO → RGBA pixels (first / only frame). Used by thumbnails
+/// and the still path for formats that are not GIF/WebP.
 fn decode_rgba(bytes: &[u8]) -> Option<image::RgbaImage> {
     Some(image::load_from_memory(bytes).ok()?.into_rgba8())
 }
 
-/// RGBA pixels → the BGRA frame GPUI draws.
-fn bgra_frame(img: image::RgbaImage) -> Option<RenderImage> {
+/// Decode `bytes`: multi-frame for GIF/animated WebP, still otherwise.
+fn decode_pixels(bytes: &[u8]) -> Option<DecodedPixels> {
+    if looks_like_gif(bytes) || looks_like_webp(bytes) {
+        // A still WebP (or a GIF the animation decoder rejects) falls back to
+        // the single-frame path so the bubble still shows something.
+        return decode_animation_pixels(bytes)
+            .or_else(|| decode_rgba(bytes).map(DecodedPixels::Still));
+    }
+    Some(DecodedPixels::Still(decode_rgba(bytes)?))
+}
+
+/// All frames of a GIF or WebP, each scaled to the animation side helper.
+/// A still WebP (or a single-frame GIF) becomes [`DecodedPixels::Still`].
+/// Frame count is unknown up front: decode one frame at a time at the current
+/// side; when the running total would pass the budget at frame `n`, ask the
+/// helper with `2n` frames, rescale held frames, and continue — or fall back
+/// to the first frame when the helper says so (feedback
+/// app-01M61EZD0GJ2XGV1EW4SCVXENK).
+fn decode_animation_pixels(bytes: &[u8]) -> Option<DecodedPixels> {
+    use image::AnimationDecoder;
+    use std::io::Cursor;
+
+    let frames_iter: Box<dyn Iterator<Item = image::ImageResult<image::Frame>>> =
+        if looks_like_gif(bytes) {
+            let dec = image::codecs::gif::GifDecoder::new(Cursor::new(bytes)).ok()?;
+            Box::new(dec.into_frames())
+        } else {
+            let dec = image::codecs::webp::WebPDecoder::new(Cursor::new(bytes)).ok()?;
+            Box::new(dec.into_frames())
+        };
+
+    let mut frames: Vec<image::Frame> = Vec::new();
+    let mut decoded_bytes: usize = 0;
+    let mut side = ANIM_SIDE_START;
+    let mut canvas: Option<(u32, u32)> = None;
+    for result in frames_iter {
+        let frame = result.ok()?;
+        let delay = frame.delay();
+        let left = frame.left();
+        let top = frame.top();
+        let buffer = frame.into_buffer();
+        let (cw, ch) = buffer.dimensions();
+        if canvas.is_none() {
+            canvas = Some((cw.max(1), ch.max(1)));
+            side = ANIM_SIDE_START.min(cw.max(ch).max(1));
+        }
+        if frames.len() >= ANIM_MAX_FRAMES {
+            return frames
+                .into_iter()
+                .next()
+                .map(|f| DecodedPixels::Still(f.into_buffer()));
+        }
+        let mut scaled = downscale_to_side(buffer, side);
+        let mut frame_bytes = {
+            let (w, h) = scaled.dimensions();
+            (w as usize).saturating_mul(h as usize).saturating_mul(4)
+        };
+        if decoded_bytes.saturating_add(frame_bytes) > ANIM_MAX_DECODED_BYTES {
+            // Running total would pass the budget at frame n (1-based).
+            let n = frames.len() + 1;
+            let (cw, ch) = canvas.expect("canvas set on first frame");
+            match animation_frame_side(n.saturating_mul(2), cw, ch) {
+                None => {
+                    return frames
+                        .into_iter()
+                        .next()
+                        .map(|f| DecodedPixels::Still(f.into_buffer()))
+                        .or(Some(DecodedPixels::Still(scaled)));
+                }
+                Some(new_side) => {
+                    if new_side < side {
+                        frames = rescale_anim_frames(frames, new_side);
+                        decoded_bytes = frames.iter().map(frame_rgba_bytes).sum();
+                        side = new_side;
+                        scaled = downscale_to_side(scaled, side);
+                        let (w, h) = scaled.dimensions();
+                        frame_bytes = (w as usize).saturating_mul(h as usize).saturating_mul(4);
+                    }
+                    if decoded_bytes.saturating_add(frame_bytes) > ANIM_MAX_DECODED_BYTES {
+                        return frames
+                            .into_iter()
+                            .next()
+                            .map(|f| DecodedPixels::Still(f.into_buffer()))
+                            .or(Some(DecodedPixels::Still(scaled)));
+                    }
+                }
+            }
+        }
+        decoded_bytes += frame_bytes;
+        frames.push(image::Frame::from_parts(scaled, left, top, delay));
+    }
+    match frames.len() {
+        0 => None,
+        1 => Some(DecodedPixels::Still(
+            frames.into_iter().next()?.into_buffer(),
+        )),
+        _ => Some(DecodedPixels::Animated(frames)),
+    }
+}
+
+/// RGBA pixels → BGRA (swap R/B in place).
+fn rgba_to_bgra(img: image::RgbaImage) -> Option<image::RgbaImage> {
     let (w, h) = img.dimensions();
     let mut raw = img.into_raw();
     for px in raw.chunks_exact_mut(4) {
         px.swap(0, 2);
     }
-    let buffer = image::RgbaImage::from_raw(w, h, raw)?;
+    image::RgbaImage::from_raw(w, h, raw)
+}
+
+/// RGBA pixels → the BGRA frame GPUI draws.
+fn bgra_frame(img: image::RgbaImage) -> Option<RenderImage> {
+    let buffer = rgba_to_bgra(img)?;
     Some(RenderImage::new(vec![image::Frame::new(buffer)]))
+}
+
+/// Many RGBA frames → one multi-frame BGRA [`RenderImage`] (delays kept).
+fn bgra_frames(frames: Vec<image::Frame>) -> Option<RenderImage> {
+    let mut out = Vec::with_capacity(frames.len());
+    for frame in frames {
+        let delay = frame.delay();
+        let left = frame.left();
+        let top = frame.top();
+        let buffer = rgba_to_bgra(frame.into_buffer())?;
+        out.push(image::Frame::from_parts(buffer, left, top, delay));
+    }
+    Some(RenderImage::new(out))
 }
 
 fn same_shape(a: &Message, b: &Message) -> bool {
@@ -11159,6 +13159,284 @@ mod unread_arrival_tests {
     }
 }
 
+#[cfg(test)]
+mod hidden_chat_open_tests {
+    //! Scout (Arbonites, 2026-10-29 16:49 UTC): "it also unarchives the chat if you open it"
+    //! ([feedback archived-chat-stays-archived-2026-10-29]). Opening a row from Hidden chats —
+    //! or from a search hit — only views it; only an incoming message from someone else while
+    //! the user looks elsewhere brings it back (Telegram), and Unarchive does.
+    use std::sync::{Arc, Mutex};
+
+    use futures::future::BoxFuture;
+    use gpui::{AppContext as _, Entity, TestAppContext};
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::model::{AccountView, ChatKind, SpaceKind};
+
+    type Commands = Arc<Mutex<Option<mpsc::UnboundedReceiver<ClientCommand>>>>;
+
+    struct Recording(Commands);
+
+    impl SyncSource for Recording {
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            *self.0.lock().expect("commands slot") = Some(commands);
+            Box::pin(std::future::pending())
+        }
+    }
+
+    fn chat(id: &str, project_id: &str) -> Chat {
+        Chat {
+            id: id.into(),
+            project_id: project_id.into(),
+            title: String::new(),
+            is_pinned: true,
+            is_system: false,
+            unread: false,
+            unread_count: 0,
+            last_message_at: 1_000,
+            archived_at: None,
+            kind: ChatKind::Chat,
+            participants: Vec::new(),
+        }
+    }
+
+    fn message(id: &str, chat_id: &str, sender: &str, text: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "chatId": chat_id, "role": "user", "sender": sender, "status": "done",
+            "createdAt": at, "completedAt": at,
+            "parts": [{ "id": format!("{id}-t"), "kind": "text", "text": text }],
+        }))
+        .expect("message")
+    }
+
+    /// Agent `arbos` open; agent `lium` and DM `dm` (with Sam) both in Hidden chats.
+    fn mount(cx: &mut TestAppContext) -> (tokio::runtime::Runtime, Commands, Entity<AppState>) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| gpui_tokio::init_from_handle(cx, handle));
+        let commands: Commands = Arc::new(Mutex::new(None));
+        let state = cx.new(|cx| AppState::new(Box::new(Recording(commands.clone())), cx));
+        cx.run_until_parked();
+        for _ in 0..3 {
+            rt.block_on(tokio::task::yield_now());
+        }
+        state.update(cx, |s, cx| {
+            s.account = Some(AccountView {
+                id: "gh_1".into(),
+                login: "scout".into(),
+                name: "Scout".into(),
+                avatar_url: String::new(),
+                device_name: "test".into(),
+                balance_usd: 0.0,
+                spent_today_usd: 0.0,
+                daily_cap_usd: None,
+            });
+            for (id, kind) in [
+                ("arbos", SpaceKind::Project),
+                ("lium", SpaceKind::Project),
+                ("dm", SpaceKind::Dm),
+            ] {
+                s.projects.push(Project {
+                    id: id.into(),
+                    name: id.into(),
+                    kind,
+                    people: if kind == SpaceKind::Dm {
+                        vec![Person {
+                            id: "gh_2".into(),
+                            handle: "sam".into(),
+                            ..Person::default()
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                    ..Project::default()
+                });
+            }
+            s.chats
+                .insert("arbos".into(), vec![chat("arbos-main", "arbos")]);
+            s.chats
+                .insert("lium".into(), vec![chat("lium-main", "lium")]);
+            s.chats.insert("dm".into(), vec![chat("dm", "dm")]);
+            s.select_project("arbos".into(), cx);
+            s.window_active = true;
+            s.set_space_archived("lium".into(), true, cx);
+            s.set_space_archived("dm".into(), true, cx);
+            // What the next registry refresh adds for an archived people chat.
+            s.archived_chats.insert("dm".into());
+        });
+        let _ = unarchives(&commands);
+        (rt, commands, state)
+    }
+
+    /// Every unarchive the state sent to the relay since the last call.
+    fn unarchives(commands: &Commands) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(rx) = commands.lock().expect("commands").as_mut() {
+            while let Ok(c) = rx.try_recv() {
+                match c {
+                    ClientCommand::ArchiveChat {
+                        chat_id,
+                        archived: false,
+                    } => out.push(chat_id),
+                    ClientCommand::ArchiveSpace {
+                        space_id,
+                        archived: false,
+                        ..
+                    } => out.push(space_id),
+                    _ => {}
+                }
+            }
+        }
+        out
+    }
+
+    fn hidden(state: &Entity<AppState>, cx: &mut TestAppContext) -> (bool, bool, usize) {
+        state.read_with(cx, |s, _| {
+            (
+                s.is_space_archived("lium"),
+                s.is_space_archived("dm"),
+                s.archived_space_count(),
+            )
+        })
+    }
+
+    #[gpui::test]
+    fn opening_a_hidden_agent_or_dm_only_views_it(cx: &mut TestAppContext) {
+        let (_rt, commands, state) = mount(cx);
+        assert_eq!(hidden(&state, cx), (true, true, 2));
+        state.update(cx, |s, cx| s.select_project("dm".into(), cx));
+        assert_eq!(
+            state.read_with(cx, |s, _| s.active_chat_id()),
+            Some("dm".into())
+        );
+        state.update(cx, |s, cx| s.select_project("lium".into(), cx));
+        assert_eq!(
+            state.read_with(cx, |s, _| s.active_chat_id()),
+            Some("lium-main".into())
+        );
+        assert_eq!(
+            hidden(&state, cx),
+            (true, true, 2),
+            "both stay in Hidden chats"
+        );
+        assert!(
+            unarchives(&commands).is_empty(),
+            "nothing asked the relay to unarchive"
+        );
+    }
+
+    #[gpui::test]
+    fn a_message_arriving_in_the_open_hidden_chat_keeps_it_hidden(cx: &mut TestAppContext) {
+        let (_rt, commands, state) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.select_project("dm".into(), cx);
+            s.apply(
+                SyncEvent::MessageUpsert {
+                    chat_id: "dm".into(),
+                    message: Box::new(message("m1", "dm", "user:gh_2", "you there?", now_ms())),
+                },
+                cx,
+            );
+        });
+        assert_eq!(
+            hidden(&state, cx),
+            (true, true, 2),
+            "seen on screen: still hidden"
+        );
+        assert!(unarchives(&commands).is_empty());
+    }
+
+    #[gpui::test]
+    fn a_search_hit_in_a_hidden_dm_opens_it_and_leaves_it_hidden(cx: &mut TestAppContext) {
+        let (_rt, commands, state) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.messages.insert(
+                "dm".into(),
+                vec![message("m1", "dm", "user:gh_2", "pizza tonight", 1_000)],
+            );
+            s.index_chat("dm");
+            s.open_from_home_search("dm".into(), "pizza", cx);
+        });
+        assert_eq!(
+            state.read_with(cx, |s, _| s.highlight_message.clone()),
+            Some("m1".into()),
+            "the hit was revealed"
+        );
+        assert_eq!(
+            state.read_with(cx, |s, _| s.active_chat_id()),
+            Some("dm".into())
+        );
+        assert_eq!(hidden(&state, cx), (true, true, 2));
+        assert!(state.read_with(cx, |s, _| s.archived_chats.contains("dm")));
+        assert!(unarchives(&commands).is_empty());
+    }
+
+    #[gpui::test]
+    fn someone_writing_while_i_look_elsewhere_brings_the_row_back(cx: &mut TestAppContext) {
+        let (_rt, commands, state) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.apply(
+                SyncEvent::MessageUpsert {
+                    chat_id: "dm".into(),
+                    message: Box::new(message("m1", "dm", "user:gh_2", "you there?", now_ms())),
+                },
+                cx,
+            );
+        });
+        assert_eq!(
+            hidden(&state, cx),
+            (true, false, 1),
+            "Telegram: new activity unhides"
+        );
+        assert_eq!(unarchives(&commands), vec!["dm".to_string()]);
+    }
+
+    #[gpui::test]
+    fn another_device_archiving_a_dm_hides_its_row_here(cx: &mut TestAppContext) {
+        let (_rt, _commands, state) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.apply(
+                SyncEvent::ChatArchived {
+                    chat_id: "dm".into(),
+                    archived_at: None,
+                },
+                cx,
+            );
+        });
+        assert_eq!(
+            hidden(&state, cx),
+            (true, false, 1),
+            "unarchived elsewhere: back"
+        );
+        state.update(cx, |s, cx| {
+            s.apply(
+                SyncEvent::ChatArchived {
+                    chat_id: "dm".into(),
+                    archived_at: Some(5),
+                },
+                cx,
+            );
+        });
+        assert_eq!(
+            hidden(&state, cx),
+            (true, true, 2),
+            "archived elsewhere: hidden here"
+        );
+    }
+}
+
 /// The block-list row for `person`: same non-empty id, else the same handle (GitHub logins
 /// are case-insensitive).
 pub(crate) fn blocked_entry<'a>(blocked: &'a [Person], person: &Person) -> Option<&'a Person> {
@@ -11285,6 +13563,430 @@ mod new_message_first_paint_tests {
         assert!(is_directory_query("@"));
         assert!(!is_directory_query("al"));
         assert!(!is_directory_query("@al"));
+    }
+}
+
+#[cfg(test)]
+mod update_restart_chain_tests {
+    //! Affinity (Arbonites, 2026-10-28 21:47 UTC): "bubble just caused my arbos to restart".
+    //! No chat event did it: her Mac had 0.6.334 installed and waiting since 17:57, relaunched
+    //! into it at 21:38, into 0.6.338 at 21:47 and into 0.6.339 at 22:00 — a build that waits
+    //! for its relaunch ignored every newer one, so each missed release was one more restart
+    //! ([feedback mac-update-restart-chain-2026-10-28]).
+    use futures::future::BoxFuture;
+    use gpui::{AppContext as _, TestAppContext};
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use arbos_update::client::{Available, Install};
+
+    struct Idle;
+
+    impl SyncSource for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            _commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    fn build(version: &str) -> Available {
+        Available {
+            item: arbos_update::appcast::Item {
+                title: format!("Arbos {version}"),
+                version: version.into(),
+                build: "1".into(),
+                ..Default::default()
+            },
+            url: format!("https://arbos.life/updates/mac/Arbos-{version}-macos-universal.tar.gz"),
+            length: 1,
+            ed_signature: String::new(),
+        }
+    }
+
+    fn bundle() -> Install {
+        Install::MacBundle("/Applications/Arbos.app".into())
+    }
+
+    /// Auto-update on, running 0.6.333, the window in the background (no relaunch yet).
+    #[allow(clippy::type_complexity)]
+    fn mount(
+        cx: &mut TestAppContext,
+    ) -> (
+        tokio::runtime::Runtime,
+        gpui::Entity<AppState>,
+        mpsc::UnboundedReceiver<UpdateCommand>,
+    ) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| gpui_tokio::init_from_handle(cx, handle));
+        let state = cx.new(|cx| AppState::new(Box::new(Idle), cx));
+        let (tx, rx) = mpsc::unbounded_channel();
+        state.update(cx, |s, _| {
+            s.update_commands = tx;
+            s.update.auto = true;
+            s.update.needs_relocation = false;
+            s.update.current_version = "0.6.333".into();
+            s.window_active = false;
+        });
+        (rt, state, rx)
+    }
+
+    fn installs(rx: &mut mpsc::UnboundedReceiver<UpdateCommand>) -> usize {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|c| matches!(c, UpdateCommand::Install))
+            .count()
+    }
+
+    fn waiting_version(state: &AppState, _: &App) -> Option<String> {
+        match &state.update.phase {
+            UpdatePhase::Installed { available, .. } => Some(available.item.version.clone()),
+            _ => None,
+        }
+    }
+
+    /// Install `version` through the automatic path the way the worker reports it.
+    fn land(cx: &mut TestAppContext, state: &gpui::Entity<AppState>, version: &str) {
+        state.update(cx, |s, cx| {
+            s.apply_update(UpdateEvent::Installing, cx);
+            s.apply_update(UpdateEvent::Installed(bundle()), cx);
+        });
+        let waiting = state.read_with(cx, waiting_version);
+        assert_eq!(
+            waiting.as_deref(),
+            Some(version),
+            "{version} waits for its relaunch"
+        );
+    }
+
+    #[gpui::test]
+    fn a_newer_release_replaces_the_waiting_build_so_there_is_one_restart(cx: &mut TestAppContext) {
+        let (_rt, state, mut rx) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.apply_update(UpdateEvent::Available(Box::new(build("0.6.334"))), cx)
+        });
+        assert_eq!(installs(&mut rx), 1, "0.6.334 installs in the background");
+        land(cx, &state, "0.6.334");
+
+        // Releases that land while 0.6.334 waits are installed over it.
+        for newer in ["0.6.338", "0.6.339"] {
+            state.update(cx, |s, cx| {
+                s.apply_update(UpdateEvent::Available(Box::new(build(newer))), cx)
+            });
+            assert_eq!(
+                installs(&mut rx),
+                1,
+                "{newer} is installed over the waiting build"
+            );
+            state.read_with(cx, |s, _| {
+                assert!(s.update.busy(), "{newer} is downloading");
+                assert!(s.pending_relaunch.is_some(), "the relaunch still waits");
+            });
+            land(cx, &state, newer);
+        }
+
+        // The same or an older build in the feed changes nothing.
+        for same in ["0.6.339", "0.6.338"] {
+            state.update(cx, |s, cx| {
+                s.apply_update(UpdateEvent::Available(Box::new(build(same))), cx)
+            });
+            assert_eq!(
+                installs(&mut rx),
+                0,
+                "{same} is not newer than the waiting 0.6.339"
+            );
+            assert_eq!(
+                state.read_with(cx, waiting_version).as_deref(),
+                Some("0.6.339")
+            );
+        }
+    }
+
+    /// The relaunch never fires while the newer build is being swapped into the bundle.
+    #[gpui::test]
+    fn no_relaunch_while_the_newer_build_installs(cx: &mut TestAppContext) {
+        let (_rt, state, mut rx) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.apply_update(UpdateEvent::Available(Box::new(build("0.6.334"))), cx)
+        });
+        land(cx, &state, "0.6.334");
+        state.update(cx, |s, cx| {
+            s.apply_update(UpdateEvent::Available(Box::new(build("0.6.338"))), cx);
+            let long_ago = now_ms().saturating_sub(10 * update::IDLE_RELAUNCH_MS);
+            s.window_active = true;
+            s.became_active_at = long_ago;
+            s.last_input_at = long_ago;
+            assert!(!s.relaunch_is_safe(), "downloading 0.6.338");
+            s.apply_update(UpdateEvent::Installing, cx);
+            assert!(!s.relaunch_is_safe(), "installing 0.6.338");
+            assert!(!s.try_relaunch(cx));
+            assert!(s.pending_relaunch.is_some());
+        });
+        assert_eq!(installs(&mut rx), 2);
+    }
+
+    /// Manual mode: the waiting build is what the user clicked for; the feed does not move it.
+    #[gpui::test]
+    fn manual_mode_keeps_the_waiting_build(cx: &mut TestAppContext) {
+        let (_rt, state, mut rx) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.apply_update(UpdateEvent::Available(Box::new(build("0.6.334"))), cx)
+        });
+        land(cx, &state, "0.6.334");
+        let _ = installs(&mut rx);
+        state.update(cx, |s, cx| {
+            s.update.auto = false;
+            s.apply_update(UpdateEvent::Available(Box::new(build("0.6.338"))), cx);
+        });
+        assert_eq!(installs(&mut rx), 0);
+        assert_eq!(
+            state.read_with(cx, waiting_version).as_deref(),
+            Some("0.6.334")
+        );
+    }
+}
+
+#[cfg(test)]
+mod channel_sender_tests {
+    //! Affinity (Arbonites, 2026-10-28 16:52 UTC, confirmed by Scout): "bug where we are
+    //! referred to as our handles instead of our usernames in server" — a channel bubble
+    //! read "A" where a group bubble reads "Scout". The homeserver names a person by handle;
+    //! the display name comes from the server's roster ([feedback
+    //! server-member-names-2026-10-28]).
+    use futures::future::BoxFuture;
+    use gpui::{AppContext as _, TestAppContext};
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::model::{AccountView, ServerInfo};
+
+    struct Idle;
+
+    impl SyncSource for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            _commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    const ROOM: &str = "!general:arbos.life";
+    const SERVER: &str = "01SERVERTEST0000000000000";
+
+    /// A homeserver event by `mxid` through the real row mapper, with the Matrix display
+    /// name the relay registers (the handle).
+    fn matrix_row(id: &str, mxid: &str, handle: &str, text: &str, at: i64) -> MessageRow {
+        let ev = serde_json::json!({
+            "type": "m.room.message", "event_id": format!("${id}"), "sender": mxid,
+            "origin_server_ts": at,
+            "content": { "msgtype": "m.text", "body": text, "life.arbos.id": id },
+        });
+        arbos_matrix::rows::message_row(&ev, &|_| Some(handle.to_owned())).expect("row")
+    }
+
+    fn scout() -> Person {
+        Person {
+            id: "test_01SCOUT".into(),
+            handle: "A".into(),
+            name: Some("Scout".into()),
+            avatar_url: "https://relay.test/a/scout.png".into(),
+            ..Person::default()
+        }
+    }
+
+    fn server(members: Vec<Person>) -> ServerInfo {
+        ServerInfo {
+            id: SERVER.into(),
+            name: "test server".into(),
+            members,
+            ..ServerInfo::default()
+        }
+    }
+
+    fn mount(cx: &mut TestAppContext) -> (tokio::runtime::Runtime, gpui::Entity<AppState>) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| gpui_tokio::init_from_handle(cx, handle));
+        let state = cx.new(|cx| AppState::new(Box::new(Idle), cx));
+        state.update(cx, |s, _| {
+            s.account = Some(AccountView {
+                id: "test_01ME".into(),
+                login: "affinity".into(),
+                name: "Affinity".into(),
+                avatar_url: String::new(),
+                device_name: "test".into(),
+                balance_usd: 0.0,
+                spent_today_usd: 0.0,
+                daily_cap_usd: None,
+            });
+        });
+        (rt, state)
+    }
+
+    fn names(state: &AppState) -> Vec<(String, Option<String>, Option<String>)> {
+        state
+            .channel_rows
+            .get(ROOM)
+            .map(|rows| {
+                rows.iter()
+                    .map(|m| {
+                        (
+                            m.sender_handle.clone().unwrap_or_default(),
+                            m.sender_name.clone(),
+                            m.sender_avatar.clone(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// With the server's members known, a channel row by Scout (`@A`) is named "Scout" and
+    /// gets their picture; my own row keeps my member string; the handle stays the handle.
+    #[gpui::test]
+    fn a_channel_row_is_named_from_the_server_roster(cx: &mut TestAppContext) {
+        let (_rt, state) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.servers.push(server(vec![scout()]));
+            s.on_matrix_timeline(
+                ROOM.into(),
+                vec![
+                    matrix_row("m1", "@test_01scout:arbos.life", "A", "yo", 1_000),
+                    matrix_row("m2", "@test_01me:arbos.life", "affinity", "who is A", 2_000),
+                ],
+                cx,
+            );
+        });
+        let got = state.read_with(cx, |s, _| names(s));
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "A".into(),
+                    Some("Scout".into()),
+                    Some("https://relay.test/a/scout.png".into())
+                ),
+                ("affinity".into(), None, None),
+            ],
+            "Scout by display name, picture from the roster; mine untouched"
+        );
+        let senders: Vec<String> = state.read_with(cx, |s, _| {
+            s.channel_rows[ROOM]
+                .iter()
+                .map(|m| m.sender.clone())
+                .collect()
+        });
+        assert_eq!(
+            senders,
+            vec![
+                "user:test_01SCOUT".to_string(),
+                "user:test_01ME".to_string()
+            ],
+            "member strings take the relay's spelling of the id (one disc colour per person)"
+        );
+        // The bubble's name label comes from `Person::display_name()` of the row's sender.
+        let shown = state.read_with(cx, |s, _| {
+            let m = &s.channel_rows[ROOM][0];
+            Person {
+                handle: m.sender_handle.clone().unwrap_or_default(),
+                name: m.sender_name.clone(),
+                ..Person::default()
+            }
+            .display_name()
+        });
+        assert_eq!(shown, "Scout");
+    }
+
+    /// The roster can come after the rows (a channel opened before `GET /servers/{id}`
+    /// answered): the rows are named when it lands, and never read the handle as a name
+    /// in between. The list asks for every server's roster once.
+    #[gpui::test]
+    fn rows_are_renamed_when_the_roster_arrives(cx: &mut TestAppContext) {
+        let (_rt, state) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.on_servers(vec![server(vec![])], cx);
+            s.on_matrix_timeline(
+                ROOM.into(),
+                vec![matrix_row(
+                    "m1",
+                    "@test_01scout:arbos.life",
+                    "A",
+                    "yo",
+                    1_000,
+                )],
+                cx,
+            );
+        });
+        assert_eq!(
+            state.read_with(cx, |s, _| names(s)),
+            vec![("A".into(), None, None)],
+            "no roster yet: no name (the handle is not written as the name)"
+        );
+        assert!(
+            state.read_with(cx, |s, _| s.server_rosters_requested.contains(SERVER)),
+            "the list asked for the server's members"
+        );
+        state.update(cx, |s, cx| s.on_server_detail(server(vec![scout()]), cx));
+        assert_eq!(
+            state.read_with(cx, |s, _| names(s)),
+            vec![(
+                "A".into(),
+                Some("Scout".into()),
+                Some("https://relay.test/a/scout.png".into())
+            )],
+            "named once the roster landed"
+        );
+    }
+
+    /// A member with no display name set stays by handle (the display-name fallback).
+    #[gpui::test]
+    fn a_member_without_a_name_keeps_the_handle(cx: &mut TestAppContext) {
+        let (_rt, state) = mount(cx);
+        state.update(cx, |s, cx| {
+            let mut nameless = scout();
+            nameless.name = None;
+            s.servers.push(server(vec![nameless]));
+            s.on_matrix_timeline(
+                ROOM.into(),
+                vec![matrix_row(
+                    "m1",
+                    "@test_01scout:arbos.life",
+                    "A",
+                    "yo",
+                    1_000,
+                )],
+                cx,
+            );
+        });
+        let got = state.read_with(cx, |s, _| names(s));
+        assert_eq!(got[0].0, "A");
+        assert_eq!(
+            got[0].1, None,
+            "no name to show: display_name() falls back to the handle"
+        );
+        assert_eq!(
+            got[0].2.as_deref(),
+            Some("https://relay.test/a/scout.png"),
+            "the picture still comes from the roster"
+        );
     }
 }
 
@@ -11445,7 +14147,7 @@ mod fork_tests {
 
 #[cfg(test)]
 mod trim_tests {
-    use super::trim_rect;
+    use super::{decode_thumbnail, opaque_rect, trim_rect};
     use image::{Rgba, RgbaImage};
 
     fn page(w: u32, h: u32, top: u32, left: u32) -> RgbaImage {
@@ -11495,6 +14197,37 @@ mod trim_tests {
             }
         });
         assert!(trim_rect(&img).is_none());
+    }
+
+    /// A macOS window capture: the window at (100, 100)–(600, 560) on
+    /// transparent padding, a faint shadow below it. The staged thumbnail
+    /// keeps the window only ([feedback composer-attachment-removal-2026-10-27]).
+    #[test]
+    fn a_window_captures_shadow_and_padding_are_cropped_from_the_thumbnail() {
+        let img = RgbaImage::from_fn(700, 700, |x, y| {
+            if (100..600).contains(&x) && (100..560).contains(&y) {
+                Rgba([30, 30, 33, 255])
+            } else if (80..620).contains(&x) && (120..620).contains(&y) {
+                Rgba([0, 0, 0, 90])
+            } else {
+                Rgba([0, 0, 0, 0])
+            }
+        });
+        assert_eq!(opaque_rect(&img), Some((100, 100, 500, 460)));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("png");
+        let thumb = decode_thumbnail(&png, 256).expect("decodes");
+        let size = thumb.size(0);
+        assert_eq!(
+            (size.width.0, size.height.0),
+            (256, 236),
+            "500 × 460 → 256 wide"
+        );
+        // A fully opaque picture is left alone (only shrunk).
+        let opaque = RgbaImage::from_pixel(640, 360, Rgba([20, 120, 220, 255]));
+        assert!(opaque_rect(&opaque).is_none());
     }
 }
 
@@ -11573,6 +14306,162 @@ mod chat_image_scale_tests {
         // Aspect ≈ 3024/1964.
         let ratio = w as f32 / h as f32;
         assert!((ratio - 3024.0 / 1964.0).abs() < 0.02);
+    }
+}
+
+#[cfg(test)]
+mod animated_image_tests {
+    //! GIF / animated WebP decode to every frame; still WebP and PNG stay one
+    //! (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG / app-01M61EZD0GJ2XGV1EW4SCVXENK).
+    use super::{
+        animation_frame_side, decode_image, decode_image_pair, is_https_page_url,
+        ANIM_MAX_DECODED_BYTES, ANIM_MAX_FRAMES, ANIM_SIDE_FLOOR, ANIM_SIDE_START,
+    };
+    use image::{Delay, Frame, Rgba, RgbaImage};
+    use std::io::Cursor;
+
+    fn three_color_frames() -> Vec<Frame> {
+        [
+            ([255, 0, 0, 255], 100u32),
+            ([0, 255, 0, 255], 100),
+            ([0, 0, 255, 255], 100),
+        ]
+        .into_iter()
+        .map(|(c, ms)| {
+            Frame::from_parts(
+                RgbaImage::from_pixel(8, 8, Rgba(c)),
+                0,
+                0,
+                Delay::from_numer_denom_ms(ms, 1),
+            )
+        })
+        .collect()
+    }
+
+    fn encode_gif(frames: Vec<Frame>) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut enc = image::codecs::gif::GifEncoder::new(Cursor::new(&mut out));
+            enc.encode_frames(frames).expect("gif encode");
+        }
+        out
+    }
+
+    fn encode_webp_anim(frames: Vec<Frame>) -> Vec<u8> {
+        // image::codecs::webp::WebPEncoder is still-only; build via the
+        // `image-webp` path used by the decoder tests — encode a GIF and
+        // re-wrap is not WebP. Use the fixture bytes for WebP instead.
+        let _ = frames;
+        include_bytes!("../../arbos-core/fixtures/anim_three.webp").to_vec()
+    }
+
+    #[test]
+    fn animation_side_fits_common_reaction_gifs() {
+        assert_eq!(animation_frame_side(60, 480, 270), Some(480));
+        let side = animation_frame_side(150, 480, 480).expect("150 square frames animate");
+        assert!((ANIM_SIDE_FLOOR..=ANIM_SIDE_START).contains(&side));
+        let side = animation_frame_side(300, 1000, 1000).expect("300 large frames animate");
+        assert!(side >= ANIM_SIDE_FLOOR);
+        let (sw, sh) = {
+            let scale = side as f64 / 1000.0;
+            (
+                (1000.0 * scale).round().max(1.0) as usize,
+                (1000.0 * scale).round().max(1.0) as usize,
+            )
+        };
+        assert!(
+            300usize
+                .saturating_mul(sw)
+                .saturating_mul(sh)
+                .saturating_mul(4)
+                <= ANIM_MAX_DECODED_BYTES
+        );
+        assert_eq!(animation_frame_side(301, 480, 270), None);
+    }
+
+    #[test]
+    fn https_page_url_accepts_only_https() {
+        assert!(is_https_page_url("https://example.com/g/1"));
+        assert!(is_https_page_url("HTTPS://Example.COM/g"));
+        assert!(!is_https_page_url("http://example.com/g/1"));
+        assert!(!is_https_page_url("file:///tmp/x.gif"));
+        assert!(!is_https_page_url("javascript:alert(1)"));
+        assert!(!is_https_page_url("arbos://gif/1"));
+        assert!(!is_https_page_url("not a url"));
+    }
+
+    #[test]
+    fn a_three_frame_gif_keeps_every_frame() {
+        let bytes = encode_gif(three_color_frames());
+        let image = decode_image(&bytes).expect("gif decodes");
+        assert_eq!(image.frame_count(), 3);
+        let (full, trimmed) = decode_image_pair(&bytes).expect("pair");
+        assert_eq!(full.frame_count(), 3);
+        assert!(trimmed.is_none(), "animated pictures are not trimmed");
+    }
+
+    #[test]
+    fn a_120_frame_reaction_gif_animates_within_the_cap() {
+        let delay = Delay::from_numer_denom_ms(30, 1);
+        let frames: Vec<Frame> = (0..120)
+            .map(|i| {
+                let c = (i % 255) as u8;
+                Frame::from_parts(
+                    RgbaImage::from_pixel(480, 270, Rgba([c, 0, 255 - c, 255])),
+                    0,
+                    0,
+                    delay,
+                )
+            })
+            .collect();
+        let bytes = encode_gif(frames);
+        let image = decode_image(&bytes).expect("decodes");
+        assert_eq!(image.frame_count(), 120);
+    }
+
+    #[test]
+    fn an_animated_webp_keeps_every_frame() {
+        let bytes = encode_webp_anim(three_color_frames());
+        let image = decode_image(&bytes).expect("webp decodes");
+        assert_eq!(image.frame_count(), 3);
+    }
+
+    #[test]
+    fn a_still_webp_and_a_png_are_one_frame() {
+        let still_webp = include_bytes!("../../arbos-core/fixtures/still.webp");
+        assert_eq!(
+            decode_image(still_webp).expect("still webp").frame_count(),
+            1
+        );
+        let png = include_bytes!("../../arbos-core/fixtures/anim_still.png");
+        assert_eq!(decode_image(png).expect("png").frame_count(), 1);
+    }
+
+    #[test]
+    fn past_the_frame_cap_falls_back_to_the_first_frame() {
+        // Many tiny frames: the decoder stops at ANIM_MAX_FRAMES and returns
+        // only the first as a still.
+        let delay = Delay::from_numer_denom_ms(20, 1);
+        let frames: Vec<Frame> = (0..(ANIM_MAX_FRAMES + 5))
+            .map(|i| {
+                let c = (i % 255) as u8;
+                Frame::from_parts(
+                    RgbaImage::from_pixel(2, 2, Rgba([c, 0, 0, 255])),
+                    0,
+                    0,
+                    delay,
+                )
+            })
+            .collect();
+        let bytes = encode_gif(frames);
+        let image = decode_image(&bytes).expect("decodes");
+        assert_eq!(
+            image.frame_count(),
+            1,
+            "over {ANIM_MAX_FRAMES} frames → first only"
+        );
+        // Memory cap is the sibling of the frame cap (same fallback path).
+        let _ = ANIM_MAX_DECODED_BYTES;
     }
 }
 

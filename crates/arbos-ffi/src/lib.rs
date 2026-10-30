@@ -19,6 +19,7 @@ uniffi::setup_scaffolding!();
 pub mod avatar;
 pub mod chart;
 pub mod highlight;
+pub mod markdown;
 pub mod matrix;
 pub mod search;
 pub mod settings_search;
@@ -466,6 +467,14 @@ pub struct Touched {
     pub other: bool,
 }
 
+/// Where a picked GIF / sticker came from (maps to core `AttachmentSource`).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AttachmentSourceRecord {
+    pub provider: String,
+    pub id: String,
+    pub page_url: String,
+}
+
 /// One attachment on a client user message (maps to core `UserAttachment`).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct UserAttachmentRecord {
@@ -473,6 +482,12 @@ pub struct UserAttachmentRecord {
     pub mime: String,
     pub kind: Option<String>,
     pub blob_ref: Option<String>,
+    /// Provider-hosted picture (a picked GIF): loaded through the relay, never copied.
+    #[uniffi(default = None)]
+    pub url: Option<String>,
+    /// Picker attribution ("via KLIPY", the sticker pack's credit line).
+    #[uniffi(default = None)]
+    pub source: Option<AttachmentSourceRecord>,
 }
 
 impl From<UserAttachmentRecord> for doc::UserAttachment {
@@ -482,6 +497,12 @@ impl From<UserAttachmentRecord> for doc::UserAttachment {
             mime: r.mime,
             kind: r.kind,
             blob_ref: r.blob_ref,
+            url: r.url,
+            source: r.source.map(|s| doc::AttachmentSource {
+                provider: s.provider,
+                id: s.id,
+                page_url: s.page_url,
+            }),
         }
     }
 }
@@ -554,14 +575,16 @@ impl From<UserMessageOptsRecord> for doc::UserMessageOpts {
 }
 
 /// Whether `sender` currently holds `emoji` on a message (flat key or legacy bucket).
+/// Skin-tone variants of the same base count as the same hold.
 fn reaction_is_on(doc: &CoreChatDoc, message_id: &str, emoji: &str, sender: &str) -> bool {
     let Some(map) = doc.find_message(message_id) else {
         return false;
     };
     let mut json = serde_json::to_value(map.get_deep_value()).unwrap_or(Value::Null);
     doc::project_reactions(&mut json);
+    let base = doc::normalize_reaction_emoji(emoji);
     json.get("reactions")
-        .and_then(|r| r.get(emoji))
+        .and_then(|r| r.get(base.as_str()))
         .and_then(|bucket| bucket.get(sender))
         .and_then(Value::as_bool)
         .unwrap_or(false)
@@ -869,6 +892,20 @@ impl ChatDoc {
         Ok(self.lock_doc().push_command(&kind, payload, &device_id))
     }
 
+    /// Append one part to a message from its JSON object (`kind` + fields, a string
+    /// `id` kept, else minted) — core's `add_part_from_json`. Forward writes a chart
+    /// part and its fallback picture after the row's text and attachments with it
+    /// ([feedback forward-attachments-ios-2026-10-27]). Returns the part id.
+    pub fn add_part_json(&self, message_id: String, part_json: String) -> Result<String, FfiError> {
+        let part: Value = serde_json::from_str(&part_json).map_err(write_err)?;
+        if !part.is_object() {
+            return Err(FfiError::Write("part_json must be a JSON object".into()));
+        }
+        self.lock_doc()
+            .add_part_from_json(&message_id, &part)
+            .ok_or_else(|| FfiError::Write(format!("no message {message_id} to add a part to")))
+    }
+
     /// Mirror the model picker into project `settings`. Does not commit.
     pub fn set_model_settings(&self, model: String, effort: String) -> Result<(), FfiError> {
         self.lock_doc()
@@ -1075,6 +1112,8 @@ mod tests {
                     mime: "image/jpeg".into(),
                     kind: Some("image".into()),
                     blob_ref: Some("blob:1".into()),
+                    url: None,
+                    source: None,
                 }],
                 mentions: vec!["user:a".into(), "user:b".into()],
                 reply_to: Some("m0".into()),

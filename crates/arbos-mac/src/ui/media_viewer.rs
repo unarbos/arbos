@@ -4,12 +4,17 @@
 //! in order) pages with ← → or the chevrons; × / Close / Esc / backdrop /
 //! swipe-down (scroll) close it and return to the chat
 //! ([feedback app-01M5N9BJNZX8T1EQCX3RAB7GXD]). Caption top-left (who, when,
-//! file), counter top-centre, Close · Download · Forward pills at the bottom.
-//! Video shows its poster with Play (QuickTime Player); a file shows its tile
-//! with Quick Look. Forward opens a picker of DMs, agents and groups; one
-//! click sends the item there as a new message. The same picker serves the
-//! bubble menu's Forward (feedback app-01M5MXRZ7609S70P9S9P2RZDDF), over the
-//! chat instead of the lightbox.
+//! file), counter top-centre, Close · Copy · Download · Forward pills at the bottom
+//! (Copy — and ⌘C while the viewer is up — puts the picture itself on the
+//! pasteboard, original bytes under its own type,
+//! [feedback copy-image-messages-mac-2026-10-27]).
+//! Video shows its poster with Play; Play fetches the clip and plays it
+//! inline in the viewer (macOS AVPlayerView — [feedback
+//! app-01M6147S9TPNBQA7KSDEY0K8C4]); Download stays a separate pill. A file
+//! shows its tile with Quick Look. Forward opens a picker of DMs, agents and
+//! groups; one click sends the item there as a new message. The same picker
+//! serves the bubble menu's Forward (feedback app-01M5MXRZ7609S70P9S9P2RZDDF),
+//! over the chat instead of the lightbox.
 
 use gpui::{
     actions, div, img, prelude::*, px, AnyElement, Context, Div, ElementId, FocusHandle,
@@ -19,12 +24,13 @@ use gpui::{
 use crate::app::{AppState, ForwardTarget, ViewerItem};
 use crate::model::AttachmentKind;
 use crate::ui::avatars;
-use crate::ui::icons::icon;
+use crate::ui::highlight;
 use crate::ui::modal::modal_overlay;
+use crate::ui::sf_symbols;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, TEXT_SMALL, TEXT_TINY};
 
-actions!(media_viewer, [Prev, Next]);
+actions!(media_viewer, [Prev, Next, CopyItem]);
 
 /// Backdrop over the window.
 const BACKDROP: f32 = 0.88;
@@ -92,9 +98,14 @@ fn control(id: &'static str, glyph: &'static str, enabled: bool) -> Stateful<Div
         .items_center()
         .justify_center()
         .when(enabled, |el| {
+            // hover-fill: exception overlay
             el.cursor_pointer().hover(|s| s.bg(white(0.28)))
         })
-        .child(icon(glyph, 14.0, white(if enabled { 1.0 } else { 0.35 })))
+        .child(sf_symbols::glyph(
+            glyph,
+            14.0,
+            white(if enabled { 1.0 } else { 0.35 }),
+        ))
 }
 
 /// A bottom pill: glyph + label on white 16 %.
@@ -110,11 +121,12 @@ fn pill(id: &'static str, glyph: &'static str, label: &'static str) -> Stateful<
         .items_center()
         .gap(px(8.0))
         .cursor_pointer()
+        // hover-fill: exception overlay
         .hover(|s| s.bg(white(0.26)))
         .text_size(px(13.0))
         .font_weight(FontWeight::MEDIUM)
         .text_color(white(1.0))
-        .child(icon(glyph, 14.0, white(1.0)))
+        .child(sf_symbols::glyph(glyph, 14.0, white(1.0)))
         .child(label)
 }
 
@@ -165,6 +177,8 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
     let act_next = shell.state.clone();
     let download = shell.state.clone();
     let forward = shell.state.clone();
+    let copy = shell.state.clone();
+    let act_copy = shell.state.clone();
 
     // ----- caption, counter, × -------------------------------------------
     let mut subline = if is_profile_picture {
@@ -237,64 +251,73 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
         },
         AttachmentKind::Video => {
             let play = shell.state.clone();
-            div()
-                .relative()
-                .w_full()
-                .h_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    div()
-                        .w_full()
-                        .h_full()
-                        .rounded(px(8.0))
-                        .bg(white(0.06))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(icon("video", 44.0, white(0.25))),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .justify_center()
-                        .gap(px(14.0))
-                        .child(
-                            div()
-                                .id("media-viewer-play")
-                                .size(px(76.0))
-                                .rounded_full()
-                                .bg(Theme::with_alpha(gpui::black(), 0.47))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .when(can_act && !busy, |el| {
-                                    el.cursor_pointer()
-                                        .hover(|s| s.bg(Theme::with_alpha(gpui::black(), 0.62)))
-                                })
-                                .child(icon("play", 30.0, white(1.0)))
-                                .on_click(move |_, _, cx| {
-                                    cx.stop_propagation();
-                                    play.update(cx, |s, cx| s.media_viewer_open_external(cx));
-                                }),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(white(0.67))
-                                .child(if busy {
-                                    "Opening…"
-                                } else {
-                                    "Opens in QuickTime Player"
-                                }),
-                        ),
-                )
-                .into_any_element()
+            let playing = viewer.playing.is_some();
+            // While the native AVPlayerView is up, leave the body empty — the
+            // player sits on top of this frame (ui::video_player).
+            if playing {
+                div()
+                    .w_full()
+                    .h_full()
+                    .rounded(px(8.0))
+                    .bg(white(0.06))
+                    .into_any_element()
+            } else {
+                div()
+                    .relative()
+                    .w_full()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .w_full()
+                            .h_full()
+                            .rounded(px(8.0))
+                            .bg(white(0.06))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(sf_symbols::glyph("video", 44.0, white(0.25))),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .justify_center()
+                            .gap(px(14.0))
+                            .child(
+                                div()
+                                    .id("media-viewer-play")
+                                    .size(px(76.0))
+                                    .rounded_full()
+                                    .bg(Theme::with_alpha(gpui::black(), 0.47))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .when(can_act && !busy, |el| {
+                                        el.cursor_pointer()
+                                            // hover-fill: exception overlay
+                                            .hover(|s| s.bg(Theme::with_alpha(gpui::black(), 0.62)))
+                                    })
+                                    .child(sf_symbols::glyph("play.fill", 30.0, white(1.0)))
+                                    .on_click(move |_, _, cx| {
+                                        cx.stop_propagation();
+                                        play.update(cx, |s, cx| s.media_viewer_open_external(cx));
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(white(0.67))
+                                    .child(if busy { "Loading…" } else { "Play" }),
+                            ),
+                    )
+                    .into_any_element()
+            }
         }
         _ => file_body(&item, busy, can_act, shell.state.clone(), &theme).into_any_element(),
     };
@@ -309,6 +332,9 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
         })
         .on_action(move |_: &Next, _, cx| {
             act_next.update(cx, |s, cx| s.media_viewer_step(1, cx));
+        })
+        .on_action(move |_: &CopyItem, _, cx| {
+            act_copy.update(cx, |s, cx| s.media_viewer_copy(cx));
         })
         .absolute()
         .inset_0()
@@ -364,7 +390,7 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
                     .flex()
                     .items_center()
                     .child(
-                        control("media-viewer-prev", "chevron-left", !at_start).on_click(
+                        control("media-viewer-prev", "chevron.left", !at_start).on_click(
                             move |_, _, cx| {
                                 cx.stop_propagation();
                                 prev.update(cx, |s, cx| s.media_viewer_step(-1, cx));
@@ -381,7 +407,7 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
                     .flex()
                     .items_center()
                     .child(
-                        control("media-viewer-next", "chevron-right", !at_end).on_click(
+                        control("media-viewer-next", "chevron.right", !at_end).on_click(
                             move |_, _, cx| {
                                 cx.stop_propagation();
                                 next.update(cx, |s, cx| s.media_viewer_step(1, cx));
@@ -395,7 +421,7 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
     // when the album has more than one item.
     root = root.child(close_btn);
 
-    // ----- Close · Download · Forward (a profile picture: Close only) -----
+    // ----- Close · Copy · Download · Forward (a profile picture: Close only) -----
     root = root.child(
         div()
             .absolute()
@@ -412,8 +438,14 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
                 }),
             )
             .when(!is_profile_picture, |el| {
-                el.child(
-                    pill("media-viewer-download", "arrow-down", "Download").on_click(
+                el.child(pill("media-viewer-copy", "doc.on.doc", "Copy").on_click(
+                    move |_, _, cx| {
+                        cx.stop_propagation();
+                        copy.update(cx, |s, cx| s.media_viewer_copy(cx));
+                    },
+                ))
+                .child(
+                    pill("media-viewer-download", "arrow.down", "Download").on_click(
                         move |_, _, cx| {
                             cx.stop_propagation();
                             download.update(cx, |s, cx| s.media_viewer_download(cx));
@@ -421,7 +453,12 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
                     ),
                 )
                 .child(
-                    pill("media-viewer-forward", "forward", "Forward").on_click(move |_, _, cx| {
+                    pill(
+                        "media-viewer-forward",
+                        "arrowshape.turn.up.right",
+                        "Forward",
+                    )
+                    .on_click(move |_, _, cx| {
                         cx.stop_propagation();
                         forward.update(cx, |s, cx| s.media_viewer_toggle_forward(cx));
                     }),
@@ -465,7 +502,7 @@ fn placeholder(glyph: &'static str, line: &str, item: &ViewerItem, _theme: &Them
         .flex_col()
         .items_center()
         .gap(px(12.0))
-        .child(icon(glyph, 44.0, white(0.35)))
+        .child(sf_symbols::glyph(glyph, 44.0, white(0.35)))
         .child(
             div()
                 .text_size(px(13.0))
@@ -502,7 +539,7 @@ fn file_body(
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(white(1.0))
             .child(e),
-        None => tile.child(icon("doc", 36.0, white(0.8))),
+        None => tile.child(sf_symbols::glyph("doc", 36.0, white(0.8))),
     };
     let mut meta = item.attachment.size_label();
     if !meta.is_empty() {
@@ -578,7 +615,7 @@ fn forward_picker(
         .bg(theme.surface_2)
         .cursor_text()
         .text_size(px(PICKER_FIELD_FONT))
-        .child(icon("search", 12.0, theme.text_muted))
+        .child(sf_symbols::glyph("magnifyingglass", 12.0, theme.text_muted))
         .child(div().flex_1().min_w_0().child(shell.viewer_search.clone()));
     let mut list = div()
         .id("media-viewer-forward-list")
@@ -607,7 +644,7 @@ fn forward_picker(
         let state = shell.state.read(cx);
         let avatar = state
             .project(&target.space_id)
-            .map(|p| crate::ui::groups::picture(p, state, 36.0, theme))
+            .map(|p| crate::ui::groups::chat_picture(p, state, 36.0, theme))
             .unwrap_or_else(|| avatars::element(&target.space_id, &target.name, None, 36.0, theme));
         let pick = target.clone();
         list = list.child(
@@ -623,7 +660,7 @@ fn forward_picker(
                 .items_center()
                 .gap(px(12.0))
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
+                .map(|el| highlight::row(el, false, highlight::Shape::Own, theme))
                 .child(avatar)
                 .child(
                     div()
@@ -707,8 +744,8 @@ fn forward_picker(
                         .items_center()
                         .justify_center()
                         .cursor_pointer()
-                        .hover(|s| s.bg(theme.surface_2))
-                        .child(icon("xmark", 11.0, theme.text_muted))
+                        .map(|el| highlight::button(el, theme))
+                        .child(sf_symbols::glyph("xmark", 11.0, theme.text_muted))
                         .on_click(move |_, _, cx| {
                             cx.stop_propagation();
                             close_x.update(cx, |s, cx| dismiss(s, cx));

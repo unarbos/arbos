@@ -254,16 +254,16 @@ pub fn setting_target(item: SettingsItem) -> Option<SettingTarget> {
 /// The glyph for a built row (its target says which item it was).
 pub fn target_glyph(target: &SettingTarget) -> &'static str {
     match target {
-        SettingTarget::Page(SettingsPage::Appearance) => "circle-half",
+        SettingTarget::Page(SettingsPage::Appearance) => "circle.lefthalf.filled",
         SettingTarget::Page(SettingsPage::Notifications) => "bell",
         SettingTarget::Page(SettingsPage::Secrets)
         | SettingTarget::SecretsNew
         | SettingTarget::SecretsConnect => "key",
-        SettingTarget::Page(SettingsPage::Devices) => "laptop",
-        SettingTarget::Page(SettingsPage::ThisMac) => "window",
-        SettingTarget::Page(SettingsPage::Machine) => "desktop",
-        SettingTarget::Page(SettingsPage::Updates) => "arrow-down",
-        SettingTarget::Page(SettingsPage::About) => "info",
+        SettingTarget::Page(SettingsPage::Devices) => "laptopcomputer",
+        SettingTarget::Page(SettingsPage::ThisMac) => "macwindow",
+        SettingTarget::Page(SettingsPage::Machine) => "desktopcomputer",
+        SettingTarget::Page(SettingsPage::Updates) => "arrow.down",
+        SettingTarget::Page(SettingsPage::About) => "info.circle",
         SettingTarget::Page(SettingsPage::Credits) => "creditcard",
         SettingTarget::Page(SettingsPage::Connectors) => "link",
         SettingTarget::Page(
@@ -271,9 +271,9 @@ pub fn target_glyph(target: &SettingTarget) -> &'static str {
             | SettingsPage::Routines
             | SettingsPage::Channels
             | SettingsPage::Skills,
-        ) => "gear",
-        SettingTarget::Feedback => "square-pencil",
-        SettingTarget::Profile => "person",
+        ) => "gearshape",
+        SettingTarget::Feedback => "square.and.pencil",
+        SettingTarget::Profile => "person.fill",
         SettingTarget::Agent { pick, .. } => match pick {
             AgentPick::Model => "cpu",
             AgentPick::Reasoning => "sparkles",
@@ -954,8 +954,55 @@ mod tests {
         );
         assert_eq!(
             target_glyph(&SettingTarget::Page(SettingsPage::Appearance)),
-            "circle-half"
+            "circle.lefthalf.filled"
         );
+    }
+
+    /// Every setting target's glyph is a registered system symbol — the
+    /// palette draws it through `sf_symbols`, which refuses a pack name
+    /// ([feedback sf-symbols-everywhere-mac-2026-10-28-followup]: "circle-half"
+    /// had stayed here and the Appearance row drew nothing).
+    #[test]
+    fn every_setting_glyph_is_a_system_symbol() {
+        use crate::ui::shell::SettingsPage::*;
+        let mut targets: Vec<SettingTarget> = [
+            Root,
+            Credits,
+            Machine,
+            Appearance,
+            Notifications,
+            Updates,
+            About,
+            Connectors,
+            Routines,
+            Channels,
+            Skills,
+            ThisMac,
+            Secrets,
+            Devices,
+        ]
+        .into_iter()
+        .map(SettingTarget::Page)
+        .collect();
+        targets.extend([
+            SettingTarget::SecretsNew,
+            SettingTarget::SecretsConnect,
+            SettingTarget::Feedback,
+            SettingTarget::Profile,
+        ]);
+        for pick in [AgentPick::Model, AgentPick::Reasoning, AgentPick::Voice] {
+            targets.push(SettingTarget::Agent {
+                project_id: Id::default(),
+                pick,
+            });
+        }
+        for target in &targets {
+            let glyph = target_glyph(target);
+            assert!(
+                crate::ui::sf_symbols::is_registered(glyph),
+                "{target:?}: {glyph:?} is not a registered system symbol"
+            );
+        }
     }
 
     /// "voice": one row per owned agent in the order given (open chat's agent
