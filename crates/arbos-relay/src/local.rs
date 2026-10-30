@@ -162,7 +162,12 @@ pub async fn exec(
     if !state.allows(&principal, &project_id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
-    if !matches!(principal, Principal::Box { .. } | Principal::Admin) {
+    // The admin is refused outright. It has no legitimate reason to run a command or read a file
+    // on someone's personal computer, and the approval the helper relies on is checked by agentd
+    // (`arbos-agentd/src/local.rs`) rather than here — so an admin caller would reach a shell with
+    // no card ever shown. The box-token path still carries that weakness; this closes the half
+    // that an operator credential opens.
+    if !matches!(principal, Principal::Box { .. }) {
         return Err((StatusCode::FORBIDDEN, "box token required".into()));
     }
     if state.db.project(&project_id).map_err(internal)?.is_none() {
@@ -298,4 +303,50 @@ pub async fn delete(
         StatusCode::NOT_FOUND
     }
     .into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::people::tests_support::{person, project_of};
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+    use arbos_core::ids::ulid;
+
+    /// Pair a helper as one of `user`'s devices and mark it connected.
+    fn helper_of(state: &AppState, user: &str, device_id: &str) {
+        state
+            .db
+            .insert_device(device_id, "device", &ulid(), user, "github")
+            .expect("device row");
+        state
+            .db
+            .local_device_hello(device_id, "host", "macos", "/Users/x")
+            .expect("hello");
+    }
+
+    /// The admin token must not reach a command or a file on anyone's personal computer. The
+    /// approval the helper relies on is checked by agentd, not here, so an admin caller would
+    /// reach a shell with no card ever shown.
+    #[tokio::test]
+    async fn exec_refuses_the_admin() {
+        let state = test_state(AuthMode::Github);
+        let (user, _) = person(&state, 901);
+        helper_of(&state, &user, "ldev_admin");
+        let project = project_of(&state, &user, "p");
+
+        let op: LocalOp = serde_json::from_value(json!({ "op": "run", "cmd": "id" })).unwrap();
+        let r = exec(
+            State(state.clone()),
+            Principal::Admin,
+            Path((project, "ldev_admin".to_owned())),
+            Json(op),
+        )
+        .await;
+        let (status, _) = match r {
+            Ok(_) => panic!("the admin reached exec"),
+            Err((s, m)) => (s, m),
+        };
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
 }
