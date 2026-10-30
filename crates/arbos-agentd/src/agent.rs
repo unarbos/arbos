@@ -7125,7 +7125,10 @@ impl Agent {
             let Some(chat_id) = chat_id.as_deref() else {
                 continue;
             };
-            let Some(host) = self.sync.host(chat_id).await else {
+            // Boot's room budget (#2367) may not have opened this chat's room; a working
+            // indicator left behind by the dead box still has to be closed. There is one such
+            // chat per interrupted subagent, so this opens a handful of rooms at most.
+            let Ok(host) = self.room(chat_id).await else {
                 continue;
             };
             let h = host.lock().await;
@@ -8566,8 +8569,14 @@ impl Agent {
             let _ = self
                 .store
                 .set_job_state(&j.id, "interrupted", Some("box restart"));
-            let Some(host) = self.sync.host(&j.chat_id).await else {
-                continue;
+            // A chat with a job left mid-flight needs its room whether or not boot's room
+            // budget opened it (#2367), or this line and the restart would be dropped.
+            let host = match self.room(&j.chat_id).await {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::warn!(error = %e, chat = %j.chat_id, job = %j.id, "job reclaim: no room");
+                    continue;
+                }
             };
             let restartable = j.restarts < 1 && job_restart_allowed(&j, &self.cfg.project_id);
             let line = if restartable {

@@ -152,6 +152,9 @@ pub struct ChatRow {
     pub title: String,
     pub is_pinned: bool,
     pub created_at: i64,
+    /// Last turn in this chat ([`Store::touch_chat`]); `None` until it has had one. The boot
+    /// room budget opens the most recently used chats first (#2367).
+    pub last_message_at: Option<i64>,
     pub compaction_summary: Option<String>,
     pub compacted_through: Option<String>,
     pub compaction_version: i64,
@@ -362,7 +365,7 @@ impl Store {
 
     pub fn chats(&self) -> Result<Vec<ChatRow>> {
         self.with(|c| {
-            let mut st = c.prepare("SELECT id, title, is_pinned, created_at, compaction_summary, compacted_through, compaction_version, pi_session_path FROM chats ORDER BY created_at")?;
+            let mut st = c.prepare("SELECT id, title, is_pinned, created_at, compaction_summary, compacted_through, compaction_version, pi_session_path, last_message_at FROM chats ORDER BY created_at")?;
             let rows = st.query_map([], |r| {
                 Ok(ChatRow {
                     id: r.get(0)?,
@@ -373,6 +376,7 @@ impl Store {
                     compacted_through: r.get(5)?,
                     compaction_version: r.get(6)?,
                     pi_session_path: r.get(7)?,
+                    last_message_at: r.get(8)?,
                 })
             })?;
             rows.collect()
