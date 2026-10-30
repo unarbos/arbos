@@ -4361,12 +4361,19 @@ pub fn build_rows_with_cache(
             continue;
         }
         let is_last_reply = last_reply == Some(mix);
+        // A hidden job row's cards speak for the agent behind the row, so they
+        // join that agent's run. The seed can come from another row, so it is
+        // part of this row's cache version.
+        let hidden_seed = (message.hidden || message.job.is_some())
+            .then(|| hidden_row_agent_seed(message, messages))
+            .flatten();
+        let run_sender = hidden_seed.as_deref().unwrap_or(&message.sender);
         // Does this message continue the run? Decided before the stamp below:
         // a stamp only lands when the hour gap passed, which is past the run
         // window anyway.
         let continues = continues_run(
             run_tail.as_ref(),
-            &message.sender,
+            run_sender,
             message.created_at,
             carries_quote(message),
         );
@@ -4383,6 +4390,10 @@ pub fn build_rows_with_cache(
             names_senders,
             width_class,
         );
+        let version = match &hidden_seed {
+            Some(seed) => hash_version(&(version, seed), false),
+            None => version,
+        };
         if let Some(hit) = cache.entries.get(&message.id) {
             if hit.version == version {
                 rows.extend(hit.rows.iter().cloned());
@@ -4642,73 +4653,71 @@ pub fn build_rows_with_cache(
                     run_tail = None;
                 }
             }
-            Role::Assistant | Role::Project => {
-                // A background job's row (duplex §2.3, `job` + `hidden`) is wordless
-                // by design: its status parts feed the presence line and the tasks
-                // drawer, never a bubble — not while it runs, not the "no answer"
-                // stock line when it ends. The job's outcome is the agent's own
-                // reply bubble (or the "Stopped: …" line). One exception: a file or
-                // picture the worker delivered onto that row (agentd ≤ 0.1.150 put
-                // `deliver_file` there — Jacob's SN120 chart, 2026-10-27, "the chart
-                // is in the card above" over nothing) still shows as its card, so a
-                // posted file is never invisible on a box that has not upgraded.
-                if message.hidden || message.job.is_some() {
-                    // The card carries the agent's disc and name like its bubbles do
-                    // ([feedback forward-attachments-mac-2026-10-27]). A worker row
-                    // from an older box may say a bare `agent`; then the agent that
-                    // answered the same ask lends its seed.
-                    let seed = hidden_row_agent_seed(message, messages);
-                    let lane = seed.filter(|_| {
-                        names_senders
-                            || message.role == Role::Project
-                            || message.asked_by_handle.is_some()
-                    });
-                    let card_parts: Vec<(&Id, &Attachment)> = message
-                        .parts
-                        .iter()
-                        .filter_map(|p| match p {
-                            Part::Attachment { id, attachment } => Some((id, attachment)),
-                            _ => None,
-                        })
-                        .collect();
-                    let last = card_parts.len().saturating_sub(1);
-                    for (ix, (id, attachment)) in card_parts.into_iter().enumerate() {
-                        let has_thumb = attachment
-                            .blob_ref
-                            .as_deref()
-                            .is_some_and(|k| thumb_keys.contains(k));
-                        let card_named = names_senders && lane.is_some() && ix == 0;
-                        let disc = ix == last;
-                        rows.push(Row {
-                            version: hash_version(
-                                &(
-                                    &attachment.name,
-                                    &attachment.title,
-                                    attachment.bytes,
-                                    &attachment.blob_ref,
-                                    has_thumb,
-                                    &lane,
-                                    card_named,
-                                    disc,
-                                ),
-                                false,
-                            ),
-                            id: format!("{}#{}", message.id, id),
-                            message_id: message.id.clone(),
-                            kind: RowKind::Attachment {
-                                attachment: attachment.clone(),
-                                part_id: id.clone(),
-                                mine: false,
-                                sender: lane.clone().map(|seed| AttachmentSender::Agent { seed }),
-                                named: card_named,
+            // A background job's row (duplex §2.3, `job` + `hidden`) is wordless by
+            // design: its status parts feed the presence line and the tasks drawer,
+            // never a bubble — not while it runs, not the "no answer" stock line when
+            // it ends. The job's outcome is the agent's own reply bubble (or the
+            // "Stopped: …" line). One exception: a file or picture the worker
+            // delivered onto that row (agentd ≤ 0.1.150 put `deliver_file` there —
+            // Jacob's SN120 chart, 2026-10-27, "the chart is in the card above" over
+            // nothing) still shows as its card, so a posted file is never invisible
+            // on a box that has not upgraded. Its charts are not drawn, so a chart's
+            // fallback picture shows.
+            Role::Assistant | Role::Project if message.hidden || message.job.is_some() => {
+                // The cards carry the agent's disc and name like its bubbles do
+                // ([feedback forward-attachments-mac-2026-10-27]).
+                let lane = hidden_seed.clone().filter(|_| {
+                    names_senders
+                        || message.role == Role::Project
+                        || message.asked_by_handle.is_some()
+                });
+                let card_parts: Vec<(&Id, &Attachment)> = message
+                    .parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        Part::Attachment { id, attachment } => Some((id, attachment)),
+                        _ => None,
+                    })
+                    .collect();
+                let last = card_parts.len().saturating_sub(1);
+                for (ix, (id, attachment)) in card_parts.into_iter().enumerate() {
+                    let has_thumb = attachment
+                        .blob_ref
+                        .as_deref()
+                        .is_some_and(|k| thumb_keys.contains(k));
+                    let card_named = names_senders && lane.is_some() && run_start && ix == 0;
+                    let disc = run_start && ix == last;
+                    rows.push(Row {
+                        version: hash_version(
+                            &(
+                                &attachment.name,
+                                &attachment.title,
+                                attachment.bytes,
+                                &attachment.blob_ref,
+                                has_thumb,
+                                &lane,
+                                card_named,
                                 disc,
-                                time: clock_label(message.created_at),
-                                forwarded_from: None,
-                            },
-                        });
-                    }
-                    continue;
+                            ),
+                            false,
+                        ),
+                        id: format!("{}#{}", message.id, id),
+                        message_id: message.id.clone(),
+                        kind: RowKind::Attachment {
+                            attachment: attachment.clone(),
+                            part_id: id.clone(),
+                            mine: false,
+                            sender: lane.clone().map(|seed| AttachmentSender::Agent { seed }),
+                            named: card_named,
+                            disc,
+                            time: clock_label(message.created_at),
+                            forwarded_from: None,
+                            quote: None,
+                        },
+                    });
                 }
+            }
+            Role::Assistant | Role::Project => {
                 if matches!(
                     message.turn,
                     Some(TurnKind::New | TurnKind::Spawn | TurnKind::Wake)
@@ -5334,7 +5343,7 @@ pub fn build_rows_with_cache(
         let drew = rows.len() > rows_before_message;
         if drew {
             run_tail = Some(RunTail {
-                sender: message.sender.clone(),
+                sender: run_sender.to_owned(),
                 at: message.created_at,
             });
             if run_start {
@@ -10400,84 +10409,95 @@ mod system_line_tests {
     /// Jacob, 2026-10-27 16:05 UTC (Arbonites, Doug agent on agentd 0.1.150): the SN120 chart
     /// PNG was delivered onto the job's hidden worker row and the client drew nothing — "the
     /// chart is in the card above" over a different message. A hidden/job row still draws its
-    /// attachment cards; everything else on it (status, text) stays hidden.
+    /// attachment cards; everything else on it (status, text) stays hidden. The card joins
+    /// Doug's run like any picture of his: right after his ack it is unnamed, later it is not.
     #[test]
     fn hidden_job_row_still_shows_its_attachment_card() {
         let t = 1_700_000_000_000u64;
-        let ask = message(
-            "user",
-            "user:gh_jacob",
-            "@doug-agent plot the subnet 120 price",
-            t,
-        );
-        // Doug's ack names the agent (`agent:<id>` + asked_by_handle, as every people-chat
-        // reply does); the worker row from the 0.1.150 box says a bare `agent`.
-        let mut ack = message(
-            "assistant",
-            "agent:01DOUG",
-            "Plotting the SN120 price now.",
-            t + 500,
-        );
-        ack.in_reply_to = Some(ask.id.clone());
-        ack.asked_by_handle = Some("jacob".into());
-        let mut job_row = spawn_row("j1", "job", true, t + 1_000);
-        job_row.sender = "agent".into();
-        job_row.in_reply_to = Some(ask.id.clone());
-        job_row.hidden = true;
-        job_row.job = serde_json::from_value(serde_json::json!({
-            "id": "01JOB", "title": "Running the program", "kind": "code", "touches": []
-        }))
-        .ok();
-        job_row.parts.push(Part::Attachment {
-            id: "att1".into(),
-            attachment: serde_json::from_value(serde_json::json!({
-                "name": "sn120_price.png", "mime": "image/png", "ref": "7ba1fc21", "bytes": 20260,
-                "kind": "image", "title": "SN120 price"
+        let card_after = |gap: u64| {
+            let ask = message(
+                "user",
+                "user:gh_jacob",
+                "@doug-agent plot the subnet 120 price",
+                t,
+            );
+            // Doug's ack names the agent (`agent:<id>` + asked_by_handle, as every
+            // people-chat reply does); the worker row from the 0.1.150 box says a bare
+            // `agent`.
+            let mut ack = message(
+                "assistant",
+                "agent:01DOUG",
+                "Plotting the SN120 price now.",
+                t + 500,
+            );
+            ack.in_reply_to = Some(ask.id.clone());
+            ack.asked_by_handle = Some("jacob".into());
+            let mut job_row = spawn_row("j1", "job", true, t + 500 + gap);
+            job_row.sender = "agent".into();
+            job_row.in_reply_to = Some(ask.id.clone());
+            job_row.hidden = true;
+            job_row.job = serde_json::from_value(serde_json::json!({
+                "id": "01JOB", "title": "Running the program", "kind": "code", "touches": []
             }))
-            .unwrap(),
-        });
-        let messages = [ask, ack, job_row];
-        let spoken = HashSet::new();
-        let failed = HashMap::new();
-        let speech = SpeechRows {
-            enabled: false,
-            spoken: &spoken,
-            failed: &failed,
-            voice_mode: false,
-        };
-        let rows = build_rows(
-            &messages,
-            false,
-            speech,
-            "gh_me",
-            &HashSet::new(),
-            &Mentions::empty(),
-            true,
-        );
-        let cards: Vec<&Row> = rows.iter().filter(|r| r.message_id == "j1").collect();
-        assert_eq!(cards.len(), 1, "exactly the card, nothing else: {rows:?}");
-        match &cards[0].kind {
-            RowKind::Attachment {
-                attachment,
-                mine,
-                sender,
-                named,
-                disc,
-                ..
-            } => {
-                assert_eq!(attachment.name, "sn120_price.png");
-                assert!(!mine);
-                assert!(
-                    matches!(sender, Some(AttachmentSender::Agent { seed }) if seed == "agent:01DOUG"),
-                    "the card sits in Doug's lane, seed borrowed from his ack: {sender:?}"
-                );
-                assert!(
-                    named && disc,
-                    "Doug's name above the card and his disc beside it"
-                );
+            .ok();
+            job_row.parts.push(Part::Attachment {
+                id: "att1".into(),
+                attachment: serde_json::from_value(serde_json::json!({
+                    "name": "sn120_price.png", "mime": "image/png", "ref": "7ba1fc21",
+                    "bytes": 20260, "kind": "image", "title": "SN120 price"
+                }))
+                .unwrap(),
+            });
+            let messages = [ask, ack, job_row];
+            let spoken = HashSet::new();
+            let failed = HashMap::new();
+            let speech = SpeechRows {
+                enabled: false,
+                spoken: &spoken,
+                failed: &failed,
+                voice_mode: false,
+            };
+            let rows = build_rows(
+                &messages,
+                false,
+                speech,
+                "gh_me",
+                &HashSet::new(),
+                &Mentions::empty(),
+                true,
+            );
+            let cards: Vec<Row> = rows.into_iter().filter(|r| r.message_id == "j1").collect();
+            assert_eq!(cards.len(), 1, "exactly the card, nothing else: {cards:?}");
+            match cards[0].kind.clone() {
+                RowKind::Attachment {
+                    attachment,
+                    mine,
+                    sender,
+                    named,
+                    disc,
+                    ..
+                } => {
+                    assert_eq!(attachment.name, "sn120_price.png");
+                    assert!(!mine);
+                    assert!(
+                        matches!(&sender, Some(AttachmentSender::Agent { seed }) if seed == "agent:01DOUG"),
+                        "the card sits in Doug's lane, seed borrowed from his ack: {sender:?}"
+                    );
+                    (named, disc)
+                }
+                other => panic!("an attachment card, not {other:?}"),
             }
-            other => panic!("an attachment card, not {other:?}"),
-        }
+        };
+        assert_eq!(
+            card_after(500),
+            (false, false),
+            "half a second after his ack the card continues Doug's run"
+        );
+        assert_eq!(
+            card_after(RUN_WINDOW_MS + 1),
+            (true, true),
+            "past the run window the card names Doug and carries his disc"
+        );
     }
 
     #[test]
