@@ -16,7 +16,7 @@
   "judge_model": "anthropic/claude-haiku-5.5",
   "ended_at": "2026-10-25T00:12:28Z",
   "spent_today_at_end": 5.341308872,
-  "run_cost_usd": -3.4568,
+  "run_cost_usd": 2.167,
   "judge_cost_usd": 0.0037,
   "reruns": [
    {
@@ -35,7 +35,8 @@
     ],
     "note": "harness fixes: ssh host key (seeds/verify ran as no-ops), settle waited for no answer, back-to-back sends 2 s apart; 10 tasks re-run on the same image"
    }
-  ]
+  ],
+  "run_cost_note": "rerun crossed 00:00 UTC (relay spent-today reset); cost is the per-task sum"
  },
  "summary": {
   "tasks": 33,
@@ -50,7 +51,7 @@
   "tool_errors": 1,
   "stalls": 1,
   "cost_usd": 2.167,
-  "run_cost_usd": -3.4568,
+  "run_cost_usd": 2.167,
   "judge_cost_usd": 0.0037,
   "categories": {
    "group": {
