@@ -5328,6 +5328,11 @@ impl AppState {
         // Open only when Matrix already lists the room. A registry room_id alone can
         // race sliding sync (memory store empty until the next snapshot) or point at a
         // gone room — both yield "no such room", which is not a product bug.
+        // Clear banners as soon as the channel is opened — even before Matrix lists the
+        // room (MarkRead waits on sync; Notification Center should not).
+        if let Some(ref rid) = room_id {
+            notify::withdraw_chat(rid);
+        }
         let synced = room_id.as_ref().is_some_and(|rid| {
             self.matrix_snapshot
                 .channels
@@ -9239,6 +9244,7 @@ impl AppState {
                     .as_ref()
                     .and_then(|c| c.room_id.clone())
                 {
+                    notify::withdraw_chat(&room_id);
                     self.command(ClientCommand::ChannelMarkRead { room_id });
                 }
             }
