@@ -383,10 +383,8 @@ pub struct Shell {
     /// Group pane › Invite links › New link options (any member): 7-day expiry, single use.
     pub(crate) group_invite_expires: bool,
     pub(crate) group_invite_single_use: bool,
-    /// Where the last Share click landed: the share picker's arrow points there.
-    pub(crate) invite_share_anchor: gpui::Point<Pixels>,
-    /// A minted link is waiting for the next frame to open the share picker.
-    invite_share_queued: bool,
+    /// A minted link is waiting for the next frame to be copied.
+    invite_copy_queued: bool,
     /// Channel page › Settings: the channel whose topic is being edited in `server_input`.
     pub(crate) channel_topic_edit: Option<crate::model::Id>,
     /// D88: the "Admins only post" toggle of the new-channel sheet.
@@ -1227,8 +1225,7 @@ impl Shell {
             invite_single_use: false,
             group_invite_expires: false,
             group_invite_single_use: false,
-            invite_share_anchor: gpui::Point::default(),
-            invite_share_queued: false,
+            invite_copy_queued: false,
             channel_topic_edit: None,
             new_channel_restricted: false,
             server_member_armed: None,
@@ -3196,16 +3193,13 @@ impl Shell {
         cx.notify();
     }
 
-    /// A group invite link to the system share picker at the last Share click; where there is
-    /// no picker (Linux) it is copied and the notice says so.
-    pub(crate) fn share_invite(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let at = self.invite_share_anchor;
-        if crate::ui::share::link(url, at, window, cx) == crate::ui::share::Shared::Copied {
-            self.state.update(cx, |s, cx| {
-                s.push_notice("Invite link copied");
-                cx.notify();
-            });
-        }
+    /// A group invite link to the clipboard, and the notice that says so.
+    pub(crate) fn copy_invite(&mut self, url: &str, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(url.to_owned()));
+        self.state.update(cx, |s, cx| {
+            s.push_notice("Invite link copied");
+            cx.notify();
+        });
     }
 
     /// Shift-click / right-click on a member row of the group pane: its menu at the click.
@@ -4920,13 +4914,13 @@ impl Render for Shell {
         self.last_viewport_width = width;
         self.fullscreen = window.is_fullscreen() || self.rig_fullscreen;
         crate::ui::picture_fit::note_scale_factor(window.scale_factor());
-        if !self.invite_share_queued && self.state.read(cx).group_invite_to_share.is_some() {
-            self.invite_share_queued = true;
-            cx.defer_in(window, |this, window, cx| {
-                this.invite_share_queued = false;
-                let url = this.state.update(cx, |s, _| s.group_invite_to_share.take());
+        if !self.invite_copy_queued && self.state.read(cx).group_invite_to_copy.is_some() {
+            self.invite_copy_queued = true;
+            cx.defer_in(window, |this, _, cx| {
+                this.invite_copy_queued = false;
+                let url = this.state.update(cx, |s, _| s.group_invite_to_copy.take());
                 if let Some(url) = url {
-                    this.share_invite(&url, window, cx);
+                    this.copy_invite(&url, cx);
                 }
             });
         }

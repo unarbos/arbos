@@ -723,12 +723,11 @@ pub struct AppState {
     /// People groups' invite links (`GET /chats/{id}/invites`), newest first; loaded when the
     /// group's pane opens and kept current after New invite link / ✕.
     pub group_invites: HashMap<Id, Vec<ServerInviteLink>>,
-    /// Members › Share invite link asked for a link this group did not have yet: the new one
-    /// goes to the share picker as soon as the relay mints it.
-    pub group_invite_share_pending: Option<Id>,
-    /// A link ready for the share picker; the shell takes it on its next frame (it needs the
-    /// window to anchor the picker).
-    pub group_invite_to_share: Option<String>,
+    /// Members › Copy invite link asked for a link this group did not have yet: the new one
+    /// is copied as soon as the relay mints it.
+    pub group_invite_copy_pending: Option<Id>,
+    /// A link ready to copy; the shell takes it on its next frame.
+    pub group_invite_to_copy: Option<String>,
     /// Avatar reply reaction window per project (ms): plays once after a turn.
     pub avatar_reply_until: HashMap<Id, u64>,
     /// Avatar picker open for this project.
@@ -1287,8 +1286,8 @@ impl AppState {
             add_members_secret: None,
             pending_join_code: None,
             group_invites: HashMap::new(),
-            group_invite_share_pending: None,
-            group_invite_to_share: None,
+            group_invite_copy_pending: None,
+            group_invite_to_copy: None,
             avatar_reply_until: HashMap::new(),
             avatar_picker: None,
             profile_from_name: false,
@@ -2062,9 +2061,9 @@ impl AppState {
                 cx.notify();
             }
             SyncEvent::GroupInviteCreated { chat_id, invite } => {
-                if self.group_invite_share_pending.as_ref() == Some(&chat_id) {
-                    self.group_invite_share_pending = None;
-                    self.group_invite_to_share = Some(invite.url.clone());
+                if self.group_invite_copy_pending.as_ref() == Some(&chat_id) {
+                    self.group_invite_copy_pending = None;
+                    self.group_invite_to_copy = Some(invite.url.clone());
                 }
                 let list = self.group_invites.entry(chat_id).or_default();
                 list.retain(|i| i.id != invite.id);
@@ -2316,7 +2315,7 @@ impl AppState {
                     self.awaiting_new_project = false;
                 }
                 if error.verb == "make the invite link" {
-                    self.group_invite_share_pending = None;
+                    self.group_invite_copy_pending = None;
                 }
                 let claimed = self
                     .failure_claim
@@ -5491,9 +5490,9 @@ impl AppState {
         cx.notify();
     }
 
-    /// Group pane › Members › "Share invite link": a usable link goes to the share picker at
-    /// once; with none, one is minted with the pane's two options and shared when it arrives.
-    pub fn share_group_invite(
+    /// Group pane › Members › "Copy invite link": a usable link is copied at once; with none,
+    /// one is minted with the pane's two options and copied when it arrives.
+    pub fn copy_group_invite(
         &mut self,
         chat_id: Id,
         expires: bool,
@@ -5501,14 +5500,14 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         if let Some(url) = self.usable_group_invite(&chat_id) {
-            self.group_invite_to_share = Some(url);
+            self.group_invite_to_copy = Some(url);
             cx.notify();
             return;
         }
-        if self.group_invite_share_pending.as_ref() == Some(&chat_id) {
+        if self.group_invite_copy_pending.as_ref() == Some(&chat_id) {
             return;
         }
-        self.group_invite_share_pending = Some(chat_id.clone());
+        self.group_invite_copy_pending = Some(chat_id.clone());
         self.create_group_invite(chat_id, expires, single_use, cx);
     }
 
