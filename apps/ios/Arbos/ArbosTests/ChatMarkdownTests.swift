@@ -195,8 +195,23 @@ final class ChatMarkdownTests: XCTestCase {
         paragraphText.lineSpacing(Theme.bodyLineSpacing).tint(.blue)
     }
 
+    /// Writes the measurements where the workflow's `xcodebuild-*.log` artifact glob picks them
+    /// up. `ArbosTests` is `parallelizable = "YES"`, and that reporter prints one line per case
+    /// with no summary; a number that only reached stdout may never reach the log. `#filePath`
+    /// locates the checkout, and the simulator shares the host file system.
+    private func writeMeasurements(_ lines: [String]) {
+        let app = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let build = app.appendingPathComponent("build")
+        try? FileManager.default.createDirectory(at: build, withIntermediateDirectories: true)
+        let text = lines.joined(separator: "\n") + "\n"
+        try? text.write(to: build.appendingPathComponent("xcodebuild-af233-measurements.log"),
+                        atomically: true, encoding: .utf8)
+    }
+
     /// Every block kind a long message is made of, measured in a real bubble. A block whose
-    /// bubble is barely taller than one line has dropped its text; the printed table says which.
+    /// bubble is barely taller than one line has dropped its text; the table says which.
     func testLongMessageBlocksKeepTheirTextInABubble() {
         let chrome = 2 * Theme.bubbleVPad
         let oneLine = wrapped("one line", at: contentWidth)
@@ -220,9 +235,14 @@ final class ChatMarkdownTests: XCTestCase {
         let pillItem = measure("list item with pills", listRowWithPills)
         let plainItem = measure("list item without pills", listRowWithoutPills)
 
-        print("AF-233 cap=\(cap) content=\(contentWidth) itemWidth=\(itemWidth) oneLine=\(oneLine)")
-        print("AF-233 wrapped truth: paragraph=\(paragraphTruth) item=\(itemTruth)")
-        for (name, h) in measured { print("AF-233 \(name) = \(h) pt (\(h / oneLine) lines)") }
+        var lines = [
+            "AF-233 widths: cap=\(cap) content=\(contentWidth) itemWidth=\(itemWidth)",
+            "AF-233 one line=\(oneLine) wrapped paragraph=\(paragraphTruth) wrapped item=\(itemTruth)",
+        ]
+        for (name, h) in measured { lines.append("AF-233 \(name) = \(h) pt = \(h / oneLine) lines") }
+        writeMeasurements(lines)
+        let oneLiner = lines.joined(separator: " | ")
+        print(oneLiner)
 
         // The whole text reaches the renderer: nothing on the way in shortens the body.
         XCTAssertEqual(Markdown.blocks(Self.longParagraph), [.paragraph(Self.longParagraph)])
@@ -237,5 +257,9 @@ final class ChatMarkdownTests: XCTestCase {
         // The A/B: the text renderer is the only difference between these pairs.
         XCTAssertEqual(pillParagraph, plainParagraph, accuracy: 1, "the text renderer changed a paragraph's height")
         XCTAssertEqual(pillItem, plainItem, accuracy: 1, "the text renderer changed a list item's height")
+
+        // AF-233 diagnostic round only: carries the table into the case stream as well, in case
+        // the artifact upload is lost. Removed once the measurement has been read.
+        XCTFail(oneLiner)
     }
 }
