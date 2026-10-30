@@ -149,6 +149,8 @@ platform :ios do
     xcodebuild_logged("test",
       "cd .. && xcodebuild test -project #{PROJECT} -scheme #{SCHEME} -configuration Debug " \
       "-destination 'platform=iOS Simulator,name=iPhone 17' -derivedDataPath '#{out_dir}/dd' #{spm_flags}" \
+      "-only-testing:ArbosUITests/BackSwipeUITests -only-testing:ArbosUITests/ChatSearchCloseUITests " \
+      "-skip-testing:ArbosUITests/BackSwipeUITests/testEdgeSwipeBackTransitionTiming -test-iterations 3 " \
       "CODE_SIGNING_ALLOWED=NO")
   end
 

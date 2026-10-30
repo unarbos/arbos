@@ -276,6 +276,70 @@ final class BackSwipeUITests: XCTestCase {
         XCTAssertTrue(back.exists, "the chat did not go back")
     }
 
+    // MARK: DIAG (experiment branch only)
+
+    private func diag(_ s: String) { XCTContext.runActivity(named: "DIAG \(s)") { _ in } }
+
+    func testDiagFramesInComms() {
+        let app = launch(["ARBOS_OPEN_PROJECT": "fx-comms"])
+        XCTAssertTrue(chatBack(app, "fx-comms-main").waitForExistence(timeout: appear))
+        _ = app.descendants(matching: .any).matching(bubbleQuery).firstMatch.waitForExistence(timeout: settle)
+        diag("window \(app.windows.firstMatch.frame)")
+        for b in app.descendants(matching: .any).matching(bubbleQuery).allElementsBoundByIndex {
+            diag("\(b.identifier) frame \(b.frame) hittable \(b.isHittable)")
+        }
+    }
+
+    func testDiagFramesInLongLaunchWeek() {
+        let app = launch(["ARBOS_OPEN_PEOPLE": "fx-group-launch", "ARBOS_FIXTURE_LONG_ROWS": "120"])
+        XCTAssertTrue(chatBack(app, "fx-group-launch").waitForExistence(timeout: appear))
+        _ = app.descendants(matching: .any).matching(bubbleQuery).firstMatch.waitForExistence(timeout: settle)
+        sleep(2)
+        diag("window \(app.windows.firstMatch.frame)")
+        for b in app.descendants(matching: .any).matching(bubbleQuery).allElementsBoundByIndex {
+            diag("\(b.identifier) frame \(b.frame) hittable \(b.isHittable)")
+        }
+    }
+
+    /// The swipe the failing test means, kept on screen: from the left third of the wide
+    /// agent bubble c4, 180 pt right.
+    func testDiagSwipeRightOnWideAgentBubbleGoesBack() {
+        let app = launch(["ARBOS_OPEN_PROJECT": "fx-comms"])
+        let back = chatBack(app, "fx-comms-main")
+        XCTAssertTrue(back.waitForExistence(timeout: appear))
+        let bubble = app.descendants(matching: .any)["bubble:c4"]
+        XCTAssertTrue(bubble.waitForExistence(timeout: settle))
+        let f = bubble.frame
+        let window = app.windows.firstMatch.frame
+        let y = min(max(f.midY, 160), window.maxY - 220)
+        let start = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: max(f.minX + 30, 60), dy: y))
+        diag("c4 frame \(f) start x=\(max(f.minX + 30, 60)) y=\(y)")
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 180, dy: 0)), withVelocity: .fast, thenHoldForDuration: 0.05)
+        let gone = XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: back)], timeout: settle)
+        diag("wide-bubble swipe result \(gone.rawValue)")
+        XCTAssertEqual(gone, .completed, "swipe right on the transcript went back")
+    }
+
+    /// The vertical drag the failing test means, on whichever bubble sits mid-screen.
+    func testDiagVerticalDragMidScreenDoesNotGoBack() {
+        let app = launch(["ARBOS_OPEN_PEOPLE": "fx-group-launch", "ARBOS_FIXTURE_LONG_ROWS": "120"])
+        let back = chatBack(app, "fx-group-launch")
+        XCTAssertTrue(back.waitForExistence(timeout: appear))
+        let bubbles = app.descendants(matching: .any).matching(bubbleQuery)
+        XCTAssertTrue(bubbles.firstMatch.waitForExistence(timeout: settle))
+        let window = app.windows.firstMatch.frame
+        let pick = bubbles.allElementsBoundByIndex.last { $0.isHittable && $0.frame.midY > window.height * 0.3 && $0.frame.midY < window.height * 0.7 }
+        diag("mid pick \(pick?.identifier ?? "none") \(pick?.frame ?? .zero)")
+        guard let onBubble = pick else { return XCTFail("no bubble mid-screen") }
+        let start = onBubble.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 6, dy: -200)), withVelocity: .slow, thenHoldForDuration: 0.1)
+        sleep(1)
+        diag("after vertical drag: back=\(back.exists) keyboard=\(app.keyboards.firstMatch.exists) reply=\(app.descendants(matching: .any)["composer-reply-preview"].exists)")
+        XCTAssertFalse(app.descendants(matching: .any)["composer-reply-preview"].exists)
+        XCTAssertFalse(app.keyboards.firstMatch.exists)
+        XCTAssertTrue(back.exists)
+    }
+
     // MARK: Frame timing of the pop
 
     /// UIKit's navigation-transition signposts over the edge-swipe pop: duration, hitch time

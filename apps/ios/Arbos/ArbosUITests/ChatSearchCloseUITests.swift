@@ -106,6 +106,47 @@ final class ChatSearchCloseUITests: XCTestCase {
         XCTAssertTrue(hit.isHittable, "…and visible")
     }
 
+    // MARK: DIAG (experiment branch only)
+
+    private func diag(_ s: String) { XCTContext.runActivity(named: "DIAG \(s)") { _ in } }
+
+    /// How long after the bar is gone the keyboard is still counted.
+    private func keyboardLag(_ app: XCUIApplication, _ what: String) {
+        let field = app.textFields["chat-search-field"]
+        let deadline = Date().addingTimeInterval(settle)
+        while field.exists, Date() < deadline { usleep(150_000) }
+        let goneAt = Date()
+        var samples: [String] = []
+        while app.keyboards.count > 0, Date().timeIntervalSince(goneAt) < 10 {
+            samples.append(String(format: "%.2f", Date().timeIntervalSince(goneAt)))
+            usleep(100_000)
+        }
+        let lag = Date().timeIntervalSince(goneAt)
+        diag("\(what): field gone=\(!field.exists) keyboard down after \(String(format: "%.2f", lag)) s (up at \(samples.joined(separator: ",")))")
+        XCTAssertEqual(app.keyboards.count, 0, "\(what): the keyboard went down within 10 s")
+    }
+
+    func testDiagKeyboardAfterX() {
+        let app = openLaunchWeekSearch()
+        let field = app.textFields["chat-search-field"]
+        field.tap()
+        field.typeText("embargo")
+        let close = app.descendants(matching: .any)["chat-search-close"].firstMatch
+        XCTAssertTrue(close.waitForExistence(timeout: settle))
+        close.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.1)).tap()
+        keyboardLag(app, "x corner")
+    }
+
+    func testDiagKeyboardAfterXFromNoMatches() {
+        let app = openLaunchWeekSearch()
+        let field = app.textFields["chat-search-field"]
+        field.tap()
+        field.typeText("zzqqxx")
+        XCTAssertTrue(app.descendants(matching: .any)["chat-search-no-matches"].waitForExistence(timeout: settle))
+        app.descendants(matching: .any)["chat-search-close"].firstMatch.tap()
+        keyboardLag(app, "x after no matches")
+    }
+
     /// A keyword with no hit is never a blank transcript.
     func testNoMatchesIsSaidNotBlank() {
         let app = openLaunchWeekSearch()
