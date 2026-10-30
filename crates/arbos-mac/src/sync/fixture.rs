@@ -5916,6 +5916,29 @@ fn attachment(name: &str, mime: &str, kind: AttachmentKind, title: &str, bytes: 
     }
 }
 
+/// A picked GIF part (ARB-544): provider-hosted, so no `ref` — only the provider `url` its
+/// picture is fetched and cached under, and the attribution the bubble shows.
+fn picked_gif(id: &str) -> Part {
+    Part::Attachment {
+        id: new_id(),
+        attachment: Attachment {
+            name: format!("{id}.gif"),
+            mime: "image/gif".into(),
+            blob_ref: None,
+            bytes: None,
+            kind: Some(AttachmentKind::Image),
+            title: None,
+            chart_part: None,
+            url: Some(format!("https://static.klipy.com/fixture/{id}/full.gif")),
+            source: Some(Box::new(crate::model::AttachmentSource {
+                provider: "KLIPY".into(),
+                id: id.into(),
+                page_url: "https://klipy.com/gifs/fixture".into(),
+            })),
+        },
+    }
+}
+
 /// A 320×200 PNG (diagonal gradient tinted from the key) for fixture thumbnails and downloads.
 /// The 64×64 site icons the fixture's replies link to (what the relay's
 /// `/link-icon` would answer), by host.
@@ -5930,7 +5953,53 @@ fn fixture_link_icon(host: &str) -> Option<&'static [u8]> {
     })
 }
 
+/// An animated GIF for a provider-hosted key (`url:<url>`): 24 frames of a disc travelling
+/// across a tinted field, 60 ms apart. The rig needs real multi-frame bytes to show that a
+/// picked GIF plays ([feedback gif-send-and-playback-2026-10-30]) — a still PNG proves
+/// nothing about animation.
+fn fixture_gif(key: &str) -> Vec<u8> {
+    let seed = key.bytes().fold(0x811c_9dc5u32, |a, b| {
+        (a ^ b as u32).wrapping_mul(0x0100_0193)
+    });
+    let (w, h) = (240u32, 160u32);
+    let frames: Vec<image::Frame> = (0..24u32)
+        .map(|i| {
+            let cx = 24.0 + (w as f32 - 48.0) * (i as f32 / 23.0);
+            let buffer = image::RgbaImage::from_fn(w, h, |x, y| {
+                let dx = x as f32 - cx;
+                let dy = y as f32 - h as f32 / 2.0;
+                if dx * dx + dy * dy < 20.0 * 20.0 {
+                    image::Rgba([250, 250, 250, 255])
+                } else {
+                    image::Rgba([
+                        (40 + (seed & 0x3F)) as u8,
+                        (60 + 120 * y / h) as u8,
+                        (150 + ((seed >> 16) & 0x3F)) as u8,
+                        255,
+                    ])
+                }
+            });
+            image::Frame::from_parts(
+                buffer,
+                0,
+                0,
+                image::Delay::from_numer_denom_ms(60_000, 1_000),
+            )
+        })
+        .collect();
+    let mut out = std::io::Cursor::new(Vec::new());
+    {
+        let mut encoder = image::codecs::gif::GifEncoder::new(&mut out);
+        let _ = encoder.set_repeat(image::codecs::gif::Repeat::Infinite);
+        let _ = encoder.encode_frames(frames);
+    }
+    out.into_inner()
+}
+
 fn fixture_png(key: &str) -> Vec<u8> {
+    if key.starts_with(crate::model::URL_KEY_PREFIX) {
+        return fixture_gif(key);
+    }
     if key.contains("Screenshot") {
         return fixture_page_png();
     }
@@ -7218,6 +7287,17 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
                 &human_message(DM_SAM, &sam(), text, base + 160_000 + i as u64 * 5_000),
             );
         }
+    }
+    // `ARBOS_FIXTURE_GIF=1`: Sam sends a picked GIF and I reply to it — the two halves of
+    // [feedback gif-send-and-playback-2026-10-30] in one chat. The GIF plays inline, and the
+    // reply's quote header carries the GIF's own picture instead of the file name.
+    if std::env::var("ARBOS_FIXTURE_GIF").is_ok_and(|v| v == "1") {
+        let mut gif = human_message(DM_SAM, &sam(), "", base + 200_000);
+        gif.parts = vec![picked_gif("6178590884800169")];
+        let mut reply = human_message(DM_SAM, &me(), "ha, that's the one", base + 210_000);
+        reply.reply_to = Some(gif.id.clone());
+        insert_message_via_core(&doc, &gif);
+        insert_message_via_core(&doc, &reply);
     }
     // The Launch week group's rows are built here so the DM can quote them
     // (`ARBOS_FIXTURE_REPLY_DM=1`, #1835: Reply in DM carries the original).
