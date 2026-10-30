@@ -399,18 +399,9 @@ fn row(
                 .flex_col()
                 .gap(px(1.0))
                 .child(
-                    // A title over a subtitle ("@handle") lifts an emoji-only
-                    // name onto the baseline; a lone title stays centred.
-                    if entry.subtitle.is_empty() {
-                        div()
-                            .text_size(px(TITLE_FONT))
-                            .truncate()
-                            .child(entry.title.clone())
-                    } else {
-                        identity::name(entry.title.clone(), TITLE_FONT)
-                    }
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.text),
+                    identity::name(entry.title.clone(), TITLE_FONT)
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text),
                 )
                 .when(!entry.subtitle.is_empty(), |el| {
                     el.child(
@@ -480,15 +471,7 @@ fn picture(shell: &Shell, entry: &Entry, theme: &Theme, cx: &Context<Shell>) -> 
             let Some(space) = state.project(id) else {
                 return tile("person.fill").into_any_element();
             };
-            if let Some(person) = space
-                .person()
-                .filter(|_| space.is_people() && !space.is_people_group())
-            {
-                let image = state.avatar(&person.avatar_url);
-                people::avatar(image, person, AVATAR, theme).into_any_element()
-            } else {
-                groups::picture(space, state, AVATAR, theme).into_any_element()
-            }
+            groups::chat_picture(space, state, AVATAR, theme).into_any_element()
         }
         Target::Server(id) | Target::Channel { server_id: id, .. } => {
             let Some(server) = state.server(id) else {

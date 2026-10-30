@@ -477,27 +477,25 @@ mod render_tests {
             )
         });
         assert_eq!(
-            awaiting.as_deref(),
-            Some("priya"),
-            "start_dm asked the relay"
+            awaiting, None,
+            "nothing goes to the relay before the first message"
         );
-        assert!(busy);
+        assert!(!busy);
         assert_eq!(
             selected.as_deref(),
-            Some("g1"),
-            "nothing to select until the relay lists the DM"
+            Some("draft-dm:priya"),
+            "the draft DM with Priya opens at once"
         );
     }
 
     /// [feedback emoji-name-handle-offset-mac-2026-10-28]: the hero's `@handle`
     /// line and the Message pill sit where they sit for a text name when the
-    /// name is one emoji (or text with an emoji); only the emoji-only name is
-    /// drawn lifted onto the baseline.
+    /// name is one emoji (or text with an emoji).
     #[gpui::test]
     fn an_emoji_name_keeps_the_handle_line_where_a_text_name_has_it(cx: &mut TestAppContext) {
         let (_rt, state, shell, vcx) = mount(cx);
         let mut seen = Vec::new();
-        for (handle, lifted) in [("samir", false), ("dawizzaa", true), ("cato", false)] {
+        for handle in ["samir", "dawizzaa", "cato"] {
             open(&state, vcx, handle);
             settle(&shell, vcx);
             let line = vcx
@@ -506,12 +504,6 @@ mod render_tests {
             let pill = vcx
                 .debug_bounds(MESSAGE_ID)
                 .unwrap_or_else(|| panic!("Message pill on @{handle}'s pane"));
-            assert_eq!(
-                vcx.debug_bounds(crate::ui::identity::LIFTED_SELECTOR)
-                    .is_some(),
-                lifted,
-                "@{handle}: lifted name = {lifted}"
-            );
             seen.push((handle, line.origin.y, line.size.height, pill.origin.y));
         }
         let (_, text_y, text_h, text_pill) = seen[0];

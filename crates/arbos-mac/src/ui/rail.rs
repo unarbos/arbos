@@ -285,7 +285,7 @@ fn rail_disc(control: StripControl, theme: &Theme, cx: &mut Context<Shell>) -> D
         StripControl::New => "rail-new",
         StripControl::Search => "rail-search",
     };
-    let disc = glass::control_disc(id, glyph, size, theme)
+    let disc = glass::strip_disc(id, glyph, size, theme)
         .debug_selector(move || id.into())
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation());
     let disc = match control {
@@ -685,7 +685,7 @@ pub(crate) fn render_overlay(
                 .absolute()
                 .left(b.origin.x)
                 .top(b.origin.y)
-                .child(glass::control_disc(id, glyph, size, &theme)),
+                .child(glass::strip_disc(id, glyph, size, &theme)),
         );
     }
     if let Some(from) = snap.footer {

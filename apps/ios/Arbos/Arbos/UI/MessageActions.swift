@@ -19,10 +19,17 @@ enum ReactionCapsule {
     static var width: CGFloat { 2 * padding + CGFloat(palette.count + 1) * cell }
     static var height: CGFloat { 2 * padding + cell }
 
-    /// The first emoji the keyboard typed, if any.
+    /// The first emoji the keyboard typed, if any. Every emoji the keyboard offers counts,
+    /// including the text-default symbols it sends with U+FE0F (©️ ®️ ™️ ‼️ ⁉️ ℹ️ ⌨️, the
+    /// arrows ↔️ … ↪️) and the keycaps (#️⃣ *️⃣ 0️⃣–9️⃣); a bare letter, digit or `#` does not
+    /// ([feedback full-picker-reaction-ios-2026-10-29]: those picks were dropped).
     static func pickedEmoji(_ text: String) -> String? {
-        guard let first = text.trimmingCharacters(in: .whitespaces).first else { return nil }
-        let isEmoji = first.unicodeScalars.contains { $0.properties.isEmojiPresentation || $0.properties.isEmoji && $0.value > 0x238C }
+        guard let first = text.trimmingCharacters(in: .whitespaces).first,
+              let lead = first.unicodeScalars.first, lead.properties.isEmoji else { return nil }
+        let isEmoji = first.unicodeScalars.contains {
+            $0.properties.isEmojiPresentation || $0.value == 0xFE0F || $0.value == 0x20E3
+                || $0.properties.isEmoji && $0.value > 0x238C
+        }
         return isEmoji ? String(first) : nil
     }
 }
