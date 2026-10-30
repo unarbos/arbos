@@ -4752,6 +4752,12 @@ mod tests {
         assert_eq!(primary_action(true, true, false, true), ButtonAction::Guide);
     }
 
+    #[test]
+    fn guiding_a_running_turn_wears_the_send_glyph() {
+        assert_eq!(ButtonAction::Guide.glyph(), ButtonAction::Send.glyph());
+        assert_eq!(ButtonAction::Guide.glyph(), "arrow.up");
+    }
+
     const SENTENCE: &str = "the quick brown fox";
 
     #[test]
