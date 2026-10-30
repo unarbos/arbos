@@ -495,6 +495,7 @@ class Lane(threading.Thread):
                 "rubric": g["rubric"],
                 "truth": g["truth"],
                 "verify_out": g["verify_out"],
+                "produced": g.get("produced"),
                 "reply": (dm.get("reply") or "")[:1500],
                 "excerpt": dr.transcript_excerpt(prompt, res["rows"], sm),
             }
