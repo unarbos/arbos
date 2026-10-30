@@ -448,6 +448,9 @@ final class AppModel: ObservableObject {
         GroupPinPolicy(rawValue: pinPolicyByChat[chatId] ?? "") ?? .admins
     }
 
+    /// Tests: the policy as a peer's doc write would leave it, without a doc.
+    func setPinPolicyForTests(_ map: [Id: String]) { pinPolicyByChat = map }
+
     /// Pinned messages in this chat, newest pin first. Read from the published
     /// transcript, so it follows a peer's pin without another doc read.
     ///
@@ -465,6 +468,18 @@ final class AppModel: ObservableObject {
     /// The group's pinned message, or nil.
     func pinnedMessage(in chatId: Id) -> Message? { pinnedMessages(in: chatId).first }
 
+    /// Does the signed-in user hold owner or admin in this group *now*? Not
+    /// `ownsGroup`, which also grants the creator: that rule is about deleting a
+    /// group you made, and reusing it here let a demoted creator pin under the
+    /// `admins` policy. Mirrors the member pane's `canManageMembers`, reading
+    /// both `myRole` and our row, since parse defaults `myRole` to `"member"`.
+    func administersGroup(_ c: PeopleChat) -> Bool {
+        guard c.isGroup else { return false }
+        if c.myRole == "owner" || c.myRole == "admin" { return true }
+        let rowRole = c.humans.first { $0.id == user?.id }?.role
+        return rowRole == "owner" || rowRole == "admin"
+    }
+
     /// Whether the signed-in user may pin here: people groups only, under the
     /// group's policy. Owners and admins may always pin, and only they may
     /// change the policy.
@@ -472,13 +487,13 @@ final class AppModel: ObservableObject {
         guard chat.isGroup else { return false }
         switch pinPolicy(for: chat.id) {
         case .everyone: return true
-        case .admins: return ownsGroup(chat)
+        case .admins: return administersGroup(chat)
         }
     }
 
     /// Owner / admin sets who may pin. Written into the shared doc.
     func setPinPolicy(_ policy: GroupPinPolicy, chatId: Id) {
-        guard let chat = peopleChat(chatId), chat.isGroup, ownsGroup(chat) else { return }
+        guard let chat = peopleChat(chatId), chat.isGroup, administersGroup(chat) else { return }
         var next = pinPolicyByChat
         next[chatId] = policy.rawValue
         pinPolicyByChat = next
