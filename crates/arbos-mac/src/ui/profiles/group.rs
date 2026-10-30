@@ -827,9 +827,11 @@ mod render_tests {
     };
     use tokio::sync::mpsc;
 
-    use super::{ADD_MEMBERS_ID, DESCRIPTION_ID};
+    use super::{ADD_MEMBERS_ID, DESCRIPTION_ID, NEW_INVITE_ID, SHARE_INVITE_ID};
     use crate::app::{AppState, ProfilePage};
-    use crate::model::{AccountView, AgentMember, Person, Project, ServerInfo, SpaceKind};
+    use crate::model::{
+        AccountView, AgentMember, Person, Project, ServerInfo, ServerInviteLink, SpaceKind,
+    };
     use crate::sync::{ClientCommand, SyncEvent, SyncSource};
     use crate::ui::motion::PulseClock;
     use crate::ui::people::{AGENTS_SECTION_ID, AGENTS_SECTION_LABEL};
@@ -1127,6 +1129,163 @@ mod render_tests {
             vcx.debug_bounds(ADD_MEMBERS_ID).expect("Add members").top(),
             add.top()
         );
+    }
+
+    fn invite(id: &str, usable: bool) -> ServerInviteLink {
+        ServerInviteLink {
+            id: id.into(),
+            code: format!("code-{id}"),
+            url: format!("https://arbos.life/g/code-{id}"),
+            created_at: 1,
+            expires_at: None,
+            uses_left: if usable { None } else { Some(0) },
+            usable,
+        }
+    }
+
+    /// Issue #2316: a people group's Members tab has Share invite link under Add members and,
+    /// below the member list, the Invite links section (each link, then New invite link); a
+    /// shared project shown as a group has neither.
+    #[gpui::test]
+    fn a_people_group_offers_invite_links_and_a_shared_project_does_not(cx: &mut TestAppContext) {
+        let (_rt, state, shell, vcx) = mount(cx);
+        open(
+            &state,
+            vcx,
+            ProfilePage::Group {
+                space_id: "g1".into(),
+            },
+            0,
+        );
+        settle(&shell, vcx);
+        let add = vcx.debug_bounds(ADD_MEMBERS_ID).expect("Add members row");
+        let share = vcx
+            .debug_bounds(SHARE_INVITE_ID)
+            .expect("Share invite link row");
+        assert!(share.top() >= add.bottom() - px(1.0), "under Add members");
+        let new = vcx
+            .debug_bounds(NEW_INVITE_ID)
+            .expect("New invite link row");
+        assert!(
+            new.top() > share.bottom(),
+            "the section is below the members"
+        );
+
+        state.update(vcx, |s, cx| {
+            s.apply(
+                SyncEvent::GroupInvites {
+                    chat_id: "g1".into(),
+                    invites: vec![invite("i1", true), invite("i2", false)],
+                },
+                cx,
+            )
+        });
+        settle(&shell, vcx);
+        let i1 = vcx.debug_bounds("group-invite-i1").expect("a usable link");
+        let i2 = vcx.debug_bounds("group-invite-i2").expect("a spent link");
+        let new = vcx
+            .debug_bounds(NEW_INVITE_ID)
+            .expect("New invite link row");
+        assert!(
+            i1.top() < i2.top() && i2.bottom() <= new.top(),
+            "links, then New"
+        );
+
+        open(
+            &state,
+            vcx,
+            ProfilePage::Group {
+                space_id: "p-shared".into(),
+            },
+            0,
+        );
+        settle(&shell, vcx);
+        assert!(vcx.debug_bounds(SHARE_INVITE_ID).is_none());
+        assert!(vcx.debug_bounds(NEW_INVITE_ID).is_none());
+    }
+
+    /// Share invite link with no usable link mints one and hands it over when the relay answers;
+    /// with one, it is shared again without minting. Off macOS the hand-off is the clipboard and
+    /// the "Invite link copied" notice (the test window has no AppKit view for the picker).
+    #[cfg(not(target_os = "macos"))]
+    #[gpui::test]
+    fn share_invite_link_mints_one_when_none_works_then_hands_it_over(cx: &mut TestAppContext) {
+        let (_rt, state, shell, vcx) = mount(cx);
+        open(
+            &state,
+            vcx,
+            ProfilePage::Group {
+                space_id: "g1".into(),
+            },
+            0,
+        );
+        state.update(vcx, |s, cx| {
+            s.apply(
+                SyncEvent::GroupInvites {
+                    chat_id: "g1".into(),
+                    invites: vec![invite("spent", false)],
+                },
+                cx,
+            )
+        });
+        settle(&shell, vcx);
+
+        let share = vcx
+            .debug_bounds(SHARE_INVITE_ID)
+            .expect("Share invite link");
+        vcx.simulate_click(centre(share), Modifiers::default());
+        settle(&shell, vcx);
+        assert_eq!(
+            state.read_with(&*vcx, |s, _| s.group_invite_share_pending.clone()),
+            Some("g1".into()),
+            "only a spent link: a new one is on its way"
+        );
+
+        state.update(vcx, |s, cx| {
+            s.apply(
+                SyncEvent::GroupInviteCreated {
+                    chat_id: "g1".into(),
+                    invite: invite("fresh", true),
+                },
+                cx,
+            )
+        });
+        settle(&shell, vcx);
+        let url = "https://arbos.life/g/code-fresh";
+        let (pending, queued, first, copied) = state.read_with(&*vcx, |s, _| {
+            (
+                s.group_invite_share_pending.clone(),
+                s.group_invite_to_share.clone(),
+                s.group_invites["g1"].first().map(|i| i.id.clone()),
+                s.notices.iter().any(|n| n.text == "Invite link copied"),
+            )
+        });
+        assert_eq!(pending, None);
+        assert_eq!(queued, None, "the shell took it");
+        assert_eq!(first.as_deref(), Some("fresh"), "newest first");
+        assert!(copied);
+        assert_eq!(
+            vcx.read_from_clipboard().and_then(|c| c.text()).as_deref(),
+            Some(url)
+        );
+
+        vcx.write_to_clipboard(gpui::ClipboardItem::new_string(String::new()));
+        vcx.simulate_click(centre(share), Modifiers::default());
+        settle(&shell, vcx);
+        assert_eq!(
+            state.read_with(&*vcx, |s, _| s.group_invite_share_pending.clone()),
+            None,
+            "a usable link is shared as it is"
+        );
+        assert_eq!(
+            vcx.read_from_clipboard().and_then(|c| c.text()).as_deref(),
+            Some(url)
+        );
+
+        state.update(vcx, |s, cx| {
+            s.revoke_group_invite("g1".into(), "fresh".into(), cx)
+        });
+        assert!(state.read_with(&*vcx, |s, _| s.usable_group_invite("g1").is_none()));
     }
 
     #[gpui::test]

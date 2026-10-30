@@ -9580,6 +9580,46 @@ impl Drop for Room {
 }
 
 #[cfg(test)]
+mod group_invite_tests {
+    use super::{group_invite_code, group_invites_of};
+    use serde_json::json;
+
+    #[test]
+    fn the_code_comes_out_of_every_shape_of_link() {
+        for input in [
+            "k3x9q2",
+            " k3x9q2 ",
+            "https://arbos.life/g/k3x9q2",
+            "https://arbos.life/g/k3x9q2/",
+            "https://relay.example/g/k3x9q2?utm=x",
+            "arbos://join-group/k3x9q2",
+            "join-group/k3x9q2#frag",
+        ] {
+            assert_eq!(group_invite_code(input), "k3x9q2", "{input}");
+        }
+    }
+
+    #[test]
+    fn the_relays_list_decodes_and_a_bad_row_is_skipped() {
+        let v = json!({ "invites": [
+            { "id": "i1", "code": "k3x9q2", "url": "https://arbos.life/g/k3x9q2",
+              "chat_id": "g1", "created_by": "gh_1", "created_at": 1,
+              "expires_at": null, "uses_left": 1, "usable": true },
+            { "id": 7 },
+            { "id": "i2", "code": "zz", "url": "https://arbos.life/g/zz",
+              "created_at": 2, "expires_at": 3, "uses_left": 0, "usable": false },
+        ]});
+        let list = group_invites_of(&v);
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].id, "i1");
+        assert_eq!(list[0].uses_left, Some(1));
+        assert!(list[0].usable);
+        assert!(!list[1].usable);
+        assert!(group_invites_of(&json!({})).is_empty());
+    }
+}
+
+#[cfg(test)]
 mod generate_failure_tests {
     //! Jacob, 2026-10-26: the picker shows one short sentence, the raw words only as detail.
     use super::*;

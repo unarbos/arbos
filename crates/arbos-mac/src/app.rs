@@ -13279,6 +13279,48 @@ impl OpenLink {
 }
 
 #[cfg(test)]
+mod open_link_tests {
+    use super::OpenLink;
+
+    #[test]
+    fn join_group_is_a_group_invite_and_join_stays_a_server_invite() {
+        assert_eq!(
+            OpenLink::parse("arbos://join-group/k3x9q2"),
+            Some(OpenLink::Group("k3x9q2".into()))
+        );
+        assert_eq!(
+            OpenLink::parse("arbos://join/abc123"),
+            Some(OpenLink::Server("abc123".into()))
+        );
+    }
+
+    #[test]
+    fn query_fragment_and_slashes_are_not_part_of_the_code() {
+        assert_eq!(
+            OpenLink::parse("arbos://join-group/k3x9q2/?src=site#top"),
+            Some(OpenLink::Group("k3x9q2".into()))
+        );
+        assert_eq!(
+            OpenLink::parse("arbos://join/abc123/"),
+            Some(OpenLink::Server("abc123".into()))
+        );
+    }
+
+    #[test]
+    fn empty_codes_and_other_urls_open_nothing() {
+        for url in [
+            "arbos://join-group/",
+            "arbos://join/",
+            "arbos://join-group/?x=1",
+            "arbos://auth/callback?code=1",
+            "https://arbos.life/g/k3x9q2",
+        ] {
+            assert_eq!(OpenLink::parse(url), None, "{url}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod unread_arrival_tests {
     use super::{arrival_read, ArrivalRead};
 
