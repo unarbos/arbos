@@ -1154,7 +1154,7 @@ final class AppModel: ObservableObject {
     /// Should a link change re-ask `/machine`? Only when the link has just come back and the
     /// machine is still showing the error nothing else will clear. Pure, so
     /// `MachineBannerTests` can pin it without a relay.
-    static func shouldReAskMachine(wasDown: Bool, now: LinkState, machineState: BoxState) -> Bool {
+    nonisolated static func shouldReAskMachine(wasDown: Bool, now: LinkState, machineState: BoxState) -> Bool {
         now == .live && wasDown && machineState == .error
     }
 
