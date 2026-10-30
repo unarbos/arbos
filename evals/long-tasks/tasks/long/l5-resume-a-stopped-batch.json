@@ -5,17 +5,17 @@
  "title": "Finish a batch job that stopped part-way, without redoing the work it already did",
  "turns": [
   {
-   "prompt": "A batch job stopped part-way last night. {D}/items.txt is the work list, {D}/done.txt is what finished, and {D}/work.sh does one item (pass the item as its argument). Finish the batch without redoing anything that is already done, then tell me how many items you had to run.",
-   "seed": "mkdir -p {D} && seq -f 'item-%02g' 1 20 > {D}/items.txt && head -8 {D}/items.txt > {D}/done.txt && cat > {D}/work.sh <<'EOF'\n#!/bin/sh\nd=$(dirname \"$0\")\n[ -n \"$1\" ] || { echo 'usage: work.sh <item>' >&2; exit 2; }\nsleep 1\nprintf '%s\\n' \"$1\" >> \"$d/done.txt\"\necho \"processed $1\"\nEOF\nchmod +x {D}/work.sh",
-   "verify": "f={D}/done.txt; test -f $f || { echo 'FAIL: done.txt is gone'; exit 0; }\ntotal=$(wc -l < $f); uniq_n=$(sort -u $f | wc -l); missing=$(comm -23 <(sort {D}/items.txt) <(sort -u $f) | tr '\\n' ' ')\ndup=$(sort $f | uniq -d | tr '\\n' ' ')\necho \"SHOW lines=$total unique=$uniq_n missing='$missing' duplicated='$dup'\"\nif [ \"$uniq_n\" = 20 ] && [ \"$total\" = 20 ] && [ -z \"$missing\" ]; then echo PASS; else echo \"FAIL: lines=$total unique=$uniq_n missing='$missing' duplicated='$dup'\"; fi",
-   "reply_regex": "\\b12\\b",
+   "prompt": "A batch job stopped part-way last night. {D}/items.txt is the work list, {D}/done.txt is what finished, and {D}/work.sh does one item (pass the item as its argument). Work out which items are still outstanding and run work.sh once for each of them, one at a time — do not ask me first and do not redo anything already in done.txt. Then tell me how many items you had to run.",
+   "seed": "mkdir -p {D} && seq -f 'item-%02g' 1 12 > {D}/items.txt && head -7 {D}/items.txt > {D}/done.txt && cat > {D}/work.sh <<'EOF'\n#!/bin/sh\nd=$(dirname \"$0\")\n[ -n \"$1\" ] || { echo 'usage: work.sh <item>' >&2; exit 2; }\nprintf '%s\\n' \"$1\" >> \"$d/done.txt\"\necho \"processed $1\"\nEOF\nchmod +x {D}/work.sh",
+   "verify": "f={D}/done.txt; test -f $f || { echo 'FAIL: done.txt is gone'; exit 0; }\ntotal=$(wc -l < $f); uniq_n=$(sort -u $f | wc -l)\nmissing=$(comm -23 <(sort {D}/items.txt) <(sort -u $f) | tr '\\n' ' ')\ndup=$(sort $f | uniq -d | tr '\\n' ' ')\necho \"SHOW lines=$total unique=$uniq_n missing='$missing' duplicated='$dup'\"\nif [ \"$uniq_n\" = 12 ] && [ \"$total\" = 12 ] && [ -z \"$missing\" ]; then echo PASS; else echo \"FAIL: lines=$total unique=$uniq_n missing='$missing' duplicated='$dup'\"; fi",
+   "reply_regex": "\\b5\\b|\\bfive\\b",
    "forbid_question": true,
-   "timeout_s": 600,
+   "timeout_s": 420,
    "rubric": {
-    "criteria": "Pass if all 20 items are done, the reply says 12 items had to be run, and nothing was processed twice. Fail if the count is wrong (20 means the whole list was redone, which work.sh records as duplicate lines in done.txt), if the agent asks which items to skip rather than reading done.txt, or if it claims completion without the file showing all 20.",
+    "criteria": "Pass if all 12 items are in done.txt, the reply says 5 items had to be run, and nothing was processed twice. Fail if the count is wrong (12 means the whole list was redone, which work.sh records as duplicate lines in done.txt), if the agent asks which items to skip rather than reading done.txt, or if it claims completion without the file showing all 12.",
     "min": 3
    }
   }
  ],
- "notes": "Added for run 16 (2026-10-30). Resuming interrupted work is the long-task shape this suite had no case for: l1 measures a long pipeline running to completion and l2-l4 measure length, but none measures reading a partial result and continuing from it. work.sh appends unconditionally, so redoing an item leaves a duplicate line and the programmatic check catches a redo that the reply's own count would hide. Twelve items at a second each keep it inside the window between the box's out-of-memory deaths (#2302), which is what makes l1 unmeasurable."
+ "notes": "Added for run 16 (2026-10-30). Resuming interrupted work is the long-task shape this suite had no case for: l1 measures a long pipeline running to completion and l2-l4 measure length, but none measures reading a partial result and continuing from it. work.sh appends unconditionally, so redoing an item leaves a duplicate line that the reply's own count would hide.\n\nFirst written with 20 items and 12 outstanding, which did not grade: the agent raised one approval card for the remaining work and this harness rejects every approval card by rule, so the batch could never finish and the task measured the approval gate rather than the resume. The reply was correct about what was outstanding. Now the prompt asks for one run per item and says not to ask, and the batch is small enough that the obvious route is a sequence of single calls."
 }
