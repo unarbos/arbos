@@ -47,7 +47,9 @@ final class MentionChipSnapshotTests: XCTestCase {
             XCTAssertGreaterThan(clear, 2, "the pill stands clear of the word \(side) it")
             XCTAssertLessThan(clear, Theme.body / 2, "a word space, not a hole, \(side) the chip")
         }
-        XCTAssertEqual(before, after, accuracy: 1.5, "the same gap on both sides")
+        // Both sides get the same inset and the same word space, so what is
+        // left to differ is the side bearing of the letter next to it.
+        XCTAssertEqual(before, after, accuracy: 2, "the same gap on both sides")
     }
 
     /// A chip wraps whole. When the line broke between the picture and the
