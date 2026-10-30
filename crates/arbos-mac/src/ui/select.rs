@@ -2448,6 +2448,7 @@ mod tests {
         selection: Entity<TextSelection>,
         mentions: Rc<Mentions>,
         text: SharedString,
+        width: f32,
     }
 
     impl gpui::Render for ChipLine {
@@ -2457,17 +2458,21 @@ mod tests {
             cx: &mut gpui::Context<Self>,
         ) -> impl gpui::IntoElement {
             use crate::ui::theme::{CHAT_BODY, CHAT_LINE_HEIGHT};
-            use gpui::{div, ParentElement as _, Styled as _};
+            use gpui::{div, InteractiveElement as _, ParentElement as _, Styled as _};
             let text = self.text.clone();
             let selectable = Selectable::new(&self.selection, Hsla::default(), cx)
                 .with_mentions(self.mentions.clone(), gpui::blue());
             let bubble = selectable.bubble("m1", text.clone());
             div()
-                .w(px(480.0))
+                .w(px(self.width))
                 .p(px(20.0))
                 .text_size(px(CHAT_BODY))
                 .line_height(px(CHAT_LINE_HEIGHT))
-                .child(bubble.text(0, text.clone(), vec![run(text.len())]))
+                .child(
+                    div()
+                        .debug_selector(|| "chip-line".into())
+                        .child(bubble.text(0, text.clone(), vec![run(text.len())])),
+                )
         }
     }
 
@@ -2487,6 +2492,7 @@ mod tests {
             selection: cx.new(TextSelection::new),
             mentions,
             text,
+            width: 480.0,
         });
         vcx.run_until_parked();
         // Every frame paints again; one copy of each is the snapshot.
@@ -2548,6 +2554,71 @@ mod tests {
                 disc.size.height <= px(mention::PICTURE),
                 "the disc is at most the picture size"
             );
+        }
+    }
+
+    /// The pills a bubble `width` wide paints (one copy each) and the text
+    /// column they have to stay inside.
+    fn painted_pills(
+        cx: &mut gpui::TestAppContext,
+        text: SharedString,
+        mentions: Rc<Mentions>,
+        width: f32,
+    ) -> (Vec<Bounds<Pixels>>, Bounds<Pixels>) {
+        PAINTED_CHIPS.with(|p| p.borrow_mut().clear());
+        let (_view, vcx) = cx.add_window_view(|_, cx| ChipLine {
+            selection: cx.new(TextSelection::new),
+            mentions,
+            text,
+            width,
+        });
+        vcx.run_until_parked();
+        let mut out: Vec<Bounds<Pixels>> = Vec::new();
+        for p in PAINTED_CHIPS.with(|p| p.borrow().clone()) {
+            if let PaintedChip::Pill { bounds, .. } = p {
+                if !out.contains(&bounds) {
+                    out.push(bounds);
+                }
+            }
+        }
+        (out, vcx.debug_bounds("chip-line").expect("text drawn"))
+    }
+
+    /// Scout, 2026-10-30: the spacing has to hold through a soft wrap, and the
+    /// [`mention::PAD`] cells are what make it hold. Because the inset is part
+    /// of the chip's own run, the pill never reaches past the run — so a chip
+    /// at the start of a wrapped line begins at the text margin with its inset
+    /// inside it, and one at the end of a line stops at the margin.
+    ///
+    /// Before the fix the pill was painted `PILL_PAD_X` outside the run at each
+    /// end, so either of those chips hung into the margin: the stray gap in the
+    /// report. Swept over every bubble width, no pill may leave the column.
+    #[gpui::test]
+    fn no_pill_hangs_into_the_margin_at_any_wrap_width(cx: &mut gpui::TestAppContext) {
+        use std::cell::RefCell;
+        let opened = Rc::new(RefCell::new(Vec::new()));
+        let mentions = chip_table(&opened);
+        let plain = "@comms one two @comms three four @comms five six @comms";
+        let text: SharedString = mentions.display(plain).into();
+        assert_eq!(mentions.find(&text).len(), 4, "four chips to wrap");
+        for step in 0..60 {
+            let width = 200.0 + step as f32 * 8.0;
+            let (pills, column) = painted_pills(cx, text.clone(), mentions.clone(), width);
+            assert!(!pills.is_empty(), "width {width}: chips painted");
+            for pill in pills {
+                assert!(
+                    f32::from(pill.left() - column.left()) > -0.01,
+                    "width {width}: a pill starts {:?} before the column at {:?}",
+                    column.left() - pill.left(),
+                    column.left()
+                );
+                assert!(
+                    f32::from(column.right() - pill.right()) > -0.01,
+                    "width {width}: a pill ends {:?} past the column at {:?}",
+                    pill.right() - column.right(),
+                    column.right()
+                );
+            }
         }
     }
 
