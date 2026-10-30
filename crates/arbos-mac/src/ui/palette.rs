@@ -399,18 +399,9 @@ fn row(
                 .flex_col()
                 .gap(px(1.0))
                 .child(
-                    // A title over a subtitle ("@handle") lifts an emoji-only
-                    // name onto the baseline; a lone title stays centred.
-                    if entry.subtitle.is_empty() {
-                        div()
-                            .text_size(px(TITLE_FONT))
-                            .truncate()
-                            .child(entry.title.clone())
-                    } else {
-                        identity::name(entry.title.clone(), TITLE_FONT)
-                    }
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.text),
+                    identity::name(entry.title.clone(), TITLE_FONT)
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text),
                 )
                 .when(!entry.subtitle.is_empty(), |el| {
                     el.child(

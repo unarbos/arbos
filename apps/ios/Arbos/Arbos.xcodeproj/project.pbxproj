@@ -40,7 +40,6 @@
 		A11149E871067930CB116885 /* CallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1686D5A87F44B94E76A8761 /* CallView.swift */; };
 		A17FC3E175B29A6CC8654F7C /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D946C1D0D3D6797F9935E9 /* ChatView.swift */; };
 		A1C1E00000000000000000A2 /* PresenceRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C1E00000000000000000A1 /* PresenceRow.swift */; };
-		A1E3C0DE0000000000000002 /* EmojiName.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E3C0DE0000000000000001 /* EmojiName.swift */; };
 		A1B7A11E00000000000000A2 /* WorkingSpinner.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B7A11E00000000000000A1 /* WorkingSpinner.swift */; };
 		A1B7A11E00000000000000B2 /* WorkingSpinnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B7A11E00000000000000B1 /* WorkingSpinnerTests.swift */; };
 		A1B7A11E00000000000000C2 /* StatusMarks.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B7A11E00000000000000C1 /* StatusMarks.swift */; };
@@ -185,7 +184,6 @@
 		A1CD0000000000000000D041 /* ChatDensityMetricsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CD0000000000000000D040 /* ChatDensityMetricsTests.swift */; };
 		A1C4A0C0000000000000E002 /* ReactionChipAnchorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C4A0C0000000000000E001 /* ReactionChipAnchorTests.swift */; };
 		A1CD0000000000000000D061 /* GroupedMessagesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CD0000000000000000D060 /* GroupedMessagesTests.swift */; };
-		A1E3C0DE0000000000000004 /* EmojiNameTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E3C0DE0000000000000003 /* EmojiNameTests.swift */; };
 		A15C0000000000000000000B /* SessionRoomTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15C0000000000000000000A /* SessionRoomTests.swift */; };
 		A15C00000000000000000004 /* ArbosFFI in Frameworks */ = {isa = PBXBuildFile; productRef = A15C00000000000000000002 /* ArbosFFI */; };
 		A15C00000000000000000005 /* ArbosFFI in Frameworks */ = {isa = PBXBuildFile; productRef = A15C00000000000000000003 /* ArbosFFI */; };
@@ -286,7 +284,6 @@
 		A1686D5A87F44B94E76A8761 /* CallView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallView.swift; sourceTree = "<group>"; };
 		A1D946C1D0D3D6797F9935E9 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
 		A1C1E00000000000000000A1 /* PresenceRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PresenceRow.swift; sourceTree = "<group>"; };
-		A1E3C0DE0000000000000001 /* EmojiName.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmojiName.swift; sourceTree = "<group>"; };
 		A1B7A11E00000000000000A1 /* WorkingSpinner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkingSpinner.swift; sourceTree = "<group>"; };
 		A1B7A11E00000000000000B1 /* WorkingSpinnerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkingSpinnerTests.swift; sourceTree = "<group>"; };
 		A1B7A11E00000000000000C1 /* StatusMarks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusMarks.swift; sourceTree = "<group>"; };
@@ -431,7 +428,6 @@
 		A1CD0000000000000000D040 /* ChatDensityMetricsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatDensityMetricsTests.swift; sourceTree = "<group>"; };
 		A1C4A0C0000000000000E001 /* ReactionChipAnchorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReactionChipAnchorTests.swift; sourceTree = "<group>"; };
 		A1CD0000000000000000D060 /* GroupedMessagesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GroupedMessagesTests.swift; sourceTree = "<group>"; };
-		A1E3C0DE0000000000000003 /* EmojiNameTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmojiNameTests.swift; sourceTree = "<group>"; };
 		A15C0000000000000000000A /* SessionRoomTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRoomTests.swift; sourceTree = "<group>"; };
 		A15C00000000000000000001 /* ArbosFFI */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = ArbosFFI; path = ../../../packages/ArbosFFI; sourceTree = SOURCE_ROOT; };
 		A1B5EA00000000000000A001 /* GlobalSearch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobalSearch.swift; sourceTree = "<group>"; };
@@ -640,7 +636,6 @@
 				A1D8800000000000000000D1,
 				A1D8800000000000000000A7 /* AvatarPickerSheet.swift */,
 				A1C1E00000000000000000A1 /* PresenceRow.swift */,
-				A1E3C0DE0000000000000001 /* EmojiName.swift */,
 				A1B7A11E00000000000000A1 /* WorkingSpinner.swift */,
 				A1B7A11E00000000000000C1 /* StatusMarks.swift */,
 				A1DE700000000000000000B1 /* MentionChips.swift */,
@@ -702,7 +697,6 @@
 				A1CD0000000000000000D040 /* ChatDensityMetricsTests.swift */,
 				A1C4A0C0000000000000E001 /* ReactionChipAnchorTests.swift */,
 				A1CD0000000000000000D060 /* GroupedMessagesTests.swift */,
-				A1E3C0DE0000000000000003 /* EmojiNameTests.swift */,
 				A1C0B10000000000000000B1 /* MessagePasteboardTests.swift */,
 				A11B0000000000000000A003 /* LibraryListTests.swift */,
 				A1AC0E00000000000000A003 /* MachineMetricsTests.swift */,
@@ -1013,7 +1007,6 @@
 				A11149E871067930CB116885 /* CallView.swift in Sources */,
 				A17FC3E175B29A6CC8654F7C /* ChatView.swift in Sources */,
 				A1C1E00000000000000000A2 /* PresenceRow.swift in Sources */,
-				A1E3C0DE0000000000000002 /* EmojiName.swift in Sources */,
 				A1B7A11E00000000000000A2 /* WorkingSpinner.swift in Sources */,
 				A1B7A11E00000000000000C2 /* StatusMarks.swift in Sources */,
 				A10A6AAB1A89692C252B33E4 /* FeedbackSheet.swift in Sources */,
@@ -1088,7 +1081,6 @@
 				A1CD0000000000000000D041 /* ChatDensityMetricsTests.swift in Sources */,
 				A1C4A0C0000000000000E002 /* ReactionChipAnchorTests.swift in Sources */,
 				A1CD0000000000000000D061 /* GroupedMessagesTests.swift in Sources */,
-				A1E3C0DE0000000000000004 /* EmojiNameTests.swift in Sources */,
 				A1C0B10000000000000000B2 /* MessagePasteboardTests.swift in Sources */,
 				A11B0000000000000000A004 /* LibraryListTests.swift in Sources */,
 				A1AC0E00000000000000A004 /* MachineMetricsTests.swift in Sources */,
