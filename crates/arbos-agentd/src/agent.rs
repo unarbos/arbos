@@ -9361,7 +9361,7 @@ pub(crate) fn finished_jobs_note(jobs: &[(crate::store::JobRow, String)]) -> Str
         return String::new();
     }
     let mut s = String::from(
-        "[Jobs of this chat that already finished — the user has not been told the results yet. Give each result in this turn with send_message (reply_to = the message that asked for it), once, whatever else the user asks; never say the job is still running:]\n",
+        "[Jobs of this chat that already finished — the user has not been told the results yet. Tell each result in this turn, once: as the answer when the user asks about that job, else alongside your answer to what they asked. Never say the job is still running:]\n",
     );
     for (j, out) in jobs {
         let out = crate::truncate::clip_marked(out.trim(), 1500, "", None);
@@ -11338,7 +11338,7 @@ mod tests {
             "{note}"
         );
         assert!(
-            note.contains("never say the job is still running"),
+            note.contains("Never say the job is still running"),
             "{note}"
         );
         assert!(
