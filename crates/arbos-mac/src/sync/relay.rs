@@ -61,8 +61,8 @@ use crate::model::{
     CallEnded, CallLeft, CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView,
     ChartBody, Chat, Effort, GifItem, GifPage, Id, Link, LinkState, Machine, MachineState,
     MediaPick, Message, Part, Person, Project, ProjectDocView, ProjectSecrets, Reachable, ReplyRef,
-    Role, Routine, RoutineRun, Sender, ServerInfo, StickerPack, ThreadInfo, STICKER_KEY_PREFIX,
-    URL_KEY_PREFIX,
+    Role, Routine, RoutineRun, Sender, ServerInfo, ServerInviteLink, StickerPack, ThreadInfo,
+    STICKER_KEY_PREFIX, URL_KEY_PREFIX,
 };
 use crate::update;
 
@@ -1873,6 +1873,34 @@ fn invite_code(input: &str) -> String {
             .to_string(),
         None => trimmed.rsplit('/').next().unwrap_or(trimmed).to_string(),
     }
+}
+
+/// The code from a group invite: a bare code, an `…/g/{code}` link or `arbos://join-group/{code}`.
+fn group_invite_code(input: &str) -> String {
+    let trimmed = input.trim().trim_end_matches('/');
+    let tail = ["/g/", "join-group/"]
+        .iter()
+        .find_map(|sep| trimmed.rsplit_once(sep).map(|(_, code)| code))
+        .unwrap_or(trimmed);
+    tail.split(['?', '#'])
+        .next()
+        .unwrap_or_default()
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// `{"invites": [...]}` from `GET /chats/{id}/invites`; a row that does not decode is skipped.
+fn group_invites_of(v: &Value) -> Vec<ServerInviteLink> {
+    v.get("invites")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(|i| serde_json::from_value(i.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn matrix_client(shared: &Arc<Shared>) -> Option<Arc<MatrixClient>> {
@@ -5802,6 +5830,80 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 let _ = refresh_registry(&shared).await;
             });
         }
+        ClientCommand::GroupInvitesLoad { chat_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                match shared.get_json(&format!("/chats/{chat_id}/invites")).await {
+                    Ok(v) => {
+                        let invites = group_invites_of(&v);
+                        let _ = shared
+                            .events
+                            .send(SyncEvent::GroupInvites { chat_id, invites });
+                    }
+                    Err(err) => shared.diagnostic("group-invites", format!("{err:#}")),
+                }
+            });
+        }
+        ClientCommand::GroupInviteCreate {
+            chat_id,
+            expires,
+            max_uses,
+        } => {
+            let shared = shared.clone();
+            let body = json!({ "expires": expires, "max_uses": max_uses });
+            tokio::spawn(async move {
+                let path = format!("/chats/{chat_id}/invites");
+                let made = shared.post_json(&path, body).await.and_then(|v| {
+                    serde_json::from_value::<ServerInviteLink>(v).context("bad invite JSON")
+                });
+                match made {
+                    Ok(invite) => {
+                        let _ = shared
+                            .events
+                            .send(SyncEvent::GroupInviteCreated { chat_id, invite });
+                    }
+                    Err(err) => shared.fail("make the invite link", &err),
+                }
+            });
+        }
+        ClientCommand::GroupInviteRevoke { chat_id, invite_id } => {
+            let shared = shared.clone();
+            let path = format!("/chats/{chat_id}/invites/{invite_id}");
+            tokio::spawn(async move {
+                if let Err(err) = shared.delete(&path).await {
+                    shared.fail("revoke the invite link", &err);
+                }
+                if let Ok(v) = shared.get_json(&format!("/chats/{chat_id}/invites")).await {
+                    let invites = group_invites_of(&v);
+                    let _ = shared
+                        .events
+                        .send(SyncEvent::GroupInvites { chat_id, invites });
+                }
+            });
+        }
+        ClientCommand::GroupJoin { code } => {
+            let shared = shared.clone();
+            let code = group_invite_code(&code);
+            tokio::spawn(async move {
+                let joined = shared
+                    .post_json("/chats/join", json!({ "code": code }))
+                    .await
+                    .and_then(|v| {
+                        serde_json::from_value::<PeopleChatDto>(v)
+                            .map(|dto| dto.id)
+                            .context("bad chat JSON")
+                    });
+                match joined {
+                    Ok(chat_id) => {
+                        if let Err(err) = refresh_registry(&shared).await {
+                            shared.diagnostic("refresh", format!("{err:#}"));
+                        }
+                        let _ = shared.events.send(SyncEvent::GroupJoined { chat_id });
+                    }
+                    Err(err) => shared.fail("join the group", &err),
+                }
+            });
+        }
         ClientCommand::StartCall { chat_id, kind } => {
             let shared = shared.clone();
             tokio::spawn(async move {
@@ -9474,6 +9576,46 @@ fn hostname() -> String {
 impl Drop for Room {
     fn drop(&mut self) {
         self.task.abort();
+    }
+}
+
+#[cfg(test)]
+mod group_invite_tests {
+    use super::{group_invite_code, group_invites_of};
+    use serde_json::json;
+
+    #[test]
+    fn the_code_comes_out_of_every_shape_of_link() {
+        for input in [
+            "k3x9q2",
+            " k3x9q2 ",
+            "https://arbos.life/g/k3x9q2",
+            "https://arbos.life/g/k3x9q2/",
+            "https://relay.example/g/k3x9q2?utm=x",
+            "arbos://join-group/k3x9q2",
+            "join-group/k3x9q2#frag",
+        ] {
+            assert_eq!(group_invite_code(input), "k3x9q2", "{input}");
+        }
+    }
+
+    #[test]
+    fn the_relays_list_decodes_and_a_bad_row_is_skipped() {
+        let v = json!({ "invites": [
+            { "id": "i1", "code": "k3x9q2", "url": "https://arbos.life/g/k3x9q2",
+              "chat_id": "g1", "created_by": "gh_1", "created_at": 1,
+              "expires_at": null, "uses_left": 1, "usable": true },
+            { "id": 7 },
+            { "id": "i2", "code": "zz", "url": "https://arbos.life/g/zz",
+              "created_at": 2, "expires_at": 3, "uses_left": 0, "usable": false },
+        ]});
+        let list = group_invites_of(&v);
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].id, "i1");
+        assert_eq!(list[0].uses_left, Some(1));
+        assert!(list[0].usable);
+        assert!(!list[1].usable);
+        assert!(group_invites_of(&json!({})).is_empty());
     }
 }
 

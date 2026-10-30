@@ -39,8 +39,8 @@ use crate::model::{
     Id, Job, JobRollout, JobState, Link, LocalDevice, LocalView, Message, MessageStatus, Part,
     Project, QuestionState, Role, RolloutEntry, RolloutKind, RolloutParent, Routine, RoutineRun,
     RoutineRunStatus, RoutineTrigger, Secret, SecretActivity, SecretAgent, SecretDirector,
-    SecretRequest, SecretScope, SecretsView, ServerChannel, ServerInfo, Skill, StatusKind,
-    ToolCall, ToolStatus, TurnKind, Widget,
+    SecretRequest, SecretScope, SecretsView, ServerChannel, ServerInfo, ServerInviteLink, Skill,
+    StatusKind, ToolCall, ToolStatus, TurnKind, Widget,
 };
 
 pub const STREAM_FRAME_MS: u64 = arbos_core::STREAM_COMMIT_MS;
@@ -106,6 +106,8 @@ struct Shared {
     jobs: Mutex<Vec<FixtureJob>>,
     /// My sidebar pins (row keys, top first) — the relay's `/me/pins` stand-in.
     pins: Mutex<Vec<String>>,
+    /// People groups' invite links (`/chats/{id}/invites` stand-in), newest first.
+    group_invites: Mutex<HashMap<Id, Vec<ServerInviteLink>>>,
 }
 
 /// One seeded job: the relay's row plus when it started (elapsed grows live)
@@ -163,6 +165,7 @@ impl SyncSource for FixtureSource {
                 blocked: Mutex::new(Vec::new()),
                 jobs: Mutex::new(Vec::new()),
                 pins: Mutex::new(Vec::new()),
+                group_invites: Mutex::new(HashMap::new()),
                 machine: Mutex::new(Machine {
                     // `ARBOS_FIXTURE_MACHINE=error|waking` seeds a banner state (screenshot rig).
                     state: match std::env::var("ARBOS_FIXTURE_MACHINE").as_deref() {
@@ -1172,6 +1175,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::RemoveMember { .. }
         | ClientCommand::SetMemberRole { .. }
         | ClientCommand::LeaveChat { .. }
+        | ClientCommand::GroupInvitesLoad { .. }
+        | ClientCommand::GroupInviteCreate { .. }
+        | ClientCommand::GroupInviteRevoke { .. }
+        | ClientCommand::GroupJoin { .. }
         | ClientCommand::BlockUser { .. }
         | ClientCommand::UnblockUser { .. }
         | ClientCommand::InviteToProject { .. }
@@ -7756,6 +7763,20 @@ fn no_such_user(verb: &str, handle: &str) -> UserError {
     )
 }
 
+fn emit_group_invites(shared: &Arc<Shared>, chat_id: &Id) {
+    let invites = shared
+        .group_invites
+        .lock()
+        .unwrap()
+        .get(chat_id)
+        .cloned()
+        .unwrap_or_default();
+    let _ = shared.events.send(SyncEvent::GroupInvites {
+        chat_id: chat_id.clone(),
+        invites,
+    });
+}
+
 fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
     match cmd {
         ClientCommand::SearchPeople { query } => {
@@ -8109,6 +8130,58 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                 .retain(|c| c.project_id != *chat_id);
             emit_projects(shared);
             emit_chats(shared);
+            true
+        }
+        ClientCommand::GroupInvitesLoad { chat_id } => {
+            emit_group_invites(shared, chat_id);
+            true
+        }
+        ClientCommand::GroupInviteCreate {
+            chat_id,
+            expires,
+            max_uses,
+        } => {
+            let now = now_ms() as i64;
+            let id = new_id();
+            let code: String = id.chars().rev().take(10).collect::<String>().to_lowercase();
+            let invite = ServerInviteLink {
+                id,
+                url: format!("https://arbos.life/g/{code}"),
+                code,
+                created_at: now,
+                expires_at: expires.then_some(now + 7 * 86_400_000),
+                uses_left: *max_uses,
+                usable: true,
+            };
+            shared
+                .group_invites
+                .lock()
+                .unwrap()
+                .entry(chat_id.clone())
+                .or_default()
+                .insert(0, invite.clone());
+            let _ = shared.events.send(SyncEvent::GroupInviteCreated {
+                chat_id: chat_id.clone(),
+                invite,
+            });
+            true
+        }
+        ClientCommand::GroupInviteRevoke { chat_id, invite_id } => {
+            if let Some(list) = shared.group_invites.lock().unwrap().get_mut(chat_id) {
+                list.retain(|i| i.id != *invite_id);
+            }
+            emit_group_invites(shared, chat_id);
+            true
+        }
+        // No other people's groups offline: a link always reads as spent.
+        ClientCommand::GroupJoin { .. } => {
+            let _ = shared.events.send(SyncEvent::Failure {
+                error: UserError::from_text(
+                    "join the group",
+                    "That invite link is not valid any more.",
+                ),
+                retry: None,
+            });
             true
         }
         ClientCommand::BlockUser { handle } => {

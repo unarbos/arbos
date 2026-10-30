@@ -27,7 +27,7 @@ use crate::model::{
     JobRollout, Link, LinkState, LocalView, Machine, MediaPick, Message, MessageBody,
     MessageStatus, NewSecret, Part, Project, ProjectDocView, ProjectSecrets, QuestionState,
     ReplyRef, Role, Routine, RoutineRun, RoutineTrigger, SecretDirector, SecretScope, SecretsView,
-    ServerInfo, Skill, StatusKind, StickerPack,
+    ServerInfo, ServerInviteLink, Skill, StatusKind, StickerPack,
 };
 use crate::palette;
 use crate::search;
@@ -720,6 +720,14 @@ pub struct AppState {
     pub add_members_secret: Option<Id>,
     /// An invite code handed over by `arbos://join/<code>`; the shell puts it in the Join sheet.
     pub pending_join_code: Option<String>,
+    /// People groups' invite links (`GET /chats/{id}/invites`), newest first; loaded when the
+    /// group's pane opens and kept current after New invite link / ✕.
+    pub group_invites: HashMap<Id, Vec<ServerInviteLink>>,
+    /// Members › Copy invite link asked for a link this group did not have yet: the new one
+    /// is copied as soon as the relay mints it.
+    pub group_invite_copy_pending: Option<Id>,
+    /// A link ready to copy; the shell takes it on its next frame.
+    pub group_invite_to_copy: Option<String>,
     /// Avatar reply reaction window per project (ms): plays once after a turn.
     pub avatar_reply_until: HashMap<Id, u64>,
     /// Avatar picker open for this project.
@@ -1277,6 +1285,9 @@ impl AppState {
             add_members_server: None,
             add_members_secret: None,
             pending_join_code: None,
+            group_invites: HashMap::new(),
+            group_invite_copy_pending: None,
+            group_invite_to_copy: None,
             avatar_reply_until: HashMap::new(),
             avatar_picker: None,
             profile_from_name: false,
@@ -2045,6 +2056,26 @@ impl AppState {
                 self.awaiting_group = None;
                 cx.notify();
             }
+            SyncEvent::GroupInvites { chat_id, invites } => {
+                self.group_invites.insert(chat_id, invites);
+                cx.notify();
+            }
+            SyncEvent::GroupInviteCreated { chat_id, invite } => {
+                if self.group_invite_copy_pending.as_ref() == Some(&chat_id) {
+                    self.group_invite_copy_pending = None;
+                    self.group_invite_to_copy = Some(invite.url.clone());
+                }
+                let list = self.group_invites.entry(chat_id).or_default();
+                list.retain(|i| i.id != invite.id);
+                list.insert(0, invite);
+                cx.notify();
+            }
+            SyncEvent::GroupJoined { chat_id } => {
+                if self.project(&chat_id).is_some() {
+                    self.select_project(chat_id, cx);
+                }
+                cx.notify();
+            }
             SyncEvent::PeopleGroupCreated { chat_id } => {
                 // Comes after the Projects event that lists the group, so the
                 // sidebar row exists; a stale id (list not refreshed) is left to
@@ -2282,6 +2313,9 @@ impl AppState {
                 // Create failed: stop waiting for a project that will not arrive.
                 if error.verb == "create the agent" {
                     self.awaiting_new_project = false;
+                }
+                if error.verb == "make the invite link" {
+                    self.group_invite_copy_pending = None;
                 }
                 let claimed = self
                     .failure_claim
@@ -5420,6 +5454,72 @@ impl AppState {
         cx.notify();
     }
 
+    /// `arbos://join-group/<code>` (what `arbos.life/g/<code>` hands to the app): join the people
+    /// group and open it, as the iPhone does.
+    pub fn join_group_link(&mut self, code: String, cx: &mut Context<Self>) {
+        let code = code.trim().trim_matches('/').to_string();
+        if code.is_empty() {
+            return;
+        }
+        self.command(ClientCommand::GroupJoin { code });
+        cx.notify();
+    }
+
+    /// Group pane › Invite links › "New invite link" (any member of a people group).
+    pub fn create_group_invite(
+        &mut self,
+        chat_id: Id,
+        expires: bool,
+        single_use: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.command(ClientCommand::GroupInviteCreate {
+            chat_id,
+            expires,
+            max_uses: single_use.then_some(1),
+        });
+        cx.notify();
+    }
+
+    /// Group pane › Invite links › ✕: the link stops working at once.
+    pub fn revoke_group_invite(&mut self, chat_id: Id, invite_id: Id, cx: &mut Context<Self>) {
+        if let Some(list) = self.group_invites.get_mut(&chat_id) {
+            list.retain(|i| i.id != invite_id);
+        }
+        self.command(ClientCommand::GroupInviteRevoke { chat_id, invite_id });
+        cx.notify();
+    }
+
+    /// Group pane › Members › "Copy invite link": a usable link is copied at once; with none,
+    /// one is minted with the pane's two options and copied when it arrives.
+    pub fn copy_group_invite(
+        &mut self,
+        chat_id: Id,
+        expires: bool,
+        single_use: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(url) = self.usable_group_invite(&chat_id) {
+            self.group_invite_to_copy = Some(url);
+            cx.notify();
+            return;
+        }
+        if self.group_invite_copy_pending.as_ref() == Some(&chat_id) {
+            return;
+        }
+        self.group_invite_copy_pending = Some(chat_id.clone());
+        self.create_group_invite(chat_id, expires, single_use, cx);
+    }
+
+    /// The newest link of this group that still lets someone in.
+    pub fn usable_group_invite(&self, chat_id: &str) -> Option<String> {
+        self.group_invites
+            .get(chat_id)?
+            .iter()
+            .find(|i| i.usable && !i.url.is_empty())
+            .map(|i| i.url.clone())
+    }
+
     /// `arbos://join/<code>` (the site's invite page): the Join sheet opens with the code.
     pub fn open_join_link(&mut self, code: String, cx: &mut Context<Self>) {
         if code.is_empty() {
@@ -7565,6 +7665,16 @@ impl AppState {
             self.command(ClientCommand::ShellGrantsRefresh {
                 project_id: project_id.clone(),
             });
+        }
+        if let ProfilePage::Group { space_id } = &page {
+            if self
+                .project(space_id)
+                .is_some_and(|p| p.kind == SpaceKind::Group)
+            {
+                self.command(ClientCommand::GroupInvitesLoad {
+                    chat_id: space_id.clone(),
+                });
+            }
         }
         if let ProfilePage::Server { server_id } | ProfilePage::Channel { server_id, .. } = &page {
             // Members only come with the detail route.
@@ -13134,6 +13244,79 @@ pub(crate) fn people_sheet_results(
     filter(pool, &normalize_query(query), |p| {
         Fields::new(p.display_name(), p.handle.clone())
     })
+}
+
+/// An invite link the platform handed over (`on_open_urls`), parsed once so a cold start can
+/// hold it until the state exists.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OpenLink {
+    /// `arbos://join/<code>`: a server invite, opened in the Join sheet.
+    Server(String),
+    /// `arbos://join-group/<code>`: a people-group invite, joined and opened.
+    Group(String),
+}
+
+impl OpenLink {
+    pub fn parse(url: &str) -> Option<Self> {
+        let (make, code): (fn(String) -> Self, &str) =
+            if let Some(code) = url.strip_prefix("arbos://join-group/") {
+                (Self::Group, code)
+            } else {
+                (Self::Server, url.strip_prefix("arbos://join/")?)
+            };
+        let code = code.split(['?', '#']).next().unwrap_or_default();
+        let code = code.trim_matches('/');
+        (!code.is_empty()).then(|| make(code.to_string()))
+    }
+
+    pub fn open(self, state: &mut AppState, cx: &mut Context<AppState>) {
+        match self {
+            Self::Server(code) => state.open_join_link(code, cx),
+            Self::Group(code) => state.join_group_link(code, cx),
+        }
+    }
+}
+
+#[cfg(test)]
+mod open_link_tests {
+    use super::OpenLink;
+
+    #[test]
+    fn join_group_is_a_group_invite_and_join_stays_a_server_invite() {
+        assert_eq!(
+            OpenLink::parse("arbos://join-group/k3x9q2"),
+            Some(OpenLink::Group("k3x9q2".into()))
+        );
+        assert_eq!(
+            OpenLink::parse("arbos://join/abc123"),
+            Some(OpenLink::Server("abc123".into()))
+        );
+    }
+
+    #[test]
+    fn query_fragment_and_slashes_are_not_part_of_the_code() {
+        assert_eq!(
+            OpenLink::parse("arbos://join-group/k3x9q2/?src=site#top"),
+            Some(OpenLink::Group("k3x9q2".into()))
+        );
+        assert_eq!(
+            OpenLink::parse("arbos://join/abc123/"),
+            Some(OpenLink::Server("abc123".into()))
+        );
+    }
+
+    #[test]
+    fn empty_codes_and_other_urls_open_nothing() {
+        for url in [
+            "arbos://join-group/",
+            "arbos://join/",
+            "arbos://join-group/?x=1",
+            "arbos://auth/callback?code=1",
+            "https://arbos.life/g/k3x9q2",
+        ] {
+            assert_eq!(OpenLink::parse(url), None, "{url}");
+        }
+    }
 }
 
 #[cfg(test)]
