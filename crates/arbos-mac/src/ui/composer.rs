@@ -214,10 +214,7 @@ pub enum ComposerEvent {
         mentions: Vec<String>,
     },
     /// Save an in-place edit of an own message (no new bubble).
-    Edit {
-        message_id: String,
-        text: String,
-    },
+    Edit { message_id: String, text: String },
 }
 
 struct Layout {
