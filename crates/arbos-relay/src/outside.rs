@@ -745,6 +745,16 @@ fn slot_of(chat: &ChatRef) -> String {
     }
 }
 
+/// The `blob` key of an attachment the relay stores no copy of: it names the part in its chat
+/// so [`file`] can read the document, find the part and proxy its provider URL. Not a slash in
+/// sight — `GET /asp/files/{slot}/{key}` matches one path segment.
+fn hosted_key(chat_id: &str, message_id: &str, part_id: &str) -> String {
+    format!("{HOSTED_KEY_PREFIX}{chat_id}:{message_id}:{part_id}")
+}
+
+/// Marks a [`hosted_key`]. No stored blob key begins with it: those are `att-<id>-<name>`.
+const HOSTED_KEY_PREFIX: &str = "hosted:";
+
 /// `attachments[]` of one row for the agent: every attachment part (pictures, files, GIFs and
 /// the PNG fallback of a chart part), `blob` = `<slot>/<key>` for `GET /asp/files/{slot}/{key}`.
 pub fn attachments_of(row: &arbos_core::doc::MessageView, chat: &ChatRef) -> Vec<Value> {
@@ -755,7 +765,18 @@ pub fn attachments_of(row: &arbos_core::doc::MessageView, chat: &ChatRef) -> Vec
         .filter(|p| p["kind"] == "attachment")
         .filter_map(|p| {
             let a = p.get("attachment")?;
-            let key = a["ref"].as_str().filter(|r| !r.is_empty())?;
+            // A picked GIF (ARB-544) lives with its provider and has no `ref`: the relay
+            // keeps no copy, so its `blob` names the part instead of a stored key and
+            // `GET /asp/files` resolves it back to the provider URL and proxies the bytes.
+            // Dropping these was why Jacob's GIF read as `attachments: []`
+            // ([feedback gif-send-and-playback-2026-10-30]).
+            let key = match a["ref"].as_str().filter(|r| !r.is_empty()) {
+                Some(key) => key.to_owned(),
+                None => {
+                    a["url"].as_str().filter(|u| !u.is_empty())?;
+                    hosted_key(&chat.chat_id, &row.id, p["id"].as_str()?)
+                }
+            };
             let mime = a["mime"].as_str().unwrap_or("application/octet-stream");
             // The app's tag (image, video, audio, pdf, doc, sheet, slides, file) when it set
             // one, else from the mime; a GIF is always "gif" so a bot can tell it apart.
@@ -2149,8 +2170,63 @@ fn slot_allowed(state: &AppState, project: &Project, slot: &str) -> bool {
     }
 }
 
+/// The provider URL a [`hosted_key`] stands for: the chat it names must be one of this agent's,
+/// and the part it names must still carry a URL the pass-through will relay. The `Err` is the
+/// status to answer with.
+fn hosted_url(state: &AppState, project: &Project, key: &str) -> Result<String, StatusCode> {
+    let rest = key.trim_start_matches(HOSTED_KEY_PREFIX);
+    let mut parts = rest.splitn(3, ':');
+    let (Some(chat_id), Some(message_id), Some(part_id)) =
+        (parts.next(), parts.next(), parts.next())
+    else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    let Some(chat) = chat_json_for(state, project, chat_id) else {
+        return Err(StatusCode::FORBIDDEN);
+    };
+    let doc = match crate::matrix::backfill::load_doc(state, chat_id, chat["project_id"].as_str()) {
+        Ok(Some(doc)) => doc,
+        Ok(None) => return Err(StatusCode::NOT_FOUND),
+        Err(e) => {
+            tracing::warn!("hosted file {key}: {e}");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+    doc.messages()
+        .iter()
+        .find(|m| m.id == message_id)
+        .and_then(|m| {
+            m.parts.iter().find_map(|p| {
+                (p["id"].as_str() == Some(part_id) && p["kind"] == "attachment")
+                    .then(|| p["attachment"]["url"].as_str())
+                    .flatten()
+                    .map(str::to_owned)
+            })
+        })
+        .filter(|u| crate::gifs::media_url_allowed(u))
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+/// The bytes a [`hosted_key`] stands for, streamed from the provider. Nothing is stored on the
+/// way through — that is the whole point of the key.
+async fn hosted_file(state: &AppState, project: &Project, key: &str) -> Response {
+    match hosted_url(state, project, key) {
+        Ok(url) => crate::gifs::relay_media(&url).await,
+        Err(StatusCode::FORBIDDEN) => api_error(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "not a file of this agent's chats",
+        ),
+        Err(StatusCode::INTERNAL_SERVER_ERROR) => {
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", "chat unreadable")
+        }
+        Err(_) => api_error(StatusCode::NOT_FOUND, "no_file", "no such file"),
+    }
+}
+
 /// `GET /asp/files/{slot}/{key}` — the bytes of a picture / file / GIF / chart PNG named in an
 /// event's `attachments[].blob`, for agents with `files.read`; only blobs of the agent's chats.
+/// A picked GIF has no stored copy: its bytes come through the provider pass-through.
 pub async fn file(
     State(state): State<AppState>,
     me: AgentPrincipal,
@@ -2166,6 +2242,12 @@ pub async fn file(
             "forbidden",
             "not a file of this agent's chats",
         );
+    }
+    // A picture the relay stores no copy of (a picked GIF, ARB-544): read its provider URL
+    // back out of the chat document and stream the provider's bytes through, the same
+    // pass-through and host allow-list the apps use. `?w=` cannot resize what is not stored.
+    if key.starts_with(HOSTED_KEY_PREFIX) {
+        return hosted_file(&state, &me.project, &key).await;
     }
     // `?w=<px>`: a picture scaled down on the way out (the apps' thumbnail path); anything
     // else, or no `w`, is the original bytes with the stored mime.
@@ -2365,6 +2447,22 @@ mod tests {
         assert!(k.starts_with(KEY_PREFIX));
         assert_eq!(k.len(), KEY_PREFIX.len() + 40);
         assert_ne!(k, mint_key());
+    }
+
+    /// Only the provider's own hosts are relayed, so a `hosted:` key cannot be turned into a
+    /// fetch of anything else.
+    #[test]
+    fn only_the_providers_hosts_are_relayed() {
+        assert!(crate::gifs::media_url_allowed(
+            "https://static.klipy.com/ii/a/f3/bd/G88BNBBL.gif"
+        ));
+        assert!(!crate::gifs::media_url_allowed(
+            "https://evil.example/x.gif"
+        ));
+        assert!(!crate::gifs::media_url_allowed(
+            "http://static.klipy.com/x.gif"
+        ));
+        assert!(!crate::gifs::media_url_allowed("file:///etc/passwd"));
     }
 
     #[test]
@@ -2667,6 +2765,58 @@ mod tests {
         let all = attachments_of(&row, &ChatRef::people(&g));
         assert_eq!(all[2]["mime"], "application/pdf");
         assert_eq!(all[0]["caption"], Value::Null);
+
+        // A picked GIF (ARB-544) has no `ref` — the relay keeps no copy — and used to be
+        // dropped here, which is why Jacob's message read `attachments: []`
+        // ([feedback gif-send-and-playback-2026-10-30]). It now names its part, and
+        // `hosted_url` reads the provider URL back out of the document.
+        let picked = ulid();
+        let (m5, o5) = (picked.clone(), other.clone());
+        let klipy = "https://static.klipy.com/ii/abc/f3/bd/G88BNBBL.gif";
+        crate::notices::write_doc(&state, None, &g, move |doc| {
+            doc.append_user_message(
+                &m5,
+                "",
+                "dev:test",
+                &UserMessageOpts {
+                    attachments: vec![UserAttachment {
+                        name: "6178590884800169.gif".into(),
+                        mime: "image/gif".into(),
+                        kind: Some("image".into()),
+                        blob_ref: None,
+                        url: Some(klipy.to_owned()),
+                        source: None,
+                    }],
+                    sender: Some(format!("user:{o5}")),
+                    ..Default::default()
+                },
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let doc = crate::matrix::backfill::load_doc(&state, &g, None)
+            .unwrap()
+            .unwrap();
+        let row = doc.message(&picked).unwrap();
+        let hosted = attachments_of(&row, &ChatRef::people(&g));
+        assert_eq!(hosted.len(), 1, "a picked GIF is an attachment: {hosted:?}");
+        assert_eq!(hosted[0]["kind"], "gif");
+        assert_eq!(hosted[0]["mime"], "image/gif");
+        let blob = hosted[0]["blob"].as_str().unwrap();
+        let (slot, key) = blob.split_once('/').unwrap();
+        assert_eq!(slot, format!("people:{g}"));
+        let project = state.db.project(&pid).unwrap().unwrap();
+        assert_eq!(
+            hosted_url(&state, &project, key).ok().as_deref(),
+            Some(klipy)
+        );
+
+        // Another agent's key resolves to nothing, and a part that is not there either.
+        let elsewhere = hosted_key("not-a-chat", &picked, "p1");
+        assert!(hosted_url(&state, &project, &elsewhere).is_err());
+        let no_part = hosted_key(&g, &picked, "not-a-part");
+        assert!(hosted_url(&state, &project, &no_part).is_err());
 
         // Scopes: files off by default, PATCH merges, unknown names are ignored by the db layer.
         let agent = state.db.outside_agent(&pid).unwrap().unwrap();

@@ -582,6 +582,26 @@ struct Attachment: Codable, Equatable {
         return !ref.isEmpty && !ref.hasPrefix("local:")
     }
 
+    /// The cache-key prefix of a provider-hosted picture, whose bytes come through the
+    /// relay's GIF pass-through instead of `/blob` (Mac `URL_KEY_PREFIX`).
+    static let urlKeyPrefix = "url:"
+
+    /// What the decoded picture is cached and fetched under (Mac `preview_key`): the blob
+    /// `ref`, or `url:<url>` for a picked GIF that lives with its provider (ARB-544).
+    var previewKey: String? {
+        if let ref = blobRef { return ref }
+        guard let url, !url.isEmpty else { return nil }
+        return Self.urlKeyPrefix + url
+    }
+
+    /// What this attachment is called when it stands in for the whole message — a reply
+    /// preview. The kind, never the file name: a picked GIF's name is the provider's numeric
+    /// id (`6178590884800169.gif`), which tells a reader nothing
+    /// ([feedback gif-send-and-playback-2026-10-30]).
+    var mediaLabel: String {
+        mime.lowercased() == "image/gif" ? "GIF" : kindLabel
+    }
+
     /// "1.8 MB" style size, empty when unknown (Mac `size_label`).
     var sizeLabel: String {
         guard let b = bytes else { return "" }

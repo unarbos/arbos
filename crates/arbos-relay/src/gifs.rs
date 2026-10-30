@@ -532,8 +532,15 @@ pub async fn media(_principal: Principal, Query(q): Query<MediaQuery>) -> Respon
             "only the GIF provider's media can be relayed",
         );
     }
+    relay_media(&q.u).await
+}
+
+/// Stream `url` through, never storing it. The caller has already decided who may ask and
+/// that the host is the provider's ([`media_url_allowed`]); outside agents reach it through
+/// `GET /asp/files` for a GIF the relay keeps no copy of.
+pub async fn relay_media(url: &str) -> Response {
     let g = gifs();
-    let resp = match g.http.get(&q.u).send().await {
+    let resp = match g.http.get(url).send().await {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("gif media: {e}");

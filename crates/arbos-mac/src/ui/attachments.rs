@@ -169,8 +169,10 @@ fn sticker_tile(row_id: &str, preview: Preview, open: Option<OpenFn>, theme: &Th
         .items_center()
         .justify_center();
     tile = match preview {
+        // Keyed so an animated sticker plays; see the note in `picture_bubble`.
         Preview::Ready(image) => tile.child(
             img(image)
+                .id(SharedString::from(format!("{row_id}#sticker")))
                 .w(px(STICKER_SIZE))
                 .h(px(STICKER_SIZE))
                 .object_fit(ObjectFit::Contain),
@@ -202,7 +204,9 @@ fn picture_bubble(
     state: Entity<AppState>,
     theme: &Theme,
 ) -> AnyElement {
-    let key = attachment.blob_ref.clone();
+    // `preview_key`, not `ref`: a picked GIF's bytes come through the relay's pass-through, so
+    // it had no Save disc ([feedback gif-send-and-playback-2026-10-30]).
+    let key = attachment.preview_key();
     let name = attachment.name.clone();
     let group = SharedString::from(format!("{row_id}-picture"));
     let (w, h) = match &preview {
@@ -230,8 +234,13 @@ fn picture_bubble(
         .items_center()
         .justify_center();
     bubble = match preview {
+        // The id is what makes an animated GIF play: GPUI keeps the frame cursor in element
+        // state and asks for the next animation frame only for an `img` it can key, so
+        // without one every GIF sat on frame 0 for ever
+        // ([feedback gif-send-and-playback-2026-10-30]).
         Preview::Ready(image) => bubble.child(
             img(image)
+                .id(SharedString::from(format!("{row_id}#picture")))
                 .w(px(w))
                 .h(px(h))
                 .rounded(px(BUBBLE_RADIUS))
