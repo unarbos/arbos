@@ -355,6 +355,7 @@ async fn run(
         room.box_joined(&box_user);
     }
     tracing::debug!(%room_name, %device, conn_id, "room join");
+    crate::admin_audit::log_admin_socket_open(&principal, &room_name);
 
     // In-order delivery per socket (the lost-first-turn bug): a live ROW must never reach a
     // client before the rows below it that the client is still fetching with ROWS_REQ. Until the
@@ -607,6 +608,7 @@ async fn handle_frame(
             ))
             .await?;
             if !dup {
+                crate::admin_audit::log_admin_row_push(principal, room_name, device, seq);
                 let row = Frame::new(
                     FrameType::Row,
                     json!({ "seq": seq, "device": device, "batchId": p.batch_id }),
