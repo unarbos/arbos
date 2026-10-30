@@ -1580,6 +1580,16 @@ pub struct PeopleMessagePayloadDto {
     /// device's row-level push has none and the banner says "New message").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// `dm` | `group` | `project` (shared project chat). Absent on an older relay → `dm`.
+    /// Since 2026-10-27: a group banner is titled with the chat, the sender goes in the body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_kind: Option<String>,
+    /// The chat's name as this recipient sees it (groups and shared project chats; a DM has none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_title: Option<String>,
+    /// Blob key of the group picture under `people:{chat_id}` (people groups with a picture).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_image_key: Option<String>,
 }
 
 /// `channel_message` payload: a message in a server channel (Matrix room), fanned out by the
@@ -1878,6 +1888,24 @@ pub struct NotificationsClearedPayloadDto {
     pub badge: i64,
 }
 
+/// `GET /me/pins` / `PUT /me/pins` body and answer: the user's sidebar pins, top first
+/// (Jacob 2026-10-28, sidebar pinning). A pin is a row key `agent:<project id>`,
+/// `chat:<people chat id>` or `server:<server id>`; `cap` is the relay's limit.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PinsDto {
+    pub pins: Vec<String>,
+    pub cap: u32,
+}
+
+/// `pins_changed` payload: another device of mine replaced the pin list (`PUT /me/pins`);
+/// `pins` is the whole list, top first.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PinsChangedPayloadDto {
+    pub pins: Vec<String>,
+}
+
 /// One kind the relay queues on `/me/pushes` via `push_user` / `push_user_except` /
 /// `push_everyone`. Adjacent tagging matches the stored `{ kind, payload }` row.
 ///
@@ -1950,6 +1978,8 @@ pub enum PushEventDto {
     AgentProfileUpdated(AgentProfileUpdatedPayloadDto),
     #[serde(rename = "notifications_cleared")]
     NotificationsCleared(NotificationsClearedPayloadDto),
+    #[serde(rename = "pins_changed")]
+    PinsChanged(PinsChangedPayloadDto),
 }
 
 impl PushEventDto {

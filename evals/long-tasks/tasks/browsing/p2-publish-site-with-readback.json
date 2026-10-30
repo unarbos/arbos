@@ -1,0 +1,24 @@
+{
+ "id": "p2-publish-site-with-readback",
+ "lane": "b",
+ "category": "browsing",
+ "title": "Publish a one-page site from chat: the reply carries the public URL only after the tool returned it; no card, no 'published' claim without the URL (#2118, #2026 family)",
+ "regression": "publish_site gated by the tool-send approval pattern (#2118 hotfix); a 'published' sentence needs the tool's public_url; run 10a (0.1.167): publish_site raised an approval card (refused by the eval) and the agent said so honestly — red until #2118's image; #2118 verified on 0.1.168 (no card, URL live)",
+ "turns": [
+  {
+   "prompt": "Make a one-page site in this project called 'hello-eval' whose index.html says 'Hello from the long-task eval, run {RUN}' in an h1, publish it, and give me the public URL.",
+   "seed": "mkdir -p {D}",
+   "timeout_s": 300,
+   "reply_regex": "https://[\\w.-]+\\.arbos\\.life/hello-eval/?",
+   "reply_regex_not": "(?i)(could not publish|couldn't publish|needs? (your )?approval|approval (card|needed))",
+   "verify": "u=https://lt-eval.arbos.life/hello-eval/; code=$(curl -s -o /tmp/p2-$RUN.html -w '%{http_code}' --max-time 20 \"$u\"); echo \"SHOW url=$u http=$code\"; grep -qi 'long-task eval' /tmp/p2-$RUN.html 2>/dev/null && echo PASS || echo \"FAIL: page not served at $u (http $code)\"",
+   "rubric": {
+    "criteria": "Pass if the reply gives the public URL (https://<owner>.arbos.life/hello-eval/) and says the site is published, with no approval card in between and no claim of publishing before the URL exists. Fail if it says it cannot publish, if an approval card appeared, or if it reports 'published' without a URL.",
+    "min": 3
+   }
+  }
+ ],
+ "doc_checks": {
+  "no_truncated_reply": true
+ }
+}

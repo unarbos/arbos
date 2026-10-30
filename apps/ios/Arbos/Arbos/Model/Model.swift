@@ -486,6 +486,24 @@ struct ToolCall: Codable, Equatable {
     var name: String
 }
 
+/// Where a GIF / sticker came from (`source` on the attachment map). Old
+/// messages and pastes have none (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG).
+struct AttachmentSource: Equatable {
+    var provider: String
+    var id: String
+    var pageUrl: String
+
+    /// `pageUrl` as an https URL for the "via <provider>" caption, or `nil`
+    /// when the scheme is anything else (feedback app-01M61EZD0GJ2XGV1EW4SCVXENK).
+    static func httpsPageURL(from string: String) -> URL? {
+        guard let url = URL(string: string),
+              url.scheme?.lowercased() == "https",
+              url.host != nil
+        else { return nil }
+        return url
+    }
+}
+
 struct Attachment: Codable, Equatable {
     var name: String
     var mime: String
@@ -497,10 +515,71 @@ struct Attachment: Codable, Equatable {
     /// The fallback picture of a chart bubble: names the `chart` part of the same message.
     /// A client that draws the chart hides this attachment ([feedback chart-bubble-ios-2026-10-26]).
     var chartPart: String? = nil
+    /// A picture that lives with its provider (a picked GIF, ARB-544): no `ref`; the bytes come
+    /// through the relay's pass-through (`GET /gif/media?u=`), nothing is stored.
+    var url: String? = nil
+    /// GIF-picker attribution; when set the bubble shows "via \<provider\>".
+    var source: AttachmentSource? = nil
 
     enum CodingKeys: String, CodingKey {
-        case name, mime, kind, bytes, chartPart
+        case name, mime, kind, bytes, chartPart, url, source
         case blobRef = "ref"
+    }
+
+    init(name: String, mime: String, blobRef: String?, kind: String? = nil, bytes: Int64? = nil,
+         chartPart: String? = nil, url: String? = nil, source: AttachmentSource? = nil) {
+        self.name = name
+        self.mime = mime
+        self.blobRef = blobRef
+        self.kind = kind
+        self.bytes = bytes
+        self.chartPart = chartPart
+        self.url = url
+        self.source = source
+    }
+
+    /// A picker sticker (`kind: sticker`): drawn at a fixed size with no bubble.
+    var isSticker: Bool { kind?.lowercased() == "sticker" }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        mime = try c.decode(String.self, forKey: .mime)
+        blobRef = try c.decodeIfPresent(String.self, forKey: .blobRef)
+        kind = try c.decodeIfPresent(String.self, forKey: .kind)
+        bytes = try c.decodeIfPresent(Int64.self, forKey: .bytes)
+        chartPart = try c.decodeIfPresent(String.self, forKey: .chartPart)
+        url = try c.decodeIfPresent(String.self, forKey: .url)
+        if let map = try c.decodeIfPresent([String: String].self, forKey: .source),
+           let provider = map["provider"], let id = map["id"],
+           let pageUrl = map["pageUrl"] ?? map["page_url"] {
+            source = AttachmentSource(provider: provider, id: id, pageUrl: pageUrl)
+        } else {
+            source = nil
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(name, forKey: .name)
+        try c.encode(mime, forKey: .mime)
+        try c.encodeIfPresent(blobRef, forKey: .blobRef)
+        try c.encodeIfPresent(kind, forKey: .kind)
+        try c.encodeIfPresent(bytes, forKey: .bytes)
+        try c.encodeIfPresent(chartPart, forKey: .chartPart)
+        try c.encodeIfPresent(url, forKey: .url)
+        if let source {
+            try c.encode(
+                ["provider": source.provider, "id": source.id, "pageUrl": source.pageUrl],
+                forKey: .source
+            )
+        }
+    }
+
+    /// Stored on the relay: a `ref` that is not a `local:` key still uploading.
+    var isOnRelay: Bool {
+        guard let ref = blobRef else { return false }
+        return !ref.isEmpty && !ref.hasPrefix("local:")
     }
 
     /// "1.8 MB" style size, empty when unknown (Mac `size_label`).
@@ -606,6 +685,9 @@ enum Part: Equatable {
     /// posted. `spec` is the validated `arbos_core::chart::Chart` as JSON (what the FFI reads),
     /// `table` its markdown table, `fallback` the PNG attachment part this client hides.
     case chart(id: Id, specVersion: Int, spec: String, table: String, fallback: String?)
+    /// Link preview ([feedback link-embeds-ios-2026-10-27]): the card the relay unfurled for
+    /// the message's first bare URL. `preview: "off"` on the message hides it.
+    case linkPreview(id: Id, preview: LinkPreview)
     /// Secret hand-off: the message's value moved into the vault; the row is the ghost
     /// "Secret saved as NAME". Names only — there is no value field.
     case secretRedacted(id: Id, name: String, savedBy: String, agent: String?)
@@ -615,7 +697,8 @@ enum Part: Equatable {
         switch self {
         case .text(let id, _), .reasoning(let id), .tool(let id, _, _), .attachment(let id, _),
              .error(let id, _, _), .status(let id, _, _), .question(let id, _), .subagentResult(let id),
-             .chart(let id, _, _, _, _), .secretRedacted(let id, _, _, _), .unknown(let id):
+             .chart(let id, _, _, _, _), .linkPreview(let id, _), .secretRedacted(let id, _, _, _),
+             .unknown(let id):
             return id
         }
     }
@@ -652,30 +735,65 @@ struct MessageReaction: Equatable, Hashable {
     /// style). Any other emoji comes from the emoji keyboard.
     static let palette: [String] = ["❤️", "👍🏽", "💪🏽", "👎🏻", "👌🏾", "🤝", "🔥", "💯"]
 
+    /// Fitzpatrick skin-tone modifiers (U+1F3FB … U+1F3FF). Matches
+    /// `arbos_core::doc::normalize_reaction_emoji` so `👍🏽` and `👍🏿` are one reaction.
+    private static let skinToneScalars: ClosedRange<UInt32> = 0x1F3FB...0x1F3FF
+
+    /// Drop skin-tone modifiers; other marks (ZWJ, VS16) stay.
+    static func normalizeEmoji(_ emoji: String) -> String {
+        guard !emoji.isEmpty else { return emoji }
+        let stripped = String(emoji.unicodeScalars.filter { !skinToneScalars.contains($0.value) })
+        return stripped.isEmpty ? emoji : stripped
+    }
+
+    /// True when both strings are the same reaction after skin-tone stripping.
+    static func sameBase(_ a: String, _ b: String) -> Bool {
+        normalizeEmoji(a) == normalizeEmoji(b)
+    }
+
     /// Toggle `sender` on/off for `emoji`, keeping other emoji reactions intact.
+    /// Skin-tone variants of the same base share one bucket.
     static func toggling(_ list: [MessageReaction], emoji: String, sender: String) -> [MessageReaction] {
-        var byEmoji: [String: [String]] = [:]
+        let base = normalizeEmoji(emoji)
+        guard !base.isEmpty else { return list }
+        var byBase: [String: [String]] = [:]
         for r in list where !r.emoji.isEmpty && !r.senders.isEmpty {
-            byEmoji[r.emoji] = r.senders
+            let key = normalizeEmoji(r.emoji)
+            guard !key.isEmpty else { continue }
+            byBase[key, default: []].append(contentsOf: r.senders)
         }
-        var people = byEmoji[emoji] ?? []
+        byBase = byBase.mapValues { Array(Set($0)) }
+        var people = byBase[base] ?? []
         if let i = people.firstIndex(of: sender) {
             people.remove(at: i)
         } else {
             people.append(sender)
         }
         if people.isEmpty {
-            byEmoji.removeValue(forKey: emoji)
+            byBase.removeValue(forKey: base)
         } else {
-            byEmoji[emoji] = people
+            byBase[base] = people
         }
-        return MessageReaction.palette.compactMap { e in
-            guard let s = byEmoji[e], !s.isEmpty else { return nil }
-            return MessageReaction(emoji: e, senders: s)
-        } + byEmoji.keys.filter { !MessageReaction.palette.contains($0) }.sorted().compactMap { e in
-            guard let s = byEmoji[e], !s.isEmpty else { return nil }
-            return MessageReaction(emoji: e, senders: s)
+        return orderedReactions(byBase)
+    }
+
+    /// Palette order first (matched by base), then the rest alphabetically.
+    /// Chip glyphs are the untoned base so they match core `normalize_reaction_emoji`
+    /// (👍🏽 and 👍🏿 both read as 👍).
+    static func orderedReactions(_ byBase: [String: [String]]) -> [MessageReaction] {
+        var used = Set<String>()
+        var out: [MessageReaction] = []
+        for e in palette {
+            let base = normalizeEmoji(e)
+            guard let s = byBase[base], !s.isEmpty, !used.contains(base) else { continue }
+            used.insert(base)
+            out.append(MessageReaction(emoji: base, senders: s))
         }
+        let rest = byBase.keys.filter { !used.contains($0) }.sorted().compactMap { base -> MessageReaction? in
+            guard let s = byBase[base], !s.isEmpty else { return nil }
+            return MessageReaction(emoji: base, senders: s)
+        }
+        return out + rest
     }
 }
 
@@ -1052,6 +1170,27 @@ struct MembershipNotice: Equatable {
     }
 }
 
+/// What a message says and shows, as one thing (`Message.body`): the prose, every attachment
+/// that is on the relay (a chart's fallback picture excluded), and every chart with its
+/// fallback — the Mac `MessageBody`.
+struct MessageBody: Equatable {
+    var text: String
+    var attachments: [Attachment]
+    var charts: [ChartBody]
+
+    var hasMedia: Bool { !attachments.isEmpty || !charts.isEmpty }
+}
+
+/// A chart bubble as a message carries it: the `chart` part's fields plus its fallback
+/// picture when the message has one.
+struct ChartBody: Equatable {
+    var id: Id
+    var specVersion: Int
+    var spec: String
+    var table: String
+    var fallback: Attachment?
+}
+
 struct Message: Identifiable, Equatable {
     var id: Id
     var chatId: Id
@@ -1118,8 +1257,21 @@ struct Message: Identifiable, Equatable {
     /// line is worded from the live roster and a rename applies to old lines too ("Const
     /// added Aureum" → "Jacob added Aureum", 2026-10-26). nil on rows older than the field.
     var notice: MembershipNotice? = nil
+    /// `"off"` once the sender removed the link preview for everyone (#2066).
+    var preview: String? = nil
 
     var isStreaming: Bool { status == .streaming }
+
+    /// The link preview the relay attached, unless the sender switched it off.
+    var linkPreview: (id: Id, preview: LinkPreview)? {
+        if preview == "off" { return nil }
+        for part in parts {
+            if case .linkPreview(let id, let p) = part, !p.title.trimmingCharacters(in: .whitespaces).isEmpty {
+                return (id, p)
+            }
+        }
+        return nil
+    }
 
     /// Does this message carry the `chart` part `partId`? (Its fallback picture is hidden only
     /// when the chart it stands in for is really here.)
@@ -1127,8 +1279,64 @@ struct Message: Identifiable, Equatable {
         parts.contains { if case .chart(let id, _, _, _, _) = $0 { return id == partId } else { return false } }
     }
 
+    /// The message's body, in part order — the one accessor Forward, Copy and any other
+    /// "take this message" action read, so they all see the same parts (the Mac
+    /// `Message::body()`, [feedback forward-attachments-ios-2026-10-27]). `nil` when there
+    /// is nothing to take: no words, no attachment on the relay, no chart. A picture-only
+    /// message has a body like any other.
+    var body: MessageBody? {
+        let text = plainText.trimmingCharacters(in: .whitespacesAndNewlines)
+        var fallbackIds = Set<String>()
+        for part in parts {
+            if case .chart(_, _, _, _, let fallback) = part, let fallback { fallbackIds.insert(fallback) }
+        }
+        var attachments: [Attachment] = []
+        var charts: [ChartBody] = []
+        for part in parts {
+            switch part {
+            case .attachment(let id, let a) where !fallbackIds.contains(id) && a.isOnRelay:
+                attachments.append(a)
+            case .chart(let id, let specVersion, let spec, let table, let fallback):
+                let picture = fallback.flatMap { f in
+                    parts.lazy.compactMap { p -> Attachment? in
+                        if case .attachment(let aid, let a) = p, aid == f, a.isOnRelay { return a }
+                        return nil
+                    }.first
+                }
+                charts.append(ChartBody(id: id, specVersion: specVersion, spec: spec, table: table, fallback: picture))
+            default:
+                break
+            }
+        }
+        guard !text.isEmpty || !attachments.isEmpty || !charts.isEmpty else { return nil }
+        return MessageBody(text: text, attachments: attachments, charts: charts)
+    }
+
+    /// Does the message hold an attachment whose upload has not finished (a `local:` key)?
+    var hasUploadingAttachment: Bool {
+        parts.contains {
+            if case .attachment(_, let a) = $0, let ref = a.blobRef { return ref.hasPrefix("local:") }
+            return false
+        }
+    }
+
     var plainText: String {
         parts.compactMap(\.textValue).joined(separator: "\n")
+    }
+
+    /// A finished row with no words, nothing to look at and no named sender (`user:`,
+    /// `agent:`, `project:`): in a people chat it is a blank line from no one (Arbonites,
+    /// 2026-10-28: a box's hand-off row and job row, bare `sender: "agent"`).
+    var isSenderlessBlank: Bool {
+        guard role == .user || role == .assistant, !isStreaming,
+              !["user:", "agent:", "project:"].contains(where: { sender.hasPrefix($0) }) else { return false }
+        return parts.allSatisfy { part in
+            switch part {
+            case .text(_, let t): return t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            case .reasoning, .status, .subagentResult, .unknown: return true
+            case .tool, .attachment, .error, .question, .chart, .linkPreview, .secretRedacted: return false
+            }
+        }
     }
 
     var textLength: Int {
@@ -1290,23 +1498,26 @@ enum DocJSON {
             voice: bool(m["voice"]) || str(m["source"]) == "voice",
             greeting: bool(m["greeting"]),
             reactions: reactions(m["reactions"]),
-            notice: MembershipNotice(row: m["notice"])
+            notice: MembershipNotice(row: m["notice"]),
+            preview: str(m["preview"])
         )
     }
 
     /// `reactions` is flat `"emoji|sender" → true` (arbos-core) and/or legacy
     /// emoji → map of sender id → true. Unknown shapes are ignored.
+    /// Skin-tone variants of the same base merge into one chip.
     static func reactions(_ raw: Any?) -> [MessageReaction] {
         guard let map = raw as? [String: Any] else { return [] }
-        var byEmoji: [String: [String]] = [:]
+        var byBase: [String: [String]] = [:]
         for (key, v) in map {
             guard !key.isEmpty else { continue }
             if let people = v as? [String: Any] {
-                // Legacy nested bucket. Merge into any flat-key senders already
-                // collected for this emoji (core project_reactions does the same).
+                // Nested bucket (projected or legacy). Merge by base emoji.
+                let base = MessageReaction.normalizeEmoji(key)
+                guard !base.isEmpty else { continue }
                 for (sid, flag) in people {
                     guard !sid.isEmpty, bool(flag) else { continue }
-                    byEmoji[key, default: []].append(sid)
+                    byBase[base, default: []].append(sid)
                 }
                 continue
             }
@@ -1315,18 +1526,12 @@ enum DocJSON {
             let emoji = String(key[..<sep])
             let sid = String(key[key.index(after: sep)...])
             guard !emoji.isEmpty, !sid.isEmpty else { continue }
-            byEmoji[emoji, default: []].append(sid)
+            let base = MessageReaction.normalizeEmoji(emoji)
+            guard !base.isEmpty else { continue }
+            byBase[base, default: []].append(sid)
         }
-        byEmoji = byEmoji.mapValues { Array(Set($0)).sorted() }
-        let ordered = MessageReaction.palette.compactMap { e -> MessageReaction? in
-            guard let s = byEmoji[e] else { return nil }
-            return MessageReaction(emoji: e, senders: s)
-        }
-        let rest = byEmoji.keys.filter { !MessageReaction.palette.contains($0) }.sorted().compactMap { e -> MessageReaction? in
-            guard let s = byEmoji[e] else { return nil }
-            return MessageReaction(emoji: e, senders: s)
-        }
-        return ordered + rest
+        byBase = byBase.mapValues { Array(Set($0)).sorted() }
+        return MessageReaction.orderedReactions(byBase)
     }
 
     static func part(_ pm: [String: Any]) -> Part {
@@ -1347,6 +1552,14 @@ enum DocJSON {
             // Nested `{ attachment: { name, mime, ref } }` is the schema; tolerate a
             // flat part map if a writer omitted the wrapper.
             let a = (pm["attachment"] as? [String: Any]) ?? pm
+            let source: AttachmentSource? = {
+                guard let map = a["source"] as? [String: Any],
+                      let provider = str(map["provider"]), !provider.isEmpty,
+                      let sid = str(map["id"]),
+                      let pageUrl = str(map["pageUrl"]) ?? str(map["page_url"]), !pageUrl.isEmpty
+                else { return nil }
+                return AttachmentSource(provider: provider, id: sid, pageUrl: pageUrl)
+            }()
             return .attachment(
                 id: id,
                 attachment: Attachment(
@@ -1355,7 +1568,11 @@ enum DocJSON {
                     blobRef: str(a["ref"]),
                     kind: str(a["kind"]).flatMap { $0 == "attachment" ? nil : $0 },
                     bytes: (a["bytes"] as? NSNumber)?.int64Value,
-                    chartPart: str(a["chartPart"])
+                    chartPart: str(a["chartPart"]),
+                    // A picked GIF lives with its provider (ARB-544): without `url` the row
+                    // had neither ref nor url and drew the broken-picture glyph.
+                    url: str(a["url"]),
+                    source: source
                 )
             )
         case "chart":
@@ -1373,6 +1590,9 @@ enum DocJSON {
                 table: str(pm["table"]) ?? "",
                 fallback: str(pm["fallback"])
             )
+        case "link_preview":
+            guard let p = LinkPreview.parse(pm) else { return .unknown(id: id) }
+            return .linkPreview(id: id, preview: p)
         case "error":
             return .error(id: id, code: str(pm["code"]) ?? "error", message: str(pm["message"]) ?? "")
         case "status":
@@ -1901,5 +2121,97 @@ extension Project {
     static func pictureURL(httpUrl: String, id: Id, imageKey: String?, version: Int) -> String? {
         guard let imageKey, !imageKey.isEmpty, !httpUrl.isEmpty else { return nil }
         return "\(httpUrl)/projects/\(id)/avatar.jpg?v=\(version)"
+    }
+}
+
+/// What a `link_preview` part carries (relay `unfurl.rs`, spec 1): the card's words and its
+/// picture, pre-formatted — the app parses nothing from the site. Everything but `title` is
+/// optional ([feedback link-embeds-ios-2026-10-27]).
+struct LinkPreview: Equatable, Hashable {
+    struct Picture: Equatable, Hashable {
+        var ref: String
+        var width: Int
+        var height: Int
+        var mime: String
+        var art: Bool
+    }
+    struct Diff: Equatable, Hashable {
+        var additions: Int
+        var deletions: Int
+        var files: Int
+    }
+
+    var specVersion: Int = 1
+    var url: String
+    var canonicalUrl: String
+    /// `spotify` `youtube` `x` `github` `bluesky` `vimeo` `loom` `soundcloud` `apple_music`
+    /// `google_maps` `wikipedia` `arbos` `file` `web`.
+    var provider: String
+    var providerName: String
+    /// `song` `album` … `pull_request` `issue` `repo` `article` `image` `file` `place` `page`.
+    var type: String
+    var title: String
+    var subtitle: String? = nil
+    var description: String? = nil
+    /// Footer facts in order ("Song", "4:03", "opened 4 days ago").
+    var facts: [String] = []
+    /// `open` `merged` `closed` `draft`.
+    var state: String? = nil
+    var diff: Diff? = nil
+    /// "18:24" on a video thumbnail.
+    var duration: String? = nil
+    var image: Picture? = nil
+    /// The final host ("github.com"): the shared link-icon tile picks its mark by it.
+    var siteHost: String? = nil
+    /// Reserved for the shared link-icon tile (a blob in the chat's slot); unused here.
+    var siteIcon: Picture? = nil
+    /// `compact` (art row) or `expanded` (media on top).
+    var layout: String = "compact"
+    /// The chat's blob slot, set by the transcript builder so the card can load its picture.
+    var slot: String = ""
+
+    var expanded: Bool { layout == "expanded" && image != nil }
+    var isPost: Bool { type == "post" }
+    var isGitHubItem: Bool { type == "pull_request" || type == "issue" || type == "gist" }
+    /// Where a tap goes: the canonical URL (tracking parameters gone), else the typed one.
+    var openURL: URL? { URL(string: canonicalUrl.isEmpty ? url : canonicalUrl) }
+    /// "<title> — <provider>" for quote headers, copies and one-line previews.
+    var oneLine: String { providerName.isEmpty ? title : "\(title) — \(providerName)" }
+
+    /// Was `text` nothing but the link the card stands for? Then the card is the bubble.
+    func isLinkOnly(_ text: String) -> Bool {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, t.rangeOfCharacter(from: .whitespacesAndNewlines) == nil else { return false }
+        let trimSlash: (String) -> String = { $0.hasSuffix("/") ? String($0.dropLast()) : $0 }
+        return t == url.trimmingCharacters(in: .whitespaces) || t == canonicalUrl.trimmingCharacters(in: .whitespaces)
+            || trimSlash(t) == trimSlash(url.trimmingCharacters(in: .whitespaces))
+    }
+
+    static func parse(_ pm: [String: Any]) -> LinkPreview? {
+        func str(_ v: Any?) -> String? { v as? String }
+        func int(_ v: Any?) -> Int? { (v as? NSNumber)?.intValue }
+        func picture(_ v: Any?) -> Picture? {
+            guard let d = v as? [String: Any], let ref = str(d["ref"]), !ref.isEmpty else { return nil }
+            return Picture(ref: ref, width: int(d["width"]) ?? 0, height: int(d["height"]) ?? 0,
+                           mime: str(d["mime"]) ?? "image/jpeg", art: (d["art"] as? Bool) ?? false)
+        }
+        guard let title = str(pm["title"])?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty else { return nil }
+        var p = LinkPreview(url: str(pm["url"]) ?? "", canonicalUrl: str(pm["canonicalUrl"]) ?? "",
+                            provider: str(pm["provider"]) ?? "web", providerName: str(pm["providerName"]) ?? "",
+                            type: str(pm["type"]) ?? "page", title: title)
+        p.specVersion = int(pm["specVersion"]) ?? 1
+        p.subtitle = str(pm["subtitle"]).flatMap { $0.isEmpty ? nil : $0 }
+        p.description = str(pm["description"]).flatMap { $0.isEmpty ? nil : $0 }
+        p.facts = (pm["facts"] as? [Any])?.compactMap { $0 as? String } ?? []
+        p.state = str(pm["state"])
+        if let d = pm["diff"] as? [String: Any] {
+            p.diff = Diff(additions: int(d["additions"]) ?? 0, deletions: int(d["deletions"]) ?? 0, files: int(d["files"]) ?? 0)
+        }
+        p.duration = str(pm["duration"])
+        p.image = picture(pm["image"])
+        p.siteHost = str(pm["siteHost"])
+        p.siteIcon = picture(pm["siteIcon"])
+        p.layout = str(pm["layout"]) ?? "compact"
+        return p
     }
 }

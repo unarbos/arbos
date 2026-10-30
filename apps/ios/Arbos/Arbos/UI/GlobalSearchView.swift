@@ -107,7 +107,8 @@ struct GlobalSearchResults: View {
                         .accessibilityIdentifier("search-section-\(group.section.label)")
                 }
             }
-            Color.clear.frame(height: 8)
+            // The last result at rest sits above the bottom fade (`BottomBarFadeView`).
+            Color.clear.frame(height: HomeChrome.listBottom)
                 .listRowInsets(EdgeInsets())
                 .listRowSeparator(.hidden)
                 .listRowBackground(Color.clear)
@@ -186,22 +187,8 @@ struct GlobalSearchRow: View {
         case .peopleChat(let id):
             if let c = model.peopleChat(id) {
                 if c.isGroup {
-                    // The home row's group picture, at the pane's 36 pt (`PeopleRow`).
-                    if let key = c.imageKey, !key.isEmpty,
-                       let url = model.blobURL(projectId: "\(peopleSlot):\(c.id)", key: key)?.absoluteString {
-                        AvatarCluster(members: [], size: PaneKit.avatar, imageUrl: url)
-                    } else if c.isNeutralAvatar {
-                        NeutralAvatar(name: c.title, size: PaneKit.avatar)
-                    } else if let leaf = c.leafPick, LeafAvatarsFlag.shared.on {
-                        LeafAvatar(pick: leaf, size: PaneKit.avatar)
-                    } else {
-                        ZStack {
-                            Circle().fill(theme.card)
-                            Image(systemName: "person.2.fill")
-                                .font(theme.font(14, weight: .medium))
-                                .foregroundStyle(theme.accent)
-                        }
-                    }
+                    // The home row's group picture through the resolver, at the pane's 36 pt.
+                    GroupAvatar(chat: c, model: model, size: PaneKit.avatar)
                 } else {
                     let other = c.counterpart(me: model.user?.id)
                     PersonAvatar(url: other?.avatarUrl, handle: other?.handle ?? "?", size: PaneKit.avatar, name: other?.name, id: other?.id, colorIndex: other?.avatarColorIndex)
@@ -228,6 +215,9 @@ struct GlobalSearchRow: View {
             RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .fill(theme.isDark ? Color(hex: "#5C5C60")! : Color(hex: "#6E6E73")!)
                 .overlay(Image(systemName: name).font(theme.font(17, weight: .semibold)).foregroundStyle(.white))
+        case .link(let url):
+            // The one link tile ([feedback link-icons-ios-adopt-2026-10-27]), at the row's 36 pt.
+            LinkRowTile(url: url, size: PaneKit.avatar)
         case .none:
             glyphTile(glyph)
         }

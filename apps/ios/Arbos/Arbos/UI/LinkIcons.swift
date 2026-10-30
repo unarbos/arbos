@@ -18,6 +18,9 @@ final class LinkIcons: ObservableObject {
     /// host → the rounded icon, or `nil` when the site has none. A host that is not a key yet is
     /// still loading (or never asked for).
     @Published private(set) var images: [String: UIImage?] = [:]
+    /// host → the relay's picture as decoded, full size, with its tone — what the link tiles
+    /// draw ([feedback link-icons-ios-tile-2026-10-27]); `nil` when the site has none.
+    @Published private(set) var pictures: [String: (image: UIImage, tone: LinkIconTone)?] = [:]
     private var inFlight: Set<String> = []
     /// Fetches the PNG for a host: the relay in the app, the bundled icons in the fixture. Set by
     /// `AppModel`; `nil` means never ask (the placeholder stays).
@@ -33,6 +36,17 @@ final class LinkIcons: ObservableObject {
         return Self.placeholder
     }
 
+    /// The full-size picture for a tile on `host`, with its tone — or `nil` while it loads or
+    /// when the site has none (the tile draws the host's letter); the first ask schedules
+    /// the fetch. A brand host is never asked: its mark is bundled (`LinkBrand`).
+    func picture(for host: String) -> (image: UIImage, tone: LinkIconTone)? {
+        if let known = pictures[host] {
+            return known
+        }
+        request(host)
+        return nil
+    }
+
     /// Ask once per host; the answer (picture or none) publishes so the bubbles redraw.
     func request(_ host: String) {
         guard images[host] == nil, !inFlight.contains(host), let fetch else { return }
@@ -41,7 +55,9 @@ final class LinkIcons: ObservableObject {
             let data = await fetch(host)
             guard let self else { return }
             self.inFlight.remove(host)
-            self.images[host] = data.flatMap(Self.rounded)
+            let decoded = data.flatMap(UIImage.init(data:))
+            self.pictures[host] = decoded.map { (image: $0, tone: LinkIconTone.of($0)) }
+            self.images[host] = decoded.flatMap(Self.roundedIcon)
         }
     }
 
@@ -54,6 +70,7 @@ final class LinkIcons: ObservableObject {
     /// Forget everything (tests).
     func reset() {
         images = [:]
+        pictures = [:]
         inFlight = []
     }
 
@@ -93,14 +110,18 @@ final class LinkIcons: ObservableObject {
                 out.append(host)
             }
         }
-        for block in Markdown.blocks(text) {
-            switch block {
-            case .paragraph(let t), .heading(_, let t): scan(t)
-            case .bullets(let items), .numbered(let items): items.forEach(scan)
-            case .table(let header, let rows): header.forEach(scan); rows.forEach { $0.forEach(scan) }
-            case .code, .math, .chart: break
+        func walk(_ blocks: [Block]) {
+            for block in blocks {
+                switch block {
+                case .paragraph(let t), .heading(_, let t): scan(t)
+                case .quote(let inner): walk(inner)
+                case .bullets(let items), .numbered(let items): items.forEach(scan)
+                case .table(let header, let rows): header.forEach(scan); rows.forEach { $0.forEach(scan) }
+                case .code, .math, .chart, .linkPreview: break
+                }
             }
         }
+        walk(Markdown.blocks(text))
         return out
     }
 
@@ -136,7 +157,11 @@ final class LinkIcons: ObservableObject {
     /// The relay's PNG as the icon: scaled to `side` points (sharp at 3×), corners rounded at a
     /// quarter, with the gap on its right so the text never touches it. `nil` when it does not decode.
     static func rounded(_ data: Data) -> UIImage? {
-        guard let src = UIImage(data: data) else { return nil }
+        UIImage(data: data).flatMap(roundedIcon)
+    }
+
+    /// The decoded picture as the inline icon (see `rounded(_ data:)`).
+    static func roundedIcon(_ src: UIImage) -> UIImage? {
         let r = UIGraphicsImageRenderer(size: CGSize(width: side + gap, height: side))
         return r.image { _ in
             let rect = CGRect(x: 0, y: 0, width: side, height: side)

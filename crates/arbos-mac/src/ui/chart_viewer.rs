@@ -13,7 +13,8 @@ use gpui::{
 use arbos_core::chart::LayoutStyle;
 
 use super::chart_card::{self, icon_square, legend, ChartUi};
-use super::icons::icon;
+use super::highlight;
+use super::sf_symbols;
 use super::shell::Shell;
 use super::theme::{Appearance, Theme};
 use crate::app::AppState;
@@ -59,7 +60,6 @@ fn pill(
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
     let color = tint.unwrap_or(theme.text);
-    let hover_bg = theme.surface_2;
     div()
         .id(id)
         .debug_selector(move || id.to_owned())
@@ -68,15 +68,18 @@ fn pill(
         .rounded_full()
         .border_1()
         .border_color(theme.border)
-        .bg(theme.surface_1)
         .flex()
         .items_center()
         .gap(px(6.0))
         .cursor_pointer()
-        .hover(move |s| s.bg(hover_bg))
+        .map(|el| highlight::washed(el, theme.surface_1, theme))
         .text_size(px(12.5))
         .text_color(color)
-        .child(icon(glyph, 14.0, tint.unwrap_or(theme.text_muted)))
+        .child(sf_symbols::glyph(
+            glyph,
+            14.0,
+            tint.unwrap_or(theme.text_muted),
+        ))
         .child(label.to_owned())
 }
 
@@ -162,7 +165,7 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
                 .child(
                     pill(
                         "chart-viewer-copy",
-                        if copied { "check" } else { "copy" },
+                        if copied { "checkmark" } else { "doc.on.doc" },
                         if copied { "Copied" } else { "Copy data" },
                         copied.then_some(theme.online),
                         &theme,
@@ -174,12 +177,17 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
                     }),
                 )
                 .child(
-                    pill("chart-viewer-save", "download", "Save PNG", None, &theme).on_click(
-                        move |_, _, cx| {
-                            cx.stop_propagation();
-                            chart_card::save_png(&spec_for_save, &title_for_save, &save_state, cx);
-                        },
-                    ),
+                    pill(
+                        "chart-viewer-save",
+                        "arrow.down.to.line",
+                        "Save PNG",
+                        None,
+                        &theme,
+                    )
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        chart_card::save_png(&spec_for_save, &title_for_save, &save_state, cx);
+                    }),
                 )
                 .child(
                     icon_square(

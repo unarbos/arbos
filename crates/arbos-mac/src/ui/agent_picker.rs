@@ -21,10 +21,10 @@ use crate::app::AppState;
 use crate::model::{Id, Project};
 use crate::ui::avatars;
 use crate::ui::composer::ComposerInput;
-use crate::ui::icons::icon;
+use crate::ui::highlight::{self, Shape};
 use crate::ui::people::agent_picker_rows;
 use crate::ui::secrets::SecretsPanel;
-use crate::ui::sidebar::{DISC_HOVER_LIFT, DISC_PRESSED_LIFT};
+use crate::ui::sf_symbols;
 use crate::ui::theme::{Theme, TEXT_SMALL, TEXT_TINY};
 
 /// A granted agent's chip and the Add button: 30 tall (the member-chip family).
@@ -226,8 +226,11 @@ pub fn render(
                         .justify_center()
                         .cursor_pointer()
                         .text_color(theme.text_muted)
-                        .hover(|s| s.text_color(theme.text).bg(theme.surface_2))
-                        .child(icon("xmark", 9.0, theme.text_muted))
+                        .map(|el| {
+                            let text = theme.text;
+                            highlight::button_with(el, theme, move |s| s.text_color(text))
+                        })
+                        .child(sf_symbols::glyph("xmark", 9.0, theme.text_muted))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
                             this.agent_picker.remove(&id);
@@ -237,8 +240,12 @@ pub fn render(
         );
     }
     let open = picker.open;
-    let hover = Theme::lighter(theme.surface_2, DISC_HOVER_LIFT);
-    let pressed = Theme::lighter(theme.surface_2, DISC_PRESSED_LIFT);
+    // Lifted while open: the pressed step stays on the chip.
+    let base = if open {
+        highlight::over(theme.surface_2, highlight::fills(theme).pressed)
+    } else {
+        theme.surface_2
+    };
     row = row.child(
         div()
             .id(ElementId::Name(SharedString::from(format!(
@@ -253,14 +260,12 @@ pub fn render(
             .flex_shrink_0()
             .items_center()
             .gap(px(6.0))
-            .bg(if open { pressed } else { theme.surface_2 })
             .text_size(px(TEXT_SMALL))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(theme.text)
             .cursor_pointer()
-            .hover(move |s| s.bg(hover))
-            .active(move |s| s.bg(pressed))
-            .child(icon("plus", 13.0, theme.text))
+            .map(|el| highlight::washed(el, base, theme))
+            .child(sf_symbols::glyph("plus", 13.0, theme.text))
             .child("Add agent")
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, window, cx| {
@@ -333,7 +338,7 @@ fn dropdown(
         .border_b_1()
         .border_color(theme.border)
         .cursor_text()
-        .child(icon("search", 13.0, theme.text_muted))
+        .child(sf_symbols::glyph("magnifyingglass", 13.0, theme.text_muted))
         .child(
             div()
                 .flex_1()
@@ -381,8 +386,7 @@ fn dropdown(
                 .text_size(px(TEXT_SMALL))
                 .text_color(theme.text)
                 .cursor_pointer()
-                .when(selected, |el| el.bg(theme.surface_2))
-                .hover(|s| s.bg(theme.surface_2))
+                .map(|el| highlight::row(el, selected, Shape::Nested(DROPDOWN_RADIUS), theme))
                 .child(avatars::project_with(
                     images.get(&p.id).cloned(),
                     p,

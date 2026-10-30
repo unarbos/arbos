@@ -13,8 +13,42 @@ final class BlockedStateTests: XCTestCase {
         XCTAssertEqual(BlockedState.label, "Blocked")
         XCTAssertEqual(BlockedState.unblock, "Unblock")
         XCTAssertEqual(BlockedState.confirmTitle(handle: "sam"), "Unblock @sam?")
+        let confirm = BlockedState.unblockConfirm(handle: "sam")
+        XCTAssertEqual(confirm.title, "Unblock @sam?")
+        XCTAssertEqual(confirm.message, BlockedState.confirmNote)
+        XCTAssertEqual(confirm.buttons, ["Unblock", "Cancel"])
+        XCTAssertFalse(confirm.destructive, "unblocking undoes a block; not red")
         XCTAssertEqual(BlockedState.composerLine(name: "Sam Rivera"), "You blocked Sam Rivera")
         XCTAssertFalse(BlockedState.confirmNote.isEmpty)
+
+        // Mute-until label ([feedback app-01M61GZ5B66VCSKF40458KH3DP]): fixed UTC clock.
+        let tz = TimeZone(secondsFromGMT: 0)!
+        let nowMs: Int64 = 1_793_188_800_000 // 2026-10-28 12:00:00 UTC
+        let laterToday: Int64 = 1_793_197_800_000 // 2026-10-28 14:30:00 UTC
+        let otherDay: Int64 = 1_793_370_600_000 // 2026-10-30 14:30:00 UTC
+        XCTAssertEqual(
+            BlockedState.mutedUntilLabel(untilMs: laterToday, nowMs: nowMs, timeZone: tz),
+            "Muted until 14:30"
+        )
+        XCTAssertEqual(
+            BlockedState.mutedUntilLabel(untilMs: otherDay, nowMs: nowMs, timeZone: tz),
+            "Muted until Oct 30, 14:30"
+        )
+        XCTAssertEqual(BlockedState.mutedUntilLabel(untilMs: nil, nowMs: nowMs, timeZone: tz), "Muted")
+        XCTAssertEqual(
+            BlockedState.refusalSentence(
+                reason: "silenced", name: nil, handle: nil,
+                silencedUntilMs: laterToday, nowMs: nowMs
+            ),
+            "Muted until 14:30. Your messages aren't being delivered."
+        )
+        XCTAssertEqual(
+            BlockedState.refusalSentence(
+                reason: "silenced", name: nil, handle: nil,
+                silencedUntilMs: nil, nowMs: nowMs
+            ),
+            "Muted. Your messages aren't being delivered."
+        )
     }
 
     func testBlockedMatchesByIdThenHandle() {
@@ -44,7 +78,7 @@ final class BlockedStateTests: XCTestCase {
         )
         XCTAssertEqual(
             BlockedState.refusalSentence(reason: "silenced", name: nil, handle: nil),
-            "You're muted in this chat, so your messages aren't being delivered."
+            "Muted. Your messages aren't being delivered."
         )
         for reason in [nil, "chat_unavailable", "something_new"] {
             XCTAssertEqual(
@@ -57,7 +91,7 @@ final class BlockedStateTests: XCTestCase {
         XCTAssertFalse(BlockedState.offersUnblock(reason: "blocked_by"))
         XCTAssertFalse(BlockedState.offersUnblock(reason: nil))
         let why = PushRefusalWhy(code: "not_available", reason: "blocked_by", byHandle: "sam", byName: "Sam Rivera")
-        XCTAssertEqual(why.sentence, "Sam Rivera has blocked you in this chat.")
+        XCTAssertEqual(why.sentence(), "Sam Rivera has blocked you in this chat.")
     }
 
     // MARK: - Structure
@@ -84,7 +118,7 @@ final class BlockedStateTests: XCTestCase {
         XCTAssertTrue(pages.contains("PanePillButton(glyph: \"nosign\", title: BlockedState.unblock) { confirmUnblock = true }"), "the pill asks first")
         XCTAssertTrue(pages.contains("PaneActionRow(title: BlockRow.title(blocked: true), color: theme.accent) { confirmUnblock = true }"), "the row asks first")
         XCTAssertFalse(pages.contains("color: theme.accent) { model.unblock(entry) }"), "no unblock without the confirm")
-        XCTAssertTrue(pages.contains(".confirmationDialog(BlockedState.confirmTitle(handle: person.handle), isPresented: $confirmUnblock"), "one confirm for both")
+        XCTAssertTrue(pages.contains(".confirm(BlockedState.unblockConfirm(handle: person.handle), isPresented: $confirmUnblock)"), "one confirm for both, the centred alert")
         XCTAssertTrue(pages.contains("case (true, let manage?): return AnyView(HStack(spacing: 6) { BlockedTag(); manage })"), "the member row's tag before the menu")
         XCTAssertTrue(pages.contains("case (true, nil): return AnyView(BlockedTag())"))
     }
@@ -97,7 +131,7 @@ final class BlockedStateTests: XCTestCase {
         XCTAssertTrue(chat.contains("if blockedPeer != nil { BlockedTag() }"), "the tag after the DM peer's name")
         XCTAssertTrue(chat.contains("} else if let peer = blockedPeer {"), "the bar takes the composer's branch")
         XCTAssertTrue(chat.contains("BlockedComposerBar(name: peer.displayName) { confirmUnblock = true }"), "the bar's Unblock asks first")
-        XCTAssertTrue(chat.contains(".confirmationDialog(BlockedState.confirmTitle(handle: blockedPeer?.handle ?? counterpart?.handle ?? \"\"), isPresented: $confirmUnblock"))
+        XCTAssertTrue(chat.contains(".confirm(BlockedState.unblockConfirm(handle: blockedPeer?.handle ?? counterpart?.handle ?? \"\"), isPresented: $confirmUnblock)"), "the centred alert, not a dialog floating over the transcript")
         XCTAssertTrue(chat.contains("BlockedState.isBlocked(id: other.id, handle: other.handle, in: model.blocked)"), "from the relay's block list")
     }
 
@@ -110,7 +144,11 @@ final class BlockedStateTests: XCTestCase {
         XCTAssertTrue(room.contains("case .pushRefused(_, let code, let reason, let byHandle, let byName):"), "the frame's fields are read")
         XCTAssertTrue(room.contains("lastRefusal = PushRefusalWhy(code: code, reason: reason, byHandle: byHandle, byName: byName)"))
         XCTAssertTrue(model.contains("let why = room?.lastRefusal"), "the model reads the reason")
-        XCTAssertTrue(model.contains("let text = why?.sentence ?? BlockedState.refusalSentence(reason: nil, name: nil, handle: nil)"))
+        XCTAssertTrue(
+            model.contains("why?.sentence(silencedUntilMs: until)"),
+            "the model passes silencedUntil into the sentence"
+        )
+        XCTAssertTrue(model.contains("BlockedState.refusalSentence(reason: nil, name: nil, handle: nil)"))
         XCTAssertFalse(model.contains("self.notice = Notice(text: \"Messages in this chat are not being delivered\")"), "no fixed sentence left")
     }
 }

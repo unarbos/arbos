@@ -152,6 +152,65 @@ final class RelayAPI {
         return (data, http)
     }
 
+    // MARK: Emoji · stickers · GIFs picker (ARB-544)
+
+    /// `GET /gif/search?q=` (or `/gif/trending` for an empty query): the relay's page, or why
+    /// there is none. The relay talks to KLIPY; this app never holds the key.
+    func gifSearch(query: String, pos: String?) async -> GifPage {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        var path: String
+        if q.isEmpty {
+            path = "/gif/trending"
+            if let pos, !pos.isEmpty, let enc = pos.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+                path += "?pos=\(enc)"
+            }
+        } else {
+            guard let enc = q.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return .failed }
+            path = "/gif/search?q=\(enc)"
+            if let pos, !pos.isEmpty, let penc = pos.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+                path += "&pos=\(penc)"
+            }
+        }
+        do {
+            let (data, _) = try await request("GET", path)
+            let page = try JSONDecoder().decode(GifPageDto.self, from: data)
+            return .items(page.items, next: page.next)
+        } catch let error as RelayError {
+            if error.type == "gif_unavailable" || error.status == 503 { return .unavailable }
+            if error.type == "gif_busy" || error.status == 429 { return .busy }
+            return .failed
+        } catch {
+            return .failed
+        }
+    }
+
+    /// `POST /gif/share?id=&q=` — the provider's ranking signal; never an error for the app.
+    func gifShare(id: String, query: String) async {
+        guard let i = id.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let q = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return }
+        _ = try? await request("POST", "/gif/share?id=\(i)&q=\(q)")
+    }
+
+    /// `GET /stickers/packs` — the relay's sticker-pack manifest; `nil` when it could not be read.
+    func stickerPacks() async -> [StickerPack]? {
+        guard let (data, _) = try? await request("GET", "/stickers/packs"),
+              let m = try? JSONDecoder().decode(StickerPacksDto.self, from: data) else { return nil }
+        return m.packs
+    }
+
+    /// `GET /stickers/{pack}/{id}` — one sticker's bytes (the relay caches them; MIT / CC BY).
+    func stickerData(path: String) async -> Data? {
+        guard let (data, http) = try? await request("GET", path), http.statusCode == 200, !data.isEmpty else { return nil }
+        return data
+    }
+
+    /// The relay's GIF pass-through for a provider media URL (`GET /gif/media?u=`); the caller
+    /// adds the device bearer. `nil` when the URL cannot be encoded.
+    func gifMediaURL(_ remote: String) -> URL? {
+        guard let enc = remote.addingPercentEncoding(withAllowedCharacters: .alphanumerics) else { return nil }
+        return URL(string: "\(endpoint.httpUrl)/gif/media?u=\(enc)")
+    }
+
     /// `GET /link-icon?domain=` — the site's 64×64 PNG for the bubbles' named links, `nil` when the
     /// site has none (204) or the call failed (nobody asked; the bubble keeps its placeholder).
     func linkIcon(host: String) async -> Data? {
@@ -320,6 +379,84 @@ final class RelayAPI {
         return (v as? [String: Any])?["id"] as? String
     }
 
+    // MARK: Outside agents (#2142) — an agent that runs elsewhere, hosted by the relay
+
+    /// `POST /outside-agents {name, transport}` → the new agent's key, shown once.
+    func connectAgent(name: String, transport: String) async throws -> ConnectReveal {
+        let v = try await json("POST", "/outside-agents", body: ["name": name, "transport": transport])
+        guard let reveal = ConnectReveal(json: v, rotated: false) else {
+            throw RelayError(status: 500, message: "The relay answered without a key.")
+        }
+        return reveal
+    }
+
+    /// `GET /outside-agents/{id}` → its connection; `nil` for an agent that is not outside.
+    func outsideAgent(_ projectId: Id) async throws -> OutsideAgentInfo? {
+        do {
+            let v = try await json("GET", "/outside-agents/\(projectId)")
+            let d = v as? [String: Any]
+            return OutsideAgentInfo(json: d?["agent"], log: d?["log"])
+        } catch let e as RelayError where e.status == 404 {
+            return nil
+        }
+    }
+
+    /// `GET /outside-agents/{id}/log?limit=500` (#2224): the connected agent's session log,
+    /// oldest first; an older relay (404) reads as no log.
+    func outsideAgentLog(_ projectId: Id) async throws -> [OutsideLogEntry] {
+        do {
+            let v = try await json("GET", "/outside-agents/\(projectId)/log?limit=500")
+            let entries = (v as? [String: Any])?["entries"] as? [Any] ?? []
+            return entries.compactMap { OutsideLogEntry(json: $0) }
+        } catch let e as RelayError where e.status == 404 {
+            return []
+        }
+    }
+
+    /// `PATCH /outside-agents/{id} {scopes: {name: on}}` — one switch of the Can card → the
+    /// agent with its effective set.
+    func setOutsideScope(_ projectId: Id, _ scope: String, on: Bool) async throws -> OutsideAgentInfo? {
+        let v = try await json("PATCH", "/outside-agents/\(projectId)", body: ["scopes": [scope: on]])
+        return OutsideAgentInfo(json: (v as? [String: Any])?["agent"])
+    }
+
+    /// `POST /outside-agents/{id}/rotate` → a fresh key; the old one stops at once.
+    func rotateOutsideKey(_ projectId: Id) async throws -> ConnectReveal {
+        let v = try await json("POST", "/outside-agents/\(projectId)/rotate", body: [String: Any]())
+        guard let reveal = ConnectReveal(json: v, rotated: true) else {
+            throw RelayError(status: 500, message: "The relay answered without a key.")
+        }
+        return reveal
+    }
+
+    /// `DELETE /outside-agents/{id}`: revoke the key; the agent and its messages stay.
+    func revokeOutsideAgent(_ projectId: Id) async throws {
+        _ = try await request("DELETE", "/outside-agents/\(projectId)")
+    }
+
+    /// `PATCH /outside-agents/{id} {wake_url, wake_auth}` ([feedback outside-agents-wake-ios-2026-10-28]):
+    /// `nil` leaves a field alone, an empty string clears it. → the agent's connection.
+    func setOutsideWake(_ projectId: Id, url: String?, auth: String?) async throws -> OutsideAgentInfo? {
+        var body: [String: Any] = [:]
+        if let url { body["wake_url"] = url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? NSNull() : url }
+        if let auth { body["wake_auth"] = auth.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? NSNull() : auth }
+        let v = try await json("PATCH", "/outside-agents/\(projectId)", body: body)
+        return OutsideAgentInfo(json: (v as? [String: Any])?["agent"])
+    }
+
+    /// `POST /outside-agents/{id}/wake/test` → `(ok, "Delivered · HTTP 200" | "Failed · <reason>")`.
+    func testOutsideWake(_ projectId: Id) async throws -> (ok: Bool, text: String) {
+        let v = try await json("POST", "/outside-agents/\(projectId)/wake/test", body: [String: Any]())
+        let d = v as? [String: Any] ?? [:]
+        let ok = d["ok"] as? Bool ?? false
+        if ok {
+            if let s = d["status"] as? NSNumber { return (true, "Delivered · HTTP \(s.intValue)") }
+            return (true, "Delivered")
+        }
+        if let e = d["error"] as? String, !e.isEmpty { return (false, "Failed · \(e)") }
+        return (false, "Failed")
+    }
+
     /// Soft-delete an owned agent (`DELETE /projects/{id}`).
     func deleteProject(_ projectId: Id) async throws {
         _ = try await request("DELETE", "/projects/\(projectId)")
@@ -333,6 +470,18 @@ final class RelayAPI {
     /// `PUT /servers/{id}/archive {archived}` — same flag for a server row.
     func setServerArchived(_ serverId: String, archived: Bool) async throws {
         _ = try await request("PUT", "/servers/\(serverId)/archive", body: ["archived": archived])
+    }
+
+    /// `GET /me/pins` → my sidebar / Home pins, top first, and the relay's cap
+    /// ([feedback sidebar-pinning-ios-2026-10-28]).
+    func pins() async throws -> PinsDto {
+        try await decode(PinsDto.self, "GET", "/me/pins")
+    }
+
+    /// `PUT /me/pins {pins}` replaces the whole list; the answer is the list the relay kept.
+    /// Over the cap → `409 pin_cap`.
+    func setPins(_ pins: [String]) async throws -> PinsDto {
+        try await decode(PinsDto.self, "PUT", "/me/pins", body: ["pins": pins])
     }
 
     func setModel(projectId: Id, model: String, effort: Effort) async throws {
@@ -534,6 +683,12 @@ final class RelayAPI {
         }
         if let projectId, !projectId.isEmpty { body["project_id"] = projectId }
         return try await decode(FeedbackSubmitReplyDto.self, "POST", "/feedback", body: body).id
+    }
+
+    /// `POST /perf/report` (JSON, device token): one MetricKit payload in its envelope
+    /// (`PerfDiagnostics.envelope`) → `{id}`. Anonymous on the relay side.
+    func sendPerfReport(_ body: [String: Any]) async throws {
+        _ = try await json("POST", "/perf/report", body: body)
     }
 
     /// `POST /feedback/capture/{id}` (device token): the answer to a `feedback_capture` push from
@@ -1212,6 +1367,12 @@ final class RelayAPI {
         _ = try await request("DELETE", "/room/\(room)/messages/\(messageId)")
     }
 
+    /// Remove a message's link preview for everyone (#2064): the relay checks who may (the
+    /// delete rule, 403 `not_yours`), writes `preview: "off"` and drops the part itself.
+    func removeLinkPreview(room: String, messageId: String) async throws {
+        _ = try await request("DELETE", "/room/\(room)/messages/\(messageId)/preview")
+    }
+
     /// `PUT /chats/{id}/settings {read_receipts?, muted?, archived?}` per member.
     func chatSettings(chatId: String, muted: Bool? = nil, readReceipts: Bool? = nil, archived: Bool? = nil) async throws {
         var body: [String: Any] = [:]
@@ -1392,5 +1553,248 @@ final class RelayAPI {
             NSLog("GoalDto: \(error)")
             throw RelayError(status: 0, message: "Bad goal reply")
         }
+    }
+}
+
+// MARK: - Outside agents (#2142)
+
+/// The connection of an outside agent (`GET /outside-agents/{id}` → `agent`).
+struct OutsideAgentInfo: Equatable {
+    /// `connected` | `away` | `never` | `revoked`.
+    var status: String
+    var connected: Bool
+    /// `acp` | `grok` | `custom`.
+    var transport: String
+    /// `asp/1`.
+    var proto: String
+    var lastSeenAt: Int64?
+    /// The nine switches (spec §4.3), effective values: `"files.read": true`.
+    var scopes: [String: Bool]
+
+    /// The switches of the Can card in the mockup's order: wire name, title, subtitle.
+    static let scopeRows: [(name: String, title: String, subtitle: String?)] = [
+        ("chat.read", "Read messages", "in chats it is a member of"),
+        ("chat.post", "Post, edit and delete its own messages", nil),
+        ("chat.react", "React", nil),
+        ("presence", "Show typing and status", nil),
+        ("approval.request", "Ask you to approve actions", "approval cards in chat"),
+        ("secret.use", "Use your secrets", "by name only, never the value"),
+        ("members.manage", "Add members or agents", nil),
+        ("files.read", "Open files shared in chat", "pictures, files, GIFs it was sent"),
+        ("calls.join", "Join voice calls", nil),
+    ]
+    /// The Wake URL (`agent.wake`): the URL is shown back, the Authorization value never is.
+    var wakeURL: String?
+    var wakeAuthSet: Bool
+    var wakeLast: OutsideWakeLast?
+    /// True on a relay that has the Wake URL at all.
+    var hasWake: Bool
+    /// The session log's header numbers (`log` beside `agent` on the record, #2224); nil on a
+    /// relay without the log — the card stays away.
+    var logSummary: OutsideLogSummary? = nil
+
+    init?(json: Any?, log: Any? = nil) {
+        guard let d = json as? [String: Any] else { return nil }
+        logSummary = OutsideLogSummary(json: log)
+        status = d["status"] as? String ?? "never"
+        connected = d["connected"] as? Bool ?? false
+        transport = d["transport"] as? String ?? "custom"
+        proto = d["protocol"] as? String ?? "asp/1"
+        if let t = d["last_seen_at"] as? NSNumber { lastSeenAt = t.int64Value } else { lastSeenAt = nil }
+        scopes = (d["scopes"] as? [String: Any])?.compactMapValues { $0 as? Bool } ?? [:]
+        let wake = d["wake"] as? [String: Any]
+        hasWake = wake != nil
+        wakeURL = (wake?["url"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        wakeAuthSet = wake?["auth_set"] as? Bool ?? false
+        wakeLast = OutsideWakeLast(json: wake?["last"])
+    }
+
+    /// A switch's value; a relay without scopes yet reads as the spec defaults.
+    func scope(_ name: String) -> Bool {
+        if let v = scopes[name] { return v }
+        return ["chat.read", "chat.post", "chat.react", "presence", "approval.request"].contains(name)
+    }
+
+    /// The transport as the Details pane names it.
+    var transportLabel: String {
+        switch transport {
+        case "acp": return "ACP · on your Mac"
+        case "grok": return "Grok · HTTPS"
+        default: return "Custom · HTTPS / WebSocket"
+        }
+    }
+
+    /// "Connected · 12 s ago", "Away · 40 min ago", "Waiting for the first heartbeat", "Disconnected".
+    func statusLine(now: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) -> String {
+        func ago(_ t: Int64) -> String {
+            let s = max(0, (now - t) / 1000)
+            if s < 60 { return "\(s) s ago" }
+            if s < 3600 { return "\(s / 60) min ago" }
+            if s < 86_400 { return "\(s / 3600) h ago" }
+            return "\(s / 86_400) d ago"
+        }
+        switch (status, lastSeenAt) {
+        case ("revoked", _): return "Disconnected"
+        case ("connected", let t?): return "Connected · \(ago(t))"
+        case ("connected", nil): return "Connected"
+        case ("away", let t?): return "Away · \(ago(t))"
+        case ("away", nil): return "Away"
+        default: return "Waiting for the first heartbeat"
+        }
+    }
+}
+
+/// `log {entries, last_at, last_reply_ms}` on a connected agent's record (#2224).
+struct OutsideLogSummary: Equatable {
+    var entries: Int
+    var lastAt: Int64?
+    var lastReplyMs: Int64?
+
+    init?(json: Any?) {
+        guard let d = json as? [String: Any] else { return nil }
+        entries = (d["entries"] as? NSNumber)?.intValue ?? 0
+        lastAt = (d["last_at"] as? NSNumber)?.int64Value
+        lastReplyMs = (d["last_reply_ms"] as? NSNumber)?.int64Value
+    }
+}
+
+/// One line of a connected agent's session log as the sidecar uploaded it (spec §13.3): a wake,
+/// an ack, a reply, a session event or an error — never message text.
+struct OutsideLogEntry: Equatable, Identifiable {
+    let id: Int64
+    let at: Int64
+    let kind: String
+    let chat: String?
+    let message: String?
+    let ms: [String: Int64]
+    let session: String?
+    let error: String?
+    let turns: Int?
+    let reason: String?
+    let handoffFrom: String?
+
+    init?(json: Any?) {
+        guard let d = json as? [String: Any], let kind = d["kind"] as? String else { return nil }
+        id = (d["id"] as? NSNumber)?.int64Value ?? 0
+        at = (d["at"] as? NSNumber)?.int64Value ?? 0
+        self.kind = kind
+        chat = d["chat"] as? String
+        message = d["message"] as? String
+        ms = (d["ms"] as? [String: Any])?.compactMapValues { ($0 as? NSNumber)?.int64Value } ?? [:]
+        session = d["session"] as? String
+        error = d["error"] as? String
+        turns = (d["turns"] as? NSNumber)?.intValue
+        reason = d["reason"] as? String
+        handoffFrom = d["handoff_from"] as? String
+    }
+
+    var isError: Bool { kind == "error" }
+    var isSession: Bool { kind.hasPrefix("session.") }
+    /// Rows worth a line on the card: replies, errors and session events; wakes, typing, reads
+    /// and uploads are the plumbing behind them.
+    var shown: Bool { kind == "reply" || kind == "post" || isError || isSession }
+
+    private static func secs(_ ms: Int64) -> String { String(format: "%.1f s", Double(ms) / 1000) }
+
+    /// The first line for a session event.
+    var sessionTitle: String {
+        switch kind {
+        case "session.new": return "new session"
+        case "session.resume": return "session resumed"
+        case "session.resume_failed": return "session could not be resumed"
+        case "session.rotate": return "session rotated"
+        default: return "session"
+        }
+    }
+
+    /// The muted second line: "ack 1.2 s · reply 9.8 s", "turn 12", or the error sentence.
+    var detail: String {
+        if let error { return error }
+        if isSession {
+            switch kind {
+            case "session.resume": return turns.map { "turn \($0)" } ?? ""
+            case "session.new": return handoffFrom.map { "handoff from \($0.prefix(4))…" } ?? "first session"
+            case "session.rotate": return reason ?? ""
+            default: return ""
+            }
+        }
+        var parts: [String] = []
+        if let a = ms["event_to_ack"] { parts.append("ack \(Self.secs(a))") }
+        if let r = ms["event_to_reply"] ?? ms["nudge_to_reply"] { parts.append("reply \(Self.secs(r))") }
+        return parts.joined(separator: " · ")
+    }
+
+    var date: Date { Date(timeIntervalSince1970: Double(at) / 1000) }
+
+    /// "17:02:11" in local time.
+    var clock: String {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f.string(from: date)
+    }
+
+    /// "Today", "Yesterday", or the weekday and date — the View all page's section headers.
+    var day: String {
+        let cal = Calendar.current
+        if cal.isDateInToday(date) { return "Today" }
+        if cal.isDateInYesterday(date) { return "Yesterday" }
+        let f = DateFormatter()
+        f.dateFormat = "EEEE, d MMMM"
+        return f.string(from: date)
+    }
+}
+
+/// The last nudge the relay sent to an outside agent's Wake URL.
+struct OutsideWakeLast: Equatable {
+    var at: Int64
+    var status: Int?
+    var error: String?
+
+    init?(json: Any?) {
+        guard let d = json as? [String: Any], let at = d["at"] as? NSNumber else { return nil }
+        self.at = at.int64Value
+        status = (d["status"] as? NSNumber)?.intValue
+        error = (d["error"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    init(at: Int64, status: Int?, error: String?) {
+        self.at = at; self.status = status; self.error = error
+    }
+
+    /// "Delivered · HTTP 200 · 12 s ago" / "Failed · HTTP 500: boom · 3 min ago" (the Mac's `WakeLast::line`).
+    func line(now: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) -> String {
+        let s = max(0, (now - at) / 1000)
+        let when: String
+        if s < 60 { when = "\(s) s ago" } else if s < 3600 { when = "\(s / 60) min ago" } else if s < 86_400 { when = "\(s / 3600) h ago" } else { when = "\(s / 86_400) d ago" }
+        if let error { return "Failed · \(error) · \(when)" }
+        if let status { return "Delivered · HTTP \(status) · \(when)" }
+        return "Delivered · \(when)"
+    }
+}
+
+/// What the reveal screen shows once: the key and the link, plus the live connection.
+struct ConnectReveal: Equatable {
+    var projectId: Id
+    var name: String
+    var transport: String
+    var key: String
+    var link: String
+    var relayURL: String
+    var chatId: Id?
+    var rotated: Bool
+    var info: OutsideAgentInfo?
+
+    init?(json: Any, rotated: Bool) {
+        guard let d = json as? [String: Any], let agent = d["agent"] as? [String: Any],
+              let id = agent["project_id"] as? String, let key = d["key"] as? String else { return nil }
+        projectId = id
+        name = agent["name"] as? String ?? ""
+        transport = agent["transport"] as? String ?? "custom"
+        self.key = key
+        link = d["link"] as? String ?? ""
+        relayURL = d["relay_url"] as? String ?? ""
+        chatId = d["chat_id"] as? String
+        self.rotated = rotated
+        info = OutsideAgentInfo(json: agent)
     }
 }

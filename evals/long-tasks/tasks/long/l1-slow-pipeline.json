@@ -1,27 +1,28 @@
 {
-  "id": "l1-slow-pipeline",
-  "lane": "d",
-  "category": "long",
-  "title": "A 33-minute pipeline with progress notes",
-  "turns": [
-    {
-      "prompt": "Process the 20 files in {D}/chunks one at a time: for each chunk-NN.txt, wait 100 seconds (simulating slow processing), then write its line count to {D}/out/chunk-NN.count. Run this in the background and send me a short progress note after every 5 chunks, then a final summary when all 20 are done.",
-      "generate": "chunks",
-      "seed": "mkdir -p {D}/out",
-      "background": true,
-      "latency_max_s": 20,
-      "timeout_s": 180
-    }
-  ],
-  "verify_wait": {
-    "verify": "n=$(ls {D}/out/*.count 2>/dev/null | wc -l); echo \"SHOW counts=$n\"; [ $n -ge 20 ] && echo PASS || echo FAIL: $n of 20 count files",
-    "wait_s": 2700,
-    "min_progress_rows": 3,
-    "rubric": {
-      "criteria": "Judge the transcript only; the output files are verified programmatically (the check output below says PASS when all 20 count files exist), so do not penalise 'unverified' claims that match it. Pass: at least three progress notes at sensible points and a final summary stating all 20 chunks were processed; notes short and not duplicated; no narration-only rows ('On it.').",
-      "min": 3
-    },
-    "settle_s": 150
+ "id": "l1-slow-pipeline",
+ "lane": "d",
+ "category": "long",
+ "title": "A 33-minute pipeline with progress notes",
+ "turns": [
+  {
+   "prompt": "Process the 20 files in {D}/chunks one at a time: for each chunk-NN.txt, wait 100 seconds (simulating slow processing), then write its line count to {D}/out/chunk-NN.count. Run this in the background and send me a short progress note after every 5 chunks, then a final summary when all 20 are done.",
+   "generate": "chunks",
+   "seed": "mkdir -p {D}/out",
+   "background": true,
+   "latency_max_s": 20,
+   "timeout_s": 180
+  }
+ ],
+ "verify_wait": {
+  "verify": "n=$(ls {D}/out/*.count 2>/dev/null | wc -l); echo \"SHOW counts=$n\"; [ $n -ge 20 ] && echo PASS || echo FAIL: $n of 20 count files",
+  "wait_s": 2700,
+  "min_progress_rows": 3,
+  "rubric": {
+   "criteria": "Judge the transcript only; the output files are verified programmatically (the check output below says PASS when all 20 count files exist), so do not penalise 'unverified' claims that match it. Pass: at least three progress notes at sensible points and a final summary stating all 20 chunks were processed; notes short and not duplicated; no narration-only rows ('On it.').",
+   "min": 3
   },
-  "cleanup_routines": true
+  "settle_s": 150
+ },
+ "cleanup_routines": true,
+ "regression": "run 10: killed by the fleet roll at 00:42 (0 of 20 files) — infrastructure, see #1777 family; run 11 quiet box: 8 of 20 chunks in 48 min (loop ran at a third of its design speed), not the roll — watch box CPU under four lanes; #2258 (run 12: agentd restarted at 00:58:24 on the 0.1.179→0.1.181 default switch and the detached loop died at 5/20; run 11's 8/20 was most likely the same, not slowness); #2275 (run 13: 20/20 files, but the job-created one-shot routines posted the 5/10/15 notes into the pinned chat, not the asking chat; final summary never fired)"
 }

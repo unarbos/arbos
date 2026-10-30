@@ -21,7 +21,8 @@ use arbos_core::chart::{
     SeriesShape, PALETTE_DARK, PALETTE_LIGHT,
 };
 
-use super::icons::icon;
+use super::highlight;
+use super::sf_symbols;
 use super::theme::{Appearance, Theme};
 use super::transcript::CodeCopy;
 
@@ -145,7 +146,6 @@ pub fn icon_square(
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
     let color = tint.unwrap_or(theme.text_muted);
-    let hover_bg = theme.surface_2;
     let selector = id.to_string();
     div()
         .id(id)
@@ -158,8 +158,8 @@ pub fn icon_square(
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .hover(move |s| s.bg(hover_bg))
-        .child(icon(glyph, ICON_GLYPH, color))
+        .map(|el| highlight::button(el, theme))
+        .child(sf_symbols::glyph(glyph, ICON_GLYPH, color))
 }
 
 /// The card: title · subtitle, the three icon squares, the legend, the plot.
@@ -206,7 +206,7 @@ pub fn card(row_id: &str, part_id: &str, spec: &str, theme: &Theme, copy: &CodeC
         icons = icons.child(
             icon_square(
                 copy_id.clone(),
-                if copied { "check" } else { "copy" },
+                if copied { "checkmark" } else { "doc.on.doc" },
                 copied.then_some(theme.online),
                 theme,
             )
@@ -222,7 +222,7 @@ pub fn card(row_id: &str, part_id: &str, spec: &str, theme: &Theme, copy: &CodeC
         icons = icons.child(
             icon_square(
                 SharedString::from(format!("{row_id}#chart-save")),
-                "download",
+                "arrow.down.to.line",
                 None,
                 theme,
             )
@@ -238,7 +238,7 @@ pub fn card(row_id: &str, part_id: &str, spec: &str, theme: &Theme, copy: &CodeC
         icons = icons.child(
             icon_square(
                 SharedString::from(format!("{row_id}#chart-expand")),
-                "expand",
+                "arrow.up.left.and.arrow.down.right",
                 None,
                 theme,
             )
@@ -333,6 +333,7 @@ pub fn legend(model: &ChartModel, theme: &Theme, font: f32, dot: f32) -> gpui::D
                 .flex()
                 .items_center()
                 .gap(px(6.0))
+                // status-dot: exception — a legend swatch carries the series' data colour, not a state.
                 .child(div().size(px(dot)).rounded_full().bg(color))
                 .child(name),
         );

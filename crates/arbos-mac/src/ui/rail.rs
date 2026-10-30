@@ -2,10 +2,11 @@
 //! [feedback mac-sidebar-rail-2026-10-26]).
 //!
 //! Pressing the sidebar toggle no longer closes the chat list; it collapses
-//! it to an 84 pt rail — one centred column: the toggle (in full screen; in a
-//! window it stays beside the traffic lights in the chat header, where today's
-//! lone toggle is), then **+** and **Search** stacked 8 apart on today's
-//! control line, then every chat's picture (agents, people, groups, servers)
+//! it to an 84 pt rail — one centred column: the toggle, **+** and **Search**
+//! stacked 8 apart under the traffic lights' slot (Jacob 2026-10-27,
+//! [feedback sidebar-toggle-in-rail-2026-10-27]: "the tab button should also
+//! be in the side bar" — before, a plain window kept it floating in the chat
+//! header), then every chat's picture (agents, people, groups, servers)
 //! at 36 pt on Grok's 58 pt pitch, and my own picture alone at the bottom on
 //! the footer's line. The rail follows the All · Agents · People · Servers
 //! segment, which persists with the collapsed state; a server's picture opens
@@ -34,24 +35,25 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui::{
-    div, prelude::*, px, Bounds, Context, Div, ElementId, Focusable as _, Pixels, SharedString,
+    div, prelude::*, px, App, Bounds, Context, Div, ElementId, Focusable as _, Pixels, SharedString,
 };
 
 use crate::model::Id;
 use crate::ui::composer::Composer;
 use crate::ui::frost::edge_faded;
 use crate::ui::glass::{self, WindowDrag};
+use crate::ui::highlight;
 use crate::ui::shell::Shell;
 use crate::ui::sidebar::{
-    self, is_control_click, ListEntry, StripControl, FOOTER_AVATAR, FOOTER_BOTTOM,
-    FOOTER_DOT_OVERHANG, FOOTER_DOT_RING, FOOTER_HEIGHT, LIST_FADE_BAND, STRIP_GAP, STRIP_INSET,
+    self, is_control_click, ListEntry, StripControl, FOOTER_AVATAR, FOOTER_BOTTOM, FOOTER_HEIGHT,
+    LIST_FADE_BAND, STRIP_GAP,
 };
 use crate::ui::theme::{Theme, CONTROL, TEXT_SMALL};
 
 /// The rail's geometry (pt). Grok's numbers where Grok has them; the button
 /// family's where the rail holds our discs.
 pub(crate) mod metrics {
-    use crate::ui::theme::{CONTROL, CONTROL_LINE};
+    use crate::ui::theme::{CONTROL, TRAFFIC_LIGHT_SLOT};
 
     /// Rail width including its 1 pt right hairline (Grok: 83.5).
     pub const WIDTH: f32 = 84.0;
@@ -66,13 +68,27 @@ pub(crate) mod metrics {
     pub const PITCH: f32 = 58.0;
     /// The discs' x: centred in the rail.
     pub const DISC_X: f32 = CENTRE_X - CONTROL / 2.0;
-    /// The toggle keeps today's line (disc top 12, centre `CONTROL_LINE`);
-    /// + and Search stack under it, `STRIP_GAP` apart.
-    pub const TOGGLE_TOP: f32 = CONTROL_LINE - CONTROL / 2.0;
-    pub const PLUS_TOP: f32 = TOGGLE_TOP + CONTROL + super::STRIP_GAP;
-    pub const SEARCH_TOP: f32 = PLUS_TOP + CONTROL + super::STRIP_GAP;
+    /// The traffic lights' slot at the top of the rail: the 44 pt title-bar
+    /// container GPUI sizes around AppKit's buttons (`TRAFFIC_LIGHT_SLOT`:
+    /// 14 pt discs centred at 22, spanning x 15–75 — the rail's whole width
+    /// but 9 pt). Reserved and empty of our controls, so a disc never sits
+    /// under the buttons or inside their tracking areas; all window drag.
+    /// Like the expanded strip, the rail moves nothing in native full screen
+    /// (the lights hide, the slot stays).
+    pub const LIGHTS_SLOT: f32 = TRAFFIC_LIGHT_SLOT;
+    /// One disc plus the strip's gap: the column's pitch between discs.
+    pub const DISC_PITCH: f32 = CONTROL + super::STRIP_GAP;
+    /// The toggle, + and Search stack under the lights' slot, `STRIP_GAP`
+    /// apart from it and from each other — the strip's order read top-down
+    /// ([feedback sidebar-toggle-in-rail-2026-10-27]: the toggle lives in the
+    /// rail with the other discs; before, a plain window kept it in the chat
+    /// header, and the rail's top slot — on the lights' line — hid it under
+    /// the buttons whenever that layout was drawn in a window).
+    pub const TOGGLE_TOP: f32 = LIGHTS_SLOT + super::STRIP_GAP;
+    pub const PLUS_TOP: f32 = TOGGLE_TOP + DISC_PITCH;
+    pub const SEARCH_TOP: f32 = PLUS_TOP + DISC_PITCH;
     /// Pictures start 16 under the last disc (Grok's first card sits 16
-    /// under its discs): first tile top 152 → first picture top 161.
+    /// under its discs): first tile top 192 → first picture top 201.
     pub const FIRST_TILE_TOP: f32 = SEARCH_TOP + CONTROL + 16.0;
     /// The scroll box starts where the first 58 pt slot does (the 54 tile is
     /// centred in its slot, 2 above and below).
@@ -80,65 +96,36 @@ pub(crate) mod metrics {
     /// The hover tip: 28 tall, 8 right of the rail's edge.
     pub const TIP_HEIGHT: f32 = 28.0;
     pub const TIP_GAP: f32 = 8.0;
-    /// Badge discs at the picture's bottom-right corner: the unread dot in a
-    /// ring of the rail's colour, the typing dot in the footer dot's ring.
-    pub const UNREAD_DOT: f32 = 8.0;
-    pub const UNREAD_RING: f32 = 12.0;
-    pub const TYPING_DOT: f32 = 9.0;
+    // Badges at the picture's bottom-right corner (`tile_badge` through
+    // `ui::marks::corner`): the working spinner in a ring of the tile's colour,
+    // or the unread count pill (`ui::marks`) — never a coloured dot.
 }
 
-/// Where the sidebar toggle lives while the sidebar is collapsed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ToggleSpot {
-    /// A plain window: beside the traffic lights in the chat header, where
-    /// today's lone toggle is (the header's 12 pt inset after the rail).
-    Header,
-    /// Native full screen (the lights are hidden): the rail's top-left slot.
-    RailTop,
-}
-
-pub(crate) fn toggle_spot(fullscreen: bool) -> ToggleSpot {
-    if fullscreen {
-        ToggleSpot::RailTop
-    } else {
-        ToggleSpot::Header
-    }
-}
-
-/// Whether the chat header draws the sidebar toggle this frame.
-///
-/// * The narrow band hides the sidebar outright: the header shows the toggle
-///   once the sidebar has left the lights' band (as before).
-/// * Collapsed to the rail: only at rest, and only in a plain window
-///   ([`ToggleSpot::Header`]) — full screen keeps it in the rail, and the
-///   morph's overlay carries it in between, so it is never drawn twice.
-pub(crate) fn header_toggle_shown(
-    sidebar_hidden: bool,
-    sidebar_visible: f32,
-    rail: bool,
-    sliding: bool,
-    fullscreen: bool,
-) -> bool {
-    if sidebar_hidden {
-        return sidebar_visible <= crate::ui::shell::TRAFFIC_LIGHTS_INSET;
-    }
-    rail && !sliding && toggle_spot(fullscreen) == ToggleSpot::Header
+/// Whether the chat header draws the sidebar toggle this frame: only for the
+/// narrow band, which hides the sidebar outright — the header shows the
+/// toggle once the sidebar has left the lights' band (as before). Collapsed
+/// to the rail the toggle is the rail's own ([`metrics::TOGGLE_TOP`]), and
+/// the morph's overlay carries it in between, so the header never draws it
+/// ([feedback sidebar-toggle-in-rail-2026-10-27]; before, a plain window kept
+/// it in the header at rest).
+pub(crate) fn header_toggle_shown(sidebar_hidden: bool, sidebar_visible: f32) -> bool {
+    sidebar_hidden && sidebar_visible <= crate::ui::shell::TRAFFIC_LIGHTS_INSET
 }
 
 /// The one badge spot at a rail picture's bottom-right corner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RailBadge {
-    /// Someone is typing in the chat: the green presence dot (pulsing).
-    Typing,
-    /// Unread messages: Grok's blue dot. Never on the selected row.
+    /// The space's agent is working: the braille spinner in a ring.
+    Working,
+    /// Unread messages: the count pill. Never on the selected row.
     Unread,
 }
 
 /// Typing wins over unread — the rows' own rule (`!typing && unread` for the
 /// accent dot); the selected chat shows no unread dot.
-pub(crate) fn badge(typing: bool, unread: bool, selected: bool) -> Option<RailBadge> {
-    if typing {
-        Some(RailBadge::Typing)
+pub(crate) fn badge(working: bool, unread: bool, selected: bool) -> Option<RailBadge> {
+    if working {
+        Some(RailBadge::Working)
     } else if unread && !selected {
         Some(RailBadge::Unread)
     } else {
@@ -158,6 +145,22 @@ pub(crate) fn disc_top(control: StripControl) -> f32 {
 /// The `index`-th picture's tile top in the rail (before scrolling).
 pub(crate) fn tile_top(index: usize) -> f32 {
     metrics::FIRST_TILE_TOP + index as f32 * metrics::PITCH
+}
+
+/// The rail list's scroll offset as its tiles land this frame. GPUI adds wheel
+/// deltas to the shared offset unclamped and clamps them only in the list's
+/// own prepaint, so a read during render runs past either end while the user
+/// keeps scrolling there ([feedback mac-rail-hover-label-overscroll-2026-10-29]).
+pub(crate) fn painted_scroll_y(scroll: &gpui::ScrollHandle) -> f32 {
+    let y: f32 = scroll.offset().y.into();
+    let max: f32 = scroll.max_offset().y.into();
+    y.clamp(-max.max(0.0), 0.0)
+}
+
+/// The hover tip's top beside the `index`-th picture, centred on its tile.
+pub(crate) fn tip_top(index: usize, scroll_y: f32) -> f32 {
+    metrics::LIST_TOP + metrics::PITCH / 2.0 + index as f32 * metrics::PITCH + scroll_y
+        - metrics::TIP_HEIGHT / 2.0
 }
 
 /// How many pictures fit between the discs and my footer picture without
@@ -210,44 +213,68 @@ pub(crate) fn progress(visible: f32, full: f32) -> f32 {
     ((full - visible) / span).clamp(0.0, 1.0)
 }
 
+/// Top of the list frame the morph's travelling pictures are clipped to and
+/// edge-faded in at progress `t`: the expanded list's frame (under the filter
+/// segment) at 0, the rail list's (under Search) at 1, on the pictures' own
+/// linear path. Both lists fade their rows over `LIST_FADE_BAND` at the
+/// frame's top and bottom, so the pictures keep that fade the whole way and
+/// the rail at rest adds none ([feedback mac-sidebar-slide-jank-2026-10-29]:
+/// it used to appear the frame the fold ended, and vanish the frame an unfold
+/// began).
+pub(crate) fn morph_list_top(t: f32) -> f32 {
+    let expanded = crate::ui::theme::HEADER_HEIGHT
+        + sidebar::FILTER_TOP
+        + sidebar::FILTER_HEIGHT
+        + sidebar::FILTER_BOTTOM
+        - LIST_FADE_BAND;
+    let rail = metrics::LIST_TOP - LIST_FADE_BAND;
+    expanded + (rail - expanded) * t.clamp(0.0, 1.0)
+}
+
 /// The text's fade during the morph: gone by half-way, back from half-way.
 pub(crate) fn text_alpha(t: f32) -> f32 {
     (1.0 - 2.0 * t).clamp(0.0, 1.0)
 }
 
 /// A rail disc's resting frame in window coordinates.
-fn disc_rest(control: StripControl, spot: ToggleSpot) -> Bounds<Pixels> {
-    match (control, spot) {
-        (StripControl::Collapse, ToggleSpot::Header) => bounds(
-            metrics::WIDTH + STRIP_INSET,
-            metrics::TOGGLE_TOP,
-            CONTROL,
-            CONTROL,
-        ),
-        _ => bounds(metrics::DISC_X, disc_top(control), CONTROL, CONTROL),
-    }
+fn disc_rest(control: StripControl) -> Bounds<Pixels> {
+    bounds(metrics::DISC_X, disc_top(control), CONTROL, CONTROL)
 }
 
-fn badge_element(badge: RailBadge, ring: gpui::Hsla, theme: &Theme, phase: f32) -> Div {
-    let (ring_size, dot, color) = match badge {
-        RailBadge::Typing => (
-            FOOTER_DOT_RING,
-            metrics::TYPING_DOT,
-            Theme::with_alpha(theme.online, 0.35 + 0.65 * phase),
-        ),
-        RailBadge::Unread => (metrics::UNREAD_RING, metrics::UNREAD_DOT, theme.accent),
-    };
-    div()
-        .absolute()
-        .right(px(-FOOTER_DOT_OVERHANG))
-        .bottom(px(-FOOTER_DOT_OVERHANG))
-        .size(px(ring_size))
-        .rounded_full()
-        .bg(ring)
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(div().size(px(dot)).rounded_full().bg(color))
+/// Where macOS draws the three window buttons in a plain window (GPUI's
+/// `traffic_light_position` frames: x 15–75, y 15–29): the box every control
+/// of ours keeps clear. Hidden by macOS in native full screen.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn lights_frame() -> Bounds<Pixels> {
+    use crate::ui::theme::{TRAFFIC_LIGHT_BUTTON, TRAFFIC_LIGHT_PITCH, TRAFFIC_LIGHT_POSITION};
+    bounds(
+        TRAFFIC_LIGHT_POSITION,
+        TRAFFIC_LIGHT_POSITION,
+        2.0 * TRAFFIC_LIGHT_PITCH + TRAFFIC_LIGHT_BUTTON,
+        TRAFFIC_LIGHT_BUTTON,
+    )
+}
+
+/// A tile's badge for `ui::marks::corner` (Jacob, 2026-10-27: never a coloured
+/// dot): the braille spinner in a ring of the tile's colour while the space's
+/// agent works, the unread count pill otherwise. `ring` is the tile's fill.
+fn tile_badge(
+    badge: RailBadge,
+    unread_count: usize,
+    ring: gpui::Hsla,
+    theme: &Theme,
+    cx: &mut App,
+) -> Div {
+    match badge {
+        RailBadge::Working => crate::ui::marks::ring_disc(
+            crate::ui::marks::corner_metrics(metrics::AVATAR).ring,
+            ring,
+        )
+        .child(crate::ui::working::glyph(theme, cx)),
+        RailBadge::Unread => crate::ui::marks::unread_pill(unread_count, theme)
+            .border_2()
+            .border_color(ring),
+    }
 }
 
 /// One of the rail's three discs with the strip's own handlers.
@@ -258,7 +285,7 @@ fn rail_disc(control: StripControl, theme: &Theme, cx: &mut Context<Shell>) -> D
         StripControl::New => "rail-new",
         StripControl::Search => "rail-search",
     };
-    let disc = glass::control_disc(id, glyph, size, theme)
+    let disc = glass::strip_disc(id, glyph, size, theme)
         .debug_selector(move || id.into())
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation());
     let disc = match control {
@@ -295,12 +322,7 @@ fn rail_disc(control: StripControl, theme: &Theme, cx: &mut Context<Shell>) -> D
 pub(crate) fn render(shell: &Shell, cx: &mut Context<Shell>) -> gpui::Stateful<Div> {
     let theme = Theme::of(cx).clone();
     let entries = sidebar::list_entries(shell, cx);
-    let spot = toggle_spot(shell.fullscreen);
     let machine = shell.state.read(cx).machine.shown_state();
-    let phase = crate::ui::motion::PulseClock::phase(cx, 900);
-    if entries.iter().any(ListEntry::typing) {
-        crate::ui::motion::PulseClock::request(cx);
-    }
 
     let mut column = div()
         .id("sidebar-rail")
@@ -312,7 +334,8 @@ pub(crate) fn render(shell: &Shell, cx: &mut Context<Shell>) -> gpui::Stateful<D
         .border_r_1()
         .border_color(theme.border)
         .debug_selector(|| "sidebar-rail".into());
-    // The top band stays macOS's drag region, as the strip is.
+    // The top band stays macOS's drag region, as the strip is; the lights'
+    // slot above the discs is all drag.
     column = column.child(
         div()
             .absolute()
@@ -322,10 +345,8 @@ pub(crate) fn render(shell: &Shell, cx: &mut Context<Shell>) -> gpui::Stateful<D
             .h(px(metrics::LIST_TOP))
             .window_drag(),
     );
-    if spot == ToggleSpot::RailTop {
-        column = column.child(rail_disc(StripControl::Collapse, &theme, cx));
-    }
     column = column
+        .child(rail_disc(StripControl::Collapse, &theme, cx))
         .child(rail_disc(StripControl::New, &theme, cx))
         .child(rail_disc(StripControl::Search, &theme, cx));
 
@@ -345,19 +366,21 @@ pub(crate) fn render(shell: &Shell, cx: &mut Context<Shell>) -> gpui::Stateful<D
         let id = entry.id().clone();
         let selected = entry.selected();
         let is_hover = hovered.as_ref() == Some(&id);
-        let badge = badge(entry.typing(), entry.unread(), selected);
+        let badge = badge(entry.working(), entry.unread(), selected);
+        let unread_count = entry.unread_count();
+        // The highlight token's selected / hover steps (`ui::highlight`); the
+        // tile is its own pill (Grok's 54 pt, radius 12), hover tracked here
+        // because the name tip beside the rail follows it.
+        let fills = highlight::fills(&theme);
         let tile_fill = if selected {
-            theme.surface_2
+            fills.selected
         } else if is_hover {
-            Theme::with_alpha(theme.surface_2, 0.55)
+            fills.hover
         } else {
             gpui::transparent_black()
         };
-        let ring = if selected || is_hover {
-            theme.surface_2
-        } else {
-            theme.sidebar
-        };
+        // The badge's ring is the tile's colour as painted on the sidebar.
+        let ring = highlight::over(theme.sidebar, tile_fill);
         let picture = entry.picture(shell, metrics::AVATAR, &theme, cx);
         let is_server = matches!(entry, ListEntry::Server(_));
         let click_id = id.clone();
@@ -377,17 +400,20 @@ pub(crate) fn render(shell: &Shell, cx: &mut Context<Shell>) -> gpui::Stateful<D
                 el.debug_selector(|| "rail-first-tile".into())
             })
             .child(
-                div()
-                    .relative()
-                    .size(px(metrics::AVATAR))
-                    .flex_shrink_0()
-                    .when(index == 0, |el| {
-                        el.debug_selector(|| "rail-first-picture".into())
-                    })
-                    .child(picture)
-                    .when_some(badge, |el, b| {
-                        el.child(badge_element(b, ring, &theme, phase))
-                    }),
+                match badge {
+                    // The badge in front of the picture, in its own paint layer
+                    // (`ui::marks::corner`); the bare picture keeps the same box.
+                    Some(b) => crate::ui::marks::corner(
+                        metrics::AVATAR,
+                        picture,
+                        tile_badge(b, unread_count, ring, &theme, cx),
+                        crate::ui::marks::CORNER_OVERHANG,
+                    ),
+                    None => crate::ui::marks::plain(metrics::AVATAR, picture),
+                }
+                .when(index == 0, |el| {
+                    el.debug_selector(|| "rail-first-picture".into())
+                }),
             )
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 let now = if *hovered {
@@ -498,7 +524,15 @@ pub(crate) fn render(shell: &Shell, cx: &mut Context<Shell>) -> gpui::Stateful<D
                 cx.notify();
             }),
         );
-    column.child(account)
+    // The rail's right edge is the same resize handle as the sidebar's:
+    // dragging it out past the snap width restores the column at its last
+    // width ([feedback sidebar-narrow-wrap-2026-10-27]).
+    column.child(account).child(sidebar::resize_handle(
+        "rail-resize",
+        &theme,
+        &shell.split_drag,
+        cx,
+    ))
 }
 
 /// The hovered picture's name, drawn at the root so the rail's clip never cuts
@@ -511,14 +545,12 @@ pub(crate) fn render_tip(shell: &Shell, cx: &Context<Shell>) -> Option<Div> {
         .enumerate()
         .find(|(_, e)| e.id() == hovered)?;
     let theme = Theme::of(cx);
-    let scroll_y: f32 = shell.rail_scroll.offset().y.into();
-    let tile_centre =
-        metrics::LIST_TOP + metrics::PITCH / 2.0 + index as f32 * metrics::PITCH + scroll_y;
+    let scroll_y = painted_scroll_y(&shell.rail_scroll);
     Some(
         div()
             .absolute()
             .left(px(metrics::WIDTH + metrics::TIP_GAP))
-            .top(px(tile_centre - metrics::TIP_HEIGHT / 2.0))
+            .top(px(tip_top(index, scroll_y)))
             .h(px(metrics::TIP_HEIGHT))
             .px(px(10.0))
             .rounded(px(8.0))
@@ -562,10 +594,10 @@ pub(crate) fn render_morph(shell: &Shell, t: f32, width: f32, cx: &mut Context<S
 }
 
 /// The moving pieces of the collapse / open slide, over the whole window:
-/// the three discs between the strip and the rail column (the toggle heads
-/// for the chat header in a plain window), every row's picture between its
-/// row and its rail slot (the selected row's card shrinking into its tile),
-/// and my footer picture sliding to the rail's centre.
+/// the three discs between the strip and the rail column, every row's
+/// picture between its row and its rail slot (the selected row's card
+/// shrinking into its tile), and my footer picture sliding to the rail's
+/// centre.
 pub(crate) fn render_overlay(
     shell: &Shell,
     t: f32,
@@ -573,19 +605,15 @@ pub(crate) fn render_overlay(
     cx: &mut Context<Shell>,
 ) -> Div {
     let theme = Theme::of(cx).clone();
-    let spot = toggle_spot(shell.fullscreen);
     let snap = shell.morph.borrow();
     let entries = sidebar::list_entries(shell, cx);
     let machine = shell.state.read(cx).machine.shown_state();
-    let scroll_y: f32 = shell.rail_scroll.offset().y.into();
+    let scroll_y = painted_scroll_y(&shell.rail_scroll);
     let mut layer = div().absolute().inset_0();
 
-    // Rows, clipped to the band both lists share (above the footer, under the strip).
-    let clip_top = crate::ui::theme::HEADER_HEIGHT
-        + sidebar::FILTER_TOP
-        + sidebar::FILTER_HEIGHT
-        + sidebar::FILTER_BOTTOM
-        - LIST_FADE_BAND;
+    // Rows, clipped to the list frame between the two lists' and faded at
+    // its edges the way both lists are.
+    let clip_top = morph_list_top(t);
     let mut rows = div()
         .absolute()
         .left_0()
@@ -635,7 +663,7 @@ pub(crate) fn render_overlay(
                 .child(entry.picture(shell, metrics::AVATAR, &theme, cx)),
         );
     }
-    layer = layer.child(rows);
+    layer = layer.child(edge_faded(LIST_FADE_BAND, true, true, rows));
 
     for control in [
         StripControl::Search,
@@ -645,7 +673,7 @@ pub(crate) fn render_overlay(
         let Some(from) = snap.discs.get(&control).copied() else {
             continue;
         };
-        let b = lerp_bounds(from, disc_rest(control, spot), t);
+        let b = lerp_bounds(from, disc_rest(control), t);
         let (glyph, size) = control.glyph();
         let id: &'static str = match control {
             StripControl::Collapse => "morph-collapse",
@@ -657,7 +685,7 @@ pub(crate) fn render_overlay(
                 .absolute()
                 .left(b.origin.x)
                 .top(b.origin.y)
-                .child(glass::control_disc(id, glyph, size, &theme)),
+                .child(glass::strip_disc(id, glyph, size, &theme)),
         );
     }
     if let Some(from) = snap.footer {
@@ -684,7 +712,7 @@ pub(crate) fn render_overlay(
 mod tests {
     use super::metrics::*;
     use super::*;
-    use crate::ui::sidebar::{FOOTER_BOTTOM, FOOTER_HEIGHT, STRIP_BUTTON};
+    use crate::ui::sidebar::{FOOTER_BOTTOM, FOOTER_HEIGHT, STRIP_BUTTON, STRIP_INSET};
     use crate::ui::theme::{AVATAR_ROW, CONTROL_LINE, HEADER_HEIGHT};
 
     /// Grok Bot's rail (`jacob-ref-grok-collapsed-rail-2.png`, 2 px/pt) and
@@ -695,13 +723,12 @@ mod tests {
         pub const TILE: f32 = 54.0;
         pub const PITCH: f32 = 58.0;
         pub const USER_CENTRE_FROM_BOTTOM: f32 = 31.0;
-        pub const UNREAD_DOT: f32 = 8.0;
     }
 
     /// The measurement table: rail 84 (Grok 83.5 + the hairline), pictures
-    /// 36 on a 58 pitch in 54 tiles, the toggle on today's line, + and Search
-    /// 8 under each other, pictures 16 under Search, my picture on the
-    /// footer's line.
+    /// 36 on a 58 pitch in 54 tiles, the lights' 44 pt slot left to macOS,
+    /// the toggle, + and Search stacked 8 apart under it, pictures 16 under
+    /// Search, my picture on the footer's line.
     #[test]
     fn rail_metrics_match_the_measurement_table() {
         assert!((WIDTH - grok::RAIL).abs() <= 0.5, "rail width {WIDTH}");
@@ -713,92 +740,166 @@ mod tests {
         assert_eq!(PITCH, grok::PITCH);
         assert_eq!(CENTRE_X, 42.0);
         assert_eq!(DISC_X, 24.0);
-        assert_eq!(TOGGLE_TOP, 12.0, "today's disc top");
-        assert_eq!(TOGGLE_TOP + CONTROL / 2.0, CONTROL_LINE);
-        assert_eq!(PLUS_TOP, 56.0);
-        assert_eq!(SEARCH_TOP, 100.0);
+        assert_eq!(LIGHTS_SLOT, 44.0, "GPUI's title-bar container: 14 + 2 × 15");
+        assert_eq!(DISC_PITCH, 44.0);
+        assert_eq!(TOGGLE_TOP, 52.0, "the toggle: first disc under the lights");
+        assert_eq!(PLUS_TOP, 96.0);
+        assert_eq!(SEARCH_TOP, 140.0);
+        assert_eq!(
+            TOGGLE_TOP - LIGHTS_SLOT,
+            8.0,
+            "slot → toggle: the discs' gap"
+        );
         assert_eq!(PLUS_TOP - (TOGGLE_TOP + CONTROL), 8.0, "discs 8 apart");
-        assert_eq!(FIRST_TILE_TOP, 152.0);
+        assert_eq!(SEARCH_TOP - (PLUS_TOP + CONTROL), 8.0, "discs 8 apart");
+        assert_eq!(FIRST_TILE_TOP, 192.0);
         assert_eq!(FIRST_TILE_TOP - (SEARCH_TOP + CONTROL), 16.0);
-        assert_eq!(LIST_TOP, 150.0);
+        assert_eq!(LIST_TOP, 190.0);
         let first_picture_centre = FIRST_TILE_TOP + TILE / 2.0;
-        assert_eq!(first_picture_centre, 179.0);
+        assert_eq!(first_picture_centre, 219.0);
         assert_eq!(tile_top(1) - tile_top(0), PITCH);
         // My picture: 36 tall, 12 above the bottom → centre 30 (Grok 31).
         let centre_from_bottom = FOOTER_BOTTOM + CONTROL / 2.0;
         assert_eq!(centre_from_bottom, CONTROL_LINE);
         assert!((centre_from_bottom - grok::USER_CENTRE_FROM_BOTTOM).abs() <= 1.0);
         assert_eq!(FOOTER_HEIGHT, HEADER_HEIGHT);
-        assert_eq!(UNREAD_DOT, grok::UNREAD_DOT);
-        assert_eq!(TYPING_DOT, super::super::sidebar::FOOTER_DOT);
     }
 
     /// Jacob's 1720 × 1079 window (Grok's rail-2 shot) holds 14 pictures
-    /// before the rail scrolls; a 760 pt window holds 9.
+    /// before the rail scrolls; a 760 pt window holds 8.
     #[test]
     fn the_rail_scrolls_past_its_capacity() {
         assert_eq!(capacity(1079.0), 14);
-        assert_eq!(capacity(760.0), 9);
+        assert_eq!(capacity(760.0), 8);
         assert_eq!(capacity(100.0), 0);
     }
 
-    /// Jacob 2026-10-26: in a window the toggle stays beside the traffic
-    /// lights (today's spot: 12 after the rail, top 12); in full screen it is
-    /// the rail's top-left slot.
+    /// Jacob 2026-10-27: the toggle lives in the rail with the other discs —
+    /// same column (x 24), same size, the first slot under the traffic
+    /// lights — in a window and in full screen alike; + and Search follow
+    /// under it. Before (v0.6.278), a plain window kept the toggle in the
+    /// chat header at x 96.
     #[test]
-    fn the_toggle_keeps_todays_spot_in_a_window_and_tops_the_rail_in_full_screen() {
-        assert_eq!(toggle_spot(false), ToggleSpot::Header);
-        assert_eq!(toggle_spot(true), ToggleSpot::RailTop);
-        let header = disc_rest(StripControl::Collapse, ToggleSpot::Header);
-        assert_eq!(
-            f32::from(header.origin.x),
-            WIDTH + STRIP_INSET,
-            "x 96: 12 after the rail"
+    fn the_toggle_rests_in_the_rail_under_the_lights() {
+        let toggle = disc_rest(StripControl::Collapse);
+        assert_eq!(f32::from(toggle.origin.x), DISC_X);
+        assert_eq!(f32::from(toggle.origin.y), TOGGLE_TOP);
+        assert_eq!(f32::from(toggle.size.width), CONTROL);
+        assert!(
+            f32::from(toggle.origin.x) < WIDTH,
+            "inside the rail, not the header"
         );
-        assert_eq!(f32::from(header.origin.y), 12.0);
-        let rail = disc_rest(StripControl::Collapse, ToggleSpot::RailTop);
-        assert_eq!(f32::from(rail.origin.x), DISC_X);
-        assert_eq!(f32::from(rail.origin.y), TOGGLE_TOP);
-        // + and Search never move between the two.
-        for c in [StripControl::New, StripControl::Search] {
-            assert_eq!(
-                disc_rest(c, ToggleSpot::Header),
-                disc_rest(c, ToggleSpot::RailTop)
+        // Under the lights' slot, never on it.
+        assert!(f32::from(toggle.origin.y) >= LIGHTS_SLOT);
+        let plus = disc_rest(StripControl::New);
+        let search = disc_rest(StripControl::Search);
+        for d in [plus, search] {
+            assert_eq!(d.origin.x, toggle.origin.x, "one column");
+            assert_eq!(d.size, toggle.size, "one size");
+        }
+        assert_eq!(f32::from(plus.origin.y - toggle.origin.y), DISC_PITCH);
+        assert_eq!(f32::from(search.origin.y - plus.origin.y), DISC_PITCH);
+    }
+
+    /// The traffic lights' slot, per state (Jacob 2026-10-27: the toggle was
+    /// half hidden under the buttons). macOS draws the buttons at x 15–75,
+    /// y 15–29, vertically centred in GPUI's 44 pt title-bar container; the
+    /// rail's discs all rest below that container, the expanded strip's all
+    /// rest right of the buttons' band, and the layout is the same in a
+    /// window, in native full screen (buttons hidden, slot kept), during the
+    /// morph (the discs travel between the two clear regions) and whether or
+    /// not the window is key (AppKit only re-tints the buttons).
+    #[test]
+    fn no_control_shares_the_traffic_lights_frame_in_any_state() {
+        use crate::ui::shell::TRAFFIC_LIGHTS_INSET;
+        use crate::ui::theme::{TRAFFIC_LIGHT_LINE, TRAFFIC_LIGHT_SLOT};
+        let lights = lights_frame();
+        assert_eq!(f32::from(lights.origin.y), 15.0);
+        assert_eq!(f32::from(lights.bottom()), 29.0);
+        assert_eq!(f32::from(lights.right()), 75.0);
+        assert_eq!(TRAFFIC_LIGHT_LINE, 22.0, "Grok's lights' line");
+        assert_eq!(
+            TRAFFIC_LIGHT_LINE,
+            TRAFFIC_LIGHT_SLOT / 2.0,
+            "the buttons are vertically centred in their slot"
+        );
+        assert!(f32::from(lights.bottom()) <= LIGHTS_SLOT);
+        assert!(
+            f32::from(lights.right()) <= WIDTH,
+            "inside the rail's width"
+        );
+        // Collapsed (rail): every disc below the slot, in a window and in full screen alike.
+        for control in [
+            StripControl::Collapse,
+            StripControl::New,
+            StripControl::Search,
+        ] {
+            let d = disc_rest(control);
+            assert!(!d.intersects(&lights), "{control:?} on the lights");
+            assert!(
+                f32::from(d.origin.y) >= LIGHTS_SLOT,
+                "{control:?} inside the title-bar container"
             );
+        }
+        // The rail's drag band covers the slot (LIST_TOP ≥ the slot).
+        let drag_band = std::hint::black_box(LIST_TOP);
+        assert!(drag_band >= LIGHTS_SLOT);
+        // Expanded (strip): the discs start right of the lights' band; the
+        // strip is the same band in full screen (`top_strip` ignores it).
+        let first_strip_disc_x = TRAFFIC_LIGHTS_INSET + STRIP_INSET;
+        assert!(first_strip_disc_x >= f32::from(lights.right()));
+        let strip_disc = bounds(first_strip_disc_x, 12.0, CONTROL, CONTROL);
+        assert!(!strip_disc.intersects(&lights));
+        assert_eq!(
+            crate::ui::sidebar::top_strip(true),
+            crate::ui::sidebar::top_strip(false)
+        );
+        // Mid-morph: each disc travelling from its strip slot (the default
+        // 296 pt sidebar: Collapse at the right end, + and Search 44 before)
+        // to its rail slot never crosses the buttons' box — it has dropped
+        // below the slot before it reaches their column.
+        let strip_right = crate::ui::theme::SIDEBAR_WIDTH - STRIP_INSET;
+        for (control, right_edge) in [
+            (StripControl::Collapse, strip_right),
+            (StripControl::New, strip_right - DISC_PITCH),
+            (StripControl::Search, strip_right - 2.0 * DISC_PITCH),
+        ] {
+            let from = bounds(right_edge - CONTROL, 12.0, CONTROL, CONTROL);
+            let to = disc_rest(control);
+            for step in 0..=20 {
+                let b = lerp_bounds(from, to, step as f32 / 20.0);
+                assert!(
+                    !b.intersects(&lights),
+                    "{control:?} morph step {step} on the lights"
+                );
+            }
         }
     }
 
-    /// The header's toggle: a plain window shows it at rest on the rail; full
-    /// screen never (the rail has it); mid-slide never (the overlay has it);
-    /// the narrow band's hidden sidebar as before.
+    /// The header's toggle is only the narrow band's (hidden sidebar): never
+    /// for the rail at rest or mid-slide, never for the expanded sidebar.
     #[test]
-    fn the_header_draws_the_toggle_only_for_a_windowed_rail_at_rest() {
-        assert!(header_toggle_shown(false, WIDTH, true, false, false));
+    fn the_header_draws_the_toggle_only_for_the_hidden_sidebar() {
         assert!(
-            !header_toggle_shown(false, WIDTH, true, false, true),
-            "full screen: in the rail"
+            !header_toggle_shown(false, WIDTH),
+            "rail at rest: the rail has it"
         );
         assert!(
-            !header_toggle_shown(false, 190.0, true, true, false),
-            "mid-slide: the overlay"
+            !header_toggle_shown(false, 190.0),
+            "mid-slide: the overlay has it"
         );
-        assert!(
-            !header_toggle_shown(false, 296.0, false, false, false),
-            "expanded: in the strip"
-        );
-        assert!(
-            header_toggle_shown(true, 0.0, false, false, false),
-            "narrow band, hidden"
-        );
-        assert!(!header_toggle_shown(true, 200.0, false, true, false));
+        assert!(!header_toggle_shown(false, 296.0), "expanded: in the strip");
+        assert!(header_toggle_shown(true, 0.0), "narrow band, hidden");
+        assert!(header_toggle_shown(true, 72.0));
+        assert!(!header_toggle_shown(true, 200.0), "still leaving the band");
     }
 
-    /// One badge spot: typing (green) beats unread (blue); the selected chat
-    /// shows no unread dot.
+    /// One badge spot: the working spinner beats the unread pill; the selected
+    /// chat shows no unread pill. No typing badge (never a coloured dot).
     #[test]
-    fn typing_beats_unread_on_the_one_badge_spot() {
-        assert_eq!(badge(true, true, false), Some(RailBadge::Typing));
-        assert_eq!(badge(true, false, true), Some(RailBadge::Typing));
+    fn working_beats_unread_on_the_one_badge_spot() {
+        assert_eq!(badge(true, true, false), Some(RailBadge::Working));
+        assert_eq!(badge(true, false, true), Some(RailBadge::Working));
         assert_eq!(badge(false, true, false), Some(RailBadge::Unread));
         assert_eq!(badge(false, true, true), None);
         assert_eq!(badge(false, false, false), None);
@@ -822,9 +923,35 @@ mod tests {
         assert_eq!(f32::from(mid.size.width), 36.0);
     }
 
-    /// The rail as `render` lays it out, in a 1079 pt window: toggle 12,
-    /// plus 56, Search 100, the first picture's top at 161 (tile 152), my
-    /// picture 12 above the bottom — the mock's pixels.
+    /// Scout on v0.6.350 ([feedback mac-sidebar-slide-jank-2026-10-29]): "it
+    /// folds in and the second it is folded in it just overlays the blur".
+    /// The travelling pictures are faded in a list frame that starts as the
+    /// expanded list's (its fade band ending at the filter segment's foot) and
+    /// lands on the rail list's (ending at the first tile's slot), moving
+    /// with the pictures — so the fade is on them from the first frame of a
+    /// fold to the last of an unfold, never added or dropped at either end.
+    #[test]
+    fn the_morph_fades_its_pictures_in_a_frame_that_moves_with_them() {
+        let expanded_band_foot = crate::ui::theme::HEADER_HEIGHT
+            + sidebar::FILTER_TOP
+            + sidebar::FILTER_HEIGHT
+            + sidebar::FILTER_BOTTOM;
+        assert_eq!(morph_list_top(0.0) + LIST_FADE_BAND, expanded_band_foot);
+        assert_eq!(morph_list_top(1.0) + LIST_FADE_BAND, LIST_TOP);
+        // On the pictures' linear path (`lerp_bounds`), clamped at both ends.
+        let mid = morph_list_top(0.5);
+        assert!((mid - (morph_list_top(0.0) + morph_list_top(1.0)) / 2.0).abs() < 1e-4);
+        assert_eq!(morph_list_top(-1.0), morph_list_top(0.0));
+        assert_eq!(morph_list_top(2.0), morph_list_top(1.0));
+        // The first picture keeps the same place relative to the frame's top
+        // band all the way: inside the frame, below the band, at both ends.
+        assert!(tile_top(0) >= morph_list_top(1.0) + LIST_FADE_BAND);
+    }
+
+    /// The rail as `render` lays it out, in a 1079 pt window: toggle 52,
+    /// plus 96, Search 140, the first picture's top at 201 (tile 192), my
+    /// picture 12 above the bottom — the mock's column, one slot down since
+    /// the toggle joined it under the lights' 44 pt slot.
     struct RailFrame;
 
     impl gpui::Render for RailFrame {
@@ -870,7 +997,7 @@ mod tests {
                 .h(px(1079.0))
                 .child(disc("toggle", TOGGLE_TOP))
                 .child(disc("plus", PLUS_TOP))
-                .child(disc("search", SEARCH_TOP))
+                .child(disc("magnifyingglass", SEARCH_TOP))
                 .child(
                     div()
                         .absolute()
@@ -907,17 +1034,17 @@ mod tests {
                 f32::from(b.size.height),
             )
         };
-        assert_eq!(at("toggle"), (24.0, 12.0, 36.0, 36.0));
-        assert_eq!(at("plus"), (24.0, 56.0, 36.0, 36.0));
-        assert_eq!(at("search"), (24.0, 100.0, 36.0, 36.0));
+        assert_eq!(at("toggle"), (24.0, 52.0, 36.0, 36.0));
+        assert_eq!(at("plus"), (24.0, 96.0, 36.0, 36.0));
+        assert_eq!(at("magnifyingglass"), (24.0, 140.0, 36.0, 36.0));
         let (tx, ty, tw, th) = at("tile-0");
-        assert_eq!((ty, tw, th), (152.0, 54.0, 54.0));
+        assert_eq!((ty, tw, th), (192.0, 54.0, 54.0));
         assert!(
             (tx + tw / 2.0 - CENTRE_X).abs() <= 0.5,
             "tile centred at 42 ({tx})"
         );
         let (p0x, p0y, pw, _) = at("picture-0");
-        assert_eq!((p0y, pw), (161.0, 36.0));
+        assert_eq!((p0y, pw), (201.0, 36.0));
         assert!((p0x + pw / 2.0 - CENTRE_X).abs() <= 0.5);
         let (_, p1y, _, _) = at("picture-1");
         assert_eq!(p1y - p0y, PITCH);
@@ -925,5 +1052,129 @@ mod tests {
         assert_eq!((ax, aw, ah), (24.0, 36.0, 36.0));
         assert_eq!(1079.0 - (ay + ah), FOOTER_BOTTOM);
         assert_eq!(1079.0 - (ay + ah / 2.0), CONTROL_LINE);
+    }
+
+    const SCROLL_TILES: usize = 20;
+    const SCROLL_WINDOW: f32 = 760.0;
+
+    /// A scrolling rail list (more pictures than fit) with the hover tip
+    /// placed the way [`render_tip`] places it.
+    struct RailScrollFrame {
+        scroll: gpui::ScrollHandle,
+        hovered: usize,
+    }
+
+    impl gpui::Render for RailScrollFrame {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let mut list = div()
+                .id("rail-list")
+                .absolute()
+                .left_0()
+                .top(px(LIST_TOP))
+                .bottom(px(FOOTER_HEIGHT))
+                .w(px(WIDTH - 1.0))
+                .flex()
+                .flex_col()
+                .overflow_y_scroll()
+                .track_scroll(&self.scroll);
+            for i in 0..SCROLL_TILES {
+                list = list.child(
+                    div()
+                        .h(px(PITCH))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            div()
+                                .size(px(TILE))
+                                .debug_selector(move || format!("tile-{i}")),
+                        ),
+                );
+            }
+            div()
+                .relative()
+                .w(px(WIDTH + 200.0))
+                .h(px(SCROLL_WINDOW))
+                .child(list)
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(WIDTH + TIP_GAP))
+                        .top(px(tip_top(self.hovered, painted_scroll_y(&self.scroll))))
+                        .w(px(80.0))
+                        .h(px(TIP_HEIGHT))
+                        .debug_selector(|| "tip".into()),
+                )
+        }
+    }
+
+    fn wheel(vcx: &mut gpui::VisualTestContext, dy: f32) {
+        vcx.simulate_event(gpui::ScrollWheelEvent {
+            position: gpui::point(px(CENTRE_X), px(400.0)),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(dy))),
+            modifiers: Default::default(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+    }
+
+    fn centre_y(vcx: &mut gpui::VisualTestContext, sel: &'static str) -> f32 {
+        let b = vcx
+            .debug_bounds(sel)
+            .unwrap_or_else(|| panic!("{sel} drawn"));
+        f32::from(b.origin.y) + f32::from(b.size.height) / 2.0
+    }
+
+    /// Scout, 2026-10-29: with the list already at its top or bottom, more
+    /// scrolling carried the hover name away from its picture while the
+    /// pictures stayed put. The tip stays centred on its tile through
+    /// wheel events past either end, in the frame each event draws.
+    #[gpui::test]
+    fn the_hover_tip_stays_on_its_tile_when_scrolling_past_the_ends(cx: &mut gpui::TestAppContext) {
+        let (view, vcx) = cx.add_window_view(|_, _| RailScrollFrame {
+            scroll: gpui::ScrollHandle::new(),
+            hovered: 2,
+        });
+        vcx.run_until_parked();
+        assert_eq!(centre_y(vcx, "tip"), centre_y(vcx, "tile-2"));
+
+        for _ in 0..3 {
+            wheel(vcx, 240.0);
+            assert_eq!(
+                centre_y(vcx, "tile-2"),
+                tile_top(2) + TILE / 2.0,
+                "top: list unmoved"
+            );
+            assert_eq!(
+                centre_y(vcx, "tip"),
+                centre_y(vcx, "tile-2"),
+                "top: tip on its tile"
+            );
+        }
+
+        let last = SCROLL_TILES - 1;
+        view.update(vcx, |frame, cx| {
+            frame.hovered = last;
+            frame
+                .scroll
+                .set_offset(gpui::point(px(0.0), px(-100_000.0)));
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        let resting = centre_y(vcx, "tile-19");
+        assert_eq!(centre_y(vcx, "tip"), resting);
+        assert!(
+            resting < SCROLL_WINDOW - FOOTER_HEIGHT,
+            "the last tile is in view at the bottom ({resting})"
+        );
+        for _ in 0..3 {
+            wheel(vcx, -240.0);
+            assert_eq!(centre_y(vcx, "tile-19"), resting, "bottom: list unmoved");
+            assert_eq!(centre_y(vcx, "tip"), resting, "bottom: tip on its tile");
+        }
     }
 }

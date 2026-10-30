@@ -12,8 +12,8 @@
 use gpui::{div, prelude::*, px, Div, FontWeight, SharedString, Stateful};
 
 use crate::model::Person;
-use crate::ui::icons::icon;
 use crate::ui::profiles::kit;
+use crate::ui::sf_symbols;
 use crate::ui::theme::{Theme, COMPOSER_HEIGHT, TEXT_SMALL, TEXT_TINY};
 
 /// The small capsule after a name: 16 pt tall, 10.5 pt semibold.
@@ -73,7 +73,7 @@ pub fn chip(theme: &Theme) -> Div {
         // error-ui: exception status mark (the Blocked chip is a state, not a failure)
         .text_color(theme.danger)
         .debug_selector(|| "blocked-chip".into())
-        .child(icon("nosign", CHIP_GLYPH, theme.danger))
+        .child(sf_symbols::glyph("nosign", CHIP_GLYPH, theme.danger))
         .child(TAG_LABEL)
 }
 
@@ -152,7 +152,7 @@ pub fn hidden_row(row_id: &str, count: usize, who: &str, theme: &Theme) -> (Div,
         .gap(px(6.0))
         .text_size(px(TEXT_SMALL))
         .text_color(theme.text_muted)
-        .child(icon("nosign", 12.0, theme.text_muted))
+        .child(sf_symbols::glyph("nosign", 12.0, theme.text_muted))
         .child(hidden_line(count, who))
         .child("·");
     let unblock = div()
@@ -197,7 +197,7 @@ pub fn composer_bar(person: &Person, theme: &Theme) -> (Div, Stateful<Div>) {
         .items_center()
         .gap(px(10.0))
         .debug_selector(|| "composer-blocked".into())
-        .child(icon("nosign", 14.0, theme.text_muted))
+        .child(sf_symbols::glyph("nosign", 14.0, theme.text_muted))
         .child(
             div()
                 .flex_1()
@@ -610,7 +610,7 @@ mod render_tests {
         );
         let why = state.read_with(vcx, |s, _| s.push_refused.get("d1").cloned().unwrap());
         assert_eq!(
-            why.sentence(),
+            why.sentence(None),
             "Couldn't post: you've blocked Sam Rivera, who is in this chat. Unblock to post."
         );
         click("delivery-error-unblock", &state, &shell, vcx);
@@ -639,7 +639,10 @@ mod render_tests {
         shell.update(vcx, |sh, cx| sh.cancel_unblock(cx));
         settle(&state, &shell, vcx);
         let why = state.read_with(vcx, |s, _| s.push_refused.get("d1").cloned().unwrap());
-        assert_eq!(why.sentence(), "Sam Rivera has blocked you in this chat.");
+        assert_eq!(
+            why.sentence(None),
+            "Sam Rivera has blocked you in this chat."
+        );
         assert!(
             vcx.debug_bounds("delivery-error-unblock").is_none(),
             "nothing to unblock"
@@ -850,6 +853,7 @@ mod hidden_tests {
                     person("gh_3", "priya", "Priya Natarajan"),
                 ],
                 blocked_senders: vec!["user:gh_2".into()],
+                my_role: None,
                 ..Project::default()
             });
             let chat: Chat = serde_json::from_value(serde_json::json!({

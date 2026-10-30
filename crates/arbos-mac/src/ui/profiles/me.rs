@@ -21,8 +21,8 @@ use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::profiles::pane::{self, Hero, Picture, ProfilePane, Section};
 use crate::ui::profiles::{self, kit, machine};
+use crate::ui::sf_symbols;
 use crate::ui::shell::{fmt_uptime, human_bytes, SettingsPage, Shell};
-use crate::ui::sidebar;
 use crate::ui::theme::{
     AppearancePref, Surface, Theme, GLASS_OPACITY_MAX, GLASS_OPACITY_MIN, TEXT_BODY, TEXT_SMALL,
     TEXT_TINY,
@@ -67,13 +67,14 @@ impl Shell {
         let notify_on = state.notifier.enabled;
         let permission = state.notification_permission();
         let read_receipts = state.read_receipts;
+        let link_previews = state.link_previews;
         let secrets_value = if state.secrets.loaded {
             state.secrets.row_value()
         } else {
             String::new()
         };
         let devices_view = state.devices.clone();
-        let devices_summary = match state.devices.items.len() {
+        let devices_summary = match devices::live(&state.devices.items).count() {
             0 => String::new(),
             1 => "1 device".to_string(),
             n => format!("{n} devices"),
@@ -130,7 +131,7 @@ impl Shell {
             div()
                 .flex_shrink_0()
                 .text_size(px(TEXT_BODY))
-                .text_color(theme.text_muted)
+                .text_color(theme.label_muted())
                 .child(text)
         };
         let link_button_text =
@@ -162,7 +163,7 @@ impl Shell {
                     .gap(px(2.0))
                     .p(px(2.0))
                     .rounded_full()
-                    .bg(theme.field)
+                    .bg(theme.field_fill())
                     .border_1()
                     .border_color(theme.field_border)
                     .child(segs),
@@ -243,7 +244,6 @@ impl Shell {
             let breakdown_open = self.machine_breakdown_open;
             let plan = machine::plan(&machine, report.as_ref(), breakdown_open);
             let live = report.as_ref().filter(|r| r.reachable);
-            let dot = sidebar::machine_dot(shown, &theme);
             let uptime = machine
                 .since
                 .filter(|_| shown == MachineState::Awake)
@@ -266,7 +266,7 @@ impl Shell {
                     .child(
                         div()
                             .text_size(px(TEXT_SMALL))
-                            .text_color(theme.text_muted)
+                            .text_color(theme.label_muted())
                             .child(sub),
                     )
             };
@@ -359,14 +359,11 @@ impl Shell {
                                 .flex()
                                 .items_center()
                                 .gap(px(7.0))
-                                .child(div().size(px(8.0)).rounded_full().bg(Theme::with_alpha(
-                                    dot,
-                                    if shown == MachineState::Waking {
-                                        0.4 + 0.6 * PulseClock::phase(cx, 1100)
-                                    } else {
-                                        1.0
-                                    },
-                                )))
+                                // The spinner while it wakes, the red `!` on a fault, nothing
+                                // at rest (Jacob, 2026-10-27: never a coloured dot).
+                                .children(crate::ui::marks::machine_mark_element(
+                                    shown, 9.0, &theme, cx,
+                                ))
                                 .child(value(
                                     match &uptime {
                                         Some(up) => format!("{} · {up}", shown.label()),
@@ -421,7 +418,7 @@ impl Shell {
                                     el.child(
                                         div()
                                             .text_size(px(TEXT_TINY))
-                                            .text_color(theme.text_muted)
+                                            .text_color(theme.label_muted())
                                             .child("Not taken from credits"),
                                     )
                                 }),
@@ -464,7 +461,7 @@ impl Shell {
                                             el.child(
                                                 div()
                                                     .text_size(px(TEXT_TINY))
-                                                    .text_color(theme.text_muted)
+                                                    .text_color(theme.label_muted())
                                                     .child(t),
                                             )
                                         }),
@@ -510,18 +507,15 @@ impl Shell {
                             )))
                         }
                         machine::Row::Breakdown => card.child(
-                            glass::row("Per-agent usage", &theme)
-                                .id("machine-breakdown")
-                                .cursor_pointer()
-                                .hover(|s| s.bg(theme.surface_2))
-                                .child(crate::ui::icons::icon(
+                            glass::hot_row("machine-breakdown", "Per-agent usage", &theme)
+                                .child(sf_symbols::glyph(
                                     if breakdown_open {
-                                        "chevron-up"
+                                        "chevron.up"
                                     } else {
-                                        "chevron-right"
+                                        "chevron.right"
                                     },
                                     13.0,
-                                    theme.text_faint,
+                                    theme.label_faint(),
                                 ))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.toggle_machine_breakdown(cx);
@@ -540,7 +534,7 @@ impl Shell {
                                     crate::ui::avatars::neutral_element(&ws.name, 28.0, &theme)
                                         .into_any_element()
                                 });
-                            card.child(machine::agent_row(picture, ws, &theme))
+                            card.child(machine::agent_row(picture, ws, &theme, cx))
                         }
                         _ => card,
                     };
@@ -739,11 +733,34 @@ impl Shell {
                             .flex_shrink_0()
                             .w(px(44.0))
                             .text_size(px(TEXT_BODY))
-                            .text_color(theme.text_muted)
+                            .text_color(theme.label_muted())
                             .child(pct),
                     ),
                 );
             }
+            // Link previews ([feedback link-embeds-mac-2026-10-27]): the cards under links in
+            // chat, on or off on this Mac; off leaves every link plain.
+            let group = group.child(seg_row(
+                "Link previews",
+                div()
+                    .flex()
+                    .gap(px(2.0))
+                    .child(
+                        glass::segment("link-previews-on", "On", link_previews, &theme).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.state.update(cx, |s, cx| s.set_link_previews(true, cx));
+                            }),
+                        ),
+                    )
+                    .child(
+                        glass::segment("link-previews-off", "Off", !link_previews, &theme)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.state
+                                    .update(cx, |s, cx| s.set_link_previews(false, cx));
+                            })),
+                    ),
+                &theme,
+            ));
             div()
                 .flex()
                 .flex_col()
@@ -769,91 +786,86 @@ impl Shell {
 
         // ----- Notifications page body -------------------------------------------
         let notifications_body = {
-            // macOS's own answer first: a denial here is why "no banners" — and the
-            // one place to fix it is System Settings, so the row opens it.
-            let system_row = match permission {
-                crate::ui::notify::Permission::Denied => Some(
-                    glass::row("Allowed by macOS".to_string(), &theme)
-                        .child(value("Off".to_string(), &theme))
-                        .child(
-                            link_button(
-                                "notify-system-settings",
-                                "Open System Settings",
-                                false,
-                                &theme,
-                            )
-                            .ml(px(10.0))
+            // macOS's own answer first. Denied: the toggle would read "On" while
+            // nothing can show, so the row states the block instead and the next
+            // row opens System Settings; the saved choice is untouched and comes
+            // back once macOS allows. State and action are two rows, as on the
+            // iPhone: label, value and link on one row do not fit the pane.
+            let notify_toggle = || {
+                div()
+                    .flex()
+                    .gap(px(2.0))
+                    .child(
+                        glass::segment("notify-on", "On", notify_on, &theme).on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.state
+                                    .update(cx, |s, cx| s.set_notifications_enabled(true, cx));
+                            },
+                        )),
+                    )
+                    .child(
+                        glass::segment("notify-off", "Off", !notify_on, &theme).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.state.update(cx, |s, cx| {
+                                    s.set_notifications_enabled(false, cx);
+                                });
+                            }),
+                        ),
+                    )
+            };
+            let group = settings_group(&theme);
+            let group = match permission {
+                crate::ui::notify::Permission::Denied => group
+                    .child(
+                        glass::row("Notifications".to_string(), &theme)
+                            .child(value("Blocked by macOS".to_string(), &theme)),
+                    )
+                    .child(
+                        glass::hot_row("notify-system-settings", "Open System Settings", &theme)
+                            .text_color(theme.accent)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.state.update(cx, |s, _| s.open_notification_settings());
                             })),
-                        ),
-                ),
-                crate::ui::notify::Permission::NotDetermined => Some(
-                    glass::row("Allowed by macOS".to_string(), &theme)
-                        .child(value("Not asked yet".to_string(), &theme))
-                        .child(
-                            link_button("notify-system-allow", "Allow", false, &theme)
-                                .ml(px(10.0))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.state.update(cx, |s, cx| s.allow_notifications(cx));
-                                })),
-                        ),
-                ),
+                    ),
+                crate::ui::notify::Permission::NotDetermined => group
+                    .child(
+                        glass::row("Allowed by macOS".to_string(), &theme)
+                            .child(value("Not asked yet".to_string(), &theme)),
+                    )
+                    .child(
+                        glass::hot_row("notify-system-allow", "Allow notifications", &theme)
+                            .text_color(theme.accent)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.state.update(cx, |s, cx| s.allow_notifications(cx));
+                            })),
+                    )
+                    .child(seg_row("Notifications", notify_toggle(), &theme)),
                 crate::ui::notify::Permission::Allowed | crate::ui::notify::Permission::Unknown => {
-                    None
+                    group.child(seg_row("Notifications", notify_toggle(), &theme))
                 }
             };
-            let mut group = settings_group(&theme);
-            if let Some(row) = system_row {
-                group = group.child(row);
-            }
-            let group = group
-                .child(seg_row(
-                    "Notifications",
-                    div()
-                        .flex()
-                        .gap(px(2.0))
-                        .child(
-                            glass::segment("notify-on", "On", notify_on, &theme).on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.state
-                                        .update(cx, |s, cx| s.set_notifications_enabled(true, cx));
-                                }),
-                            ),
-                        )
-                        .child(
-                            glass::segment("notify-off", "Off", !notify_on, &theme).on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.state.update(cx, |s, cx| {
-                                        s.set_notifications_enabled(false, cx);
-                                    });
-                                }),
-                            ),
+            let group = group.child(seg_row(
+                "Read receipts",
+                div()
+                    .flex()
+                    .gap(px(2.0))
+                    .child(
+                        glass::segment("receipts-on", "On", read_receipts, &theme).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.state.update(cx, |s, cx| s.set_read_receipts(true, cx));
+                            }),
                         ),
-                    &theme,
-                ))
-                .child(seg_row(
-                    "Read receipts",
-                    div()
-                        .flex()
-                        .gap(px(2.0))
-                        .child(
-                            glass::segment("receipts-on", "On", read_receipts, &theme).on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.state.update(cx, |s, cx| s.set_read_receipts(true, cx));
-                                }),
-                            ),
-                        )
-                        .child(
-                            glass::segment("receipts-off", "Off", !read_receipts, &theme).on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.state
-                                        .update(cx, |s, cx| s.set_read_receipts(false, cx));
-                                }),
-                            ),
+                    )
+                    .child(
+                        glass::segment("receipts-off", "Off", !read_receipts, &theme).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.state
+                                    .update(cx, |s, cx| s.set_read_receipts(false, cx));
+                            }),
                         ),
-                    &theme,
-                ));
+                    ),
+                &theme,
+            ));
             div()
                 .flex()
                 .flex_col()
@@ -1066,7 +1078,7 @@ impl Shell {
                 ));
             } else if !view.loaded && view.items.is_empty() {
                 body = body.child(kit::empty("Loading…", &theme));
-            } else if view.items.is_empty() {
+            } else if devices::live(&view.items).next().is_none() {
                 body = body.child(kit::empty("No devices yet", &theme));
             } else {
                 let mut rows: Vec<gpui::AnyElement> = Vec::new();
@@ -1111,9 +1123,9 @@ impl Shell {
                                 .px(px(6.0))
                                 .py(px(1.0))
                                 .rounded_full()
-                                .bg(theme.surface_2)
+                                .bg(theme.control_fill())
                                 .text_size(px(TEXT_TINY))
-                                .text_color(theme.text_muted)
+                                .text_color(theme.label_muted())
                                 .whitespace_nowrap()
                                 .child(tag),
                         );
@@ -1122,7 +1134,7 @@ impl Shell {
                         trailing.child(
                             div()
                                 .text_size(px(TEXT_SMALL))
-                                .text_color(theme.text_muted)
+                                .text_color(theme.label_muted())
                                 .whitespace_nowrap()
                                 .child("This Mac"),
                         )
@@ -1174,7 +1186,7 @@ impl Shell {
         if page != SettingsPage::Root {
             let back = glass::control_disc(
                 "settings-back",
-                "chevron-left",
+                "chevron.left",
                 crate::ui::theme::CONTROL_GLYPH,
                 &theme,
             )
@@ -1267,7 +1279,7 @@ impl Shell {
             None => div()
                 .size(px(profiles::HERO_AVATAR))
                 .rounded_full()
-                .bg(theme.surface_2),
+                .bg(theme.control_fill()),
         }
         .into_any_element();
         // The crayon: the agents' avatar picker (Generate | Upload, Reset) for my picture; it
@@ -1309,7 +1321,7 @@ impl Shell {
                         .child(
                             div()
                                 .text_size(px(TEXT_BODY))
-                                .text_color(theme.text_muted)
+                                .text_color(theme.label_muted())
                                 .child("@"),
                         )
                         .child(
@@ -1318,7 +1330,7 @@ impl Shell {
                                 .px(px(10.0))
                                 .py(px(6.0))
                                 .rounded(px(10.0))
-                                .bg(theme.field)
+                                .bg(theme.field_fill())
                                 .border_1()
                                 .border_color(theme.field_border)
                                 .text_size(px(TEXT_BODY))
@@ -1350,7 +1362,7 @@ impl Shell {
             name: name_el,
             badge: None,
             subtitle: Some(who.clone().into()),
-            subtitle_color: theme.text_muted,
+            subtitle_color: theme.label_muted(),
             subtitle_click: None,
             subtitle_element: None,
             editor,
@@ -1364,14 +1376,14 @@ impl Shell {
             let rows: Vec<gpui::AnyElement> = vec![
                 kit::value_row("me-name-row", "Name", display_name.clone(), &theme)
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme.surface_2))
+                    .group(kit::HOT)
                     .on_click(
                         cx.listener(|this, _, window, cx| this.start_profile_edit(window, cx)),
                     )
                     .into_any_element(),
                 kit::value_row("me-handle-row", "Handle", who.clone(), &theme)
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme.surface_2))
+                    .group(kit::HOT)
                     .on_click(
                         cx.listener(|this, _, window, cx| this.start_profile_edit(window, cx)),
                     )
@@ -1387,7 +1399,7 @@ impl Shell {
             body.push(Section::Card(vec![
                 page_row(
                     "settings-appearance",
-                    "circle-half",
+                    "circle.lefthalf.filled",
                     SettingsPage::Appearance,
                     Some(appearance_summary),
                     &theme,
@@ -1426,7 +1438,7 @@ impl Shell {
                 .into_any_element(),
                 page_row(
                     "settings-devices",
-                    "laptop",
+                    "laptopcomputer",
                     SettingsPage::Devices,
                     Some(devices_summary),
                     &theme,
@@ -1437,7 +1449,7 @@ impl Shell {
             // On this Mac (Routines · Channels · Skills hidden until implemented).
             body.push(Section::Card(vec![kit::nav_row(
                 "settings-local",
-                "window",
+                "macwindow",
                 "On this Mac",
                 Some(on_this_mac),
                 &theme,
@@ -1450,7 +1462,7 @@ impl Shell {
             body.push(Section::Card(vec![
                 page_row(
                     "settings-machine",
-                    "desktop",
+                    "desktopcomputer",
                     SettingsPage::Machine,
                     Some(shown.label().to_string()),
                     &theme,
@@ -1459,7 +1471,7 @@ impl Shell {
                 .into_any_element(),
                 page_row(
                     "settings-updates",
-                    "arrow-down",
+                    "arrow.down",
                     SettingsPage::Updates,
                     Some(if auto_update { "On" } else { "Off" }.into()),
                     &theme,
@@ -1472,7 +1484,7 @@ impl Shell {
             body.push(Section::Card(vec![
                 kit::nav_row(
                     "settings-feedback",
-                    "square-pencil",
+                    "square.and.pencil",
                     "Send feedback",
                     Some("⌘⌥F".into()),
                     &theme,
@@ -1481,7 +1493,7 @@ impl Shell {
                 .into_any_element(),
                 page_row(
                     "settings-about",
-                    "info",
+                    "info.circle",
                     SettingsPage::About,
                     Some(update.current_version.to_string()),
                     &theme,

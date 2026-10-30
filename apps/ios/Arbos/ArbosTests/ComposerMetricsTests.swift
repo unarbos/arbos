@@ -97,7 +97,7 @@ final class ComposerMetricsTests: XCTestCase {
         // Three nested inner strokes — 1, 2/3, 1/3 pt — so the outer pixel is brightest
         // (58 / 47 / 40 luminance over #181818, Grok's edges top, bottom, left and right).
         let layers = Theme.composerRimLayers
-        XCTAssertEqual(layers.map(\.width), [1, 2 / 3, 1 / 3])
+        XCTAssertEqual(layers.map(\.width), [CGFloat(1), CGFloat(2) / 3, CGFloat(1) / 3])
         var lum: [Double] = []
         var value = 24.0  // #181818
         for layer in layers {
@@ -172,5 +172,36 @@ final class ComposerMetricsTests: XCTestCase {
         ] {
             assertOnPixel(value, name)
         }
+    }
+
+    // MARK: Pending attachments ([feedback composer-attachment-removal-ios-2026-10-27])
+
+    private func pendingTrio() -> [AppModel.PendingAttachment] {
+        [.init(name: "profile-card.png", mime: "image/png", data: Data([1])),
+         .init(name: "portrait.png", mime: "image/png", data: Data([2])),
+         .init(name: "notes.txt", mime: "text/plain", data: Data([3]))]
+    }
+
+    func testRemovingOnePendingAttachmentKeepsTheOthers() {
+        let trio = pendingTrio()
+        let left = ChatSession.removingPending(trio[1].id, from: trio)
+        XCTAssertEqual(left.map(\.name), ["profile-card.png", "notes.txt"])
+        XCTAssertEqual(ChatSession.removingPending(UUID(), from: trio).count, 3, "an unknown id removes nothing")
+    }
+
+    func testBackspaceOnAnEmptyDraftRemovesTheLastPendingAttachment() {
+        let trio = pendingTrio()
+        let two = ChatSession.removingLastPending(from: trio, draftEmpty: true)
+        XCTAssertEqual(two.map(\.name), ["profile-card.png", "portrait.png"])
+        XCTAssertEqual(ChatSession.removingLastPending(from: trio, draftEmpty: false).count, 3,
+                       "with text in the draft the key edits text, never the strip")
+        XCTAssertTrue(ChatSession.removingLastPending(from: [], draftEmpty: true).isEmpty)
+    }
+
+    func testPendingRemoveHitTargetIsAtLeastTwentyPoints() {
+        XCTAssertGreaterThanOrEqual(Theme.pendingRemoveHit, 20)
+        // The glyph keeps 10 pt from the capsule's edge whatever the hit frame.
+        XCTAssertEqual(Theme.pendingChipTrailing + (Theme.pendingRemoveHit - Theme.pendingRemoveGlyph) / 2, 10)
+        XCTAssertGreaterThanOrEqual(Theme.pendingChipTrailing, 0)
     }
 }

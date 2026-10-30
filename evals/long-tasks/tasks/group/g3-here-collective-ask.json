@@ -11,7 +11,7 @@
       "expect_other_agent": "lane-b",
       "reply_regex": "42",
       "rubric": {
-        "criteria": "Both agents (lane-a and lane-b) answered once each with their own name and 42; neither answered for the other or twice; no agent asked which one was meant.",
+        "criteria": "Both agents (lane-a and lane-b) answered once each, each giving its own name and 42. A bare name prefix counts as stating the name (\"lane-a, 6 × 7 = 42.\" is a full pass); neither answered for the other or twice; no agent asked which one was meant.",
         "min": 3
       },
       "timeout_s": 300
@@ -26,5 +26,5 @@
       "title": "eval here"
     }
   ],
-  "regression": "collective address in a project group (the respond judge's `all agents` verdict, responders.rs)"
+  "regression": "collective address in a project group (the respond judge's `all agents` verdict, responders.rs); run 12: judge read 'lane-a, 6 × 7 = 42.' as no name — rubric wording fixed, re-graded PASS"
 }

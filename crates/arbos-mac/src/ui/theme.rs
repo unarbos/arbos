@@ -12,19 +12,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use gpui::{hsla, rgb, rgba, App, Global, Hsla, WindowAppearance, WindowBackgroundAppearance};
 
 use crate::sync::credentials::config_dir;
+use crate::ui::mock_backdrop;
 
 /// Chat-list sidebar (the iPhone home list, one column). Default width; the
 /// user can drag the right edge between [`SIDEBAR_WIDTH_MIN`] and
 /// [`SIDEBAR_WIDTH_MAX`] ([feedback app-01M5MJ9Y91W9ZET71KTCE7PS65]).
 pub const SIDEBAR_WIDTH: f32 = 296.0;
-/// Narrowest the chat-list column may be dragged (avatar + short name).
-pub const SIDEBAR_WIDTH_MIN: f32 = 200.0;
+/// Narrowest the chat-list column is drawn at: the strip's three discs
+/// exactly fill the band right of the traffic lights (72 + 12 + 3 × 36 +
+/// 2 × 8 + 12) and a row keeps a readable name with no time. Dragging on
+/// past it snaps the column to the icon rail (`ui::sidebar_fit`; was 200,
+/// where the discs overflowed onto the lights and the filter capsules
+/// clipped — [feedback sidebar-narrow-wrap-2026-10-27]).
+pub const SIDEBAR_WIDTH_MIN: f32 = 220.0;
 /// Widest the chat-list column may be dragged.
 pub const SIDEBAR_WIDTH_MAX: f32 = 480.0;
-/// Hit target on the sidebar's right edge for the resize drag.
-/// Slightly wider than a hairline so the col-resize cursor is easy to grab
-/// ([feedback app-01M5MWRQZ8TM4SS0Q25KSYYVV1]).
-pub const SIDEBAR_RESIZE_HANDLE: f32 = 10.0;
 /// Kept for the settings sub-panels, which open just right of the sidebar.
 pub const RAIL_WIDTH: f32 = SIDEBAR_WIDTH;
 
@@ -131,6 +133,25 @@ impl SidebarWidth {
 /// left edge 15, centre 22. We were at 14 / 21 ([feedback
 /// topbar-grok-parity-2026-10-24]).
 pub const TRAFFIC_LIGHT_POSITION: f32 = 15.0;
+/// The standard window buttons' frame on macOS 26: a 14 pt disc each, on a
+/// 23 pt pitch (AppKit's `standardWindowButton` frames; the app never draws
+/// them). Three of them span x 15–75.
+pub const TRAFFIC_LIGHT_BUTTON: f32 = 14.0;
+pub const TRAFFIC_LIGHT_PITCH: f32 = 23.0;
+/// The lights' centre line from the window's top edge (Grok Bot: 22;
+/// measured on the v0.6.213 build: position 14 → centre 21).
+#[cfg_attr(not(test), allow(dead_code))]
+pub const TRAFFIC_LIGHT_LINE: f32 = TRAFFIC_LIGHT_POSITION + TRAFFIC_LIGHT_BUTTON / 2.0;
+/// The lights' slot: GPUI sizes AppKit's title-bar container view to
+/// `button + 2 × position.y` = **44** pt (`gpui_macos::window::move_traffic_light`,
+/// re-run on resize, full-screen exit, activation and screen change), so the
+/// buttons sit vertically centred in it and their hover tracking areas live
+/// there. Our controls stay out of that band wherever they share its column
+/// (the collapsed rail, `ui::rail::metrics`); the expanded strip clears it
+/// horizontally instead (`shell::TRAFFIC_LIGHTS_INSET`). In native full screen
+/// macOS hides the buttons (GPUI restores their stock frames); the slot stays,
+/// nothing moves ([feedback sidebar-toggle-in-rail-2026-10-27]).
+pub const TRAFFIC_LIGHT_SLOT: f32 = TRAFFIC_LIGHT_BUTTON + 2.0 * TRAFFIC_LIGHT_POSITION;
 /// The button family's centre line, from the window's top edge: Grok Bot's
 /// round discs are centred 60 px = **30 pt** under it (same shot: disc rows
 /// 24–96 px → top 12, bottom 48), 8 pt below the lights' line. Jacob
@@ -214,6 +235,18 @@ pub const CHROME_WASH_FLOOR: f32 = 0.25;
 /// Floating cards' floor (menus, sheets, pickers; fixed 0.85 before): a menu
 /// is read, so it stays a surface even over a friendly desktop.
 pub const CARD_WASH_FLOOR: f32 = 0.55;
+/// The right pane's grouped cards on Glass ([feedback
+/// right-pane-glass-cards-2026-10-28]; `Theme::pane_card_fill`): white over
+/// the pane's wash at these alphas — a translucent plate, not a slab.
+pub const PANE_CARD_GLASS_DARK: f32 = 0.08;
+pub const PANE_CARD_GLASS_LIGHT: f32 = 0.55;
+/// The search popups' floor ([feedback search-popup-single-layer-2026-10-28],
+/// Jacob 2026-10-28: "double transparency on search pop up is annoying"): the
+/// ⌘K palette hangs over a busy transcript and nothing of it may read
+/// through. With [`crate::ui::glass::POPUP_BLUR`] under it the tint only has
+/// to flatten what the blur leaves — a stronger wash than a menu's, still a
+/// glass plate, not a solid card.
+pub const POPUP_WASH_FLOOR: f32 = 0.80;
 /// Glass shell tint: how opaque the window wash is over the blur (Settings →
 /// Appearance → Opacity). Default is [`GLASS_ALPHA`] / [`GLASS_ALPHA_LIGHT`].
 /// Floor 0 % (#1425; it was 0.30 before, which Jacob hit — the thumb stopped
@@ -400,6 +433,9 @@ pub enum GlassRegion {
     /// Floating cards — menus, sheets, pickers (`card()`); they hang over the
     /// chat column, so they read its band.
     Card,
+    /// The search popups — the ⌘K palette (`popup()`): one frosted plate over
+    /// the chat column, thick enough that the transcript never reads through.
+    Popup,
 }
 
 /// The user's glass opacity (0.00–1.00). Saved as a float string in
@@ -754,7 +790,10 @@ impl Theme {
         theme.glass_opacity = GlassOpacity::load(theme.appearance);
         // Keep the sampled desktop across a theme change: a fresh theme with
         // no sample would paint the worst-case washes until the next sample.
-        theme.backdrop = cx.try_global::<Theme>().and_then(|t| t.backdrop);
+        theme.backdrop = cx
+            .try_global::<Theme>()
+            .and_then(|t| t.backdrop)
+            .or_else(|| mock_backdrop::lum().map(Backdrop::uniform));
         theme
     }
 
@@ -824,7 +863,10 @@ impl Theme {
     /// underneath is already grey, and a grey-on-grey wash is what made Light
     /// + Glass look muddy (Jacob's shot, 2026-10-21).
     pub fn shell(&self) -> Hsla {
-        if !self.is_glass() {
+        // The rig's stand-in desktop (`ui::mock_backdrop`) stands in for the
+        // window material: the wash goes translucent over it as on a Mac.
+        let over_backdrop = self.is_glass() || (self.is_frost() && mock_backdrop::active());
+        if !over_backdrop {
             return self.bg;
         }
         let mut c = self.shell_tint();
@@ -848,6 +890,16 @@ impl Theme {
             return self.surface_1;
         }
         self.adaptive_wash(GlassRegion::Card)
+    }
+
+    /// A search popup's plate ([feedback search-popup-single-layer-2026-10-28]):
+    /// the card tint at the popup floor on Glass (under [`crate::ui::glass::POPUP_BLUR`]),
+    /// the flat card on Matte — one material either way.
+    pub fn popup(&self) -> Hsla {
+        if !self.is_frost() {
+            return self.surface_1;
+        }
+        self.adaptive_wash(GlassRegion::Popup)
     }
 
     /// The chat column over glass: a wash of the page colour — white in light,
@@ -890,7 +942,7 @@ impl Theme {
     pub fn wash_tint(&self, region: GlassRegion) -> Hsla {
         match region {
             GlassRegion::Sidebar => self.sidebar,
-            GlassRegion::Card => self.surface_1,
+            GlassRegion::Card | GlassRegion::Popup => self.surface_1,
             GlassRegion::Chat | GlassRegion::Pane => self.shell_tint(),
         }
     }
@@ -902,6 +954,7 @@ impl Theme {
             GlassRegion::Sidebar => CHROME_WASH_FLOOR,
             GlassRegion::Chat | GlassRegion::Pane => CHAT_WASH_FLOOR,
             GlassRegion::Card => CARD_WASH_FLOOR,
+            GlassRegion::Popup => POPUP_WASH_FLOOR,
         }
     }
 
@@ -910,7 +963,7 @@ impl Theme {
         let b = self.backdrop?;
         Some(match region {
             GlassRegion::Sidebar => b.left,
-            GlassRegion::Chat | GlassRegion::Card => b.center,
+            GlassRegion::Chat | GlassRegion::Card | GlassRegion::Popup => b.center,
             GlassRegion::Pane => b.right,
         })
     }
@@ -1037,6 +1090,163 @@ impl Theme {
 
     pub fn plate_highlight(&self) -> Hsla {
         self.header_glass_highlight()
+    }
+
+    // ----- the right pane's components on Glass ---------------------------
+    //
+    // [feedback right-pane-glass-cards-2026-10-28] (Jacob, 2026-10-28: "these
+    // items don't steal the glass backing … we can still have the glass for
+    // basically every component in the pane when we go glass"). The pane
+    // itself has worn the adaptive wash since [feedback
+    // mac-glass-adaptive-2026-10-26], but everything drawn on it — the
+    // grouped cards, the tab capsule, the glyph and icon tiles, the fields,
+    // the On/Off segments — kept its Matte token (`pane_card`, `surface_2`,
+    // `field`, `bubble`), an opaque hex colour whatever the surface, so on
+    // Glass they sat as solid slabs over a see-through pane. On Glass every
+    // one of them is now a **wash of the text colour** (white-alpha in dark,
+    // black-alpha in light — the material's own plusL / plusD idiom), so the
+    // desktop shows through them as it does through the pane, and they adapt
+    // with it: over a bright desktop the adaptive pane wash thickens and the
+    // cards ride on it. Matte returns the old tokens untouched.
+
+    /// The grouped card ([`profiles::kit::card`]): `pane_card` on Matte. On
+    /// Glass, dark: white at 8 % — over the pane's floor wash on the lake
+    /// backdrop (≈ `#252525`) the card lands ≈ +17 lighter, the same step
+    /// Matte's `#232323` takes over `#141414`; light: white at 55 % — the
+    /// card lifts off the pane, the way a grouped list sits on a translucent
+    /// macOS sidebar (lighter, not greyer).
+    pub fn pane_card_fill(&self) -> Hsla {
+        if !self.is_frost() {
+            return self.pane_card;
+        }
+        if self.is_light() {
+            hex_a(0xffffff, PANE_CARD_GLASS_LIGHT)
+        } else {
+            hex_a(0xffffff, PANE_CARD_GLASS_DARK)
+        }
+    }
+
+    /// The 1 pt rim a card wears on Glass so its edge reads where the fill
+    /// is thin (the header pill's rule, lighter); transparent on Matte — the
+    /// Matte card has no border.
+    pub fn pane_card_rim(&self) -> Hsla {
+        if !self.is_frost() {
+            return gpui::transparent_black();
+        }
+        if self.is_light() {
+            hex_a(0x000000, 0.06)
+        } else {
+            hex_a(0xffffff, 0.10)
+        }
+    }
+
+    /// The fill of a small control on the pane or the sidebar — the round
+    /// discs (share, close, back; the strip's search · + · collapse), the
+    /// tab capsule, the "Add members" glyph tile, the Library thumbnails,
+    /// the hero's glyph tile, the Message pill: `surface_2` on Matte; on
+    /// Glass white 14 % (dark) / black 7 % (light).
+    pub fn control_fill(&self) -> Hsla {
+        if !self.is_frost() {
+            return self.surface_2;
+        }
+        if self.is_light() {
+            hex_a(0x000000, 0.07)
+        } else {
+            hex_a(0xffffff, 0.14)
+        }
+    }
+
+    /// The plate under the transcript's hover rail (☺ ↩ ⋯ beside a bubble)
+    /// on Glass ([feedback message-hover-actions-backing-2026-10-29]): the
+    /// search popup's frosted plate ([`Self::popup`], thick enough that the
+    /// desktop under the chat column cannot break the glyphs up), worn under
+    /// the round-button wash ([`Self::control_fill`]). `None` on Matte — the
+    /// rail sits on the flat page there and stays as it was — and on light
+    /// Glass, whose chrome waits on Jacob's light-mode pick.
+    pub fn rail_plate(&self) -> Option<Hsla> {
+        (self.is_frost() && !self.is_light()).then(|| self.popup())
+    }
+
+    /// The sidebar filter's selected capsule ("All" · Agents · People ·
+    /// Servers): Grok's `bubble_assistant` on Matte; on Glass the round-button
+    /// family's wash ([`Self::control_fill`]), so the one opaque chip left on
+    /// the frosted sidebar goes glass with the discs beside it (Jacob,
+    /// 2026-10-28 18:17).
+    pub fn filter_on_fill(&self) -> Hsla {
+        if !self.is_frost() {
+            return self.bubble_assistant;
+        }
+        self.control_fill()
+    }
+
+    /// A text field inside the pane (the description editor, a secret's
+    /// value, the inline name editor): `field` on Matte; on Glass white 6 %
+    /// (dark) / white 60 % (light) — a step *under* the card in dark, a step
+    /// over it in light, so the field reads as a well either way.
+    pub fn field_fill(&self) -> Hsla {
+        if !self.is_frost() {
+            return self.field;
+        }
+        if self.is_light() {
+            hex_a(0xffffff, 0.60)
+        } else {
+            hex_a(0xffffff, 0.06)
+        }
+    }
+
+    /// The Apple-style settings icon tile ([`glass::icon_tile`]): its fixed
+    /// mid-grey on Matte; on Glass white 22 % (dark) / black 42 % (light) —
+    /// the white glyph keeps ≥ 3:1 on it (a graphic, not text) over any card.
+    pub fn tile_fill(&self) -> Hsla {
+        if !self.is_frost() {
+            return match self.appearance {
+                Appearance::Dark => hex(0x5c5c60),
+                Appearance::Light => hex(0x6e6e73),
+            };
+        }
+        if self.is_light() {
+            hex_a(0x000000, 0.42)
+        } else {
+            hex_a(0xffffff, 0.22)
+        }
+    }
+
+    /// The selected segment of an On/Off or Dark/Light choice
+    /// ([`glass::segment`]): `bubble` on Matte; on Glass white 16 % (dark) /
+    /// black 72 % (light) — its text stays `bubble_text` (white) in both.
+    /// 16 %, not more: over a white desktop the dark card already sits near
+    /// `#4d4d4d`, and the white label must keep 4.5:1 on the segment there.
+    pub fn segment_on_fill(&self) -> Hsla {
+        if !self.is_frost() {
+            return self.bubble;
+        }
+        if self.is_light() {
+            hex_a(0x000000, 0.72)
+        } else {
+            hex_a(0xffffff, 0.16)
+        }
+    }
+
+    /// Secondary text on the pane (row subtitles and details, section titles,
+    /// footnotes, the unselected tab, "No members"): the flat `text_muted` on
+    /// Matte; on Glass a **vibrant** label — the text colour at 72 % (dark) /
+    /// 62 % (light) — so it composites with whatever lies under it and
+    /// brightens with a bright backdrop instead of sinking into it (the
+    /// `secondaryLabelColor` idiom of a vibrant `NSVisualEffectView`).
+    pub fn label_muted(&self) -> Hsla {
+        if !self.is_frost() {
+            return self.text_muted;
+        }
+        Self::with_alpha(self.text, if self.is_light() { 0.62 } else { 0.72 })
+    }
+
+    /// Tertiary text and glyphs on the pane (chevrons, placeholders): `text_faint`
+    /// on Matte; on Glass the text colour at 45 % (dark) / 42 % (light).
+    pub fn label_faint(&self) -> Hsla {
+        if !self.is_frost() {
+            return self.text_faint;
+        }
+        Self::with_alpha(self.text, if self.is_light() { 0.42 } else { 0.45 })
     }
 
     /// The colour a code token paints in (`code_comment` is also italic).
@@ -1217,6 +1427,7 @@ mod glass_contrast_tests {
             GlassRegion::Chat => theme.chat_wash(),
             GlassRegion::Pane => theme.pane(),
             GlassRegion::Card => theme.card(),
+            GlassRegion::Popup => theme.popup(),
         };
         composite(wash, under)
     }
@@ -1237,11 +1448,12 @@ mod glass_contrast_tests {
         );
     }
 
-    const REGIONS: [GlassRegion; 4] = [
+    const REGIONS: [GlassRegion; 5] = [
         GlassRegion::Sidebar,
         GlassRegion::Chat,
         GlassRegion::Pane,
         GlassRegion::Card,
+        GlassRegion::Popup,
     ];
 
     /// With the desktop sampled, every region reads over every desktop at
@@ -1405,6 +1617,146 @@ mod glass_contrast_tests {
         let white: Hsla = grey(1.0);
         assert_eq!(needed_alpha(0.08, 0.0, white, 4.5, false), 0.0);
         assert_eq!(needed_alpha(0.9, 1.0, white, 4.5, false), 1.0);
+    }
+
+    // ----- the right pane's components ([feedback right-pane-glass-cards-2026-10-28])
+
+    /// What a pane component composes to over a desktop: the pane's own
+    /// surface (desktop → shell wash → adaptive pane wash), then the
+    /// component's translucent fill on top.
+    fn on_pane(theme: &Theme, fill: Hsla, lum: f32) -> Hsla {
+        composite(fill, surface_under(theme, GlassRegion::Pane, lum))
+    }
+
+    /// Text (possibly translucent, the vibrant labels) read against the
+    /// surface it is drawn on: composited first, then measured.
+    fn text_contrast(text: Hsla, under: Hsla) -> f32 {
+        contrast_ratio(composite(text, under), under)
+    }
+
+    /// On Glass every pane component keeps its text readable over white,
+    /// black and the photo, light and dark, at every slider value, sampled
+    /// and unsampled: body ≥ 4.5:1 and the vibrant muted label ≥ 3:1 on a
+    /// card, on a field inside a card and on a control tile; the selected
+    /// segment's white label ≥ 4.5:1; the icon tile's white glyph ≥ 3:1.
+    #[test]
+    fn every_pane_component_reads_over_every_desktop_on_glass() {
+        for appearance in [Appearance::Dark, Appearance::Light] {
+            for (wall, lum) in desktops() {
+                for slider in SLIDERS {
+                    for sampled in [Some(lum), None] {
+                        let theme = themed(appearance, slider, sampled);
+                        let at = format!(
+                            "{appearance:?} over {wall} at {slider:.1} (sampled {})",
+                            sampled.is_some()
+                        );
+                        let card = on_pane(&theme, theme.pane_card_fill(), lum);
+                        let field = composite(theme.field_fill(), card);
+                        let tile = composite(theme.control_fill(), card);
+                        let control = on_pane(&theme, theme.control_fill(), lum);
+                        for (name, under) in [
+                            ("card", card),
+                            ("field on a card", field),
+                            ("glyph tile on a card", tile),
+                            ("control on the pane", control),
+                        ] {
+                            let body = text_contrast(theme.text, under);
+                            let muted = text_contrast(theme.label_muted(), under);
+                            assert!(
+                                body >= 4.5,
+                                "{name} {at}: body {body:.2}:1 over {:?}",
+                                under.to_rgb()
+                            );
+                            assert!(
+                                muted >= 3.0,
+                                "{name} {at}: muted {muted:.2}:1 over {:?}",
+                                under.to_rgb()
+                            );
+                        }
+                        let segment = composite(theme.segment_on_fill(), card);
+                        let seg_text = text_contrast(theme.bubble_text(), segment);
+                        assert!(
+                            seg_text >= 4.5,
+                            "selected segment {at}: {seg_text:.2}:1 over {:?}",
+                            segment.to_rgb()
+                        );
+                        let icon_tile = composite(theme.tile_fill(), card);
+                        let glyph = text_contrast(grey(1.0), icon_tile);
+                        assert!(
+                            glyph >= 3.0,
+                            "icon tile glyph {at}: {glyph:.2}:1 over {:?}",
+                            icon_tile.to_rgb()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// On Glass no pane component is a slab: every fill is translucent (the
+    /// desktop shows through it as through the pane) and the card wears a rim.
+    #[test]
+    fn on_glass_the_pane_components_are_translucent() {
+        for appearance in [Appearance::Dark, Appearance::Light] {
+            let theme = Theme::with(appearance, Surface::Glass);
+            for (name, fill) in [
+                ("card", theme.pane_card_fill()),
+                ("control", theme.control_fill()),
+                ("filter capsule", theme.filter_on_fill()),
+                ("field", theme.field_fill()),
+                ("icon tile", theme.tile_fill()),
+                ("segment", theme.segment_on_fill()),
+            ] {
+                assert!(
+                    fill.a > 0.0 && fill.a < 1.0,
+                    "{appearance:?} {name}: alpha {} is a slab or nothing",
+                    fill.a
+                );
+            }
+            assert!(
+                theme.pane_card_rim().a > 0.0,
+                "{appearance:?}: the card has a rim"
+            );
+            assert!(
+                theme.label_muted().a < 1.0 && theme.label_faint().a < 1.0,
+                "{appearance:?}: vibrant labels are washes of the text colour"
+            );
+            // The dark card steps up from the pane about as much as Matte's
+            // card steps up from the page (+15/255), over the pane's floor
+            // wash on a dark desktop.
+            if appearance == Appearance::Dark {
+                let t = themed(appearance, 0.0, Some(0.0));
+                let pane = surface_under(&t, GlassRegion::Pane, 0.0);
+                let card = composite(t.pane_card_fill(), pane);
+                let step = card.to_rgb().r - pane.to_rgb().r;
+                assert!(
+                    (0.04..=0.10).contains(&step),
+                    "dark card step over the pane: {step:.3}"
+                );
+            }
+        }
+    }
+
+    /// Matte is untouched: every pane token returns exactly what it did.
+    #[test]
+    fn on_matte_the_pane_components_keep_their_solid_tokens() {
+        for appearance in [Appearance::Dark, Appearance::Light] {
+            let theme = Theme::with(appearance, Surface::Matte);
+            assert_eq!(theme.pane_card_fill(), theme.pane_card);
+            assert_eq!(theme.pane_card_rim(), gpui::transparent_black());
+            assert_eq!(theme.control_fill(), theme.surface_2);
+            assert_eq!(theme.filter_on_fill(), theme.bubble_assistant);
+            assert_eq!(theme.field_fill(), theme.field);
+            assert_eq!(theme.segment_on_fill(), theme.bubble);
+            assert_eq!(theme.label_muted(), theme.text_muted);
+            assert_eq!(theme.label_faint(), theme.text_faint);
+            let tile = match appearance {
+                Appearance::Dark => hex(0x5c5c60),
+                Appearance::Light => hex(0x6e6e73),
+            };
+            assert_eq!(theme.tile_fill(), tile);
+            assert_eq!(theme.tile_fill().a, 1.0);
+        }
     }
 }
 

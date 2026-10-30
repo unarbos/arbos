@@ -678,7 +678,7 @@ mod placement_tests {
     use crate::sync::{ClientCommand, SyncEvent, SyncSource};
     use crate::ui::shell::Shell;
     use crate::ui::theme::COMPOSER_HEIGHT;
-    use crate::ui::transcript::{LAST_BUBBLE_TO_COMPOSER, ROW_GAP_HALF, TURN_GAP_EXTRA};
+    use crate::ui::transcript::{LAST_BUBBLE_TO_COMPOSER, ROW_GAP_HALF};
 
     struct Idle;
 
@@ -891,7 +891,9 @@ mod placement_tests {
         );
 
         // The reply lands: the row goes, the reply takes the next slot under
-        // the ack (the turn gap), and the pill and its 54 pt stand still.
+        // the ack — the in-run gap, since the answer follows the same agent's
+        // ack within the run window (grouped messages, Jacob 2026-10-28) —
+        // and the pill and its 54 pt stand still.
         state.update(vcx, |s, cx| {
             let list = s.messages.get_mut("c1").expect("chat");
             list.pop();
@@ -910,14 +912,11 @@ mod placement_tests {
                 sh.transcript.read(cx).row_frame("m3#m3-t.0")
             })
             .expect("the reply was drawn");
-        let answer_top = f32::from(answer.top()) + TURN_GAP_EXTRA + ROW_GAP_HALF;
+        let answer_top = f32::from(answer.top()) + ROW_GAP_HALF;
         let answer_bottom = f32::from(answer.bottom()) - ROW_GAP_HALF;
         assert!(
-            close(
-                answer_top - landed.ack_bottom,
-                2.0 * ROW_GAP_HALF + TURN_GAP_EXTRA
-            ),
-            "ack → reply {} (want the turn gap)",
+            close(answer_top - landed.ack_bottom, 2.0 * ROW_GAP_HALF),
+            "ack → reply {} (want the in-run gap)",
             answer_top - landed.ack_bottom
         );
         assert!(
@@ -968,5 +967,64 @@ mod placement_tests {
             vcx.debug_bounds("presence-row").is_none(),
             "scrolled into history: bubbles pass through the band, the row is gone"
         );
+    }
+
+    /// Dragging the window by its header ([feedback
+    /// mac-typing-line-drag-flicker-2026-10-29]): the header floats over the
+    /// transcript, and while AppKit moves the window the pointer still sends
+    /// moves that jitter up and down against the lagging frame. The press
+    /// belongs to the window move, not to the transcript's drag-scroll, so
+    /// the list stays pinned and the row stays up for the whole drag.
+    #[gpui::test]
+    fn the_row_stays_while_the_window_is_dragged_by_its_header(cx: &mut TestAppContext) {
+        let (_rt, state, shell, vcx) = mount(cx);
+        vcx.update(|_, cx| {
+            cx.set_global(crate::ui::glass::WindowDragPress {
+                record_only: true,
+                ..Default::default()
+            })
+        });
+        let now = crate::model::now_ms();
+        state.update(vcx, |s, cx| {
+            let list = s.messages.get_mut("c1").expect("chat");
+            for i in 0..60 {
+                list.push(reply(&format!("r{i}"), ACK, now - 40_000 + i));
+            }
+            list.push(working("m3", "Running the program", now - 5_000));
+            cx.notify();
+        });
+        settle(&state, &shell, vcx);
+        assert!(
+            vcx.debug_bounds("presence-row").is_some(),
+            "pinned: the row shows"
+        );
+
+        let bar = vcx.debug_bounds("chat-header-bar").expect("header drawn");
+        let grab = gpui::point(bar.right() - px(120.0), bar.top() + px(20.0));
+        vcx.simulate_mouse_down(grab, gpui::MouseButton::Left, gpui::Modifiers::default());
+        let mut hidden = 0;
+        for (i, dy) in [6.0, 14.0, 22.0, 30.0, 18.0, 34.0, 10.0, 40.0, 26.0, 44.0]
+            .into_iter()
+            .enumerate()
+        {
+            vcx.simulate_mouse_move(
+                gpui::point(grab.x + px(i as f32), grab.y + px(dy)),
+                Some(gpui::MouseButton::Left),
+                gpui::Modifiers::default(),
+            );
+            shell.update(vcx, |_, cx| cx.notify());
+            vcx.run_until_parked();
+            if vcx.debug_bounds("presence-row").is_none() {
+                hidden += 1;
+            }
+        }
+        let moves = vcx.update(|_, cx| cx.global::<crate::ui::glass::WindowDragPress>().moves);
+        assert!(moves >= 1, "the press became a window move");
+        assert_eq!(
+            hidden, 0,
+            "the row went away on {hidden} of 10 frames mid-drag"
+        );
+        let pinned = shell.read_with(&*vcx, |sh, cx| sh.transcript.read(cx).is_pinned_to_bottom());
+        assert!(pinned, "a window drag leaves the transcript pinned");
     }
 }

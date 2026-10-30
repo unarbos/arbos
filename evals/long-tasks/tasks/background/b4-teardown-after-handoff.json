@@ -57,6 +57,6 @@
     "background",
     "recovery"
   ],
-  "regression": "Doug teardown incident 2026-10-22 13:44 CR (owner bc-d117b386)",
+  "regression": "Doug teardown incident 2026-10-22 13:44 CR (owner bc-d117b386); #2258 (run 12: the teardown's follow-on job ended 'interrupted / box restart' at 00:58:24 and the turn never confirmed, though the routine was deleted and the loop killed)",
   "cleanup_routines": true
 }

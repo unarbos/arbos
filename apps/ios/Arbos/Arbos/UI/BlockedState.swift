@@ -16,6 +16,12 @@ enum BlockedState {
 
     static func confirmTitle(handle: String) -> String { "Unblock @\(handle)?" }
 
+    /// The Unblock confirm (`Confirm.swift`): "Unblock @x?" · the note · Cancel · Unblock.
+    /// Plain, not red — unblocking undoes a block, it destroys nothing.
+    static func unblockConfirm(handle: String) -> ConfirmSpec {
+        ConfirmSpec(title: confirmTitle(handle: handle), message: confirmNote, action: unblock, destructive: false)
+    }
+
     /// "N messages hidden because you blocked @x" for the transcript's folded line.
     static func hiddenLine(count: Int, who: String) -> String {
         "\(count == 1 ? "1 message" : "\(count) messages") hidden because you blocked \(who)"
@@ -37,10 +43,37 @@ enum BlockedState {
         return nil
     }
 
+    /// "Muted until 14:30" when the end is later today, "Muted until Oct 30, 14:30" on any
+    /// other day, "Muted" with no end. HH:MM is 24-hour local time in `timeZone`
+    /// ([feedback app-01M61GZ5B66VCSKF40458KH3DP]; the Mac's `muted_until_label` twin).
+    static func mutedUntilLabel(untilMs: Int64?, nowMs: Int64, timeZone: TimeZone = .current) -> String {
+        guard let untilMs else { return "Muted" }
+        let until = Date(timeIntervalSince1970: TimeInterval(untilMs) / 1000)
+        let now = Date(timeIntervalSince1970: TimeInterval(nowMs) / 1000)
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = timeZone
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = timeZone
+        if cal.isDate(until, inSameDayAs: now) {
+            f.dateFormat = "HH:mm"
+            return "Muted until \(f.string(from: until))"
+        }
+        f.dateFormat = "MMM d, HH:mm"
+        return "Muted until \(f.string(from: until))"
+    }
+
     /// The plain sentence for a refused push, keyed on the relay's `reason`
     /// (`not_available` + `blocked_by` / `blocks_member` / `silenced`; nil from an older
     /// relay keeps the generic line). The Mac's `PushRefusal::sentence` twin.
-    static func refusalSentence(reason: String?, name: String?, handle: String?) -> String {
+    /// `silencedUntilMs` is the active chat's end time for the mute line.
+    static func refusalSentence(
+        reason: String?,
+        name: String?,
+        handle: String?,
+        silencedUntilMs: Int64? = nil,
+        nowMs: Int64? = nil
+    ) -> String {
         let who = who(name: name, handle: handle)
         switch (reason, who) {
         case ("blocked_by", let who?): return "\(who) has blocked you in this chat."
@@ -49,7 +82,10 @@ enum BlockedState {
             return "Couldn't post: you've blocked \(who), who is in this chat. Unblock to post."
         case ("blocks_member", nil):
             return "Couldn't post: you've blocked someone in this chat. Unblock to post."
-        case ("silenced", _): return "You're muted in this chat, so your messages aren't being delivered."
+        case ("silenced", _):
+            let now = nowMs ?? Int64(Date().timeIntervalSince1970 * 1000)
+            let label = mutedUntilLabel(untilMs: silencedUntilMs, nowMs: now)
+            return "\(label). Your messages aren't being delivered."
         default: return "Messages in this chat aren't being delivered right now. We'll keep trying."
         }
     }
@@ -96,6 +132,24 @@ struct BlockedChip: View {
         .background(Capsule().fill(theme.danger.opacity(0.14)))
         .accessibilityIdentifier("blocked-chip")
         .accessibilityLabel("Blocked")
+    }
+}
+
+/// The composer's stand-in when an admin muted me in a group: one quiet "Muted until …" line
+/// ([feedback app-01M61GZ5B66VCSKF40458KH3DP]). Kept out of `ChatView` so the type-checker
+/// finishes; the chat's `.task` clears local silenced state when `untilMs` passes.
+struct SilencedComposerLine: View {
+    @Environment(\.theme) private var theme
+    let untilMs: Int64?
+
+    var body: some View {
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        Text(BlockedState.mutedUntilLabel(untilMs: untilMs, nowMs: now))
+            .font(theme.font(Theme.small))
+            .foregroundStyle(theme.muted)
+            .frame(maxWidth: .infinity)
+            .frame(height: Theme.composerHeight)
+            .accessibilityIdentifier("group-silenced")
     }
 }
 

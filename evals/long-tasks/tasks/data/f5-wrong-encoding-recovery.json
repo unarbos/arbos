@@ -1,0 +1,19 @@
+{
+ "id": "f5-wrong-encoding-recovery",
+ "lane": "a",
+ "category": "data",
+ "title": "A CSV with a BOM, Windows line endings and a Latin-1 name: parse it right and say what was odd",
+ "turns": [
+  {
+   "prompt": "{D}/people.csv is an export from a Windows tool. Give me the total of the amount column and the name with the highest amount, spelled correctly.",
+   "seed": "mkdir -p {D} && printf '\\xef\\xbb\\xbfname,amount\\r\\nJos\\xe9 Mu\\xf1oz,120\\r\\nAna,80\\r\\nZo\\xeb,45\\r\\n' > {D}/people.csv",
+   "timeout_s": 240,
+   "reply_regex": "\\b245\\b",
+   "reply_regex_not": "Jos\\?|Mu\\?oz|\\ufffd",
+   "rubric": {
+    "criteria": "Pass if the reply gives 245 as the total and 'José Muñoz' (with the accents) as the top name, and ideally mentions the file was not UTF-8 / had a BOM or CRLF. Fail if the total is wrong, the name is mangled (Jos?, JosÃ©, replacement characters) or the agent asks the user to fix the file.",
+    "min": 3
+   }
+  }
+ ]
+}

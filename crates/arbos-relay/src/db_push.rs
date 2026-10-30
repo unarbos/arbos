@@ -183,6 +183,17 @@ impl Db {
         })
     }
 
+    /// Was this message announced (`chat_events` row present)?
+    pub fn chat_event_exists(&self, chat_id: &str, message_id: &str) -> Result<bool> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT EXISTS (SELECT 1 FROM chat_events WHERE chat_id = ?1 AND message_id = ?2)",
+                params![chat_id, message_id],
+                |r| r.get(0),
+            )
+        })
+    }
+
     /// Has `sender_user` announced a message in `chat_id` since `since_ms`? (The row-level
     /// fallback checks this before sending a content-less notification.)
     pub fn chat_event_since(

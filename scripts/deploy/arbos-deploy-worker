@@ -154,6 +154,58 @@ agentd_hold_release_if_fixed() {
   done < <(git -C "$REPO" log --format='%H %s' "${held_sha:-HEAD~50}..origin/main" 2>/dev/null | grep -i 'canary-fix\]' | cut -d' ' -f1)
 }
 
+# Lane collision (2026-10-29 00:13): the 0.1.180 canary busy-reply smoke ran while the relay lane restarted
+# the relay for 9c44ba36 (sockets closed 00:12:05, probes arrived via matrix resync 7–8 s late) and the
+# agentd lane was held for a failure the image did not cause. Two markers keep the lanes apart:
+#   $STATE/agentd.canary   — written by roll_image around the canary smokes; the relay lane does not
+#                            deploy (restart) while it exists and is fresh.
+#   $STATE/relay.deploying — written by deploy_relay for the build + restart; a canary smoke waits for
+#                            it to clear (and for RELAY_SETTLE_S after a restart) before it starts.
+# Both are stale after LANE_MARKER_MAX_S so a killed unit cannot wedge the other lane.
+LANE_MARKER_MAX_S="${LANE_MARKER_MAX_S:-1800}"
+RELAY_SETTLE_S="${RELAY_SETTLE_S:-45}"
+CANARY_WAIT_MAX_S="${CANARY_WAIT_MAX_S:-900}"
+marker_fresh() { # marker_fresh <file>: 0 when the file exists and is younger than LANE_MARKER_MAX_S
+  local f="$1" at
+  [[ -f "$f" ]] || return 1
+  at="$(stat -c %Y "$f" 2>/dev/null || echo 0)"
+  (( $(date +%s) - at < LANE_MARKER_MAX_S )) || { rm -f "$f"; return 1; }
+  return 0
+}
+canary_running() { marker_fresh "$STATE/agentd.canary"; }
+relay_deploying() { marker_fresh "$STATE/relay.deploying"; }
+# arbos-www (Caddy) reloads close every proxied WebSocket for a second (2026-10-29: 12 reloads between
+# 23:30 and 04:03, 49–57 boxes dropped each, two canary smokes broken mid-probe). refresh-mac-download
+# writes `www.reloading` around a reload and `www.reload-pending` when it had to defer one behind a
+# canary smoke / relay deploy; the tick applies a pending reload once the lanes are clear.
+www_reloading() { marker_fresh "$STATE/www.reloading"; }
+apply_pending_www_reload() {
+  [[ -f "$STATE/www.reload-pending" ]] || return 0
+  if canary_running || relay_deploying; then return 0; fi
+  dry && { log "dry-run: would apply the deferred arbos-www reload"; return 0; }
+  systemctl is-active --quiet arbos-www.service || { rm -f "$STATE/www.reload-pending"; return 0; }
+  printf 'by=%s\nat=%s\n' "arbos-deploy-worker" "$(date -u +%FT%TZ)" > "$STATE/www.reloading"
+  systemctl reload arbos-www.service || true
+  rm -f "$STATE/www.reloading" "$STATE/www.reload-pending"
+  log "www: applied the arbos-www reload deferred by refresh-mac-download (lanes clear)"
+  event relay "$(deployed_sha relay)" www_reload_applied "deferred Caddy reload applied once no canary smoke / relay deploy was in flight"
+}
+wait_for_relay_lane() { # before a canary smoke: no relay deploy / Caddy reload in flight, and the relay up for RELAY_SETTLE_S
+  local waited=0 up last
+  while relay_deploying || www_reloading; do
+    (( waited == 0 )) && log "agentd: canary smoke waits — relay deploy or arbos-www reload in flight ($(cat "$STATE/relay.deploying" "$STATE/www.reloading" 2>/dev/null | tr '\n' ' '))"
+    (( waited >= CANARY_WAIT_MAX_S )) && { log "agentd: relay deploy still in flight after ${waited}s; running the canary anyway"; return 0; }
+    sleep 10; waited=$((waited + 10))
+  done
+  last="$(cat "$STATE/relay.last-deploy" 2>/dev/null || true)"
+  if [[ "$last" =~ ^[0-9]+$ ]] && (( $(date -u +%s) - last < RELAY_SETTLE_S )); then
+    up=$(( RELAY_SETTLE_S - ($(date -u +%s) - last) ))
+    log "agentd: canary smoke waits ${up}s for the relay to settle after its restart"
+    sleep "$up"
+  fi
+  return 0
+}
+
 gh_api() {
   # gh_api <path-after-repo> [curl args…]
   local path="$1"; shift
@@ -245,11 +297,22 @@ relay_planned_restart() {
   # Before any restart of the running relay (#1347): POST /admin/restart sends every room socket a
   # `restart_soon` notice, waits, closes them with 1012 Service Restart and drains, so the apps redial
   # at once instead of backing off. Answers when the relay is ready; an old relay (404) is just restarted.
-  local code
-  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 -X POST \
-    -H "Authorization: Bearer $(secret_from "$RELAY_ENV" ARBOS_RELAY_ADMIN_TOKEN)" -H "Content-Type: application/json" \
-    -d "{\"notice_s\":${RELAY_RESTART_NOTICE_S:-10},\"drain_s\":5}" "$RELAY_URL/admin/restart" || echo 000)
-  log "relay: planned-restart handshake answered HTTP $code"
+  # 409 box_work_in_flight (#2262): a box upgrade or create is running; wait, then force.
+  local code waited=0 force=false
+  while :; do
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 -X POST \
+      -H "Authorization: Bearer $(secret_from "$RELAY_ENV" ARBOS_RELAY_ADMIN_TOKEN)" -H "Content-Type: application/json" \
+      -d "{\"notice_s\":${RELAY_RESTART_NOTICE_S:-10},\"drain_s\":5,\"force\":$force}" "$RELAY_URL/admin/restart" || echo 000)
+    [[ "$code" == 409 ]] || break
+    if (( waited >= ${RELAY_BOX_WORK_WAIT_MAX_S:-1800} )); then
+      log "relay: box work still in flight after ${waited}s; restarting with force"
+      force=true
+      continue
+    fi
+    (( waited == 0 )) && log "relay: restart waits — box upgrade or create in flight"
+    sleep 15; waited=$((waited + 15))
+  done
+  log "relay: planned-restart handshake answered HTTP $code (waited ${waited}s for box work)"
 }
 
 relay_connect_probe() {
@@ -276,7 +339,11 @@ deploy_relay() {
   git -C "$REPO" show "$sha:scripts/feedback/deploy-relay.sh" > "$tmp/deploy-relay.sh"
   t0=$(date +%s)
   log "relay: deploying $sha (build from source as $BUILD_USER)"
-  if BUILD_USER="$BUILD_USER" bash "$tmp/deploy-relay.sh" "$sha" > "$STATE/runs/relay-$sha.log" 2>&1; then
+  printf 'sha=%s\nat=%s\n' "$sha" "$(date -u +%FT%TZ)" > "$STATE/relay.deploying"
+  local ok=1
+  BUILD_USER="$BUILD_USER" bash "$tmp/deploy-relay.sh" "$sha" > "$STATE/runs/relay-$sha.log" 2>&1 || ok=0
+  rm -f "$STATE/relay.deploying"
+  if (( ok )); then
     rm -rf "$tmp"
     local now
     now="$(deployed_sha relay)"
@@ -566,17 +633,54 @@ for u in json.load(sys.stdin):
 
 real_min_sha() {
   # real_min_sha [skipped uids] — the relay's real_min_sha (the sha of the earliest-reporting awake real
-  # box), recomputed here from the same box list when skipped boxes must not count.
-  curl -fsS --max-time 30 -H "Authorization: Bearer $(secret_from "$RELAY_ENV" ARBOS_RELAY_ADMIN_TOKEN)" "$RELAY_URL/admin/calls" \
-    | python3 -c '
-import sys, json
+  # box), recomputed here from the same box list so that skipped boxes and LIMBO boxes do not count.
+  # Limbo (2026-10-29 03:50): gh_17856706 had a boxes row with no sandbox_id and no snapshot but a 0.1.181
+  # hello from 01:03 and a ticking meter, and held the 0.1.183 roll at "not done" although every real box
+  # ran the image. A box whose row has no sandbox/snapshot, or whose last hello predates the row's
+  # last_started_at while naming another image than the row's snapshot, is logged (so it stays visible) and left out.
+  local rows out
+  rows="$(relay_db -separator $'\t' "select user_id, coalesce(sandbox_id,''), coalesce(snapshot,''), coalesce(last_started_at,0) from boxes" 2>/dev/null || true)"
+  out="$(curl -fsS --max-time 30 -H "Authorization: Bearer $(secret_from "$RELAY_ENV" ARBOS_RELAY_ADMIN_TOKEN)" "$RELAY_URL/admin/calls" \
+    | ROWS="$rows" python3 -c '
+import sys, json, os
 a = json.load(sys.stdin).get("agentd") or {}
 skipped = set(sys.argv[1].split()) if len(sys.argv) > 1 else set()
-if not skipped:
-    print(a.get("real_min_sha") or a.get("fleet_min_sha") or ""); sys.exit(0)
-real = sorted(((b.get("reported_at") or 0), b.get("sha") or "") for b in a.get("boxes") or []
-              if not b.get("test") and b.get("state") == "awake" and b.get("sha") and b.get("user_id") not in skipped)
-print(real[0][1] if real else (a.get("real_min_sha") or ""))' "${1:-}" 2>/dev/null || true
+rows = {}
+for line in (os.environ.get("ROWS") or "").splitlines():
+    f = line.split("\t")
+    if len(f) == 4:
+        rows[f[0]] = (f[1], f[2], int(f[3] or 0))
+real, ignored = [], []
+for b in a.get("boxes") or []:
+    uid = b.get("user_id") or ""
+    if b.get("test") or b.get("state") != "awake" or not b.get("sha") or uid in skipped:
+        continue
+    row = rows.get(uid)
+    why = None
+    if row is not None:
+        sandbox, snapshot, started = row
+        if not sandbox or not snapshot:
+            why = "no sandbox/snapshot on its row"
+        elif started and (b.get("reported_at") or 0) < started and not snapshot.endswith("-" + str(b.get("image") or "?")):
+            # a stale hello from before the row was (re)started AND for another image than the row says:
+            # a hello that already names the row snapshot is just older than a later wake, and counts
+            why = "last hello predates the row last_started_at and names another image than the row snapshot"
+    if why:
+        img = b.get("image"); short = (b.get("sha") or "")[:8]
+        ignored.append(f"{uid}: {why} (hello image {img} sha {short})")
+        continue
+    real.append(((b.get("reported_at") or 0), b.get("sha") or ""))
+real.sort()
+sha = real[0][1] if real else (a.get("real_min_sha") or a.get("fleet_min_sha") or "")
+print(sha)
+for i in ignored:
+    print("IGNORED " + i)' "${1:-}" 2>/dev/null || true)"
+  local line
+  while IFS= read -r line; do
+    # log() echoes to stdout, which is this function's return value: send the note to stderr + the log file only
+    [[ "$line" == IGNORED\ * ]] && log "agentd: real_min_sha ignores limbo box ${line#IGNORED }" >&2
+  done <<< "$out"
+  head -n1 <<< "$out"
 }
 
 box_quiet() {
@@ -708,7 +812,7 @@ ROLL_FAILED_UIDS=""
 roll_pass() {
   # roll_pass <target> — one pass over every pending box (real first, then test), quiet ones only.
   # Returns 2 when the consecutive-failure limit stopped the roll.
-  local target="$1" uid tier outcome go counts passes reason
+  local target="$1" uid tier outcome go counts passes reason answer
   for tier in real test; do
     for uid in $(pending_boxes "$target" "$tier" || true); do
       go=0
@@ -731,7 +835,12 @@ roll_pass() {
       if (( go )); then
         busy_counter "$uid" "$target" reset >/dev/null
         attempt_ms=$(date +%s%3N)
-        log "agentd: upgrading box of $uid → $target: $(upgrade_box "$uid")"
+        answer="$(upgrade_box "$uid")"
+        log "agentd: upgrading box of $uid → $target: $answer"
+        if [[ "$answer" == *"the relay is restarting"* ]]; then
+          log "agentd: $uid not started — a relay restart is under way; the box is untouched, the next pass retries"
+          continue
+        fi
         # One at a time: give it up to 4 minutes before the next box.
         outcome=pending
         for _ in $(seq 1 24); do
@@ -926,11 +1035,15 @@ roll_image() {
   # Busy-reply gate on the canary box first (scripts/deploy/agentd-canary-smoke.sh, from the
   # rolled commit): a failed gate stops here — default unchanged, no real box moves.
   local smoke_rc=0
+  wait_for_relay_lane
+  printf 'image=%s\nsha=%s\nat=%s\n' "$version" "$sha" "$(date -u +%FT%TZ)" > "$STATE/agentd.canary"
+  trap 'rm -f "$STATE/agentd.canary"' EXIT
   if [[ -x "$REPO/scripts/deploy/agentd-canary-smoke.sh" ]]; then
     RELAY_URL="$RELAY_URL" RELAY_ENV="$RELAY_ENV" STATE="$STATE" EVENTS="$EVENTS" \
       bash "$REPO/scripts/deploy/agentd-canary-smoke.sh" "$sha" "$version" "$snapshot" || smoke_rc=$?
   fi
   if (( smoke_rc == 1 )); then
+    rm -f "$STATE/agentd.canary"
     record_failure agentd "$sha" "busy-reply smoke failed on the canary box (image $version); default not switched, nothing rolled"
     hold_agentd "$sha" "$version" "busy-reply canary failed (turn never started); log $STATE/runs/agentd-$version-smoke.log"
     exit 1
@@ -944,6 +1057,7 @@ roll_image() {
     RELAY_URL="$RELAY_URL" RELAY_ENV="$RELAY_ENV" STATE="$STATE" EVENTS="$EVENTS" SMOKE_USER_ID="$SMOKE_HOST_USER_ID" \
       bash "$REPO/scripts/deploy/agentd-canary-smoke.sh" "$sha" "$version" "$snapshot" || host_rc=$?
     if (( host_rc == 1 )); then
+      rm -f "$STATE/agentd.canary"
       record_failure agentd "$sha" "host-box canary failed (image $version, user $SMOKE_HOST_USER_ID); default not switched, nothing rolled"
       hold_agentd "$sha" "$version" "host-box canary failed on $SMOKE_HOST_USER_ID; log $STATE/runs/agentd-$version-smoke.log"
       exit 1
@@ -955,6 +1069,7 @@ roll_image() {
   else
     log "agentd: no SMOKE_HOST_USER_ID in deploy.env — host-box canary skipped (set one: a test user whose box runs on the host provider)"
   fi
+  rm -f "$STATE/agentd.canary"; trap - EXIT
   if grep -q '^ARBOS_DAYTONA_SNAPSHOT=' "$RELAY_ENV"; then
     sed -i "s|^ARBOS_DAYTONA_SNAPSHOT=.*|ARBOS_DAYTONA_SNAPSHOT=$snapshot|" "$RELAY_ENV"
   else
@@ -1100,19 +1215,20 @@ relay_hotfix_marker() {
   # carries the marker — the `[hotfix]` sits on the branch commit (#1966; 17:54–18:09 Oct 27 the P0 authz fix
   # #2093 was held 20 min to coalesce). Merges of gate-pinned items are named by the loop in $PRIORITY_MERGES
   # ("<merge-sha> <item> <when>" per line) and count as markers too.
-  {
-    git -C "$REPO" log --format='%H%x09%s%x09%b' "$deployed..origin/main" 2>/dev/null \
-      | { grep -iE $'\t(revert|hotfix)\b|\[hotfix\]' || true; }
-    if [[ -f "$PRIORITY_MERGES" ]]; then
-      local psha _rest
-      while read -r psha _rest; do
-        [[ "$psha" =~ ^[0-9a-f]{7,40}$ ]] || continue
-        if git -C "$REPO" merge-base --is-ancestor "$psha" origin/main 2>/dev/null && ! git -C "$REPO" merge-base --is-ancestor "$psha" "$deployed" 2>/dev/null; then
-          git -C "$REPO" rev-parse "$psha" 2>/dev/null
-        fi
-      done < "$PRIORITY_MERGES"
-    fi
-  } | head -1 | cut -f1
+  # No `| head -1` on the producers: with two marker lines the producer gets SIGPIPE (141) and under set -e that
+  # killed the whole tick (20:36–20:41 Oct 27, nothing deployed). Collect, then take the first line.
+  local found
+  found="$(git -C "$REPO" log --format='%H%x09%s%x09%b' "$deployed..origin/main" 2>/dev/null | { grep -iE $'\t(revert|hotfix)\b|\[hotfix\]' || true; })"
+  if [[ -z "$found" && -f "$PRIORITY_MERGES" ]]; then
+    local psha _rest
+    while read -r psha _rest; do
+      [[ "$psha" =~ ^[0-9a-f]{7,40}$ ]] || continue
+      if git -C "$REPO" merge-base --is-ancestor "$psha" origin/main 2>/dev/null && ! git -C "$REPO" merge-base --is-ancestor "$psha" "$deployed" 2>/dev/null; then
+        found="$(git -C "$REPO" rev-parse "$psha" 2>/dev/null)"; break
+      fi
+    done < "$PRIORITY_MERGES"
+  fi
+  printf '%s\n' "${found%%$'\n'*}" | cut -f1
 }
 
 # Four relay deploys in 95 minutes caused the 2026-10-22 "Reconnecting..." outage. Hold a relay
@@ -1252,6 +1368,10 @@ handle_request() {
   esac
   case "$kind" in
     relay)
+      if canary_running; then
+        log "relay: $full waits — agentd canary smoke in progress ($(cat "$STATE/agentd.canary" 2>/dev/null | tr '\n' ' ')); no relay restart until it ends"
+        return 0
+      fi
       if relay_deploy_held "$full" "$age_first"; then return 0; fi
       rm -f "$STATE/relay.held"
       if deploy_relay "$full"; then date -u +%s > "$STATE/relay.last-deploy"; rm -f "$file"; fi ;;
@@ -1297,6 +1417,7 @@ continue_roll_if_due() {
 
 tick() {
   need_root
+  apply_pending_www_reload
   if dry; then
     # Throwaway state: the real metadata files and queue are copied, the repo clone is shared read-only
     # (fetch only), the lock is private so a live tick is never blocked, nothing is removed or written
@@ -1340,6 +1461,9 @@ status() {
   for f in "$QUEUE"/*; do [[ -f "$f" ]] && { echo "  $(basename "$f"): $(tr '\n' ' ' < "$f")"; }; done
   echo "failed:"; for f in "$STATE"/failed/*; do [[ -f "$f" ]] && echo "  $(basename "$f"): $(tr '\n' ' ' < "$f")"; done
   if agentd_held; then echo "agentd lane HELD: $(tr '\n' ' ' < "$(agentd_hold_file)")"; else echo "agentd lane: open"; fi
+  if canary_running; then echo "agentd canary smoke: running ($(tr '\n' ' ' < "$STATE/agentd.canary")) — relay deploys wait"; fi
+  if relay_deploying; then echo "relay deploy: in flight ($(tr '\n' ' ' < "$STATE/relay.deploying")) — canary smokes wait"; fi
+  if [[ -f "$STATE/www.reload-pending" ]]; then echo "arbos-www reload: PENDING ($(tr '\n' ' ' < "$STATE/www.reload-pending")) — applied by the tick once the lanes are clear"; fi
   if [[ -s "$STATE/agentd.skip" ]]; then
     echo "skipped boxes (left on their image; 'unskip <uid>' after the fix):"
     while IFS='|' read -r u r w; do echo "  $u since $w: $r"; done < "$STATE/agentd.skip"

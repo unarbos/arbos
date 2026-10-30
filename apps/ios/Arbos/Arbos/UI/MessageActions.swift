@@ -19,11 +19,36 @@ enum ReactionCapsule {
     static var width: CGFloat { 2 * padding + CGFloat(palette.count + 1) * cell }
     static var height: CGFloat { 2 * padding + cell }
 
-    /// The first emoji the keyboard typed, if any.
+    /// The first emoji the keyboard typed, if any. Every emoji the keyboard offers counts,
+    /// including the text-default symbols it sends with U+FE0F (©️ ®️ ™️ ‼️ ⁉️ ℹ️ ⌨️, the
+    /// arrows ↔️ … ↪️) and the keycaps (#️⃣ *️⃣ 0️⃣–9️⃣); a bare letter, digit or `#` does not
+    /// ([feedback full-picker-reaction-ios-2026-10-29]: those picks were dropped).
     static func pickedEmoji(_ text: String) -> String? {
-        guard let first = text.trimmingCharacters(in: .whitespaces).first else { return nil }
-        let isEmoji = first.unicodeScalars.contains { $0.properties.isEmojiPresentation || $0.properties.isEmoji && $0.value > 0x238C }
+        guard let first = text.trimmingCharacters(in: .whitespaces).first,
+              let lead = first.unicodeScalars.first, lead.properties.isEmoji else { return nil }
+        let isEmoji = first.unicodeScalars.contains {
+            $0.properties.isEmojiPresentation || $0.value == 0xFE0F || $0.value == 0x20E3
+                || $0.properties.isEmoji && $0.value > 0x238C
+        }
         return isEmoji ? String(first) : nil
+    }
+}
+
+/// The add-emoji field's one answer. UIKit reports a single keyboard insert to the
+/// field twice — `shouldChangeCharactersIn` first, then `.editingChanged` — and each
+/// report toggled the reaction, so a pick from the emoji keyboard switched it on and
+/// straight off again while the overlay closed on the first toggle
+/// ([feedback iphone-emoji-picker-reaction-2026-10-28]). The first emoji wins; every
+/// later report is dropped.
+struct ReactionPick {
+    private(set) var emoji: String?
+
+    /// The emoji to react with, exactly once per field; nil for non-emoji text and for
+    /// every report after the first pick.
+    mutating func take(_ text: String) -> String? {
+        guard emoji == nil, let picked = ReactionCapsule.pickedEmoji(text) else { return nil }
+        emoji = picked
+        return picked
     }
 }
 
@@ -54,7 +79,6 @@ struct MessageActionsOverlay<Bubble: View>: View {
     @ViewBuilder let bubble: () -> Bubble
 
     @State private var pickOpen = false
-    @State private var picked = ""
     /// The bubble's frame when the press landed. The composer's keyboard goes down as
     /// the overlay opens and the transcript reflows under the blur; the held bubble
     /// stays where the finger is (iMessage) instead of following that reflow.
@@ -107,11 +131,10 @@ struct MessageActionsOverlay<Bubble: View>: View {
         .ignoresSafeArea()
         .overlay {
             if pickOpen {
-                EmojiKeyboardField(text: $picked) { text in
-                    if let emoji = ReactionCapsule.pickedEmoji(text) { onReact(emoji) }
-                }
-                .frame(width: 1, height: 1)
-                .opacity(0.01)
+                EmojiKeyboardField(onPick: onReact)
+                    .frame(width: 1, height: 1)
+                    .opacity(0.01)
+                    .accessibilityIdentifier("reaction-pick-field")
             }
         }
         .transition(.opacity)
@@ -133,7 +156,7 @@ struct MessageActionsOverlay<Bubble: View>: View {
                     Text(emoji)
                         .font(.system(size: ReactionCapsule.emojiSize))
                         .frame(width: ReactionCapsule.cell, height: ReactionCapsule.cell)
-                        .background(Circle().fill(held.contains(emoji) ? theme.accent.opacity(0.22) : Color.clear))
+                        .background(Circle().fill(held.contains(where: { MessageReaction.sameBase($0, emoji) }) ? theme.accent.opacity(0.22) : Color.clear))
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(CapsuleCellButtonStyle(pressed: theme.text.opacity(0.1)))
@@ -309,10 +332,10 @@ final class KeyboardFrameObserver: ObservableObject {
 }
 
 /// A one-character field that raises the **emoji** keyboard (the system picker
-/// on iPhone): `textInputMode` is pinned to the emoji input mode.
+/// on iPhone): `textInputMode` is pinned to the emoji input mode. `onPick` is
+/// called once, with the first emoji typed (`ReactionPick`).
 struct EmojiKeyboardField: UIViewRepresentable {
-    @Binding var text: String
-    let onChange: (String) -> Void
+    let onPick: (String) -> Void
 
     func makeUIView(context: Context) -> EmojiTextField {
         let field = EmojiTextField()
@@ -327,22 +350,27 @@ struct EmojiKeyboardField: UIViewRepresentable {
 
     func updateUIView(_ uiView: EmojiTextField, context: Context) {}
 
-    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    func makeCoordinator() -> Coordinator { Coordinator(onPick: onPick) }
 
     final class Coordinator: NSObject, UITextFieldDelegate {
-        var parent: EmojiKeyboardField
-        init(_ parent: EmojiKeyboardField) { self.parent = parent }
-        @objc func changed(_ field: UITextField) {
-            parent.text = field.text ?? ""
-            parent.onChange(parent.text)
+        let onPick: (String) -> Void
+        private var pick = ReactionPick()
+
+        init(onPick: @escaping (String) -> Void) { self.onPick = onPick }
+
+        /// Both delegate paths funnel here; `ReactionPick` lets only the first emoji through.
+        func report(_ text: String) {
+            if let emoji = pick.take(text) { onPick(emoji) }
         }
-        // The emoji keyboard's insert arrives here first; `editingChanged` does
-        // not always follow for a non-text key.
+
+        @objc func changed(_ field: UITextField) {
+            report(field.text ?? "")
+        }
+
+        // The emoji keyboard's insert arrives here first; `editingChanged` usually
+        // follows with the same character, sometimes not (a non-text key).
         func textField(_ textField: UITextField, shouldChangeCharactersIn range: NSRange, replacementString string: String) -> Bool {
-            if !string.isEmpty {
-                parent.text = string
-                parent.onChange(string)
-            }
+            report(string)
             return true
         }
     }
@@ -356,18 +384,27 @@ final class EmojiTextField: UITextField {
 }
 
 extension View {
-    /// A message bubble long-presses into the actions overlay; any other row
-    /// (date / system / channel line) keeps a plain Copy context menu.
+    /// A message bubble: long-press → actions overlay; double-tap → ❤️ reaction.
+    /// Any other row (date / system / channel line) keeps a plain Copy context menu.
     @ViewBuilder
     func messageRowGestures(isMessage: Bool, onLongPress: @escaping () -> Void,
+                            onDoubleTap: @escaping () -> Void,
                             onCopyMenu: @escaping (MessageMenuItem) -> Void) -> some View {
         if isMessage {
             // simultaneous so the chat ScrollView keeps vertical pans that start
             // on a bubble; exclusive onLongPressGesture eats the scroll
             // ([feedback app-01M5Q1N6C1HAKHC6P2XPEWMRSS]).
+            // A hold on a chart plot reads a value instead (`ChartTouch`).
             simultaneousGesture(
                 LongPressGesture(minimumDuration: 0.35)
-                    .onEnded { _ in onLongPress() }
+                    .onEnded { _ in if !ChartTouch.holding { onLongPress() } },
+                enabled: ChatGestures.longPress
+            )
+            // Double-tap toggles a heart under the bubble (Telegram / iMessage;
+            // [feedback app-01M5VCGAPAXY6NN8TNSWAWJ52Z]).
+            .simultaneousGesture(
+                TapGesture(count: 2)
+                    .onEnded { onDoubleTap() }
             )
         } else {
             contextMenu { MessageMenuContent(items: MessageMenu.copyOnly, action: onCopyMenu) }

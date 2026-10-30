@@ -4,10 +4,10 @@
 //! opens the 1:1 DM, or starts it through the same `/chats/dm` path the New
 //! Message sheet uses; never on your own pane, never when you blocked them),
 //! one tab pill Links | Groups, the list, and a single red "Block user" row.
-//! When opened from a people chat (`space_id`), an **Add your agent** row
-//! sits above Block so a guest can bring their agent into that shared chat
-//! ([feedback app-01M5WKBR85JVW1KKJH96FWZVK5]). No Add members here —
-//! adding people starts in groups.
+//! No Add members and no "Add your agent" here (Jacob 2026-10-27, [feedback
+//! add-your-agent-row-removal-mac-2026-10-27]): members — people and agents —
+//! are added from a group's Add members; `space_id` only says which chat the
+//! pane was opened from.
 
 use gpui::{div, prelude::*, px, Context, Div, ElementId, SharedString, Stateful};
 
@@ -150,7 +150,7 @@ pub(super) fn page(
     } else {
         shows_message(me, blocked).then(|| {
             let handle = person.handle.clone();
-            kit::pill_button(MESSAGE_ID, "bubble", MESSAGE_LABEL, &theme)
+            kit::pill_button(MESSAGE_ID, "bubble.left", MESSAGE_LABEL, &theme)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let handle = handle.clone();
                     this.state.update(cx, |s, cx| s.start_dm(handle, cx));
@@ -170,7 +170,7 @@ pub(super) fn page(
         name,
         badge: None,
         subtitle: Some(format!("@{}", person.handle).into()),
-        subtitle_color: theme.text_muted,
+        subtitle_color: theme.label_muted(),
         subtitle_click: None,
         subtitle_element: None,
         editor: chip,
@@ -202,12 +202,12 @@ pub(super) fn page(
                             leading,
                             p.name.clone(),
                             sub,
-                            theme.text_muted,
+                            theme.label_muted(),
                             None,
                             &theme,
                         )
                         .cursor_pointer()
-                        .hover(|s| s.bg(theme.surface_2))
+                        .group(kit::HOT)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let pid = pid.clone();
                             this.state.update(cx, |s, cx| {
@@ -223,32 +223,10 @@ pub(super) fn page(
         }
     };
 
-    // ----- actions: Add your agent (from a shared chat) · Block / Unblock ----------
-    // Add your agent only when this pane was opened from a people chat — that
-    // is the chat the agent joins ([feedback app-01M5WKBR85JVW1KKJH96FWZVK5]).
+    // ----- actions: Block / Unblock ----------------------------------------------
     // The Block label comes from the relay's block list (#1545), so it is right
     // on re-open and relaunch; the pane stays open so the flip is visible.
     let mut footer: Vec<Section> = Vec::new();
-    if space_id.is_some() {
-        footer.push(Section::Card(vec![kit::row(
-            "profile-add-agent",
-            kit::Leading::Glyph("sparkles"),
-            "Add your agent",
-            Some("Bring one of yours into this chat".into()),
-            None,
-            None,
-            false,
-            &theme,
-        )
-        .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
-        .on_click(cx.listener(|this, _, _, cx| {
-            this.members_open = false;
-            this.add_agent_open = true;
-            cx.notify();
-        }))
-        .into_any_element()]));
-    }
     if !me {
         let target = person.clone();
         let row = if blocked && shell.unblock_armed_for(&person) {
@@ -409,6 +387,8 @@ mod render_tests {
                 people: vec![
                     person("gh_2", "samir", "Sam Rivera"),
                     person("gh_3", "priya", "Priya Natarajan"),
+                    person("gh_4", "dawizzaa", "🧙🏽\u{200d}♂\u{fe0f}"),
+                    person("gh_5", "cato", "Cato 🌳"),
                 ],
                 ..Project::default()
             });
@@ -497,16 +477,50 @@ mod render_tests {
             )
         });
         assert_eq!(
-            awaiting.as_deref(),
-            Some("priya"),
-            "start_dm asked the relay"
+            awaiting, None,
+            "nothing goes to the relay before the first message"
         );
-        assert!(busy);
+        assert!(!busy);
         assert_eq!(
             selected.as_deref(),
-            Some("g1"),
-            "nothing to select until the relay lists the DM"
+            Some("draft-dm:priya"),
+            "the draft DM with Priya opens at once"
         );
+    }
+
+    /// [feedback emoji-name-handle-offset-mac-2026-10-28]: the hero's `@handle`
+    /// line and the Message pill sit where they sit for a text name when the
+    /// name is one emoji (or text with an emoji).
+    #[gpui::test]
+    fn an_emoji_name_keeps_the_handle_line_where_a_text_name_has_it(cx: &mut TestAppContext) {
+        let (_rt, state, shell, vcx) = mount(cx);
+        let mut seen = Vec::new();
+        for handle in ["samir", "dawizzaa", "cato"] {
+            open(&state, vcx, handle);
+            settle(&shell, vcx);
+            let line = vcx
+                .debug_bounds("hero-subtitle")
+                .unwrap_or_else(|| panic!("@{handle} line"));
+            let pill = vcx
+                .debug_bounds(MESSAGE_ID)
+                .unwrap_or_else(|| panic!("Message pill on @{handle}'s pane"));
+            seen.push((handle, line.origin.y, line.size.height, pill.origin.y));
+        }
+        let (_, text_y, text_h, text_pill) = seen[0];
+        for (handle, y, h, pill) in &seen[1..] {
+            assert_eq!(
+                *y, text_y,
+                "@{handle}: the handle line's top is a text name's"
+            );
+            assert_eq!(
+                *h, text_h,
+                "@{handle}: the handle line's height is a text name's"
+            );
+            assert_eq!(
+                *pill, text_pill,
+                "@{handle}: the pill under it is where a text name has it"
+            );
+        }
     }
 
     #[gpui::test]

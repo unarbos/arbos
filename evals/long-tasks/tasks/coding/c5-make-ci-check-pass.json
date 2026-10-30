@@ -11,5 +11,6 @@
       "forbid_question": true,
       "timeout_s": 600
     }
-  ]
+  ],
+  "regression": "run 13: not measured — box exec for verify refused ('connecting to control server … connection refused') at 15:53"
 }

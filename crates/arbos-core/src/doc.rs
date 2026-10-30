@@ -122,9 +122,61 @@ pub fn project_hidden_parts(json: &mut Value) {
 /// Separator in flat reaction keys: `"emoji|sender"` under `reactions`.
 pub const REACTION_KEY_SEP: char = '|';
 
+/// Fitzpatrick skin-tone modifiers (U+1F3FB … U+1F3FF). Stripped so
+/// `👍🏽` and `👍🏿` count as the same reaction on a message.
+const SKIN_TONE_LO: u32 = 0x1F3FB;
+const SKIN_TONE_HI: u32 = 0x1F3FF;
+
+/// Drop skin-tone modifiers from an emoji. Other combining marks (ZWJ,
+/// variation selectors, hair/gender) stay. Empty input stays empty; if
+/// stripping would leave nothing, the original string is kept.
+pub fn normalize_reaction_emoji(emoji: &str) -> String {
+    if emoji.is_empty() {
+        return String::new();
+    }
+    let stripped: String = emoji
+        .chars()
+        .filter(|c| !(SKIN_TONE_LO..=SKIN_TONE_HI).contains(&(*c as u32)))
+        .collect();
+    if stripped.is_empty() {
+        emoji.to_string()
+    } else {
+        stripped
+    }
+}
+
 /// Build the CRDT key for one sender's hold of an emoji.
+/// The emoji side is skin-tone-normalized so tone variants share one key.
 pub fn reaction_key(emoji: &str, sender: &str) -> String {
-    format!("{emoji}{REACTION_KEY_SEP}{sender}")
+    let base = normalize_reaction_emoji(emoji);
+    format!("{base}{REACTION_KEY_SEP}{sender}")
+}
+
+/// Remove flat keys and legacy buckets that are skin-tone variants of `base`
+/// for `sender`, so a message keeps one entry per base emoji per person.
+fn clear_skin_tone_reaction_variants(reactions: &LoroMap, base: &str, sender: &str) {
+    let raw = serde_json::to_value(reactions.get_deep_value()).unwrap_or(Value::Null);
+    let Some(obj) = raw.as_object() else {
+        return;
+    };
+    for key in obj.keys() {
+        if let Some((emoji, sid)) = key.split_once(REACTION_KEY_SEP) {
+            if sid == sender && emoji != base && normalize_reaction_emoji(emoji) == base {
+                let _ = reactions.delete(key.as_str());
+            }
+            continue;
+        }
+        if key.contains(REACTION_KEY_SEP) {
+            continue;
+        }
+        if key != base && normalize_reaction_emoji(key) == base {
+            if let Some(ValueOrContainer::Container(Container::Map(bucket))) =
+                reactions.get(key.as_str())
+            {
+                let _ = bucket.delete(sender);
+            }
+        }
+    }
 }
 
 /// Concatenate text parts of a projected (or raw) message row JSON.
@@ -144,8 +196,9 @@ pub fn message_text(row: &Value) -> String {
 
 /// Reader projection: expand flat `reactions` keys (`"emoji|sender" → true`)
 /// into `emoji → { sender → true }` for UI / serde. Also folds legacy nested
-/// emoji-bucket maps so both shapes read the same. Call before deserializing
-/// a message row.
+/// emoji-bucket maps so both shapes read the same. Skin-tone variants of the
+/// same base emoji merge under one bucket. Call before deserializing a
+/// message row.
 pub fn project_reactions(json: &mut Value) {
     let Some(obj) = json.as_object_mut() else {
         return;
@@ -160,8 +213,12 @@ pub fn project_reactions(json: &mut Value) {
             if key.contains(REACTION_KEY_SEP) {
                 continue;
             }
+            let base = normalize_reaction_emoji(&key);
+            if base.is_empty() {
+                continue;
+            }
             let entry = nested
-                .entry(key)
+                .entry(base)
                 .or_insert_with(|| Value::Object(serde_json::Map::new()));
             if let Value::Object(dst) = entry {
                 for (sender, flag) in bucket {
@@ -181,8 +238,12 @@ pub fn project_reactions(json: &mut Value) {
         if emoji.is_empty() || sender.is_empty() {
             continue;
         }
+        let base = normalize_reaction_emoji(emoji);
+        if base.is_empty() {
+            continue;
+        }
         let entry = nested
-            .entry(emoji.to_string())
+            .entry(base)
             .or_insert_with(|| Value::Object(serde_json::Map::new()));
         if let Value::Object(dst) = entry {
             dst.insert(sender.to_string(), Value::Bool(true));
@@ -266,6 +327,17 @@ impl MessageView {
             .filter_map(|p| p.get("text").and_then(Value::as_str))
             .collect::<Vec<_>>()
             .join("")
+    }
+
+    /// Words or a visible attachment: what a reader of the chat can see on this row. A
+    /// hand-off row, a background job's host row or a stream that never got text has
+    /// neither and is a blank, sender-less line to anyone reading the transcript as text.
+    pub fn has_visible_content(&self) -> bool {
+        !self.text().trim().is_empty()
+            || self.parts.iter().any(|p| {
+                p.get("kind").and_then(Value::as_str) == Some("attachment")
+                    && p.get("hidden").and_then(Value::as_bool) != Some(true)
+            })
     }
 }
 
@@ -393,13 +465,33 @@ pub fn device_time_zone() -> Option<String> {
         .filter(|z| !z.is_empty())
 }
 
-/// One attachment part on a client user message (`name` / `mime` / optional `kind` / `ref`).
-#[derive(Debug, Clone)]
+/// Where a GIF / sticker came from (a later picker fills this in). Old messages
+/// and pasted images have none. Written as an optional `source` map on the
+/// attachment: `{ provider, id, pageUrl }`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentSource {
+    pub provider: String,
+    pub id: String,
+    pub page_url: String,
+}
+
+/// One attachment part on a client user message (`name` / `mime` / optional `kind` / `ref`
+/// / optional `url` / optional `source`).
+///
+/// `kind` is a free string the clients agree on: `image`, `audio`, `video`, `file`,
+/// and `sticker` (a picker sticker: drawn at a fixed size with no bubble).
+#[derive(Debug, Clone, Default)]
 pub struct UserAttachment {
     pub name: String,
     pub mime: String,
     pub kind: Option<String>,
     pub blob_ref: Option<String>,
+    /// A picture that lives with its provider, not in the chat slot (a GIF picked from
+    /// KLIPY: the provider's terms allow no stored copy). Clients load it through the
+    /// relay's pass-through (`GET /gif/media?u=`). Never set together with `blob_ref`.
+    pub url: Option<String>,
+    /// Attribution for a GIF / sticker picker result; omitted when absent.
+    pub source: Option<AttachmentSource>,
 }
 
 fn lv_to_json(v: &LoroValue) -> Value {
@@ -787,6 +879,15 @@ impl ChatDoc {
             if let Some(r) = att.blob_ref.as_deref() {
                 loro_err(a.insert("ref", r))?;
             }
+            if let Some(u) = att.url.as_deref() {
+                loro_err(a.insert("url", u))?;
+            }
+            if let Some(src) = &att.source {
+                let s = loro_err(a.insert_container("source", LoroMap::new()))?;
+                loro_err(s.insert("provider", src.provider.as_str()))?;
+                loro_err(s.insert("id", src.id.as_str()))?;
+                loro_err(s.insert("pageUrl", src.page_url.as_str()))?;
+            }
         }
         let part = loro_err(parts.push_container(LoroMap::new()))?;
         loro_err(part.insert("id", ulid()))?;
@@ -883,10 +984,11 @@ impl ChatDoc {
     ///
     /// CRDT shape: flat keys under `reactions` — `"emoji|sender" → true` — so
     /// concurrent first reacts on the same emoji merge as map-key inserts
-    /// instead of racing on nested emoji-bucket creation. Readers call
-    /// [`project_reactions`] to view `emoji → { sender → true }`. Does not
-    /// commit. Turning a reaction off is a no-op when the reactions map is
-    /// missing (does not create containers).
+    /// instead of racing on nested emoji-bucket creation. The emoji side is
+    /// skin-tone-normalized (`👍🏽` ≡ `👍`). Readers call [`project_reactions`]
+    /// to view `emoji → { sender → true }`. Does not commit. Turning a
+    /// reaction off is a no-op when the reactions map is missing (does not
+    /// create containers).
     pub fn set_reaction(
         &self,
         msg_id: &str,
@@ -897,6 +999,10 @@ impl ChatDoc {
         if emoji.is_empty() || sender.is_empty() {
             return Ok(());
         }
+        let base = normalize_reaction_emoji(emoji);
+        if base.is_empty() {
+            return Ok(());
+        }
         let Some(map) = self.find_message(msg_id) else {
             return Ok(());
         };
@@ -905,14 +1011,18 @@ impl ChatDoc {
             _ if on => loro_err(map.insert_container("reactions", LoroMap::new()))?,
             _ => return Ok(()),
         };
-        let key = reaction_key(emoji, sender);
+        // Drop any older skin-tone variant keys / legacy buckets for this
+        // sender so only the normalized base remains.
+        clear_skin_tone_reaction_variants(&reactions, &base, sender);
+        let key = reaction_key(&base, sender);
         if on {
             loro_err(reactions.insert(key.as_str(), true))?;
         } else {
             // Flat key (current shape). Also clear a legacy nested bucket entry
             // if one is still present from older writers.
             let _ = reactions.delete(key.as_str());
-            if let Some(ValueOrContainer::Container(Container::Map(bucket))) = reactions.get(emoji)
+            if let Some(ValueOrContainer::Container(Container::Map(bucket))) =
+                reactions.get(base.as_str())
             {
                 let _ = bucket.delete(sender);
             }
@@ -1435,6 +1545,34 @@ impl ChatDoc {
         }
         self.commit_now();
         true
+    }
+
+    /// Remove every part of `kind` from message `msg_id` (the relay dropping a link preview
+    /// the sender removed). Returns how many went. Commits like the other part writers.
+    pub fn remove_parts_of_kind(&self, msg_id: &str, kind: &str) -> usize {
+        let Some(parts) = self.parts_of(msg_id) else {
+            return 0;
+        };
+        let mut removed = 0;
+        let mut i = 0;
+        while i < parts.len() {
+            let is_kind = match parts.get(i) {
+                Some(ValueOrContainer::Container(Container::Map(p))) => matches!(
+                    p.get("kind"),
+                    Some(ValueOrContainer::Value(LoroValue::String(s))) if s.as_str() == kind
+                ),
+                _ => false,
+            };
+            if is_kind && parts.delete(i, 1).is_ok() {
+                removed += 1;
+            } else {
+                i += 1;
+            }
+        }
+        if removed > 0 {
+            self.commit_now();
+        }
+        removed
     }
 
     /// Id of the part at index `pix` in message `msg_id`.
@@ -2166,6 +2304,32 @@ mod secret_redaction_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn remove_parts_of_kind_drops_only_that_kind_and_leaves_the_rest() {
+        use super::*;
+        let doc = ChatDoc::new(Some(1), false);
+        doc.append_user_message("m", "look https://a.test/x", "dev", &Default::default())
+            .unwrap();
+        doc.add_part_from_json(
+            "m",
+            &serde_json::json!({ "kind": "link_preview", "title": "A", "url": "https://a.test/x" }),
+        )
+        .unwrap();
+        doc.add_part_from_json(
+            "m",
+            &serde_json::json!({ "kind": "link_preview", "title": "B", "url": "https://a.test/y" }),
+        )
+        .unwrap();
+        assert_eq!(doc.message("m").unwrap().parts.len(), 3);
+        assert_eq!(doc.remove_parts_of_kind("m", "link_preview"), 2);
+        let m = doc.message("m").unwrap();
+        assert_eq!(m.parts.len(), 1);
+        assert_eq!(m.parts[0]["kind"], "text");
+        assert_eq!(m.text(), "look https://a.test/x");
+        assert_eq!(doc.remove_parts_of_kind("m", "link_preview"), 0);
+        assert_eq!(doc.remove_parts_of_kind("nope", "link_preview"), 0);
+    }
+
     use super::*;
 
     #[test]
@@ -2435,6 +2599,8 @@ mod tests {
                         mime: "image/png".into(),
                         kind: Some("image".into()),
                         blob_ref: Some("blob-1".into()),
+                        url: None,
+                        source: None,
                     }],
                     ..UserMessageOpts::default()
                 },
@@ -2457,6 +2623,8 @@ mod tests {
         assert!(row.get("reactions").is_some());
         assert_eq!(row["replyTo"], "prev");
         assert_eq!(row["senderHandle"], "ken");
+        // Pasted / ordinary attachments omit `source`.
+        assert!(row["parts"][0]["attachment"].get("source").is_none());
         let sys = &a.to_json()["messages"][1];
         assert_eq!(sys["callId"], "c1");
         assert!(sys.get("call_id").is_none());
@@ -2587,6 +2755,32 @@ mod tests {
             assert_eq!(row["reactions"]["👍"]["user:a"], true);
             assert_eq!(row["reactions"]["👍"]["user:b"], true);
         }
+    }
+
+    #[test]
+    fn skin_tone_variants_collapse_to_one_reaction() {
+        let doc = ChatDoc::new(None, false);
+        doc.transact(|d| {
+            d.append_user_message("m", "hi", "dev:a", &UserMessageOpts::default())
+                .unwrap();
+            d.set_reaction("m", "👍🏽", "user:a", true).unwrap();
+            d.set_reaction("m", "👍🏿", "user:b", true).unwrap();
+        });
+        let mut row = doc.to_json()["messages"][0].clone();
+        project_reactions(&mut row);
+        assert_eq!(row["reactions"]["👍"]["user:a"], true);
+        assert_eq!(row["reactions"]["👍"]["user:b"], true);
+        assert!(row["reactions"].get("👍🏽").is_none());
+        assert!(row["reactions"].get("👍🏿").is_none());
+        // Same sender toggling a different tone flips the shared base off.
+        doc.transact(|d| d.set_reaction("m", "👍🏻", "user:a", false).unwrap());
+        let mut row = doc.to_json()["messages"][0].clone();
+        project_reactions(&mut row);
+        assert!(row["reactions"]
+            .get("👍")
+            .and_then(|b| b.get("user:a"))
+            .is_none());
+        assert_eq!(row["reactions"]["👍"]["user:b"], true);
     }
 
     #[test]
@@ -2879,5 +3073,121 @@ mod tests {
         assert_eq!(json["parts"][0]["kind"], "text");
         assert_eq!(json["hiddenParts"].as_array().unwrap().len(), 1);
         assert_eq!(json["hiddenParts"][0]["kind"], "tool");
+    }
+
+    /// The two blank Arbonites rows of 2026-10-28 (an agent-to-agent hand-off row and a job's
+    /// host row) have no words and no visible attachment; a reply, a picture, and a row whose
+    /// only attachment is hidden are told apart.
+    #[test]
+    fn has_visible_content_tells_blank_rows_apart() {
+        use super::*;
+        use serde_json::json;
+        let d = ChatDoc::new(None, false);
+        d.start_assistant_message("handoff", "ask", "box:1");
+        d.set_message_fields(
+            "handoff",
+            &[
+                ("turn", json!({ "kind": "spawn" })),
+                ("subagentName", json!("Bob")),
+            ],
+        );
+        d.add_hidden_part("handoff", "agent_message_sent", "Hey Bob", &json!({}));
+        d.finish_message("handoff", MessageStatus::Done);
+        let part = d.start_assistant_message("reply", "ask", "box:1");
+        d.append_text("reply", &part, "Bob's here.");
+        d.finish_message("reply", MessageStatus::Done);
+        d.transact(|d| {
+            d.append_user_message(
+                "photo",
+                "",
+                "dev",
+                &UserMessageOpts {
+                    attachments: vec![UserAttachment {
+                        name: "a.jpg".into(),
+                        mime: "image/jpeg".into(),
+                        kind: Some("image".into()),
+                        blob_ref: Some("k".into()),
+                        url: None,
+                        source: None,
+                    }],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        });
+        let by_id = |id: &str| d.message(id).unwrap();
+        assert!(!by_id("handoff").has_visible_content());
+        assert!(by_id("reply").has_visible_content());
+        assert!(by_id("photo").has_visible_content());
+        let hidden_card = MessageView {
+            id: "h".into(),
+            role: "assistant".into(),
+            status: "done".into(),
+            parts: vec![
+                json!({ "kind": "text", "text": "  " }),
+                json!({ "kind": "attachment", "hidden": true, "attachment": { "ref": "k" } }),
+            ],
+            rest: json!({}),
+        };
+        assert!(!hidden_card.has_visible_content());
+    }
+
+    /// An attachment with and without `source` round-trips through the doc
+    /// (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG): the picker attribution map
+    /// is optional and omitted when absent.
+    #[test]
+    fn attachment_source_round_trips_through_the_doc() {
+        let with = ChatDoc::new(None, false);
+        with.transact(|d| {
+            d.append_user_message(
+                "m-src",
+                "gif",
+                "dev:a",
+                &UserMessageOpts {
+                    attachments: vec![UserAttachment {
+                        name: "dance.gif".into(),
+                        mime: "image/gif".into(),
+                        kind: Some("image".into()),
+                        blob_ref: Some("blob-gif".into()),
+                        url: None,
+                        source: Some(AttachmentSource {
+                            provider: "giphy".into(),
+                            id: "abc".into(),
+                            page_url: "https://giphy.com/gifs/abc".into(),
+                        }),
+                    }],
+                    ..UserMessageOpts::default()
+                },
+            )
+            .unwrap();
+        });
+        let att = &with.to_json()["messages"][0]["parts"][0]["attachment"];
+        assert_eq!(att["source"]["provider"], "giphy");
+        assert_eq!(att["source"]["id"], "abc");
+        assert_eq!(att["source"]["pageUrl"], "https://giphy.com/gifs/abc");
+
+        let without = ChatDoc::new(None, false);
+        without.transact(|d| {
+            d.append_user_message(
+                "m-plain",
+                "pic",
+                "dev:a",
+                &UserMessageOpts {
+                    attachments: vec![UserAttachment {
+                        name: "shot.png".into(),
+                        mime: "image/png".into(),
+                        kind: Some("image".into()),
+                        blob_ref: Some("blob-png".into()),
+                        url: None,
+                        source: None,
+                    }],
+                    ..UserMessageOpts::default()
+                },
+            )
+            .unwrap();
+        });
+        let plain = &without.to_json()["messages"][0]["parts"][0]["attachment"];
+        assert!(plain.get("source").is_none());
+        assert_eq!(plain["name"], "shot.png");
     }
 }

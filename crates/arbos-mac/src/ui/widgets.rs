@@ -26,7 +26,7 @@ use crate::app::AppState;
 use crate::model::{ChoiceOption, FieldKind, FormField, Id, Part, QuestionState, Widget};
 use crate::ui::composer::ComposerInput;
 use crate::ui::error_note;
-use crate::ui::icons::icon;
+use crate::ui::sf_symbols;
 use crate::ui::theme::{Appearance, Theme, TEXT_SMALL};
 
 actions!(
@@ -845,8 +845,9 @@ pub fn card_header(
                 .justify_center()
                 .rounded(px(5.0))
                 .cursor_pointer()
+                // hover-fill: exception card-option
                 .hover(|s| s.bg(palette.highlight))
-                .child(icon("xmark", 13.0, palette.close))
+                .child(sf_symbols::glyph("xmark", 13.0, palette.close))
                 .on_click(move |e, window, cx| on_close(e, window, cx)),
         );
     }
@@ -900,6 +901,7 @@ pub fn option_row(
             el.bg(palette.highlight)
         })
         .when(clickable, |el| {
+            // hover-fill: exception card-option
             el.cursor_pointer().hover(|s| s.bg(palette.highlight))
         })
         .when_some(badge, |el, letter| {

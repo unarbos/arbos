@@ -368,6 +368,9 @@ Auth: `Authorization: Bearer <device_token>` unless noted. Apps column: **Mac** 
 | `PATCH` | `/me` | profile fields | Mac, iOS |
 | `PUT` | `/me/avatar` | image body → avatar URL | Mac, iOS |
 | `GET` | `/healthz` | `{ ok, proto, … }` | probes |
+| `GET` | `/chats/{id}/health` | room health (#1470): head/floor, checkpoint, stored vs pending rows, replicas, `divergent` + reasons, and `gate` — the newest respond-gate verdicts per message (each agent's reply/silent, the judge's reason, confidence, who the message was for) | members, debug views |
+| `GET` | `/admin/room-health/{chat}?n=` | the same block for a people chat with up to `n` (≤ 500) gate decisions | ops |
+| `POST` | `/box/people/{chat}/gate` | a box records its agent's verdict on one message `{ message_id, agent_id, handle, decision: reply\|silent, reason, chosen[], confidence, addressee, model, latency_ms, cost_usd }`; 500 kept per chat | agentd |
 
 ### 9.2 Registry: projects and chats
 

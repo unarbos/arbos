@@ -10,7 +10,7 @@ import SwiftUI
 // rows then "Show more" that unfolds the rest in place. A long press is the
 // system context menu with the preview on top (the hover card's twin: the
 // picture or a big type tile, "Image", the full name wrapping, the sender's
-// picture and "Arbos · Yesterday 10:06 PM") over Open · Forward · Save /
+// picture and "Arbos · Yesterday 10:06 PM") over Open · Copy · Forward · Save /
 // Open link · Copy link. A tap opens the viewer (links open in Safari).
 // Mock: `media/feedback/library-list/mock-iphone-{list,preview}.png`.
 
@@ -20,6 +20,8 @@ enum LibraryList {
     /// The thumbnail / type tile (the kit's 36 pt leading) and its corners.
     static let thumb: CGFloat = PaneKit.avatar
     static let thumbRadius: CGFloat = 8
+    /// The link tile in the long-press preview's picture frame (the 36 pt globe it replaces, as a tile).
+    static let previewTile: CGFloat = 72
     /// The preview card: width, picture height, the sender's picture.
     static let previewWidth: CGFloat = 344
     static let previewImageHeight: CGFloat = 206
@@ -128,11 +130,13 @@ enum LibraryList {
         }
     }
 
-    /// What the long press offers: attachments open, forward, save; links open and copy.
+    /// What the long press offers: attachments open, copy (the picture or file itself on
+    /// the pasteboard, [feedback copy-image-messages-ios-2026-10-27]), forward, save;
+    /// links open and copy.
     static func menuItems(_ item: ChatItem) -> [String] {
         switch item.kind {
-        case .media: return ["Open", "Forward", "Save to Photos"]
-        case .file: return ["Open", "Forward", "Save"]
+        case .media: return ["Open", "Copy", "Forward", "Save to Photos"]
+        case .file: return ["Open", "Copy", "Forward", "Save"]
         case .voice, .link: return ["Open link", "Copy link"]
         }
     }
@@ -237,6 +241,14 @@ struct LibraryRow: View {
     let forward: () -> Void
     let save: () -> Void
 
+    /// The row's picture or file on the pasteboard (`AppModel.copyAttachment`).
+    private func copy() {
+        guard let media = item.media else { return }
+        let attachment = Attachment(name: media.name, mime: media.mime, blobRef: media.blobRef,
+                                    kind: media.kind == .image ? "image" : media.kind == .video ? "video" : nil)
+        Task { await model.copyAttachment(attachment, slot: media.slot) }
+    }
+
     var body: some View {
         Button(action: open) {
             HStack(spacing: PaneKit.gap) {
@@ -263,6 +275,7 @@ struct LibraryRow: View {
             switch item.kind {
             case .media, .file:
                 Button(action: open) { Label("Open", systemImage: "arrow.up.right.square") }
+                Button(action: copy) { Label("Copy", systemImage: "doc.on.doc") }
                 Button(action: forward) { Label("Forward", systemImage: "arrowshape.turn.up.right") }
                 Button(action: save) {
                     Label(item.kind == .media ? "Save to Photos" : "Save", systemImage: "arrow.down.to.line")
@@ -308,7 +321,8 @@ struct LibraryThumb: View {
             case .voice:
                 Image(systemName: "waveform").font(theme.font(15, weight: .medium)).foregroundStyle(theme.muted)
             case .link:
-                Image(systemName: "link").font(theme.font(15, weight: .medium)).foregroundStyle(theme.muted)
+                // The one link tile ([feedback link-icons-ios-adopt-2026-10-27]).
+                LinkRowTile(url: item.url, size: LibraryList.thumb)
             }
         }
         .frame(width: LibraryList.thumb, height: LibraryList.thumb)
@@ -343,7 +357,7 @@ struct LibraryPreview: View {
                 case .voice:
                     Image(systemName: "waveform").font(.system(size: 36)).foregroundStyle(theme.muted)
                 case .link:
-                    Image(systemName: "globe").font(.system(size: 36)).foregroundStyle(theme.muted)
+                    LinkRowTile(url: item.url, size: LibraryList.previewTile)
                 }
             }
             .frame(width: LibraryList.previewWidth, height: LibraryList.previewImageHeight)

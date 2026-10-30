@@ -166,6 +166,13 @@ struct Theme: Equatable {
     /// 22 + `micPillGap`).
     static let micHitWidth: CGFloat = 44
     static let micPillGap: CGFloat = 2
+    /// Pending-attachment chip: the remove ✕'s hit frame (the glyph is 10 pt; the
+    /// target is ≥ 20 pt, [feedback composer-attachment-removal-ios-2026-10-27]).
+    /// The chip's trailing inset shrinks by the frame's overhang so the glyph
+    /// keeps its 10 pt from the capsule's edge.
+    static let pendingRemoveHit: CGFloat = 24
+    static let pendingRemoveGlyph: CGFloat = 10
+    static let pendingChipTrailing: CGFloat = 10 - (pendingRemoveHit - pendingRemoveGlyph) / 2
     /// Mic glyph box (Grok's filled mic has no base bar; drawn by `MicGlyph`): 36 × 49 px.
     static let micGlyphWidth: CGFloat = 12
     static let micGlyphHeight: CGFloat = 49 / 3
@@ -214,9 +221,14 @@ struct Theme: Equatable {
     static let presenceAvatarOffset: CGFloat = 6
     static let presenceGap: CGFloat = 14
     static let presenceBottomGap: CGFloat = 68 / 3
+    /// Where the fade over the transcript's end begins, above the chat bar's top edge
+    /// ([feedback iphone-composer-see-through-2026-10-28]; `BottomBarFade`): rows scrolling
+    /// under the bar dim from here and stay readable through and between the pills.
+    static let composerFade: CGFloat = 28
     /// The transcript's tail: the clear space under the last row, before the chat bar's
-    /// own top padding, so the last bubble never sits under the bar's fade.
-    static let transcriptTail: CGFloat = 28
+    /// own top padding — the fade's start, so the last bubble at rest sits fully above
+    /// the fade (`BottomBarFadeTests`).
+    static let transcriptTail: CGFloat = composerFade
     /// The chat bar's padding over its first view (the status row or the composer).
     static let chatBarTopPad: CGFloat = 8
     /// Last bubble → the status picture's top: 42 px in the same Grok shot ([feedback
@@ -337,6 +349,23 @@ struct Theme: Equatable {
     /// Frosted chrome (header blur, glass circles/pills) when Surface is Glass.
     var isGlass: Bool { surface == .glass }
 
+    /// The grouped pane card (`PaneCard`: members, settings, library lists). Matte: the
+    /// assistant-bubble grey, as before. Glass: a wash of white over the frosted page —
+    /// 8 % dark / 55 % light — so the desktop-through-material shows through the card as it
+    /// does through the page, not an opaque slab on a see-through pane (Jacob 2026-10-28,
+    /// [feedback right-pane-glass-cards-ios-2026-10-28]; the Mac's `Theme::pane_card_fill`
+    /// uses the same numbers, pinned there by `theme::glass_contrast_tests`).
+    var paneCardFill: Color {
+        guard isGlass else { return bubbleAssistant }
+        return Color.white.opacity(PaneCardGlass.fillAlpha(isDark: isDark))
+    }
+    /// The 1 pt rim the card wears on Glass so its edge reads where the fill is thin
+    /// (white 10 % dark / black 6 % light); clear on Matte, where the card has no border.
+    var paneCardRim: Color {
+        guard isGlass else { return .clear }
+        return isDark ? Color.white.opacity(PaneCardGlass.rimAlphaDark) : Color.black.opacity(PaneCardGlass.rimAlphaLight)
+    }
+
     /// Grok's bot palette; a project's hex colour snaps to the nearest one.
     static let palette: [Color] = [
         Color(hex: "#1084FE")!, Color(hex: "#10B981")!, Color(hex: "#FF7A00")!, Color(hex: "#FF3B5C")!,
@@ -407,6 +436,23 @@ extension EnvironmentValues {
     }
 }
 
+// MARK: - Pane card glass ([feedback right-pane-glass-cards-ios-2026-10-28], Jacob 2026-10-28)
+
+/// The pane card's fill on Glass, as numbers (the Mac's `PANE_CARD_GLASS_DARK` / `_LIGHT`):
+/// white at `fillAlpha` over the page's material + wash; a hairline rim so the edge
+/// reads. Matte keeps `bubbleAssistant` (`Theme.paneCardFill`).
+enum PaneCardGlass {
+    static let fillAlphaDark: Double = 0.08
+    static let fillAlphaLight: Double = 0.55
+    static let rimAlphaDark: Double = 0.10
+    static let rimAlphaLight: Double = 0.06
+
+    static func fillAlpha(isDark: Bool) -> Double { isDark ? fillAlphaDark : fillAlphaLight }
+
+    /// Is the card glass for this surface? (Glass yes, Matte no — on every appearance.)
+    static func isGlass(surface: Surface) -> Bool { surface == .glass }
+}
+
 // MARK: - Chat header glass ([feedback ios-header-glass-2026-10-25], Jacob 2026-10-25)
 
 /// What a chat-header control is made of.
@@ -472,6 +518,23 @@ enum ChatHeaderGlass {
     static let searchBarTint: Double = 0.55
     /// Tint under the legacy glass controls elsewhere (home header, sheets).
     static let legacyTint: Double = 0.85
+
+    /// The composer's pills and Home's search capsule on Glass ([feedback
+    /// iphone-composer-glass-2026-10-28], Jacob: "Grok chat is actual transparent glass. Ours
+    /// isn't."): the system's clear Liquid Glass (frost before iOS 26) with **no** fill, tint or
+    /// wash of ours on it, so the transcript reads through the pill like Grok's. Matte: solid.
+    struct PillGlass: Equatable {
+        let material: HeaderMaterial
+        /// Liquid Glass `.clear` (the transparent variant for glass over content), not `.regular`.
+        let clear: Bool
+        /// No `field` tint over the material.
+        let tinted: Bool
+    }
+
+    static func pillGlass(surface: Surface, liquidGlassAvailable: Bool = liquidGlassAvailable) -> PillGlass {
+        let m = material(surface: surface, liquidGlassAvailable: liquidGlassAvailable)
+        return PillGlass(material: m, clear: m != .solid, tinted: false)
+    }
 }
 
 /// The glass behind a header control: one shape, three materials.
@@ -485,6 +548,10 @@ struct HeaderGlassBackground<S: InsettableShape>: View {
     /// clear glass; a light `field` tint keeps its placeholder readable. Discs and the pill
     /// stay untinted, as in the reference.
     var tinted: Bool = false
+    /// The transparent variant (`Glass.clear`; frost without any tint before iOS 26): the
+    /// composer's pills and Home's search capsule, where the content must read through
+    /// ([feedback iphone-composer-glass-2026-10-28]). The header keeps `.regular`.
+    var clear: Bool = false
 
     var body: some View {
         switch material {
@@ -505,17 +572,18 @@ struct HeaderGlassBackground<S: InsettableShape>: View {
 
     @available(iOS 26.0, *)
     private var liquid: Glass {
-        let glass: Glass = interactive ? .regular.interactive() : .regular
+        let base: Glass = clear ? .clear : .regular
+        let glass: Glass = interactive ? base.interactive() : base
         return tinted ? glass.tint(theme.field.opacity(ChatHeaderGlass.searchBarTint)) : glass
     }
 
-    /// `.ultraThinMaterial`, a thin tint so the content stays visible through it, and a
-    /// rim lit from the top (the specular edge of the reference) — see the Mac's
-    /// `Theme::header_glass()` for the same recipe in quads.
+    /// `.ultraThinMaterial`, a thin tint so the content stays visible through it (none when
+    /// `clear`), and a rim lit from the top (the specular edge of the reference) — see the
+    /// Mac's `Theme::header_glass()` for the same recipe in quads.
     private var frosted: some View {
         ZStack {
             shape.fill(.ultraThinMaterial)
-            shape.fill(theme.field.opacity(ChatHeaderGlass.frostedTint))
+            if !clear { shape.fill(theme.field.opacity(ChatHeaderGlass.frostedTint)) }
             ComposerRim(shape: shape)
         }
     }
@@ -686,6 +754,10 @@ enum Controls {
     /// Picture inside a title pill, `avatarInset` from the capsule's end on every side.
     static let avatar: CGFloat = 32
     static var avatarInset: CGFloat { (height - avatar) / 2 }
+    /// The confirm pill (Add · Create · Save) and the back disc inside a sheet's
+    /// `height`-tall header bar ([feedback iphone-add-members-2026-10-26]): a control
+    /// inside a bar, so it sits under the bar height like the `avatar` inside a pill.
+    static let sheetAction: CGFloat = 36
     /// Outline: `ComposerRim` (#1841's thin light rim) on every member of the family.
 
     /// Surfaces that keep their own size on purpose, each with its reason. A lint
@@ -732,8 +804,11 @@ enum Controls {
     enum Screen: String, CaseIterable {
         case home, hiddenChats, chatHeader, chatSearchBar, composer, bottomSearchBar, serverHeader
         case settingsProfileFields, personPaneMessagePill, newMessageSheetSearch, signIn, secretsFields, callHeader
+        /// Cancel · title · Add bar on the pickers and Create / Edit sheets (`SheetHeaderBar`).
+        case sheetHeader
         var members: [Member] {
             switch self {
+            case .sheetHeader: return [.bar]
             case .home: return [.disc, .disc]
             case .hiddenChats: return [.disc, .pill]
             case .chatHeader: return [.disc, .pill, .disc]
@@ -768,9 +843,38 @@ struct ControlSurface<S: InsettableShape>: View {
 
     var body: some View {
         ZStack {
-            shape.fill(theme.field)
+            if theme.isGlass {
+                PillSurface(shape: shape)
+            } else {
+                shape.fill(theme.field)
+                ComposerRim(shape: shape)
+            }
             if pressed { shape.fill(theme.text.opacity(0.12)) }
+        }
+    }
+}
+
+/// The pill's surface on Glass: the real material and nothing of ours on it — clear Liquid
+/// Glass on iOS 26, plain frost before — so the content reads through the pill like Grok's
+/// ([feedback iphone-composer-glass-2026-10-28]; the 0.55 `field` tint of the first see-through
+/// cut read as a near-opaque dark fill on the phone). On Matte: the field colour.
+/// Rig (`ARBOS_PILL_STYLE=translucent`, Debug): the no-blur alternative for Jacob's eye — the
+/// field colour at `translucentAlpha`, the rim, no material — if the system glass still smears
+/// the text on the phone.
+struct PillSurface<S: InsettableShape>: View {
+    @Environment(\.theme) private var theme
+    let shape: S
+    static var translucentAlpha: Double { 0.3 }
+
+    var body: some View {
+        if !theme.isGlass {
+            shape.fill(theme.field)
+        } else if DebugHooks.pillStyle == "translucent" {
+            shape.fill(theme.field.opacity(Self.translucentAlpha))
             ComposerRim(shape: shape)
+        } else {
+            let glass = ChatHeaderGlass.pillGlass(surface: .glass)
+            HeaderGlassBackground(shape: shape, material: glass.material, tinted: glass.tinted, clear: glass.clear)
         }
     }
 }
@@ -855,37 +959,71 @@ struct ListTopFade: View {
             case .homeSearch, .hiddenChats, .serverChannels, .chat, .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library: return 0
             }
         }
-        /// Opaque past the status bar. Home: through the disc row and the whole tab bar, so nothing
-        /// reads through behind the discs or around the tabs (Jacob's shot). Chat: 20 pt into the
-        /// header (its `headerBlur` since #1336). Bar-only lists and pane pages: the status bar alone.
+        /// Opaque past the status bar. Home and its search: a hair (`HomeChrome.topSolid`), then the
+        /// bars float over the rows ([feedback iphone-home-bar-fades-2026-10-28] — Jacob reversed
+        /// #1988's opaque-through-the-tabs block: Grok's buttons float and the rows fade out under
+        /// them). Chat: 20 pt into the header (its `headerBlur` since #1336). Bar-only lists and
+        /// pane pages: the status bar alone.
         var solid: CGFloat {
             switch self {
-            case .home: return Controls.top + Controls.diameter + HomeChrome.filterBand
+            case .home, .homeSearch: return HomeChrome.topSolid
             case .chat: return 20
-            case .homeSearch, .hiddenChats, .serverChannels, .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library: return 0
+            case .hiddenChats, .serverChannels, .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library: return 0
             }
         }
         /// The gradient after `solid`, ending where the content starts at rest.
         var band: CGFloat {
             switch self {
             case .home: return HomeChrome.listTop - solid
+            case .homeSearch: return HomeChrome.barOnlyListTop - solid
             case .chat: return Controls.top + Controls.diameter + 6 - solid
-            case .homeSearch, .hiddenChats, .serverChannels: return HomeChrome.barOnlyListTop
+            case .hiddenChats, .serverChannels: return HomeChrome.barOnlyListTop
             case .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library: return PaneKit.pageTop
+            }
+        }
+        /// The gradient's shape after `solid`: `(pt into the band, wash alpha)` knots before the
+        /// clear end. Home: the rows pass under the discs at a quarter strength and under the tabs
+        /// at under half (`HomeChrome.discsWash` / `tabsWash`), gone where the first row rests —
+        /// Grok's floating bars; the other screens keep the Mac family's straight ramp.
+        var knots: [(at: CGFloat, alpha: Double)] {
+            switch self {
+            case .home:
+                return [(HomeChrome.discsBottom - solid, HomeChrome.discsWash),
+                        (HomeChrome.discsBottom + HomeChrome.filterBand - solid, HomeChrome.tabsWash)]
+            case .homeSearch:
+                return [(HomeChrome.discsBottom - solid, HomeChrome.discsWash)]
+            case .chat, .hiddenChats, .serverChannels, .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library:
+                return []
             }
         }
     }
 
-    /// The layer's geometry for a status-bar height: where it starts, how far it is opaque, how tall it is.
+    /// The layer's geometry for a status-bar height: where it starts, how far it is opaque, how tall
+    /// it is, and the mask's knots from the top edge (`y` pt, wash alpha) — opaque to `solid`, the
+    /// screen's `knots`, clear at `height`.
     struct Spec: Equatable {
+        struct Knot: Equatable {
+            let y: CGFloat
+            let alpha: Double
+        }
         let topInset: CGFloat
         let solid: CGFloat
         let height: CGFloat
+        let knots: [Knot]
+
+        var stops: [Gradient.Stop] {
+            guard height > 0 else { return [] }
+            return knots.map { .init(color: .black.opacity($0.alpha), location: $0.y / height) }
+        }
     }
 
     static func spec(_ screen: Screen, statusBar: CGFloat, extra: CGFloat = 0) -> Spec {
         let solid = statusBar + screen.solid + extra
-        return Spec(topInset: 0, solid: solid, height: solid + screen.band)
+        let height = solid + screen.band
+        var knots = [Spec.Knot(y: 0, alpha: 1), Spec.Knot(y: solid, alpha: 1)]
+        knots += screen.knots.map { Spec.Knot(y: solid + $0.at, alpha: $0.alpha) }
+        knots.append(Spec.Knot(y: height, alpha: 0))
+        return Spec(topInset: 0, solid: solid, height: height, knots: knots)
     }
 
     var body: some View {
@@ -901,15 +1039,7 @@ struct ListTopFade: View {
                 theme.bg.opacity(theme.isGlass ? Self.glassWash : 1)
             }
             .frame(height: spec.height)
-            .mask(
-                LinearGradient(
-                    stops: [
-                        .init(color: .black, location: 0),
-                        .init(color: .black, location: spec.solid / spec.height),
-                        .init(color: .clear, location: 1),
-                    ],
-                    startPoint: .top, endPoint: .bottom)
-            )
+            .mask(LinearGradient(stops: spec.stops, startPoint: .top, endPoint: .bottom))
             .frame(maxWidth: .infinity, alignment: .top)
             .ignoresSafeArea(.container, edges: .top)
         }
@@ -935,13 +1065,124 @@ extension View {
 /// ([feedback iphone-list-top-fade-2026-10-26]: the tabs no longer scroll with the list, so the
 /// fade can be opaque through them).
 extension HomeChrome {
-    /// Tab pill (32) with `filterTop` above and 4 below.
+    /// Tab pill (32) with `filterTop` above and `filterBottom` below — the whole band is the
+    /// tabs' hit area ([feedback iphone-filter-tab-taps-2026-10-28]: 44 pt tall taps).
     static let filterTop: CGFloat = 8
-    static let filterBand: CGFloat = filterTop + 32 + 4
+    static let filterBottom: CGFloat = 4
+    static let filterBand: CGFloat = filterTop + PaneTabsMetrics.pill + filterBottom
     /// Rows scrolling under the tabs vanish over this band; the first row sits at its end at rest.
     static let fadeBand: CGFloat = 20
     /// The list's first row starts this far under the safe-area top: bar + tabs + the fade band.
     static let listTop: CGFloat = Controls.top + Controls.diameter + filterBand + fadeBand
     /// Lists with a bar and nothing under it (hidden chats, server channels, search results).
     static let barOnlyListTop: CGFloat = Controls.top + Controls.diameter + 12
+
+    // Home's floating bars ([feedback iphone-home-bar-fades-2026-10-28], Jacob 2026-10-28 18:21):
+    // the discs, the tabs and the bottom search capsule float over the list like Grok's; rows stay
+    // visible and fade out under them. Same geometry on Glass and Matte, each with its material.
+    /// Opaque this far past the status bar, then the rows show (nothing ever reads behind the
+    /// status bar itself, #1988).
+    static let topSolid: CGFloat = 4
+    /// The disc row's bottom edge, from the safe-area top.
+    static let discsBottom: CGFloat = Controls.top + Controls.diameter
+    /// The wash's alpha at the disc row's bottom: rows read at a quarter strength under the discs.
+    static let discsWash: Double = 0.75
+    /// … and at the tab bar's bottom: under half under the tabs (the words stay legible; the
+    /// selected tab has its own capsule), then gone over `fadeBand` where the first row rests.
+    static let tabsWash: Double = 0.55
+    /// The bottom search capsule's padding over the home indicator.
+    static let bottomPad: CGFloat = 8
+    /// The bar on the bottom edge: the capsule + its padding (the safe-area inset it takes).
+    static let bottomBar: CGFloat = Controls.height + bottomPad
+    /// The list's trailing clear row: the last row at rest sits above the fade.
+    static let listBottom: CGFloat = BottomBarFade.fade
+}
+
+// MARK: - Bottom bar fade (the chat composer, Home's search capsule)
+
+/// What the bottom bars sit on — nothing opaque ([feedback iphone-composer-see-through-2026-10-28],
+/// Jacob 2026-10-28 on TestFlight 202610281715985037: "we should actually see the text behind the
+/// search bar"; supersedes the opaque band of [feedback iphone-composer-bottom-fade-2026-10-28]
+/// and the first bottom curve of [feedback iphone-home-bar-fades-2026-10-28]). Grok Bot: rows
+/// scroll under the glass pills and stay readable through and between them; a soft fade dims the
+/// content toward the bottom edge. One layer at the canvas's bottom — over the content, under the
+/// controls — the page colour masked by a ramp: clear `fade` pt above the bar's top edge,
+/// `edgeWash` at that edge, `controlsWash` at the controls' bottom edge, `bottomWash` at the
+/// screen's (or the keyboard's) edge. Never 1: no band, no hard edge. The same ramp on Matte and
+/// Glass, light and dark (the surface shows in the pills: `ControlSurface` is glass on Glass).
+/// The reader keeps the safe area, so its bottom inset is the bar (+ home indicator / keyboard);
+/// the layer inside ignores that edge and reaches the screen's edge, moving with the keyboard.
+/// `BottomBarFadeTests` pins the ramp (readable over every control) and the lists' clearances.
+enum BottomBarFade {
+    /// Clear this far above the bar's top edge; the lists' trailing clearance, so the last row at
+    /// rest sits above the fade (`Theme.transcriptTail`, `HomeChrome.listBottom`).
+    static let fade: CGFloat = Theme.composerFade
+    /// The wash at the bar's top edge, at the controls' bottom edge, and at the screen's edge.
+    /// Lighter under the pills since [feedback iphone-composer-glass-2026-10-28] (0.3 / 0.5 /
+    /// 0.8 before): the pills are clear glass now and the text must read through them, so the
+    /// layer under them dims less; the edge still darkens.
+    static let edgeWash: Double = 0.25
+    static let controlsWash: Double = 0.4
+    static let bottomWash: Double = 0.75
+    /// Readable: the wash over any control never passes this.
+    static let readableMax: Double = 0.6
+
+    struct Spec: Equatable {
+        let fade: CGFloat
+        /// The bar's top edge → the controls' bottom edge (chat: the 8 pt pad + the composer;
+        /// Home: the capsule).
+        let controls: CGFloat
+        /// The canvas's bottom inset: the bar + the home indicator, or the bar + the keyboard.
+        let inset: CGFloat
+        /// The layer's height; its bottom is the screen's (or the keyboard's) edge.
+        var height: CGFloat { fade + inset }
+        var knots: [ListTopFade.Spec.Knot] {
+            [.init(y: 0, alpha: 0),
+             .init(y: fade, alpha: BottomBarFade.edgeWash),
+             .init(y: min(fade + controls, height), alpha: BottomBarFade.controlsWash),
+             .init(y: height, alpha: BottomBarFade.bottomWash)]
+        }
+        var stops: [Gradient.Stop] {
+            guard height > 0 else { return [] }
+            return knots.map { .init(color: .black.opacity($0.alpha), location: min(1, $0.y / height)) }
+        }
+        /// The mask's alpha `y` pt from the layer's top: linear between the knots around it.
+        func alpha(at y: CGFloat) -> Double {
+            let k = knots
+            guard let i = k.firstIndex(where: { $0.y >= y }) else { return k.last?.alpha ?? 0 }
+            if i == 0 || k[i].y == y { return k[i].alpha }
+            let a = k[i - 1], b = k[i]
+            return a.alpha + (b.alpha - a.alpha) * Double((y - a.y) / (b.y - a.y))
+        }
+    }
+
+    /// The chat: the bar's top pad and the composer are the controls (the status row, when it
+    /// shows, rides above them in the same ramp).
+    static func chat(bottomInset: CGFloat) -> Spec {
+        Spec(fade: fade, controls: Theme.chatBarTopPad + Theme.composerHeight, inset: bottomInset)
+    }
+
+    /// Home: the search capsule sits at the bar's top edge.
+    static func home(bottomInset: CGFloat) -> Spec {
+        Spec(fade: fade, controls: Controls.height, inset: bottomInset)
+    }
+}
+
+struct BottomBarFadeView: View {
+    @Environment(\.theme) private var theme
+    /// `BottomBarFade.chat` or `.home`, given the canvas's bottom inset.
+    let spec: (CGFloat) -> BottomBarFade.Spec
+
+    var body: some View {
+        GeometryReader { geo in
+            let s = spec(geo.safeAreaInsets.bottom)
+            theme.bg
+                .frame(height: s.height)
+                .mask(LinearGradient(stops: s.stops, startPoint: .top, endPoint: .bottom))
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .ignoresSafeArea(edges: .bottom)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
 }

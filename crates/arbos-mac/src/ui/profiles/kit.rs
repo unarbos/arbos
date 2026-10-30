@@ -17,14 +17,20 @@
 //! * danger row: centred red label, same height.
 
 use gpui::{
-    div, prelude::*, px, AnyElement, Div, ElementId, FontWeight, Hsla, SharedString, Stateful,
+    div, prelude::*, px, AnyElement, BoxShadow, Div, ElementId, FontWeight, Hsla, SharedString,
+    Stateful,
 };
 
 use crate::ui::glass;
-use crate::ui::icons::icon;
+use crate::ui::highlight::{self, Shape};
 use crate::ui::identity;
-use crate::ui::sidebar::{DISC_HOVER_LIFT, DISC_PRESSED_LIFT};
+use crate::ui::sf_symbols;
 use crate::ui::theme::{Theme, CONTROL, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
+
+/// The group a clickable row joins so its highlight pill lights: every
+/// [`row`] carries the pill as its first child; `.group(HOT)` (plus
+/// `cursor_pointer()`) is what makes it react. A value row never joins.
+pub const HOT: &str = highlight::GROUP;
 
 /// Row height, side inset, gap between leading and text. Grok Bot's pane
 /// cards ([feedback info-pane-chrome-2026-10-24], `grok-right-pane-details.png`
@@ -92,7 +98,17 @@ pub fn card(theme: &Theme) -> Div {
         .mx(px(INSET))
         .mb(px(CARD_GAP))
         .rounded(px(CARD_RADIUS))
-        .bg(theme.pane_card)
+        .bg(theme.pane_card_fill())
+        // The Glass rim: an inset shadow, so it costs the rows no layout
+        // (a border would shrink the card's content box by 1 pt a side);
+        // transparent on Matte.
+        .shadow(vec![BoxShadow::new(
+            px(0.0),
+            px(0.0),
+            theme.pane_card_rim(),
+        )
+        .spread_radius(px(1.0))
+        .inset()])
         .overflow_hidden()
 }
 
@@ -177,11 +193,11 @@ fn leading_el(leading: Leading, theme: &Theme) -> Option<AnyElement> {
                 .size(px(AVATAR))
                 .flex_shrink_0()
                 .rounded(px(10.0))
-                .bg(theme.surface_2)
+                .bg(theme.control_fill())
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(icon(glyph, 18.0, theme.text_muted))
+                .child(sf_symbols::glyph(glyph, 18.0, theme.label_muted()))
                 .into_any_element(),
         ),
     }
@@ -192,7 +208,9 @@ fn leading_el(leading: Leading, theme: &Theme) -> Option<AnyElement> {
 /// hangs 1 pt below the row at the row's padding on both sides: between rows
 /// it lands on the next row's first pixel, under the last row the card's clip
 /// swallows it (D80 / the iPhone's `PaneCardLayout`: no line under the last
-/// row).
+/// row). The highlight pill ([`highlight::row`], inset 4, radius
+/// `CARD_RADIUS - 4`) is the row's first child; it lights for rows that join
+/// [`HOT`].
 #[allow(clippy::too_many_arguments)]
 pub fn row(
     id: impl Into<ElementId>,
@@ -202,6 +220,25 @@ pub fn row(
     detail: Option<SharedString>,
     trailing: Option<AnyElement>,
     chevron: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
+    row_state(
+        id, leading, title, subtitle, detail, trailing, chevron, false, theme,
+    )
+}
+
+/// [`row`] with a selected state: the pill at its selected step at rest (the
+/// open hoverpick anchor, the server pane's current channel).
+#[allow(clippy::too_many_arguments)]
+pub fn row_state(
+    id: impl Into<ElementId>,
+    leading: Leading,
+    title: impl Into<SharedString>,
+    subtitle: Option<SharedString>,
+    detail: Option<SharedString>,
+    trailing: Option<AnyElement>,
+    chevron: bool,
+    selected: bool,
     theme: &Theme,
 ) -> Stateful<Div> {
     // Mock b: names on people / agent / file rows are medium; mock g: settings
@@ -223,6 +260,12 @@ pub fn row(
         .py(px(6.0))
         .text_size(px(TEXT_BODY))
         .text_color(theme.text)
+        // First child: paints under the content; lights only for `HOT` rows.
+        .child(highlight::layer(
+            selected,
+            Shape::Nested(CARD_RADIUS),
+            theme,
+        ))
         .children(leading)
         .child(
             div()
@@ -241,7 +284,7 @@ pub fn row(
                     el.child(
                         div()
                             .text_size(px(TEXT_SMALL))
-                            .text_color(theme.text_muted)
+                            .text_color(theme.label_muted())
                             .truncate()
                             .child(s),
                     )
@@ -252,13 +295,17 @@ pub fn row(
                 div()
                     .flex_shrink_0()
                     .text_size(px(TEXT_SMALL))
-                    .text_color(theme.text_muted)
+                    .text_color(theme.label_muted())
                     .child(d),
             )
         })
         .children(trailing)
         .when(chevron, |el| {
-            el.child(icon("chevron-right", 13.0, theme.text_faint))
+            el.child(sf_symbols::glyph(
+                "chevron.right",
+                13.0,
+                theme.label_faint(),
+            ))
         })
         .child(hairline_below(theme))
 }
@@ -282,7 +329,7 @@ pub fn nav_row(
         theme,
     )
     .cursor_pointer()
-    .hover(|s| s.bg(theme.surface_2))
+    .group(HOT)
 }
 
 /// Label left, value right (not interactive).
@@ -318,7 +365,7 @@ pub fn action_row(
     color: Hsla,
     theme: &Theme,
 ) -> Stateful<Div> {
-    div()
+    let frame = div()
         .id(id)
         .flex()
         .items_center()
@@ -327,37 +374,34 @@ pub fn action_row(
         .px(px(INSET))
         .text_size(px(TEXT_BODY))
         .text_color(color)
-        .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
-        .child(label.to_string())
+        .cursor_pointer();
+    highlight::row(frame, false, Shape::Nested(CARD_RADIUS), theme).child(label.to_string())
 }
 
 /// The hero's action pill ("Message" on a person's pane,
 /// [feedback profile-message-button-mac-2026-10-25]): one of the Grok button
 /// family — [`CONTROL`] 36 tall, a capsule on the discs' `surface_2` fill,
-/// glyph and 13 pt semibold label in `text`; hover and pressed lift the fill
-/// in lightness like the footer disc (the chip rule: brighter under the
-/// pointer, brighter still while down).
+/// SF Symbol (the iPhone's `PanePillButton(glyph:)` name, semibold at the
+/// label's size) and 13 pt semibold label in `text`; hover and pressed are the
+/// highlight token's two steps over the fill (`highlight::washed`).
 pub const PILL_PAD_X: f32 = 18.0;
-pub const PILL_GLYPH: f32 = 17.0;
+pub const PILL_GLYPH: f32 = TEXT_SMALL;
+pub const PILL_GLYPH_SLOT: f32 = 18.0;
 pub const PILL_GAP: f32 = 7.0;
 
 pub fn pill_button(
     id: &'static str,
-    glyph: &'static str,
+    symbol: &'static str,
     label: &str,
     theme: &Theme,
 ) -> Stateful<Div> {
-    let hover = Theme::lighter(theme.surface_2, DISC_HOVER_LIFT);
-    let pressed = Theme::lighter(theme.surface_2, DISC_PRESSED_LIFT);
-    div()
+    let frame = div()
         .id(id)
         .debug_selector(move || id.to_owned())
         .h(px(CONTROL))
         .px(px(PILL_PAD_X))
         .flex_shrink_0()
         .rounded_full()
-        .bg(theme.surface_2)
         .flex()
         .items_center()
         .justify_center()
@@ -365,10 +409,15 @@ pub fn pill_button(
         .text_size(px(TEXT_SMALL))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme.text)
-        .cursor_pointer()
-        .hover(move |s| s.bg(hover))
-        .active(move |s| s.bg(pressed))
-        .child(icon(glyph, PILL_GLYPH, theme.text))
+        .cursor_pointer();
+    highlight::washed(frame, theme.control_fill(), theme)
+        .child(sf_symbols::symbol(
+            symbol,
+            PILL_GLYPH,
+            sf_symbols::Weight::Semibold,
+            PILL_GLYPH_SLOT,
+            theme.text,
+        ))
         .child(label.to_string())
 }
 
@@ -380,7 +429,7 @@ pub fn footnote(text: impl Into<SharedString>, theme: &Theme) -> Div {
         .mt(px(-8.0))
         .mb(px(14.0))
         .text_size(px(TEXT_TINY))
-        .text_color(theme.text_muted)
+        .text_color(theme.label_muted())
         .child(text.into())
 }
 
@@ -395,7 +444,7 @@ pub fn section_title(text: impl Into<SharedString>, theme: &Theme) -> Div {
         .pb(px(SECTION_TITLE_BOTTOM))
         .text_size(px(TEXT_SMALL))
         .line_height(px(SECTION_TITLE_LINE))
-        .text_color(theme.text_muted)
+        .text_color(theme.label_muted())
         .debug_selector(|| "section-title".into())
         .child(text.into())
 }
@@ -409,7 +458,7 @@ pub fn empty(text: &str, theme: &Theme) -> Div {
         .flex()
         .justify_center()
         .text_size(px(TEXT_SMALL))
-        .text_color(theme.text_muted)
+        .text_color(theme.label_muted())
         .child(text.to_string())
 }
 
@@ -436,11 +485,13 @@ pub fn confirm_button(
                 .hover(|s| s.opacity(0.88))
         })
         .when(!danger, |el| {
-            el.bg(theme.field)
-                .border_1()
-                .border_color(theme.field_border)
-                .text_color(theme.text)
-                .hover(|s| s.bg(theme.surface_2))
+            highlight::washed(
+                el.border_1()
+                    .border_color(theme.field_border)
+                    .text_color(theme.text),
+                theme.field_fill(),
+                theme,
+            )
         })
         .child(label)
 }
@@ -622,7 +673,7 @@ mod tests {
                 .into_any_element()
             };
             let card = match self.0 {
-                Probe::TileRow => card(&theme).child(kit_row(Leading::Tile("gear"))),
+                Probe::TileRow => card(&theme).child(kit_row(Leading::Tile("gearshape"))),
                 Probe::AvatarRow => card(&theme).child(kit_row(Leading::Avatar(
                     div().size(px(AVATAR)).into_any_element(),
                 ))),
@@ -671,6 +722,73 @@ mod tests {
             assert_eq!(leading, trailing, "{name}: symmetric");
             assert_eq!(f(line.size.height), 1.0, "{name}: 1 pt line");
         }
+    }
+
+    /// A member row (avatar, name over `@handle`) for one name.
+    struct MemberRow(&'static str);
+
+    impl gpui::Render for MemberRow {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            let subtitle = div()
+                .debug_selector(|| "member-handle".into())
+                .child("@dawizzaa")
+                .into_any_element();
+            div().w(px(340.0)).h(px(120.0)).child(
+                card(&theme).debug_selector(|| "member-card".into()).child(
+                    row(
+                        "member",
+                        Leading::Avatar(div().size(px(AVATAR)).into_any_element()),
+                        self.0,
+                        Some("@dawizzaa".into()),
+                        None,
+                        Some(subtitle),
+                        false,
+                        &theme,
+                    )
+                    .debug_selector(|| "member-row".into()),
+                ),
+            )
+        }
+    }
+
+    /// [feedback emoji-name-handle-offset-mac-2026-10-28]: a member row whose
+    /// name is one emoji is as tall as a text name's row, its `@handle` sits at
+    /// the same place in it ([feedback emoji-name-baseline-2026-10-29]: no lift).
+    #[gpui::test]
+    fn an_emoji_member_name_keeps_the_row_and_its_handle_in_place(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let theme = crate::ui::theme::Theme::for_pref(
+                crate::ui::theme::AppearancePref::Dark,
+                crate::ui::theme::Surface::Matte,
+                cx,
+            );
+            cx.set_global(theme);
+        });
+        let lay = |cx: &mut gpui::TestAppContext, name: &'static str| {
+            let (_view, vcx) = cx.add_window_view(|_, _| MemberRow(name));
+            vcx.run_until_parked();
+            let row = vcx.debug_bounds("member-row").expect("row");
+            let handle = vcx.debug_bounds("member-handle").expect("handle");
+            let divider = vcx.debug_bounds(DIVIDER_SELECTOR).expect("divider");
+            (
+                row.size,
+                handle.origin.y - row.origin.y,
+                divider.origin.y - row.origin.y,
+            )
+        };
+        let text = lay(cx, "Sam Rivera");
+        let emoji = lay(cx, "🧙🏽\u{200d}♂\u{fe0f}");
+        let mixed = lay(cx, "Cato 🌳");
+        assert_eq!(emoji.0, text.0, "row size");
+        assert_eq!(emoji.1, text.1, "handle offset in the row");
+        assert_eq!(emoji.2, text.2, "divider offset in the row");
+        assert_eq!(mixed.0, text.0, "row size (mixed)");
+        assert_eq!(mixed.1, text.1, "handle offset in the row (mixed)");
     }
 
     /// Headless GPUI render: a 1-row and a 3-row section draw without a panic

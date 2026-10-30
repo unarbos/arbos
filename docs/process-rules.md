@@ -82,6 +82,23 @@ and a 250 GB volume (five leftover 13 GB test-simulator clones took it from 60 t
   equal stamps the caller's order holds (chat roster, my records, other rosters). While a picture
   loads, the disc is the neutral initial — never an older picture, never the leaf.
 
+## No Simulator.app on the gate Mac (2026-10-28 21:40 UTC)
+
+Xcode 27 on the shared EC2 Mac ships **no Simulator.app** (nothing under `Contents/Developer/Applications`,
+nothing elsewhere on the box). Rig steps that `open -a Simulator` and then tap with `cgclick` can never work
+there — eight such runs from several owners failed with "no Simulator window" after holding a heavy slot. The
+runner's PATH shim (`/Users/Shared/arbos-run/axbin/open`) now fails such a call fast (exit 66) with this note.
+
+Working path for iPhone shots and flows:
+
+- boot the named simulator you own (`xcrun simctl boot <udid>`), install the build (`simctl install`), and
+  drive the UI from an **XCUITest** target (`xcodebuild test-without-building -xctestrun <…> -destination
+  "id=<udid>"`) — taps, swipes and typing go through XCUITest, not the window;
+- capture with `xcrun simctl io <udid> screenshot <file.png>` (or `recordVideo`), which needs no window;
+- shut the simulator down when done (`simctl shutdown <udid>`), as the heavy-slot rules already require.
+
+Do not install Simulator.app or any other system-wide tool on the shared Mac without the coordinator's go-ahead.
+
 ## Rigs take a heavy slot on the shared EC2 Mac (2026-10-26 20:30 UTC)
 
 The Mac's heavy-job cap (`/usr/local/bin/arbos-heavy-slot.sh`, versioned at `scripts/runner/arbos-heavy-slot.sh`;
@@ -98,8 +115,15 @@ load 66–167). Rule, for every rig script under `/Users/Shared/arbos-*/` and ev
   the GUI lock (`gui-lock.sh`) for those as before. A slot is for the burst, not the whole session.
 - Builds in a rig run `nice -n 12` with `CARGO_BUILD_JOBS=4` (the gate does the same); a rig never needs the
   `--priority` slot — that is for a pinned hotfix.
-- A rig that is refused for `WAIT_MAX_S` proceeds, as the gate does, and says so in its issue; a rig that
-  holds a slot with no heavy process alive is stale and gets reclaimed.
+- A rig never proceeds without a slot. While a release lane (`mac-release*`, `tf-archive*`) holds a slot, the
+  script refuses every rig, capped or uncapped, and fails a rig that is already waiting: nothing on stdout,
+  exit 75, and the `--pid` owner is sent SIGTERM. On exit 75, stop: do not retry, requeue or run the heavy step
+  anyway — ask the coordinator for a window between releases. A rig past its wait budget may still be given an
+  `uncapped-*` slot, but never during a release or while one is queued.
+- To ask without queueing, pass `--no-wait`: it writes no waiting marker, returns a slot (exit 0) or nothing
+  (exit 75) at once, and signals no one. Use it whenever you were told to ask rather than queue.
+- A waiter whose `--pid` owner has died gives up and clears its queue marker; a rig that holds a slot with no
+  heavy process alive is stale and gets reclaimed.
 - Shared simulators stay shut down when the rig is done (`xcrun simctl shutdown <udid>`): a booted idle
   simulator keeps a dozen daemons runnable.
 

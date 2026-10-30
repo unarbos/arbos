@@ -692,7 +692,10 @@ pub(crate) fn project_from_dto(
         description: non_empty(&p.description),
         owner_person: Some(Person::from(&p.owner)),
         machine_info: Some(machine_from_dto(&p.machine)),
+        outside: None,
         muted: false,
+        silenced: false,
+        silenced_until: None,
         primary_chat: p.primary_chat_id.as_deref().and_then(non_empty),
         voice: p.voice.as_deref().and_then(non_empty),
         vision_enabled: p.vision_enabled,
@@ -704,6 +707,7 @@ pub(crate) fn project_from_dto(
         avatar_version: p.avatar_version.unwrap_or(0),
         message_grants: p.message_grants.iter().map(message_grant_from).collect(),
         blocked_senders: Vec::new(),
+        my_role: None,
     }
 }
 
@@ -1010,8 +1014,11 @@ pub(crate) fn people_space_from(
             .map(str::to_owned),
         owner_person: None,
         machine_info: None,
+        outside: None,
         muted: dto.me.muted.unwrap_or(false),
-        archived_at: None,
+        silenced: dto.me.silenced.unwrap_or(false),
+        silenced_until: dto.me.silenced_until.filter(|&t| t > 0),
+        archived_at: dto.archived_at.filter(|t| *t > 0).map(|t| t as u64),
         primary_chat: None,
         voice: None,
         vision_enabled: true,
@@ -1028,6 +1035,7 @@ pub(crate) fn people_space_from(
         avatar_version: 0,
         message_grants: Vec::new(),
         blocked_senders: dto.blocked_senders.clone(),
+        my_role: dto.me.role.clone().flatten(),
     };
     let chat = Chat {
         id: id.clone(),
@@ -1461,6 +1469,8 @@ mod tests {
         assert_eq!(space.name, "user102");
         assert_eq!(space.people.len(), 1);
         assert!(space.agents.is_empty());
+        assert!(!space.silenced);
+        assert!(space.silenced_until.is_none());
 
         let without_me: PeopleChatDto = load_json("people_chat_json_without_me.json");
         let (space, _) = people_space_from(&without_me, "", "", "http://relay", "tok");
@@ -1474,6 +1484,36 @@ mod tests {
         let (space, _) = people_space_from(&with_agent, "gh_101", "user101", "http://relay", "tok");
         assert_eq!(space.agents.len(), 1);
         assert_eq!(space.agents[0].name, "Fixture");
+    }
+
+    #[test]
+    fn people_space_from_copies_me_silenced_until() {
+        let mut dto: PeopleChatDto = load_json("people_chat_json_with_me.json");
+        dto.me.silenced = Some(true);
+        dto.me.silenced_until = Some(1_793_200_000_000);
+        let (space, _) = people_space_from(&dto, "gh_101", "user101", "http://relay", "tok");
+        assert!(space.silenced);
+        assert_eq!(space.silenced_until, Some(1_793_200_000_000));
+        assert!(space.is_silenced_now(1_793_100_000_000));
+        assert!(!space.is_silenced_now(1_793_200_000_001));
+    }
+
+    /// Scout, 2026-10-29: an archived DM / group came back into the list on the next 15-s
+    /// registry poll because its row was rebuilt with no archive mark.
+    #[test]
+    fn people_space_from_keeps_the_archive_on_the_row() {
+        let mut dto: PeopleChatDto = load_json("people_chat_json_with_me.json");
+        dto.archived_at = Some(1_793_288_000_000);
+        let (space, chat) = people_space_from(&dto, "gh_101", "user101", "http://relay", "tok");
+        assert_eq!(space.archived_at, Some(1_793_288_000_000));
+        assert_eq!(chat.archived_at, Some(1_793_288_000_000));
+
+        dto.archived_at = None;
+        let (space, _) = people_space_from(&dto, "gh_101", "user101", "http://relay", "tok");
+        assert!(space.archived_at.is_none());
+        dto.archived_at = Some(0);
+        let (space, _) = people_space_from(&dto, "gh_101", "user101", "http://relay", "tok");
+        assert!(space.archived_at.is_none(), "0 = not archived");
     }
 
     #[test]
@@ -1723,6 +1763,7 @@ mod tests {
             "push_secrets_paused.json",
             "push_secret_expiring.json",
             "push_profile_updated.json",
+            "push_pins_changed.json",
         ];
         for name in names {
             let item: PushItemDto = load_json(name);

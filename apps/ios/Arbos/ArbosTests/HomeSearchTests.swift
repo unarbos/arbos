@@ -312,3 +312,189 @@ final class SharedSearchTests: XCTestCase {
         }
     }
 }
+
+/// Home pins synced through the relay ([feedback sidebar-pinning-ios-2026-10-28]): the
+/// one-time migration of the device-local list, the row keys, and the list's rules on the
+/// model (top insert, cap, unpin, reorder, archive unpins, the relay's answer wins).
+final class HomePinsTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        for key in [HomePins.cacheKey, HomePins.legacyKey, HomePins.migratedKey] {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+    }
+
+    func testLegacyLocalPinsBecomeRelayRowKeysOnceInOrder() {
+        let legacy = ["p:01A", "c:01B", "p:01A", "x:junk", "p:", "server:01S", "c:01C", "p:01D"]
+        XCTAssertEqual(
+            HomePins.migrateLegacy(legacy, cap: 5),
+            ["agent:01A", "chat:01B", "server:01S", "chat:01C", "agent:01D"],
+            "p: → agent:, c: → chat:, duplicates folded, junk and empty ids dropped, order kept"
+        )
+        XCTAssertEqual(HomePins.migrateLegacy(legacy, cap: 2), ["agent:01A", "chat:01B"], "capped like the relay")
+        XCTAssertEqual(HomePins.migrateLegacy([], cap: 5), [])
+
+        // Before `/me/pins` answers, a fresh build shows the legacy list translated — nothing vanishes.
+        UserDefaults.standard.set(["p:01A", "c:01B"], forKey: HomePins.legacyKey)
+        XCTAssertEqual(HomePins.cached(), ["agent:01A", "chat:01B"])
+        // Once the relay confirmed a list, that list is what launches show.
+        HomePins.cache(["server:01S"])
+        XCTAssertEqual(HomePins.cached(), ["server:01S"])
+        XCTAssertFalse(HomePins.migrated())
+        HomePins.markMigrated()
+        XCTAssertTrue(HomePins.migrated())
+    }
+
+    func testRowKeysAreTheMacsAndTheRelays() {
+        XCTAssertEqual(HomePins.key(projectId: "01A"), "agent:01A")
+        XCTAssertEqual(HomePins.key(peopleChatId: "01B"), "chat:01B")
+        XCTAssertEqual(HomePins.key(serverId: "01S"), "server:01S")
+    }
+
+    @MainActor
+    func testPinsLandOnTopStopAtTheCapAndReorder() {
+        let model = AppModel()
+        model.isFixture = true
+        model.pinHome(projectId: "a1")
+        model.pinHome(peopleChatId: "c1")
+        model.pinHome(serverId: "s1")
+        XCTAssertEqual(model.pinnedHomeIds, ["server:s1", "chat:c1", "agent:a1"], "a new pin lands at the top")
+        XCTAssertTrue(model.isHomePinned(serverId: "s1"))
+        XCTAssertEqual(model.homePinIndex(projectId: "a1"), 2)
+        XCTAssertNil(model.homePinIndex(projectId: "nope"))
+
+        model.pinHome(projectId: "a2")
+        model.pinHome(projectId: "a3")
+        model.pinHome(projectId: "a4")
+        XCTAssertEqual(model.pinnedHomeIds.count, 5, "the cap refuses the sixth")
+        XCTAssertFalse(model.isHomePinned(projectId: "a4"))
+        XCTAssertTrue(model.toasts.contains { $0.error?.sentence.contains("pin up to 5") == true }, "one sentence says why")
+
+        model.moveHomePinToTop(projectId: "a1")
+        XCTAssertEqual(model.pinnedHomeIds.first, "agent:a1")
+        model.moveHomePinDown(projectId: "a1")
+        XCTAssertEqual(model.pinnedHomeIds[1], "agent:a1")
+        model.moveHomePinUp(projectId: "a1")
+        XCTAssertEqual(model.pinnedHomeIds.first, "agent:a1")
+
+        model.unpinHome(peopleChatId: "c1")
+        XCTAssertFalse(model.isHomePinned(peopleChatId: "c1"))
+        model.archive(serverId: "s1")
+        XCTAssertFalse(model.isHomePinned(serverId: "s1"), "archiving unpins")
+        XCTAssertEqual(UserDefaults.standard.stringArray(forKey: HomePins.cacheKey), model.pinnedHomeIds, "cached for the next launch")
+
+        model.applyRemotePins(["chat:c9"])
+        XCTAssertEqual(model.pinnedHomeIds, ["chat:c9"], "another device's list replaces mine")
+    }
+}
+
+/// Scout (Arbonites, 2026-10-29): "it also unarchives the chat if you open it"
+/// ([feedback archived-chat-stays-archived-2026-10-29]). Opening a row from Hidden chats only
+/// views it; new activity from someone else (`unarchiveOnActivity`) and Unarchive bring it back.
+/// Mirrors crates/arbos-mac `hidden_chat_open_tests`.
+@MainActor
+final class HiddenChatOpenTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        for key in ["archivedProjects", "archivedPeopleChats", "archivedServers", HomePins.cacheKey] {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+    }
+
+    private func hiddenModel() -> AppModel {
+        let model = AppModel()
+        model.isFixture = true
+        model.chats = ["a1": [Chat(id: "a1-main", projectId: "a1", title: "Main", isPinned: true, unread: false, lastMessageAt: 0)]]
+        model.peopleChats = [PeopleChat(id: "dm1", kind: "dm", createdBy: "gh_me", createdAt: 0, title: "", pending: false,
+                                        members: [], headSeq: 0, readSeq: 0, unread: false, lockState: "people_only",
+                                        lastActivityAt: 0, myRole: "owner", muted: false, silenced: false)]
+        model.archive("a1")
+        model.archive(peopleChatId: "dm1")
+        return model
+    }
+
+    func testOpeningAHiddenAgentChatOrDMOnlyViewsIt() throws {
+        let model = hiddenModel()
+        model.open(chat: try XCTUnwrap(model.chats["a1"]?.first))
+        XCTAssertEqual(model.path, [.chat(chatId: "a1-main", projectId: "a1")])
+        model.open(peopleChat: try XCTUnwrap(model.peopleChat("dm1")))
+        XCTAssertEqual(model.path.count, 1)
+        XCTAssertTrue(model.isArchived("a1"), "the agent stays in Hidden chats")
+        XCTAssertTrue(model.isArchived(peopleChatId: "dm1"), "the DM stays in Hidden chats")
+        XCTAssertNotNil(model.peopleChat("dm1")?.archivedAt)
+    }
+
+    func testNewActivityAndUnarchiveStillBringTheRowBack() {
+        let model = hiddenModel()
+        model.unarchiveOnActivity(chatId: "dm1")
+        XCTAssertFalse(model.isArchived(peopleChatId: "dm1"), "someone wrote: back in the list")
+        model.unarchiveOnActivity(chatId: "a1-main")
+        XCTAssertFalse(model.isArchived("a1"))
+        model.archive("a1")
+        model.unarchive("a1")
+        XCTAssertFalse(model.isArchived("a1"))
+    }
+}
+
+/// Affinity (Arbonites, 2026-10-29): starting a chat from search made a permanent chat and
+/// notified both people before anything was sent ([feedback
+/// draft-chat-from-search-ios-2026-10-29]). It is a local draft now: no `POST /chats/dm`
+/// (the fixture's stand-in is `fixtureOpenDM`) until the first send; backing out drops it.
+@MainActor
+final class DraftDMTests: XCTestCase {
+    private let draft = "draft-dm:mira-k"
+
+    private func fixtureModel() -> AppModel {
+        let model = AppModel()
+        model.loadFixture()
+        return model
+    }
+
+    private func dmWithMira(_ model: AppModel) -> PeopleChat? {
+        model.peopleChats.first { $0.kind == "dm" && $0.humans.contains { $0.handle == "mira-k" } }
+    }
+
+    func testStartingAChatFromSearchCreatesNothing() async {
+        let model = fixtureModel()
+        let before = model.peopleChats.map(\.id)
+        model.open(searchTarget: .person(handle: "mira-k"))
+        for _ in 0..<20 where model.draftDM == nil { try? await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertEqual(model.path, [.chat(chatId: draft, projectId: peopleSlot)], "the draft opens")
+        XCTAssertEqual(model.peopleChats.map(\.id), before, "no chat was made, so nobody was told")
+        XCTAssertNil(dmWithMira(model))
+        let peer = model.peopleChat(draft)?.counterpart(me: model.user?.id)
+        XCTAssertEqual(peer?.handle, "mira-k")
+        XCTAssertEqual(peer?.name, "Mira Kaplan", "the header names her")
+    }
+
+    func testBackingOutDropsTheDraft() async {
+        let model = fixtureModel()
+        _ = await model.openDM(handle: "mira-k")
+        XCTAssertNotNil(model.draftDM)
+        model.setComposerDraft("half a thought", for: draft)
+        model.path = []
+        XCTAssertNil(model.draftDM, "the draft is gone")
+        XCTAssertNil(model.peopleChat(draft))
+        XCTAssertEqual(model.composerDraft(for: draft), "", "its typed text too")
+        XCTAssertNil(dmWithMira(model), "nothing was made")
+    }
+
+    func testTheFirstSendMakesTheDMAndGoesOutThere() async throws {
+        let model = fixtureModel()
+        _ = await model.openDM(handle: "mira-k")
+        model.sendPeople(chatId: draft, text: "hey Mira", replyTo: nil)
+        for _ in 0..<50 where model.draftDM != nil { try? await Task.sleep(for: .milliseconds(20)) }
+        let dm = try XCTUnwrap(dmWithMira(model), "the first send made the DM")
+        XCTAssertNil(model.draftDM)
+        XCTAssertEqual(model.path, [.chat(chatId: dm.id, projectId: peopleSlot)], "the screen is the DM now")
+        XCTAssertEqual(model.messages(of: dm.id).last?.plainText, "hey Mira")
+    }
+
+    func testADMIAlreadyHaveOpensAsBefore() async {
+        let model = fixtureModel()
+        let dm = await model.openDM(handle: "unconst")
+        XCTAssertEqual(dm?.id, "fx-dm-unconst")
+        XCTAssertEqual(model.path, [.chat(chatId: "fx-dm-unconst", projectId: peopleSlot)])
+        XCTAssertNil(model.draftDM)
+    }
+}

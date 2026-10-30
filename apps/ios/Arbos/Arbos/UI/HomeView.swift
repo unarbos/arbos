@@ -101,6 +101,11 @@ struct HomeView: View {
                 ListTopFade(screen: searching ? .homeSearch : .home)
                 topBar
             }
+            // The bottom search capsule floats over the list ([feedback iphone-home-bar-fades-
+            // 2026-10-28], see-through since [feedback iphone-composer-see-through-2026-10-28]):
+            // the fade is one layer at the canvas's bottom (over the rows, under the capsule),
+            // not the bar's own background; rows stay readable through and between the pills.
+            .overlay(alignment: .bottom) { BottomBarFadeView(spec: BottomBarFade.home) }
             .safeAreaInset(edge: .bottom, spacing: 0) { bottomBar }
             .animation(.easeOut(duration: 0.18), value: searching)
             .task(id: model.link) {
@@ -175,7 +180,7 @@ struct HomeView: View {
         .onAppear {
             // Rig: the New Message sheet, which hosts the Create screens (`newagent`,
             // `newgroup`, `newserver`) and the group member picker (`newgroup2`).
-            if ["newchat", "newagent", "newgroup", "newgroup2", "newserver"].contains(DebugHooks.show ?? ""),
+            if ["newchat", "newagent", "newgroup", "newgroup2", "newserver", "newconnect"].contains(DebugHooks.show ?? ""),
                DebugHooks.openProject == nil {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showNewChat = true }
             }
@@ -238,19 +243,294 @@ struct HomeView: View {
     }
 
     /// The one control on Home's bottom edge: the app-wide search capsule, 20 pt
-    /// side margins like the header, over a fade so rows slide under it. It sits in
-    /// the bottom safe-area inset, so it rides the keyboard and clears the home indicator.
+    /// side margins like the header. It sits in the bottom safe-area inset, so it rides the
+    /// keyboard and clears the home indicator; it floats over the rows on `BottomBarFadeView`
+    /// (no background of its own, [feedback iphone-home-bar-fades-2026-10-28]).
     private var bottomBar: some View {
-        VStack(spacing: 0) {
-            LinearGradient(colors: [theme.bg.opacity(0), theme.bg], startPoint: .top, endPoint: .bottom)
-                .frame(height: 18)
-                .allowsHitTesting(false)
-            HomeSearchBar(query: $query, focused: $searchFocused, active: searching, onClose: closeSearch)
-                .padding(.horizontal, 20)
-                .padding(.bottom, 8)
-                .background(theme.bg)
+        HomeSearchBar(query: $query, focused: $searchFocused, active: searching, onClose: closeSearch)
+            .padding(.horizontal, 20)
+            .padding(.bottom, HomeChrome.bottomPad)
+            .accessibilityIdentifier("home-bottom-bar")
+    }
+
+    /// One home row with its menu and swipes — drawn for the Pinned section and the list
+    /// below it alike ([feedback sidebar-pinning-ios-2026-10-28]).
+    @ViewBuilder
+    private func homeRow(_ entry: HomeEntry) -> some View {
+        switch entry.row {
+        case .project(let project):
+            let pinned = model.isHomePinned(projectId: project.id)
+            // borderless (not .plain): .plain steals the list swipe /
+            // long-press on recent iOS, so archive and the menu fail.
+            Button { openSearchHit(project, hit: entry.hit) } label: {
+                AgentRow(project: project, preview: entry.hit.reason ?? preview(project),
+                         previewIcon: entry.hit.reason == nil ? previewIcon(project) : nil, time: timeLabel(project),
+                         streaming: model.isStreaming(project: project.id),
+                         unread: model.chats(of: project.id).contains { model.chatHasUnread($0) },
+                         unreadCount: model.unreadCount(project: project.id),
+                         pinned: pinned)
+            }
+            .buttonStyle(.borderless)
+            .contextMenu {
+                // Long-press: Pin (also on leading swipe), reorder when
+                // pinned, Fork (owned), Archive (also on trailing swipe),
+                // then Delete for owned agents. Profile is the chat header.
+                Button {
+                    withAnimation {
+                        if pinned { model.unpinHome(projectId: project.id) }
+                        else { model.pinHome(projectId: project.id) }
+                    }
+                } label: {
+                    Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
+                }
+                if let pinIndex = model.homePinIndex(projectId: project.id) {
+                    if pinIndex > 0 {
+                        Button {
+                            withAnimation { model.moveHomePinToTop(projectId: project.id) }
+                        } label: {
+                            Label("Move to top", systemImage: "arrow.up.to.line")
+                        }
+                        Button {
+                            withAnimation { model.moveHomePinUp(projectId: project.id) }
+                        } label: {
+                            Label("Move up", systemImage: "arrow.up")
+                        }
+                    }
+                    if pinIndex + 1 < model.pinnedHomeIds.count {
+                        Button {
+                            withAnimation { model.moveHomePinDown(projectId: project.id) }
+                        } label: {
+                            Label("Move down", systemImage: "arrow.down")
+                        }
+                    }
+                }
+                if !project.shared {
+                    Button { model.duplicateProject(project) } label: {
+                        Label("Fork", systemImage: "arrow.triangle.branch")
+                    }
+                }
+                Button {
+                    withAnimation { model.archive(project.id) }
+                } label: {
+                    Label("Archive", systemImage: "archivebox")
+                }
+                if !project.shared {
+                    Divider()
+                    Button(role: .destructive) { model.deleteProject(project.id) } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                }
+            }
+            .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
+            .listRowSeparator(.hidden)
+            .listRowBackground(theme.bg)
+            .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                Button {
+                    withAnimation {
+                        if pinned { model.unpinHome(projectId: project.id) }
+                        else { model.pinHome(projectId: project.id) }
+                    }
+                } label: {
+                    Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
+                }
+                .tint(Color(hex: "#1084FE")!)
+            }
+            // Trailing = swipe left. Full-swipe archives (Telegram-easy).
+            // Archive alone so a destructive Delete cannot steal the full swipe.
+            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                Button {
+                    withAnimation { model.archive(project.id) }
+                } label: {
+                    Label("Archive", systemImage: "archivebox")
+                }
+                .tint(Color(hex: "#636366")!)
+            }
+        case .people(let chat):
+            let pinned = model.isHomePinned(peopleChatId: chat.id)
+            Button { model.open(peopleChat: chat) } label: {
+                PeopleRow(chat: chat, preview: entry.hit.reason ?? peoplePreview(chat), time: timeLabel(ms: peopleActivity(chat)),
+                          unread: model.peopleUnread.contains(chat.id) || model.unreadCount(for: chat) > 0,
+                          streaming: model.isStreaming(chat.id),
+                          count: model.unreadCount(for: chat), me: model.user?.id,
+                          pinned: pinned)
+            }
+            .buttonStyle(.borderless)
+            .contextMenu {
+                // Long-press: Pin, reorder when pinned, Archive,
+                // Mute (groups), Profile/Group info, Delete.
+                Button {
+                    withAnimation {
+                        if pinned { model.unpinHome(peopleChatId: chat.id) }
+                        else { model.pinHome(peopleChatId: chat.id) }
+                    }
+                } label: {
+                    Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
+                }
+                if let pinIndex = model.homePinIndex(peopleChatId: chat.id) {
+                    if pinIndex > 0 {
+                        Button {
+                            withAnimation { model.moveHomePinToTop(peopleChatId: chat.id) }
+                        } label: {
+                            Label("Move to top", systemImage: "arrow.up.to.line")
+                        }
+                        Button {
+                            withAnimation { model.moveHomePinUp(peopleChatId: chat.id) }
+                        } label: {
+                            Label("Move up", systemImage: "arrow.up")
+                        }
+                    }
+                    if pinIndex + 1 < model.pinnedHomeIds.count {
+                        Button {
+                            withAnimation { model.moveHomePinDown(peopleChatId: chat.id) }
+                        } label: {
+                            Label("Move down", systemImage: "arrow.down")
+                        }
+                    }
+                }
+                Button {
+                    withAnimation { model.archive(peopleChatId: chat.id) }
+                } label: {
+                    Label("Archive", systemImage: "archivebox")
+                }
+                if chat.isGroup {
+                    if model.isPeopleChatMuted(chat.id) {
+                        Button { model.unmutePeopleChat(chat.id) } label: {
+                            Label("Unmute", systemImage: "bell")
+                        }
+                    } else {
+                        Menu {
+                            ForEach(ChatMuteDuration.allCases) { duration in
+                                Button(duration.title) {
+                                    model.mutePeopleChat(chat.id, for: duration)
+                                }
+                            }
+                        } label: {
+                            Label("Mute", systemImage: "bell.slash")
+                        }
+                    }
+                }
+                if chat.kind == "dm", let other = chat.counterpart(me: model.user?.id) {
+                    Button { model.showProfile(.user(ProfilePerson(other))) } label: { Label("Profile", systemImage: "person.crop.circle") }
+                } else {
+                    Button { model.showProfile(.group(chatId: chat.id, projectId: nil)) } label: { Label("Group info", systemImage: "person.2") }
+                }
+                Button(role: .destructive) { model.deleteOrLeavePeopleChat(chat) } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+            }
+            .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
+            .listRowSeparator(.hidden)
+            .listRowBackground(theme.bg)
+            .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                Button {
+                    withAnimation {
+                        if pinned { model.unpinHome(peopleChatId: chat.id) }
+                        else { model.pinHome(peopleChatId: chat.id) }
+                    }
+                } label: {
+                    Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
+                }
+                .tint(Color(hex: "#1084FE")!)
+            }
+            // Trailing = swipe left. Full-swipe archives (same as agents).
+            // Archive alone so Delete stays on long-press / Hidden chats.
+            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                Button {
+                    withAnimation { model.archive(peopleChatId: chat.id) }
+                } label: {
+                    Label("Archive", systemImage: "archivebox")
+                }
+                .tint(Color(hex: "#636366")!)
+            }
+        case .server(let server):
+            // D88 rule 1: a server row is a chat row — avatar, name, preview,
+            // time, unread dot; no counts, badges or disclosure. Tap → its
+            // channel list; the user then opens a channel.
+            let pinned = model.isHomePinned(serverId: server.id)
+            Button { model.open(server: server) } label: {
+                ServerRow(server: server, preview: entry.hit.reason ?? model.serverPreview(server),
+                          time: timeLabel(ms: model.serverActivity(server)),
+                          unread: model.serverUnread(server),
+                          unreadCount: model.serverUnreadCount(server),
+                          pinned: pinned)
+            }
+            .buttonStyle(.borderless)
+            .contextMenu {
+                // Long-press: Pin (servers too since the synced pins, Jacob 2026-10-28),
+                // reorder when pinned, Server info, Archive.
+                Button {
+                    withAnimation {
+                        if pinned { model.unpinHome(serverId: server.id) }
+                        else { model.pinHome(serverId: server.id) }
+                    }
+                } label: {
+                    Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
+                }
+                if let pinIndex = model.homePinIndex(serverId: server.id) {
+                    if pinIndex > 0 {
+                        Button {
+                            withAnimation { model.moveHomePinToTop(serverId: server.id) }
+                        } label: {
+                            Label("Move to top", systemImage: "arrow.up.to.line")
+                        }
+                        Button {
+                            withAnimation { model.moveHomePinUp(serverId: server.id) }
+                        } label: {
+                            Label("Move up", systemImage: "arrow.up")
+                        }
+                    }
+                    if pinIndex + 1 < model.pinnedHomeIds.count {
+                        Button {
+                            withAnimation { model.moveHomePinDown(serverId: server.id) }
+                        } label: {
+                            Label("Move down", systemImage: "arrow.down")
+                        }
+                    }
+                }
+                Button { model.showProfile(.server(serverId: server.id)) } label: {
+                    Label("Server info", systemImage: "person.2")
+                }
+                Button {
+                    withAnimation { model.archive(serverId: server.id) }
+                } label: {
+                    Label("Archive", systemImage: "archivebox")
+                }
+            }
+            .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
+            .listRowSeparator(.hidden)
+            .listRowBackground(theme.bg)
+            .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                Button {
+                    withAnimation {
+                        if pinned { model.unpinHome(serverId: server.id) }
+                        else { model.pinHome(serverId: server.id) }
+                    }
+                } label: {
+                    Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
+                }
+                .tint(Color(hex: "#1084FE")!)
+            }
         }
-        .accessibilityIdentifier("home-bottom-bar")
+    }
+
+    /// The "Pinned" label over the section: 15 pt semibold, muted, at the rows' inset — the
+    /// Mac sidebar's header in the iPhone's type.
+    private var pinnedHeader: some View {
+        Text("Pinned")
+            .font(theme.font(15, weight: .semibold))
+            .foregroundStyle(theme.muted)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(height: 30)
+            .accessibilityIdentifier("home-pinned-header")
+    }
+
+    /// The hairline after the pinned rows (1 pt, the theme's border, 4 pt margins).
+    private var pinnedDivider: some View {
+        Rectangle()
+            .fill(theme.separator)
+            .frame(height: 1)
+            .padding(.vertical, 4)
+            .accessibilityIdentifier("home-pinned-divider")
     }
 
     private var homeList: some View {
@@ -292,214 +572,23 @@ struct HomeView: View {
                         if !plannedTasks.isEmpty {
                             plannedTasksSection
                         }
-                        ForEach(homeRows) { entry in
-                            switch entry.row {
-                            case .project(let project):
-                                let pinned = model.isHomePinned(projectId: project.id)
-                                // borderless (not .plain): .plain steals the list swipe /
-                                // long-press on recent iOS, so archive and the menu fail.
-                                Button { openSearchHit(project, hit: entry.hit) } label: {
-                                    AgentRow(project: project, preview: entry.hit.reason ?? preview(project),
-                                             previewIcon: entry.hit.reason == nil ? previewIcon(project) : nil, time: timeLabel(project),
-                                             streaming: model.isStreaming(project: project.id),
-                                             unread: model.chats(of: project.id).contains { model.chatHasUnread($0) },
-                                             pinned: pinned)
-                                }
-                                .buttonStyle(.borderless)
-                                .contextMenu {
-                                    // Long-press: Pin (also on leading swipe), reorder when
-                                    // pinned, Fork (owned), Archive (also on trailing swipe),
-                                    // then Delete for owned agents. Profile is the chat header.
-                                    Button {
-                                        withAnimation {
-                                            if pinned { model.unpinHome(projectId: project.id) }
-                                            else { model.pinHome(projectId: project.id) }
-                                        }
-                                    } label: {
-                                        Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
-                                    }
-                                    if let pinIndex = model.homePinIndex(projectId: project.id) {
-                                        if pinIndex > 0 {
-                                            Button {
-                                                withAnimation { model.moveHomePinToTop(projectId: project.id) }
-                                            } label: {
-                                                Label("Move to top", systemImage: "arrow.up.to.line")
-                                            }
-                                            Button {
-                                                withAnimation { model.moveHomePinUp(projectId: project.id) }
-                                            } label: {
-                                                Label("Move up", systemImage: "arrow.up")
-                                            }
-                                        }
-                                        if pinIndex + 1 < model.pinnedHomeIds.count {
-                                            Button {
-                                                withAnimation { model.moveHomePinDown(projectId: project.id) }
-                                            } label: {
-                                                Label("Move down", systemImage: "arrow.down")
-                                            }
-                                        }
-                                    }
-                                    if !project.shared {
-                                        Button { model.duplicateProject(project) } label: {
-                                            Label("Fork", systemImage: "arrow.triangle.branch")
-                                        }
-                                    }
-                                    Button {
-                                        withAnimation { model.archive(project.id) }
-                                    } label: {
-                                        Label("Archive", systemImage: "archivebox")
-                                    }
-                                    if !project.shared {
-                                        Divider()
-                                        Button(role: .destructive) { model.deleteProject(project.id) } label: {
-                                            Label("Delete", systemImage: "trash")
-                                        }
-                                    }
-                                }
+                        if !pinnedRows.isEmpty {
+                            pinnedHeader
                                 .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
                                 .listRowSeparator(.hidden)
                                 .listRowBackground(theme.bg)
-                                .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                                    Button {
-                                        withAnimation {
-                                            if pinned { model.unpinHome(projectId: project.id) }
-                                            else { model.pinHome(projectId: project.id) }
-                                        }
-                                    } label: {
-                                        Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
-                                    }
-                                    .tint(Color(hex: "#1084FE")!)
-                                }
-                                // Trailing = swipe left. Full-swipe archives (Telegram-easy).
-                                // Archive alone so a destructive Delete cannot steal the full swipe.
-                                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                                    Button {
-                                        withAnimation { model.archive(project.id) }
-                                    } label: {
-                                        Label("Archive", systemImage: "archivebox")
-                                    }
-                                    .tint(Color(hex: "#636366")!)
-                                }
-                            case .people(let chat):
-                                let pinned = model.isHomePinned(peopleChatId: chat.id)
-                                Button { model.open(peopleChat: chat) } label: {
-                                    PeopleRow(chat: chat, preview: entry.hit.reason ?? peoplePreview(chat), time: timeLabel(ms: peopleActivity(chat)),
-                                              unread: model.peopleUnread.contains(chat.id) || model.unreadCount(for: chat) > 0,
-                                              count: model.unreadCount(for: chat), me: model.user?.id,
-                                              pinned: pinned)
-                                }
-                                .buttonStyle(.borderless)
-                                .contextMenu {
-                                    // Long-press: Pin, reorder when pinned, Archive,
-                                    // Mute (groups), Profile/Group info, Delete.
-                                    Button {
-                                        withAnimation {
-                                            if pinned { model.unpinHome(peopleChatId: chat.id) }
-                                            else { model.pinHome(peopleChatId: chat.id) }
-                                        }
-                                    } label: {
-                                        Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
-                                    }
-                                    if let pinIndex = model.homePinIndex(peopleChatId: chat.id) {
-                                        if pinIndex > 0 {
-                                            Button {
-                                                withAnimation { model.moveHomePinToTop(peopleChatId: chat.id) }
-                                            } label: {
-                                                Label("Move to top", systemImage: "arrow.up.to.line")
-                                            }
-                                            Button {
-                                                withAnimation { model.moveHomePinUp(peopleChatId: chat.id) }
-                                            } label: {
-                                                Label("Move up", systemImage: "arrow.up")
-                                            }
-                                        }
-                                        if pinIndex + 1 < model.pinnedHomeIds.count {
-                                            Button {
-                                                withAnimation { model.moveHomePinDown(peopleChatId: chat.id) }
-                                            } label: {
-                                                Label("Move down", systemImage: "arrow.down")
-                                            }
-                                        }
-                                    }
-                                    Button {
-                                        withAnimation { model.archive(peopleChatId: chat.id) }
-                                    } label: {
-                                        Label("Archive", systemImage: "archivebox")
-                                    }
-                                    if chat.isGroup {
-                                        if model.isPeopleChatMuted(chat.id) {
-                                            Button { model.unmutePeopleChat(chat.id) } label: {
-                                                Label("Unmute", systemImage: "bell")
-                                            }
-                                        } else {
-                                            Menu {
-                                                ForEach(ChatMuteDuration.allCases) { duration in
-                                                    Button(duration.title) {
-                                                        model.mutePeopleChat(chat.id, for: duration)
-                                                    }
-                                                }
-                                            } label: {
-                                                Label("Mute", systemImage: "bell.slash")
-                                            }
-                                        }
-                                    }
-                                    if chat.kind == "dm", let other = chat.counterpart(me: model.user?.id) {
-                                        Button { model.showProfile(.user(ProfilePerson(other))) } label: { Label("Profile", systemImage: "person.crop.circle") }
-                                    } else {
-                                        Button { model.showProfile(.group(chatId: chat.id, projectId: nil)) } label: { Label("Group info", systemImage: "person.2") }
-                                    }
-                                    Button(role: .destructive) { model.deleteOrLeavePeopleChat(chat) } label: {
-                                        Label("Delete", systemImage: "trash")
-                                    }
-                                }
+                        }
+                        ForEach(pinnedRows) { entry in
+                            homeRow(entry)
+                        }
+                        if !pinnedRows.isEmpty {
+                            pinnedDivider
                                 .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
                                 .listRowSeparator(.hidden)
                                 .listRowBackground(theme.bg)
-                                .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                                    Button {
-                                        withAnimation {
-                                            if pinned { model.unpinHome(peopleChatId: chat.id) }
-                                            else { model.pinHome(peopleChatId: chat.id) }
-                                        }
-                                    } label: {
-                                        Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
-                                    }
-                                    .tint(Color(hex: "#1084FE")!)
-                                }
-                                // Trailing = swipe left. Full-swipe archives (same as agents).
-                                // Archive alone so Delete stays on long-press / Hidden chats.
-                                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                                    Button {
-                                        withAnimation { model.archive(peopleChatId: chat.id) }
-                                    } label: {
-                                        Label("Archive", systemImage: "archivebox")
-                                    }
-                                    .tint(Color(hex: "#636366")!)
-                                }
-                            case .server(let server):
-                                // D88 rule 1: a server row is a chat row — avatar, name, preview,
-                                // time, unread dot; no counts, badges or disclosure. Tap → its
-                                // channel list; the user then opens a channel.
-                                Button { model.open(server: server) } label: {
-                                    ServerRow(server: server, preview: entry.hit.reason ?? model.serverPreview(server),
-                                              time: timeLabel(ms: model.serverActivity(server)),
-                                              unread: model.serverUnread(server))
-                                }
-                                .buttonStyle(.borderless)
-                                .contextMenu {
-                                    Button { model.showProfile(.server(serverId: server.id)) } label: {
-                                        Label("Server info", systemImage: "person.2")
-                                    }
-                                    Button {
-                                        withAnimation { model.archive(serverId: server.id) }
-                                    } label: {
-                                        Label("Archive", systemImage: "archivebox")
-                                    }
-                                }
-                                .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
-                                .listRowSeparator(.hidden)
-                                .listRowBackground(theme.bg)
-                            }
+                        }
+                        ForEach(restRows) { entry in
+                            homeRow(entry)
                         }
                         if hiddenCount > 0 {
                             hiddenFooter
@@ -515,6 +604,12 @@ struct HomeView: View {
                             .accessibilityHidden(true)
                             .onAppear { LaunchClock.mark("first-content", detail: "source=\(model.contentOrigin) rows=\(homeRows.count)") }
                     }
+                    // The last row at rest sits above the bottom fade (`BottomBarFadeView`).
+                    Color.clear.frame(height: HomeChrome.listBottom)
+                        .listRowInsets(EdgeInsets())
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+                        .accessibilityHidden(true)
                 }
                 .listStyle(.plain)
                 .scrollContentBackground(.hidden)
@@ -657,10 +752,10 @@ struct HomeView: View {
         VStack(spacing: 0) {
             topBarRow
             if showsFilterBar {
+                // The tabs' hit bands are the chrome's own 8 over / 4 under
+                // (`HomeChrome.filterBand`), so every tab is 44 pt tall end to end.
                 listFilterBar
                     .padding(.horizontal, 20)
-                    .padding(.top, 8)
-                    .padding(.bottom, 4)
             }
         }
         .zIndex(1)
@@ -669,15 +764,11 @@ struct HomeView: View {
     private var topBarRow: some View {
         HStack(spacing: 10) {
             Button { showSettings = true } label: {
-                ZStack(alignment: .bottomTrailing) {
-                    PersonAvatar(url: model.user?.avatarUrl, handle: model.user?.login ?? "?", size: Theme.control, name: model.user?.name, id: model.user?.id, colorIndex: model.user?.avatarColorIndexEffective)
-                    Circle()
-                        .fill(machineDotColor(model.machine.state, theme: theme))
-                        .frame(width: 11, height: 11)
-                        .overlay(Circle().strokeBorder(theme.bg, lineWidth: 2))
-                        .offset(x: 2, y: 2)
-                }
-                .frame(width: Theme.control, height: Theme.control)
+                // My picture with the machine mark through the one presence badge (in
+                // front, ring cut out of the picture) — never a coloured dot (2026-10-27).
+                PersonAvatar(url: model.user?.avatarUrl, handle: model.user?.login ?? "?", size: Theme.control, name: model.user?.name, id: model.user?.id, colorIndex: model.user?.avatarColorIndexEffective)
+                    .statusMark(machineMark(model.machine.state), size: Theme.control)
+                    .frame(width: Theme.control, height: Theme.control)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Account, machine and settings · \(model.machine.label)")
@@ -696,7 +787,9 @@ struct HomeView: View {
                     }
                 }
             Button { showNewChat = true } label: {
-                GlassCircle {
+                // The chat header's real glass (not the 0.85 legacy tint), beside the clear
+                // search capsule ([feedback iphone-composer-glass-2026-10-28]).
+                GlassCircle(material: ChatHeaderGlass.material(surface: theme.surface)) {
                     Image(systemName: "plus")
                         .font(theme.font(Controls.glyph, weight: .regular))
                         .foregroundStyle(theme.text)
@@ -784,7 +877,20 @@ struct HomeView: View {
     /// order), then newest activity. `listFilter` scopes the rows: Agents hides
     /// people and servers, People hides agents and servers, Servers shows only
     /// servers (`HomeListFilter`). Archived rows stay out (Hidden chats).
-    private var homeRows: [HomeEntry] {
+    private var homeRows: [HomeEntry] { pinnedRows + restRows }
+
+    /// The Pinned section: the pins the filter admits, in the user's order (never re-sorted
+    /// by activity); empty → no header, no hairline.
+    private var pinnedRows: [HomeEntry] {
+        rankedRows.filter { $0.0 != Int.max }.sorted { $0.0 < $1.0 }.map(\.2)
+    }
+
+    /// Everything else, newest activity first.
+    private var restRows: [HomeEntry] {
+        rankedRows.filter { $0.0 == Int.max }.sorted { $0.1 > $1.1 }.map(\.2)
+    }
+
+    private var rankedRows: [(Int, Int64, HomeEntry)] {
         // pinRank: strip index when pinned (0 = top), Int.max when not.
         var rows: [(Int, Int64, HomeEntry)] = []
         let hit = HomeSearch.Hit(kind: .title)
@@ -807,13 +913,11 @@ struct HomeView: View {
             // D88: servers sort among the chats by last activity (rule 1); the
             // Servers segment shows them alone (Mac parity, 2026-10-24).
             for s in model.servers where !model.isArchived(serverId: s.id) {
-                rows.append((Int.max, model.serverActivity(s), HomeEntry(row: .server(s), hit: hit)))
+                let pinRank = model.homePinIndex(serverId: s.id) ?? Int.max
+                rows.append((pinRank, model.serverActivity(s), HomeEntry(row: .server(s), hit: hit)))
             }
         }
-        return rows.sorted {
-            if $0.0 != $1.0 { return $0.0 < $1.0 }
-            return $0.1 > $1.1
-        }.map(\.2)
+        return rows
     }
 
     /// All | Agents | People | Servers — same capsule pill as profile panes (`PaneTabs`).
@@ -826,7 +930,8 @@ struct HomeView: View {
                 withAnimation(.snappy(duration: 0.2)) { listFilter = next }
             }
         )
-        return PaneTabs(tabs: HomeListFilter.allCases.map(\.rawValue), selected: selected)
+        return PaneTabs(tabs: HomeListFilter.allCases.map(\.rawValue), selected: selected,
+                        hitAbove: HomeChrome.filterTop, hitBelow: HomeChrome.filterBottom)
             .accessibilityIdentifier("home-list-filter")
     }
 
@@ -855,7 +960,11 @@ struct HomeView: View {
     }
 
     private func peoplePreview(_ c: PeopleChat) -> String {
-        guard let m = model.messages(of: c.id).last(where: { !$0.voice && !$0.plainText.isEmpty }) else {
+        // Skip group deletion audits (hidden in the chat; Activity only) so the
+        // home row matches what you see when you open the conversation.
+        guard let m = model.messages(of: c.id).last(where: {
+            !$0.voice && !$0.plainText.isEmpty && !GroupActivity.isAuditLine($0.plainText)
+        }) else {
             return c.pending ? "Invited · opens when they sign in" : "Say hi"
         }
         let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
@@ -1176,8 +1285,13 @@ struct HiddenChatsView: View {
     }
 
     static func peoplePreview(_ c: PeopleChat, in model: AppModel) -> String {
-        // A row hidden for me (someone I blocked) never previews.
-        guard let m = model.messages(of: c.id).last(where: { !$0.voice && !$0.plainText.isEmpty && !model.hidesMessage($0, chatId: c.id) }) else {
+        // A row hidden for me (someone I blocked) never previews. Deletion
+        // audits stay out too — same filter as the open chat (Transcript).
+        guard let m = model.messages(of: c.id).last(where: {
+            !$0.voice && !$0.plainText.isEmpty
+                && !model.hidesMessage($0, chatId: c.id)
+                && !GroupActivity.isAuditLine($0.plainText)
+        }) else {
             return c.pending ? "Invited · opens when they sign in" : "Say hi"
         }
         let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
@@ -1195,6 +1309,8 @@ struct AgentRow: View {
     let time: String
     let streaming: Bool
     let unread: Bool
+    /// Missed messages across the agent's chats (≥ 1 whenever `unread`).
+    var unreadCount: Int = 0
     var pinned: Bool = false
 
     var body: some View {
@@ -1202,9 +1318,9 @@ struct AgentRow: View {
         // semibold over a 15 pt grey preview, time right, 10 pt unread dot at the far
         // right of the preview line, 80 pt row pitch.
         HStack(spacing: 15) {
-            // No "agent is working" indicator on rows (Jacob, 2026-10-22): the working
-            // state lives in the chat header / activity line. The right edge keeps the
-            // unread dot.
+            // The status slot at the right end of the preview line, under the time
+            // (Jacob, 2026-10-27): the braille spinner while the agent works (one
+            // shared ticker, `WorkingSpinner`), else the unread dot, else nothing.
             AgentAvatar(project: project, theme: theme, size: Theme.rowAvatar)
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
@@ -1237,14 +1353,36 @@ struct AgentRow: View {
                         .foregroundStyle(theme.muted)
                         .lineLimit(1)
                     Spacer(minLength: 0)
-                    if unread {
-                        Circle().fill(theme.unread).frame(width: Theme.unreadDot, height: Theme.unreadDot)
+                    switch RowStatus.of(streaming: streaming, unread: unread) {
+                    case .working:
+                        WorkingSpinner()
+                    case .unread:
+                        // The count pill, never a dot (Jacob, 2026-10-27).
+                        UnreadMark(count: unreadCount)
+                    case .quiet:
+                        EmptyView()
                     }
                 }
             }
         }
         .padding(.vertical, Theme.rowVPad)
         .contentShape(Rectangle())
+    }
+}
+
+/// What the status slot under a row's time shows ([feedback
+/// working-braille-spinner-ios-2026-10-27]; the Mac's `sidebar::RowStatus`): one
+/// thing — the spinner while the chat's agent works, else the unread mark,
+/// else nothing.
+enum RowStatus: Equatable {
+    case working
+    case unread
+    case quiet
+
+    static func of(streaming: Bool, unread: Bool) -> RowStatus {
+        if streaming { return .working }
+        if unread { return .unread }
+        return .quiet
     }
 }
 
@@ -1257,6 +1395,9 @@ struct PeopleRow: View {
     let preview: String
     let time: String
     let unread: Bool
+    /// An agent in this chat is working: the spinner takes the slot unless a
+    /// count pill is showing.
+    var streaming: Bool = false
     /// Unread messages (Grok/Telegram-style count pill); 0 → the dot only.
     var count: Int = 0
     let me: String?
@@ -1279,31 +1420,13 @@ struct PeopleRow: View {
         return other?.handle ?? chat.title
     }
 
-    /// Tokenised blob URL for the group's custom picture, when one is set.
-    private var groupImageURL: String? {
-        guard chat.isGroup, let key = chat.imageKey, !key.isEmpty else { return nil }
-        return model.blobURL(projectId: "\(peopleSlot):\(chat.id)", key: key)?.absoluteString
-    }
-
     var body: some View {
         HStack(spacing: 15) {
             ZStack(alignment: .bottomTrailing) {
                 if chat.isGroup {
-                    if let groupImageURL {
-                        AvatarCluster(members: [], size: Theme.rowAvatar, imageUrl: groupImageURL)
-                    } else if chat.isNeutralAvatar {
-                        NeutralAvatar(name: chat.title, size: Theme.rowAvatar)
-                    } else if let leaf = chat.leafPick, LeafAvatarsFlag.shared.on {
-                        // D92 amendment: the leaf picked on the Create screen.
-                        LeafAvatar(pick: leaf, size: Theme.rowAvatar)
-                    } else {
-                        ZStack {
-                            Circle().fill(theme.card).frame(width: Theme.rowAvatar, height: Theme.rowAvatar)
-                            Image(systemName: "person.2.fill")
-                                .font(theme.font(17, weight: .medium))
-                                .foregroundStyle(theme.accent)
-                        }
-                    }
+                    // The group's picture through the resolver (its upload, else the leaf or
+                    // neutral initial from the Create screen, else the two-person disc).
+                    GroupAvatar(chat: chat, model: model, size: Theme.rowAvatar)
                 } else {
                     PersonAvatar(url: other?.avatarUrl, handle: other?.handle ?? "?", size: Theme.rowAvatar, name: other?.name, id: other?.id, colorIndex: other?.avatarColorIndex)
                 }
@@ -1340,10 +1463,15 @@ struct PeopleRow: View {
                         .foregroundStyle(theme.muted)
                         .lineLimit(1)
                     Spacer(minLength: 0)
+                    // Information over animation (coordinator, 2026-10-27): an unread
+                    // count pill wins the slot; the spinner replaces only the plain dot.
                     if count > 0 {
                         UnreadBadge(count: count)
+                    } else if streaming {
+                        WorkingSpinner()
                     } else if unread {
-                        Circle().fill(theme.unread).frame(width: Theme.unreadDot, height: Theme.unreadDot)
+                        // The count pill ("1"), never a dot (Jacob, 2026-10-27).
+                        UnreadMark(count: 1)
                     }
                 }
             }

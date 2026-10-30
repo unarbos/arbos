@@ -175,7 +175,13 @@ pub fn plot_svg(
         );
     }
     if let Some(l) = &layout.y_label {
-        let (x, y) = (ox + layout.label_font * 0.95, oy + plot.y + plot.h / 2.0);
+        // Baseline of the rotated title. Rotated −90°, the glyphs rise to the left of `x` by the
+        // ascent (≈ 0.73 em) and hang right by the descent (≈ 0.25 em); this centres that body in
+        // the `label_font * 1.5 + 4` strip the layout reserves (see `ChartModel::layout`).
+        let (x, y) = (
+            ox + 2.0 + layout.label_font * 0.99,
+            oy + plot.y + plot.h / 2.0,
+        );
         let _ = write!(
             o,
             "<text transform=\"translate({} {}) rotate(-90)\" text-anchor=\"middle\" font-size=\"{}\" fill=\"{}\" {font}>{}</text>",
@@ -653,5 +659,95 @@ mod tests {
             "{} bytes",
             png.len()
         );
+    }
+
+    /// Advance of `s` in the bundled Inter Regular at `size` px — what resvg actually draws.
+    fn inter_w(s: &str, size: f32) -> f32 {
+        static INTER_REGULAR: &[u8] = include_bytes!("../assets/Inter-Regular-subset.ttf");
+        let face = ttf_parser::Face::parse(INTER_REGULAR, 0).unwrap();
+        let upem = face.units_per_em() as f32;
+        s.chars()
+            .map(|c| {
+                let g = face
+                    .glyph_index(c)
+                    .unwrap_or_else(|| panic!("{c:?} not in the subset"));
+                face.glyph_hor_advance(g).unwrap() as f32 / upem * size
+            })
+            .sum()
+    }
+
+    #[test]
+    fn the_width_estimate_tracks_the_real_font() {
+        // Tick labels are mostly digits and `%`, which are wider than the average letter; the
+        // estimate must never under-reserve by more than a few percent, nor waste a third.
+        for s in [
+            "60%",
+            "65%",
+            "90%",
+            "100%",
+            "1,200",
+            "0.5",
+            "−12",
+            "10k",
+            "12",
+            "Run 12",
+            "Pass rate (%)",
+            "memory-pack eval",
+        ] {
+            let real = inter_w(s, 17.0);
+            let est = crate::chart::LayoutStyle::PNG.text_w(s, 17.0);
+            assert!(
+                est >= real * 0.95,
+                "{s:?}: estimated {est:.1} for real {real:.1}"
+            );
+            assert!(
+                est <= real * 1.35,
+                "{s:?}: estimated {est:.1} for real {real:.1}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_rotated_y_title_clears_the_percent_tick_labels() {
+        let svg = picture_svg(
+            &chart(),
+            1200,
+            675,
+            &PictureTheme::LIGHT,
+            &PictureCredit::default(),
+        );
+        let attr = |tag: &str, name: &str| -> f32 {
+            let i = tag.find(&format!("{name}=\"")).unwrap() + name.len() + 2;
+            tag[i..].split('"').next().unwrap().parse().unwrap()
+        };
+        let title = svg
+            .split("<text ")
+            .find(|t| t.contains("rotate(-90)"))
+            .expect("rotated y title");
+        let tx: f32 = title
+            .split("translate(")
+            .nth(1)
+            .unwrap()
+            .split(' ')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let title_fs = attr(title, "font-size");
+        // Rotated −90°, the glyphs hang right of the baseline by the descent.
+        let title_right = tx + title_fs * 0.25;
+        let ticks: Vec<&str> = svg
+            .split("<text ")
+            .filter(|t| t.contains("text-anchor=\"end\"") && t.contains("%</text>"))
+            .collect();
+        assert!(ticks.len() >= 4, "{} y ticks", ticks.len());
+        for t in ticks {
+            let label = t.split('>').nth(1).unwrap().split('<').next().unwrap();
+            let left = attr(t, "x") - inter_w(label, attr(t, "font-size"));
+            assert!(
+                left >= title_right + 2.0,
+                "{label:?} starts at {left:.1}, the y title ends at {title_right:.1}"
+            );
+        }
     }
 }

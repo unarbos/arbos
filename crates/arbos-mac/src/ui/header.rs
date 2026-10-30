@@ -16,18 +16,17 @@ use gpui::{
 
 use crate::app::ProfilePage;
 use crate::model::{Chat, LinkState, Project, ServerChannel, ServerInfo};
-use crate::ui::avatars;
 use crate::ui::blocked;
 use crate::ui::composer::Composer;
 use crate::ui::glass::{self, WindowDrag};
 use crate::ui::groups;
-use crate::ui::icons::icon;
+use crate::ui::highlight;
 use crate::ui::identity;
-use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::profile_target;
+use crate::ui::sf_symbols;
 use crate::ui::shell::Shell;
-use crate::ui::sidebar::{self, machine_dot};
+use crate::ui::sidebar;
 use crate::ui::theme::{
     Theme, AVATAR_HEADER, CONTROL, CONTROL_GLYPH_WIDE, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
 };
@@ -135,7 +134,6 @@ pub fn render(
         );
         part.on_click(cx.listener(move |this, _, _, cx| {
             this.members_open = false;
-            this.add_agent_open = false;
             let page = page.clone();
             this.state.update(cx, |s, cx| s.toggle_profile(page, cx));
         }))
@@ -148,7 +146,6 @@ pub fn render(
         )
         .on_click(cx.listener(move |this, _, _, cx| {
             this.members_open = false;
-            this.add_agent_open = false;
             let sid = sid.clone();
             this.state.update(cx, |s, cx| {
                 s.toggle_profile(ProfilePage::Group { space_id: sid }, cx)
@@ -202,38 +199,25 @@ pub fn render(
         let showing = state.profile_shows(&page);
         // D92 amendment: the picture built before the clock takes `cx`.
         let picture_disc = groups::picture(space, state, AVATAR_HEADER, &theme);
-        if avatar_state != avatars::AvatarState::Idle {
-            PulseClock::request(cx);
-        }
-        // The machine dot hangs off the disc's corner, inside the slot's box.
-        let picture = div()
-            .relative()
-            .size(px(AVATAR_HEADER))
-            .flex_shrink_0()
-            .child(picture_disc)
-            .child(
-                div()
-                    .absolute()
-                    .right(px(-2.0))
-                    .bottom(px(-2.0))
-                    .size(px(10.0))
-                    .rounded_full()
-                    .bg(theme.bg)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        div()
-                            .size(px(6.0))
-                            .rounded_full()
-                            .bg(machine_dot(machine, &theme)),
-                    ),
-            );
+        let _ = avatar_state;
+        // The machine mark hangs off the disc's corner, in front of the picture
+        // (`ui::marks::machine_corner`, its own paint layer — the pill is frosted)
+        // in a ring of the page colour. Never a coloured dot (Jacob, 2026-10-27):
+        // the spinner while the machine wakes, the red `!` on a fault, nothing
+        // at rest — then the bare picture in the same box.
+        let picture = crate::ui::marks::machine_corner(
+            AVATAR_HEADER,
+            picture_disc,
+            machine,
+            theme.bg,
+            |ring| ring,
+            &theme,
+            cx,
+        );
         let part = profile_target::mark(name_part(picture, name_el, &theme), &space.name, showing);
         part.on_click(
             cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                 this.members_open = false;
-                this.add_agent_open = false;
                 let p = pid.clone();
                 if !can_rename {
                     this.open_from_name(p, groupish, cx);
@@ -393,24 +377,16 @@ fn link_pill(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     let chat_id = state.active_chat_id();
     let link = state.link_pill(chat_id.as_deref())?;
     let label = link.label()?;
-    let dot = match link {
-        LinkState::Offline => theme.text_faint,
-        LinkState::RelayDown => theme.danger,
-        LinkState::Reconnecting | LinkState::RestartSoon => theme.warn,
-        LinkState::Syncing => theme.accent,
+    // The capsule's mark (Jacob, 2026-10-27: never a coloured dot): the braille
+    // spinner while the link is being brought back (Reconnecting / Syncing /
+    // RestartSoon), the red `!` glyph when the relay is down, nothing for Offline.
+    let mark: Option<gpui::AnyElement> = match link {
+        LinkState::Reconnecting | LinkState::RestartSoon | LinkState::Syncing => {
+            Some(crate::ui::working::glyph(&theme, cx).into_any_element())
+        }
+        LinkState::RelayDown => Some(crate::ui::marks::fault_glyph(9.0, &theme).into_any_element()),
+        LinkState::Offline => None,
         LinkState::Live => return None,
-    };
-    let pulsing = matches!(
-        link,
-        LinkState::Reconnecting | LinkState::Syncing | LinkState::RestartSoon
-    );
-    if pulsing {
-        PulseClock::request(cx);
-    }
-    let phase = if pulsing {
-        PulseClock::phase(cx, 1400)
-    } else {
-        1.0
     };
     Some(
         div()
@@ -424,12 +400,7 @@ fn link_pill(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
             .rounded_full()
             .bg(theme.bubble_assistant)
             .debug_selector(|| "chat-header-link-pill".into())
-            .child(
-                div()
-                    .size(px(6.0))
-                    .rounded_full()
-                    .bg(Theme::with_alpha(dot, 0.55 + 0.45 * phase)),
-            )
+            .children(mark)
             .child(
                 div()
                     .text_size(px(TEXT_TINY))
@@ -446,7 +417,7 @@ fn link_pill(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
 /// ([feedback mac-collapsed-toggle-inline], [feedback sidebar-strip-filter-2026-10-24]).
 fn sidebar_toggle(shell: &Shell, theme: &Theme, cx: &mut Context<Shell>) -> AnyElement {
     let _ = shell.state.read(cx).sidebar_overlay;
-    let disc = glass::control_disc("header-sidebar", "sidebar-left", CONTROL_GLYPH_WIDE, theme);
+    let disc = glass::control_disc("header-sidebar", "sidebar.left", CONTROL_GLYPH_WIDE, theme);
     // The header's material ([feedback mac-header-glass-2026-10-25]): frosted
     // glass on both surfaces, like the pill beside it.
     let disc = glass::header_surface(disc, theme)
@@ -523,6 +494,10 @@ pub mod metrics {
             b
         }
     }
+    /// The toast slot (`shell::render_notices`): just below the pill — under the connection
+    /// pill when it hangs there — centred on the chat column (Jacob 2026-10-27, [feedback
+    /// toast-stack-mac-2026-10-27]).
+    pub const TOAST_SLOT_TOP: f32 = LINK_PILL_TOP + LINK_PILL_HEIGHT + 8.0;
 }
 
 /// The frame of every chat header — agent, DM, group, server channel: the top
@@ -610,7 +585,7 @@ pub fn render_channel(
         .items_center()
         .gap(px(5.0))
         .min_w_0()
-        .child(icon("hash", 14.0, theme.text_muted))
+        .child(sf_symbols::glyph("number", 14.0, theme.text_muted))
         .child(
             div()
                 .text_size(px(TEXT_BODY))
@@ -619,7 +594,9 @@ pub fn render_channel(
                 .truncate()
                 .child(channel.name.clone()),
         )
-        .when(locked, |el| el.child(icon("lock", 11.0, theme.text_faint)));
+        .when(locked, |el| {
+            el.child(sf_symbols::glyph("lock", 11.0, theme.text_faint))
+        });
     let name_part = name_part(
         sidebar::server_picture(server, state, AVATAR_HEADER, &theme),
         title.into_any_element(),
@@ -627,7 +604,6 @@ pub fn render_channel(
     )
     .on_click(cx.listener(move |this, _, _, cx| {
         this.members_open = false;
-        this.add_agent_open = false;
         let page = page.clone();
         this.state.update(cx, |s, cx| s.toggle_profile(page, cx));
     }));
@@ -662,8 +638,8 @@ fn new_chat_plus(cx: &mut Context<Shell>) -> Stateful<Div> {
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
-        .child(icon("plus", 13.0, theme.text_muted))
+        .map(|el| highlight::button(el, &theme))
+        .child(sf_symbols::glyph("plus", 13.0, theme.text_muted))
         // Mouse-down stops the header's window-drag region; click creates the chat.
         .on_mouse_down(
             gpui::MouseButton::Left,
@@ -692,7 +668,7 @@ fn name_part(picture: impl IntoElement, name: AnyElement, theme: &Theme) -> Stat
         .h_full()
         .cursor_pointer()
         .rounded_full()
-        .hover(|s| s.bg(theme.surface_2))
+        .map(|el| highlight::button(el, theme))
         .pr(px(4.0))
 }
 
@@ -713,10 +689,6 @@ fn tab_segment(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Optio
     let streaming = active
         .as_deref()
         .is_some_and(|id| state.chat_is_streaming(id));
-    if streaming {
-        PulseClock::request(cx);
-    }
-    let phase = PulseClock::phase(cx, 1200);
     let open = shell.tab_menu_open;
     Some(
         div()
@@ -730,16 +702,18 @@ fn tab_segment(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Optio
             .pl(px(9.0))
             .pr(px(7.0))
             .rounded_full()
-            .bg(if open {
-                theme.surface_2
-            } else {
-                theme.surface_1
-            })
             .text_size(px(TEXT_SMALL))
             .font_weight(FontWeight::MEDIUM)
             .text_color(theme.text)
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .map(|el| {
+                let base = if open {
+                    theme.surface_2
+                } else {
+                    theme.surface_1
+                };
+                highlight::washed(el, base, &theme)
+            })
             .child(
                 div()
                     .text_size(px(TEXT_SMALL))
@@ -747,15 +721,12 @@ fn tab_segment(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Optio
                     .child("·"),
             )
             .child(div().max_w(px(160.0)).truncate().child(current))
+            // The working spinner, not an amber dot (Jacob, 2026-10-27): the
+            // same shared ticker as the sidebar rows' status cell.
             .when(streaming, |el| {
-                el.child(
-                    div()
-                        .size(px(6.0))
-                        .rounded_full()
-                        .bg(Theme::with_alpha(theme.warn, 0.4 + 0.6 * phase)),
-                )
+                el.child(crate::ui::working::glyph(&theme, cx))
             })
-            .child(icon("chevron-down", 11.0, theme.text_muted))
+            .child(sf_symbols::glyph("chevron.down", 11.0, theme.text_muted))
             // Mouse-down, not click: the root closes every popover on
             // mouse-down, so a click handler could never toggle this one shut.
             .on_mouse_down(
@@ -842,16 +813,11 @@ fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl
             .h(px(36.0))
             .pl(px(10.0))
             .pr(px(8.0))
-            .rounded(px(9.0))
+            .rounded(px(glass::MENU_ROW_RADIUS))
             .text_size(px(TEXT_SMALL))
             .text_color(theme.text)
-            .bg(if is_active || menu_here {
-                theme.surface_2
-            } else {
-                gpui::transparent_black()
-            })
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .map(|el| highlight::row(el, is_active || menu_here, highlight::Shape::Own, &theme))
             .when(menu_here, |el| {
                 el.children(anchored_menu.take().map(|(_, menu)| menu))
             })
@@ -861,7 +827,9 @@ fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl
                     .flex_shrink_0()
                     .flex()
                     .justify_center()
-                    .when(is_active, |el| el.child(icon("check", 12.0, theme.text))),
+                    .when(is_active, |el| {
+                        el.child(sf_symbols::glyph("checkmark", 12.0, theme.text))
+                    }),
             );
         if editing {
             row = row
@@ -895,7 +863,7 @@ fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl
             let glyph: gpui::AnyElement = if job_running {
                 crate::ui::cards::activity_spinner(13.0, &theme, cx).into_any_element()
             } else {
-                icon("check", 12.0, theme.online).into_any_element()
+                sf_symbols::glyph("checkmark", 12.0, theme.online).into_any_element()
             };
             row = row.child(div().flex_shrink_0().size(px(14.0)).child(glyph));
         }
@@ -939,8 +907,8 @@ fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl
                     .group_hover(SharedString::from(format!("tab-row-{key}")), |s| {
                         s.opacity(1.0)
                     })
-                    .hover(|s| s.bg(theme.border_strong))
-                    .child(icon("xmark", 9.0, theme.text_muted))
+                    .map(|el| highlight::button(el, &theme))
+                    .child(sf_symbols::glyph("xmark", 9.0, theme.text_muted))
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
@@ -1028,15 +996,14 @@ fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl
                     .h(px(36.0))
                     .pl(px(34.0))
                     .pr(px(12.0))
-                    .rounded(px(9.0))
+                    .rounded(px(glass::MENU_ROW_RADIUS))
                     .text_size(px(TEXT_SMALL))
                     .text_color(theme.text_muted)
                     .cursor_pointer()
+                    .map(|el| highlight::row(el, menu_here, highlight::Shape::Own, &theme))
                     .when(menu_here, |el| {
-                        el.bg(theme.surface_2)
-                            .children(anchored_menu.take().map(|(_, menu)| menu))
+                        el.children(anchored_menu.take().map(|(_, menu)| menu))
                     })
-                    .hover(|s| s.bg(theme.surface_2))
                     .on_mouse_down(
                         gpui::MouseButton::Right,
                         cx.listener(move |this, _, _, cx| {

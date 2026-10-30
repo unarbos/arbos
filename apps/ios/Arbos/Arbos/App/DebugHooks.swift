@@ -38,6 +38,10 @@ enum DebugHooks {
     static var fixtureWaitlist: Int? { value("ARBOS_FIXTURE_WAITLIST").flatMap { Int($0) } }
     /// `ARBOS_FIXTURE_SERVERS=1`: the fixture lists three servers (the home list's Servers segment).
     static var fixtureServers: Bool { value("ARBOS_FIXTURE_SERVERS") == "1" }
+    /// `member` | `admin`: my role in the fixture group "Launch week" (owner by default).
+    static var fixtureGroupRole: String? {
+        value("ARBOS_FIXTURE_GROUP_ROLE").flatMap { ["member", "admin"].contains($0) ? $0 : nil }
+    }
     /// Seed the connected 1Password vault and the connect flow (`features.vault_connect` on).
     /// Default off, like the shipped relay flag.
     static var fixtureVault: Bool { value("ARBOS_FIXTURE_VAULT") == "1" }
@@ -65,9 +69,22 @@ enum DebugHooks {
     /// #1592 rig: the fixture group holds someone else's agent ("TestAgent", run by @sami —
     /// in the roster, not in my projects) with one bubble; with `ARBOS_FIXTURE_WORKING` it works.
     static var fixtureForeignAgent: Bool { value("ARBOS_FIXTURE_FOREIGN_AGENT") == "1" }
+    /// `ARBOS_FIXTURE_BLOCKED=<handle,…>`: these fixture people are on my block list, as
+    /// `GET /blocks` would hand it over (the Mac fixture's hook of the same name; blocked-state
+    /// rig: the DM's bar and tag, the group's folded rows, the member list's tags).
+    static var fixtureBlocked: Set<String> {
+        Set((value("ARBOS_FIXTURE_BLOCKED") ?? "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
+    }
     /// `ARBOS_FIXTURE_REPLY_DM=1`: rows in the fixture DM that answer messages in other chats
     /// (Reply in DM rig, #1836).
     static var fixtureReplyDM: Bool { value("ARBOS_FIXTURE_REPLY_DM") == "1" }
+    /// `ARBOS_FIXTURE_CHIPS=1` ([feedback mention-chip-highlight-2026-10-28]): the fixture group
+    /// ends with a member's and my own bubble, each with an agent and a person chip (mine has one
+    /// inside a code span).
+    static var fixtureChips: Bool { value("ARBOS_FIXTURE_CHIPS") == "1" }
+    /// `ARBOS_FIXTURE_LINKS=1`: four links from unconst in the fixture DM, for the Links tab's
+    /// tiles ([feedback link-icons-ios-tile-2026-10-27]).
+    static var fixtureLinks: Bool { value("ARBOS_FIXTURE_LINKS") == "1" }
     /// Presence-row rig: `1` (the chat's other person) or comma-separated handles typing.
     static var fixtureTyping: String? { value("ARBOS_FIXTURE_TYPING").flatMap { $0.isEmpty || $0 == "0" ? nil : $0 } }
     /// Join a call seen via presence automatically (two-simulator relay tests).
@@ -122,6 +139,9 @@ enum DebugHooks {
     /// `ARBOS_VIEWER_CLOSE_MS=<ms>`: the media viewer closes itself through its own Close path
     /// that long after it appears (a shot of what is underneath afterwards).
     static var viewerCloseMs: Int? { value("ARBOS_VIEWER_CLOSE_MS").flatMap(Int.init) }
+    /// `white | dark | busy`: every fixture picture is a full-screen portrait of that kind, so
+    /// the viewer's controls sit on the picture ([feedback image-viewer-close-button-2026-10-29]).
+    static var fixturePicture: String? { value("ARBOS_FIXTURE_PICTURE") }
     /// With a Settings page open: scroll to the card with this id (e.g. `people` on a Secret page).
     static var settingsScroll: String? { value("ARBOS_SETTINGS_SCROLL") }
     /// `ARBOS_RIG_AGENT_PICKED=<name>,<name>`: a Secrets form's agent picker starts with these
@@ -129,6 +149,14 @@ enum DebugHooks {
     static var agentPickerPicked: [String] {
         (value("ARBOS_RIG_AGENT_PICKED") ?? "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
     }
+    /// `ARBOS_RIG_PICK=<agent name>,@<handle>,…`: the Add members picker pre-picks these rows
+    /// once it is up; `ARBOS_RIG_AUTO_ADD=<ms>` then runs Add that long after
+    /// ([feedback iphone-add-members-2026-10-26] live proof on a scratch group).
+    static var rigPick: [String]? {
+        let list = (value("ARBOS_RIG_PICK") ?? "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        return list.isEmpty ? nil : list
+    }
+    static var rigAutoAddMs: Int? { value("ARBOS_RIG_AUTO_ADD").flatMap(Int.init) }
     /// `ARBOS_RIG_AGENT_PICKER=<query>`: the picker's "Add agent" sheet starts open with that
     /// query typed (empty = open, nothing typed).
     static var agentPickerQuery: String? { value("ARBOS_RIG_AGENT_PICKER") }
@@ -142,6 +170,9 @@ enum DebugHooks {
     static var appearance: Appearance? { value("ARBOS_APPEARANCE").flatMap(Appearance.init(rawValue:)) }
     /// `matte | glass`: the surface for one launch, same precedence.
     static var surface: Surface? { value("ARBOS_SURFACE").flatMap(Surface.init(rawValue:)) }
+    /// `translucent`: the Glass pills as a no-blur translucent fill instead of the system glass
+    /// (mock for Jacob, [feedback iphone-composer-glass-2026-10-28] rig).
+    static var pillStyle: String? { value("ARBOS_PILL_STYLE") }
     /// `offline | relay-down | reconnecting | syncing | restart-soon`: the open chat's link state for the
     /// header's connection pill; `ARBOS_LINK_CLEARS_MS=<ms>` sets it back to live after that long.
     static var link: LinkState? {
@@ -162,6 +193,9 @@ enum DebugHooks {
     /// Log frame pacing (dropped frames, worst frame, time over budget) and memory every
     /// 2 s to `com.unarbos.arbos.ios` / `perf` for the duration of the launch.
     static let perfLog: Bool = value("ARBOS_PERF_LOG") == "1"
+    /// Rig (chart bubbles): print every chart-plot gesture event (`[arbos chart] …`) so a
+    /// simulator run can tell a touch that never reached the plot from a readout that did not draw.
+    static let traceChart: Bool = value("ARBOS_TRACE_CHART") == "1"
     /// Seed the fixture group from a Loro snapshot file (a relay export of a real chat).
     static var fixtureDoc: String? { value("ARBOS_FIXTURE_DOC") }
     /// Live-path replay (iphone-open-scroll-block): `<checkpoint path>|<rows.hex path>`. The
@@ -188,6 +222,20 @@ enum DebugHooks {
     /// transcript to its top and back, `type` appends 40 keystrokes to the composer,
     /// `typing` fakes a member's typing presence every second. Comma-separated.
     static var perfDrive: Set<String> { Set((value("ARBOS_PERF_DRIVE") ?? "").split(separator: ",").map(String.init)) }
+    /// With `ARBOS_PERF_DRIVE=switch`: the other people chat to alternate with (default the fixture DM).
+    static var perfSwitchTo: String? { value("ARBOS_PERF_SWITCH_TO") }
+    /// Scroll rig (iphone-scroll-perf, 2026-10-27): log every touch sequence on the chat
+    /// screen — touch-down → scroll pan began / first content-offset change (latency), and
+    /// pans that moved the finger but never moved the transcript ("dropped") — to the `perf`
+    /// log, plus a one-time dump of the gesture-recognizer graph under the first touch.
+    static let perfTouch: Bool = value("ARBOS_PERF_TOUCH") == "1"
+    /// Scroll rig A/B: comma-separated gestures left out of the chat screen for this launch —
+    /// `time` (transcript swipe-left time peek), `back` (the full-screen swipe-right back; the
+    /// system edge pop is never off), `longpress` (bubble long-press menu).
+    static let gesturesOff: Set<String> = Set((value("ARBOS_PERF_GESTURES_OFF") ?? "").split(separator: ",").map(String.init))
+    /// With `ARBOS_FIXTURE_LONG_ROWS`: an Arbonites-shaped history — code cards, chart bubbles,
+    /// @mentions, reactions and real (generated) pictures on top of the prose / markdown rows.
+    static var fixtureLongRich: Bool { value("ARBOS_FIXTURE_LONG_RICH") == "1" }
     /// Scripted tour for the screen recording (fixture only).
     static var demo: Bool { value("ARBOS_DEMO") == "1" }
     /// Scripted tour against the live relay: sends ARBOS_AUTO_SEND, waits for the reply, tours the sheets.

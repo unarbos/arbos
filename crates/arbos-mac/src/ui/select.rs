@@ -15,7 +15,7 @@
 //! [`StyledText`] and wires the mouse to the model from inside its own paint,
 //! where the text layout is guaranteed to exist.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -197,6 +197,10 @@ pub struct TextSelection {
     /// that pointer state. The EC2 Mac's VNC session cannot hold a button
     /// down for a capture, so the rig asks.
     rig_chip: Option<mention::ChipState>,
+    /// The `||spoilers||` this viewer has clicked open, by bubble key and the
+    /// spoiler's start in the bubble's plain text. Per viewer, per launch:
+    /// nothing is stored ([feedback chat-markdown-mac-2026-10-27]).
+    revealed: Rc<HashSet<SpoilerKey>>,
     /// The cursor the last painted bubble text asked for (tests).
     #[cfg(test)]
     pub(crate) cursor: CursorStyle,
@@ -204,6 +208,10 @@ pub struct TextSelection {
     #[cfg(test)]
     pub(crate) opened: Vec<String>,
 }
+
+/// Names one spoiler across frames: the bubble and where the spoiler's text
+/// starts in the bubble's plain text.
+pub type SpoilerKey = (SharedString, usize);
 
 /// Names one chip across frames: the bubble and the chip's range in the
 /// bubble's plain text.
@@ -219,11 +227,27 @@ impl TextSelection {
             rig_chip: std::env::var("ARBOS_RIG_CHIP")
                 .ok()
                 .and_then(|s| mention::ChipState::parse(&s)),
+            revealed: Rc::new(HashSet::new()),
             #[cfg(test)]
             cursor: CursorStyle::Arrow,
             #[cfg(test)]
             opened: Vec::new(),
         }
+    }
+
+    /// Show or hide one spoiler for this viewer.
+    pub fn toggle_spoiler(&mut self, key: SpoilerKey, cx: &mut Context<Self>) {
+        let revealed = Rc::make_mut(&mut self.revealed);
+        if !revealed.remove(&key) {
+            revealed.insert(key);
+        }
+        cx.notify();
+    }
+
+    /// Whether the viewer has opened the spoiler at `key`.
+    #[cfg(test)]
+    pub fn spoiler_revealed(&self, key: &SpoilerKey) -> bool {
+        self.revealed.contains(key)
     }
 
     /// The selected text when the selection lives in one bubble. A selection
@@ -539,6 +563,8 @@ pub struct Selectable {
     icon_placeholder: Hsla,
     /// Search-in-chat marks for this bubble's words, while the bar is up.
     marks: Option<Rc<SearchMarks>>,
+    /// The spoilers open this frame.
+    revealed: Rc<HashSet<SpoilerKey>>,
 }
 
 /// What ⌘F Search-in-chat paints on a hit's words ([feedback
@@ -556,7 +582,9 @@ pub struct SearchMarks {
 
 impl Selectable {
     pub fn new(entity: &Entity<TextSelection>, color: Hsla, cx: &App) -> Self {
-        let current = entity.read(cx).model.span();
+        let selection = entity.read(cx);
+        let current = selection.model.span();
+        let revealed = selection.revealed.clone();
         Self {
             entity: entity.clone(),
             current,
@@ -567,6 +595,7 @@ impl Selectable {
             link_icons: LinkIcons::empty(),
             icon_placeholder: Hsla::default(),
             marks: None,
+            revealed,
         }
     }
 
@@ -641,6 +670,7 @@ impl Selectable {
             link_icons: self.link_icons.clone(),
             icon_placeholder: self.icon_placeholder,
             marks: self.marks.clone(),
+            revealed: self.revealed.clone(),
         }
     }
 }
@@ -658,6 +688,15 @@ pub struct BubbleSelectable {
     link_icons: Rc<LinkIcons>,
     icon_placeholder: Hsla,
     marks: Option<Rc<SearchMarks>>,
+    revealed: Rc<HashSet<SpoilerKey>>,
+}
+
+impl BubbleSelectable {
+    /// Whether the spoiler whose text starts at byte `at` of this bubble's
+    /// plain text is open for the viewer.
+    pub fn spoiler_revealed(&self, at: usize) -> bool {
+        self.revealed.contains(&(self.at.key.clone(), at))
+    }
 }
 
 /// One mention chip inside a [`SelectableText`]: the `@Name` run (element-local
@@ -746,6 +785,7 @@ impl BubbleSelectable {
             span: at..at + text.len(),
             at,
             links: Vec::new(),
+            spoilers: Vec::new(),
             chips,
             icons: Vec::new(),
             link_icons: self.link_icons.clone(),
@@ -756,7 +796,9 @@ impl BubbleSelectable {
 }
 
 /// Recolour the `@Name` run for a chip: the `@` (first byte) transparent, the
-/// name in `accent`, no underline; everything else untouched.
+/// name in `accent`, no underline and no run background — the pill is the
+/// chip's only background (a code span's box behind the name stacked a second,
+/// square one inside it); everything else untouched.
 pub fn chip_runs(
     runs: Vec<TextRun>,
     range: Range<usize>,
@@ -785,6 +827,7 @@ pub fn chip_runs(
                 len: cut - cursor,
                 color,
                 underline: if in_chip { None } else { run.underline },
+                background_color: if in_chip { None } else { run.background_color },
                 ..run.clone()
             });
             cursor = cut;
@@ -965,6 +1008,9 @@ pub struct SelectableText {
     span: Range<usize>,
     styled: StyledText,
     links: Vec<(Range<usize>, String)>,
+    /// Spoiler ranges (element-local) and each one's key: a plain click
+    /// inside one shows or hides it.
+    spoilers: Vec<(Range<usize>, SpoilerKey)>,
     chips: Vec<Chip>,
     /// Named links' icon cells, with the site picture when it is known.
     icons: Vec<LinkIcon>,
@@ -978,6 +1024,17 @@ impl SelectableText {
     /// one opens it.
     pub fn with_links(mut self, links: Vec<(Range<usize>, String)>) -> Self {
         self.links = links;
+        self
+    }
+
+    /// Spoiler ranges (element-local) with the byte each spoiler starts at
+    /// in the bubble's plain text: a plain click toggles the spoiler.
+    pub fn with_spoilers(mut self, spoilers: Vec<(Range<usize>, usize)>) -> Self {
+        let key = self.bubble.key.clone();
+        self.spoilers = spoilers
+            .into_iter()
+            .map(|(range, start)| (range, (key.clone(), start)))
+            .collect();
         self
     }
 
@@ -1104,6 +1161,7 @@ impl Element for SelectableText {
             paint_link_icon(&layout, icon, self.icon_placeholder, window);
         }
         let links = std::mem::take(&mut self.links);
+        let spoilers = std::mem::take(&mut self.spoilers);
         let focus_handle = selection.read(cx).focus_handle.clone();
         let (bubble, at) = (self.bubble.clone(), self.at);
         let key = bubble.key.clone();
@@ -1113,6 +1171,7 @@ impl Element for SelectableText {
                 .index_for_position(window.mouse_position())
                 .is_ok_and(|ix| {
                     links.iter().any(|(r, _)| r.contains(&ix))
+                        || spoilers.iter().any(|(r, _)| r.contains(&ix))
                         || chips.iter().any(|c| c.clickable() && c.range.contains(&ix))
                 });
         let cursor = if over_link {
@@ -1279,12 +1338,18 @@ impl Element for SelectableText {
                     && hitbox.is_hovered(window)
                     && selection.read(cx).model.pressed_in(&bubble.key, &span)
                 {
+                    let index = layout.index_for_position(event.position).ok();
                     if let Some(chip) = chip_at(&chips, &layout, event.position) {
                         chip.mentions.open(&chip.mention, cx);
-                    } else if let Some((_, href)) = layout
-                        .index_for_position(event.position)
-                        .ok()
-                        .and_then(|ix| links.iter().find(|(r, _)| r.contains(&ix)))
+                    } else if let Some((_, key)) =
+                        index.and_then(|ix| spoilers.iter().find(|(r, _)| r.contains(&ix)))
+                    {
+                        // A hidden spoiler opens; its link (if any) waits for
+                        // the next click, once the text can be read.
+                        let key = key.clone();
+                        selection.update(cx, |s, cx| s.toggle_spoiler(key, cx));
+                    } else if let Some((_, href)) =
+                        index.and_then(|ix| links.iter().find(|(r, _)| r.contains(&ix)))
                     {
                         #[cfg(test)]
                         selection.update(cx, |s, _| s.opened.push(href.clone()));
@@ -1324,6 +1389,14 @@ fn paint_chip_pill(layout: &TextLayout, chip: &Chip, color: Hsla, window: &mut W
                 line_h + px(mention::PILL_PAD_Y * 2.0),
             ),
         );
+        #[cfg(test)]
+        PAINTED_CHIPS.with(|p| {
+            p.borrow_mut().push(PaintedChip::Pill {
+                bounds,
+                text: (start, end),
+                line: (top, line_h),
+            })
+        });
         window.paint_quad(gpui::quad(
             bounds,
             Corners::all(px(mention::PILL_RADIUS)),
@@ -1404,12 +1477,41 @@ fn paint_chip_picture(layout: &TextLayout, chip: &Chip, window: &mut Window, cx:
         return;
     }
     let origin = point(at.x, at.y + (line_h - d) / 2.0);
+    #[cfg(test)]
+    PAINTED_CHIPS.with(|p| {
+        p.borrow_mut().push(PaintedChip::Disc {
+            bounds: Bounds::new(origin, size(d, d)),
+            name_x: after_at.x,
+        })
+    });
     paint_picture(
         &chip.mention.picture,
         Bounds::new(origin, size(d, d)),
         window,
         cx,
     );
+}
+
+/// What a chip painted, for the headless render tests: each pill (one per
+/// line fragment) with the `@Name` run's span and the line box it sits on,
+/// and the disc with where the name starts.
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub enum PaintedChip {
+    Pill {
+        bounds: Bounds<Pixels>,
+        text: (Pixels, Pixels),
+        line: (Pixels, Pixels),
+    },
+    Disc {
+        bounds: Bounds<Pixels>,
+        name_x: Pixels,
+    },
+}
+
+#[cfg(test)]
+thread_local! {
+    pub static PAINTED_CHIPS: std::cell::RefCell<Vec<PaintedChip>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// The disc a chip's `@` cell holds — a photo, D79 initials or a D92 leaf —
@@ -2375,6 +2477,120 @@ mod tests {
         let runs = chip_runs(vec![run(20)], 0..9, 4, gpui::blue());
         let lens: Vec<usize> = runs.iter().map(|r| r.len).collect();
         assert_eq!(lens, vec![4, 5, 11]);
+    }
+
+    /// A chip inside a code span: the pill is its only background — the code
+    /// box stays on the text around it, not behind the name.
+    #[test]
+    fn chip_runs_drop_the_run_background_inside_the_chip() {
+        let mut code = run(20);
+        code.background_color = Some(gpui::red());
+        let runs = chip_runs(vec![code], 4..10, 1, gpui::blue());
+        let backgrounds: Vec<bool> = runs.iter().map(|r| r.background_color.is_some()).collect();
+        assert_eq!(backgrounds, vec![true, false, false, true]);
+    }
+
+    /// A bubble line at the chat's type size and line height, chips and all.
+    struct ChipLine {
+        selection: Entity<TextSelection>,
+        mentions: Rc<Mentions>,
+        text: SharedString,
+    }
+
+    impl gpui::Render for ChipLine {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            use crate::ui::theme::{CHAT_BODY, CHAT_LINE_HEIGHT};
+            use gpui::{div, ParentElement as _, Styled as _};
+            let text = self.text.clone();
+            let selectable = Selectable::new(&self.selection, Hsla::default(), cx)
+                .with_mentions(self.mentions.clone(), gpui::blue());
+            let bubble = selectable.bubble("m1", text.clone());
+            div()
+                .w(px(480.0))
+                .p(px(20.0))
+                .text_size(px(CHAT_BODY))
+                .line_height(px(CHAT_LINE_HEIGHT))
+                .child(bubble.text(0, text.clone(), vec![run(text.len())]))
+        }
+    }
+
+    /// Geometry snapshot of what a bubble paints for its chips
+    /// ([feedback mention-chip-highlight-2026-10-28], Jacob: "odd pfp
+    /// highlights … clearly not centered"): one pill per chip, as wide as the
+    /// disc and the name plus the same inset at both ends, the disc and the
+    /// pill on the line's centre, #1533's gap between disc and name kept.
+    #[gpui::test]
+    fn each_chip_paints_one_pill_centred_on_its_picture_and_name(cx: &mut gpui::TestAppContext) {
+        use std::cell::RefCell;
+        let opened = Rc::new(RefCell::new(Vec::new()));
+        let mentions = chip_table(&opened);
+        let text: SharedString = mentions.display("@comms says hi to @here").into();
+        PAINTED_CHIPS.with(|p| p.borrow_mut().clear());
+        let (_view, vcx) = cx.add_window_view(|_, cx| ChipLine {
+            selection: cx.new(TextSelection::new),
+            mentions,
+            text,
+        });
+        vcx.run_until_parked();
+        // Every frame paints again; one copy of each is the snapshot.
+        let mut painted: Vec<PaintedChip> = Vec::new();
+        for p in PAINTED_CHIPS.with(|p| p.borrow().clone()) {
+            if !painted.contains(&p) {
+                painted.push(p);
+            }
+        }
+        let pills: Vec<_> = painted
+            .iter()
+            .filter_map(|p| match p {
+                PaintedChip::Pill { bounds, text, line } => Some((*bounds, *text, *line)),
+                PaintedChip::Disc { .. } => None,
+            })
+            .collect();
+        let discs: Vec<_> = painted
+            .iter()
+            .filter_map(|p| match p {
+                PaintedChip::Disc { bounds, name_x } => Some((*bounds, *name_x)),
+                PaintedChip::Pill { .. } => None,
+            })
+            .collect();
+        assert_eq!(pills.len(), 2, "one pill per chip: {painted:#?}");
+        assert_eq!(discs.len(), 2, "one disc per chip: {painted:#?}");
+        let close = |a: Pixels, b: Pixels, what: &str| {
+            assert!(
+                (f32::from(a) - f32::from(b)).abs() < 0.01,
+                "{what}: {a:?} vs {b:?}"
+            );
+        };
+        let mid_y = |b: &Bounds<Pixels>| b.origin.y + b.size.height / 2.0;
+        let pad = px(mention::PILL_PAD_X);
+        for ((pill, (start, end), (top, line_h)), (disc, name_x)) in pills.iter().zip(&discs) {
+            close(disc.left() - pill.left(), pad, "inset before the picture");
+            close(pill.right() - *end, pad, "inset after the name");
+            close(pill.left(), *start - pad, "the pill starts at the chip");
+            assert!(
+                f32::from(*name_x - disc.right()) >= mention::PICTURE_GAP - 0.01,
+                "the disc keeps its gap to the name"
+            );
+            close(
+                pill.size.height,
+                *line_h + px(mention::PILL_PAD_Y * 2.0),
+                "pill height",
+            );
+            close(
+                mid_y(pill),
+                *top + *line_h / 2.0,
+                "the pill on the line's centre",
+            );
+            close(mid_y(disc), mid_y(pill), "the disc on the pill's centre");
+            assert!(
+                disc.size.height <= px(mention::PICTURE),
+                "the disc is at most the picture size"
+            );
+        }
     }
 
     #[test]

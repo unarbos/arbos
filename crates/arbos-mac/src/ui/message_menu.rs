@@ -1,15 +1,17 @@
 //! The message bubble's menu — right-click or the hover rail's ⋯ on the Mac,
 //! under the capsule on the iPhone's long-press (`MessageMenu.swift`):
-//! **Copy, Reply, Forward, Reply in DM, Delete** and nothing else (Jacob,
-//! #1370; Reply in DM joined with #1835, as on the iPhone). Reactions live in
-//! the capsule (`reactions.rs`), never in this menu. One builder for every
-//! bubble, and one placement rule: the menu always sits fully inside the
-//! window — flipped to the other side of the click near the right or bottom
-//! edge, clamped to the edge margin when neither side fits.
+//! **Copy, Reply, Forward, Reply in DM, Edit (own text), Remove preview, Delete**
+//! (Jacob, #1370; Reply in DM joined with #1835; Edit matches the iPhone's
+//! long-press → Edit; **Remove preview** joined with #2065, only on a message
+//! that shows a link card the user may edit). Reactions live in the capsule
+//! (`reactions.rs`), never in this menu. One builder for every bubble, and one
+//! placement rule: the menu always sits fully inside the window — flipped to
+//! the other side of the click near the right or bottom edge, clamped to the
+//! edge margin when neither side fits.
 
 use gpui::{div, point, prelude::*, px, size, Div, Pixels, Point, Size, Window};
 
-use crate::model::Id;
+use crate::model::{Id, Message, Role};
 use crate::ui::glass::{
     self, MENU_CARD_BORDER, MENU_CARD_PADDING, MENU_DIVIDER_HEIGHT, MENU_GAP, MENU_ROW_HEIGHT,
 };
@@ -28,6 +30,12 @@ pub enum MessageMenuItem {
     /// Another person's message in a group / shared chat: answer them
     /// privately, with the quote and its chat name on the DM bubble (#1835).
     ReplyInDm,
+    /// Own sent text: open it in the composer to save an in-place edit
+    /// (iPhone `MessageMenu.edit` / `ChatView.canEditMessage`).
+    Edit,
+    /// The message shows a link preview card and the user may edit the message: drop the
+    /// card for everyone ([feedback link-embeds-mac-2026-10-27]).
+    RemovePreview,
     Delete,
 }
 
@@ -38,16 +46,21 @@ impl MessageMenuItem {
             MessageMenuItem::Reply => "Reply",
             MessageMenuItem::Forward => "Forward",
             MessageMenuItem::ReplyInDm => "Reply in DM",
+            MessageMenuItem::Edit => "Edit",
+            MessageMenuItem::RemovePreview => "Remove preview",
             MessageMenuItem::Delete => "Delete",
         }
     }
 
+    /// The row's SF Symbol — the iPhone's `MessageMenu.systemImage` names.
     pub fn glyph(self) -> &'static str {
         match self {
-            MessageMenuItem::Copy => "copy",
-            MessageMenuItem::Reply => "reply",
-            MessageMenuItem::Forward => "forward",
-            MessageMenuItem::ReplyInDm => "bubble",
+            MessageMenuItem::Copy => "doc.on.doc",
+            MessageMenuItem::Reply => "arrowshape.turn.up.left",
+            MessageMenuItem::Forward => "arrowshape.turn.up.right",
+            MessageMenuItem::ReplyInDm => "bubble.left",
+            MessageMenuItem::Edit => "pencil",
+            MessageMenuItem::RemovePreview => "link",
             MessageMenuItem::Delete => "trash",
         }
     }
@@ -58,23 +71,49 @@ impl MessageMenuItem {
 }
 
 /// The menu's items, in order. One list for every bubble: the set is the
-/// contract, not a per-row choice.
-pub const ITEMS: [MessageMenuItem; 5] = [
+/// contract, not a per-row choice (Edit / Delete / Reply in DM / Remove
+/// preview are gated per row via `items_for`).
+pub const ITEMS: [MessageMenuItem; 7] = [
     MessageMenuItem::Copy,
     MessageMenuItem::Reply,
     MessageMenuItem::Forward,
     MessageMenuItem::ReplyInDm,
+    MessageMenuItem::Edit,
+    MessageMenuItem::RemovePreview,
     MessageMenuItem::Delete,
 ];
 
+/// Own user text the menu may offer Edit for (iPhone `canEditMessage`).
+pub fn can_edit_message(me_id: &str, message: &Message) -> bool {
+    if message.role != Role::User {
+        return false;
+    }
+    let mine = message.sender == "user"
+        || message.sender.is_empty()
+        || message.sender == format!("user:{me_id}");
+    mine && !message.plain_text().trim().is_empty()
+}
+
 /// The items for one bubble: Copy, Reply and Forward always; Reply in DM only
 /// on another person's message (`can_dm`: a human who is not me — my own rows
-/// and an agent's have no peer to DM); Delete only when the relay would let
-/// this user delete it (`model::may_delete_message`).
-pub fn items_for(can_delete: bool, can_dm: bool) -> Vec<MessageMenuItem> {
+/// and an agent's have no peer to DM); Edit only on the user's own text;
+/// Delete only when the relay would let this user delete it
+/// (`model::may_delete_message`); Remove preview only on a message that
+/// shows a link card (`has_preview`) the user may delete.
+pub fn items_for(
+    can_delete: bool,
+    can_dm: bool,
+    can_edit: bool,
+    has_preview: bool,
+) -> Vec<MessageMenuItem> {
     ITEMS
         .into_iter()
-        .filter(|i| (can_delete || !i.danger()) && (can_dm || *i != MessageMenuItem::ReplyInDm))
+        .filter(|i| {
+            (can_delete || !i.danger())
+                && (can_dm || *i != MessageMenuItem::ReplyInDm)
+                && (can_edit || *i != MessageMenuItem::Edit)
+                && ((can_delete && has_preview) || *i != MessageMenuItem::RemovePreview)
+        })
         .collect()
 }
 
@@ -83,8 +122,14 @@ const DIVIDERS: usize = 1;
 
 /// The menu's size, from the same constants `glass::menu_card` /
 /// `menu_row` / `menu_divider` lay it out with.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn menu_size() -> Size<Pixels> {
-    let rows = ITEMS.len() as f32;
+    menu_size_for(ITEMS.len() - 1)
+}
+
+/// The size of a menu with `n` rows (the full set less the items a bubble is not offered).
+pub fn menu_size_for(n: usize) -> Size<Pixels> {
+    let rows = n as f32;
     let dividers = DIVIDERS as f32;
     let children = rows + dividers;
     let height = 2.0 * (MENU_CARD_PADDING + MENU_CARD_BORDER)
@@ -127,6 +172,7 @@ fn place_axis(anchor: f32, extent: f32, limit: f32) -> f32 {
 
 /// Rect of the menu as placed: `(origin, size)`, for the callers (and tests)
 /// that check it against the window.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn placed_rect(anchor: Point<Pixels>, viewport: Size<Pixels>) -> (Point<Pixels>, Size<Pixels>) {
     let size = menu_size();
     (place(anchor, size, viewport), size)
@@ -165,22 +211,28 @@ pub fn render(shell: &Shell, window: &Window, cx: &mut Context<Shell>) -> Option
             _ => false,
         }
     };
-    let can_dm = {
+    let (can_dm, can_edit, has_preview) = {
         let state = shell.state.read(cx);
-        let me = format!("user:{}", state.me_id());
-        state
+        let me_id = state.me_id();
+        let me = format!("user:{me_id}");
+        let message = state
             .messages_of(&chat_id)
             .iter()
-            .find(|m| m.id == message_id)
-            .is_some_and(|m| {
+            .find(|m| m.id == message_id);
+        (
+            message.is_some_and(|m| {
                 m.sender.starts_with("user:")
                     && m.sender != me
                     && m.sender_handle.as_deref().is_some_and(|h| !h.is_empty())
-            })
+            }),
+            message.is_some_and(|m| can_edit_message(&me_id, m)),
+            message.is_some_and(|m| crate::ui::transcript::link_preview_of(m).is_some()),
+        )
     };
-    let (origin, _) = placed_rect(at, window.viewport_size());
+    let items = items_for(can_delete, can_dm, can_edit, has_preview);
+    let origin = place(at, menu_size_for(items.len()), window.viewport_size());
     let mut body = div().flex().flex_col().gap(px(MENU_GAP));
-    for item in items_for(can_delete, can_dm) {
+    for item in items {
         if item.danger() {
             body = body.child(glass::menu_divider(&theme));
         }
@@ -238,6 +290,30 @@ fn run(
                 .state
                 .update(cx, |s, cx| s.reply_in_dm(chat_id, message_id, cx));
         }
+        MessageMenuItem::Edit => {
+            let text = shell
+                .state
+                .read(cx)
+                .messages_of(&chat_id)
+                .iter()
+                .find(|m| m.id == message_id)
+                .map(|m| m.plain_text())
+                .unwrap_or_default();
+            if text.trim().is_empty() {
+                return;
+            }
+            shell
+                .state
+                .update(cx, |s, cx| s.begin_edit(chat_id, message_id, cx));
+            shell.composer.update(cx, |c, cx| {
+                c.input.update(cx, |input, cx| input.set_text(text, cx));
+            });
+        }
+        MessageMenuItem::RemovePreview => {
+            shell
+                .state
+                .update(cx, |s, cx| s.remove_link_preview(chat_id, message_id, cx));
+        }
         MessageMenuItem::Delete => {
             // Deletes at once, for everyone (Jacob, feedback
             // remove-delete-confirms-2026-10-24: no "Delete message?" card). The
@@ -263,38 +339,66 @@ mod tests {
     }
 
     #[test]
-    fn items_are_exactly_copy_reply_forward_reply_in_dm_delete() {
+    fn items_are_exactly_copy_reply_forward_reply_in_dm_edit_remove_preview_delete() {
         let labels: Vec<&str> = ITEMS.iter().map(|i| i.label()).collect();
         assert_eq!(
             labels,
-            ["Copy", "Reply", "Forward", "Reply in DM", "Delete"]
+            [
+                "Copy",
+                "Reply",
+                "Forward",
+                "Reply in DM",
+                "Edit",
+                "Remove preview",
+                "Delete"
+            ]
         );
-        // Forward and Reply in DM sit above the divider, with the plain actions; Delete alone is red.
+        // Forward, Reply in DM, Edit and Remove preview sit above the divider; Delete alone is red.
         assert!(!MessageMenuItem::Forward.danger());
         assert!(!MessageMenuItem::ReplyInDm.danger());
+        assert!(!MessageMenuItem::Edit.danger());
+        assert!(!MessageMenuItem::RemovePreview.danger());
         // No emoji row: every label is plain ASCII text.
         assert!(ITEMS.iter().all(|i| i.label().is_ascii()));
     }
 
     #[test]
-    fn delete_and_reply_in_dm_are_offered_only_when_allowed() {
+    fn delete_reply_in_dm_edit_and_remove_preview_are_offered_only_when_allowed() {
         let labels = |v: Vec<MessageMenuItem>| v.iter().map(|i| i.label()).collect::<Vec<_>>();
         assert_eq!(
-            labels(items_for(true, true)),
+            labels(items_for(true, true, false, false)),
             ["Copy", "Reply", "Forward", "Reply in DM", "Delete"]
         );
         assert_eq!(
-            labels(items_for(false, true)),
+            labels(items_for(false, true, false, false)),
             ["Copy", "Reply", "Forward", "Reply in DM"]
         );
-        // My own row / an agent's: nobody to DM.
+        // My own row: Edit, no Reply in DM.
         assert_eq!(
-            labels(items_for(true, false)),
-            ["Copy", "Reply", "Forward", "Delete"]
+            labels(items_for(true, false, true, false)),
+            ["Copy", "Reply", "Forward", "Edit", "Delete"]
+        );
+        // An agent's: nobody to DM, nothing to edit.
+        assert_eq!(
+            labels(items_for(false, false, false, false)),
+            ["Copy", "Reply", "Forward"]
+        );
+        // A message with a link card the user may edit offers Remove preview above Delete;
+        // a card on someone else's message (no delete right) does not.
+        assert_eq!(
+            labels(items_for(true, false, true, true)),
+            [
+                "Copy",
+                "Reply",
+                "Forward",
+                "Edit",
+                "Remove preview",
+                "Delete"
+            ]
         );
         assert_eq!(
-            labels(items_for(false, false)),
-            ["Copy", "Reply", "Forward"]
+            labels(items_for(false, true, false, true)),
+            ["Copy", "Reply", "Forward", "Reply in DM"]
         );
     }
 

@@ -1,10 +1,10 @@
 import XCTest
 
-/// Horizontal gestures on every chat screen (#1831; Jacob's 2026-10-26 iMessage rule):
-/// a swipe from the left edge goes back one level, keyboard open or closed; a swipe
-/// right on a bubble away from the edge replies to it; the edge wins over the bubble;
-/// vertical scroll is untouched. Runs the fixture app (`ARBOS_FIXTURE=1`, Debug builds):
-/// no relay, deterministic screens.
+/// Back gestures on every chat screen (Jacob, 2026-10-28: the system's interactive edge pop,
+/// finger-tracking and cancellable, is the one owner of the edge; a swipe right anywhere
+/// else is an animated "back"; there is no swipe-to-reply — Reply stays on long-press and in
+/// the actions menu). Runs the fixture app (`ARBOS_FIXTURE=1`, Debug builds): no relay,
+/// deterministic screens.
 ///
 /// Screens are told apart by their back chevron: `chat-back:<chatId>` on a chat,
 /// `server-back:<serverId>` on a server's channel list, the `Agents` / `People` filter on Home.
@@ -175,27 +175,77 @@ final class BackSwipeUITests: XCTestCase {
         XCTAssertTrue(chatBack(app, "fx-comms-main").waitForExistence(timeout: settle), "back from a job tab is the agent's chat")
     }
 
-    // MARK: Bubble swipe → reply
+    // MARK: The edge pop is the system's: interactive and cancellable
 
-    /// Swipe right on a message, away from the edge: the composer opens with that
-    /// message's quote and the keyboard; the chat stays.
-    func testSwipeRightOnABubbleReplies() {
+    /// A short edge drag released short of halfway cancels: the chat stays, settles back
+    /// where it was, and the next edge swipe still pops. (Main's edge rule popped after
+    /// 40 pt whatever the release — a threshold, not a finger-tracking transition.)
+    func testAPartialEdgeSwipeReleasedCancelsCleanly() {
+        let app = launch(["ARBOS_OPEN_PROJECT": "fx-comms"])
+        let back = chatBack(app, "fx-comms-main")
+        XCTAssertTrue(back.waitForExistence(timeout: appear), "the Comms chat opened")
+        let restX = back.frame.minX
+        let from = app.coordinate(withNormalizedOffset: CGVector(dx: 0.0, dy: 0.45))
+        // 60 pt of a 393 pt screen: well under the halfway point; the hold kills the velocity.
+        from.press(forDuration: 0.05, thenDragTo: from.withOffset(CGVector(dx: 60, dy: 0)), withVelocity: .slow, thenHoldForDuration: 0.6)
+        sleep(1)
+        XCTAssertTrue(back.exists, "the chat did not go back")
+        XCTAssertEqual(back.frame.minX, restX, accuracy: 1, "the screen settled back where it was")
+        XCTAssertTrue(back.isHittable, "the chat is usable again")
+        XCTAssertFalse(app.descendants(matching: .any)["composer-reply-preview"].exists, "no reply started")
+        edgeSwipeBack(app)
+        assertGone(back)
+        assertHome(app)
+    }
+
+    /// An edge swipe while the transcript is still decelerating from a flick still pops.
+    func testEdgeSwipeWhileScrollingGoesBack() {
+        let app = launch(["ARBOS_OPEN_PEOPLE": "fx-group-launch", "ARBOS_FIXTURE_LONG_ROWS": "120"])
+        let back = chatBack(app, "fx-group-launch")
+        XCTAssertTrue(back.waitForExistence(timeout: appear), "the Launch week group opened")
+        let bubbles = app.descendants(matching: .any).matching(bubbleQuery)
+        XCTAssertTrue(bubbles.firstMatch.waitForExistence(timeout: settle), "the transcript shows bubbles")
+        let window = app.windows.firstMatch.frame
+        let mid = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6))
+        // A fast flick up: the scroll view decelerates for a second or more.
+        mid.press(forDuration: 0.02, thenDragTo: mid.withOffset(CGVector(dx: 0, dy: -window.height * 0.4)), withVelocity: .fast, thenHoldForDuration: 0)
+        edgeSwipeBack(app)
+        assertGone(back)
+        assertHome(app)
+    }
+
+    // MARK: A swipe right away from the edge is also back; nothing replies
+
+    /// Swipe right on a message bubble, away from the edge: the chat goes back (the
+    /// full-screen rule); no reply starts, the composer stays unfocused.
+    func testSwipeRightOnABubbleGoesBackAndStartsNoReply() {
         let app = launch(["ARBOS_OPEN_PROJECT": "fx-comms"])
         let back = chatBack(app, "fx-comms-main")
         XCTAssertTrue(back.waitForExistence(timeout: appear), "the Comms chat opened")
         let bubble = lastBubble(app)
         let start = bubble.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
-        let end = start.withOffset(CGVector(dx: 150, dy: 0))
-        start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.1)
-        let quote = app.descendants(matching: .any)["composer-reply-preview"]
-        XCTAssertTrue(quote.waitForExistence(timeout: settle), "the reply quote is in the composer")
-        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: settle), "the composer is focused")
-        XCTAssertTrue(back.exists, "the chat did not go back")
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 180, dy: 0)), withVelocity: .fast, thenHoldForDuration: 0.05)
+        assertGone(back)
+        XCTAssertFalse(app.descendants(matching: .any)["composer-reply-preview"].exists, "no reply started")
+        XCTAssertFalse(app.keyboards.firstMatch.exists, "the composer was not focused")
+        assertHome(app)
+    }
+
+    /// Reply is still reachable: long-press a bubble → the actions menu shows Reply.
+    func testLongPressStillOffersReply() {
+        let app = launch(["ARBOS_OPEN_PROJECT": "fx-comms"])
+        XCTAssertTrue(chatBack(app, "fx-comms-main").waitForExistence(timeout: appear), "the Comms chat opened")
+        let bubble = lastBubble(app)
+        bubble.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 0.9)
+        XCTAssertTrue(app.descendants(matching: .any)["message-actions-menu"].waitForExistence(timeout: settle), "the actions menu opened")
+        // The menu rows are buttons labelled by their item; the container carries the identifier.
+        let reply = app.buttons.matching(NSPredicate(format: "identifier == 'message-menu-reply' OR label == 'Reply'")).firstMatch
+        XCTAssertTrue(reply.waitForExistence(timeout: settle), "Reply is in the menu")
     }
 
     /// The edge zone is the edge pop's: a swipe from the edge at a bubble's height goes
     /// back and starts no reply.
-    func testEdgeSwipeOverABubbleGoesBackNotReply() {
+    func testEdgeSwipeOverABubbleGoesBack() {
         let app = launch(["ARBOS_OPEN_PROJECT": "fx-comms"])
         let back = chatBack(app, "fx-comms-main")
         XCTAssertTrue(back.waitForExistence(timeout: appear), "the Comms chat opened")
@@ -207,25 +257,45 @@ final class BackSwipeUITests: XCTestCase {
         assertHome(app)
     }
 
-    /// A vertical drag on a bubble is left to the scroll view: no reply, no keyboard, no
-    /// back. (Whether the transcript moved is not asserted here: XCUI's synthetic pans
-    /// do not scroll this SwiftUI ScrollView on the rig — real pans do, see the idb probe
-    /// shots on #1985 — and `BackSwipeTests` pins the axis rule.)
-    func testVerticalDragOnABubbleDoesNotReplyOrGoBack() {
+    /// A vertical drag on a bubble is left to the scroll view: no keyboard, no back.
+    func testVerticalDragOnABubbleDoesNotGoBack() {
         let app = launch(["ARBOS_OPEN_PEOPLE": "fx-group-launch", "ARBOS_FIXTURE_LONG_ROWS": "120"])
         let back = chatBack(app, "fx-group-launch")
         XCTAssertTrue(back.waitForExistence(timeout: appear), "the Launch week group opened")
         let bubbles = app.descendants(matching: .any).matching(bubbleQuery)
         XCTAssertTrue(bubbles.firstMatch.waitForExistence(timeout: settle), "the transcript shows bubbles")
         let window = app.windows.firstMatch.frame
-        // A bubble whose top is clear of the header and of the composer.
-        let onBubble = bubbles.allElementsBoundByIndex.first { $0.frame.minY > 140 && $0.frame.minY < window.maxY - 220 }
+        // A bubble in the lower half of the transcript, clear of the composer.
+        let onBubble = bubbles.allElementsBoundByIndex.last { $0.frame.minY > window.midY && $0.frame.maxY < window.maxY - 200 }
         XCTAssertNotNil(onBubble, "a bubble is on screen")
-        let start = onBubble!.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3))
-        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 6, dy: 300)), withVelocity: .slow, thenHoldForDuration: 0.1)
-        onBubble?.swipeDown()
+        let start = onBubble!.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 6, dy: -200)), withVelocity: .slow, thenHoldForDuration: 0.1)
+        sleep(1)
         XCTAssertFalse(app.descendants(matching: .any)["composer-reply-preview"].exists, "no reply started")
         XCTAssertFalse(app.keyboards.firstMatch.exists, "the composer was not focused")
         XCTAssertTrue(back.exists, "the chat did not go back")
+    }
+
+    // MARK: Frame timing of the pop
+
+    /// UIKit's navigation-transition signposts over the edge-swipe pop: duration, hitch time
+    /// ratio, frame rate. Each iteration relaunches outside the measured window so only the
+    /// pop is measured. Read the numbers in the xcodebuild log (`measured [...]`).
+    func testEdgeSwipeBackTransitionTiming() {
+        let options = XCTMeasureOptions()
+        options.iterationCount = 5
+        options.invocationOptions = [.manuallyStart, .manuallyStop]
+        measure(metrics: [XCTOSSignpostMetric.navigationTransitionMetric, XCTClockMetric()], options: options) {
+            let app = launch(["ARBOS_OPEN_PEOPLE": "fx-group-launch"])
+            let back = chatBack(app, "fx-group-launch")
+            XCTAssertTrue(back.waitForExistence(timeout: appear), "the Launch week group opened")
+            sleep(1)
+            startMeasuring()
+            edgeSwipeBack(app)
+            assertGone(back)
+            assertHome(app)
+            stopMeasuring()
+            app.terminate()
+        }
     }
 }

@@ -9,6 +9,8 @@
 //! machines are always on (Jacob, 2026-10-15), so their cost never gates inference, never
 //! consumes the grant, and never counts toward a user's daily cap.
 
+use std::collections::HashMap;
+
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -40,7 +42,8 @@ CREATE INDEX IF NOT EXISTS credit_ledger_user_at ON credit_ledger(user_id, at);
 CREATE INDEX IF NOT EXISTS credit_ledger_at ON credit_ledger(at);
 CREATE TABLE IF NOT EXISTS box_history (
   sandbox_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, snapshot TEXT, replaced_at INTEGER NOT NULL,
-  delete_after INTEGER NOT NULL, deleted_at INTEGER, row_json TEXT, archived_at INTEGER
+  delete_after INTEGER NOT NULL, deleted_at INTEGER, row_json TEXT, archived_at INTEGER,
+  partial INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS machine_meter (
   user_id TEXT PRIMARY KEY, last_tick_at INTEGER NOT NULL, last_state TEXT NOT NULL
@@ -62,6 +65,9 @@ pub fn migrate_accounts(c: &Connection) {
         "ALTER TABLE boxes ADD COLUMN held_stopped INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE box_history ADD COLUMN row_json TEXT",
         "ALTER TABLE box_history ADD COLUMN archived_at INTEGER",
+        // 1 = the new box of a rolled-back upgrade (half-carried /work): kept so the sweeper
+        // deletes it after the window, never re-adopted by a repair.
+        "ALTER TABLE box_history ADD COLUMN partial INTEGER NOT NULL DEFAULT 0",
         // Who may add this person to a people group: anyone | people_i_know | nobody.
         "ALTER TABLE users ADD COLUMN group_add TEXT NOT NULL DEFAULT 'anyone'",
         // Where `name` came from: `github` (seeded from the profile at first sign-in) or `user`
@@ -376,6 +382,7 @@ impl Db {
                 "secret_requests",
                 "user_keys",
                 "user_secrets_settings",
+                "user_pins",
             ] {
                 c.execute(
                     &format!("DELETE FROM {table} WHERE user_id = ?1"),
@@ -671,12 +678,27 @@ impl Db {
         })
     }
 
+    /// Every device row of a user, signed-out ones included (admin and debug views).
     pub fn devices_of_user(&self, user_id: &str) -> Result<Vec<serde_json::Value>> {
+        self.devices_of_user_filtered(user_id, true)
+    }
+
+    /// The user's signed-in devices only (`revoked_at IS NULL`) — what Settings → Devices shows.
+    pub fn live_devices_of_user(&self, user_id: &str) -> Result<Vec<serde_json::Value>> {
+        self.devices_of_user_filtered(user_id, false)
+    }
+
+    fn devices_of_user_filtered(
+        &self,
+        user_id: &str,
+        include_revoked: bool,
+    ) -> Result<Vec<serde_json::Value>> {
         self.with(|c| {
             let mut st = c.prepare(
-                "SELECT id, name, created_at, revoked_at, last_seen_at, kind FROM devices WHERE user_id = ?1 ORDER BY created_at",
+                "SELECT id, name, created_at, revoked_at, last_seen_at, kind FROM devices
+                 WHERE user_id = ?1 AND (?2 OR revoked_at IS NULL) ORDER BY created_at",
             )?;
-            let rows = st.query_map(params![user_id], |r| {
+            let rows = st.query_map(params![user_id, include_revoked], |r| {
                 Ok(serde_json::json!({
                     "id": r.get::<_, String>(0)?, "name": r.get::<_, String>(1)?, "created_at": r.get::<_, i64>(2)?,
                     "revoked_at": r.get::<_, Option<i64>>(3)?, "last_seen_at": r.get::<_, Option<i64>>(4)?,
@@ -685,6 +707,103 @@ impl Db {
             })?;
             rows.collect()
         })
+    }
+
+    /// Revoke every live GitHub device of this user that shares `name`, except
+    /// `keep_id` when set. Used on re-login and when collapsing reinstalls so
+    /// Settings → Devices stays one row per machine name. Returns the revoked ids.
+    pub fn revoke_named_github_devices(
+        &self,
+        user_id: &str,
+        name: &str,
+        keep_id: Option<&str>,
+    ) -> Result<Vec<String>> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Ok(Vec::new());
+        }
+        let live = self.live_devices_of_user(user_id)?;
+        let mut revoked = Vec::new();
+        for d in live {
+            let kind = d.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+            if kind != "github" {
+                continue;
+            }
+            let id = match d.get("id").and_then(|v| v.as_str()) {
+                Some(id) => id,
+                None => continue,
+            };
+            if keep_id == Some(id) {
+                continue;
+            }
+            let dname = d.get("name").and_then(|v| v.as_str()).unwrap_or("").trim();
+            if dname != name {
+                continue;
+            }
+            if self.revoke_device_fully(id)? {
+                revoked.push(id.to_owned());
+            }
+        }
+        Ok(revoked)
+    }
+
+    /// Collapse same-name live GitHub sessions: keep `current_id` when it is in
+    /// the group, otherwise the most recently seen (else newest created); revoke
+    /// the rest. Reinstalls and re-logins used to leave a row per attempt
+    /// (Affinity, 2026-10-28: 3 stale iPhone rows beside the real one).
+    pub fn collapse_github_device_duplicates(
+        &self,
+        user_id: &str,
+        current_id: &str,
+    ) -> Result<Vec<String>> {
+        let live = self.live_devices_of_user(user_id)?;
+        let mut by_name: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+        for d in live {
+            if d.get("kind").and_then(|v| v.as_str()) != Some("github") {
+                continue;
+            }
+            let name = d
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_owned();
+            if name.is_empty() {
+                continue;
+            }
+            by_name.entry(name).or_default().push(d);
+        }
+        let mut revoked = Vec::new();
+        for group in by_name.values() {
+            if group.len() < 2 {
+                continue;
+            }
+            let keep = group
+                .iter()
+                .find(|d| d.get("id").and_then(|v| v.as_str()) == Some(current_id))
+                .or_else(|| {
+                    group.iter().max_by_key(|d| {
+                        d.get("last_seen_at")
+                            .and_then(|v| v.as_i64())
+                            .or_else(|| d.get("created_at").and_then(|v| v.as_i64()))
+                            .unwrap_or(0)
+                    })
+                });
+            let keep_id = keep.and_then(|d| d.get("id").and_then(|v| v.as_str()));
+            for d in group {
+                let id = match d.get("id").and_then(|v| v.as_str()) {
+                    Some(id) => id,
+                    None => continue,
+                };
+                if Some(id) == keep_id {
+                    continue;
+                }
+                if self.revoke_device_fully(id)? {
+                    revoked.push(id.to_owned());
+                }
+            }
+        }
+        Ok(revoked)
     }
 
     /// Device ids of a user, most recently seen first — revoked ones included, since a row they
@@ -1033,6 +1152,37 @@ impl Db {
         })
     }
 
+    /// Record the new sandbox of a rolled-back upgrade so the history sweeper deletes it after
+    /// `delete_after` (retrying until Daytona agrees) — never left running unrecorded. It holds a
+    /// half-carried `/work`, so [`Db::latest_box_history`] never offers it for repair.
+    pub fn insert_partial_box_history(
+        &self,
+        row: &crate::db::Sandbox,
+        delete_after: i64,
+    ) -> Result<()> {
+        let sandbox_id = row.sandbox_id.clone().unwrap_or_default();
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO box_history(sandbox_id, user_id, snapshot, replaced_at, delete_after, row_json, partial) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)
+                 ON CONFLICT(sandbox_id) DO UPDATE SET delete_after = excluded.delete_after, deleted_at = NULL, row_json = excluded.row_json, partial = 1",
+                params![sandbox_id, row.user_id, row.snapshot, now_ms(), delete_after, serde_json::to_string(row).unwrap_or_default()],
+            )
+            .map(|_| ())
+        })
+    }
+
+    #[cfg(test)]
+    pub fn box_history_entry(&self, sandbox_id: &str) -> Result<Option<(i64, bool)>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT delete_after, partial FROM box_history WHERE sandbox_id = ?1 AND deleted_at IS NULL",
+                params![sandbox_id],
+                |r| Ok((r.get(0)?, r.get::<_, i64>(1)? == 1)),
+            )
+            .optional()
+        })
+    }
+
     #[cfg(test)]
     pub fn insert_box_history_at(
         &self,
@@ -1064,7 +1214,7 @@ impl Db {
     pub fn latest_box_history(&self, user_id: &str) -> Result<Option<RetainedBox>> {
         self.with(|c| {
             c.query_row(
-                "SELECT sandbox_id, snapshot, row_json FROM box_history WHERE user_id = ?1 AND deleted_at IS NULL ORDER BY replaced_at DESC LIMIT 1",
+                "SELECT sandbox_id, snapshot, row_json FROM box_history WHERE user_id = ?1 AND deleted_at IS NULL AND partial = 0 ORDER BY replaced_at DESC LIMIT 1",
                 params![user_id],
                 |r| {
                     let row: Option<String> = r.get(2)?;
@@ -1079,11 +1229,13 @@ impl Db {
         })
     }
 
-    /// `(user_id, sandbox_id)` of old sandboxes past their fallback window.
+    /// `(user_id, sandbox_id)` of old sandboxes past their fallback window. A sandbox a box row
+    /// names again (an upgrade cut short after the old box went into history) is never due.
     pub fn box_history_due(&self) -> Result<Vec<(String, String)>> {
         self.with(|c| {
             let mut st = c.prepare(
-                "SELECT user_id, sandbox_id FROM box_history WHERE deleted_at IS NULL AND delete_after <= ?1",
+                "SELECT user_id, sandbox_id FROM box_history WHERE deleted_at IS NULL AND delete_after <= ?1
+                   AND sandbox_id NOT IN (SELECT sandbox_id FROM boxes WHERE sandbox_id IS NOT NULL)",
             )?;
             let rows = st.query_map(params![now_ms()], |r| Ok((r.get(0)?, r.get(1)?)))?;
             rows.collect()
@@ -1106,6 +1258,7 @@ impl Db {
                           ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY replaced_at DESC, sandbox_id DESC) AS rn
                    FROM box_history WHERE deleted_at IS NULL AND archived_at IS NULL
                      AND (?1 IS NULL OR user_id = ?1)
+                     AND sandbox_id NOT IN (SELECT sandbox_id FROM boxes WHERE sandbox_id IS NOT NULL)
                  ) WHERE rn > ?2 ORDER BY user_id, rn",
             )?;
             let rows = st.query_map(params![user_id, keep as i64], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -1270,6 +1423,117 @@ mod address_name_tests {
         assert_eq!(name, None);
         assert_eq!(former, vec!["Const".to_owned(), "Jacob".to_owned()]);
         assert!(db.user_address("gh_nobody").unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod device_dedupe_tests {
+    //! Settings → Devices must collapse reinstall/re-login duplicates of the same
+    //! GitHub device name (Affinity, 2026-10-28). Live-only listing is covered by
+    //! `signin::devices_list_tests`.
+
+    use super::GithubIdentity;
+    use crate::db::Db;
+    use arbos_core::ids::ulid;
+
+    fn open() -> (std::path::PathBuf, Db) {
+        let dir = std::env::temp_dir().join(format!(
+            "arbos-devices-dedupe-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let db = Db::open(&dir.join("relay.db")).expect("db");
+        (dir, db)
+    }
+
+    fn user(db: &Db, github_id: i64) -> String {
+        db.upsert_github_user(
+            &GithubIdentity {
+                id: github_id,
+                login: format!("u{github_id}"),
+                avatar_url: None,
+                name: None,
+            },
+            20.0,
+        )
+        .unwrap()
+        .0
+        .id
+    }
+
+    #[test]
+    fn reinstall_revokes_the_same_named_github_session() {
+        let (dir, db) = open();
+        let alice = user(&db, 703);
+        let old = ulid();
+        let phone = ulid();
+        db.insert_device(&old, "iPhone", &ulid(), &alice, "github")
+            .unwrap();
+        db.insert_device(&phone, "Other Phone", &ulid(), &alice, "github")
+            .unwrap();
+        let revoked = db
+            .revoke_named_github_devices(&alice, "iPhone", None)
+            .unwrap();
+        assert_eq!(revoked, vec![old.clone()]);
+        assert!(db.device_status(&old).unwrap().unwrap().1);
+        assert!(!db.device_status(&phone).unwrap().unwrap().1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn collapse_keeps_current_or_most_recent_per_name() {
+        let (dir, db) = open();
+        let alice = user(&db, 704);
+        let stale = ulid();
+        let newer = ulid();
+        let other = ulid();
+        db.insert_device(&stale, "Mac (Mac)", &ulid(), &alice, "github")
+            .unwrap();
+        db.insert_device(&newer, "Mac (Mac)", &ulid(), &alice, "github")
+            .unwrap();
+        db.insert_device(&other, "iPhone", &ulid(), &alice, "github")
+            .unwrap();
+        db.touch_device(&newer).unwrap();
+
+        let revoked = db
+            .collapse_github_device_duplicates(&alice, &other)
+            .unwrap();
+        assert_eq!(revoked, vec![stale.clone()]);
+        let live = db.live_devices_of_user(&alice).unwrap();
+        let ids: Vec<&str> = live.iter().filter_map(|d| d["id"].as_str()).collect();
+        assert!(ids.contains(&newer.as_str()));
+        assert!(ids.contains(&other.as_str()));
+        assert!(!ids.contains(&stale.as_str()));
+
+        // Current wins even when another same-name row was seen more recently.
+        let again = ulid();
+        db.insert_device(&again, "iPhone", &ulid(), &alice, "github")
+            .unwrap();
+        db.touch_device(&again).unwrap();
+        let revoked = db
+            .collapse_github_device_duplicates(&alice, &other)
+            .unwrap();
+        assert_eq!(revoked, vec![again]);
+        assert!(!db.device_status(&other).unwrap().unwrap().1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn readers_are_not_collapsed_with_github_sign_ins() {
+        let (dir, db) = open();
+        let alice = user(&db, 705);
+        let gh = ulid();
+        let reader = ulid();
+        db.insert_device(&gh, "GrokBot-Arbos", &ulid(), &alice, "github")
+            .unwrap();
+        db.insert_device(&reader, "GrokBot-Arbos", &ulid(), &alice, "reader")
+            .unwrap();
+        let revoked = db.collapse_github_device_duplicates(&alice, &gh).unwrap();
+        assert!(revoked.is_empty());
+        assert_eq!(db.live_devices_of_user(&alice).unwrap().len(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

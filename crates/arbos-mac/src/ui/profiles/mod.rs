@@ -29,8 +29,11 @@ use gpui::{
 use crate::app::{AppState, ProfilePage};
 use crate::model::{now_ms, Attachment, AttachmentKind, Chat, Id, Message, Part};
 use crate::ui::glass;
-use crate::ui::icons::icon;
+use crate::ui::highlight;
+use crate::ui::identity;
+use crate::ui::link_tile;
 use crate::ui::mention;
+use crate::ui::sf_symbols;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, CONTROL_GAP, CONTROL_GLYPH, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
@@ -109,7 +112,7 @@ pub(super) fn pushed_frame(
             cx,
         );
     }
-    let back = glass::control_disc("profile-back", "chevron-left", CONTROL_GLYPH, theme)
+    let back = glass::control_disc("profile-back", "chevron.left", CONTROL_GLYPH, theme)
         .debug_selector(|| "profile-back".into())
         .on_click(cx.listener(|this, _, _, cx| this.back_profile(cx)));
     pane_frame(
@@ -146,9 +149,14 @@ pub(crate) fn top_bar() -> Div {
 /// The share disc of a page that has something to share (an agent, a group:
 /// the invite sheet). Left of the close disc, Grok's order.
 pub(crate) fn share_disc(theme: &Theme, on_click: HeroClick) -> Stateful<Div> {
-    glass::control_disc("profile-share", "share", glass::PANE_SHARE_GLYPH, theme)
-        .debug_selector(|| "profile-share".into())
-        .on_click(move |e, w, cx| on_click(e, w, cx))
+    glass::control_disc(
+        "profile-share",
+        "square.and.arrow.up",
+        glass::PANE_SHARE_GLYPH,
+        theme,
+    )
+    .debug_selector(|| "profile-share".into())
+    .on_click(move |e, w, cx| on_click(e, w, cx))
 }
 
 /// The close disc: `×` at [`glass::PANE_CLOSE_GLYPH`].
@@ -283,9 +291,7 @@ pub(super) fn hero(
         .child(status.to_string());
     let subtitle: AnyElement = match (status_element, status_click) {
         (Some(el), _) => el,
-        (None, Some(f)) => subtitle
-            .cursor_text()
-            .hover(|s| s.bg(theme.field))
+        (None, Some(f)) => highlight::button(subtitle.cursor_text(), theme)
             .on_click(move |e, w, cx| f(e, w, cx))
             .into_any_element(),
         (None, None) => subtitle.into_any_element(),
@@ -387,7 +393,7 @@ pub(super) fn hero_picture(
                     .bg(Theme::with_alpha(gpui::black(), 0.45))
                     .opacity(0.0)
                     .group_hover("hero-picture", |s| s.opacity(1.0))
-                    .child(icon("pencil", 30.0, gpui::white())),
+                    .child(sf_symbols::glyph("pencil", 30.0, gpui::white())),
             )
         })
         .when_some(on_click, |el, f| el.on_click(move |e, w, cx| f(e, w, cx)))
@@ -419,7 +425,7 @@ pub(super) fn editable_name(
     if editing {
         return field
             .w(px(SHEET_WIDTH - 64.0))
-            .bg(theme.field)
+            .bg(theme.field_fill())
             .border_color(theme.primary)
             .child(input.clone());
     }
@@ -428,10 +434,10 @@ pub(super) fn editable_name(
         .max_w(px(SHEET_WIDTH - 64.0))
         .border_color(gpui::transparent_black())
         .when(editable, |el| {
-            el.cursor_text()
-                .hover(|s| s.bg(theme.field).border_color(theme.field_border))
+            let rim = theme.field_border;
+            highlight::button_with(el.cursor_text(), theme, move |s| s.border_color(rim))
         })
-        .child(div().truncate().child(name.to_string()))
+        .child(identity::name(name.to_string(), TEXT_BODY + 6.0))
         .when_some(on_click, |el, f| el.on_click(move |e, w, cx| f(e, w, cx)))
 }
 
@@ -476,14 +482,9 @@ pub(super) fn tab_bar(
                 } else {
                     FontWeight::NORMAL
                 })
-                .text_color(if on { theme.text } else { theme.text_muted })
-                .bg(if on {
-                    theme.surface_2
-                } else {
-                    gpui::transparent_black()
-                })
+                .text_color(if on { theme.text } else { theme.label_muted() })
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
+                .map(|el| highlight::segment(el, on, theme.control_fill(), theme))
                 .child(name.to_string())
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.state.update(cx, |s, cx| s.set_profile_tab(i, cx));
@@ -626,7 +627,9 @@ pub(super) fn collect(state: &AppState, chats: &[&Chat]) -> Content {
                             part_id: id.clone(),
                         };
                         match attachment.kind() {
-                            AttachmentKind::Image | AttachmentKind::Video => out.media.push(found),
+                            AttachmentKind::Image
+                            | AttachmentKind::Video
+                            | AttachmentKind::Sticker => out.media.push(found),
                             AttachmentKind::Audio => out.voice.push(found),
                             _ => out.files.push(found),
                         }
@@ -711,30 +714,31 @@ pub(super) fn when_text(at: u64) -> String {
     }
 }
 
-/// Host for a link row (no scheme, path, or leading `www.`).
-fn link_host(url: &str) -> String {
-    url.trim_start_matches("https://")
+/// Host for a link row, shown as the row's title (no scheme, path, or leading `www.`).
+pub(crate) fn link_host(url: &str) -> String {
+    link_icon_host(url).trim_start_matches("www.").to_string()
+}
+
+/// The host a link's icon is keyed by at the relay (`GET /link-icon?domain=`): lower-case,
+/// no scheme, path or port, `www.` kept (it is a different site's icon in theory, and the
+/// bubbles' inline icons key on it the same way).
+pub(crate) fn link_icon_host(url: &str) -> String {
+    url.trim()
+        .trim_start_matches("https://")
         .trim_start_matches("http://")
-        .split('/')
+        .split(['/', '?', '#'])
         .next()
         .unwrap_or("")
-        .trim_start_matches("www.")
-        .to_string()
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
 }
 
-/// The site's own favicon — fetched through the avatar pipeline (ICO/PNG/JPEG).
-fn favicon_url(host: &str) -> Option<String> {
-    if host.is_empty()
-        || !host
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':'))
-    {
-        return None;
-    }
-    Some(format!("https://{host}/favicon.ico"))
-}
-
-/// Links tab: the site's favicon when we have it, else a letter tile; URL; who shared it.
+/// Links tab: the link tile (the bundled brand mark for a known host, the relay's icon for
+/// the rest, the host's letter meanwhile — [`link_tile`]); the host; URL; who shared it.
+/// Before [feedback link-icons-mac-tile-2026-10-27] this stretched `https://<host>/favicon.ico`
+/// — a 16 px picture — over the 36 pt tile.
 pub(super) fn link_list(
     items: &[Link],
     shell: &Shell,
@@ -746,49 +750,23 @@ pub(super) fn link_list(
     }
     let wants: Vec<String> = items
         .iter()
-        .filter_map(|l| favicon_url(&link_host(&l.url)))
+        .filter(|l| link_tile::Brand::for_url(&l.url).is_none())
+        .map(|l| link_icon_host(&l.url))
         .collect();
     shell.state.update(cx, |s, _| {
-        for url in wants {
-            s.want_avatar(url);
+        for host in wants {
+            s.want_link_icon(host);
         }
     });
     let state = shell.state.read(cx);
     let mut list = card(theme);
     for (i, l) in items.iter().enumerate() {
         let host = link_host(&l.url);
-        let letter = host
-            .chars()
-            .next()
-            .map(|c| c.to_uppercase().to_string())
-            .unwrap_or_else(|| "#".into());
-        let favicon = favicon_url(&host).and_then(|u| state.avatar(&u));
-        let leading = match favicon {
-            Some(img) => div()
-                .size(px(kit::AVATAR))
-                .rounded(px(10.0))
-                .overflow_hidden()
-                .bg(theme.surface_2)
-                .child(
-                    gpui::img(crate::ui::picture_fit::fit(&img, kit::AVATAR))
-                        .size(px(kit::AVATAR))
-                        .rounded(px(10.0))
-                        .object_fit(gpui::ObjectFit::Cover),
-                )
-                .into_any_element(),
-            None => div()
-                .size(px(kit::AVATAR))
-                .rounded(px(10.0))
-                .bg(crate::ui::groups::sender_color(&host, theme))
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(TEXT_BODY + 2.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.text)
-                .child(letter)
-                .into_any_element(),
-        };
+        let icon_host = link_icon_host(&l.url);
+        let icon = link_tile::icon_for(&l.url, &host, state.link_icon(&icon_host));
+        let leading = link_tile::tile(icon, kit::AVATAR, theme)
+            .debug_selector(move || format!("profile-link-tile-{i}"))
+            .into_any_element();
         let url = l.url.clone();
         list = list.child(
             list_row(
@@ -809,7 +787,7 @@ pub(super) fn link_list(
                 theme,
             )
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .group(kit::HOT)
             .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url))),
         );
     }

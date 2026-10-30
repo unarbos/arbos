@@ -1,36 +1,34 @@
 {
-  "id": "g8-respond-gate-everyone",
-  "lane": "a",
-  "category": "group",
-  "title": "'everyone, …' in a people group: both agents answer once; a remark after that is silence",
-  "turns": [
-    {
-      "prompt": "everyone, in one line: what is 6 × 7?",
-      "chat": "dm",
-      "reply_regex": "42",
-      "reply_from": "lane-a",
-      "timeout_s": 200,
-      "rubric": {
-        "criteria": "Both agents (lane-a and lane-b) answered once each with 42 in one line; neither answered twice or for the other.",
-        "min": 3
-      }
-    },
-    {
-      "prompt": "task is done",
-      "chat": "dm",
-      "expect_no_reply_s": 45,
-      "timeout_s": 60
-    }
-  ],
-  "setup_actions": [
-    {
-      "kind": "people_group",
-      "peer_handle": "lt-peer",
-      "with": [
-        "lane-b"
-      ],
-      "title": "eval respond gate everyone"
-    }
-  ],
-  "regression": "the judge's `all agents` verdict (everyone replies) and silence on the remark that follows ('task is done' woke Affine on 2026-10-27)."
+ "id": "g8-respond-gate-everyone",
+ "lane": "a",
+ "category": "group",
+ "title": "'everyone, …' in a people group: both agents answer once; a remark after that is silence",
+ "turns": [
+  {
+   "prompt": "everyone, in one line: what is 6 × 7?",
+   "chat": "dm",
+   "reply_regex": "42",
+   "reply_from": "lane-a",
+   "timeout_s": 200,
+   "also_reply_from": "lane-b"
+  },
+  {
+   "prompt": "task is done",
+   "chat": "dm",
+   "expect_no_reply_s": 45,
+   "timeout_s": 60
+  }
+ ],
+ "setup_actions": [
+  {
+   "kind": "people_group",
+   "peer_handle": "lt-peer",
+   "with": [
+    "lane-b"
+   ],
+   "title": "eval respond gate everyone"
+  }
+ ],
+ "regression": "the judge's `all agents` verdict (everyone replies) and silence on the remark that follows ('task is done' woke Affine on 2026-10-27).",
+ "notes": "Graded programmatically: reply_from lane-a + also_reply_from lane-b, 42 in the text; the judge read the joined two-line text as repetition/format faults."
 }

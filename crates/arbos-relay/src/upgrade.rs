@@ -12,12 +12,15 @@
 //!             deadline and retries); a failure here revives the old box in place;
 //!   stop    — hibernate the old sandbox and record it in `box_history` (kept 7 days as fallback; the 2
 //!             newest per user stay unarchived, older retained ones are Daytona-archived at once);
-//!   create  — a fresh box from the target snapshot (new tokens; the `boxes` row is replaced);
+//!   create  — a fresh box from the target snapshot, staged: new tokens, the `boxes` row still
+//!             names the source;
 //!   unpack  — stop the new agentd, check room (bytes and inodes), upload / verify / extract part by
 //!             part, count the tree against the plan, reset the per-workspace owner markers;
-//!   start   — bounce the sandbox so the entrypoint starts agentd on the carried `/work`.
-//! Progress is in `GET /machine` (`upgrade.phase`, e.g. `pack 3/16`); failures leave the old box as
-//! the user's box again when the new one was never created, else the new box with whatever was unpacked.
+//!   start   — the swap: the row now names the new box, which is bounced so the entrypoint starts
+//!             agentd on the carried `/work` and must say hello.
+//! Progress is in `GET /machine` (`upgrade.phase`, e.g. `pack 3/16`). Any failure after pack rolls
+//! back (see [`rollback`]): the row is back on the source first, then the new box is deleted when it
+//! holds nothing of `/work`, else kept stopped in `box_history` for the sweeper.
 
 use std::time::{Duration, Instant};
 
@@ -115,6 +118,21 @@ async fn record_refusal(state: &AppState, user_id: &str, reason: &str, work_mib:
     );
 }
 
+/// A planned restart is under way (`/admin/restart`, SIGTERM): no new run may start, or the
+/// restart would cut it short with the old box stopped and the new one half made (#2262). Called
+/// under the `upgrading` lock, which the restart holds while it checks for runs in flight.
+fn refuse_while_restarting(state: &AppState) -> Result<()> {
+    if state.restart.box_work_frozen() {
+        return Err(anyhow!(
+            "{RESTARTING_PHRASE}; the box was not touched, try again after the restart"
+        ));
+    }
+    Ok(())
+}
+
+/// Words the deploy worker can match in a refused upgrade.
+pub const RESTARTING_PHRASE: &str = "the relay is restarting";
+
 /// What `run` ended with.
 #[derive(Debug)]
 enum Outcome {
@@ -158,6 +176,7 @@ pub async fn start(state: &AppState, user_id: &str, force: bool) -> Result<bool>
         if running.contains_key(user_id) {
             return Ok(false);
         }
+        refuse_while_restarting(state)?;
         running.insert(
             user_id.to_owned(),
             UpgradeStatus {
@@ -274,6 +293,7 @@ async fn start_gvisor(
         if running.contains_key(user_id) {
             return Ok(false);
         }
+        refuse_while_restarting(state)?;
         running.insert(
             user_id.to_owned(),
             UpgradeStatus {
@@ -407,14 +427,17 @@ async fn pack(
     })
 }
 
-/// Put the carried `/work` onto a freshly created box and bounce it so agentd boots on it.
-async fn unpack_and_start(
+/// Put the carried `/work` onto the staged new box. The user's row still names the source.
+/// `holds_data` turns true before the first byte of `/work` is uploaded: from then on the new box
+/// may hold user data and rollback keeps it instead of deleting it.
+async fn unpack(
     state: &AppState,
     dt: &crate::daytona::Daytona,
     user_id: &str,
     new_id: &str,
     packed: &Packed,
     cfg: &CarryConfig,
+    holds_data: &mut bool,
 ) -> Result<()> {
     let tb = dt.toolbox(new_id).await;
     let _ = tb
@@ -434,6 +457,7 @@ async fn unpack_and_start(
     )
     .map_err(|m| anyhow!("{m}"))?;
     let n = packed.parts.len();
+    *holds_data = true;
     carry::unpack_parts(&tb, &packed.parts, packed.expected, cfg, |k, _| {
         let (state, user) = (state.clone(), user_id.to_owned());
         tokio::spawn(async move { set_phase(&state, &user, &format!("unpack {k}/{n}")).await });
@@ -451,12 +475,27 @@ async fn unpack_and_start(
             owners.get("result").and_then(Value::as_str).unwrap_or("")
         ));
     }
+    Ok(())
+}
+
+/// The swap: the carried new box becomes the user's row, then it is bounced so the entrypoint
+/// starts agentd on the carried `/work`, and must say hello.
+async fn swap_and_start(
+    state: &AppState,
+    dt: &crate::daytona::Daytona,
+    user_id: &str,
+    new: &crate::db::Sandbox,
+    new_id: &str,
+) -> Result<()> {
     set_phase(state, user_id, "start").await;
     dt.stop(new_id, true).await?;
     dt.wait_for(new_id, Duration::from_secs(120), |s| {
         s.state == SandboxState::Stopped
     })
     .await?;
+    let mut row = new.clone();
+    row.daytona_state = Some("stopped".into());
+    state.db.upsert_box(&row)?;
     state.set_box_state(user_id, BoxState::Asleep, None).await;
     boxes::start_box(state, user_id).await?;
     // The new box must say hello; otherwise the upgrade did not work.
@@ -473,32 +512,113 @@ async fn unpack_and_start(
     }
 }
 
-/// Undo a failed upgrade: delete the half-made new sandbox (if any), put the old row back, start
-/// the old sandbox again, forget the history entry. The user ends where they began.
-async fn rollback(
+/// The new sandbox of a failed run, as far as it got.
+pub(crate) struct Staged<'a> {
+    pub(crate) row: &'a crate::db::Sandbox,
+    /// Part of `/work` was uploaded to it, or the row named it: it is kept (stopped, recorded for
+    /// the sweeper), never deleted on the spot.
+    pub(crate) keep: bool,
+    /// The swap wrote it into the user's row.
+    pub(crate) swapped: bool,
+}
+
+/// Write the row the user had before the run, verify it landed, retry a few times. Returns
+/// whether the row is back.
+async fn put_row_back(state: &AppState, user_id: &str, prev: Option<&crate::db::Sandbox>) -> bool {
+    let want = prev.and_then(|p| p.sandbox_id.clone());
+    for attempt in 0..5u32 {
+        let wrote = match prev {
+            Some(p) if p.sandbox_id.is_some() => state.db.upsert_box(p),
+            Some(p) => state.db.upsert_box_clearing_sandbox(p),
+            None => state.db.delete_box_row(user_id).map(|_| ()),
+        };
+        let now = state
+            .db
+            .user_box(user_id)
+            .map(|r| r.and_then(|r| r.sandbox_id));
+        match (wrote, now) {
+            (Ok(()), Ok(now)) if now == want => return true,
+            (w, n) => tracing::warn!(
+                user = %user_id, attempt, write = ?w.err(), row_sandbox = ?n.ok().flatten(), want = ?want,
+                "rollback: the box row is not back on the source yet"
+            ),
+        }
+        tokio::time::sleep(Duration::from_millis(200 << attempt)).await;
+    }
+    false
+}
+
+/// Undo a failed run. Order matters: the row goes back first, cleanup comes after, so no failure
+/// in the cleanup can leave the source without a row.
+///   1. Upgrade: the row is put back on the source (verified, retried) and the source leaves
+///      `box_history`. If the row cannot be written, the source stays in `box_history` (findable,
+///      re-adoptable by repair). Repair: a row the swap wrote is put back as it was.
+///   2. The new sandbox: deleted only when it never was the row's sandbox and nothing of `/work`
+///      was uploaded to it; otherwise stopped and recorded as a partial history entry that the
+///      sweeper deletes after the fallback window. A failed delete is recorded the same way, due now.
+///   3. Upgrade: the source is started again.
+pub(crate) async fn rollback(
     state: &AppState,
     dt: &crate::daytona::Daytona,
     user_id: &str,
-    old: &crate::db::Sandbox,
-    new_sandbox: Option<&str>,
+    source: &Source,
+    prev_row: Option<&crate::db::Sandbox>,
+    staged: Option<Staged<'_>>,
 ) {
+    let new_sandbox = staged.as_ref().and_then(|s| s.row.sandbox_id.clone());
     tracing::warn!(user = %user_id, new_sandbox, "upgrade rolled back");
-    if let Some(id) = new_sandbox {
-        let _ = dt.stop(id, true).await;
-        let _ = dt.delete(id).await;
+    match source {
+        Source::CurrentBox => {
+            let restored = prev_row.map(|old| {
+                let mut r = old.clone();
+                r.daytona_state = Some("stopped".into());
+                r
+            });
+            if restored.is_none() {
+                tracing::error!(user = %user_id, "rollback has no source row to put back");
+            } else if put_row_back(state, user_id, restored.as_ref()).await {
+                if let Some(old_id) = prev_row.and_then(|o| o.sandbox_id.as_deref()) {
+                    let _ = state.db.remove_box_history(old_id);
+                }
+            } else {
+                tracing::error!(user = %user_id, source = ?prev_row.and_then(|o| o.sandbox_id.clone()), "rollback could not put the box row back on the source; the source stays in box_history for repair");
+            }
+        }
+        Source::History { .. } => {
+            if staged.as_ref().is_some_and(|s| s.swapped)
+                && !put_row_back(state, user_id, prev_row).await
+            {
+                tracing::error!(user = %user_id, "repair rollback could not put the box row back");
+            }
+        }
     }
-    let mut restored = old.clone();
-    restored.daytona_state = Some("stopped".into());
-    let _ = state.db.upsert_box(&restored);
-    let _ = state.db.set_box_held(user_id, false);
-    if let Some(old_id) = &old.sandbox_id {
-        let _ = state.db.remove_box_history(old_id);
+
+    if let Some(s) = &staged {
+        if s.keep || s.swapped {
+            if let Some(id) = s.row.sandbox_id.as_deref() {
+                if let Err(e) = dt.stop(id, true).await {
+                    tracing::warn!(user = %user_id, sandbox = %id, error = %e, "rollback: stop of the new box failed; recorded for the sweeper");
+                }
+            }
+            if let Err(e) = state
+                .db
+                .insert_partial_box_history(s.row, now_ms() + KEEP_OLD_SANDBOX_MS)
+            {
+                tracing::error!(user = %user_id, sandbox = ?s.row.sandbox_id, error = %e, "rollback could not record the new box in box_history");
+            }
+        } else {
+            boxes::discard_empty_staged(state, dt, s.row).await;
+        }
     }
-    state
-        .set_box_state(user_id, BoxState::Asleep, Some("upgrade rolled back"))
-        .await;
-    if let Err(e) = boxes::start_box(state, user_id).await {
-        tracing::error!(user = %user_id, error = %e, "restart of the old box after rollback failed");
+
+    if matches!(source, Source::CurrentBox) {
+        let _ = state.db.set_box_held(user_id, false);
+        state
+            .set_box_state(user_id, BoxState::Asleep, Some("upgrade rolled back"))
+            .await;
+        if let Err(e) = boxes::start_box(state, user_id).await {
+            tracing::error!(user = %user_id, error = %e, "restart of the old box after rollback failed");
+        }
     }
 }
 
@@ -552,6 +672,18 @@ async fn run(state: &AppState, user_id: &str, target: &str, source: Source) -> R
         }
     }
 
+    // One carry at a time on the toolbox link (#2254): a second carry halves the throughput for
+    // both and every piece times out. Waiting here keeps the box running; nothing is stopped yet.
+    let permits = carry::carry_permits(&cfg);
+    if permits.available_permits() == 0 {
+        set_phase(state, user_id, "wait").await;
+        tracing::info!(user = %user_id, "another /work carry is running; waiting for the toolbox link");
+    }
+    let _carry_permit = permits
+        .acquire()
+        .await
+        .map_err(|_| anyhow!("carry permits closed"))?;
+
     set_phase(state, user_id, "pack").await;
     let packed = match pack(state, user_id, &tb, work_mib, &cfg).await {
         Ok(p) => p,
@@ -575,8 +707,8 @@ async fn run(state: &AppState, user_id: &str, target: &str, source: Source) -> R
     outcome
 }
 
-/// Stop the old sandbox, create the new one and unpack onto it; every failure from here rolls the
-/// user back (normal upgrade) or leaves the retained sandbox untouched (repair).
+/// Stop the old sandbox, create the new one staged (the row stays on the source), unpack onto it,
+/// then swap the row over and start it. Every failure rolls back: the row ends where it began.
 #[allow(clippy::too_many_arguments)]
 async fn carry_onto_new_box(
     state: &AppState,
@@ -589,51 +721,58 @@ async fn carry_onto_new_box(
     packed: &Packed,
     cfg: &CarryConfig,
 ) -> Result<Outcome> {
+    let prev_row = match &old_row {
+        Some(old) => Some(old.clone()),
+        None => state.db.user_box(user_id)?,
+    };
     if let Some(old) = &old_row {
         set_phase(state, user_id, "stop").await;
         let _ = dt.stop(source_id, false).await;
-        state
+        if let Err(e) = state
             .db
-            .insert_box_history(old, now_ms() + KEEP_OLD_SANDBOX_MS)?;
+            .insert_box_history(old, now_ms() + KEEP_OLD_SANDBOX_MS)
+        {
+            rollback(state, dt, user_id, source, prev_row.as_ref(), None).await;
+            return Err(e.context("record the source box in box_history"));
+        }
     }
 
     set_phase(state, user_id, "create").await;
-    let created = boxes::create_box(state, user_id, Provider::Daytona, Some(target)).await;
-    let mut new = match created {
+    let mut new = match boxes::create_staged_box(state, user_id, Some(target)).await {
         Ok(n) => n,
         Err(e) => {
-            if let Some(old) = &old_row {
-                rollback(state, dt, user_id, old, None).await;
-            }
+            rollback(state, dt, user_id, source, prev_row.as_ref(), None).await;
             return Err(e.context("create the new box"));
         }
     };
     if let Some(old) = &old_row {
         new.migrated_from = old.migrated_from.clone();
     }
-    state.db.upsert_box(&new)?;
-    let new_id = match new.sandbox_id.clone() {
-        Some(id) => id,
-        None => {
-            if let Some(old) = &old_row {
-                rollback(state, dt, user_id, old, None).await;
-            }
-            return Err(anyhow!("new box has no sandbox id"));
-        }
+    let Some(new_id) = new.sandbox_id.clone() else {
+        rollback(state, dt, user_id, source, prev_row.as_ref(), None).await;
+        return Err(anyhow!("new box has no sandbox id"));
     };
 
     set_phase(state, user_id, "unpack").await;
-    if let Err(e) = unpack_and_start(state, dt, user_id, &new_id, packed, cfg).await {
-        if let Some(old) = &old_row {
-            rollback(state, dt, user_id, old, Some(&new_id)).await;
-        } else {
-            let _ = dt.stop(&new_id, true).await;
-            let _ = dt.delete(&new_id).await;
-            let mut empty = new.clone();
-            empty.sandbox_id = None;
-            let _ = state.db.upsert_box(&empty);
-        }
+    let mut holds_data = false;
+    if let Err(e) = unpack(state, dt, user_id, &new_id, packed, cfg, &mut holds_data).await {
+        let staged = Staged {
+            row: &new,
+            keep: holds_data,
+            swapped: false,
+        };
+        rollback(state, dt, user_id, source, prev_row.as_ref(), Some(staged)).await;
         return Err(e.context("carry /work onto the new box"));
+    }
+
+    if let Err(e) = swap_and_start(state, dt, user_id, &new, &new_id).await {
+        let staged = Staged {
+            row: &new,
+            keep: true,
+            swapped: true,
+        };
+        rollback(state, dt, user_id, source, prev_row.as_ref(), Some(staged)).await;
+        return Err(e.context("start the new box"));
     }
     let archived = archive_excess_retained(state, dt, Some(user_id)).await;
     Ok(Outcome::Done(json!({
@@ -754,6 +893,7 @@ pub async fn start_repair(state: &AppState, user_id: &str) -> Result<bool> {
         if running.contains_key(user_id) {
             return Ok(false);
         }
+        refuse_while_restarting(state)?;
         running.insert(
             user_id.to_owned(),
             UpgradeStatus {
@@ -791,6 +931,9 @@ pub async fn admin_repair(
         )
             .into_response(),
         Ok(false) => Json(json!({ "user_id": id, "upgrade": status_json(&state, &id).await, "note": "nothing to repair (the box row has a live sandbox) or a run is in progress" })).into_response(),
+        Err(e) if e.to_string().contains(RESTARTING_PHRASE) => {
+            api_error(StatusCode::SERVICE_UNAVAILABLE, "restarting", e.to_string())
+        }
         Err(e) => api_error(StatusCode::BAD_GATEWAY, "repair", e.to_string()),
     }
 }
@@ -853,6 +996,9 @@ async fn kick(state: &AppState, user_id: &str, force: bool) -> Response {
                 Json(json!({ "user_id": user_id, "upgrade": st, "note": "already on the current snapshot (use ?force=true to recreate anyway)" }))
                     .into_response()
             }
+        }
+        Err(e) if e.to_string().contains(RESTARTING_PHRASE) => {
+            api_error(StatusCode::SERVICE_UNAVAILABLE, "restarting", e.to_string())
         }
         Err(e) => api_error(StatusCode::BAD_GATEWAY, "upgrade", e.to_string()),
     }

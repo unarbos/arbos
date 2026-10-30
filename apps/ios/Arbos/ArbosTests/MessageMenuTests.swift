@@ -39,7 +39,7 @@ final class MessageMenuTests: XCTestCase {
             XCTAssertTrue(item.label.unicodeScalars.allSatisfy { $0.isASCII }, "\(item) label carries non-ASCII text")
             XCTAssertFalse(MessageReaction.palette.contains(item.label))
         }
-        XCTAssertEqual(MessageMenuItem.allCases.count, 7)
+        XCTAssertEqual(MessageMenuItem.allCases.count, 8)
     }
 
     func testOnlyDeleteIsDestructive() {
@@ -49,6 +49,19 @@ final class MessageMenuTests: XCTestCase {
     func testNonMessageRowsCopyOnly() {
         XCTAssertEqual(MessageMenu.items(forMessage: false), [.copy])
         XCTAssertEqual(MessageMenu.items(forMessage: false, canEdit: true), [.copy])
+    }
+
+    /// #1871: already in a private / 1:1 chat — no Reply in DM (it would open the same chat).
+    func testPrivateChatOmitsReplyInDM() {
+        XCTAssertEqual(
+            MessageMenu.items(forMessage: true, inPrivateChat: true),
+            [.copy, .reply, .forward, .delete]
+        )
+        XCTAssertEqual(
+            MessageMenu.items(forMessage: true, canEdit: true, canDelete: true, hasReplies: true, inPrivateChat: true),
+            [.copy, .reply, .viewThread, .forward, .edit, .delete]
+        )
+        XCTAssertFalse(MessageMenu.items(forMessage: true, inPrivateChat: true).contains(.replyInDM))
     }
 
 

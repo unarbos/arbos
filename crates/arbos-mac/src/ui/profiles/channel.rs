@@ -62,7 +62,7 @@ pub(super) fn page(
         .into_any_element()
     };
     let hero = Hero {
-        picture: Picture::Glyph("hash"),
+        picture: Picture::Glyph("number"),
         name,
         badge: restricted.then_some("lock"),
         subtitle: Some(
@@ -73,7 +73,7 @@ pub(super) fn page(
             )
             .into(),
         ),
-        subtitle_color: theme.text_muted,
+        subtitle_color: theme.label_muted(),
         subtitle_click: None,
         subtitle_element: None,
         editor: None,
@@ -126,7 +126,7 @@ fn name_field(shell: &Shell, theme: &Theme) -> Div {
         .flex()
         .items_center()
         .rounded(px(8.0))
-        .bg(theme.field)
+        .bg(theme.field_fill())
         .border_1()
         .border_color(theme.primary)
         .text_size(px(TEXT_BODY))
@@ -166,7 +166,7 @@ fn server_row(
         theme,
     )
     .cursor_pointer()
-    .hover(|s| s.bg(theme.surface_2))
+    .group(kit::HOT)
     .on_click(cx.listener(move |this, _, _, cx| {
         this.push_profile(page.clone(), cx);
     }))
@@ -237,7 +237,7 @@ fn profile_tab(
             theme,
         )
         .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
+        .group(kit::HOT)
         .on_click(cx.listener(move |this, _, _, cx| {
             // The server's Members tab, pushed so ‹ comes back here.
             this.push_profile(members_page.clone(), cx);
@@ -316,7 +316,7 @@ fn settings_tab(
     if can_admin {
         name_row = name_row
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .group(kit::HOT)
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.start_rename_channel(cid.clone(), cname.clone(), window, cx);
             }));
@@ -347,7 +347,7 @@ fn settings_tab(
                         .flex()
                         .items_center()
                         .rounded(px(8.0))
-                        .bg(theme.field)
+                        .bg(theme.field_fill())
                         .border_1()
                         .border_color(theme.primary)
                         .text_size(px(TEXT_BODY))
@@ -375,7 +375,7 @@ fn settings_tab(
         if can_admin {
             topic_row = topic_row
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
+                .group(kit::HOT)
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.start_edit_channel_topic(cid.clone(), ctopic.clone(), window, cx);
                 }));
@@ -471,7 +471,11 @@ fn danger_footer(
     let (sid, cid) = (server.id.clone(), channel.id.clone());
     let mut rows: Vec<AnyElement> = vec![kit::row(
         "channel-archive",
-        kit::Leading::Tile(if archived { "tray-up" } else { "archive" }),
+        kit::Leading::Tile(if archived {
+            "tray.and.arrow.up"
+        } else {
+            "archivebox"
+        }),
         if archived {
             "Unarchive channel"
         } else {
@@ -491,7 +495,7 @@ fn danger_footer(
         theme,
     )
     .cursor_pointer()
-    .hover(|s| s.bg(theme.surface_2))
+    .group(kit::HOT)
     .on_click(cx.listener(move |this, _, _, cx| {
         let (sid, cid) = (sid.clone(), cid.clone());
         this.state
@@ -518,7 +522,7 @@ fn danger_footer(
                     .child(
                         div()
                             .text_size(px(TEXT_SMALL))
-                            .text_color(theme.text_muted)
+                            .text_color(theme.label_muted())
                             .child(
                                 "Deletes the channel and its messages for everyone in the server.",
                             ),

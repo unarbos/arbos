@@ -27,40 +27,14 @@ pub fn modal_overlay(
     overlay_at(id, dismiss, card, None)
 }
 
-/// The same backdrop with `card` hung `top` points under the window's top
-/// edge instead of centred — Spotlight's shape, for the command palette
-/// ([feedback search-palette-2026-10-24]).
-pub fn modal_overlay_top(
-    id: impl Into<ElementId>,
-    dismiss: impl Fn(&mut Window, &mut App) + 'static,
-    top: f32,
-    card: impl IntoElement,
-) -> Stateful<Div> {
-    overlay_at(id, dismiss, card, Some(top))
-}
-
 fn overlay_at(
     id: impl Into<ElementId>,
     dismiss: impl Fn(&mut Window, &mut App) + 'static,
     card: impl IntoElement,
     top: Option<f32>,
 ) -> Stateful<Div> {
-    div()
-        .id(id)
-        .absolute()
-        .inset_0()
+    backdrop(id, top, BACKDROP_ALPHA)
         .occlude()
-        .flex()
-        .flex_col()
-        .items_center()
-        .map(|el| match top {
-            Some(top) => el.justify_start().pt(gpui::px(top)),
-            None => el.justify_center(),
-        })
-        .bg(Theme::with_alpha(gpui::black(), BACKDROP_ALPHA))
-        // Wheel / trackpad scrolling over the sheet — list or backdrop — ends
-        // here; the transcript underneath stays still.
-        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             cx.stop_propagation();
             dismiss(window, cx);
@@ -68,6 +42,49 @@ fn overlay_at(
         .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
         .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(modal_card(card))
+}
+
+/// The palette's backdrop ([feedback search-toggle-click-outside-mac-2026-10-27],
+/// Jacob 2026-10-27): a click outside the panel dismisses it **and still lands
+/// on what is under it** — a message, a sidebar row, a button answers in the
+/// same click. So this backdrop does not occlude and takes no mouse-down of
+/// its own; the dismissal is the shell's capture-phase click-outside
+/// (`Shell::click_outside`). It still swallows the wheel so the transcript
+/// stays put (#1632). `card` keeps the modal card's own mouse-down stop, so a
+/// click inside the panel never reaches the chat.
+///
+/// It does **not** dim ([feedback search-popup-single-layer-2026-10-28], Jacob
+/// 2026-10-28 "double transparency"): the panel is one frosted plate
+/// (`glass::popup_plate`), and a dim under a translucent plate was the second
+/// layer — the two stacked to a muddy wash with the chat still reading through.
+/// Spotlight does not dim the desktop either.
+pub fn modal_overlay_top_passthrough(
+    id: impl Into<ElementId>,
+    top: f32,
+    card: impl IntoElement,
+) -> Stateful<Div> {
+    backdrop(id, Some(top), PASSTHROUGH_BACKDROP_ALPHA).child(modal_card(card))
+}
+
+/// How much the see-through backdrop dims: nothing. One layer, the plate.
+pub const PASSTHROUGH_BACKDROP_ALPHA: f32 = 0.0;
+
+fn backdrop(id: impl Into<ElementId>, top: Option<f32>, dim: f32) -> Stateful<Div> {
+    div()
+        .id(id)
+        .absolute()
+        .inset_0()
+        .flex()
+        .flex_col()
+        .items_center()
+        .map(|el| match top {
+            Some(top) => el.justify_start().pt(gpui::px(top)),
+            None => el.justify_center(),
+        })
+        .when(dim > 0.0, |el| el.bg(Theme::with_alpha(gpui::black(), dim)))
+        // Wheel / trackpad scrolling over the sheet — list or backdrop — ends
+        // here; the transcript underneath stays still.
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
 }
 
 /// Keep the keyboard inside the open sheet: when neither `owner` nor anything
