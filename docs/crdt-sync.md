@@ -42,7 +42,7 @@ This document is drawn from the code as it exists today:
 - **Version tie-in:** ship the xcframework under the **same release tag** as the Mac app (workspace `version`). Bump them together; do not publish an FFI binary from a different commit than the Mac build it pairs with.
 - **Size:** the device `libarbos_ffi.a` is roughly **50–60 MiB** before linking (Loro dominates). The `archive` lane reports the shipped `ArbosFFI.framework` size (prints the measured byte size and writes `apps/ios/Arbos/build/arbosffi-size.txt`); re-check after each release build.
 
-The relay never parses Loro bytes. It stores opaque **rows** and optional **checkpoints**, and forwards them on WebSocket rooms.
+The relay stores opaque **rows** and optional **checkpoints**, and forwards them on WebSocket rooms. It parses Loro bytes in exactly one place — `rooms::inspect_push`, which refuses a pushed row claiming a `notice` field (the relay's own to write) or, from a device token, a `role: assistant` row that is not the D82 greeting (an agent's turns are written under a box token). Everything else about a row stays opaque to it.
 
 ---
 
@@ -179,7 +179,7 @@ Unknown `kind` values decode to “unknown” and render as nothing (additive ru
 3. **Client writers** (`append_user_message`, `append_system_line`, `append_greeting`, `set_reaction`, `push_command`, `set_model_settings`) do not commit themselves — wrap them in `ChatDoc::transact` (one commit = one PUSH). `transact` is re-entrant: nested calls share one depth counter and only the outermost commits; a drop guard restores depth if `f` panics. `snapshot()` / `export_updates_since()` return empty and do not call Loro `export` while a `transact` is open (Loro treats export as a commit barrier). They write no null placeholders, `chatId`, `pending`, `hiddenParts`, or `call_id`. New message rows get an empty `reactions` map. System lines use a `text` part and optional `callId` only (Mac and iOS already decode that shape; Swift ignores `callId` when rendering).
 4. **`push_command` / `append_command`.** `push_command` is the non-committing writer; object payloads are nested `LoroMap` containers (arrays → `LoroList`), not a single JSON blob value. `append_command` is `push_command` then commit (honors an open `transact`). Box helpers that used to duplicate the command row now call through this path.
 5. **Box helpers** (`append_user_message_from`, `append_command`, `append_system_note`, streaming/tool/question/approval writers, …) still commit inside the helper when no `transact` is open; they honor an outer `transact` (only the outermost commits). `append_system_note` (`status` + `code: "note"`) is unchanged; neither app renders it in the transcript.
-6. **`has_greeting()`** is true when any message has `greeting: true` (D82 canned first line).
+6. **`has_greeting()`** is true when any message has `greeting: true` (D82 canned first line). `append_greeting` is the only client writer of a `role: assistant` row, and the relay allows it only from the project owner's device, in that project's own chat, while `has_greeting()` is false (`rooms::is_the_projects_first_greeting`).
 7. **Mac facts.** Relay-mode Mac does not write `meta` (`ChatDoc::empty`). Mac already uses Loro's random peer, which satisfies R7. Mac system lines are text parts (same as iOS / core `append_system_line`).
 
 ### 6.3 Project document
@@ -245,7 +245,7 @@ Binary frame (`arbos_core::wire`; Swift uses the same bytes through ArbosFFI):
 | `ACK` | `0x07` | S→C | `{ batchId, seq, dup? }` |
 | `PRESENCE` | `0x08` | both | Presence / focus / typing |
 | `PROBE` / `PROBE_OK` | `0x09` / `0x0a` | C→S / S→C | Liveness / head check |
-| `ERROR` | `0x0b` | S→C | `{ code, message }` (e.g. `lagging`, `too_large`) |
+| `ERROR` | `0x0b` | S→C | `{ code, message }` (e.g. `lagging`, `too_large`, `notice_not_yours`, `agent_turn_not_yours`) |
 | `STATUS` | `0x0c` | S→C | Box lifecycle (§8.2) |
 | `WAKE` | `0x0d` | C→S | `{ reason }` ask relay to wake box |
 
