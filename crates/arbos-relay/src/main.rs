@@ -59,6 +59,7 @@ mod pins;
 mod preview_token_tests;
 mod proxy;
 mod push;
+mod read_receipts;
 mod releases;
 mod restart;
 mod room_health;
@@ -462,6 +463,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/me/notifications",
             get(notify::me_notifications).put(notify::put_me_notifications),
+        )
+        .route(
+            "/me/read-receipts",
+            get(read_receipts::me_read_receipts).put(read_receipts::put_me_read_receipts),
         )
         .route("/chats/{id}/calls", post(calls::start_people_call))
         .route("/chats/{id}/call", get(calls::people_chat_call))
