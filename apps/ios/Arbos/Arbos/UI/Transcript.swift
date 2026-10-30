@@ -47,6 +47,9 @@ struct Quote: Equatable, Hashable {
     /// Reply in DM (#1836): the original lives in another chat — its address and the
     /// "Replying to <who> in <chat>" line. `nil` for an in-chat reply.
     var source: ReplyRef? = nil
+    /// The quoted message's first picture: the header shows it instead of the speech-bubble
+    /// glyph. A cross-chat quote has none — its snapshot carries words only.
+    var preview: QuotePreview? = nil
 
     /// The header for a forwarded message (`forwardedFrom` on the row).
     static func forwarded(from name: String) -> Quote {
@@ -72,8 +75,9 @@ struct Quote: Equatable, Hashable {
 
     /// Same, over a prebuilt id → message index (one lookup per reply, not a scan).
     static func forReply(_ replyTo: String, in byId: [Id: Message]) -> Quote {
-        let text = byId[replyTo].map(Self.text) ?? "Earlier message"
-        return Quote(messageId: replyTo, text: text)
+        let original = byId[replyTo]
+        let text = original.map(Self.text) ?? "Earlier message"
+        return Quote(messageId: replyTo, text: text, preview: original.flatMap(QuotePreview.of))
     }
 
     /// First words of a message: the whole message on one line (newlines and markdown
@@ -136,16 +140,40 @@ struct Quote: Equatable, Hashable {
     }
 
     /// The message flattened to one line (`oneLine`) and cut to `maxChars`; an attachment-only
-    /// message names its file, an empty one says "Message".
+    /// message names its picture by kind and its file by name, an empty one says "Message".
     static func line(of message: Message, maxChars: Int) -> String {
         var line = oneLine(message.plainText)
         if line.isEmpty {
             for part in message.parts {
-                if case .attachment(_, let a) = part { line = a.name; break }
+                if case .attachment(_, let a) = part { line = attachmentLine(a); break }
             }
         }
         if line.isEmpty { return "Message" }
         return firstWords(line, maxChars: maxChars)
+    }
+
+    /// What an attachment-only message reads as. A picture is named by its kind ("GIF",
+    /// "Image", "Video") because a picked GIF's file name is the provider's numeric id; a
+    /// document keeps its file name, which is the useful thing about it
+    /// ([feedback gif-send-and-playback-2026-10-30]).
+    static func attachmentLine(_ a: Attachment) -> String {
+        a.isImage || a.kindLabel == "Video" ? a.mediaLabel : a.name
+    }
+}
+
+/// The picture a reply's quote header shows in place of the speech-bubble glyph
+/// ([feedback gif-send-and-playback-2026-10-30]: a reply to a GIF read "6178590884800169.gif").
+struct QuotePreview: Equatable, Hashable {
+    /// `ChatImageCache` key: the blob `ref`, or `url:<url>` for a picked GIF.
+    var cacheKey: String
+
+    /// The first picture of `message`, or `nil` when it has none.
+    static func of(_ message: Message) -> QuotePreview? {
+        for part in message.parts {
+            guard case .attachment(_, let a) = part, a.isImage, let key = a.previewKey else { continue }
+            return QuotePreview(cacheKey: key)
+        }
+        return nil
     }
 }
 
@@ -3004,8 +3032,19 @@ struct ReplyQuoteHeader: View {
                         .accessibilityIdentifier("reply-quote-source")
                 }
                 HStack(spacing: 6) {
-                    Image(systemName: "bubble.left")
-                        .font(.system(size: 11, weight: .medium))
+                    // Replying to a picture leads with that picture, not a speech bubble
+                    // ([feedback gif-send-and-playback-2026-10-30]).
+                    if let thumb = quotedPicture {
+                        Image(uiImage: thumb)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: Self.thumbSide, height: Self.thumbSide)
+                            .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+                            .accessibilityIdentifier("reply-quote-thumb")
+                    } else {
+                        Image(systemName: "bubble.left")
+                            .font(.system(size: 11, weight: .medium))
+                    }
                     Text("“\(quote.text)”")
                         .font(theme.font(Theme.small))
                         .lineLimit(1)
@@ -3019,6 +3058,20 @@ struct ReplyQuoteHeader: View {
         .disabled(!linkable)
         .accessibilityIdentifier("reply-quote")
         .accessibilityLabel(quote.source.map { "\($0.label): \(quote.text)" } ?? "Replying to: \(quote.text)")
+    }
+
+    /// The square the quoted picture fills, where the glyph would be.
+    static let thumbSide: CGFloat = 16
+
+    /// The quoted picture, as the original's own bubble decoded it — a cache read, not a
+    /// fetch: pulling megabytes of GIF down to draw a 16 pt square is not worth it. Read here
+    /// rather than held in state so a picture that decodes after this header first drew
+    /// appears on the next pass. `nil` keeps the speech-bubble glyph.
+    private var quotedPicture: UIImage? {
+        guard let key = quote.preview?.cacheKey, let hit = ChatImageCache.decoded(for: key) else {
+            return nil
+        }
+        return hit.stillFrame ?? hit.image
     }
 }
 
@@ -3534,7 +3587,9 @@ struct ReplyThumb: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     let projectId: Id
-    let blobRef: String
+    /// `Attachment.previewKey`: the blob `ref`, or `url:<url>` for a picked GIF whose bytes
+    /// come through the relay's pass-through ([feedback gif-send-and-playback-2026-10-30]).
+    let previewKey: String
 
     @State private var image: UIImage?
 
@@ -3550,16 +3605,26 @@ struct ReplyThumb: View {
         .frame(width: Theme.replyPreviewThumb, height: Theme.replyPreviewThumb)
         .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
         .accessibilityHidden(true)
-        .task(id: blobRef) { await load() }
+        .task(id: previewKey) { await load() }
     }
 
     private func load() async {
-        guard let url = model.blobURL(projectId: projectId, key: blobRef) else { return }
+        guard let url = Self.url(previewKey, projectId: projectId, model: model) else { return }
         var req = URLRequest(url: url)
         for (k, v) in model.authHeaders { req.setValue(v, forHTTPHeaderField: k) }
         guard let (data, response) = try? await URLSession.shared.data(for: req),
               let http = response as? HTTPURLResponse, (200..<400).contains(http.statusCode) else { return }
         image = UIImage(data: data)
+    }
+
+    /// Where the bytes of a preview key come from: the relay's GIF pass-through for a
+    /// provider-hosted picture, the chat's blob slot for everything else (Mac
+    /// `blob_request_url`).
+    static func url(_ previewKey: String, projectId: Id, model: AppModel) -> URL? {
+        if previewKey.hasPrefix(Attachment.urlKeyPrefix) {
+            return model.gifMediaURL(String(previewKey.dropFirst(Attachment.urlKeyPrefix.count)))
+        }
+        return model.blobURL(projectId: projectId, key: previewKey)
     }
 }
 

@@ -374,6 +374,12 @@ pub struct Quote {
     /// Reply in DM (#1835): the original lives in another chat — its address
     /// and the "Replying to <who> in <chat>" line. `None` for an in-chat reply.
     pub source: Option<QuoteSource>,
+    /// The quoted message's first picture, as its [`Attachment::preview_key`], and only once
+    /// that picture is decoded: the header shows it instead of the speech-bubble glyph. Set
+    /// late rather than at once so the row's version changes when the picture lands and the
+    /// cached row is rebuilt. A cross-chat quote never has one — its snapshot carries words
+    /// only.
+    pub preview: Option<String>,
 }
 
 /// Where a cross-chat quote came from.
@@ -387,19 +393,24 @@ pub struct QuoteSource {
 /// The quote header shows this many characters of the original before "…".
 pub const QUOTE_CHARS: usize = 64;
 
+/// The quoted picture's thumbnail in a quote header, square, where the glyph would be.
+const QUOTE_THUMB: f32 = 16.0;
+
 impl Quote {
     /// The quote for a message that replies to `reply_to`; a reply whose original is not
     /// loaded (older than the snapshot) still shows a header so the reference is never lost.
-    pub fn for_reply(reply_to: &str, messages: &[Message]) -> Self {
-        let text = messages
-            .iter()
-            .find(|m| m.id == reply_to)
+    pub fn for_reply(reply_to: &str, messages: &[Message], thumb_keys: &HashSet<&str>) -> Self {
+        let original = messages.iter().find(|m| m.id == reply_to);
+        let text = original
             .map(quote_text)
             .unwrap_or_else(|| "Earlier message".to_owned());
         Self {
             message_id: reply_to.to_owned(),
             text,
             source: None,
+            preview: original
+                .and_then(quote_preview_key)
+                .filter(|k| thumb_keys.contains(k.as_str())),
         }
     }
 
@@ -418,8 +429,19 @@ impl Quote {
                 chat_id: r.chat_id.clone(),
                 label: reply_ref_label(r),
             }),
+            preview: None,
         }
     }
+}
+
+/// The picture a quote header shows instead of the speech-bubble glyph: the first
+/// picture part of the quoted message, as its [`Attachment::preview_key`] (the blob `ref`,
+/// or `url:<url>` for a picked GIF). `None` when the message carries no picture.
+fn quote_preview_key(message: &Message) -> Option<String> {
+    message.parts.iter().find_map(|p| match p {
+        Part::Attachment { attachment, .. } if attachment.is_image() => attachment.preview_key(),
+        _ => None,
+    })
 }
 
 /// "Replying to Jacob in Arbonites" — what a cross-chat quote says above the text.
@@ -475,6 +497,18 @@ fn one_line_blocks(blocks: Vec<Block>, out: &mut String) {
     }
 }
 
+/// What an attachment-only message reads as on one line. A picture is named by its kind
+/// ("GIF", "Image", "Video") because a picked GIF's file name is the provider's numeric id;
+/// a document keeps its file name, which is the useful thing about it
+/// ([feedback gif-send-and-playback-2026-10-30]).
+fn attachment_line(attachment: &Attachment) -> String {
+    if attachment.is_image() || attachment.kind() == AttachmentKind::Video {
+        attachment.media_label().to_owned()
+    } else {
+        attachment.name.clone()
+    }
+}
+
 /// `line` cut to `max_chars` on a word boundary with an ellipsis; shorter
 /// lines come back as they are.
 pub fn first_words(line: &str, max_chars: usize) -> String {
@@ -496,7 +530,7 @@ pub fn message_line(message: &Message, max_chars: usize) -> String {
     let line = one_line(&message.plain_text());
     let line = if line.is_empty() {
         match message.parts.iter().find_map(|p| match p {
-            Part::Attachment { attachment, .. } => Some(attachment.name.clone()),
+            Part::Attachment { attachment, .. } => Some(attachment_line(attachment)),
             _ => None,
         }) {
             Some(name) => name,
@@ -1966,9 +2000,9 @@ impl Transcript {
         )
     }
 
-    /// Grok's quote header at the top of a reply bubble: speech-bubble glyph,
-    /// then the original's first words in quotes, one line, truncated. Click
-    /// → scroll to the original and highlight it for a moment.
+    /// Grok's quote header at the top of a reply bubble: speech-bubble glyph (or the
+    /// original's own picture, when it had one), then its first words in quotes, one line,
+    /// truncated. Click → scroll to the original and highlight it for a moment.
     fn quote_header(
         &self,
         row_id: &str,
@@ -1987,12 +2021,29 @@ impl Transcript {
             Some(src) => self.state.read(cx).is_member_of_chat(&src.chat_id),
             None => true,
         };
+        // Replying to a picture shows that picture, not a speech bubble and its file name
+        // ([feedback gif-send-and-playback-2026-10-30]: a GIF reply read "6178590884800169.gif").
+        // The glyph stands in for a quote with no picture, and until the picture decodes.
+        let thumb = quote
+            .preview
+            .as_deref()
+            .and_then(|k| self.state.read(cx).card_thumbnail(k));
+
+        let lead = match thumb {
+            Some(image) => gpui::img(image)
+                .size(px(QUOTE_THUMB))
+                .flex_shrink_0()
+                .rounded(px(3.0))
+                .object_fit(gpui::ObjectFit::Cover)
+                .into_any_element(),
+            None => sf_symbols::glyph("bubble.left", 12.0, muted).into_any_element(),
+        };
         let quote_line = div()
             .flex()
             .items_center()
             .gap(px(6.0))
             .min_w_0()
-            .child(sf_symbols::glyph("bubble.left", 12.0, muted))
+            .child(lead)
             .child(
                 div()
                     .min_w_0()
@@ -4113,6 +4164,29 @@ impl MessageRowCache {
     }
 }
 
+/// Is this attachment's picture decoded already? Keyed by [`Attachment::preview_key`], not
+/// by `ref`: a provider-hosted GIF (ARB-544) has no `ref`, so keying on `ref` alone left its
+/// row's version unchanged when the picture landed, and the cached "Loading" card was reused
+/// for ever ([feedback gif-send-and-playback-2026-10-30]).
+fn has_thumbnail(attachment: &Attachment, thumb_keys: &HashSet<&str>) -> bool {
+    attachment
+        .preview_key()
+        .is_some_and(|k| thumb_keys.contains(k.as_str()))
+}
+
+/// Has the picture of the message this one replies to decoded yet? The quote header shows it
+/// in place of the speech-bubble glyph, and it belongs to another message, so
+/// [`has_thumbnail`] on this one would never see it land.
+fn quoted_thumb_ready(message: &Message, messages: &[Message], thumb_keys: &HashSet<&str>) -> bool {
+    message
+        .reply_to
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .and_then(|id| messages.iter().find(|m| m.id == id))
+        .and_then(quote_preview_key)
+        .is_some_and(|k| thumb_keys.contains(k.as_str()))
+}
+
 /// Fingerprint of the fields that change a message's rows: text, parts,
 /// status, completed time, reactions, and the stamp / sender-run context
 /// (plus speech / details / thumbs / width-class flags).
@@ -4126,6 +4200,8 @@ fn message_render_version(
     speech: &SpeechRows<'_>,
     me_id: &str,
     thumb_keys: &HashSet<&str>,
+    // The quoted message's picture is decoded (see `quoted_thumb_ready`).
+    quote_thumb: bool,
     names_senders: bool,
     // Width class: multi-party layout changes who gets a name caption.
     width_class: u8,
@@ -4156,11 +4232,7 @@ fn message_render_version(
     for p in &message.parts {
         format!("{p:?}").hash(&mut h);
         if let Part::Attachment { attachment, .. } = p {
-            attachment
-                .blob_ref
-                .as_deref()
-                .is_some_and(|k| thumb_keys.contains(k))
-                .hash(&mut h);
+            has_thumbnail(attachment, thumb_keys).hash(&mut h);
         }
     }
     message.sender_name.hash(&mut h);
@@ -4188,6 +4260,7 @@ fn message_render_version(
     speech.spoken.contains(&message.id).hash(&mut h);
     speech.failed.contains_key(&message.id).hash(&mut h);
     me_id.hash(&mut h);
+    quote_thumb.hash(&mut h);
     names_senders.hash(&mut h);
     width_class.hash(&mut h);
     h.finish()
@@ -4198,8 +4271,8 @@ fn message_render_version(
 /// JSON, usage) is hidden; the Details drawer has it. One indicator per chat
 /// pulses under the last message while anything runs.
 ///
-/// `thumb_keys` are blob refs that already have a decoded preview; they are
-/// mixed into row versions so a late thumbnail reloads the picture row.
+/// `thumb_keys` are the [`Attachment::preview_key`]s that already have a decoded
+/// picture; they are mixed into row versions so a late thumbnail reloads the row.
 /// `names_senders` landed from a parallel feedback; keep it a plain arg
 /// rather than a one-off options struct.
 #[cfg(test)]
@@ -4360,6 +4433,7 @@ pub fn build_rows_with_cache(
             &speech,
             me_id,
             thumb_keys,
+            quoted_thumb_ready(message, messages, thumb_keys),
             names_senders,
             width_class,
         );
@@ -4506,16 +4580,13 @@ pub fn build_rows_with_cache(
                                 .reply_to
                                 .as_deref()
                                 .filter(|id| !id.is_empty())
-                                .map(|id| Quote::for_reply(id, messages))
+                                .map(|id| Quote::for_reply(id, messages, thumb_keys))
                         })
                 };
                 for (ix, (part_id, attachment)) in attachment_parts.iter().enumerate() {
                     let forwarded = forwarded.clone().filter(|_| ix == 0);
                     let quote = quote.clone().filter(|_| ix == 0);
-                    let has_thumb = attachment
-                        .blob_ref
-                        .as_deref()
-                        .is_some_and(|k| thumb_keys.contains(k));
+                    let has_thumb = has_thumbnail(attachment, thumb_keys);
                     // Someone else's picture carries their disc like their bubble, and
                     // their name on the first card when the run changes sender.
                     let sender = from.clone().map(AttachmentSender::Person);
@@ -4704,7 +4775,7 @@ pub fn build_rows_with_cache(
                             .then(|| message.in_reply_to.as_deref().filter(|id| !id.is_empty()))
                             .flatten()
                     })
-                    .map(|id| Quote::for_reply(id, messages));
+                    .map(|id| Quote::for_reply(id, messages, thumb_keys));
                 if agent_speaker {
                     // A people-chat agent (or another Project, F6) speaks in its own lane;
                     // the disc on the last block names it. No meta line — "answering
@@ -4927,10 +4998,7 @@ pub fn build_rows_with_cache(
                                 .as_deref()
                                 .is_some_and(|cp| message.has_chart_part(cp)) => {}
                         Part::Attachment { id, attachment } => {
-                            let has_thumb = attachment
-                                .blob_ref
-                                .as_deref()
-                                .is_some_and(|k| thumb_keys.contains(k));
+                            let has_thumb = has_thumbnail(attachment, thumb_keys);
                             // The agent's picture sits in its lane with its disc, and
                             // names it when it is the message's first row (Scout's
                             // photo in Arbonites drew as a bare picture before).

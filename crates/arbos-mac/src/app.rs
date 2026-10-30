@@ -8292,7 +8292,7 @@ impl AppState {
         let Some(item) = viewer.items.get(viewer.index) else {
             return;
         };
-        let Some(key) = item.attachment.blob_ref.clone() else {
+        let Some(key) = item.attachment.preview_key() else {
             return;
         };
         if key.starts_with("local:") {
@@ -11048,10 +11048,12 @@ impl AppState {
         }
         self.copy_request_seq += 1;
         let request = self.copy_request_seq;
+        // `preview_key`, not `ref`: a picked GIF's bytes come from the relay's pass-through
+        // under a `url:` key. One key per attachment, in order — `finish_copy` zips them back.
         let keys: Vec<String> = body
             .attachments
             .iter()
-            .filter_map(|a| a.blob_ref.clone())
+            .filter_map(Attachment::preview_key)
             .collect();
         self.copy_request = Some(CopyRequest { id: request, body });
         self.command(ClientCommand::FetchCopyBlobs {

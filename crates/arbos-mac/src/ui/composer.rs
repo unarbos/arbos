@@ -27,7 +27,7 @@ use gpui::{
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::app::{decode_thumbnail, AppState, ComposerMode};
-use crate::model::{AttachmentKind, CallKind, Message, Part, Role};
+use crate::model::{CallKind, Message, Part, Role};
 use crate::search;
 use crate::ui::callview;
 use crate::ui::error_note;
@@ -4351,13 +4351,13 @@ impl ReplyPreview {
                 Role::User => "you".into(),
                 Role::System | Role::Project => "message".into(),
             });
+        // `preview_key`, not `ref`: a picked GIF has no `ref`, so the bar fell back to its
+        // file name — the provider's numeric id
+        // ([feedback gif-send-and-playback-2026-10-30]).
         let thumb = message.parts.iter().find_map(|p| match p {
-            Part::Attachment { attachment, .. } if attachment.kind() == AttachmentKind::Image => {
-                attachment
-                    .blob_ref
-                    .as_deref()
-                    .and_then(|k| thumbnails.get(k).cloned())
-            }
+            Part::Attachment { attachment, .. } if attachment.is_image() => attachment
+                .preview_key()
+                .and_then(|k| thumbnails.get(&k).cloned()),
             _ => None,
         });
         Self {

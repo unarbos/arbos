@@ -1639,11 +1639,27 @@ impl Attachment {
             .is_some_and(|k| k.starts_with("local:"))
     }
 
-    /// The bytes can be fetched from the relay (`GET /blob/{slot}/{key}`).
+    /// The bytes can be fetched from the relay (`GET /blob/{slot}/{key}`), or through its
+    /// GIF pass-through for a provider-hosted picture with no `ref` (ARB-544). Either way
+    /// [`Self::preview_key`] is the key to ask for
+    /// ([feedback gif-send-and-playback-2026-10-30]: a picked GIF answered "Nothing to copy").
     pub fn is_on_relay(&self) -> bool {
         self.blob_ref
             .as_deref()
-            .is_some_and(|k| !k.is_empty() && !k.starts_with("local:"))
+            .map(|k| !k.is_empty() && !k.starts_with("local:"))
+            .unwrap_or_else(|| self.url.as_deref().is_some_and(|u| !u.is_empty()))
+    }
+
+    /// What this attachment is called when it stands in for the whole message — a reply
+    /// preview, a notification. The kind, never the file name: a picked GIF's name is the
+    /// provider's numeric id (`6178590884800169.gif`), which tells a reader nothing
+    /// ([feedback gif-send-and-playback-2026-10-30]).
+    pub fn media_label(&self) -> &'static str {
+        if self.mime.eq_ignore_ascii_case("image/gif") {
+            "GIF"
+        } else {
+            self.kind().label()
+        }
     }
 }
 
@@ -2527,13 +2543,6 @@ pub struct ChartBody {
     pub fallback: Option<Attachment>,
 }
 
-/// An attachment the relay holds (not a `local:` key still uploading).
-fn on_relay(a: &Attachment) -> bool {
-    a.blob_ref
-        .as_deref()
-        .is_some_and(|k| !k.is_empty() && !k.starts_with("local:"))
-}
-
 impl Message {
     /// The message's body, in part order; `None` when there is nothing to take —
     /// no words, no attachment on the relay, no chart. A picture-only message has a
@@ -2555,7 +2564,7 @@ impl Message {
             .iter()
             .filter_map(|p| match p {
                 Part::Attachment { id, attachment }
-                    if !chart_fallbacks.contains(id.as_str()) && on_relay(attachment) =>
+                    if !chart_fallbacks.contains(id.as_str()) && attachment.is_on_relay() =>
                 {
                     Some(attachment.clone())
                 }
@@ -2570,7 +2579,7 @@ impl Message {
                     let fallback = fallback.as_deref().and_then(|f| {
                         self.parts.iter().find_map(|q| match q {
                             Part::Attachment { id, attachment }
-                                if id == f && on_relay(attachment) =>
+                                if id == f && attachment.is_on_relay() =>
                             {
                                 Some(attachment.clone())
                             }
