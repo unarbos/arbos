@@ -39,18 +39,60 @@ BASELINE_DIR="$HOME/arbos-gate/.test-baseline"
 # The target run_suite selects. Named once so the xcodebuild flag and the "0 tests" message cannot drift.
 TEST_ONLY=ArbosTests
 
-# tests_executed <xcodebuild log> → how many tests the run executed, 0 when the log never says.
-# The largest count, not the last: a watchdog kill can leave a per-suite line after the total.
-tests_executed() {
-  local n
-  n=$(grep -oE 'Executed [0-9]+ test' "$1" 2>/dev/null | grep -oE '[0-9]+' | sort -n | tail -n 1)
-  echo "${n:-0}"
+# xcodebuild reports a test case in one of two shapes and this gate has to read both.
+#   Xcode 27 running a target in parallel clones, which is what ArbosTests is:
+#     Test case 'PinPolicyTests.testAMemberCannotPin()' passed on 'Clone 1 of iPhone 17 - Arbos (41549)' (0.001 seconds)
+#   The older serial reporter, which ArbosUITests still uses:
+#     Test Case '-[ArbosTests.PinPolicyTests testAMemberCannotPin]' passed (0.001 seconds).
+# The wording, the capitalisation and the brackets all differ, so a parser written for one
+# matches nothing in the other. Do NOT key anything on the `Executed N tests` summary: the
+# parallel reporter never prints it. In a 10,713-line hosted log of a run that passed, all
+# 507 ArbosTests cases were the first shape with no summary of their own, and the only eight
+# `Executed N tests` lines in the file belonged to the 33 UI tests. On the gate Mac, where
+# run_suite selects ArbosTests alone, there is no such line at all — asserting on it reported
+# a six-case run that genuinely passed as a run of nothing
+# (store note internal/xcodebuild-test-count-detection.md, 2026-10-30 20:13).
+# test_cases <log> <passed|failed> → one "Class/test" per matching case, sorted, unique.
+# Both shapes normalise to "Class/test", which is what the known-red baseline files hold.
+test_cases() {
+  local log=$1 want=$2
+  {
+    grep -E "^Test case '[A-Za-z0-9_]+\.[A-Za-z0-9_]+\(\)' $want " "$log" 2>/dev/null \
+      | sed -E "s/^Test case '([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)\(\)' $want .*/\1\/\2/"
+    grep -E "^Test Case '-\[([A-Za-z0-9_]+\.)?[A-Za-z0-9_]+ [A-Za-z0-9_]+\]' $want" "$log" 2>/dev/null \
+      | sed -E "s/^Test Case '-\[([A-Za-z0-9_]+\.)?([A-Za-z0-9_]+) ([A-Za-z0-9_]+)\]' $want.*/\2\/\3/"
+  } | sort -u
 }
 
 # failing_tests <xcodebuild log> → "Class/test" per failing test, sorted.
 failing_tests() {
-  grep -E "^Test Case '-\[ArbosTests\.[A-Za-z0-9_]+ [A-Za-z0-9_]+\]' failed" "$1" 2>/dev/null \
-    | sed -E "s/^Test Case '-\[ArbosTests\.([A-Za-z0-9_]+) ([A-Za-z0-9_]+)\]' failed.*/\1\/\2/" | sort -u
+  test_cases "$1" failed
+}
+
+# test_run_state <xcodebuild log> → "<state> <passed> <failed>". The point of the state is to
+# keep "I read this log and it ran nothing" apart from "I could not read this log", because
+# the second is a parser that has fallen behind the toolchain and must not be reported as a
+# suite of zero tests — that mistake looks exactly like a test regression.
+#   ran        case lines are there, so the counts mean what they say
+#   none       the run finished and says in so many words that it selected no test
+#   unreadable the run finished, but carries no case line of either known shape: either it
+#              selected nothing in a way this toolchain does not spell out, or the per-case
+#              wording has changed again and test_cases needs updating. Never silently zero.
+#   incomplete no verdict banner at all — the run did not get that far (no simulator, a
+#              watchdog kill before the end). Infrastructure, handled by the caller as before.
+test_run_state() {
+  local log=$1 passed failed
+  passed=$(test_cases "$log" passed | grep -c .)
+  failed=$(test_cases "$log" failed | grep -c .)
+  if (( passed + failed > 0 )); then
+    echo "ran $passed $failed"
+  elif ! grep -qE '\*\* TEST (SUCCEEDED|FAILED|EXECUTE FAILED) \*\*' "$log" 2>/dev/null; then
+    echo "incomplete 0 0"
+  elif grep -qE "Executed 0 test|Test Suite 'Selected tests'" "$log" 2>/dev/null; then
+    echo "none 0 0"
+  else
+    echo "unreadable 0 0"
+  fi
 }
 
 test_sim_udid() {
@@ -120,25 +162,36 @@ baseline_for() {
 }
 
 run_unit_tests() {
-  local log t0 fails ran base baseline new
+  local log t0 fails state passed base baseline new
   log=$(mktemp -t ios-gate-tests); t0=$(date +%s)
   run_suite "$HOME/arbos-gate-dd-Debug" "$log"
   local trc=$?
   fails=$(failing_tests "$log")
-  ran=$(tests_executed "$log")
+  read -r state passed _ <<< "$(test_run_state "$log")"
+  # A finished run whose cases this script cannot find is a parser problem, and saying so is the
+  # whole point of the state: the alternative is calling it zero tests, which reads as a suite
+  # that never ran and sends the next person looking at the branch instead of at this file.
+  if [[ "$state" == "unreadable" ]]; then
+    echo "== tests: FAIL — the run finished but no test case line of a shape this gate knows is in"
+    echo "   its log, so it cannot tell a suite that passed from one that never ran. Either"
+    echo "   -only-testing:$TEST_ONLY selected nothing, or xcodebuild's per-case wording changed"
+    echo "   again and test_cases() needs the new shape (see its comment for the two it reads)."
+    tail -n 8 "$log" | cut -c1-200
+    rm -f "$log"; return 1
+  fi
   if [[ "$trc" -eq 0 && -z "$fails" ]]; then
     # A run that executed nothing is not a pass. xcodebuild exits 0 and prints "** TEST SUCCEEDED **"
     # when -only-testing matches no test in the .xctestrun, so the verdict line above cannot see it
     # (2026-10-30: a rig built the app, ran 0 tests and reported success because a new ArbosUITests
     # file was never added to project.pbxproj, so it compiled into no bundle).
-    if (( ran == 0 )); then
-      echo "== tests: FAIL — the suite reported success but executed 0 tests; -only-testing:$TEST_ONLY"
+    if [[ "$state" == "none" ]]; then
+      echo "== tests: FAIL — the suite reported success but ran no test; -only-testing:$TEST_ONLY"
       echo "   matched nothing in the .xctestrun. Check that $TEST_ONLY is a target of the Arbos scheme's"
       echo "   Test action and that every test file is a member of it in project.pbxproj."
       tail -n 8 "$log" | cut -c1-200
       rm -f "$log"; return 1
     fi
-    echo "== tests: $ran passed ($(( $(date +%s) - t0 )) s)"
+    echo "== tests: $passed passed ($(( $(date +%s) - t0 )) s)"
     rm -f "$log"; return 0
   fi
   if [[ -z "$fails" ]]; then
@@ -197,20 +250,34 @@ if [[ "${1:-}" == "selftest" ]]; then
   else
     echo "selftest: failing-test parser WRONG — got: $(failing_tests "$tlog")"; rm -f "$tlog"; exit 1
   fi
-  # The counter must read the executed count, including the 0 of a run that selected no test at all.
-  printf '%s\n' "Test Suite 'ArbosTests.xctest' passed at 2026-10-26 05:52:12.318." \
-                 "	 Executed 217 tests, with 0 failures (0 unexpected) in 4.012 (4.098) seconds" > "$tlog"
-  counted=$(tests_executed "$tlog")
+  # The run-state reader is what keeps a passing suite from being reported as a suite that never
+  # ran, so it is pinned to lines copied out of real logs: the parallel shape from the gate Mac's
+  # Xcode 27, the serial shape, a run that selected nothing, and a finished run in neither shape.
+  printf '%s\n' "Test case 'PinPolicyTests.testAdminsPolicyRefusesAPlainMember()' passed on 'Clone 1 of iPhone 17 - Arbos (41549)' (0.001 seconds)" \
+                 "Test case 'PinPolicyTests.testAMemberCannotPin()' failed on 'Clone 1 of iPhone 17 - Arbos (41549)' (0.002 seconds)" \
+                 "** TEST FAILED **" > "$tlog"
+  parallel="$(test_run_state "$tlog") $(failing_tests "$tlog")"
+  printf '%s\n' "Test Case '-[ArbosTests.PinPolicyTests testAdminsPolicyRefusesAPlainMember]' passed (0.001 seconds)." \
+                 "Test Case '-[ArbosTests.PinPolicyTests testAMemberCannotPin]' failed (0.002 seconds)." \
+                 "	 Executed 2 tests, with 1 failure (0 unexpected) in 0.003 (0.004) seconds" \
+                 "** TEST FAILED **" > "$tlog"
+  serial="$(test_run_state "$tlog") $(failing_tests "$tlog")"
   printf '%s\n' "Test Suite 'Selected tests' passed at 2026-10-30 17:24:31.002." \
                  "	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds" \
                  "** TEST SUCCEEDED **" > "$tlog"
-  empty=$(tests_executed "$tlog")
-  : > "$tlog"
-  silent=$(tests_executed "$tlog")
-  if [[ "$counted" == "217" && "$empty" == "0" && "$silent" == "0" ]]; then
-    echo "selftest: test counter reads the executed count (0 for an empty run and for a log that never says)"
+  selected_nothing=$(test_run_state "$tlog")
+  printf '%s\n' "Test thing 'PinPolicyTests.whatever' went fine on some future runner" \
+                 "** TEST SUCCEEDED **" > "$tlog"
+  future=$(test_run_state "$tlog")
+  printf '%s\n' "no xctestrun or no simulator 'iPhone 17'" > "$tlog"
+  no_run=$(test_run_state "$tlog")
+  if [[ "$parallel" == "ran 1 1 PinPolicyTests/testAMemberCannotPin" \
+     && "$serial" == "ran 1 1 PinPolicyTests/testAMemberCannotPin" \
+     && "$selected_nothing" == "none 0 0" && "$future" == "unreadable 0 0" && "$no_run" == "incomplete 0 0" ]]; then
+    echo "selftest: run-state reader counts cases in both shapes and separates none / unreadable / incomplete"
   else
-    echo "selftest: test counter WRONG — got $counted / $empty / $silent, want 217 / 0 / 0"; rm -f "$tlog"; exit 1
+    echo "selftest: run-state reader WRONG — parallel '$parallel', serial '$serial', selected-nothing"
+    echo "          '$selected_nothing', future '$future', no-run '$no_run'"; rm -f "$tlog"; exit 1
   fi
   rm -f "$tlog"
   [[ -n "$(test_sim_udid)" ]] && echo "selftest: test simulator '$TEST_SIM_NAME' present ($(test_sim_udid))" || { echo "selftest: test simulator '$TEST_SIM_NAME' MISSING"; exit 1; }

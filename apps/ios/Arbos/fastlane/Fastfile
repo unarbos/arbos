@@ -116,19 +116,41 @@ def require_xcframework!
   )
 end
 
-# A test run that executed nothing is not a pass. xcodebuild exits 0 and prints no
-# `error:` line when the selected tests do not exist, when a test bundle was built
-# without its sources, or when the scheme's Test action has no target, so neither
-# xcodebuild_logged's exit status nor its error count can see it. `selection` names
-# what to look at first (2026-10-30: a rig reported success on 0 tests because a new
-# file was never added to project.pbxproj, so it compiled into no bundle).
+# xcodebuild reports a test case in one of two shapes, and both appear in one `test` log
+# because the two targets run differently:
+#   ArbosTests, in parallel clones on Xcode 27 —
+#     Test case 'PinPolicyTests.testAMemberCannotPin()' passed on 'Clone 1 of iPhone 17 - Arbos (90505)' (0.001 seconds)
+#   ArbosUITests, serial —
+#     Test Case '-[ArbosUITests.BackSwipeUITests testAgentChatEdgeSwipeGoesHome]' passed (42.807 seconds).
+# Count cases, never the `Executed N tests` summary: the parallel reporter does not print one.
+# A 10,713-line log of a run that passed held 507 parallel cases with no summary of their own
+# and eight `Executed N tests` lines, all of them from the 33 UI tests
+# (store note internal/xcodebuild-test-count-detection.md).
+TEST_CASE_LINE = /^(Test case '[A-Za-z0-9_]+\.[A-Za-z0-9_]+\(\)' |Test Case '-\[[A-Za-z0-9_. ]+\]' )(passed|failed)/
+
+# A test run that executed nothing is not a pass. xcodebuild exits 0 and prints no `error:`
+# line when the selected tests do not exist, when a bundle was built without its sources, or
+# when the scheme's Test action has no target, so neither xcodebuild_logged's exit status nor
+# its error count can see it (2026-10-30: a rig reported success on 0 tests because a new file
+# was never added to project.pbxproj, so it compiled into no bundle). `selection` names what
+# to look at first. A finished run with no case line of either shape is reported as what it
+# is — a log this lane cannot read — and not as a run of zero tests: calling a toolchain
+# change "no tests ran" points the next person at the branch instead of at this file.
 def require_tests_ran!(log, selection)
-  counts = File.exist?(log) ? File.read(log).scan(/Executed (\d+) test/).flatten.map(&:to_i) : []
-  return if counts.any?(&:positive?)
-  UI.user_error!(
-    "#{selection} executed 0 tests (see #{log}) — check that the scheme's Test action " \
-    "builds the test target and that every test file is a member of it in project.pbxproj"
-  )
+  body = File.exist?(log) ? File.read(log) : ""
+  return if body.scan(TEST_CASE_LINE).any?
+  if body.match?(/Executed 0 test|Test Suite 'Selected tests'/)
+    UI.user_error!(
+      "#{selection} ran no test (see #{log}) — check that the scheme's Test action " \
+      "builds the test target and that every test file is a member of it in project.pbxproj"
+    )
+  else
+    UI.user_error!(
+      "cannot tell whether #{selection} ran any test (see #{log}): the log carries no test " \
+      "case line of a shape this lane knows. Either nothing was selected, or xcodebuild's " \
+      "per-case wording changed and TEST_CASE_LINE needs the new shape."
+    )
+  end
 end
 
 def report_arbosffi_size(archive_path)
