@@ -277,14 +277,16 @@ impl Supervisor {
                 tracing::warn!(error = %e, id, source = src, "fork chat seed");
             }
         }
-        let known: Vec<String> = store.chats()?.into_iter().map(|c| c.id).collect();
+        let known = store.chats()?;
         let initial_chat = known
             .first()
-            .cloned()
+            .map(|c| c.id.clone())
             .unwrap_or_else(|| "default".to_owned());
         sync.open_room(PROJECT_DOC_CHAT_ID).await?;
-        for id in &known {
-            sync.open_room(id).await?;
+        for id in boot_rooms(&known) {
+            if let Err(e) = sync.open_room(&id).await {
+                tracing::warn!(error = %e, chat = %id, "boot: open room");
+            }
         }
         // Skills index (F5) before the first turn; refreshed every 60 s, when `skills_rev` moves,
         // and on the `skills_changed` push.
@@ -641,21 +643,53 @@ impl Workspace {
     /// A chat forked from another (#1257) is seeded from its source first.
     pub async fn sync_chats(&self, chats: &[Value]) {
         for c in chats {
-            open_listed_chat(&self.cfg, &self.store, &self.sync, &self.project_id, c).await;
+            open_listed_chat(
+                &self.cfg,
+                &self.store,
+                &self.sync,
+                &self.project_id,
+                c,
+                false,
+            )
+            .await;
         }
     }
+}
+
+/// Which chat rooms open at boot (#2367): the pinned chat and the chats most recently used,
+/// at most [`crate::sync::max_open_rooms`] of them — not every chat the box has ever had. A
+/// row waiting in any other chat reaches the box as a `chat_open` push, queued by the relay
+/// while no socket of this box was on the room, and `/box/hello` delivers those at boot.
+///
+/// "Used" is the chat's last turn (`last_message_at`), and its creation time until it has one.
+pub(crate) fn boot_rooms(chats: &[crate::store::ChatRow]) -> Vec<String> {
+    let mut by_use: Vec<&crate::store::ChatRow> = chats.iter().collect();
+    by_use.sort_by_key(|c| {
+        std::cmp::Reverse((c.is_pinned, c.last_message_at.unwrap_or(c.created_at)))
+    });
+    let cap = crate::sync::max_open_rooms();
+    if cap > 0 {
+        by_use.truncate(cap);
+    }
+    by_use.into_iter().map(|c| c.id.clone()).collect()
 }
 
 /// One chat as the relay lists it (`{id, title, is_pinned, created_at, forked_from?}`): record
 /// it and open its room unless the room is already open. Idempotent; shared by the registry
 /// pass and the relay's `chat_open` push (#2127), so a chat reaches the agent by whichever
 /// arrives first.
+///
+/// `open_now` is the push: rows are waiting in the room, or the chat was just created, so it
+/// opens whatever its history says. The 3 s registry pass passes `false` and so opens only a
+/// chat the box has never seen: reopening every listed chat is what kept 1,667 rooms alive on
+/// the lt-eval box (#2367).
 pub(crate) async fn open_listed_chat(
     cfg: &Config,
     store: &Store,
     sync: &SyncHub,
     project_id: &str,
     c: &Value,
+    open_now: bool,
 ) {
     let Some(id) = c.get("id").and_then(Value::as_str) else {
         return;
@@ -667,7 +701,10 @@ pub(crate) async fn open_listed_chat(
         c.get("is_pinned").and_then(Value::as_bool).unwrap_or(false),
         c.get("created_at").and_then(Value::as_i64).unwrap_or(0),
     );
-    if sync.host(id).await.is_some() {
+    if sync.is_open(id).await {
+        return;
+    }
+    if !(open_now || first_sight) {
         return;
     }
     if first_sight {
@@ -1141,6 +1178,47 @@ mod tests {
         assert!(
             REGISTRY_CALL_TIMEOUT < Duration::from_secs(15),
             "bound stays well under the relay's stale-box window"
+        );
+    }
+
+    /// #2367: boot opens the pinned chat and the chats most recently used, at most
+    /// `max_open_rooms` of them — not a room for every chat the box has ever had.
+    #[test]
+    fn boot_opens_the_pinned_chat_and_the_most_recently_used_ones() {
+        let chat =
+            |id: &str, pinned: bool, created: i64, used: Option<i64>| crate::store::ChatRow {
+                id: id.to_owned(),
+                title: id.to_owned(),
+                is_pinned: pinned,
+                created_at: created,
+                last_message_at: used,
+                compaction_summary: None,
+                compacted_through: None,
+                compaction_version: 0,
+                pi_session_path: None,
+            };
+        let cap = crate::sync::max_open_rooms();
+        assert!(cap > 0, "the test needs a cap to exceed");
+        let mut chats = vec![
+            chat("pinned", true, 1, None),
+            chat("old-but-used", false, 2, Some(9_000)),
+            chat("new-unused", false, 5_000, None),
+        ];
+        // Far more chats than the cap, every one of them older than those three.
+        for i in 0..cap * 2 {
+            chats.push(chat(&format!("stale{i}"), false, 3, Some(100 + i as i64)));
+        }
+        let open = super::boot_rooms(&chats);
+        assert_eq!(open.len(), cap, "the room budget holds");
+        assert_eq!(open[0], "pinned", "the pinned chat first");
+        assert_eq!(
+            &open[1..3],
+            &["old-but-used".to_owned(), "new-unused".to_owned()],
+            "then by last use, newest first (creation time stands in until a chat has a turn)"
+        );
+        assert!(
+            !open.contains(&"stale0".to_owned()),
+            "the coldest chats get no room at boot; a row waiting in one reopens it"
         );
     }
 

@@ -696,7 +696,8 @@ pub async fn on_issue_push(agent: &Arc<Agent>, payload: &Value) {
     };
     // A `system` row with a text part: both apps draw it as one centred muted line (the
     // `note` status part of `append_system_note` is not shown by either transcript).
-    if let Some(host) = agent.sync.host(&chat_id).await {
+    // The room may be closed for being idle (#2367): the line opens it, rather than being lost.
+    if let Ok(host) = agent.room(&chat_id).await {
         let h = host.lock().await;
         h.doc.append_voice_line(
             "system",

@@ -209,6 +209,7 @@ impl Agent {
                     &self.sync,
                     &self.cfg.project_id,
                     &chat,
+                    true,
                 )
                 .await;
                 tracing::info!(chat_id, reason = ?payload.get("reason"), "chat_open push: room opened");
@@ -489,10 +490,15 @@ impl Agent {
         } else {
             format!("Routine “{name}” ran while you were away ({status}) → open “{chat_title}”.")
         };
-        if let Some(host) = self.sync.host(&pinned.id).await {
-            let h = host.lock().await;
-            h.doc
-                .append_system_note(&ulid(), sender, &text, &self.cfg.device_id);
+        // The pinned chat's room may be closed for being idle (#2367): the notice opens it,
+        // rather than being dropped.
+        match self.room(&pinned.id).await {
+            Ok(host) => {
+                let h = host.lock().await;
+                h.doc
+                    .append_system_note(&ulid(), sender, &text, &self.cfg.device_id);
+            }
+            Err(e) => tracing::warn!(error = %e, chat = %pinned.id, "routine notice: no room"),
         }
     }
 }
