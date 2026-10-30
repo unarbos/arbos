@@ -100,7 +100,7 @@ pub fn store(creds: &DeviceCredentials) -> Result<()> {
     }
     let path = file_path(&creds.relay_url);
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        super::store::make_owner_only_dir(parent);
     }
     let json = serde_json::to_vec_pretty(creds)?;
     std::fs::write(&path, json).with_context(|| format!("write {}", path.display()))?;

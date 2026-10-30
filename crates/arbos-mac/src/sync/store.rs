@@ -87,7 +87,10 @@ impl Store {
         }
         let path = file_path(relay_url, device_id);
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            make_owner_only_dir(parent);
+            if let Some(config) = parent.parent() {
+                make_owner_only_dir(config);
+            }
         }
         match Store::open_at(&path) {
             Ok(s) => Some(s),
@@ -101,6 +104,13 @@ impl Store {
 
     pub(crate) fn open_at(path: &Path) -> Result<Store> {
         let conn = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
+        // Before the WAL pragma, not after: SQLite copies the database file's mode onto the
+        // `-wal` and `-shm` files when it creates them, and those hold the same chat rows.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         // secure_delete: a snapshot replaced after a secret redaction leaves no old bytes in
         // the file (secret hand-off, 2026-10-26).
@@ -351,6 +361,18 @@ impl Store {
     }
 }
 
+/// Create a directory of ours so only its owner can look inside. The store holds chat
+/// content and, in the avatar cache keys, the device token; the rest of the config dir
+/// holds read receipts, mutes and settings. None of it is another account's business.
+pub fn make_owner_only_dir(dir: &Path) {
+    let _ = std::fs::create_dir_all(dir);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
+}
+
 /// Delete the database and its WAL side files (sign-out, corrupt file).
 pub fn remove_files(path: &Path) {
     for suffix in ["", "-wal", "-shm", "-journal"] {
@@ -441,6 +463,66 @@ mod secret_handoff_store_tests {
                 );
             }
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod permission_tests {
+    //! The store file is chat content, and the avatar cache keys inside it carry the device
+    //! token (`/blob/people:{id}/{k}?token=…`, `sync/dto.rs`). Nothing in it is readable by
+    //! anybody but its owner — not another account on the Mac, not a copied home directory.
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use super::*;
+
+    fn mode_of(path: &Path) -> u32 {
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn the_store_file_and_its_sidecars_are_owner_only() {
+        let dir = std::env::temp_dir().join(format!("arbos-store-perms-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("store.sqlite");
+        let store = Store::open_at(&path).unwrap();
+        // A write so WAL puts its sidecars on disk next to the database.
+        store.put(KEY_ACCOUNT, b"{\"login\":\"sam\"}");
+        store.put(
+            &format!("{KEY_AVATAR_PREFIX}https://relay/blob/people:c1/a.jpg?token=secret"),
+            b"jpegbytes",
+        );
+        for suffix in ["", "-wal", "-shm"] {
+            let mut p = path.as_os_str().to_owned();
+            p.push(suffix);
+            let p = PathBuf::from(p);
+            if !p.exists() {
+                continue;
+            }
+            assert_eq!(
+                mode_of(&p) & 0o077,
+                0,
+                "{} is readable beyond its owner (mode {:o})",
+                p.display(),
+                mode_of(&p)
+            );
+        }
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_store_directory_is_made_owner_only() {
+        let dir = std::env::temp_dir().join(format!("arbos-store-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        make_owner_only_dir(&dir);
+        assert_eq!(
+            mode_of(&dir) & 0o077,
+            0,
+            "the store directory is readable beyond its owner (mode {:o})",
+            mode_of(&dir)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
