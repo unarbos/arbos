@@ -1770,7 +1770,7 @@ struct RowView: View, Equatable {
             if let sender {
                 mediaRow(sender: sender, named: named) {
                     FileCard(item: item, subtitle: subtitle, chatId: chatId, fromUser: false, caption: caption,
-                             forwardedFrom: forwardedFrom, quote: quote, onQuoteTap: onQuoteTap)
+                             mentions: mentions, forwardedFrom: forwardedFrom, quote: quote, onQuoteTap: onQuoteTap)
                         .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: false) }
                         .frame(maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset), alignment: .leading)
                 }
@@ -1778,7 +1778,7 @@ struct RowView: View, Equatable {
                 HStack {
                     if row.role == .user { Spacer(minLength: 0) }
                     FileCard(item: item, subtitle: subtitle, chatId: chatId, fromUser: row.role == .user, caption: caption,
-                             forwardedFrom: forwardedFrom, quote: quote, onQuoteTap: onQuoteTap)
+                             mentions: mentions, forwardedFrom: forwardedFrom, quote: quote, onQuoteTap: onQuoteTap)
                         .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: row.role == .user) }
                         .frame(maxWidth: maxBubble, alignment: row.role == .user ? .trailing : .leading)
                     if row.role != .user { Spacer(minLength: 0) }
@@ -3590,6 +3590,9 @@ struct FileCard: View {
     let chatId: Id
     let fromUser: Bool
     var caption: String? = nil
+    /// The chat's mention table, so an `@handle` in the caption draws as a chip — the
+    /// same renderer a text bubble and a picture's caption use.
+    var mentions: MentionTable? = nil
     /// "Forwarded from <name>" at the top of the card.
     var forwardedFrom: String? = nil
     /// A reply's quote header at the top of the card ([feedback picture-reply-quote-ios-2026-10-28]).
@@ -3643,9 +3646,13 @@ struct FileCard: View {
             .disabled(item.blobRef == nil)
             .accessibilityLabel(item.blobRef == nil ? "\(item.name), unavailable" : "\(item.name), \(subtitle), tap to open")
             if let captionText {
-                Text(captionText)
+                // The same text as a text bubble: links and mention chips (ImageBubble's
+                // caption bar does this too).
+                Markdown.inlineText(captionText, color: fromUser ? theme.userText : theme.text, link: theme.accent,
+                                    codeChip: fromUser ? theme.userCodeChip : theme.codeChip, mentions: mentions)
                     .font(theme.font(Theme.body))
-                    .foregroundStyle(fromUser ? theme.userText : theme.text)
+                    .tint(theme.accent)
+                    .mentionPills()
                     .multilineTextAlignment(.leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, Theme.bubbleHPad)
