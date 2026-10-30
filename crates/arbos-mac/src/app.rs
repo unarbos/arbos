@@ -7070,12 +7070,10 @@ impl AppState {
         if text.trim().is_empty() && attachments.is_empty() {
             return;
         }
-        // For everyone, through the relay, like the message menu's Delete — not a local
-        // hide, which the next snapshot would undo.
+        // For everyone, through the relay, like the message menu's Delete. The row is not
+        // dropped from `self.messages` here: the relay's doc edit is what removes it, and a
+        // local removal is undone by the next snapshot — which is the defect above.
         self.delete_message(chat_id.clone(), message_id.clone(), cx);
-        if let Some(list) = self.messages.get_mut(&chat_id) {
-            list.retain(|m| m.id != message_id);
-        }
         self.send_with(text, attachments, None, reply_to, false, mentions, cx);
         cx.emit(AppEvent::TranscriptChanged { chat_id });
         cx.notify();

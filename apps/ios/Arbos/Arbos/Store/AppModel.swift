@@ -5207,12 +5207,11 @@ final class AppModel: ObservableObject {
             // Already gone (never reached the relay, or a second delete): the caller's
             // goal — this row is not in the chat — is met.
         }
+        // The row itself is not dropped from `messages` here: the relay's doc edit is what
+        // removes it, and a local removal is undone by the next snapshot — which is the
+        // defect this fix is about ([feedback failed-upload-retry]).
         clearUnacked(chatId: chatId, messageId: messageId)
         clearSendFailed(chatId: chatId, messageId: messageId)
-        if var list = messages[chatId] {
-            list.removeAll { $0.id == messageId }
-            messages[chatId] = list
-        }
     }
 
     /// Long-press → Remove preview: the relay drops the message's link preview for everyone

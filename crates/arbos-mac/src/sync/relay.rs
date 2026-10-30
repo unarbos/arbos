@@ -6436,25 +6436,36 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let room = room::room_path(&project_id, &chat_id, is_people);
             let shared = shared.clone();
             tokio::spawn(async move {
-                // The row is going, so it is no longer a failed send of mine: without this
-                // the overlay would keep marking an id that has left the chat
-                // ([feedback failed-upload-retry]).
-                shared.failed_sends.lock().unwrap().remove(&message_id);
-                if let Err(err) = shared
+                match shared
                     .delete(&format!("/room/{room}/messages/{message_id}"))
                     .await
                 {
-                    let error = match err.downcast_ref::<RelayError>() {
-                        Some(e) if e.status == 403 => UserError::of(
-                            "delete the message",
-                            ErrorClass::Refused {
-                                message: Some("You can only delete your own messages.".into()),
-                            },
-                            format!("{err:#}"),
-                        ),
-                        _ => UserError::classify("delete the message", &err),
-                    };
-                    shared.fail_with(error);
+                    // Gone (or never there): it is no longer a failed send of mine, so the
+                    // overlay stops marking it ([feedback failed-upload-retry]). A refused
+                    // delete leaves the mark, and Retry, exactly where they were.
+                    Ok(_) => {
+                        shared.failed_sends.lock().unwrap().remove(&message_id);
+                    }
+                    Err(err)
+                        if err
+                            .downcast_ref::<RelayError>()
+                            .is_some_and(|e| e.status == 404) =>
+                    {
+                        shared.failed_sends.lock().unwrap().remove(&message_id);
+                    }
+                    Err(err) => {
+                        let error = match err.downcast_ref::<RelayError>() {
+                            Some(e) if e.status == 403 => UserError::of(
+                                "delete the message",
+                                ErrorClass::Refused {
+                                    message: Some("You can only delete your own messages.".into()),
+                                },
+                                format!("{err:#}"),
+                            ),
+                            _ => UserError::classify("delete the message", &err),
+                        };
+                        shared.fail_with(error);
+                    }
                 }
             });
         }

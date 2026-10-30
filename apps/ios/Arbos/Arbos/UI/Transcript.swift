@@ -473,7 +473,7 @@ enum Transcript {
                 }
                 // The failed mark goes once per message, on its first card — where the
                 // forward header and the reply quote already go.
-                let mediaDelivery = mine ? Delivery.of(message) : nil
+                let mediaDelivery: Delivery? = mine ? Delivery.of(message) : nil
                 for (i, part) in mediaParts.enumerated() {
                     let cap = (i == lastCaptionable) ? mediaCaption : nil
                     // Another person's picture / file sits left like their bubble, with their
@@ -1812,7 +1812,7 @@ struct RowView: View, Equatable {
                         .frame(maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset), alignment: .leading)
                 }
             } else {
-                HStack(spacing: 8) {
+                HStack {
                     if row.role == .user { Spacer(minLength: 0) }
                     failedRetryMark(gap: 0)
                     FileCard(item: item, subtitle: subtitle, chatId: chatId, fromUser: row.role == .user, caption: caption,
@@ -1830,7 +1830,7 @@ struct RowView: View, Equatable {
                 if !fromUser { Spacer(minLength: 0) }
             }
         case .voiceMemo(let name, let projectId, let ref, let fromUser):
-            HStack(spacing: 8) {
+            HStack {
                 if fromUser { Spacer(minLength: 0) }
                 failedRetryMark(gap: 0)
                 VoiceMemoBubble(name: name, projectId: projectId, blobRef: ref, fromUser: fromUser)
