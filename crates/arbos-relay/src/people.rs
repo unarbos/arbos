@@ -5636,10 +5636,16 @@ mod mention_resolution_tests {
         );
 
         // A handle on its own still resolves, and only once when the collective names it too.
-        assert_eq!(
-            resolve_mentions(&state, &cm, "@lium and @here", &me),
-            resolve_mentions(&state, &cm, "@here", &me)
-        );
+        // Sorted, because what is being compared is who was named: a collective walks the
+        // roster, and `members_of` orders that by `joined_at` with no tiebreak, so members who
+        // joined in the same millisecond come back in whatever order SQLite chooses. Sorting
+        // still catches a duplicate, which is what this assertion is for — the lists would
+        // differ in length.
+        let mut handle_and_collective = resolve_mentions(&state, &cm, "@lium and @here", &me);
+        let mut collective_alone = resolve_mentions(&state, &cm, "@here", &me);
+        handle_and_collective.sort();
+        collective_alone.sort();
+        assert_eq!(handle_and_collective, collective_alone);
     }
 
     /// A collective that names nobody adds nothing — the array is a list of members. The word is
