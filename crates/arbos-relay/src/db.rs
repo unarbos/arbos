@@ -560,6 +560,7 @@ impl Db {
         c.execute_batch(SCHEMA)?;
         c.execute_batch(crate::outside::SCHEMA)?;
         c.execute_batch(crate::outside_log::SCHEMA)?;
+        c.execute_batch(crate::agent_link::SCHEMA)?;
         for m in crate::outside::MIGRATIONS {
             let _ = c.execute(m, []);
         }
