@@ -1125,7 +1125,14 @@ pub async fn devices_list(
             }
             Json(list).into_response()
         }
-        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+        Err(e) => {
+            tracing::error!(user = %user_id, error = %e, "device list unreadable");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db",
+                "the account's devices could not be read; try again",
+            )
+        }
     }
 }
 
@@ -1139,7 +1146,14 @@ pub async fn device_revoke(
     let owner = match state.db.device_status(&target) {
         Ok(Some((owner, _))) => owner,
         Ok(None) => return api_error(StatusCode::NOT_FOUND, "not_found", "no such device"),
-        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+        Err(e) => {
+            tracing::error!(device = %target, error = %e, "device row unreadable");
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db",
+                "that device could not be read; try again",
+            );
+        }
     };
     let allowed = match &principal {
         Principal::Admin => true,

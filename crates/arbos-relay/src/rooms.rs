@@ -1206,10 +1206,14 @@ mod ordering_tests {
             let mut seqs: Vec<i64> = Vec::new();
             let mut rows_done = false;
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
-            while seqs.last().copied() != Some(ROWS) {
+            // Both conditions, not just the rows. `RowsDone` is sent after the last row of a
+            // catch-up batch, so stopping at the last row can stop one frame too early: when
+            // the writer finishes before the reader's ROWS_REQ is answered, every row arrives
+            // as catch-up and `RowsDone` is the frame after the one that ends this loop.
+            while seqs.last().copied() != Some(ROWS) || !rows_done {
                 let m = tokio::time::timeout_at(deadline, rstream.next()).await;
                 let Ok(Some(Ok(m))) = m else {
-                    panic!("iteration {it}: reader timed out with {seqs:?}");
+                    panic!("iteration {it}: reader timed out with {seqs:?}, rows_done={rows_done}");
                 };
                 let Some(f) = decode(m) else { continue };
                 match f.ty {
