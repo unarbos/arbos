@@ -1,6 +1,11 @@
 //! Skills library (F5): reusable Markdown how-tos stored on the relay, shared across Projects.
-//! Devices get full CRUD; a box reads the shared skills plus its own Project's and may save
-//! skills it learned (`skills_save`), which land as that Project's own.
+//! A device gets full CRUD over the skills of the Projects its user can reach; a box reads the
+//! shared skills plus its own Project's and may save skills it learned (`skills_save`), which
+//! land as that Project's own.
+//!
+//! "Shared across Projects" is the whole of it: a skill is never shared across *people*. Every
+//! route here asks the same ownership question of a device, and a listing shows exactly the
+//! skills that device could also open by id (#1953).
 
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -14,6 +19,7 @@ use arbos_core::ids::{now_ms, ulid};
 use arbos_core::skill::{slugify, Skill};
 
 use crate::auth::Principal;
+use crate::db::SkillScope;
 use crate::state::AppState;
 
 type ApiResult = Result<Response, (StatusCode, String)>;
@@ -36,14 +42,17 @@ fn box_project(state: &AppState, principal: &Principal, headers: &HeaderMap) -> 
     (p.user_id == *user_id).then_some(p.id)
 }
 
-/// What a principal may see: everything for devices, shared + own for a box (scoped to the
-/// workspace named in the request; a box without a project header sees shared skills only).
-fn visible_to(state: &AppState, principal: &Principal, headers: &HeaderMap) -> Option<String> {
+/// Which skills a listing may show this caller. A device is held to the projects its user can
+/// reach, which is the question [`owns_skill`] asks on the by-id routes; a box keeps the view
+/// [`can_see`] gives it, scoped to the workspace named in the request (without a project header
+/// it sees the shared skills only).
+fn scope_of(state: &AppState, principal: &Principal, headers: &HeaderMap) -> SkillScope {
     match principal {
-        Principal::Device { .. } | Principal::Admin => None,
-        Principal::Box { .. } => {
-            Some(box_project(state, principal, headers).unwrap_or_else(|| "-".to_owned()))
-        }
+        Principal::Admin => SkillScope::Everything,
+        Principal::Device { user_id, .. } => SkillScope::Reachable(user_id.clone()),
+        Principal::Box { .. } => SkillScope::Project(
+            box_project(state, principal, headers).unwrap_or_else(|| "-".to_owned()),
+        ),
     }
 }
 
@@ -200,13 +209,13 @@ pub async fn list(
     headers: HeaderMap,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> ApiResult {
-    let vis = visible_to(&state, &principal, &headers);
+    let scope = scope_of(&state, &principal, &headers);
     let rows = match q.get("q").map(|s| s.trim()).filter(|s| !s.is_empty()) {
         Some(query) => state
             .db
-            .search_skills(query, vis.as_deref(), 50)
+            .search_skills(query, &scope, 50)
             .map_err(internal)?,
-        None => state.db.list_skills(vis.as_deref()).map_err(internal)?,
+        None => state.db.list_skills(&scope).map_err(internal)?,
     };
     Ok(Json(rows.iter().map(skill_json).collect::<Vec<_>>()).into_response())
 }
@@ -217,9 +226,9 @@ pub async fn index(
     principal: Principal,
     headers: HeaderMap,
 ) -> ApiResult {
-    let vis = visible_to(&state, &principal, &headers);
-    let rows = state.db.list_skills(vis.as_deref()).map_err(internal)?;
-    let rev = state.db.skills_rev(vis.as_deref()).map_err(internal)?;
+    let scope = scope_of(&state, &principal, &headers);
+    let rows = state.db.list_skills(&scope).map_err(internal)?;
+    let rev = state.db.skills_rev(&scope).map_err(internal)?;
     Ok(Json(json!({
         "rev": rev,
         "skills": rows.iter().map(index_json).collect::<Vec<_>>(),
@@ -268,14 +277,25 @@ pub async fn create(
         Principal::Box { .. } => scope.clone(),
         Principal::Device { .. } | Principal::Admin => b.origin_project_id.clone(),
     };
-    // A device names its own origin project, and `delete` checks ownership against that field,
-    // so it has to be a project the caller actually has. A foreign project answers like an
-    // unknown one.
-    if let Some(project) = origin.as_deref() {
-        if !state.allows(&principal, project) {
-            return Err((StatusCode::NOT_FOUND, "no such project".to_owned()));
+    // A device names its own origin project, and every ownership question about the skill is
+    // answered from that field afterwards, so it has to be a project the caller actually has.
+    // A foreign project answers like an unknown one. `allows` takes a project's name as well
+    // as its id; store the id it resolved to rather than the caller's spelling, because the
+    // listing scopes on that column in SQL and cannot resolve a name the same way.
+    let origin = match origin.as_deref() {
+        Some(named) => {
+            let found = state
+                .db
+                .project(named)
+                .map_err(internal)?
+                .filter(|_| state.allows(&principal, named));
+            let Some(project) = found else {
+                return Err((StatusCode::NOT_FOUND, "no such project".to_owned()));
+            };
+            Some(project.id)
         }
-    }
+        None => None,
+    };
     let base = Skill {
         id: ulid(),
         origin_project_id: origin,
@@ -400,13 +420,28 @@ mod tests {
         }
     }
 
+    /// Stands in for whatever a person or an agent wrote down in a skill.
+    const ALICES_BODY: &str = "the steps Alice worked out and wrote down for herself";
+
     fn skill_of(state: &AppState, origin: Option<&str>, slug: &str) -> String {
+        skill_with(state, origin, slug, false, "")
+    }
+
+    fn skill_with(
+        state: &AppState,
+        origin: Option<&str>,
+        slug: &str,
+        shared: bool,
+        body: &str,
+    ) -> String {
         let now = now_ms();
         let s = Skill {
             id: ulid(),
             slug: slug.to_owned(),
             name: slug.to_owned(),
+            body: body.to_owned(),
             origin_project_id: origin.map(str::to_owned),
+            shared,
             version: 1,
             created_at: now,
             updated_at: now,
@@ -414,6 +449,33 @@ mod tests {
         };
         state.db.insert_skill(&s).expect("skill");
         s.id
+    }
+
+    async fn body_text(r: ApiResult) -> String {
+        let resp = r.expect("a listing answers");
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 22)
+            .await
+            .expect("body");
+        String::from_utf8(bytes.to_vec()).expect("utf-8")
+    }
+
+    /// The slugs in a `GET /skills` answer, in the order the route returned them.
+    async fn listed(state: &AppState, principal: Principal, headers: HeaderMap) -> Vec<String> {
+        let text = body_text(
+            list(
+                State(state.clone()),
+                principal,
+                headers,
+                Query(std::collections::HashMap::new()),
+            )
+            .await,
+        )
+        .await;
+        serde_json::from_str::<Vec<Value>>(&text)
+            .expect("an array of skills")
+            .iter()
+            .map(|s| s["slug"].as_str().unwrap_or_default().to_owned())
+            .collect()
     }
 
     /// #1953: `delete` refused boxes and nothing else, so any signed-in device could delete
@@ -453,11 +515,10 @@ mod tests {
     /// device principal, so one user could fetch and edit another user's skill. Both now answer
     /// like `delete` does.
     ///
-    /// `GET /skills/{id}` is **not** where another user's skill content leaks — `GET /skills`
-    /// hands every skill's full `body` and `markdown` to any device token, and that is the list
-    /// the apps actually read (no client calls this route at all). Scoping the list is a product
-    /// decision about whether a relay has a shared skill library; this only makes the by-id
-    /// routes agree with `delete`.
+    /// This is the by-id half. The content leak was `GET /skills`, which handed every skill's
+    /// full `body` to any device token and is the list the apps actually read;
+    /// `a_device_lists_its_own_library_and_not_the_relays` is that half, and the two routes
+    /// now answer the same question.
     #[tokio::test]
     async fn get_and_update_refuse_a_skill_of_another_users_project() {
         let state = test_state(AuthMode::Github);
@@ -640,8 +701,199 @@ mod tests {
         .await;
         assert_eq!(status(r), StatusCode::NOT_FOUND);
         assert!(
-            state.db.list_skills(Some(&project)).unwrap().is_empty(),
+            state
+                .db
+                .list_skills(&SkillScope::Project(project))
+                .unwrap()
+                .is_empty(),
             "nothing lands in another user's library"
+        );
+    }
+
+    /// #1953's substance. `GET /skills` answered every device with every skill on the relay,
+    /// bodies and all, and it is the list the apps read: the Mac's Settings → Skills panel
+    /// (`arbos-mac/src/sync/relay.rs` `refresh_skills`) and `arbosctl skills list`.
+    ///
+    /// A device now sees what its user can reach, which is the question `owns_skill` already
+    /// asks on the by-id routes. Another user's **shared** skill is out too: `shared` reads
+    /// "Shared with every project" in the Mac's own toggle and the agent's `skills_save` tool
+    /// calls it "visible to every Project", so it says nothing about other people, and a device
+    /// that cannot open the skill by id has no use for it in a list.
+    #[tokio::test]
+    async fn a_device_lists_its_own_library_and_not_the_relays() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let alices = project_of(&state, &alice, "Alice work");
+        let bobs = project_of(&state, &bob, "Bob work");
+
+        skill_with(&state, Some(&alices), "alices-notes", false, ALICES_BODY);
+        skill_with(&state, Some(&alices), "alices-shared", true, ALICES_BODY);
+        skill_of(&state, Some(&bobs), "bobs-notes");
+        skill_of(&state, None, "nobodys-notes");
+
+        let text = body_text(
+            list(
+                State(state.clone()),
+                bob_dev.clone(),
+                HeaderMap::new(),
+                Query(std::collections::HashMap::new()),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            !text.contains(ALICES_BODY),
+            "no part of another user's skill reaches Bob"
+        );
+
+        let mut mine = listed(&state, bob_dev, HeaderMap::new()).await;
+        mine.sort();
+        assert_eq!(
+            mine,
+            vec!["bobs-notes".to_owned(), "nobodys-notes".to_owned()],
+            "Bob's own project's skill, and the ownerless one that has no owner to check against"
+        );
+
+        let mut hers = listed(&state, alice_dev, HeaderMap::new()).await;
+        hers.sort();
+        assert_eq!(
+            hers,
+            vec![
+                "alices-notes".to_owned(),
+                "alices-shared".to_owned(),
+                "nobodys-notes".to_owned()
+            ],
+            "and Alice still has everything of hers"
+        );
+    }
+
+    /// `allows` lets a guest of a shared project (D72) drive it, and `owns_skill` is built on
+    /// `allows` rather than `owns` for that reason. The listing has to agree, or being invited
+    /// to a project would show you its chats and hide its skills.
+    #[tokio::test]
+    async fn a_guest_of_a_project_sees_that_projects_skills() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let alices = project_of(&state, &alice, "Alice work");
+        skill_of(&state, Some(&alices), "alices-notes");
+
+        assert!(
+            listed(&state, bob_dev.clone(), HeaderMap::new())
+                .await
+                .is_empty(),
+            "nothing before the invitation"
+        );
+
+        state
+            .db
+            .add_project_member(&alices, &bob, &alice)
+            .expect("invite");
+
+        assert_eq!(
+            listed(&state, bob_dev, HeaderMap::new()).await,
+            vec!["alices-notes".to_owned()],
+            "the guest reads the project's skills, as `owns_skill` already lets them"
+        );
+    }
+
+    /// `GET /skills/search` takes the best 50 rows by relevance. Filtering the answer after
+    /// that limit would be the quiet kind of broken: a relay with more skills than the limit
+    /// would hand a user an empty search while their own skill sat just outside it. The scope
+    /// belongs in the query.
+    #[tokio::test]
+    async fn a_search_crowded_by_other_users_skills_still_finds_the_callers_own() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let alices = project_of(&state, &alice, "Alice work");
+        let bobs = project_of(&state, &bob, "Bob work");
+
+        for i in 0..60 {
+            skill_of(&state, Some(&alices), &format!("deploy-hers-{i:02}"));
+        }
+        skill_of(&state, Some(&bobs), "deploy-his-own");
+
+        let text = body_text(
+            list(
+                State(state.clone()),
+                bob_dev,
+                HeaderMap::new(),
+                Query(std::collections::HashMap::from([(
+                    "q".to_owned(),
+                    "deploy".to_owned(),
+                )])),
+            )
+            .await,
+        )
+        .await;
+        let slugs: Vec<String> = serde_json::from_str::<Vec<Value>>(&text)
+            .expect("an array")
+            .iter()
+            .map(|s| s["slug"].as_str().unwrap_or_default().to_owned())
+            .collect();
+        assert_eq!(slugs, vec!["deploy-his-own".to_owned()]);
+    }
+
+    /// The scoping is the device arm only. A box keeps the view `can_see` gives it — the
+    /// shared skills of the whole relay plus its own project's — because that is the library
+    /// the agent works from, and the admin token keeps everything.
+    #[tokio::test]
+    async fn a_box_and_the_admin_token_list_what_they_always_did() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _alice_dev) = person(&state, 1);
+        let (bob, _bob_dev) = person(&state, 2);
+        let alices = project_of(&state, &alice, "Alice work");
+        let bobs = project_of(&state, &bob, "Bob work");
+
+        skill_with(&state, Some(&alices), "alices-shared", true, "");
+        skill_of(&state, Some(&alices), "alices-notes");
+        skill_of(&state, Some(&bobs), "bobs-notes");
+
+        let bobs_box = Principal::Box {
+            user_id: bob.clone(),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("x-arbos-project", bobs.parse().unwrap());
+        let mut seen = listed(&state, bobs_box, headers).await;
+        seen.sort();
+        assert_eq!(
+            seen,
+            vec!["alices-shared".to_owned(), "bobs-notes".to_owned()],
+            "a box still reads the relay's shared skills; `a_box_still_reads_another_users_shared_skill_by_id` is the other half"
+        );
+
+        let mut all = listed(&state, Principal::Admin, HeaderMap::new()).await;
+        all.sort();
+        assert_eq!(
+            all,
+            vec![
+                "alices-notes".to_owned(),
+                "alices-shared".to_owned(),
+                "bobs-notes".to_owned()
+            ]
+        );
+    }
+
+    /// `GET /skills/index` is the box's lean view, but a device token reaches it too, and it
+    /// carries every skill's name, description and `when_to_use`. Scoping the body route and
+    /// leaving the index open would just move the enumeration one route across.
+    #[tokio::test]
+    async fn the_index_view_is_scoped_like_the_listing() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let alices = project_of(&state, &alice, "Alice work");
+        skill_of(&state, Some(&alices), "alices-notes");
+        let bobs = project_of(&state, &bob, "Bob work");
+        skill_of(&state, Some(&bobs), "bobs-notes");
+
+        let text = body_text(index(State(state.clone()), bob_dev, HeaderMap::new()).await).await;
+        assert!(text.contains("bobs-notes"));
+        assert!(
+            !text.contains("alices-notes"),
+            "the index names only the skills this device can open"
         );
     }
 }

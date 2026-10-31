@@ -3153,6 +3153,48 @@ impl Db {
     }
 }
 
+/// The skills of the projects a person can reach: the ones they own and the ones they were
+/// invited to (D72), plus the skills filed under no project at all, which have nobody to check
+/// a caller against. This is `AppState::allows` over `origin_project_id` written as SQL, so a
+/// listing holds the same opinion as `GET /skills/{id}` (#1953).
+const REACHABLE_SKILLS: &str = "s.origin_project_id IS NULL OR EXISTS (
+     SELECT 1 FROM projects p
+      WHERE p.id = s.origin_project_id AND p.deleted_at IS NULL
+        AND (p.user_id = ?1
+             OR EXISTS (SELECT 1 FROM project_members m
+                         WHERE m.project_id = p.id AND m.user_id = ?1 AND m.left_at IS NULL)))";
+
+/// Whose skills a query is for. The `skills` table has no owner column, so the only owner a
+/// skill can have is the user behind its origin project.
+#[derive(Debug, Clone)]
+pub enum SkillScope {
+    /// The admin token.
+    Everything,
+    /// One box, in the workspace it named: the relay's shared skills plus that project's own.
+    Project(String),
+    /// One person's devices.
+    Reachable(String),
+}
+
+impl SkillScope {
+    /// A predicate over the `skills` row aliased `s`, reading the scope's value from `?1`.
+    fn predicate(&self) -> &'static str {
+        match self {
+            Self::Everything => "?1 IS NULL",
+            Self::Project(_) => "s.shared = 1 OR s.origin_project_id = ?1",
+            Self::Reachable(_) => REACHABLE_SKILLS,
+        }
+    }
+
+    fn key(&self) -> Option<&str> {
+        match self {
+            Self::Everything => None,
+            Self::Project(id) => Some(id),
+            Self::Reachable(user_id) => Some(user_id),
+        }
+    }
+}
+
 impl Db {
     // ---- skills (F5) --------------------------------------------------------------------------
 
@@ -3259,44 +3301,53 @@ impl Db {
         })
     }
 
-    /// Every skill (devices), or the shared ones plus a project's own (`visible_to = Some(project)`).
-    pub fn list_skills(&self, visible_to: Option<&str>) -> Result<Vec<Skill>> {
+    /// Every skill query takes one of these and binds its [`SkillScope::key`] as `?1`.
+    fn skill_cols_aliased() -> String {
+        Self::SKILL_COLS
+            .split(", ")
+            .map(|col| format!("s.{col}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    pub fn list_skills(&self, scope: &SkillScope) -> Result<Vec<Skill>> {
         self.with(|c| {
             let mut st = c.prepare(&format!(
-                "SELECT {} FROM skills WHERE ?1 IS NULL OR shared = 1 OR origin_project_id = ?1 ORDER BY name",
-                Self::SKILL_COLS
+                "SELECT {} FROM skills s WHERE ({}) ORDER BY s.name",
+                Self::skill_cols_aliased(),
+                scope.predicate()
             ))?;
-            let rows = st.query_map(params![visible_to], Self::row_to_skill)?;
+            let rows = st.query_map(params![scope.key()], Self::row_to_skill)?;
             rows.collect()
         })
     }
 
-    /// FTS5 over name/description/tags/when_to_use, best match first.
-    pub fn search_skills(
-        &self,
-        query: &str,
-        visible_to: Option<&str>,
-        limit: i64,
-    ) -> Result<Vec<Skill>> {
+    /// FTS5 over name/description/tags/when_to_use, best match first. The scope is part of the
+    /// query rather than a filter over its answer, so `limit` counts rows the caller may see.
+    pub fn search_skills(&self, query: &str, scope: &SkillScope, limit: i64) -> Result<Vec<Skill>> {
         let q = fts_query(query);
         self.with(|c| {
             let mut st = c.prepare(&format!(
                 "SELECT {} FROM skills_fts JOIN skills s ON s.id = skills_fts.id
-                 WHERE skills_fts MATCH ?1 AND (?2 IS NULL OR s.shared = 1 OR s.origin_project_id = ?2)
+                 WHERE skills_fts MATCH ?2 AND ({})
                  ORDER BY bm25(skills_fts) LIMIT ?3",
-                Self::SKILL_COLS.split(", ").map(|col| format!("s.{col}")).collect::<Vec<_>>().join(", ")
+                Self::skill_cols_aliased(),
+                scope.predicate()
             ))?;
-            let rows = st.query_map(params![q, visible_to, limit], Self::row_to_skill)?;
+            let rows = st.query_map(params![scope.key(), q, limit], Self::row_to_skill)?;
             rows.collect()
         })
     }
 
-    /// Cheap change marker for the box poll: `count:max(updated_at)` over the skills a project sees.
-    pub fn skills_rev(&self, visible_to: Option<&str>) -> Result<String> {
+    /// Cheap change marker for the box poll: `count:max(updated_at)` over the skills a caller sees.
+    pub fn skills_rev(&self, scope: &SkillScope) -> Result<String> {
         self.with(|c| {
             c.query_row(
-                "SELECT COUNT(*), COALESCE(MAX(updated_at), 0) FROM skills WHERE ?1 IS NULL OR shared = 1 OR origin_project_id = ?1",
-                params![visible_to],
+                &format!(
+                    "SELECT COUNT(*), COALESCE(MAX(s.updated_at), 0) FROM skills s WHERE ({})",
+                    scope.predicate()
+                ),
+                params![scope.key()],
                 |r| Ok(format!("{}:{}", r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
             )
         })

@@ -19,7 +19,7 @@ use arbos_core::wire::{BoxState, PROJECT_DOC_CHAT_ID};
 
 use crate::auth::Principal;
 use crate::boxes::{self, Provider};
-use crate::db::{Chat, Project};
+use crate::db::{Chat, Project, SkillScope};
 use crate::state::{AppState, AuthMode};
 
 pub(crate) type ApiResult = Result<Response, (StatusCode, String)>;
@@ -592,7 +592,10 @@ pub async fn get_project(
         .usage_since(&p.id, start_of_day())
         .map_err(internal)?;
     // The box polls this every 3 s; a changed marker tells it to refetch `/skills/index` (F5).
-    let skills_rev = state.db.skills_rev(Some(&p.id)).map_err(internal)?;
+    let skills_rev = state
+        .db
+        .skills_rev(&SkillScope::Project(p.id.clone()))
+        .map_err(internal)?;
     let mut v = serde_json::to_value(GetProjectResponseDto {
         project: project_dto(&state, &p).await,
         chats,
@@ -1946,7 +1949,10 @@ fn workspace_json(state: &AppState, p: &Project) -> Result<Value, (StatusCode, S
     let chats = state.db.list_chats(&p.id).map_err(internal)?;
     let pushes = state.db.take_pushes(&p.id).map_err(internal)?;
     let mut project = serde_json::to_value(p).unwrap_or(Value::Null);
-    project["skills_rev"] = json!(state.db.skills_rev(Some(&p.id)).map_err(internal)?);
+    project["skills_rev"] = json!(state
+        .db
+        .skills_rev(&SkillScope::Project(p.id.clone()))
+        .map_err(internal)?);
     project["primary_chat_id"] = json!(primary_chat_id(state, p));
     project["avatar_color_index_effective"] = json!(crate::avatar::effective_color_index(
         &p.id,
@@ -2046,7 +2052,10 @@ pub async fn box_projects(State(state): State<AppState>, principal: Principal) -
             .avatar
             .clone()
             .unwrap_or_else(|| crate::avatar::default_for(&p.id, &state.cfg.avatar_slugs)));
-        project["skills_rev"] = json!(state.db.skills_rev(Some(&p.id)).map_err(internal)?);
+        project["skills_rev"] = json!(state
+            .db
+            .skills_rev(&SkillScope::Project(p.id.clone()))
+            .map_err(internal)?);
         if let Ok(Some(src)) = state.db.project_fork_source(&p.id) {
             project["forked_from"] = json!(src);
         }
