@@ -296,9 +296,10 @@ impl ChatMeta {
 }
 
 /// The chat meta as `recipient` sees it. An untitled people group is named after the *other*
-/// members' handles (the same rule as `GET /chats`), so it is per recipient. A project chat
-/// counts as a group only when it is shared (owner plus guests); the owner's own 1:1 agent
-/// chat is a DM with the agent.
+/// members' handles (the same rule as `GET /chats`), so it is per recipient. The handles are
+/// bare, with no `@`: a generated group name reads the same on every surface (see
+/// `group_name_tests`). A project chat counts as a group only when it is shared (owner plus
+/// guests); the owner's own 1:1 agent chat is a DM with the agent.
 pub fn chat_meta(state: &AppState, chat: &ChatRef, recipient: &str) -> ChatMeta {
     match &chat.project_id {
         Some(pid) => {

@@ -508,7 +508,8 @@ pub fn people_chat_dto(
         .filter(|m| m.member.starts_with("user:") && m.member != format!("user:{me}"))
         .collect();
     // Untitled group: the other people's handles — or, with no other human
-    // (a group of my agents), the agents' handles.
+    // (a group of my agents), the agents' handles. Bare, no `@`: a generated group name reads
+    // the same on every surface (see `group_name_tests`).
     let named: Vec<&ChatMemberDto> = if others.is_empty() {
         members
             .iter()
