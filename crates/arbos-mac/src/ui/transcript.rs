@@ -927,6 +927,10 @@ pub struct Transcript {
     /// list holds while it lays its items out — v0.6.224 crashed on launch,
     /// [feedback bubble-rail-crash-hotfix-2026-10-25]).
     measured: Rc<std::cell::RefCell<Measured>>,
+    /// Mentions already reported seen to the relay, so the frames between the
+    /// `PUT` and the count coming back do not send it again. Dropped when the
+    /// chat changes; the relay's count is the truth across chats and launches.
+    marked_mentions: HashSet<Id>,
 }
 
 /// Last-frame geometry, by row id, plus the transcript's viewport.
@@ -1018,6 +1022,7 @@ impl Transcript {
             }),
             drag_scroll: None,
             measured: Rc::default(),
+            marked_mentions: HashSet::new(),
         }
     }
 
@@ -1249,12 +1254,12 @@ impl Transcript {
     /// focus. Scrolling past is not enough on its own and neither is opening
     /// the chat, which is why this does not ride on the read mark.
     ///
-    /// Only the **oldest** unread mention is reported per pass. The relay
-    /// merges the cursor with `MAX`, so clearing a newer one first would
-    /// swallow the older ones silently; the jump capsule visits them
-    /// oldest-first for the same reason. Reporting one lowers the count on
-    /// the spot, which promotes the next, so a screenful clears over the next
-    /// few frames rather than all at once.
+    /// Only the **oldest** unread mention is ever reported, and only when we
+    /// can prove we hold it ([`UnreadMentions::oldest_markable`]). The relay
+    /// takes nothing else and says `204` anyway, so a wrong id would read as
+    /// a success and show as a badge that will not clear. Reporting one
+    /// lowers the count on the spot, which promotes the next, so a screenful
+    /// clears over the next few frames rather than all at once.
     fn clear_seen_mentions(&mut self, cx: &mut Context<Self>) {
         let Some(chat_id) = self.chat_id.clone() else {
             return;
@@ -1263,12 +1268,24 @@ impl Transcript {
         if !state.window_active {
             return;
         }
-        let Some(oldest) = state.unread_mentions_in(&chat_id).into_iter().next() else {
+        let Some(oldest) = state
+            .unread_mentions_in(&chat_id)
+            .oldest_markable()
+            .cloned()
+        else {
             return;
         };
+        // The count drops through the sync thread and comes back as a chat
+        // event, several frames later. Without this the same mention is sent
+        // once per frame in between, and every send takes another one off the
+        // local count.
+        if self.marked_mentions.contains(&oldest) {
+            return;
+        }
         if !self.message_is_readable(&oldest) {
             return;
         }
+        self.marked_mentions.insert(oldest.clone());
         self.state
             .update(cx, |s, cx| s.mention_seen(&chat_id, &oldest, cx));
     }
@@ -1639,6 +1656,7 @@ impl Transcript {
                 .is_some_and(|p| matches!(p.kind, SpaceKind::Group | SpaceKind::Dm));
         if chat_changed {
             self.row_cache.clear();
+            self.marked_mentions.clear();
         }
         self.chat_id = chat_id;
         // Clone the Rc so the row-cache mut borrow does not conflict.
@@ -3770,14 +3788,16 @@ impl Render for Transcript {
         self.clear_seen_mentions(cx);
         // Oldest first (D2): the jump never reorders under the user, so the
         // next click is always predictable. A mention that lands while they
-        // read raises the count and is visited last.
+        // read raises the count and is visited last. The capsule counts what
+        // the relay says is unread, not what is loaded, so scrollback does
+        // not change the number under the user.
         let mentions = self
             .chat_id
             .as_deref()
             .map(|chat| self.state.read(cx).unread_mentions_in(chat))
             .unwrap_or_default();
-        let mention_count = mentions.len();
-        let oldest_mention = mentions.into_iter().next();
+        let mention_count = mentions.count;
+        let oldest_mention = mentions.jump_target().cloned();
         // Grok Mac (ref 58): a 40 pt ↓ circle centred above the composer once
         // the user has scrolled up; clicking re-pins and lands on the newest
         // page (`jump_to_latest`).
