@@ -120,6 +120,30 @@ gate_state() {
   echo "NOVERDICT $got run(s) on this head, every one skipped or neutral, so none of them tested it: $all"
 }
 
+# gate_applies <workflow> <sha> <files>: 0 when the diff touches the workflow's path filter, 1 when it
+# touches none, 2 when that cannot be told. For 1 and 2 it prints why.
+#
+# Both filters, unioned. The head's own filter explains which runs exist; the base's filter is what
+# will gate the code once it lands. They differ in practice: #2376 changes
+# crates/arbos-matrix/src/client.rs, and crates/arbos-matrix/** was added to this filter after that
+# branch forked, so no run could ever have been created for its head while main would gate the merged
+# result. Judging by either filter alone misses that; the union asks for the verdict.
+gate_applies() {
+  local wf=$1 sha=$2 files=$3 phead pbase pats
+  phead=$(gate_patterns "$wf" "$sha"); pbase=$(gate_patterns "$wf" "${GATE_BASE:-main}")
+  if [ -z "$phead" ] || [ -z "$pbase" ]; then
+    echo "BLOCKED — cannot read the path filter in $wf at this head or at ${GATE_BASE:-main}, so whether it applies is unknown"
+    return 2
+  fi
+  pats=$(printf '%s\n%s\n' "$phead" "$pbase" | grep -v '^$' | sort -u)
+  files_match_patterns "$files" "$pats"
+  case $? in
+    0) return 0 ;;
+    1) echo "not required — this diff touches none of its $(printf '%s\n' "$pats" | grep -c .) filtered paths"; return 1 ;;
+    *) echo "BLOCKED — $wf has a path pattern this cannot evaluate"; return 2 ;;
+  esac
+}
+
 # require_gates <sha> <files>: print one indented finding per gate and return 0 only when every gate
 # that applies to this head is satisfied. 1 = a gate has no passing run, 2 = a gate could not be read,
 # 3 = a gate is still running. All three are refusals to a caller that fails closed; they are separate
@@ -130,22 +154,10 @@ require_gates() {
   local sha=$1 files=$2 wf name phead pbase pats state rc=0
   while IFS='|' read -r wf name; do
     [ -n "$wf" ] || continue
-    # Both filters, unioned. The head's own filter explains which runs exist; the base's filter is
-    # what will gate the code once it lands. They differ in practice: #2376 changes
-    # crates/arbos-matrix/src/client.rs, and crates/arbos-matrix/** was added to this filter after
-    # that branch forked, so no run could ever have been created for its head while main would gate
-    # the merged result. Judging by either filter alone misses that; the union asks for the verdict.
-    phead=$(gate_patterns "$wf" "$sha"); pbase=$(gate_patterns "$wf" "${GATE_BASE:-main}")
-    if [ -z "$phead" ] || [ -z "$pbase" ]; then
-      echo "    required check '$name' on ${sha:0:9}: BLOCKED — cannot read the path filter in $wf at this head or at ${GATE_BASE:-main}, so whether it applies is unknown"
-      rc=2; continue
-    fi
-    pats=$(printf '%s\n%s\n' "$phead" "$pbase" | grep -v '^$' | sort -u)
-    files_match_patterns "$files" "$pats"
+    state=$(gate_applies "$wf" "$sha" "$files")
     case $? in
-      1) echo "    required check '$name' on ${sha:0:9}: not required — this diff touches none of its $(printf '%s\n' "$pats" | grep -c .) filtered paths"; continue ;;
-      2) echo "    required check '$name' on ${sha:0:9}: BLOCKED — $wf has a path pattern this cannot evaluate"
-         rc=2; continue ;;
+      1) echo "    required check '$name' on ${sha:0:9}: $state"; continue ;;
+      2) echo "    required check '$name' on ${sha:0:9}: $state"; rc=2; continue ;;
     esac
     state=$(gate_state "$wf" "$sha")
     case "$state" in
