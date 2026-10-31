@@ -1,10 +1,16 @@
 // The one presence row over the composer ([feedback
 // typing-indicator-left-2026-10-23], Jacob 2026-10-23): who is typing (people)
 // or working (agents) in the open chat, as a stack of round profile pictures
-// and ONE line of text — "Sam is typing…", "Lium and Home are working" — that
+// and ONE line of text — "Sam is typing", "Lium and Home are working" — that
 // starts at the chat column's left edge like the bubbles. Mirrors the Mac's
 // `ui/presence.rs`; it replaces the "<name> is working" transcript row.
+//
+// The typing clause is not written here. It is `arbos_core::presence`, reached
+// through `ArbosFFI.presenceTypingLine`, so this row and the Mac's two surfaces
+// say the same words ([feedback group-typing-names-2026-10-30]). The working
+// clause is still this file's own.
 
+import ArbosFFI
 import SwiftUI
 
 enum PresenceActivity: Equatable {
@@ -26,12 +32,18 @@ struct PresenceParticipant: Identifiable {
 /// The row's words, shared with the tests. Same rules as the Mac
 /// (`presence::sentence`): one clause per activity, joined with " · ";
 /// a single worker shows the harness's `detail` or "is waiting for the machine".
+///
+/// The typing clause comes from the shared core, the working clause from here:
+/// only the typing one is drawn on more than one surface, so only it had two
+/// copies to lose.
 enum PresenceLine {
     /// "Sam Okafor" → "Sam"; "@sam" and one-word names stay as they are.
+    /// The core's own shortener, so the Mac cuts names the same way.
     static func firstName(_ name: String) -> String {
-        name.split(separator: " ").first.map(String.init) ?? name
+        presenceFirstName(name: name)
     }
 
+    /// Joins the **working** names. Typing names are joined by the core.
     static func join(_ names: [String]) -> String {
         switch names.count {
         case 0: return ""
@@ -44,8 +56,8 @@ enum PresenceLine {
 
     static func sentence(typing: [String], working: [String], detail: String? = nil, queued: Bool = false) -> String {
         var clauses: [String] = []
-        if !typing.isEmpty {
-            clauses.append("\(join(typing)) \(typing.count == 1 ? "is" : "are") typing…")
+        if let typingClause = presenceTypingLine(names: typing) {
+            clauses.append(typingClause)
         }
         if !working.isEmpty {
             if working.count == 1, queued {
@@ -97,7 +109,7 @@ struct PresenceRow: View {
     static let textSize: CGFloat = Theme.body
 
     /// One line. Alone, a participant keeps the full display name; from two on,
-    /// first names ("Mira and Sam are typing…"), so the line stays one line.
+    /// first names ("Mira and Sam are typing"), so the line stays one line.
     var text: String {
         let several = participants.count > 1
         let name: (PresenceParticipant) -> String = { several ? PresenceLine.firstName($0.name) : $0.name }

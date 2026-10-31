@@ -21,6 +21,7 @@ pub mod chart;
 pub mod highlight;
 pub mod markdown;
 pub mod matrix;
+pub mod presence;
 pub mod search;
 pub mod settings_search;
 

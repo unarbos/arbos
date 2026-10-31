@@ -96,8 +96,15 @@ final class ProfileToggleTests: XCTestCase {
             throw XCTSkip("sources not beside the test bundle (CI without the tree)")
         }
         XCTAssertFalse(transcript.contains("showProfile("), "Transcript.swift opens profiles only through toggleProfile")
-        XCTAssertTrue(transcript.contains("model.toggleProfile(personTarget)"), "the person's avatar and name toggle")
-        XCTAssertTrue(transcript.contains("model.toggleProfile(memberTarget)"), "the agent's disc and name toggle")
+        // Both of the transcript's profile targets go through one funnel, and the funnel is
+        // what calls `toggleProfile`. Pinning the funnel says more than pinning its call sites
+        // did: the two literals that used to be asserted here were `model.toggleProfile(…)` at
+        // each binding, which left a new binding free to call the model directly.
+        XCTAssertTrue(transcript.contains("openProfile(personTarget)"), "the person's avatar and name toggle")
+        XCTAssertTrue(transcript.contains("openProfile(memberTarget)"), "the agent's disc and name toggle")
+        XCTAssertTrue(transcript.contains("model.toggleProfile(target)"), "and the funnel is what toggles")
+        XCTAssertEqual(transcript.components(separatedBy: "model.toggleProfile(").count - 1, 1,
+                       "exactly one call to the model, inside openProfile")
         XCTAssertTrue(transcript.contains("ProfileToggle.label(name: personName"), "the person's targets carry the shared label")
         XCTAssertTrue(transcript.contains("ProfileToggle.label(name: agent.name"), "the agent's targets carry the shared label")
         XCTAssertTrue(chat.contains("model.toggleProfile(headerTarget)"), "the header pill toggles")
