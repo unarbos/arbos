@@ -3,7 +3,7 @@
  "lane": "c",
  "category": "background",
  "title": "Steer while the agent's own turn is running: the working row says 'Steering: …' and the running work takes the correction",
- "regression": "#1657 guide path (working row 'Steering: …' ≤ 5 s, applied in-turn) and #1690 (a steer during a long tool call must take effect before the tool returns); #1704 follow-up (steer seen, running writer never stopped → 40 lines); run 15 part 2: as b7 — the quick reply claimed the steer applied in 0.6 s, the writer was never steered (40 lines), and t3 excused it as 'came after the count had finished' — #2276",
+ "regression": "#1657 guide path (working row 'Steering: …' ≤ 5 s, applied in-turn) and #1690 (a steer during a long tool call must take effect before the tool returns); #1704 follow-up (steer seen, running writer never stopped → 40 lines); run 15 part 2: as b7 — the quick reply claimed the steer applied in 0.6 s, the writer was never steered (40 lines), and t3 excused it as 'came after the count had finished' — #2276; run 16: failed again, the working row's activity changed at 9.4 s against the 6 s limit",
  "notes": "b7 asks for a detached job and the agent's turn ends in ~15 s, so a steer there is a plain new turn. Here the agent runs the loop itself in the foreground, so its turn is still running when the steer lands; the harness confirms a streaming row before sending it (truth.steer_mid_turn). Run 7 (0.1.141): the model split the count into short bash chunks, the steer arrived between chunks (no interrupt needed) and it wrote 17–20 — but its first command had also started the full 1–40 loop, which it never stopped: 40 lines.",
  "cleanup_routines": true,
  "doc_checks": {
