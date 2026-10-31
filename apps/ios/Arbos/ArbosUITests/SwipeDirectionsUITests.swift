@@ -90,7 +90,12 @@ final class SwipeDirectionsUITests: XCTestCase {
     /// that is in the right place but still decelerating. A swipe delivered into a moving
     /// scroll view belongs to the scroll view, so the gesture under test never happens and the
     /// failure is recorded against the app.
-    private func settleRow(_ element: XCUIElement, timeout: TimeInterval = 4) {
+    ///
+    /// It fails rather than falling through on timeout. A settle that gives up quietly is the
+    /// same defect in new clothes: the swipe still lands mid-scroll, and the app is still the
+    /// one blamed for it.
+    private func settleRow(_ element: XCUIElement, timeout: TimeInterval = 4,
+                           file: StaticString = #filePath, line: UInt = #line) {
         var previous = CGRect.null
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
@@ -99,6 +104,7 @@ final class SwipeDirectionsUITests: XCTestCase {
             previous = current
             Thread.sleep(forTimeInterval: 0.1)
         }
+        XCTFail("\(element.identifier) was still moving after \(Int(timeout))s", file: file, line: line)
     }
 
     /// Scroll `bubble:<id>` clear of the header and the composer, let it come to rest, and
@@ -134,7 +140,7 @@ final class SwipeDirectionsUITests: XCTestCase {
                 let stuck = frame == previous && frame.minY > window.minY
                     && frame.maxY < window.maxY - 110
                 if clear || stuck {
-                    settleRow(bubble)
+                    settleRow(bubble, file: file, line: line)
                     return bubble
                 }
                 previous = frame
@@ -177,6 +183,13 @@ final class SwipeDirectionsUITests: XCTestCase {
             .withOffset(CGVector(dx: startX - bubble.frame.minX, dy: 0))
         let distance = min(want, window.maxX - 8 - startX)
         XCTAssertGreaterThan(distance, 80, "the bubble has room for a right swipe", file: file, line: line)
+        // Print what the app is actually given. XCUITest clamps a destination to the screen in
+        // silence, so a test can ask for 180 pt, deliver 45, and then report the app refusing
+        // to go back — the exact misreading that cost `BackSwipeUITests` a day. The arithmetic
+        // above keeps the destination on screen; this line is what lets a reader check that
+        // from the log instead of re-deriving it from a frame.
+        print("swipe right on \(bubble.identifier): x \(Int(startX)) → \(Int(startX + distance)) " +
+              "of \(Int(window.maxX)), distance \(Int(distance))")
         start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: distance, dy: 0)),
                     withVelocity: .fast, thenHoldForDuration: 0.05)
     }
