@@ -110,6 +110,9 @@ pub struct Recipient {
     /// Account default; never `Inherit`.
     pub default_level: Level,
     pub mentioned: bool,
+    /// The message names this person, not just the room. Decides the unread-mention mark;
+    /// never consulted by [`decide`], which treats a collective as a mention for push.
+    pub mentioned_directly: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,7 +194,21 @@ pub fn decide(r: &Recipient, shape: ChatShape, large_group_min: usize) -> Verdic
 /// has to be read here: the apps turn it into member ids on the row, which this path never sees.
 /// `@agents` is deliberately absent — it names the chat's agents, so it mentions no person
 /// (`expand_collectives` in the Mac app adds the people for `@here` and not for `@agents`).
+///
+/// This is the push rule and it keeps counting collectives. The narrower
+/// [`mentioned_directly`] is what the unread-mention mark uses.
 pub fn mentioned(text: &str, mentions: &[String], user_id: &str, handle: &str) -> bool {
+    mentioned_directly(text, mentions, user_id, handle) || mentions_collective(text)
+}
+
+/// Does the message name **this person**, by id, by declared handle or by `@handle` in the
+/// prose? A collective (`@here`, `@everyone`) does not count here even though it does count
+/// for a push: the unread-mention mark is for mentions aimed at you (Jacob, 2026-10-31), so
+/// the two rules are split rather than duplicated, and [`mentioned`] stays the union of them.
+///
+/// For the mark, pass the **writer's** mention list, not the relay's resolved one: the relay
+/// expands `@here` into every member, which would make a room-wide message look personal.
+pub fn mentioned_directly(text: &str, mentions: &[String], user_id: &str, handle: &str) -> bool {
     let handle = handle.trim().trim_start_matches('@');
     let declared = mentions.iter().any(|m| {
         let m = m.trim();
@@ -203,12 +220,14 @@ pub fn mentioned(text: &str, mentions: &[String], user_id: &str, handle: &str) -
         return true;
     }
     let lower = text.to_lowercase();
-    if word_at(&lower, "@everyone")
-        || crate::people::at_token(&lower, crate::people::COLLECTIVE_HERE)
-    {
-        return true;
-    }
     !handle.is_empty() && word_at(&lower, &format!("@{}", handle.to_lowercase()))
+}
+
+/// Does the message address the room rather than a person — `@here` or `@everyone`? It wakes
+/// everyone's push and raises no `@` mark.
+pub fn mentions_collective(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    word_at(&lower, "@everyone") || crate::people::at_token(&lower, crate::people::COLLECTIVE_HERE)
 }
 
 /// `needle` appears in `hay` followed by a non-handle character (or the end).
@@ -264,6 +283,11 @@ pub fn chat_shape(state: &AppState, chat: &ChatRef) -> ChatShape {
 
 impl Recipient {
     /// Load the facts for `user_id` as a recipient of `sender`'s message in `chat`.
+    ///
+    /// `mentions` is the resolved set, which decides the push. `declared` is the writer's own
+    /// list before the relay expanded any collective, which is what decides
+    /// [`Recipient::mentioned_directly`]: `@here` resolves to every member, so the resolved
+    /// set cannot tell "Jacob named me" from "Jacob addressed the room".
     pub fn load(
         state: &AppState,
         chat: &ChatRef,
@@ -271,6 +295,7 @@ impl Recipient {
         user_id: &str,
         text: &str,
         mentions: &[String],
+        declared: &[String],
     ) -> Self {
         let is_sender = sender.user_id.as_deref() == Some(user_id);
         let blocks_sender = sender
@@ -308,7 +333,9 @@ impl Recipient {
                 .unwrap_or(Level::Inherit),
             legacy_muted,
             default_level: state.db.user_notify_default(user_id).unwrap_or(Level::All),
+            // The push rule, on the resolved set, unchanged.
             mentioned: mentioned(text, mentions, user_id, &handle),
+            mentioned_directly: mentioned_directly(text, declared, user_id, &handle),
         }
     }
 }
@@ -328,6 +355,7 @@ pub fn silenced_by_level(state: &AppState, user_id: &str, chat: &ChatRef) -> boo
         legacy_muted: false,
         default_level: state.db.user_notify_default(user_id).unwrap_or(Level::All),
         mentioned: false,
+        mentioned_directly: false,
     };
     effective_level(&r, chat_shape(state, chat), large_group_min()).0 == Level::None
 }
@@ -418,6 +446,7 @@ mod tests {
             legacy_muted: false,
             default_level: Level::All,
             mentioned: false,
+            mentioned_directly: false,
         }
     }
 
