@@ -49,7 +49,9 @@ jobs:
     # Pull requests from forks have no push run here, so they keep theirs.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: macos-15
-    timeout-minutes: 60
+    # 46-63 min measured on identical content, the spread being runner draw not diff. The old 60
+    # killed runs mid-bundle, which is no verdict rather than a red one; this change took 63.4.
+    timeout-minutes: 90
     env:
       APP_DIR: apps/ios/Arbos
     steps:
