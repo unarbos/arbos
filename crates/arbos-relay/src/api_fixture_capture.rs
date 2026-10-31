@@ -1219,7 +1219,19 @@ fn skill_json_matches_fixture() {
 #[tokio::test]
 async fn local_devices_match_fixture() {
     let state = test_state(AuthMode::Github);
-    let (_, device) = person(&state, 503);
+    let (user, device) = person(&state, 503);
+    // `GET /local/devices` is the caller's own helpers, and a helper's owner is the `devices`
+    // row its token was minted for, so the fixture helper needs one.
+    state
+        .db
+        .insert_device(
+            "ldev_fixture",
+            "fixture-host",
+            "jwt:ldev_fixture",
+            &user,
+            "github",
+        )
+        .unwrap();
     state
         .db
         .local_device_hello("ldev_fixture", "fixture-host", "macos", "/Users/fixture")

@@ -166,6 +166,22 @@ struct Theme: Equatable {
     /// 22 + `micPillGap`).
     static let micHitWidth: CGFloat = 44
     static let micPillGap: CGFloat = 2
+    /// The trailing controls take this much of the field whatever it holds: the
+    /// mic's hit frame, the gap, the pill and its inset. The mic keeps its
+    /// frame even when the send arrow has replaced it, so the text field
+    /// beside it never changes width — least of all mid-swap (Jacob,
+    /// 2026-10-30, [feedback composer-send-crossfade-2026-10-30]: no layout
+    /// jump of the text field).
+    static let composerTrailingWidth: CGFloat =
+        micHitWidth + micPillGap + actionPillWidth + actionPillTrailing
+    /// How long the trailing controls take to trade the grey mic + white call
+    /// pill for the send arrow, and back. The middle of the 150–200 ms band
+    /// asked for; `easeOut` spends most of it in the first half, so the arrow
+    /// reads as already there while the mic is still on its way out.
+    static let composerSwapDuration: Double = 0.17
+    /// How small the mic and the leaving glyph get as they go, and start from
+    /// as they return.
+    static let composerSwapScale: CGFloat = 0.8
     /// Pending-attachment chip: the remove ✕'s hit frame (the glyph is 10 pt; the
     /// target is ≥ 20 pt, [feedback composer-attachment-removal-ios-2026-10-27]).
     /// The chip's trailing inset shrinks by the frame's overhang so the glyph
