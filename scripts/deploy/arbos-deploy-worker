@@ -46,6 +46,14 @@ RELAY_ENV=/etc/arbos/relay.env
 FEEDBACK_ENV=/etc/arbos/feedback.env
 DEPLOY_ENV=/etc/arbos/deploy.env
 KILL_FILE=/etc/arbos/deploy.disabled
+# Disk guard (#1890): below DISK_LOW_GB free on the state volume no image build starts (a build + its
+# docker layers is ~4 GB each; 22 stale tags held 85 GB on 2026-10-26 when the host hit 94–99 %); the
+# request stays queued and is picked up when space is back. Every tick also prunes the agent image
+# tags this worker produced down to IMAGE_TAGS_KEEP (the deployed one, the default, and the newest few).
+DISK_LOW_GB="${ARBOS_DISK_LOW_GB:-40}"
+IMAGE_TAGS_KEEP="${ARBOS_IMAGE_TAGS_KEEP:-4}"
+disk_free_gb() { df --output=avail -BG "$STATE" 2>/dev/null | tail -n 1 | tr -d ' G'; }
+disk_low() { local f; f="$(disk_free_gb)"; [[ -n "$f" ]] && (( f < DISK_LOW_GB )); }
 HOOK="${ARBOS_DEPLOY_HOOK:-/usr/local/bin/arbos-deploy-hook}"
 SETTLE_S=120
 MAX_WAIT_S=300
@@ -1386,6 +1394,11 @@ handle_request() {
         rm -f "$file"
         return 0
       fi
+      if disk_low; then
+        log "agentd: DISK LOW — $(disk_free_gb) GB free < ${DISK_LOW_GB}; not starting an image build for $full (request stays queued)"
+        event agentd "$full" disk_low "image build deferred: $(disk_free_gb) GB free < ${DISK_LOW_GB} GB"
+        return 0
+      fi
       # Never start an image a minute before a merge it can see: a newer first-parent commit on main
       # that touches agentd paths and whose CI is still pending (younger than PENDING_NEWER_WAIT_S)
       # makes this tick wait and the next request carry it (#1866).
@@ -1415,6 +1428,22 @@ continue_roll_if_due() {
   log "agentd: another roll pass started for $(sed -n 's/^sha=//p' "$STATE/agentd.rolling" | head -1)"
 }
 
+# Local docker image tags of our agent image, newest first by version; keep the ones a container runs,
+# the relay default, and the IMAGE_TAGS_KEEP newest. ~3.8 GB each.
+prune_agent_image_tags() {
+  local repo="ghcr.io/unarbos/arbos/arbos-agent" in_use tag n=0
+  in_use="$(docker ps -a --format '{{.Image}}' 2>/dev/null | grep -F "$repo:" | sed "s#^$repo:##" | sort -u | tr '\n' ' ')"
+  in_use="$in_use $(secret_from "$RELAY_ENV" ARBOS_DAYTONA_SNAPSHOT 2>/dev/null | sed 's/^arbos-agent-//')"
+  while read -r tag; do
+    [[ -n "$tag" ]] || continue
+    case " $in_use " in *" $tag "*) continue ;; esac
+    if dry; then log "dry-run: would remove image tag $repo:$tag"; continue; fi
+    docker rmi "$repo:$tag" >/dev/null 2>&1 && n=$((n + 1))
+  done < <(docker images --format '{{.Tag}}' "$repo" 2>/dev/null | grep -E '^0\.[0-9]+\.[0-9]+$' | sort -t. -k3 -rn | tail -n "+$((IMAGE_TAGS_KEEP + 1))")
+  (( n > 0 )) && log "agentd: pruned $n old agent image tag(s); $(disk_free_gb) GB free"
+  return 0
+}
+
 tick() {
   need_root
   apply_pending_www_reload
@@ -1440,6 +1469,7 @@ tick() {
   ensure_repo
   mkdir -p "$QUEUE"
   auto_requests
+  prune_agent_image_tags
   local f
   for f in "$QUEUE"/relay "$QUEUE"/voice "$QUEUE"/agentd; do
     [[ -f "$f" ]] && handle_request "$f"
@@ -1453,6 +1483,7 @@ tick() {
 }
 
 status() {
+  echo "disk    $(disk_free_gb) GB free on $STATE (image builds pause below ${DISK_LOW_GB} GB)$(disk_low && echo '  ** LOW **')"
   echo "relay   deployed $(deployed_sha relay)"
   echo "voice   deployed $(deployed_sha voice)"
   echo "agentd  deployed $(deployed_sha agentd) (default snapshot $(secret_from "$RELAY_ENV" ARBOS_DAYTONA_SNAPSHOT 2>/dev/null || echo ?))"
