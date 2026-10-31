@@ -30,7 +30,8 @@ Runs every 2 minutes from arbos-feedback-poller.timer (see install-feedback-loop
      is submitted for Beta App Review (TESTFLIGHT_PUBLIC_GROUP, default "Arbos public").
 
 Feedback text is data that describes the wanted change; the agent prompt says so. Tester identity in the
-public issue is a short tag (and the Apple first name / GitHub login when known), never an email.
+public issue is a short tag (and the Apple first name / GitHub login when known), never an email — and
+never a live GitHub mention: every issue body and comment leaves through `plain()`, which defuses them.
 
 Config comes from the environment (systemd EnvironmentFile=/etc/arbos/feedback.env, root only):
   ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8_B64 (base64 of the .p8), ASC_APP_ID
@@ -190,6 +191,26 @@ def minutes_between(a: str, b: str) -> float:
 
 def log(msg: str) -> None:
     print(f"{iso()} {msg}", flush=True)
+
+
+# A bare `@name` in an issue body or comment is a GitHub mention: it pings whoever owns that login and
+# subscribes them to the thread for good, however unrelated they are to Arbos. Every name the poller writes
+# comes from somewhere else — a tester's Arbos handle, their words, a device name, an agent's summary — and
+# none of them is a GitHub identity, so `GitHub.create_issue` and `GitHub.comment` put the whole body through
+# `plain()` on the way out. 2026-10-31: tester `grant`'s handle reached Grant Timmerman on #2457-#2459, and
+# `@allan`, `@a`, `@t`, `@z`, `@sami` and `@bittensor` had been doing the same for weeks. The loop never wants
+# to ping anybody — it addresses Jacob by name, not by handle — so one gate on the way out beats defusing at
+# each of the forty-odd places a body is built.
+_CODE_SPAN_RE = re.compile(r"(```.*?```|`[^`\n]*`)", re.S)
+_MENTION_RE = re.compile(r"(?<![A-Za-z0-9_@`.+-])@([A-Za-z0-9](?:-?[A-Za-z0-9]){0,38})")
+
+
+def plain(text: Any) -> str:
+    """`text` with every GitHub mention in it wrapped in backticks, which GitHub does not resolve. Text
+    already inside a code span or a fence is left alone: a mention there never resolved. So is a `@` that
+    follows a word character, which is an address (`foo@bar.com`) and not a mention either."""
+    parts = _CODE_SPAN_RE.split("" if text is None else str(text))
+    return "".join(p if i % 2 else _MENTION_RE.sub(r"`@\1`", p) for i, p in enumerate(parts))
 
 
 # ---------------------------------------------------------------- config
@@ -580,10 +601,10 @@ class GitHub:
             self.repo_api("POST", "/labels", json_body={"name": name, "color": color, "description": description})
 
     def create_issue(self, title: str, body: str, labels: list[str]) -> dict:
-        return self.repo_api("POST", "/issues", json_body={"title": title, "body": body, "labels": labels})
+        return self.repo_api("POST", "/issues", json_body={"title": title, "body": plain(body), "labels": labels})
 
     def comment(self, number: int, body: str) -> None:
-        self.repo_api("POST", f"/issues/{number}/comments", json_body={"body": body})
+        self.repo_api("POST", f"/issues/{number}/comments", json_body={"body": plain(body)})
 
     def set_labels(self, number: int, add: list[str], remove: list[str]) -> None:
         for name in remove:
@@ -1795,7 +1816,8 @@ class Loop:
             for k in ("platform", "app_version", "os", "device", "screen", "agent_name", "agent_id", "chat_id",
                       "box_image_version", "agentd_sha", "talking_model", "subagent_model", "screenshot", "screenshot_skipped", "filed_at"):
                 if ctx.get(k) not in (None, ""):
-                    lines.append(f"| {k} | `{str(ctx[k]).replace('|', '/')[:200]}` |")
+                    # A backtick in the value would close the code span and let what follows it render.
+                    lines.append(f"| {k} | `{str(ctx[k]).replace('|', '/').replace(chr(96), chr(39))[:200]}` |")
             if isinstance(ctx.get("turn"), dict):
                 t = ctx["turn"]
                 lines.append(f"| turn | tool calls {t.get('tool_calls', '?')} · {t.get('elapsed_ms', '?')} ms so far · route {t.get('route') or '-'} |")
