@@ -778,7 +778,8 @@ pub async fn logout(State(state): State<AppState>, principal: Principal) -> Resp
 pub const SIGN_OUT_AUDIT_KIND: &str = "account";
 
 /// One audit row per sign-out-everywhere: what happened, from which device, how much of it
-/// worked, and how many Matrix dead letters it swept up.
+/// worked, how many agent access links went with it, and how many Matrix dead letters it swept
+/// up.
 ///
 /// **This row is for the operator, not for the owner.** Nothing serves it: the only API reader
 /// of the `audit` table is `GET /projects/{id}/audit`, which resolves a `projects` row first, and
@@ -802,6 +803,7 @@ fn note_sign_out_audit(state: &AppState, user_id: &str, from_device: &str, tally
         "principal": format!("user:{user_id}"),
         "device_id": from_device,
         "revoked": tally.revoked,
+        "links": tally.links,
         "swept": tally.swept,
         "failed": tally.failed,
     });
@@ -819,6 +821,8 @@ fn note_sign_out_audit(state: &AppState, user_id: &str, from_device: &str, tally
 struct SignOutTally {
     revoked: usize,
     failed: usize,
+    /// Agent access links revoked alongside the sessions.
+    links: usize,
     /// Matrix sessions closed that no live `devices` row pointed at any more — the dead letters
     /// an earlier failed attempt left behind. Counted separately because they are repair work,
     /// not sessions this call found open.
@@ -951,7 +955,11 @@ async fn sweep_orphan_matrix_sessions(
 /// token (`export::READER_KIND`) is a credential on the account like any other, and a person
 /// signing out everywhere after losing a laptop means that one too.
 ///
-/// The caller's own device is revoked only once every other device has been revoked without a
+/// Every agent access link of the account goes too. A link is a grant the account made to
+/// somebody else, so a person signing out everywhere — the thing you do after losing a laptop —
+/// must not leave a third party still reading and writing.
+///
+/// The caller's own device is revoked only once everything else has been revoked without a
 /// failure. The ordering alone did not do that: the loop runs to completion either way, so the
 /// first version of this handler revoked the caller whatever happened, destroying the one
 /// credential its own "try again" message asks the owner to retry with.
@@ -1017,6 +1025,30 @@ pub async fn sign_out_everywhere(
         let current = current.clone();
         tokio::spawn(async move {
             let mut tally = revoke_each(&state, &user_id, &others).await;
+            // Links are grants the account made to third parties, so they go with the
+            // sessions, and they go before the caller's own device: a link that survived the
+            // call is a failure the owner has to be able to retry.
+            match state.db.revoke_agent_links_of_user(&user_id) {
+                Ok(ids) => {
+                    for id in &ids {
+                        let _ = state.db.note_link_audit(
+                            id,
+                            &user_id,
+                            "revoked",
+                            None,
+                            None,
+                            None,
+                            None,
+                            &json!({ "by": "sign_out_everywhere" }),
+                        );
+                    }
+                    tally.links = ids.len();
+                }
+                Err(e) => {
+                    tally.failed += 1;
+                    tracing::error!(user = %user_id, error = %e, "sign out everywhere: agent links not revoked");
+                }
+            }
             // Before the caller's own device, and whatever happened above: a Matrix session an
             // earlier attempt failed to close is invisible to every list keyed on `devices`, so
             // this call is the only chance to retry it. Without the sweep a second call reports
@@ -1059,7 +1091,7 @@ pub async fn sign_out_everywhere(
             format!("{revoked} sessions were signed out and {failed} could not be; this device is still signed in, so try again"),
         );
     }
-    tracing::info!(user = %user_id, revoked = tally.revoked, swept = tally.swept, "signed out everywhere");
+    tracing::info!(user = %user_id, revoked = tally.revoked, links = tally.links, swept = tally.swept, "signed out everywhere");
     StatusCode::NO_CONTENT.into_response()
 }
 
