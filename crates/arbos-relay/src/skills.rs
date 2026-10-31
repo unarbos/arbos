@@ -70,6 +70,13 @@ fn can_edit(scope: Option<&str>, principal: &Principal, s: &Skill) -> bool {
 /// origin project. A skill with no origin project therefore has nobody to check the caller
 /// against and keeps its previous behaviour — the honest limit of a fix that adds no column
 /// (#1953). Deciding that an ownerless skill is admin-only is a product call.
+/// Whether [`owns_skill`] is the right question for this caller. `can_see` and `can_edit` already
+/// confine a box correctly; their device arm is the one that returns `true` for everything, so the
+/// ownership check belongs on devices only. The admin token stays unscoped.
+fn device_only(principal: &Principal) -> bool {
+    matches!(principal, Principal::Device { .. })
+}
+
 fn owns_skill(state: &AppState, principal: &Principal, s: &Skill) -> bool {
     match s.origin_project_id.as_deref() {
         Some(project) => state.allows(principal, project),
@@ -235,6 +242,15 @@ pub async fn get(
     if !can_see(scope.as_deref(), &principal, &s) {
         return Err((StatusCode::FORBIDDEN, "not visible to this box".into()));
     }
+    // Only the device arm needs this. `can_see` above is already right for a box — shared skills
+    // plus its own project's — and a box does fetch another user's *shared* skill by id
+    // (`arbos-agentd/src/skills.rs` reads `/skills/index` then the body of each changed entry),
+    // so checking ownership here would drop it from that agent's set, silently: agentd treats a
+    // non-success as `continue`. As `delete` does, a device asking for another user's skill gets
+    // 404 rather than 403 (#1953).
+    if device_only(&principal) && !owns_skill(&state, &principal, &s) {
+        return Err((StatusCode::NOT_FOUND, "no such skill".to_owned()));
+    }
     Ok(Json(skill_json(&s)).into_response())
 }
 
@@ -315,6 +331,12 @@ pub async fn update(
         .ok_or((StatusCode::NOT_FOUND, "no such skill".to_owned()))?;
     if !can_edit(scope.as_deref(), &principal, &existing) {
         return Err((StatusCode::FORBIDDEN, "not this box's skill".into()));
+    }
+    // `can_edit` already confines a box to its own project's skills; it is the device arm that is
+    // open, returning `true` for every device. This closes that arm, the same way `delete` does
+    // (#1953). A skill with no origin project has no owner to check against and stays editable.
+    if device_only(&principal) && !owns_skill(&state, &principal, &existing) {
+        return Err((StatusCode::NOT_FOUND, "no such skill".to_owned()));
     }
     let next = b.apply(existing.clone());
     if next.name.is_empty() {
@@ -425,6 +447,159 @@ mod tests {
         let own = delete(State(state.clone()), alice_dev, Path(owned.clone())).await;
         assert_eq!(status(own), StatusCode::NO_CONTENT);
         assert!(state.db.skill(&owned).unwrap().is_none());
+    }
+
+    /// #1953, read and write by id: `can_see` and `can_edit` both return `true` for every
+    /// device principal, so one user could fetch and edit another user's skill. Both now answer
+    /// like `delete` does.
+    ///
+    /// `GET /skills/{id}` is **not** where another user's skill content leaks — `GET /skills`
+    /// hands every skill's full `body` and `markdown` to any device token, and that is the list
+    /// the apps actually read (no client calls this route at all). Scoping the list is a product
+    /// decision about whether a relay has a shared skill library; this only makes the by-id
+    /// routes agree with `delete`.
+    #[tokio::test]
+    async fn get_and_update_refuse_a_skill_of_another_users_project() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (_bob, bob_dev) = person(&state, 2);
+        let project = project_of(&state, &alice, "Comms");
+        let owned = skill_of(&state, Some(&project), "deploy-the-relay");
+        let row = state.db.skill(&owned).unwrap().unwrap();
+
+        assert!(
+            can_see(None, &bob_dev, &row) && can_edit(None, &bob_dev, &row),
+            "neither gate constrains a device, which is why both routes needed this check"
+        );
+
+        let read = get(
+            State(state.clone()),
+            bob_dev.clone(),
+            HeaderMap::new(),
+            Path(owned.clone()),
+        )
+        .await;
+        assert_eq!(status(read), StatusCode::NOT_FOUND);
+
+        let edited = update(
+            State(state.clone()),
+            bob_dev,
+            HeaderMap::new(),
+            Path(owned.clone()),
+            Json(SkillBody {
+                name: Some("renamed by a stranger".into()),
+                ..SkillBody::default()
+            }),
+        )
+        .await;
+        assert_eq!(status(edited), StatusCode::NOT_FOUND);
+        assert_eq!(
+            state.db.skill(&owned).unwrap().unwrap().name,
+            "deploy-the-relay",
+            "another user's skill is unchanged"
+        );
+
+        // The owner still reads and edits it.
+        assert_eq!(
+            status(
+                get(
+                    State(state.clone()),
+                    alice_dev.clone(),
+                    HeaderMap::new(),
+                    Path(owned.clone())
+                )
+                .await
+            ),
+            StatusCode::OK
+        );
+        let own = update(
+            State(state.clone()),
+            alice_dev,
+            HeaderMap::new(),
+            Path(owned.clone()),
+            Json(SkillBody {
+                name: Some("Deploy the relay".into()),
+                ..SkillBody::default()
+            }),
+        )
+        .await;
+        assert_eq!(status(own), StatusCode::OK);
+        assert_eq!(
+            state.db.skill(&owned).unwrap().unwrap().name,
+            "Deploy the relay"
+        );
+    }
+
+    /// A box must keep reading another user's **shared** skill by id. `GET /skills/index` lists
+    /// it (`can_see` allows `shared` from any project), and `arbos-agentd/src/skills.rs` then
+    /// fetches the body of every changed entry by id — and treats a non-success as `continue`, so
+    /// refusing here would drop that skill from the agent's set with no error anywhere. The
+    /// ownership check is a device-arm fix and must not reach boxes.
+    #[tokio::test]
+    async fn a_box_still_reads_another_users_shared_skill_by_id() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let alice_project = project_of(&state, &alice, "Alice work");
+        let bob_project = project_of(&state, &bob, "Bob work");
+
+        let now = now_ms();
+        let shared = Skill {
+            id: ulid(),
+            slug: "shared-one".into(),
+            name: "Shared one".into(),
+            origin_project_id: Some(alice_project),
+            shared: true,
+            version: 1,
+            created_at: now,
+            updated_at: now,
+            ..Skill::default()
+        };
+        state.db.insert_skill(&shared).expect("skill");
+
+        let bobs_box = Principal::Box {
+            user_id: bob.clone(),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("x-arbos-project", bob_project.parse().unwrap());
+
+        let row = state.db.skill(&shared.id).unwrap().unwrap();
+        assert!(
+            !owns_skill(&state, &bobs_box, &row),
+            "Bob's box does not own it — which is exactly why the check must not apply here"
+        );
+        assert_eq!(
+            status(
+                get(
+                    State(state.clone()),
+                    bobs_box.clone(),
+                    headers.clone(),
+                    Path(shared.id.clone())
+                )
+                .await
+            ),
+            StatusCode::OK,
+            "the box reads the shared skill it just saw in its index"
+        );
+
+        // A skill that is *not* shared is still none of that box's business.
+        let private = Skill {
+            id: ulid(),
+            slug: "private-one".into(),
+            name: "Private one".into(),
+            origin_project_id: row.origin_project_id.clone(),
+            shared: false,
+            version: 1,
+            created_at: now,
+            updated_at: now,
+            ..Skill::default()
+        };
+        state.db.insert_skill(&private).expect("skill");
+        assert_eq!(
+            status(get(State(state.clone()), bobs_box, headers, Path(private.id)).await),
+            StatusCode::FORBIDDEN,
+            "and `can_see` still keeps an unshared one away from it"
+        );
     }
 
     /// The honest limit of a fix with no schema change: `skills` has no owner column, so a
