@@ -23,15 +23,26 @@ name: iPhone capture
 # confident-looking picture that cannot support the claim you attach to it, which is worse than no
 # picture. Five cases belong on the gate Mac:
 #
-# 1. ANYTHING ABOUT SYSTEM CHROME. Hosted `macos-15` is Xcode 26.3 with an iOS 26.2 simulator; the
-#    gate Mac is Xcode 27 and iOS 27. The app compiles either way (deployment target is 17.0 and no
-#    source file names anything newer than iOS 26), but the *operating system* draws the status
-#    bar, the keyboard, the system glass materials, the share sheet and the long-press menu
-#    platter. A fix to any of those — `ARBOS_SURFACE=glass`, `ARBOS_PILL_STYLE`, keyboard
-#    appearance, the context-menu platter — may render differently here or not reproduce at all.
-#    A before/after PAIR from this job is still sound, because both shots come off one runtime and
-#    the only difference between them is the branch. What breaks is comparing a shot from here
-#    against a tester's iOS 27 screenshot, which is step one of reproducing a report.
+# 1. ANYTHING ABOUT SYSTEM CHROME — unless you pass `runner: xcode-27` and `xcode: 27.0`.
+#    The default `macos-15` is Xcode 26.3 with an iOS 26.2 simulator, a version behind what testers
+#    run. The app compiles either way (deployment target is 17.0 and no source file names anything
+#    newer than iOS 26), but the *operating system* draws the status bar, the keyboard, the glass
+#    materials, the share sheet and the long-press menu platter. On 26.2 a fix to any of those —
+#    `ARBOS_SURFACE=glass`, `ARBOS_PILL_STYLE`, keyboard appearance, the context-menu platter —
+#    may render differently or not reproduce at all.
+#
+#    A before/after PAIR off `macos-15` is still sound for app-drawn things, because both shots
+#    come off one runtime and the branch is the only difference between them. What breaks there is
+#    comparing a shot against a tester's iOS 27 screenshot, which is step one of reproducing a
+#    report.
+#
+#    Since #2455 there is a hosted `xcode-27` image carrying Xcode 27.0 (27A266a) and iOS 27 — the
+#    Xcode the build Mac archives TestFlight builds with. `swift-ios27-advisory.yml` runs on it and
+#    has gone green. For a chrome-sensitive shoot, dispatch with `runner: xcode-27` and
+#    `xcode: 27.0` and this exception does not apply. Two cautions. The image is a public preview,
+#    so treat a strange result as the image's fault until you have ruled it out; the advisory lane
+#    is advisory for exactly that reason. And pin the Xcode: the image's own default is 27.1, which
+#    is not what testers install, and a wrong pin is invisible in the picture.
 #
 # 2. ANYTHING MEASURED IN TIME. A hosted runner is a shared three-core machine. The split is sharp,
 #    and worth getting right: a still is a still, so the pixel-band brightness measurement in
@@ -67,12 +78,29 @@ name: iPhone capture
 #
 # ──────────────────────────────────────────────────────────────────────────────────────────────
 #
-# Dispatch only, deliberately. A capture holds a macOS runner for about 25 minutes, and that pool
-# is already this repository's bottleneck: `ios.yml` records nine queued runs sitting behind each
-# other for up to 2.5 h, and job queue times of 87 and 90 minutes were measured on 2026-10-30.
-# Running a capture on every pull request would deepen the queue that starves TestFlight uploads,
-# to produce screenshots nobody asked for. There is no pull-request trigger here and there should
-# never be one.
+# WHEN IT RUNS, AND WHAT IT COSTS
+#
+# Only when someone dispatches it. There is no `push` or `pull_request` trigger and there should
+# never be one: a capture holds two macOS runners for about 25 minutes each, and that pool is
+# already congested — job queue times of 87 and 90 minutes were measured on 2026-10-30, and #2456
+# puts the Swift core check's own cost at 46–63 minutes per run, on every push and every pull
+# request touching `apps/ios/**`. Running a capture on every pull request would deepen that queue
+# to produce screenshots nobody asked for.
+#
+# It cannot get in front of a shipping lane. Both of them are off the hosted pool entirely:
+# `ios.yml` (TestFlight) is `runs-on: ${{ inputs.runner || 'arbos-mac' }}`, and `release.yml`'s Mac
+# job resolved to the `arbos-mac` label on each of its four most recent runs. A capture on the
+# default `macos-15` is not in the queue a release build waits in, so it cannot be ahead of one.
+#
+# On the hosted pool it shares with the Swift core check (`macos-15`) and, if dispatched there,
+# the iOS 27 advisory lane (`xcode-27`, a separate image). Two jobs for ~25 minutes against a gate
+# that costs 46–63 minutes per push is a small addition, but it is not nothing: dispatch when you
+# need a shot, not to see what happens.
+#
+# The one way it can touch a shipping lane is `runner: arbos-mac`, and that path takes the same
+# heavy-job slot `ios.yml` and `release.yml` take (#1839, at most two heavy jobs at once). It
+# therefore queues *behind* a release rather than beside it, and releases the slot on exit, pass
+# or fail.
 
 on:
   workflow_dispatch:
@@ -107,9 +135,14 @@ on:
         type: string
         default: "iPhone 17"
       runner:
-        description: "runs-on label; empty = macos-15. `arbos-mac` sends it to the shared EC2 Mac (takes a heavy slot)"
+        description: "runs-on label; empty = macos-15. `xcode-27` for iOS 27 chrome; `arbos-mac` for the EC2 Mac (takes a heavy slot)"
         type: string
         default: ""
+      xcode:
+        description: "Exact Xcode version, e.g. `27.0` to match what testers install; empty = newest on the runner"
+        type: string
+        default: ""
+      # workflow_dispatch allows at most 10 inputs; this file uses 9. One more is the ceiling.
 
 permissions:
   contents: read
@@ -149,10 +182,12 @@ jobs:
             echo "::error title=Same commit twice::base_ref ($BASE_REF) and head_ref ($HEAD_REF) are both $base; the pair would show nothing."
             exit 1
           fi
-          echo "base_sha=$base" >> "$GITHUB_OUTPUT"
-          echo "head_sha=$head" >> "$GITHUB_OUTPUT"
-          printf 'matrix={"include":[{"leg":"base","sha":"%s","ref":"%s"},{"leg":"head","sha":"%s","ref":"%s"}]}\n' \
-            "$base" "$BASE_REF" "$head" "$HEAD_REF" >> "$GITHUB_OUTPUT"
+          {
+            echo "base_sha=$base"
+            echo "head_sha=$head"
+            printf 'matrix={"include":[{"leg":"base","sha":"%s","ref":"%s"},{"leg":"head","sha":"%s","ref":"%s"}]}\n' \
+              "$base" "$BASE_REF" "$head" "$HEAD_REF"
+          } >> "$GITHUB_OUTPUT"
           {
             echo "## iPhone capture"
             echo "| leg | ref | commit |"
@@ -194,9 +229,15 @@ jobs:
     name: Shoot ${{ matrix.leg }}
     needs: plan
     runs-on: ${{ inputs.runner || 'macos-15' }}
-    # ~25 min of work when the caches are cold (12 min xcframework, 7 min compile, the rest boot
-    # and capture). Queue time is not counted against this.
-    timeout-minutes: 75
+    # 90, the same as the Swift core check since #2456, and for that PR's reason rather than by
+    # imitation: the spread on these runners is runner draw, not diff. #2456 measured the
+    # xcframework build alone swinging 7.3–12.2 min across runs of identical content. This job is
+    # much shorter than the gate — one capture case instead of the whole bundle, so ~25 min of work
+    # — but it is drawn from the same pool and inherits the same variance, and a cap that fires
+    # buys nothing: it yields no screenshots and the dispatch has to be repeated, which spends more
+    # pool time than letting the first one finish. A hang cannot hold the runner for the full 90
+    # either; the capture step's own watchdog stops xcodebuild after 30 minutes.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
@@ -220,14 +261,30 @@ jobs:
             slot=none
           fi
           echo "slot=$slot" >> "$GITHUB_OUTPUT"
+      # Newest by default, as everywhere else. But a chrome-sensitive shoot wants the Xcode the
+      # build Mac archives with, not the newest the image happens to carry: the `xcode-27` image
+      # defaults to 27.1 while testers install builds made with 27.0, and the system draws the
+      # chrome. `xcode: 27.0` pins it, and a pin that is not on the runner fails here rather than
+      # quietly shooting the wrong one.
       - name: Select Xcode
         id: xcode
+        env:
+          WANT: ${{ inputs.xcode }}
         run: |
           set -euo pipefail
-          newest="$(find /Applications -maxdepth 1 -name 'Xcode_*.app' | sort -V | tail -1)"
-          if [[ -n "$newest" ]]; then sudo xcode-select -s "$newest"; fi
+          if [[ -n "$WANT" ]]; then
+            pick="/Applications/Xcode_$WANT.app"
+            if [[ ! -d "$pick" ]]; then
+              echo "::error title=No Xcode $WANT::this runner has $(find /Applications -maxdepth 1 -name 'Xcode_*.app' -exec basename {} \; | tr '\n' ' ')"
+              exit 1
+            fi
+          else
+            pick="$(find /Applications -maxdepth 1 -name 'Xcode_*.app' | sort -V | tail -1)"
+          fi
+          if [[ -n "$pick" ]]; then sudo xcode-select -s "$pick"; fi
           xcodebuild -version
           echo "version=$(xcodebuild -version | head -1 | tr ' ' '-')" >> "$GITHUB_OUTPUT"
+          echo "- \`${{ matrix.leg }}\`: $(xcodebuild -version | tr '\n' ' ')" >> "$GITHUB_STEP_SUMMARY"
       - name: Collect the fixture patch
         if: needs.plan.outputs.patch == 'yes'
         uses: actions/download-artifact@v4
