@@ -225,6 +225,35 @@ final class OneAddRowPerPaneTests: XCTestCase {
         XCTAssertFalse(chat.contains("\"Add agent\""), "no Add agent control in the chat pane")
     }
 
+    /// Jacob 2026-10-31 ([feedback chat-info-pane-icon-defaults-2026-10-31]: "fix the
+    /// settings page icons so that they are all classic defaults"): every row on the chat
+    /// info pane leads with the stock SF Symbol Apple's own apps put on that action, drawn
+    /// at the row label's own point size, weight and colour. The muted tint is what made
+    /// the glyphs read lighter than the text beside them. The Mac twin is
+    /// `profiles::kit::tests::an_action_rows_icon_has_the_menus_room_around_it`.
+    func testChatInfoRowsLeadWithStockSymbolsDrawnLikeTheirLabel() throws {
+        let pages = try source("UI/ProfilePages.swift")
+        let group = body(of: "GroupProfileView", in: pages)
+        for (row, symbol) in [("Add members", "person.badge.plus"), ("Description", "note.text"),
+                              ("Share invite link", "square.and.arrow.up"), ("Activity", "clock.arrow.circlepath")] {
+            XCTAssertTrue(group.contains(".glyph(\"\(symbol)\")"), "\(row) leads with \(symbol)")
+        }
+        // A text-alignment control and a filled list rectangle: neither is the symbol
+        // Apple would put on a description or on a history, and both sat heavier or
+        // lighter than the rest of the set.
+        for gone in ["text.alignleft", "list.bullet.rectangle"] {
+            XCTAssertFalse(group.contains(gone), "\(gone) is gone from the chat info pane")
+        }
+        // The icon is drawn like the label it sits beside, and the box matches the Mac's.
+        XCTAssertEqual(PaneKit.glyphPoint, Theme.body)
+        XCTAssertEqual(PaneKit.glyphWeight, .medium)
+        XCTAssertEqual(PaneKit.glyphRadius, 10)
+        let box = body(of: "PaneGlyphBox", in: pages)
+        XCTAssertTrue(box.contains("Image(systemName: symbol)"), "the system symbol, not a drawn glyph")
+        XCTAssertTrue(box.contains("foregroundStyle(theme.text)"), "the label's colour")
+        XCTAssertFalse(box.contains("theme.muted"), "never the muted tint")
+    }
+
     func testThePickerHasAnAgentsSectionMineFirstThenTheOthersAlreadyIn() throws {
         XCTAssertEqual(AddMembersAgents.sectionTitle, "Agents")
         XCTAssertEqual(AddMembersAgents.peopleTitle, "People")

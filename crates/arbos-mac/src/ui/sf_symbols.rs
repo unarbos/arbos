@@ -152,6 +152,11 @@ pub const FALLBACKS: &[(&str, &str)] = &[
     ("mic.slash", "mic-off"),
     ("phone.down.fill", "phone-down"),
     ("text.alignleft", "text-align-left"),
+    // A written note about a thing — Apple's own on Notes and on Reminders' note
+    // field. The chat info pane's Description row ([feedback
+    // chat-info-pane-icon-defaults-2026-10-31]); `text.alignleft`, which it drew
+    // before, is an alignment control.
+    ("note.text", "doc"),
     // Sidebar pinning ([feedback sidebar-pinning-mac-2026-10-28]): the row menu's Pin /
     // Unpin and the pinned row's mark — the iPhone's `pin` / `pin.slash` / `pin.fill`.
     ("pin", "pin"),
@@ -190,7 +195,21 @@ pub fn symbol(name: &str, size: f32, weight: Weight, slot: f32, color: Hsla) -> 
         .justify_center();
     #[cfg(target_os = "macos")]
     if let Some((w, h)) = mac::natural_size(name, size, weight) {
-        return frame.child(mac::element(name, size, weight, color).w(px(w)).h(px(h)));
+        // `flex_shrink_0`: GPUI's default shrink is 1, so a symbol whose canvas
+        // is wider than the slot was squeezed to the slot's width while keeping
+        // its height — Apple's artwork drawn out of proportion, with thinner
+        // vertical strokes and the ink pulled off the slot's centre. The widest
+        // in the app, `person.badge.plus`, is half again as wide as it is tall,
+        // so every row that led with it was drawing a narrowed person
+        // ([feedback chat-info-pane-icon-defaults-2026-10-31]). The slot does
+        // not clip, so a symbol wider than its slot now overflows it evenly and
+        // stays centred on it.
+        return frame.child(
+            mac::element(name, size, weight, color)
+                .flex_shrink_0()
+                .w(px(w))
+                .h(px(h)),
+        );
     }
     #[cfg(not(target_os = "macos"))]
     let _ = (size, weight);
