@@ -1479,32 +1479,36 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Does `text` name `handle` after an `@`, as a whole token?
+    /// Does `text` name `handle` after an `@`? A character-for-character port of the relay's
+    /// `eligibility::word_at`, which is the scan the `@` mark is actually counted with.
     ///
-    /// A character-for-character port of the relay's `people::at_token`, which is the rule
-    /// that decides the count this client has to agree with. The two sides must name the
-    /// *same* rows: the mention-read route takes only the oldest unread mention, so a client
-    /// whose idea of the list differs by one row names the wrong id, gets a 204 that did
-    /// nothing, and leaves the `@` stuck. Matching it by eye is not enough — keep the two
-    /// character classes below identical to the Rust.
+    /// **The relay has two tokenisers and this is deliberately the looser one.** The mark's
+    /// chain is `notify.rs` writing a `MENTION_DIRECT` row when `mentioned_directly` is true,
+    /// `GET /me/unread` counting only those rows, and `mentioned_directly` falling through to
+    /// `word_at`. `people::at_token` is the *other* rule — it decides collectives and the
+    /// member ids a send resolves to — and it is stricter in two ways: it also examines the
+    /// character before the `@`, and it lets `.` continue a handle. Porting that one here
+    /// looks right and is wrong: `at_token` implies `word_at`, so an `at_token` client counts
+    /// strictly fewer rows than the relay, cannot see a mention the relay counted, and so
+    /// names the wrong message as oldest. The route takes only the oldest unread mention and
+    /// answers 204 to anything else, so that lands as a stuck `@` behind a success. Do not
+    /// unify the two rules; use whichever one the relay counted with.
     ///
-    /// Before the `@`: anything that is not alphanumeric and not another `@` (so `@@jacob`
-    /// is not a mention). After the handle: anything that is not alphanumeric, `_`, `-` or
-    /// `.` (so `@jo` is not `@jo-b`, and a trailing `.` ends the token rather than being
-    /// swallowed).
+    /// `word_at` does not look before the `@` at all, and a handle is continued only by an
+    /// alphanumeric, `_` or `-`. So `thanks @jacob.`, `@@jacob` and `mail me@jacob.com` are
+    /// all mentions here, and `@jacobs-ladder` is not.
     nonisolated static func textMentions(handle: String, in text: String) -> Bool {
-        let name = handle.trimmingCharacters(in: CharacterSet(charactersIn: "@ ")).lowercased()
+        let trimmed = handle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = String(trimmed.drop { $0 == "@" }).lowercased()
         guard !name.isEmpty else { return false }
         let needle = "@" + name
-        let lower = text.lowercased()
-        var from = lower.startIndex
-        while let hit = lower.range(of: needle, range: from..<lower.endIndex) {
-            let before = hit.lowerBound == lower.startIndex ? nil : lower[lower.index(before: hit.lowerBound)]
-            let after = hit.upperBound == lower.endIndex ? nil : lower[hit.upperBound]
-            let opens = before.map { !$0.isLetter && !$0.isNumber && $0 != "@" } ?? true
-            let closes = after.map { !($0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" || $0 == ".") } ?? true
-            if opens, closes { return true }
-            from = lower.index(after: hit.lowerBound)
+        let hay = text.lowercased()
+        var from = hay.startIndex
+        while let hit = hay.range(of: needle, range: from..<hay.endIndex) {
+            let after = hit.upperBound == hay.endIndex ? nil : hay[hit.upperBound]
+            let boundary = after.map { !($0.isLetter || $0.isNumber || $0 == "_" || $0 == "-") } ?? true
+            if boundary { return true }
+            from = hit.upperBound
         }
         return false
     }

@@ -49,29 +49,51 @@ final class UnreadMentionCursorTests: XCTestCase {
         XCTAssertEqual(AppModel.directMentions(in: rows, handle: "jacob", me: me), [])
     }
 
-    /// A port of the relay's `people::at_token`, and it has to stay one: the two sides must
-    /// name the same rows or the client marks the wrong id and the `@` sticks. These cases
-    /// are the character classes, not a sample of nice inputs.
-    func testHandleIsAWholeToken() {
+    /// A port of the relay's `eligibility::word_at` — the scan the `@` mark is counted with.
+    /// A handle is continued only by an alphanumeric, `_` or `-`.
+    func testHandleRunsToAHandleBoundary() {
         XCTAssertFalse(AppModel.textMentions(handle: "jo", in: "ping @jo-b about it"))
         XCTAssertTrue(AppModel.textMentions(handle: "jo-b", in: "ping @jo-b about it"))
-        XCTAssertFalse(AppModel.textMentions(handle: "jacob", in: "mail jacob@example.com"))
+        XCTAssertFalse(AppModel.textMentions(handle: "jo", in: "@jo_b shipped it"))
+        XCTAssertFalse(AppModel.textMentions(handle: "jacob", in: "@jacobs-ladder"))
         XCTAssertTrue(AppModel.textMentions(handle: "jacob", in: "(@jacob) take a look"))
         XCTAssertTrue(AppModel.textMentions(handle: "Jacob", in: "@jacob"))
-        XCTAssertFalse(AppModel.textMentions(handle: "jo", in: "@jo_b shipped it"))
+        XCTAssertFalse(AppModel.textMentions(handle: "jacob", in: "mail jacob@example.com"))
     }
 
-    /// The two classes that differ from "word characters", and the two the first draft of
-    /// this client got wrong. `.` continues the token on the relay, so a handle followed by
-    /// a full stop is not a direct mention there; `@` before the `@` is not an opening.
-    func testTokenBoundariesMatchTheRelay() {
-        XCTAssertFalse(AppModel.textMentions(handle: "jacob", in: "thanks @jacob."),
-                       "a trailing `.` continues the token in people::at_token")
-        XCTAssertFalse(AppModel.textMentions(handle: "jacob", in: "see @jacob.smith"))
-        XCTAssertFalse(AppModel.textMentions(handle: "jacob", in: "@@jacob"),
-                       "`@` before the `@` is not an opening boundary in people::at_token")
-        XCTAssertTrue(AppModel.textMentions(handle: "jacob", in: "cc_@jacob please"),
-                      "`_` before the `@` is an opening boundary, unlike a word-character rule")
+    /// **The cases where the relay's two tokenisers disagree, pinned so nobody unifies them.**
+    ///
+    /// The mark is counted with `word_at`, which never looks at the character before the `@`
+    /// and lets `.` end a handle. `people::at_token` — the rule for collectives and for the
+    /// member ids a send resolves to — is stricter on both counts, and every case here is one
+    /// it would answer `false` to. `at_token` implies `word_at`, so a client that ported the
+    /// strict one counts fewer rows than the relay, cannot see a mention the relay counted,
+    /// and names the wrong message as oldest; the route answers 204 to anything but the
+    /// oldest, so that is a stuck `@` hidden behind a success. This client got that wrong
+    /// once already.
+    func testScanMatchesWordAtWhereTheTwoRelayRulesDisagree() {
+        XCTAssertTrue(AppModel.textMentions(handle: "jacob", in: "thanks @jacob."),
+                      "`.` ends a handle in word_at, so a handle at the end of a sentence counts")
+        XCTAssertTrue(AppModel.textMentions(handle: "jacob", in: "see @jacob.smith"))
+        XCTAssertTrue(AppModel.textMentions(handle: "jacob", in: "@@jacob"),
+                      "word_at does not examine the character before the `@`")
+        XCTAssertTrue(AppModel.textMentions(handle: "jacob", in: "mail me@jacob.com"))
+        XCTAssertTrue(AppModel.textMentions(handle: "jacob", in: "cc_@jacob please"))
+    }
+
+    /// `word_at` resumes past the whole needle after a non-boundary, so a continued handle
+    /// earlier in the line does not hide a real mention later in it.
+    func testAContinuedHandleDoesNotHideALaterMention() {
+        XCTAssertTrue(AppModel.textMentions(handle: "jacob", in: "@jacobson and @jacob"))
+        XCTAssertFalse(AppModel.textMentions(handle: "jacob", in: "@jacobson and @jacobs"))
+    }
+
+    /// The relay trims the handle and drops leading `@`s before scanning; a handle that is
+    /// nothing but those matches nothing rather than matching every `@`.
+    func testEmptyHandleMatchesNothing() {
+        XCTAssertFalse(AppModel.textMentions(handle: "", in: "@jacob here"))
+        XCTAssertFalse(AppModel.textMentions(handle: "@", in: "@jacob here"))
+        XCTAssertTrue(AppModel.textMentions(handle: " @jacob ", in: "ping @jacob"))
     }
 
     func testMentionsAreOldestFirst() {
