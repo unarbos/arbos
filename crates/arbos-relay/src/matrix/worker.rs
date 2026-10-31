@@ -83,6 +83,24 @@ impl RoomSpec {
     }
 }
 
+/// The member who stands in as room creator when the relay's recorded creator has left.
+///
+/// The creator holds infinite power in a v12 room and can never be demoted, so this pick is a
+/// permanent property of the room. Choose it explicitly — the earliest to join, their Matrix id
+/// settling a tie — rather than letting it fall out of whichever member the roster yields first.
+fn earliest_to_join(
+    cfg: &super::Config,
+    members: &[crate::db_people::Membership],
+    keep: impl Fn(&crate::db_people::Membership, &str) -> bool,
+) -> Option<String> {
+    members
+        .iter()
+        .filter_map(|m| cfg.member_mxid(&m.member).map(|mxid| (m, mxid)))
+        .filter(|(m, mxid)| keep(m, mxid))
+        .min_by(|(a, ax), (b, bx)| (a.joined_at, ax).cmp(&(b.joined_at, bx)))
+        .map(|(_, mxid)| mxid)
+}
+
 /// What the relay knows about a chat, or `None` when it is gone.
 pub fn room_spec(state: &AppState, chat_id: &str, project_id: Option<&str>) -> Option<RoomSpec> {
     let cfg = &state.matrix.cfg;
@@ -105,10 +123,9 @@ pub fn room_spec(state: &AppState, chat_id: &str, project_id: Option<&str>) -> O
             let creator = if mx.iter().any(|m| m.mxid == creator) {
                 creator
             } else {
-                mx.iter()
-                    .find(|m| m.role == "owner")
-                    .or_else(|| mx.iter().find(|m| !m.mxid.starts_with("@_")))
-                    .map(|m| m.mxid.clone())?
+                earliest_to_join(cfg, &members, |m, _| m.role == "owner").or_else(|| {
+                    earliest_to_join(cfg, &members, |_, mxid| !mxid.starts_with("@_"))
+                })?
             };
             mx.sort_by(|a, b| a.mxid.cmp(&b.mxid));
             let is_direct = chat.kind == "dm" && humans == 2;
