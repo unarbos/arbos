@@ -136,6 +136,9 @@ struct ChatSession: View {
     /// field, not this screen. Read it as `composerDraft.text` for actions; the
     /// field observes it for display.
     @State private var composerDraft = ComposerDraft()
+    /// The chat bar's height, observed only by the transcript's tail and the layers over the
+    /// bar's top edge, so the bar growing or shrinking does not re-render this screen.
+    @State private var chatBarHeight = ChatBarHeight()
     /// `AppModel.addressesEveryone(text)` for the current draft, updated only when it flips.
     @State private var draftAddressesEveryone = false
     @State private var rows: [Row] = []
@@ -170,6 +173,45 @@ struct ChatSession: View {
     /// Newest rows dropped below the viewport while reading history; 0 when the
     /// window is the tail of the transcript.
     @State private var windowSkipEnd = 0
+    /// The animated hop a reveal makes to a row the stack has already built.
+    static let revealHop: Double = 0.35
+    /// How long `settleOnRevealed` waits between its corrections, and how many it makes.
+    /// Three over 0.45 s: long enough for the lazy rows around the landing to be measured,
+    /// short enough to be over before the reader could have started scrolling themselves.
+    ///
+    /// The count was four and was cut on measurement. Across all twenty-six laddered
+    /// reveals recorded for #2404 — several runtimes, including two ten-iteration
+    /// repetitions that varied nothing but timing — the first correction moved the scroll
+    /// in eighteen, the second in three, and the third in none. The fourth never moved it
+    /// in the ten reveals where it could be measured, which is what it was cut on. Read
+    /// the trace with care when checking this: the `settle` line is printed *before* its
+    /// own `scrollTo`, so the offset logged at `step=N` is what correction N achieved, not
+    /// N+1.
+    ///
+    /// The rule the count follows: **keep the deepest pass ever measured to do work, plus
+    /// one of margin.** The deepest real correction is the second, so the count is three.
+    /// The margin is there because the costs are not symmetrical — a pass that never fires
+    /// costs one no-op `scrollTo` against a layout that already agrees, while one pass too
+    /// few costs exactly the bug this corrects. Every one of the twenty-six was a simulator
+    /// on one Mac; real devices, slower main threads and deeper transcripts are unmeasured.
+    ///
+    /// The second pass is not a rarity kept out of caution. It did nothing in the first
+    /// sixteen reveals but one, and then moved the landing in two of the ten taken after
+    /// the count was cut — 7131 to 7368 and 7131 to 7591, both onto a correct landing.
+    ///
+    /// Cut this to two when measurements on hardware justify it, rather than re-deriving
+    /// the argument.
+    static let revealSettleGap: Double = 0.15
+    static let revealSettleSteps = 3
+    /// How long after the last correction `traceAtRest` reports where the transcript ended
+    /// up. Three seconds, to land beside the moment the UI test reads the resting frame
+    /// rather than somewhere before it; the test sleeps 3 s after the bar closes.
+    static let revealAtRestAfter: Double = 3.0
+    /// How long after a result tap the reveal trace records scroll samples. It has to outlast
+    /// `revealAtRestAfter`, or the at-rest line reports a stillness that is only the trace
+    /// having stopped watching. Nothing scrolls between the correction and the read, so in
+    /// practice this costs no lines at all — which is the measurement.
+    static let revealTraceWindow: Double = 5.0
     @State private var showModelPicker = false
     /// Rig: the media viewer opened by `ARBOS_SHOW=media…` (media-viewer-2026-10-23).
     @State private var rigViewer: MediaViewerState?
@@ -201,6 +243,14 @@ struct ChatSession: View {
     @State private var firstRowMarked = false
     /// When the history window last grew (the near-top reporter fires per scroll sample).
     @State private var lastGrowAt = Date.distantPast
+    /// Rig (#2404): while this is in the future the trace reports every scroll offset sample.
+    /// Outside it they are left alone — a chat scroll samples per frame, and a `print` on each
+    /// one changes the thing being measured.
+    @State private var traceOffsetsUntil = Date.distantPast
+    /// Rig (#2404): the last scroll offset seen, so a reveal can report where it started from.
+    /// A reference box and not `@State`: this is written on every scroll sample, and a state
+    /// write per sample would invalidate the view on every frame of every scroll.
+    @State private var scrollProbe = ScrollProbe()
     /// Rows that arrived while the reader was away from the end — drives the
     /// "New messages" pill. Cleared when they re-pin or jump to the latest.
     @State private var newBelowCount = 0
@@ -260,6 +310,43 @@ struct ChatSession: View {
         showSearch && !searchText.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
+    /// The transcript's lazy stack is keyed by the keyword while one is set, so a filter that
+    /// replaces the whole row set gets a **new** stack rather than the one that was holding
+    /// the other 437 rows.
+    ///
+    /// Why it has to be the identity. A keyword swaps the row set for its hits in one step.
+    /// iOS 27 does not re-measure the rows that stay: it keeps the space it had reserved for
+    /// the rows that left, reports a content height built from it — 608 pt of content for a
+    /// single 98 pt row — and builds none of the survivors. The transcript is blank while the
+    /// scroll view still reports two pages at 100 %, with no row in the accessibility tree,
+    /// and it stays that way, because nothing built is nothing measured
+    /// ([feedback iphone-search-blank-ios27-2026-10-31]). iOS 26.5 re-measures by itself from
+    /// the same binary.
+    ///
+    /// Scrolling does not cure it, and that was measured rather than assumed: an arm that
+    /// scrolled to the surviving row by id on every filter change — which should force the
+    /// stack to resolve and build that row — left the transcript just as blank, 3 runs out of
+    /// 3. So the stale state is the stack's own per-child bookkeeping, not the scroll offset,
+    /// and the only thing that clears it is a stack that has none.
+    ///
+    /// The cost is bounded: unfiltered the key never changes, so the transcript's hot path
+    /// (streaming, window growth, scrolling) still never rebuilds, and a rebuilt filtered
+    /// stack is lazy, so it builds the few rows at the viewport and not the window.
+    private var transcriptStackIdentity: String {
+        searchHitsActive ? "filtered:\(searchText.trimmingCharacters(in: .whitespaces))" : "all"
+    }
+
+    /// `transcriptStackIdentity` with the keyword taken out, for the reveal trace.
+    ///
+    /// The identity has to carry the keyword — that is the whole point of it, a new stack per
+    /// filter. A log line must not. What someone types into a chat search is their content:
+    /// a name, a diagnosis, a fragment of a secret they are looking for. The trace only ever
+    /// needs to know **which of the two stacks** a reveal is scrolling, so the keyword never
+    /// reaches the line and there is nothing to redact later.
+    private var stackIdentityForTrace: String {
+        searchHitsActive ? "filtered" : "all"
+    }
+
     static func shownStamp(_ rowsVersion: Int, _ windowCount: Int, _ windowSkipEnd: Int, _ query: String, _ searching: Bool) -> Int {
         var h = Hasher()
         h.combine(rowsVersion); h.combine(windowCount); h.combine(windowSkipEnd)
@@ -274,6 +361,24 @@ struct ChatSession: View {
         return kept.count > windowCount ? Array(kept.suffix(windowCount)) : Array(kept)
     }
 
+    /// Rig (`ARBOS_TRACE_REVEAL=1`, #2404): one line per thing that moves the transcript.
+    /// Compiled out of Release; `detail` is an autoclosure, so a run without the flag pays
+    /// nothing for the list walks some of these lines do.
+    private func revealTrace(_ what: String, _ detail: @autoclosure () -> String = "") {
+        #if DEBUG
+        guard DebugHooks.traceReveal else { return }
+        print("[arbos reveal] t=\(LaunchClock.msSinceLaunch())ms \(what) \(detail())")
+        #endif
+    }
+
+    /// A scroll offset for the trace. `NearTopReporter` reports `.infinity` for a content that
+    /// is not taller than its container, which is what the first layout of a chat looks like,
+    /// and `Int(_: CGFloat)` traps on a value that is infinite or NaN. Formatting the number
+    /// was enough to kill the app on every chat open and cost a heavy slot's run.
+    private static func offsetText(_ v: CGFloat) -> String {
+        v.isFinite ? String(Int(v)) : "inf"
+    }
+
     /// Nearing the top: bring the next older slice into the view tree. The scroll view is
     /// anchored at the bottom, so the rows on screen stay put while the content grows above.
     /// Never inside the caller's animation: an animated change to the row list makes
@@ -284,6 +389,7 @@ struct ChatSession: View {
         guard windowCount < available else { return }
         let step = min(Self.windowStep, available - windowCount)
         let firstShown = windowedRows.first?.id
+        revealTrace("grow", "step=\(step) window=\(windowCount)->\(windowCount + step) skipEnd=\(windowSkipEnd) firstShown=\(firstShown ?? "-")")
         var t = Transaction()
         t.disablesAnimations = true
         withTransaction(t) {
@@ -314,11 +420,58 @@ struct ChatSession: View {
     }
 
     /// Make sure the row for `messageId` is in the window (quote taps into older history).
-    /// Returns true when the window had to grow (the caller scrolls after the next layout).
+    /// Returns true when the window had to move (the caller scrolls after the next layout).
+    ///
+    /// The window SLIDES onto the target; it does not stretch back to it from the tail
+    /// (#2404). Stretching is what a reveal into older history used to do, and it put every
+    /// row between the tail and the target into the stack at once — 107 of them in the
+    /// measured case — so the scroll that followed had 172 rows of estimated height between
+    /// it and where it was going, and came to rest 18 to 35 rows away. A slice that ends
+    /// just after the target is one page instead, whatever the distance, and the scroll that
+    /// follows it starts from the bottom anchor a dozen rows away.
+    ///
+    /// Sliding bounds the error; it does not remove it, and the measured landing after this
+    /// change alone was still 13 rows out. `settleOnRevealed` is the other half.
     private func includeInWindow(messageId: Id) -> Bool {
         let all = visibleRows
         guard let ix = all.firstIndex(where: { $0.messageId == messageId }) else { return false }
+        if DebugHooks.revealPreFix { return stretchWindowToTail(all: all, ix: ix, messageId: messageId) }
+        // Nothing to do when the stack has already built the row: `scrollTo` can reach it and
+        // the window is the reader's, not this function's, to change.
+        guard !windowedRows.contains(where: { $0.messageId == messageId }) else {
+            revealTrace("include-in-window", "id=\(messageId) already shown; window untouched")
+            return false
+        }
+        // Rows kept below the target. Half a step is a comfortable margin either way: enough
+        // that the end of the window is well clear of the viewport, so `AwayFromBottomReporter`
+        // does not read the landing as "back at the end" and settle the reader to the real
+        // tail; few enough that the scroll from the bottom anchor up to the target crosses
+        // rows the stack has just built.
+        let below = Self.windowStep / 2
+        let skip = max(0, all.count - ix - 1 - below)
+        let count = min(all.count - skip, Self.windowInitial)
+        revealTrace("include-in-window",
+                    "id=\(messageId) ix=\(ix)/\(all.count) fromTail=\(all.count - ix) "
+                    + "window=\(windowCount)->\(count) skipEnd=\(windowSkipEnd)->\(skip)")
+        guard count != windowCount || skip != windowSkipEnd else { return false }
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            windowSkipEnd = skip
+            windowCount = count
+        }
+        return true
+    }
+
+    /// Rig (`ARBOS_REVEAL_PRE_FIX=1`, #2404): the reveal windowing as it was before the fix —
+    /// every row between the tail and the target joins the stack at once. Kept so one build
+    /// can measure the symptom beside the fix; it goes away with the rig.
+    private func stretchWindowToTail(all: [Row], ix: Int, messageId: Id) -> Bool {
         let needed = all.count - ix + Self.windowStep / 2
+        revealTrace("include-in-window",
+                    "stretch id=\(messageId) ix=\(ix)/\(all.count) fromTail=\(all.count - ix) needed=\(needed) "
+                    + "window=\(windowCount) skipEnd=\(windowSkipEnd) "
+                    + "grows=\(needed > windowCount || windowSkipEnd > 0)")
         guard needed > windowCount || windowSkipEnd > 0 else { return false }
         var t = Transaction()
         t.disablesAnimations = true
@@ -420,6 +573,15 @@ struct ChatSession: View {
     /// (the quote-tap path, `revealQuoted`), once the unfiltered rows have laid out.
     private func openSearchResult(_ messageId: Id) {
         guard ChatSearchClose.resultTapReveals(open: showSearch, query: searchText) else { return }
+        // Where the result list was standing when the reader tapped. A reveal animates from
+        // wherever the scroll view already is, so this is the one number that says which
+        // reveal was asked for, and it is not recoverable afterwards.
+        revealTrace("result-tap", "id=\(messageId) hits=\(visibleRows.count) window=\(windowCount) "
+                    + "skipEnd=\(windowSkipEnd) offset=\(Self.offsetText(scrollProbe.last))")
+        // The reveal lands inside a second. The window is far longer than that because the
+        // interesting part is the silence after it: whether anything moves the transcript
+        // between the correction and the moment the test reads the resting frame.
+        traceOffsetsUntil = Date().addingTimeInterval(Self.revealTraceWindow)
         searchResultTapped = messageId
         closeSearch(scrollToTail: false)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { revealQuoted(messageId) }
@@ -540,6 +702,9 @@ struct ChatSession: View {
     /// Drives the connection pill's dot pulse while it is reconnecting / syncing.
     /// The original a quote tap scrolled to; tinted until the fade timer clears it.
     @State private var highlightedMessage: Id?
+    /// Rig (#2404): the last message a reveal was asked for, kept after the highlight fades
+    /// so a UI test can tell a mis-aimed tap from a bad landing. See `revealedMessageProbe`.
+    @State private var lastRevealedMessage: Id?
     /// After a quote tap: the reply we came from. The ↓ disc returns here once
     /// (not to the latest message); cleared on use, send, or a real jump-to-latest.
     @State private var jumpBackTo: Id?
@@ -946,31 +1111,44 @@ struct ChatSession: View {
         // The fade the chat bar floats on ([feedback iphone-composer-see-through-2026-10-28]):
         // rows scrolling under the bar dim from `Theme.composerFade` above it toward the
         // bottom edge and stay readable through and between the glass pills — no band. The
-        // canvas ends at the bar's top edge (the bar is a safe-area inset), so the layer sits
-        // right on it, moves with the keyboard, is over the transcript and under the pill and
-        // the chevron below — not in the bar's layer.
-        .overlay(alignment: .bottom) { BottomBarFadeView(spec: BottomBarFade.chat) }
+        // bar's measured height is added to the layer's bottom inset, so it starts at the
+        // bar's top edge, moves with the keyboard, is over the transcript and under the pill
+        // and the chevron below — not in the bar's layer.
+        .overlay(alignment: .bottom) {
+            ChatBarHeightReader(bar: chatBarHeight) { bar in
+                BottomBarFadeView(spec: BottomBarFade.chat).safeAreaPadding(.bottom, bar)
+            }
+        }
         .overlay(alignment: .bottom) {
             if newBelowCount > 0 {
-                newMessagesPill
-                    .padding(.bottom, 10)
-                    .transition(.opacity.combined(with: .scale(scale: 0.92)))
+                ChatBarHeightReader(bar: chatBarHeight) { bar in
+                    newMessagesPill.padding(.bottom, bar + 10)
+                }
+                .transition(.opacity.combined(with: .scale(scale: 0.92)))
             }
         }
         // Trailing-only overlay so the hit target is just the disc (not a full-width
         // bar). UIKit tap inside the disc still works while the transcript decelerates.
         .overlay(alignment: .bottomTrailing) {
             if newBelowCount == 0, awayFromBottom {
-                scrollToBottomButton
-                    .padding(.trailing, composerSideInset)
-                    .padding(.bottom, 10)
-                    .transition(.opacity.combined(with: .scale(scale: 0.8)))
+                ChatBarHeightReader(bar: chatBarHeight) { bar in
+                    scrollToBottomButton
+                        .padding(.trailing, composerSideInset)
+                        .padding(.bottom, bar + 10)
+                }
+                .transition(.opacity.combined(with: .scale(scale: 0.8)))
             }
         }
         .animation(.easeOut(duration: 0.2), value: awayFromBottom)
         .animation(.easeOut(duration: 0.2), value: newBelowCount > 0)
         .environment(\.composerInset, composerSideInset)
-        .safeAreaInset(edge: .bottom, spacing: 0) {
+        // The bar floats over the transcript instead of being a bottom safe-area inset: every
+        // change of its height (the chat opening, the status row, a reply or edit banner,
+        // attachment chips, a growing field, the error note) would otherwise resize the
+        // transcript's inset, and a LazyVStack can drop every visible row when that inset
+        // grows — the chat stays blank until the next scroll. The height reaches the rows only
+        // as the transcript's tail spacer (`ChatBarHeight`).
+        .overlay(alignment: .bottom) {
             VStack(spacing: 0) {
                 // The composer's note (Jacob 2026-10-26): the last send / attachment / recording
                 // failure in this chat, directly above the composer at its width; Try again
@@ -1015,9 +1193,11 @@ struct ChatSession: View {
             .padding(.top, Theme.chatBarTopPad)
             // Grok: 18 pt between the field and the keyboard, 2 pt above the home indicator.
             .padding(.bottom, composerFocused ? Theme.composerBottomKeyboard : Theme.composerBottom)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { chatBarHeight.update($0) }
             // No background of its own: the bar floats on `BottomBarFadeView` in the canvas.
             // A drag that starts here selects text or slides the mic — never "back".
             .backSwipeComposerBar()
+            .modifier(ChatBarHeightProbe())
         }
         .overlayPreferenceValue(RowFrameKey.self) { anchors in
             GeometryReader { geo in
@@ -1808,9 +1988,35 @@ struct ChatSession: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Search in chat")
             .accessibilityIdentifier("chat-search-button")
+            // Rig (#2404): which reveal this build is running, where a UI test can read it.
+            // A launch variable that does not arrive makes the A/B arm silently become the
+            // control arm, and a run then reports the fix working against no baseline at
+            // all. The app says which arm it is in, and the test asserts it before it taps.
+            .accessibilityValue(DebugHooks.revealPreFix ? "reveal-pre-fix" : "reveal-fixed")
             .background { searchKeyboardShortcuts }
+            .background { revealedMessageProbe }
         }
         .controlBar()
+    }
+
+    /// Rig (#2404): which message the app was last asked to reveal, where a UI test can read
+    /// it after the highlight has faded.
+    ///
+    /// A result tap is a touch at a coordinate, and a coordinate can land on a row the test
+    /// did not mean. When that happens the app reveals the row that was actually tapped —
+    /// correctly — and a test that asserts about the row it *aimed* at reports a perfectly
+    /// good landing as a failure tens of rows short. That is not hypothetical: it is what
+    /// both iOS 26 failures in this lane turned out to be.
+    ///
+    /// So the app names the row it revealed and the test checks that against the row it
+    /// meant to tap. A mis-tap then fails as a mis-tap instead of being blamed on the fix.
+    @ViewBuilder private var revealedMessageProbe: some View {
+        if DebugHooks.traceReveal {
+            Color.clear
+                .frame(width: 0, height: 0)
+                .accessibilityIdentifier("reveal-probe")
+                .accessibilityValue(lastRevealedMessage.map(String.init(describing:)) ?? "none")
+        }
     }
 
     private var composerSideInset: CGFloat {
@@ -1956,9 +2162,10 @@ struct ChatSession: View {
                 // reading history) was laid out on every change of the row set — a 1.6–2.7 s
                 // frame at open, a 0.3–0.45 s stall per 30-row grow step, 1 s on jump-to-bottom
                 // (iphone-scroll-perf, Time Profiler: 7.7 of 10.3 busy main-thread seconds in
-                // AttributeGraph layout). An older iOS let a LazyVStack drop its visible rows
-                // when the composer's safe-area inset grew; the rig's keyboard / typing pass
-                // on iOS 27 is what guards that now.
+                // AttributeGraph layout). A LazyVStack can drop every visible row when the
+                // scroll view's bottom inset grows (seen on device, not in the simulator), so
+                // the chat bar is not an inset: it floats over this list and its height is
+                // the tail spacer (`ChatBarHeight`).
                 LazyVStack(alignment: .leading, spacing: 0) {
                     // iOS 17 window growth: report this top edge's position in the scroll space.
                     Color.clear.frame(height: 0)
@@ -2028,10 +2235,10 @@ struct ChatSession: View {
                     transcriptRows(shown: shown, mentions: mentions, width: width)
                     // Who is working is the presence row over the composer
                     // (`PresenceRow`), not a transcript row.
-                    // Clears the `Theme.composerFade` above the chat bar, so the last
-                    // row at rest is never under the fade; the status row rises into it
-                    // (`Theme.presenceLift`).
-                    Color.clear.frame(height: Theme.transcriptTail).id("bottom")
+                    // Clears the chat bar and the `Theme.composerFade` above it, so the
+                    // last row at rest is never under the fade; the status row rises into
+                    // it (`Theme.presenceLift`).
+                    TranscriptTail(bar: chatBarHeight).id("bottom")
                 }
                 .padding(.horizontal, 16)
                 // The transcript's horizontal swipes (left: time peek, right: back) live on the
@@ -2057,12 +2264,17 @@ struct ChatSession: View {
                 )
                 // Fill the short-thread frame so taps on empty chrome hit this view.
                 .contentShape(Rectangle())
+                // A keyword replaces the whole row set, and iOS 27 keeps the space it reserved
+                // for the rows that left unless the stack itself is new (`transcriptStackIdentity`).
+                .id(transcriptStackIdentity)
             }
             .defaultScrollAnchor(.bottom)
+            .modifier(ChatBarIndicatorMargin(bar: chatBarHeight))
             // iOS 26's automatic edge effect under a bottom inset would blur the rows under the
             // composer a second time; the canvas fade is the one treatment.
             .modifier(NoBottomScrollEdgeEffect())
             .scrollDismissesKeyboard(.interactively)
+            .modifier(TranscriptBottomInsetProbe())
             // Tap empty chat chrome to dismiss the keyboard and free the transcript — and, with
             // Search-in-chat up, close it ([feedback iphone-search-close-2026-10-28], Jacob:
             // "clicking away from the search should close it"). A tap on a result row runs
@@ -2091,7 +2303,10 @@ struct ChatSession: View {
             })
             // Nearing the top: the next older slice of rows joins the view tree; a channel
             // also asks the server for one older page.
-            .modifier(NearTopReporter(enabled: true) {
+            .modifier(NearTopReporter(enabled: true, onNear: { offset in
+                revealTrace("near-top", "offset=\(Self.offsetText(offset)) window=\(windowCount) skipEnd=\(windowSkipEnd) "
+                            + "sinceAppear=\(Int(Date().timeIntervalSince(appearedAt) * 1000))ms "
+                            + "sinceGrow=\(Int(Date().timeIntervalSince(lastGrowAt) * 1000))ms")
                 // The first layout reports offset 0 before the bottom anchor applies; a
                 // grow step there (30 more bubbles) landed inside the open and cost a
                 // 200–300 ms frame on a long group. History waits a beat after appear.
@@ -2106,7 +2321,13 @@ struct ChatSession: View {
                 } else if isChannel {
                     model.loadOlderChannel(chatId)
                 }
-            })
+            }, onSample: { old, new in
+                scrollProbe.last = new
+                scrollProbe.samples += 1
+                guard Date() < traceOffsetsUntil else { return }
+                revealTrace("offset", "\(Self.offsetText(old))->\(Self.offsetText(new)) "
+                            + "window=\(windowCount) skipEnd=\(windowSkipEnd) shown=\(windowedRows.count)")
+            }))
             // Top fade is `headerBlur` over the transcript — a ScrollView `.mask`
             // forced an offscreen pass of every row on each scroll frame and made
             // long / group chats feel sticky (feedback app-01M5MQ2GFB1681YXNJMZV4EK7J).
@@ -2164,6 +2385,7 @@ struct ChatSession: View {
                     if windowSkipEnd > 0 { settleToBottom(proxy) }
                 }
             }
+            .onChange(of: transcriptStackIdentity) { _, _ in pinFilteredStackToEnd(proxy) }
         }
     }
 
@@ -2318,6 +2540,39 @@ struct ChatSession: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { proxy.scrollTo("bottom", anchor: .bottom) }
     }
 
+    /// Put the rebuilt filtered stack back on its end after a keyword re-keys it.
+    ///
+    /// `transcriptStackIdentity` is what makes the hits draw on iOS 27 at all, and it costs the
+    /// list its bottom anchor there: the rebuilt stack starts with no measured child heights,
+    /// iOS 27 never re-measures it, and the scroll view comes to rest on the estimates. On the
+    /// 420-row search fixture that left 219 pt of reserved space under the last hit where the
+    /// tail is really 82 pt: the newest hit floats 161 pt clear of the composer instead of
+    /// 25 pt, the match above it is pushed entirely behind the search bar, and the reader sees
+    /// two matches over a block of black where the same build without the re-key shows three.
+    /// iOS 26.5 re-measures by itself and is 24 pt with the re-key or without it.
+    ///
+    /// Scrolling the rebuilt stack to its end puts the offset back on the real geometry. This is
+    /// not the scroll re-settle that was measured and discarded for the blank transcript: that
+    /// one scrolled *instead of* re-keying, so it addressed rows that were never built and could
+    /// not resolve them. Here the re-key has already built them.
+    ///
+    /// Only on the way *into* a keyword. Leaving one belongs to `closeSearch`, and a result tap
+    /// closes search in order to land on its own message — hence the identity re-check before
+    /// each deferred hop, so a tap taken mid-ladder is not dragged back to the tail.
+    private func pinFilteredStackToEnd(_ proxy: ScrollViewProxy) {
+        guard searchHitsActive else { return }
+        let key = transcriptStackIdentity
+        proxy.scrollTo("bottom", anchor: .bottom)
+        DispatchQueue.main.async {
+            guard transcriptStackIdentity == key else { return }
+            proxy.scrollTo("bottom", anchor: .bottom)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            guard transcriptStackIdentity == key else { return }
+            proxy.scrollTo("bottom", anchor: .bottom)
+        }
+    }
+
     private func m_text(_ row: Row) -> String {
         messageById[row.messageId]?.plainText ?? ""
     }
@@ -2351,21 +2606,120 @@ struct ChatSession: View {
 
     private func revealQuoted(_ messageId: Id) {
         guard let target = rows.first(where: { $0.messageId == messageId && $0.role != .system }) else { return }
+        // `scrollTo` can only move to a row the stack has actually built, so whether the
+        // target is in `windowedRows` decides whether the reveal can do anything at all.
+        revealTrace("reveal-begin",
+                    "id=\(messageId) row=\(target.id) rows=\(rows.count) visible=\(visibleRows.count) "
+                    + "window=\(windowCount) skipEnd=\(windowSkipEnd) shown=\(windowedRows.count) "
+                    + "windowTop=\(windowedRows.first?.id ?? "-") windowBottom=\(windowedRows.last?.id ?? "-") "
+                    + "targetShown=\(windowedRows.contains { $0.id == target.id }) "
+                    + "offset=\(Self.offsetText(scrollProbe.last)) "
+                    // Which lazy stack this reveal is scrolling. A result tap closes the bar
+                    // first, and closing changes `transcriptStackIdentity`, so the stack is
+                    // rebuilt around the reveal (#2450). "filtered" would mean the reveal is
+                    // scrolling a stack about to be thrown away, which is the one ordering
+                    // these two fixes must not have.
+                    //
+                    // Read it for that and nothing more. The identity flips synchronously
+                    // with the close; the rebuild it triggers does not. So "all" proves the
+                    // reveal is addressing the new stack, not that the new stack has laid
+                    // out, and those are different facts: on iOS 26 a single hop issued in
+                    // this gap rests tens of rows short of the target. Covering the gap is
+                    // what the corrections in `settleOnRevealed` are for.
+                    + "stack=\(stackIdentityForTrace)")
         // Leave stick-to-bottom so a window grow (or the ↓ disc) does not yank
         // the reader off the revealed row / the reply they jumped back to.
         pinnedToBottom = false
-        if includeInWindow(messageId: messageId) {
-            // The original was outside the window: let the grown VStack lay out first.
-            DispatchQueue.main.async {
-                withAnimation(.easeInOut(duration: 0.35)) { scroller?.scrollTo(target.id, anchor: .center) }
-            }
-        } else {
-            withAnimation(.easeInOut(duration: 0.35)) { scroller?.scrollTo(target.id, anchor: .center) }
-        }
+        // Before the scroll, so the corrections can tell this reveal from the next one.
         highlightedMessage = messageId
+        lastRevealedMessage = messageId
+        if includeInWindow(messageId: messageId) {
+            // The window has just moved onto the target, so the rows on screen are not the
+            // rows that were there a moment ago. A jump across a hundred rows of history has
+            // no animation worth keeping, and an animated scroll over a window that changed
+            // in the same frame makes SwiftUI diff the whole stack per frame. Let the moved
+            // window lay out first.
+            DispatchQueue.main.async { settleOnRevealed(target.id, messageId: messageId, animated: false) }
+        } else {
+            settleOnRevealed(target.id, messageId: messageId, animated: true)
+        }
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(1600))
             if highlightedMessage == messageId { highlightedMessage = nil }
+        }
+    }
+
+    /// Scroll onto a revealed row, then scroll onto it once more as the rows gain real heights.
+    ///
+    /// `scrollTo` on a `LazyVStack` is resolved against *estimated* heights for every row the
+    /// stack has not laid out, and a reveal into older history has just moved the window, so
+    /// at the moment of the first call almost nothing around the destination is measured. One
+    /// scroll therefore lands wherever the estimate error puts it, and on a 420-row fixture
+    /// group that is tens of rows away with the message not even realized (#2404): 18 to 35
+    /// rows *newer* than it when the window stretched back to the tail, and 13 rows *older*
+    /// than it when the window slid onto it. Same fault, opposite signs — which is why the
+    /// shape of the window alone cannot be the whole fix.
+    ///
+    /// Each repeat is resolved against a layout that knows more than the last one did, so the
+    /// error shrinks with every pass. The ladder is deliberately short and stands down the
+    /// moment another reveal claims the highlight: a correction that outlived the jump would
+    /// be fighting the reader's own scroll, and `settleToBottom` corrects the tail the same
+    /// way and for the same reason.
+    private func settleOnRevealed(_ rowId: String, messageId: Id, animated: Bool) {
+        if animated {
+            withAnimation(.easeInOut(duration: Self.revealHop)) { scroller?.scrollTo(rowId, anchor: .center) }
+        } else {
+            withTransaction(Transaction(animation: nil)) { scroller?.scrollTo(rowId, anchor: .center) }
+        }
+        guard !DebugHooks.revealPreFix else { return }
+        // An animated hop owns the scroll view until its curve ends; correcting into it would
+        // cancel the animation the reader is watching.
+        let first = (animated ? Self.revealHop : 0) + Self.revealSettleGap
+        for step in 0..<Self.revealSettleSteps {
+            DispatchQueue.main.asyncAfter(deadline: .now() + first + Double(step) * Self.revealSettleGap) {
+                guard highlightedMessage == messageId else { return }
+                // `stack` again on every correction, not only at the start: the question a
+                // ladder has to answer is whether its later passes are still scrolling the
+                // stack its first pass aimed at, or one that was torn down underneath it.
+                revealTrace("settle", "id=\(messageId) step=\(step) "
+                            + "offset=\(Self.offsetText(scrollProbe.last)) stack=\(stackIdentityForTrace)")
+                withTransaction(Transaction(animation: nil)) { scroller?.scrollTo(rowId, anchor: .center) }
+                if step == Self.revealSettleSteps - 1 {
+                    traceAtRest(messageId: messageId, after: scrollProbe.samples)
+                }
+            }
+        }
+    }
+
+    /// Where the transcript actually came to rest, logged late enough to be read beside the
+    /// frame the UI test asserts on.
+    ///
+    /// This closes the one window the rest of the trace left dark (#2404). The reveal's own
+    /// lines stop at the last correction, under a second after the tap; the test reads the
+    /// resting frame about three seconds after it. Two very different faults fit that
+    /// silence — the scroll estimate was still wrong when the ladder ran and stayed wrong,
+    /// or the layout moved again afterwards — and they want different fixes, so the gap is
+    /// worth a line rather than a guess.
+    ///
+    /// `moved` is what separates them. It counts scroll samples taken since the last rung
+    /// was issued, so a **zero** is the load-bearing reading: the transcript has not moved a
+    /// pixel since the ladder finished, and the residual was already baked in by then. A
+    /// non-zero is weaker, because it also catches that last rung's own effect; the `offset`
+    /// lines carry the timestamps that tell the two apart.
+    ///
+    /// It is a count and a scroll offset: no row content, no sender, nothing a reader typed.
+    private func traceAtRest(messageId: Id, after samplesAtLastRung: Int) {
+        guard DebugHooks.traceReveal else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.revealAtRestAfter) {
+            // The highlight clears on its own well before this fires, so nil is the normal
+            // case. A *different* id means a second reveal has taken over and this line
+            // would be reporting its scroll position under the first one's name.
+            guard highlightedMessage == nil || highlightedMessage == messageId else { return }
+            revealTrace("at-rest", "id=\(messageId) "
+                        + "offset=\(Self.offsetText(scrollProbe.last)) "
+                        + "moved=\(scrollProbe.samples - samplesAtLastRung) "
+                        + "window=\(windowCount) skipEnd=\(windowSkipEnd) "
+                        + "shown=\(windowedRows.count) stack=\(stackIdentityForTrace)")
         }
     }
 
@@ -3784,18 +4138,34 @@ extension ChatSession {
     }
 }
 
+/// Rig (#2404): the last scroll offset, held by reference so writing it per sample does not
+/// invalidate the transcript.
+private final class ScrollProbe {
+    var last: CGFloat = .infinity
+    /// Scroll samples seen, so a reveal can say whether the transcript moved after its
+    /// correction rather than leaving that to be read out of an absence of trace lines.
+    var samples = 0
+}
+
 /// Fires when the scroll view comes near its top (channel older page / grow window).
 /// iOS 18+ uses scroll geometry; iOS 17 watches a top-of-content frame in a named
 /// coordinate space so the row window can grow (feedback app-01M5NNJ001NHHYBHXTASM5NXBZ).
 private struct NearTopReporter: ViewModifier {
     let enabled: Bool
-    let onNear: () -> Void
+    /// The scroll offset that looked near the top, for the rig to report; nothing reads it
+    /// to decide anything.
+    let onNear: (CGFloat) -> Void
+    /// Rig (`ARBOS_TRACE_REVEAL=1`, #2404): every offset sample, in the band or not, so a
+    /// run shows the whole trajectory of a reveal and where it came to rest — not only the
+    /// samples that happened to ask for a grow.
+    let onSample: (CGFloat, CGFloat) -> Void
 
     func body(content: Content) -> some View {
         if #available(iOS 18, *), enabled {
             content.onScrollGeometryChange(for: CGFloat.self) { g in
                 g.contentSize.height > g.containerSize.height ? g.contentOffset.y : .infinity
             } action: { old, new in
+                onSample(old, new)
                 // About a screen ahead of the top edge, so the next slice is in place before
                 // the reader reaches it. Fires on every sample inside the band while the offset
                 // is still falling: with lazy rows (#2149) the rows a grow step prepends have
@@ -3803,14 +4173,15 @@ private struct NearTopReporter: ViewModifier {
                 // across the step — a one-shot "near" flag never re-armed and the window
                 // stopped at its cap (rig: 90 flicks into history stuck after ~90 s). The
                 // caller rate-limits the steps.
-                if new < 900, new < old || old == .infinity { onNear() }
+                if new < 900, new < old || old == .infinity { onNear(new) }
             }
         } else if enabled {
             content
                 .coordinateSpace(name: "arbosChatScroll")
                 .onPreferenceChange(ChatScrollTopKey.self) { minY in
+                    onSample(.infinity, minY)
                     // Content top near the scroll view's top → grow the row window.
-                    if minY > -40 && minY < 900 { onNear() }
+                    if minY > -40 && minY < 900 { onNear(minY) }
                 }
         } else {
             content
@@ -3841,6 +4212,43 @@ private struct NoBottomScrollEdgeEffect: ViewModifier {
         } else {
             content
         }
+    }
+}
+
+/// The chat bar's measured height (`sessionCanvas`). Held by the screen as plain state and
+/// observed only by the views below, so a change re-renders them and not the transcript.
+@MainActor
+final class ChatBarHeight: ObservableObject {
+    /// Seeded with the plain composer bar, so the first layout already clears it.
+    @Published private(set) var value: CGFloat = Theme.chatBarTopPad + Theme.composerHeight + Theme.composerBottom
+
+    func update(_ height: CGFloat) {
+        if abs(height - value) > 0.5 { value = height }
+    }
+}
+
+private struct ChatBarHeightReader<Content: View>: View {
+    @ObservedObject var bar: ChatBarHeight
+    @ViewBuilder var content: (CGFloat) -> Content
+
+    var body: some View { content(bar.value) }
+}
+
+/// The transcript's last child: the bar plus the fade above it.
+private struct TranscriptTail: View {
+    @ObservedObject var bar: ChatBarHeight
+
+    var body: some View {
+        Color.clear.frame(height: Theme.transcriptTail + bar.value)
+    }
+}
+
+/// Keeps the scroll indicator above the bar now that the bar is not a safe-area inset.
+private struct ChatBarIndicatorMargin: ViewModifier {
+    @ObservedObject var bar: ChatBarHeight
+
+    func body(content: Content) -> some View {
+        content.contentMargins(.bottom, bar.value, for: .scrollIndicators)
     }
 }
 
@@ -3931,10 +4339,33 @@ final class ComposerDraft: ObservableObject {
     var onCaretOrMentions: (() -> Void)?
 }
 
+/// Which of the composer's trailing controls the field's state calls for. The
+/// mic and the round pill are decided apart, because a recording wants both:
+/// the mic so a hold-to-talk release lands somewhere, the arrow so a tap can
+/// finish the memo. Pure, so `ComposerMetricsTests` can pin the pair that
+/// cross-fades ([feedback composer-send-crossfade-2026-10-30]).
+enum ComposerTrailing {
+    /// The mic is in its slot and takes touches: an empty field, or any
+    /// recording. The moment the field has text the mic is leaving, and a
+    /// leaving mic answers nothing.
+    static func micShown(draftEmpty: Bool, recording: Bool) -> Bool {
+        draftEmpty || recording
+    }
+
+    /// The round pill sends rather than calls: something to send, a recording
+    /// to finish, or a server channel, which has no calls (C1).
+    static func sendShown(canSend: Bool, recording: Bool, isChannel: Bool) -> Bool {
+        canSend || recording || isChannel
+    }
+}
+
 /// The field, mic and send / call button. Owns nothing: every action calls back
 /// into the chat screen, whose memo and send logic is unchanged.
 private struct ComposerField: View {
     @Environment(\.theme) private var theme
+    /// Settings → Accessibility → Motion → Reduce Motion. The swap below then
+    /// lands on the frame the character does, with no scale and no fade.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var draft: ComposerDraft
     @ObservedObject var recorder: MemoRecorder
     @Binding var focus: Bool
@@ -3968,6 +4399,22 @@ private struct ComposerField: View {
         RoundedRectangle(cornerRadius: Theme.composerHeight / 2, style: .circular)
     }
 
+    /// The mic is in its slot and takes touches.
+    private var micShown: Bool {
+        ComposerTrailing.micShown(draftEmpty: draft.text.isEmpty, recording: recorder.recording)
+    }
+
+    /// The round pill sends rather than calls.
+    private var sendShown: Bool {
+        ComposerTrailing.sendShown(canSend: canSend, recording: recorder.recording, isChannel: isChannel)
+    }
+
+    /// How the trailing controls cross-fade, or nothing at all when the system
+    /// has asked for less motion.
+    private var swap: Animation? {
+        reduceMotion ? nil : .easeOut(duration: Theme.composerSwapDuration)
+    }
+
     /// Grok's filled mic (`MicGlyph`); the armed slide-to-cancel shows the bin instead.
     @ViewBuilder
     private var micGlyph: some View {
@@ -3981,17 +4428,46 @@ private struct ComposerField: View {
     /// Inside the white pill: the send arrow with text or a recording; idle, Grok's
     /// voice-wave bars — a tap starts a voice call (agent or people chat). Channels
     /// have no calls (C1): the arrow stays, dimmed until there is text.
+    ///
+    /// The two marks cross-fade rather than cut ([feedback
+    /// composer-send-crossfade-2026-10-30]). The pill underneath them never
+    /// fades: it is the same white capsule in both states, and two of them
+    /// dissolving in one place would dip to half alpha and read as a flicker.
     @ViewBuilder
     private var actionGlyph: some View {
-        if canSend || recorder.recording || isChannel {
+        ZStack {
+            VoiceWaveGlyph()
+                .fill(theme.onPrimary)
+                .opacity(sendShown ? 0 : 1)
+                .scaleEffect(sendShown ? Theme.composerSwapScale : 1)
             Image(systemName: "arrow.up")
                 .font(theme.font(16, weight: .bold))
                 .foregroundStyle(theme.onPrimary)
-        } else {
-            VoiceWaveGlyph()
-                .fill(theme.onPrimary)
-                .accessibilityHidden(true)
+                .opacity(sendShown ? 1 : 0)
+                .scaleEffect(sendShown ? 1 : Theme.composerSwapScale)
         }
+        .animation(swap, value: sendShown)
+        .accessibilityHidden(true)
+    }
+
+    /// The mic, with its press / hold / slide-to-cancel gesture. Drawn in a
+    /// slot its caller always keeps, so the field beside it cannot move.
+    @ViewBuilder
+    private var micButton: some View {
+        micGlyph
+            .foregroundStyle(recorder.recording ? theme.danger : theme.icon)
+            .frame(width: Theme.micHitWidth, height: Theme.composerHeight)
+            .contentShape(Rectangle())
+            .id("memo-mic")
+            .accessibilityIdentifier("composer-mic")
+            // Press/release like Mac: tap toggles recording on; hold ≥0.25s then
+            // release sends. Slide left while holding to discard (WhatsApp-style).
+            // highPriorityGesture so a focused TextField cannot steal the touch.
+            .highPriorityGesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { onMicDrag($0) }
+                    .onEnded { onMicEnd($0) }
+            )
     }
 
     /// Max height for the growing composer field.
@@ -4075,24 +4551,19 @@ private struct ComposerField: View {
             // Grok's trailing cluster: mic glyph centre 24 pt before the pill, the pill
             // 8⅔ pt from the field's edge, both centred on the field's bottom line.
             HStack(spacing: Theme.micPillGap) {
-                if draft.text.isEmpty || recorder.recording {
-                    // Press/release like Mac: tap toggles recording on; hold ≥0.25s then
-                    // release sends. Slide left while holding to discard (WhatsApp-style).
-                    // highPriorityGesture so a focused TextField cannot steal the touch.
-                    // The mic stays mounted while recording so release can finish without
-                    // a second tap.
-                    micGlyph
-                        .foregroundStyle(recorder.recording ? theme.danger : theme.icon)
-                        .frame(width: Theme.micHitWidth, height: Theme.composerHeight)
-                        .contentShape(Rectangle())
-                        .id("memo-mic")
-                        .accessibilityIdentifier("composer-mic")
-                        .highPriorityGesture(
-                            DragGesture(minimumDistance: 0)
-                                .onChanged { onMicDrag($0) }
-                                .onEnded { onMicEnd($0) }
-                        )
-                }
+                // The mic's frame is here whether the mic is or not: the text
+                // field must not change width when the arrow replaces the pair
+                // ([feedback composer-send-crossfade-2026-10-30]). The mic
+                // stays mounted while recording too, so a hold-to-talk release
+                // can finish without a second tap.
+                micButton
+                    .scaleEffect(micShown ? 1 : Theme.composerSwapScale)
+                    .opacity(micShown ? 1 : 0)
+                    // A mic on its way out answers nothing: a swap that
+                    // swallows the touch that started it is worse than a cut.
+                    .allowsHitTesting(micShown)
+                    .accessibilityHidden(!micShown)
+                    .animation(swap, value: micShown)
                 // While recording: tap send also finishes (same as release). Otherwise
                 // Grok keeps the composer usable while the bot works: text sends, an
                 // empty field starts a voice call with the agent (Grok's voice-wave pill).
@@ -4106,6 +4577,9 @@ private struct ComposerField: View {
                 }
                 .buttonStyle(.plain)
                 .opacity(isChannel && !canSend && !recorder.recording ? 0.45 : 1)
+                .animation(swap, value: canSend)
+                // The label follows the action, not the fade: the button sends
+                // from the first frame of the swap, so it says so at once.
                 .accessibilityLabel((canSend || recorder.recording) ? "Send" : (isChannel ? "Send" : "Call"))
                 .accessibilityIdentifier("composer-action")
             }
@@ -4144,3 +4618,69 @@ private struct SearchResultTap: ViewModifier {
         }
     }
 }
+
+// UI-test hooks, DEBUG builds only (release builds compile both modifiers to a no-op). The rule they
+// let a test check: the chat bar growing must not change the transcript's bottom inset. The failure
+// that rule prevents — a LazyVStack dropping every visible row when that inset grows — shows on
+// devices and not in the simulator, so a test asserts the inset instead of the blank: the bar's
+// height went up (`chat-bar-height`) and the inset did not (`transcript-bottom-inset`). Values are
+// points with one decimal, e.g. "34.0"; "-1.0" until the first sample.
+
+/// `transcript-bottom-inset`: the transcript scroll view's bottom content inset (safe area included).
+private struct TranscriptBottomInsetProbe: ViewModifier {
+    #if DEBUG
+    @State private var inset: CGFloat = -1
+    #endif
+
+    func body(content: Content) -> some View {
+        #if DEBUG
+        if #available(iOS 18, *) {
+            content
+                .onScrollGeometryChange(for: CGFloat.self) { $0.contentInsets.bottom } action: { _, new in inset = new }
+                .overlay(alignment: .topLeading) {
+                    TestProbeElement(id: "transcript-bottom-inset", label: "Transcript bottom inset", value: inset)
+                }
+        } else {
+            content
+        }
+        #else
+        content
+        #endif
+    }
+}
+
+/// `chat-bar-height`: the chat bar's own height (error note, status row, banners, chips, field, pads).
+private struct ChatBarHeightProbe: ViewModifier {
+    #if DEBUG
+    @State private var height: CGFloat = -1
+    #endif
+
+    func body(content: Content) -> some View {
+        #if DEBUG
+        content
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
+            .overlay(alignment: .topLeading) {
+                TestProbeElement(id: "chat-bar-height", label: "Chat bar height", value: height)
+            }
+        #else
+        content
+        #endif
+    }
+}
+
+#if DEBUG
+private struct TestProbeElement: View {
+    let id: String
+    let label: String
+    let value: CGFloat
+
+    var body: some View {
+        Color.clear.frame(width: 1, height: 1)
+            .allowsHitTesting(false)
+            .accessibilityElement()
+            .accessibilityLabel(label)
+            .accessibilityIdentifier(id)
+            .accessibilityValue(String(format: "%.1f", value))
+    }
+}
+#endif
