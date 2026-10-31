@@ -1164,6 +1164,7 @@ struct ChatSession: View {
                 presenceRow
                     .environment(\.composerInset, composerSideInset)
                     .animation(.easeOut(duration: 0.25), value: composerFocused)
+                    .animation(.easeOut(duration: 0.2), value: awayFromBottom)
                 Group {
                     if isChannel, !model.channelCanPost(chatId) {
                         // Rule 9: a restricted channel I cannot post in — one quiet line, no composer.
@@ -3059,11 +3060,14 @@ struct ChatSession: View {
     /// The presence row over the composer: ticks once a second so time-capped
     /// states (stale stream, hand-off grace, awaiting-reply cheat, a typing
     /// mark's 6 s) expire without a stuck line. Left edge = the bubbles' 16 pt.
+    /// Only while pinned at the end — scrolled into history, bubbles pass through
+    /// that band and the ↓ button takes it (Mac shell; [feedback
+    /// app-01M69JD3HF6BFR40WYV00XRGKP]).
     @ViewBuilder
     private var presenceRow: some View {
         TimelineView(.periodic(from: .now, by: 1)) { _ in
             let participants = presenceParticipants
-            if !participants.isEmpty {
+            if !participants.isEmpty, !awayFromBottom {
                 // The tasks chip rides on the row while the agent has background jobs
                 // open in this chat (duplex §2.4); a tap opens the sheet.
                 let jobs = model.openJobs(chatId)
@@ -3085,6 +3089,7 @@ struct ChatSession: View {
                     // rises into the transcript's tail instead of stacking under it
                     // ([feedback status-row-gap-ios-2026-10-26]).
                     .padding(.top, -Theme.presenceLift)
+                    .transition(.opacity)
             }
         }
     }
