@@ -51,6 +51,14 @@ separate lanes rediscovered them from scratch on 2026-10-31.
    from the right until exactly one otherwise-unaccounted declaration still matches,
    so a recovery is unambiguous or it is reported as unresolved.
 
+   Where the cut lands decides whether anything is lost, and only that. The same
+   observer message hit the same case in two runs on consecutive commits: at 9818583d1
+   it cut mid-name and the record needed recovering, and at d6b35db36 it cut after
+   `' passed`, leaving the record readable and taking only the trailing clone stamp.
+   So a truncated `passed on 'Clone N …'` is not a missing case — but it does make the
+   clone stamps one short of the records, which is a real trap for anyone counting
+   those to check how work was spread across clones.
+
 4. RERUNS. A case can appear more than once, so unique names are what count.
 
 Declared cases are counted as `func test[A-Z][A-Za-z0-9_]*\\(\\)`. A bare `func test`
