@@ -1231,6 +1231,16 @@ fn load_store(shared: &Arc<Shared>) {
             cap: PIN_CAP_DEFAULT,
         });
     }
+    // Messages whose uploads were still running when the app was last quit. Nothing of
+    // them reached a chat document, so this is what puts them back in the chat as unsent
+    // instead of losing them ([feedback caption-sent-without-media]).
+    if let Some(Some(entries)) =
+        shared.with_store(|s| s.get_json::<Vec<crate::model::OutboxSend>>(store::KEY_OUTBOX))
+    {
+        if !entries.is_empty() {
+            let _ = shared.events.send(SyncEvent::Outbox { entries });
+        }
+    }
     if let Some(u) = account {
         // Who is signed in, before `/me` answers (and when it cannot).
         *shared.me.lock().unwrap() = Some(u.clone());
@@ -4896,6 +4906,9 @@ async fn send_message(
     reply_ref: Option<ReplyRef>,
     mentions: Vec<String>,
 ) {
+    // Retry sends an unsent message again under its own id, so this attempt starts clean:
+    // leaving the id marked would re-mark the row the moment it finally lands.
+    shared.failed_sends.lock().unwrap().remove(&message_id);
     // No room doc yet: queue while NewChat is in flight, otherwise fail visibly.
     if !shared.docs.lock().unwrap().contains_key(&chat_id) {
         {
@@ -4932,9 +4945,9 @@ async fn send_message(
         &project_id
     });
     let mut user_attachments: Vec<UserAttachment> = Vec::new();
-    // The first upload that did not land. The row is still written — with the part and
-    // no `ref`, so the file is named and Retry has something to put back — and then
-    // marked failed ([feedback failed-upload-retry]).
+    // The first upload that did not land. Nothing is written to the document while this is
+    // set: the words and the media are one message, so a caption whose picture never
+    // uploaded must not reach the chat on its own ([feedback caption-sent-without-media]).
     let mut upload_error: Option<UserError> = None;
     for outgoing in attachments {
         let (attachment, error) = upload_outgoing(&shared, &blob_slot, outgoing).await;
@@ -4971,6 +4984,14 @@ async fn send_message(
             };
             chart_parts.extend(forwarded_chart_parts(&c.chart, fallback));
         }
+    }
+    // A file did not reach the relay, so the message is not sent at all: no row, no
+    // caption on its own, no empty message. The whole of it — words and files — stays in
+    // the sender's outbox, which is where Retry and Delete act on it
+    // ([feedback caption-sent-without-media]).
+    if let Some(error) = upload_error {
+        fail_send(&shared, chat_id, message_id, error);
+        return;
     }
     shared.unacked.lock().unwrap().insert(message_id.clone());
     // People chats, and projects with more than one human, carry who wrote
@@ -5071,12 +5092,6 @@ async fn send_message(
                 .unwrap()
                 .insert(chat_id.clone(), now_ms());
         }
-    }
-    // The row is in the doc but one of its files is not on the relay. Marking it failed
-    // is what keeps it in the chat with a working Retry; silently leaving it looked, to
-    // the sender, like the video had been sent ([feedback failed-upload-retry]).
-    if let Some(error) = upload_error {
-        fail_send(&shared, chat_id.clone(), message_id.clone(), error);
     }
     mark_activity(&shared, &chat_id);
     // Other people in the chat get a notification with the text (API §7c); the relay never
@@ -6888,6 +6903,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         shared.diagnostic("pins", format!("{err:#}"));
                         refresh_pins(&shared).await;
                     }
+                }
+            });
+        }
+        ClientCommand::SaveOutbox { entries } => {
+            shared.with_store(|s| {
+                if entries.is_empty() {
+                    s.remove(store::KEY_OUTBOX);
+                } else {
+                    s.put_json(store::KEY_OUTBOX, &entries);
                 }
             });
         }

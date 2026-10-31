@@ -343,6 +343,15 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// An outbox row is part of what the transcript draws, so a change to it is a change
+    /// to that chat's list as far as every view watching `messagesVersion` is concerned.
+    private func bumpOutboxVersions(from old: [Id: [OutboxMessage]], to new: [Id: [OutboxMessage]]) {
+        for id in Set(old.keys).union(new.keys) where old[id] != new[id] {
+            messagesVersion[id, default: 0] &+= 1
+            activityCache[id] = nil
+        }
+    }
+
     /// Same array buffer (an unchanged value carried over by copy-on-write).
     private static func sameStorage(_ a: [Message], _ b: [Message]?) -> Bool {
         guard let b, a.count == b.count else { return false }
@@ -881,15 +890,19 @@ final class AppModel: ObservableObject {
     /// Client-minted message ids whose push the relay has not `ACK`ed (S3),
     /// keyed by chat id so one room's ACK cannot leave another chat's bubble faint.
     private var unacked: [Id: Set<Id>] = [:]
-    /// Rows of mine whose send did not fully land — today, a message whose attachment
-    /// upload failed ([feedback failed-upload-retry]). The doc writes no `status` for a
-    /// user row, so this client-side set is what gives the bubble `Delivery.failed` and
-    /// its red Retry mark; it is applied over every doc read exactly like `unacked`.
-    private var sendFailed: [Id: Set<Id>] = [:]
-    /// How to send a failed row again, by message id: the original send with its
-    /// attachment bytes still captured, so Retry re-uploads instead of sending the text
-    /// alone. Dropped once the row is retried or deleted.
-    private var failedSendReplay: [Id: () -> Void] = [:]
+    /// Messages the sender has committed to that are NOT in any chat document, because
+    /// their pictures or videos have not finished uploading ([feedback failed-upload-retry],
+    /// [feedback caption-sent-without-media]). Nobody else can see them; the sender sees
+    /// them at the end of the transcript with a Retry. Appended by `messages(of:)`.
+    @Published private(set) var outbox: [Id: [OutboxMessage]] = [:] {
+        didSet { bumpOutboxVersions(from: oldValue, to: outbox) }
+    }
+    /// The staged bytes behind `outbox`, and the index that survives a relaunch.
+    private var outboxStore: OutboxStore?
+    /// Bytes for a launch with no store (fixture / `ARBOS_NO_STORE`), keyed `<id>/<file>`.
+    private var outboxMemoryBytes: [String: Data] = [:]
+    /// Outbox ids with an upload running, so a second Retry tap cannot start a second one.
+    private var outboxSending: Set<Id> = []
     /// Rooms whose pushes were refused with `not_available` on the live connection.
     /// Cleared by that room's next ACK (not by another room's ACK).
     @Published private(set) var pushRefused: Set<Id> = []
@@ -1751,7 +1764,7 @@ final class AppModel: ObservableObject {
     /// just vanished and nothing happened" ([feedback failed-upload-retry]). `resendFailed`
     /// clears it once a retry really starts.
     func retrySendError(_ chatId: Id) {
-        guard let failed = messages[chatId]?.last(where: { $0.role == .user && $0.status == .error })
+        guard let failed = messages(of: chatId).last(where: { $0.role == .user && $0.status == .error })
         else { return }
         resendFailed(chatId: chatId, messageId: failed.id)
     }
@@ -1816,8 +1829,13 @@ final class AppModel: ObservableObject {
         store?.close(wipe: true)
         store = nil
         storeUsage = DeviceStore.Usage()
+        outbox = [:]
+        outboxSending = []
+        outboxMemoryBytes = [:]
+        outboxStore = nil
         if let creds = credentials {
             UserDefaults.standard.removeObject(forKey: "registryCache.\(creds.relayUrl).\(creds.deviceId)")
+            OutboxStore.wipe(relayUrl: creds.relayUrl, account: creds.deviceId)
             if forget { Keychain.delete(relayUrl: creds.relayUrl) }
         }
         credentials = nil
@@ -1989,6 +2007,7 @@ final class AppModel: ObservableObject {
         if ProcessInfo.processInfo.environment["ARBOS_NO_STORE"] == "1" { return }
         store = DeviceStore.open(relayUrl: creds.relayUrl, account: creds.deviceId)
         storeUsage = store?.usage() ?? DeviceStore.Usage()
+        loadOutbox(relayUrl: creds.relayUrl, account: creds.deviceId)
     }
 
     /// Registry, people chats, account and unread counts: small JSON, read
@@ -2627,13 +2646,8 @@ final class AppModel: ObservableObject {
         }
         var list = list
         let pendingIds = unacked[chatId] ?? []
-        let failedIds = sendFailed[chatId] ?? []
         for i in list.indices where list[i].role == .user {
             list[i].pending = pendingIds.contains(list[i].id)
-            if failedIds.contains(list[i].id) {
-                list[i].status = .error
-                list[i].pending = false
-            }
         }
         foldOptimisticNotices(chatId: chatId, into: &list)
         // Reassign the whole dictionary so `@Published` always fires. Subscript
@@ -2661,15 +2675,10 @@ final class AppModel: ObservableObject {
         var list = messages[chatId] ?? []
         var needSnapshot = false
         let pendingIds = unacked[chatId] ?? []
-        let failedIds = sendFailed[chatId] ?? []
         for ix in indexes.sorted() {
             guard var m = doc.readMessage(ix) else { continue }
             if m.role == .user {
                 m.pending = pendingIds.contains(m.id)
-                if failedIds.contains(m.id) {
-                    m.status = .error
-                    m.pending = false
-                }
             }
             if ix < list.count, list[ix].id == m.id {
                 list[ix] = m
@@ -2706,25 +2715,199 @@ final class AppModel: ObservableObject {
         unacked[chatId] = set.isEmpty ? nil : set
     }
 
-    /// A row of mine that did not fully land: it keeps its place in the chat and draws the
-    /// red Retry mark until it is retried or deleted. `replay` re-runs the original send
-    /// with its attachment bytes; without one, Retry falls back to the text.
-    private func markSendFailed(chatId: Id, messageId: Id, replay: (() -> Void)? = nil) {
-        clearUnacked(chatId: chatId, messageId: messageId)
-        sendFailed[chatId, default: []].insert(messageId)
-        if let replay { failedSendReplay[messageId] = replay }
-        if var list = messages[chatId], let i = list.firstIndex(where: { $0.id == messageId }) {
-            list[i].status = .error
-            list[i].pending = false
-            messages[chatId] = list
+    // MARK: The outbox
+    //
+    // A send that carries a picture or a video is committed to the outbox BEFORE its first
+    // upload byte leaves, and written into the chat document only once every attachment has
+    // a relay `ref`. That ordering is the whole fix: text and media have one fate because
+    // there is one write and it cannot run early. The failure modes nobody enumerates — a
+    // cancelled request, an expired token, the app being killed mid-upload — all land in the
+    // same place, because they are all "the write never happened".
+
+    /// Stage the bytes and show the row. Returns nil only when the bytes cannot be written,
+    /// which is the one case where there is nothing to retry from.
+    private func enqueueOutbox(id: Id, chatId: Id, kind: OutboxMessage.Kind, text: String,
+                               attachments: [PendingAttachment], replyTo: Id? = nil,
+                               mentions: [String] = [], forwardedFrom: String? = nil,
+                               replyRef: ReplyRef? = nil, extraParts: [[String: Any]] = [],
+                               projectId: Id? = nil) -> OutboxMessage? {
+        var staged: [OutboxAttachment] = []
+        for (i, a) in attachments.enumerated() {
+            let kindHint = Self.attachmentKind(mime: a.mime, name: a.name)
+            if let store = outboxStore {
+                guard let entry = store.stage(a, of: id, at: i, kind: kindHint) else { return nil }
+                staged.append(entry)
+            } else {
+                // No store (fixture, or `ARBOS_NO_STORE`): the bytes stay in memory, so the
+                // outbox still works for this launch but cannot outlive it.
+                staged.append(OutboxAttachment(name: a.name, mime: a.mime, kind: kindHint,
+                                               bytes: Int64(a.data.count), file: "\(i)"))
+                outboxMemoryBytes["\(id)/\(i)"] = a.data
+            }
+        }
+        let entry = OutboxMessage(
+            id: id, chatId: chatId, kind: kind, text: text, attachments: staged,
+            createdAt: nowMs(), failed: false, replyTo: replyTo, mentions: mentions,
+            forwardedFrom: forwardedFrom, replyRef: replyRef,
+            extraPartsJSON: extraParts.isEmpty ? nil : try? JSONSerialization.data(withJSONObject: extraParts),
+            projectId: projectId
+        )
+        outbox[chatId, default: []].append(entry)
+        persistOutbox()
+        return entry
+    }
+
+    /// Bytes for one staged attachment, from disk or (storeless) memory.
+    private func outboxBytes(_ entry: OutboxMessage, _ a: OutboxAttachment) -> Data? {
+        outboxStore?.bytes(entry.id, a) ?? outboxMemoryBytes["\(entry.id)/\(a.file)"]
+    }
+
+    /// This row is in the outbox, not in any chat document — nobody else can see it.
+    func isUnsent(_ messageId: Id) -> Bool { outboxEntry(messageId) != nil }
+
+    private func outboxEntry(_ messageId: Id) -> OutboxMessage? {
+        for (_, list) in outbox {
+            if let hit = list.first(where: { $0.id == messageId }) { return hit }
+        }
+        return nil
+    }
+
+    private func updateOutbox(_ messageId: Id, _ change: (inout OutboxMessage) -> Void) {
+        for (chatId, list) in outbox {
+            guard let i = list.firstIndex(where: { $0.id == messageId }) else { continue }
+            var next = list
+            change(&next[i])
+            outbox[chatId] = next
+            persistOutbox()
+            return
         }
     }
 
-    private func clearSendFailed(chatId: Id, messageId: Id) {
-        failedSendReplay[messageId] = nil
-        guard var set = sendFailed[chatId] else { return }
-        set.remove(messageId)
-        sendFailed[chatId] = set.isEmpty ? nil : set
+    /// Drop an outbox entry and its staged bytes — it was posted, or the sender deleted it.
+    private func dropOutbox(_ messageId: Id) {
+        for (chatId, list) in outbox where list.contains(where: { $0.id == messageId }) {
+            let rest = list.filter { $0.id != messageId }
+            outbox[chatId] = rest.isEmpty ? nil : rest
+        }
+        outboxSending.remove(messageId)
+        outboxStore?.discard(messageId)
+        outboxMemoryBytes = outboxMemoryBytes.filter { !$0.key.hasPrefix("\(messageId)/") }
+        persistOutbox()
+    }
+
+    private func persistOutbox() {
+        outboxStore?.save(outbox.values.flatMap { $0 })
+    }
+
+    /// Read the outbox at launch. Anything that was mid-upload when the app went away is
+    /// failed, not sending: no upload survives the process, and a row that sits spinning
+    /// for ever is the same silent loss in a different costume.
+    private func loadOutbox(relayUrl: String, account: String) {
+        let store = OutboxStore(relayUrl: relayUrl, account: account)
+        outboxStore = store
+        var byChat: [Id: [OutboxMessage]] = [:]
+        for var entry in store.load() {
+            entry.failed = true
+            byChat[entry.chatId, default: []].append(entry)
+        }
+        for (chatId, list) in byChat {
+            byChat[chatId] = list.sorted { $0.createdAt < $1.createdAt }
+        }
+        outbox = byChat
+        if !byChat.isEmpty { store.save(byChat.values.flatMap { $0 }) }
+    }
+
+    /// The transcript row for an outbox entry: an ordinary user message whose pictures have
+    /// no `ref` yet, drawn as failed once the upload has stopped.
+    private func outboxRow(_ entry: OutboxMessage) -> Message {
+        var parts: [Part] = entry.attachments.map {
+            .attachment(id: "\(entry.id)-a-\($0.file)", attachment: Attachment(outbox: $0))
+        }
+        if !entry.text.isEmpty { parts.append(.text(id: "\(entry.id)-t", text: entry.text)) }
+        var m = Message(
+            id: entry.id, chatId: entry.chatId, role: .user, sender: user.map { "user:\($0.id)" } ?? "user",
+            status: entry.failed ? .error : .done, turn: nil, decision: nil,
+            subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil,
+            createdAt: entry.createdAt, completedAt: entry.createdAt, pending: !entry.failed,
+            parts: parts, hiddenCount: 0
+        )
+        m.replyTo = entry.replyTo
+        m.forwardedFrom = entry.forwardedFrom
+        m.replyRef = entry.replyRef
+        m.mentions = entry.mentions
+        m.senderHandle = user?.login
+        m.senderName = user?.name
+        m.senderAvatar = user?.avatarUrl
+        return m
+    }
+
+    /// Upload every attachment and, only if all of them land, write the one document row
+    /// that carries the text and the media together.
+    private func deliverOutbox(_ messageId: Id) {
+        guard let entry = outboxEntry(messageId), !outboxSending.contains(messageId) else { return }
+        outboxSending.insert(messageId)
+        updateOutbox(messageId) { $0.failed = false }
+        clearSendError(entry.chatId)
+        let slot = entry.kind == .people ? "\(peopleSlot):\(entry.chatId)" : (entry.projectId ?? peopleSlot)
+        Task {
+            var uploaded: [Attachment] = []
+            for a in entry.attachments {
+                guard let data = outboxBytes(entry, a) else {
+                    failOutbox(messageId, UserError.classify("upload the attachment",
+                                                             RelayError(status: 0, message: "The file is no longer on this device.")))
+                    return
+                }
+                let key = AppModel.blobKey(for: a.name)
+                do {
+                    _ = try await api.putBlob(projectId: slot, key: key, mime: a.mime, data: data)
+                } catch {
+                    // Nothing is written to the document: no caption goes out on its own,
+                    // and the row stays here with its bytes until Retry or Delete.
+                    failOutbox(messageId, UserError.classify("upload the attachment", error))
+                    return
+                }
+                uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: key,
+                                           kind: a.kind, bytes: a.bytes))
+            }
+            postOutbox(entry, attachments: uploaded)
+        }
+    }
+
+    private func failOutbox(_ messageId: Id, _ error: UserError) {
+        outboxSending.remove(messageId)
+        updateOutbox(messageId) { $0.failed = true }
+        if let entry = outboxEntry(messageId) { setSendError(entry.chatId, error) }
+    }
+
+    /// Every upload landed: write the row, then let go of the outbox entry.
+    private func postOutbox(_ entry: OutboxMessage, attachments: [Attachment]) {
+        switch entry.kind {
+        case .people:
+            guard let doc = docs[entry.chatId], let me = user else {
+                // The chat closed under the upload. The message is untouched and still
+                // here, which is the point: it is never half-sent.
+                failOutbox(entry.id, UserError.classify("send your message",
+                                                        RelayError(status: 0, message: "This chat is not open.")))
+                return
+            }
+            let author = CoreChatDoc.Author(sender: "user:\(me.id)", handle: me.login,
+                                            name: me.name, avatar: me.avatarUrl)
+            commitPeople(chatId: entry.chatId, doc: doc, messageId: entry.id, text: entry.text,
+                         author: author, mentions: entry.mentions, reply: entry.replyTo,
+                         attachments: attachments, forwardedFrom: entry.forwardedFrom,
+                         replyRef: entry.replyRef, extraParts: entry.extraParts)
+        case .agent:
+            guard write(chatId: entry.chatId, text: entry.text, command: "send",
+                        attachments: attachments, messageId: entry.id, replyTo: entry.replyTo,
+                        forwardedFrom: entry.forwardedFrom, extraParts: entry.extraParts) != nil
+            else {
+                failOutbox(entry.id, UserError.classify("send your message",
+                                                        RelayError(status: 0, message: "This chat is not open.")))
+                return
+            }
+        }
+        // Written for everyone now: the outbox lets go of the message and its staged bytes.
+        dropOutbox(entry.id)
     }
 
     private func markActivity(chatId: Id) {
@@ -3615,40 +3798,19 @@ final class AppModel: ObservableObject {
                          replyRef: replyRef, extraParts: extraParts)
             return
         }
-        markUnacked(chatId: chatId, messageId: messageId)
-        Task {
-            var uploaded: [Attachment] = []
-            var failed = false
-            for a in attachments {
-                let key = AppModel.blobKey(for: a.name)
-                let kind = Self.attachmentKind(mime: a.mime, name: a.name)
-                do {
-                    _ = try await api.putBlob(projectId: "\(peopleSlot):\(chatId)", key: key, mime: a.mime, data: a.data)
-                    uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: key, kind: kind))
-                } catch {
-                    // The row keeps the attachment with no `ref` — same as the agent-chat
-                    // path in `send` ([feedback failed-upload-retry]). Leaving it out wrote a
-                    // message with the caption and no video, and a caption-less send became a
-                    // part-less row that draws nothing at all: the sender's video was gone.
-                    setSendError(chatId, UserError.classify("upload the attachment", error))
-                    uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: nil, kind: kind))
-                    failed = true
-                }
-            }
-            // The forward header rides along with the pictures ([feedback
-            // forward-attachments-ios-2026-10-27]: it was dropped on this path).
-            commitPeople(chatId: chatId, doc: doc, messageId: messageId, text: text, author: author,
-                         mentions: mentions, reply: reply, attachments: uploaded, alreadyUnacked: true,
-                         forwardedFrom: forwardedFrom, replyRef: replyRef, extraParts: extraParts)
-            if failed {
-                markSendFailed(chatId: chatId, messageId: messageId) { [weak self] in
-                    self?.sendPeople(chatId: chatId, text: text, replyTo: replyTo, address: address,
-                                     chipMentions: chipMentions, attachments: attachments,
-                                     forwardedFrom: forwardedFrom, chipTokens: chipTokens,
-                                     replyRef: replyRef, extraParts: extraParts)
-                }
-            }
+        // With media: the outbox takes the whole message first and the document write waits
+        // for the uploads ([feedback caption-sent-without-media]). The forward header rides
+        // along with the pictures ([feedback forward-attachments-ios-2026-10-27]).
+        guard let entry = enqueueOutbox(id: messageId, chatId: chatId, kind: .people, text: text,
+                                        attachments: attachments, replyTo: reply, mentions: mentions,
+                                        forwardedFrom: forwardedFrom, replyRef: replyRef,
+                                        extraParts: extraParts)
+        else {
+            setSendError(chatId, UserError.classify("send your message",
+                                                    RelayError(status: 0, message: "This device has no room for the attachment.")))
+            return
         }
+        deliverOutbox(entry.id)
     }
 
     /// Insert + pushCommand + commit for a people chat. `alreadyUnacked` when the caller
@@ -5119,7 +5281,14 @@ final class AppModel: ObservableObject {
     func chats(of projectId: Id) -> [Chat] { chats[projectId] ?? [] }
 
     /// Room docs first; a server channel (D88) reads its Matrix timeline.
-    func messages(of chatId: Id) -> [Message] { messages[chatId] ?? channelRows[chatId] ?? [] }
+    /// The chat's rows as the sender sees them: what the document holds, then anything of
+    /// mine still waiting in the outbox. Outbox rows are always last — they are the newest
+    /// and they are not in the document, so no index into `messages[chatId]` can mean one.
+    func messages(of chatId: Id) -> [Message] {
+        let rows = messages[chatId] ?? channelRows[chatId] ?? []
+        guard let queued = outbox[chatId], !queued.isEmpty else { return rows }
+        return rows + queued.map(outboxRow)
+    }
 
     /// Add or remove an emoji reaction on a message. Multiple different emojis
     /// can be active on the same message; tapping the same emoji again clears it.
@@ -5150,6 +5319,14 @@ final class AppModel: ObservableObject {
     /// hidden admin audit line for the Activity screen before asking the relay.
     func deleteMessage(chatId: Id, messageId: Id, projectId: Id? = nil) {
         guard !messageId.isEmpty else { return }
+        // An outbox row was never posted, so there is nothing to delete anywhere else:
+        // dropping the entry and its staged bytes is the whole of it.
+        if outboxEntry(messageId) != nil {
+            dropOutbox(messageId)
+            clearSendError(chatId)
+            Haptics.pick()
+            return
+        }
         let audit = groupDeletionAuditLine(chatId: chatId)
         #if DEBUG
         if isFixture {
@@ -5211,7 +5388,6 @@ final class AppModel: ObservableObject {
         // removes it, and a local removal is undone by the next snapshot — which is the
         // defect this fix is about ([feedback failed-upload-retry]).
         clearUnacked(chatId: chatId, messageId: messageId)
-        clearSendFailed(chatId: chatId, messageId: messageId)
     }
 
     /// Long-press → Remove preview: the relay drops the message's link preview for everyone
@@ -5467,28 +5643,31 @@ final class AppModel: ObservableObject {
         var data: Data
     }
 
-    /// Retry on one of my own rows that did not land (`status == .error`): the failed row
-    /// goes and the message goes out again through the normal send path.
+    /// Retry on one of my own rows that did not land.
     ///
-    /// When the failure was an attachment upload the original bytes are still held
-    /// (`failedSendReplay`), so the picture or video goes with it. Before [feedback
-    /// failed-upload-retry] this dropped the row before it checked anything, then returned
-    /// early on a message with no text — so Retry on a video deleted the row and sent
-    /// nothing — and even with a caption it re-sent the words alone.
+    /// Almost always that row is an outbox entry — a message whose pictures never uploaded,
+    /// which is why it is not in the chat document. Retrying it is just running the upload
+    /// again: the staged bytes are still here, nothing has to be removed from the relay
+    /// first, and when the upload lands the media and the text are posted as one message.
     ///
-    /// The row is removed through the relay, as Delete is, and only once that is confirmed
-    /// does the send happen: the old shape removed the row from `messages` only, so the doc
-    /// row came back on the next snapshot. If the removal fails the row and its bytes stay
-    /// exactly where they are and Retry still works.
+    /// Before [feedback failed-upload-retry] this dropped the row before it checked
+    /// anything, then returned early on a message with no text — so Retry on a video deleted
+    /// the row and sent nothing.
     func resendFailed(chatId: Id, messageId: Id) {
+        if outboxEntry(messageId) != nil {
+            deliverOutbox(messageId)
+            return
+        }
         guard let failed = messages[chatId]?
             .first(where: { $0.id == messageId && $0.role == .user && $0.status == .error })
         else { return }
-        let replay = failedSendReplay[messageId]
         let text = failed.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard replay != nil || !text.isEmpty else { return }
+        guard !text.isEmpty else { return }
         clearSendError(chatId)
         let projectId = peopleChat(chatId) == nil ? chat(chatId)?.projectId : nil
+        let replyTo = failed.replyTo
+        // A row that IS in the document has to leave it before the text goes again, or the
+        // retry doubles the message. Removing it through the relay is what Delete does.
         Task {
             do {
                 try await removeMessageOnRelay(chatId: chatId, messageId: messageId, projectId: projectId)
@@ -5496,11 +5675,7 @@ final class AppModel: ObservableObject {
                 setSendError(chatId, UserError.classify("send your message again", error))
                 return
             }
-            if let replay {
-                replay()
-            } else {
-                send(chatId: chatId, text: text, replyTo: failed.replyTo)
-            }
+            send(chatId: chatId, text: text, replyTo: replyTo)
         }
     }
 
@@ -5528,32 +5703,17 @@ final class AppModel: ObservableObject {
             }, replyTo: replyTo)
             return
         }
-        Task {
-            var uploaded: [Attachment] = []
-            var failed = false
-            for a in attachments {
-                let key = AppModel.blobKey(for: a.name)
-                let kind = Self.attachmentKind(mime: a.mime, name: a.name)
-                do {
-                    _ = try await api.putBlob(projectId: chat.projectId, key: key, mime: a.mime, data: a.data)
-                    uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: key, kind: kind))
-                } catch {
-                    setSendError(chatId, UserError.classify("upload the attachment", error))
-                    uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: nil, kind: kind))
-                    failed = true
-                }
-            }
-            // The forward header rides along with the pictures ([feedback
-            // forward-attachments-ios-2026-10-27]: it was dropped on this path).
-            let messageId = write(chatId: chatId, text: text, command: "send", attachments: uploaded, replyTo: replyTo,
-                                  forwardedFrom: forwardedFrom, extraParts: extraParts)
-            if failed, let messageId {
-                markSendFailed(chatId: chatId, messageId: messageId) { [weak self] in
-                    self?.send(chatId: chatId, text: text, attachments: attachments, replyTo: replyTo,
-                               forwardedFrom: forwardedFrom, extraParts: extraParts)
-                }
-            }
+        // As in `sendPeople`: the outbox holds the whole message until every upload lands.
+        guard let entry = enqueueOutbox(id: newId(), chatId: chatId, kind: .agent, text: text,
+                                        attachments: attachments, replyTo: replyTo,
+                                        forwardedFrom: forwardedFrom, extraParts: extraParts,
+                                        projectId: chat.projectId)
+        else {
+            setSendError(chatId, UserError.classify("send your message",
+                                                    RelayError(status: 0, message: "This device has no room for the attachment.")))
+            return
         }
+        deliverOutbox(entry.id)
     }
 
     /// Emoji · stickers · GIFs picker (ARB-544): one tap sends the sticker or GIF as its own
@@ -5804,9 +5964,8 @@ final class AppModel: ObservableObject {
         messages[chatId] = list
     }
 
-    /// Returns the id of the row it wrote, so a caller that knows the send was incomplete
-    /// (a failed attachment upload) can mark that row for Retry; `nil` when no row of this
-    /// chat's own was written here (fixture, or an optimistic chat still being minted).
+    /// Returns the id of the row it wrote, or `nil` when no row of this chat's own was
+    /// written here (fixture, or an optimistic chat still being minted).
     @discardableResult
     private func write(chatId: Id, text: String, command: String, attachments: [Attachment],
                        extra: [String: Any] = [:], messageId presetId: Id? = nil, replyTo: Id? = nil,

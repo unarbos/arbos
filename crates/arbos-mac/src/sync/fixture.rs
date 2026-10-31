@@ -1217,7 +1217,9 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::ChannelOpen { .. }
         | ClientCommand::ChannelLoadOlder { .. }
         | ClientCommand::ChannelSend { .. }
-        | ClientCommand::ChannelMarkRead { .. } => {}
+        | ClientCommand::ChannelMarkRead { .. }
+        // Nothing to persist: the fixture has no on-device store.
+        | ClientCommand::SaveOutbox { .. } => {}
         // The relay keeps the pin list and answers with it; the fixture echoes
         // the list it was given, capped like the relay.
         ClientCommand::SetPins { pins } => {

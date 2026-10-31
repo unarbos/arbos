@@ -2374,6 +2374,37 @@ impl MembershipNotice {
     }
 }
 
+/// A message the sender has committed to that is **not** in any chat document, because
+/// its pictures or videos have not finished uploading
+/// ([feedback caption-sent-without-media]).
+///
+/// The document write carries the words and the media together and only runs once every
+/// upload has a `ref`, so until then the whole message waits here: the sender sees it,
+/// nobody else sees anything, and Retry sends the words and the files as one message. It
+/// is written to the on-device store, so quitting mid-upload leaves the message in the
+/// chat rather than losing it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutboxSend {
+    pub chat_id: Id,
+    pub message_id: Id,
+    #[serde(default)]
+    pub text: String,
+    /// The files the composer picked. They are read from disk again on each attempt, so a
+    /// file the person has since moved or deleted fails the same way any send would.
+    #[serde(default)]
+    pub attachments: Vec<std::path::PathBuf>,
+    #[serde(default)]
+    pub reply_to: Option<String>,
+    #[serde(default)]
+    pub mentions: Vec<String>,
+    #[serde(default)]
+    pub created_at: u64,
+    /// The upload stopped. Until it does, the row draws as still sending.
+    #[serde(default)]
+    pub failed: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {

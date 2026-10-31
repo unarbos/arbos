@@ -25,9 +25,9 @@ use crate::model::{
     new_id, now_ms, Attachment, AttachmentKind, AttachmentSource, BoxReport, BoxState, ChannelSel,
     ChannelsView, Chat, ChatKind, ConnectorsView, DevicesView, Effort, GifPage, Id, Job,
     JobRollout, Link, LinkState, LocalView, Machine, MediaPick, Message, MessageBody,
-    MessageStatus, NewSecret, Part, Project, ProjectDocView, ProjectSecrets, QuestionState,
-    ReplyRef, Role, Routine, RoutineRun, RoutineTrigger, SecretDirector, SecretScope, SecretsView,
-    ServerInfo, Skill, StatusKind, StickerPack,
+    MessageStatus, NewSecret, OutboxSend, Part, Project, ProjectDocView, ProjectSecrets,
+    QuestionState, ReplyRef, Role, Routine, RoutineRun, RoutineTrigger, SecretDirector,
+    SecretScope, SecretsView, ServerInfo, Skill, StatusKind, StickerPack,
 };
 use crate::palette;
 use crate::search;
@@ -657,17 +657,6 @@ pub enum HandoffState {
     Failed(crate::ui::error_note::Slot),
 }
 
-/// Everything Retry needs to send a failed row again exactly as it went the first time,
-/// files included ([feedback failed-upload-retry]).
-struct FailedSend {
-    text: String,
-    /// The files the composer picked. They are read from disk again on each attempt, so a
-    /// file the person has since moved or deleted fails the same way any send would.
-    attachments: Vec<PathBuf>,
-    reply_to: Option<String>,
-    mentions: Vec<String>,
-}
-
 pub struct AppState {
     pub source_name: &'static str,
     pub pairing: Option<Pairing>,
@@ -754,11 +743,12 @@ pub struct AppState {
     pub skills: Vec<Skill>,
     pub chats: HashMap<Id, Vec<Chat>>,
     pub messages: HashMap<Id, Vec<Message>>,
-    /// How to send a row with files again, by message id: the composer's own send, kept
-    /// until the row lands ([feedback failed-upload-retry]). Retry used to re-send the
-    /// text alone — the pictures had been read from disk at send time and were gone, so
-    /// Retry on a failed video sent an empty message and the video never came back.
-    failed_send_replay: HashMap<Id, FailedSend>,
+    /// Sends with files that are not in any chat document yet, oldest first. A send is put
+    /// here before its first upload byte leaves and taken out when the row lands, so the
+    /// failure modes nobody enumerates — a cancelled request, an expired token, the app
+    /// being quit mid-upload — all end the same way: the write never happened and the whole
+    /// message is still here ([feedback caption-sent-without-media]).
+    outbox: Vec<OutboxSend>,
     /// Membership notices this device shows ahead of the relay's row (ARB-393), per chat.
     pub optimistic_notices: HashMap<Id, Vec<OptimisticNotice>>,
     pub chat_ui: HashMap<Id, ChatUi>,
@@ -1304,7 +1294,7 @@ impl AppState {
             skills: Vec::new(),
             chats: HashMap::new(),
             messages: HashMap::new(),
-            failed_send_replay: HashMap::new(),
+            outbox: Vec::new(),
             optimistic_notices: HashMap::new(),
             chat_ui: HashMap::new(),
             blobs: HashMap::new(),
@@ -2153,6 +2143,7 @@ impl AppState {
                     Some(slot) => *slot = chat.clone(),
                     None => tabs.push(chat.clone()),
                 }
+                self.remap_outbox_chat(&local_id, &chat.id);
                 if let Some(msgs) = self.messages.remove(&local_id) {
                     self.messages.insert(chat.id.clone(), msgs);
                     self.search_index.remove_chat(&local_id);
@@ -2940,6 +2931,10 @@ impl AppState {
                 }
                 cx.notify();
             }
+            SyncEvent::Outbox { entries } => {
+                self.restore_outbox(entries);
+                cx.notify();
+            }
             SyncEvent::NotificationsCleared { chat_id, badge } => {
                 // I read it on another device: its banners go, the dot clears, the Dock
                 // badge follows. The relay's total is the truth for what this Mac cannot
@@ -3018,7 +3013,9 @@ impl AppState {
                             .collect()
                     }
                 };
+                self.clear_landed_outbox(&messages);
                 self.messages.insert(chat_id.clone(), messages);
+                self.apply_outbox(&chat_id);
                 self.index_chat(&chat_id);
                 // Message counts decide an agent's primary chat (single-chat mode).
                 if let Some(project_id) = self.project_of_chat(&chat_id).map(|p| p.id.clone()) {
@@ -3345,10 +3342,14 @@ impl AppState {
                 error,
             } => {
                 log::warn!("send to {chat_id} failed: {}", error.raw);
-                if let Some(list) = self.messages.get_mut(&chat_id) {
-                    if let Some(m) = list.iter_mut().find(|m| m.id == message_id) {
-                        m.pending = false;
-                        m.status = MessageStatus::Error;
+                // An unsent message has no row in the document to mark: the outbox entry
+                // is the row, and marking it is what puts Retry on it.
+                if !self.set_outbox_failed(&message_id, true) {
+                    if let Some(list) = self.messages.get_mut(&chat_id) {
+                        if let Some(m) = list.iter_mut().find(|m| m.id == message_id) {
+                            m.pending = false;
+                            m.status = MessageStatus::Error;
+                        }
                     }
                 }
                 self.send_errors
@@ -5186,20 +5187,24 @@ impl AppState {
                 wav,
             });
         } else {
-            // Keep the send while its files could still need putting back (above: a row
-            // whose upload fails keeps the part with no `ref`, and Retry re-reads the
-            // files). Dropped as soon as the row lands ([feedback failed-upload-retry]).
+            // With files, the message goes to the outbox before the first upload byte
+            // leaves and is written into the document only once every upload has landed
+            // ([feedback caption-sent-without-media]). Taken out when the row arrives.
             if !attachments.is_empty() {
-                self.prune_send_replays();
-                self.failed_send_replay.insert(
-                    message_id.clone(),
-                    FailedSend {
-                        text: text.clone(),
-                        attachments: attachments.clone(),
-                        reply_to: reply_to.clone(),
-                        mentions: mentions.clone(),
-                    },
-                );
+                self.outbox.push(OutboxSend {
+                    chat_id: chat_id.clone(),
+                    message_id: message_id.clone(),
+                    text: text.clone(),
+                    attachments: attachments.clone(),
+                    reply_to: reply_to.clone(),
+                    mentions: mentions.clone(),
+                    created_at: now_ms(),
+                    failed: false,
+                });
+                self.save_outbox();
+                // Nothing will be written to the document until the uploads land, so the
+                // sender's own row comes from here rather than from the next snapshot.
+                self.apply_outbox(&chat_id);
             }
             self.command(ClientCommand::Send {
                 chat_id: chat_id.clone(),
@@ -5215,20 +5220,106 @@ impl AppState {
         cx.notify();
     }
 
-    /// Forget the files of every send that has landed: what is left is the sends still in
-    /// flight and the ones waiting for Retry ([feedback failed-upload-retry]).
-    fn prune_send_replays(&mut self) {
-        if self.failed_send_replay.is_empty() {
+    // ----- the outbox ------------------------------------------------------
+
+    pub fn outbox_entry(&self, message_id: &str) -> Option<&OutboxSend> {
+        self.outbox.iter().find(|o| o.message_id == message_id)
+    }
+
+    /// This row is in the outbox, not in any chat document — nobody else can see it.
+    pub fn is_unsent(&self, message_id: &str) -> bool {
+        self.outbox_entry(message_id).is_some()
+    }
+
+    /// Put this chat's outbox rows back on the end of its transcript.
+    fn apply_outbox(&mut self, chat_id: &str) {
+        if !self.outbox.iter().any(|o| o.chat_id == chat_id) {
             return;
         }
-        let keep: HashSet<Id> = self
-            .messages
-            .values()
-            .flatten()
-            .filter(|m| m.pending || m.status == MessageStatus::Error)
-            .map(|m| m.id.clone())
+        let me = self
+            .account
+            .as_ref()
+            .map(|a| format!("user:{}", a.id))
+            .unwrap_or_else(|| "user".into());
+        let entries: Vec<OutboxSend> = self
+            .outbox
+            .iter()
+            .filter(|o| o.chat_id == chat_id)
+            .cloned()
             .collect();
-        self.failed_send_replay.retain(|id, _| keep.contains(id));
+        merge_outbox_rows(
+            self.messages.entry(chat_id.to_owned()).or_default(),
+            &entries,
+            &me,
+        );
+    }
+
+    /// The send landed: the document has its row now, so the outbox lets go of it.
+    fn clear_landed_outbox(&mut self, rows: &[Message]) {
+        if drop_landed_outbox(&mut self.outbox, rows) {
+            self.save_outbox();
+        }
+    }
+
+    /// Delete on an unsent message. Nothing was ever written, so there is nothing to ask
+    /// the relay to remove — dropping the entry is the whole of it.
+    fn drop_outbox(&mut self, chat_id: &str, message_id: &str) -> bool {
+        let before = self.outbox.len();
+        self.outbox.retain(|o| o.message_id != message_id);
+        if self.outbox.len() == before {
+            return false;
+        }
+        if let Some(list) = self.messages.get_mut(chat_id) {
+            list.retain(|m| m.id != message_id);
+        }
+        self.save_outbox();
+        true
+    }
+
+    /// Mark an unsent message as still trying or as stopped, and redraw its row.
+    fn set_outbox_failed(&mut self, message_id: &str, failed: bool) -> bool {
+        let Some(entry) = self.outbox.iter_mut().find(|o| o.message_id == message_id) else {
+            return false;
+        };
+        entry.failed = failed;
+        let chat_id = entry.chat_id.clone();
+        self.apply_outbox(&chat_id);
+        self.save_outbox();
+        true
+    }
+
+    /// Hold the outbox on disk, so an app quit mid-upload leaves the message in the chat
+    /// instead of losing it ([feedback caption-sent-without-media]).
+    fn save_outbox(&mut self) {
+        self.command(ClientCommand::SaveOutbox {
+            entries: self.outbox.clone(),
+        });
+    }
+
+    /// The store's outbox at launch. Nothing of it is in flight any more — the process that
+    /// was uploading is gone — so every entry reads as stopped, with Retry on it.
+    fn restore_outbox(&mut self, entries: Vec<OutboxSend>) {
+        self.outbox = entries;
+        for entry in &mut self.outbox {
+            entry.failed = true;
+        }
+        let chats: HashSet<Id> = self.outbox.iter().map(|o| o.chat_id.clone()).collect();
+        for chat_id in chats {
+            self.apply_outbox(&chat_id);
+        }
+    }
+
+    /// A chat that was still being minted when the send went out has its real id now
+    /// (`ChatCreated`): the outbox entries follow it, or Retry would send nowhere.
+    fn remap_outbox_chat(&mut self, from: &str, to: &str) {
+        let mut moved = false;
+        for entry in self.outbox.iter_mut().filter(|o| o.chat_id == from) {
+            entry.chat_id = to.to_owned();
+            moved = true;
+        }
+        if moved {
+            self.save_outbox();
+        }
     }
 
     // ----- servers and channels (D88) --------------------------------------
@@ -6966,6 +7057,13 @@ impl AppState {
         if message_id.is_empty() {
             return;
         }
+        // An unsent message was never written for anyone, so Delete is local and asking
+        // the relay to remove a row that does not exist would only fail.
+        if self.drop_outbox(&chat_id, &message_id) {
+            cx.emit(AppEvent::TranscriptChanged { chat_id });
+            cx.notify();
+            return;
+        }
         self.command(ClientCommand::DeleteMessage {
             chat_id,
             message_id,
@@ -7038,14 +7136,37 @@ impl AppState {
     }
 
     /// Retry on one of my own rows that did not land (`MessageStatus::Error`, see
-    /// `MessageSendFailed`): the failed row is deleted for everyone and the whole message
-    /// — words **and** files — goes out again through the normal send path
-    /// ([feedback failed-upload-retry]).
+    /// `MessageSendFailed`): the whole message — words **and** files — goes out again
+    /// through the normal send path ([feedback failed-upload-retry]).
     ///
-    /// It used to drop the row from this list only, which left the row in the chat doc, so
-    /// the next snapshot brought it straight back; and it re-sent the text alone, so a
-    /// failed video came back as an empty message or, with no caption, as nothing at all.
+    /// A message with files is still in the outbox and in no document, so Retry simply
+    /// sends it again under the same id: nothing to delete, and the words and the media
+    /// go as one message ([feedback caption-sent-without-media]). A row the relay refused
+    /// for some other reason is in the document, so that one is deleted for everyone and
+    /// re-sent.
     pub fn resend_failed(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
+        if let Some(entry) = self.outbox_entry(&message_id) {
+            let (text, attachments, reply_to, mentions) = (
+                entry.text.clone(),
+                entry.attachments.clone(),
+                entry.reply_to.clone(),
+                entry.mentions.clone(),
+            );
+            self.set_outbox_failed(&message_id, false);
+            self.send_errors.remove(&chat_id);
+            self.command(ClientCommand::Send {
+                chat_id: chat_id.clone(),
+                message_id,
+                text,
+                attachments,
+                reply_to,
+                reply_ref: None,
+                mentions,
+            });
+            cx.emit(AppEvent::TranscriptChanged { chat_id });
+            cx.notify();
+            return;
+        }
         // Retry lives on the row in the open chat, and `send_with` sends to the open chat:
         // retrying into a chat that is not open would delete the row and send nowhere.
         if self.active_chat_id().as_deref() != Some(chat_id.as_str()) {
@@ -7058,23 +7179,18 @@ impl AppState {
         }) else {
             return;
         };
-        let row_text = failed.plain_text();
-        let row_reply_to = failed.reply_to.clone();
-        let replay = self.failed_send_replay.remove(&message_id);
-        let (text, attachments, reply_to, mentions) = match replay {
-            Some(r) => (r.text, r.attachments, r.reply_to, r.mentions),
-            None => (row_text, Vec::new(), row_reply_to, Vec::new()),
-        };
+        let text = failed.plain_text();
+        let reply_to = failed.reply_to.clone();
         // Nothing to put back (a send with neither words nor files): leave the row alone
         // rather than delete it and send an empty message.
-        if text.trim().is_empty() && attachments.is_empty() {
+        if text.trim().is_empty() {
             return;
         }
         // For everyone, through the relay, like the message menu's Delete. The row is not
         // dropped from `self.messages` here: the relay's doc edit is what removes it, and a
         // local removal is undone by the next snapshot — which is the defect above.
         self.delete_message(chat_id.clone(), message_id.clone(), cx);
-        self.send_with(text, attachments, None, reply_to, false, mentions, cx);
+        self.send_with(text, Vec::new(), None, reply_to, false, Vec::new(), cx);
         cx.emit(AppEvent::TranscriptChanged { chat_id });
         cx.notify();
     }
@@ -12540,6 +12656,115 @@ impl AppState {
     }
 }
 
+/// The row the transcript draws for an outbox entry: an ordinary message of mine whose
+/// pictures have no `ref` yet, failed once the upload has stopped. The size comes off the
+/// file on disk, so the card reads the same as it will once the upload lands.
+///
+/// `me` is the sender string the document would carry (`user:<id>`), so the row sits on
+/// the sender's own side of the transcript and the own-row controls reach it.
+fn outbox_row(entry: &OutboxSend, me: &str) -> Message {
+    let mut parts: Vec<Part> = entry
+        .attachments
+        .iter()
+        .enumerate()
+        .map(|(i, path)| Part::Attachment {
+            id: format!("{}:att:{i}", entry.message_id),
+            attachment: Attachment {
+                name: path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "attachment".to_owned()),
+                mime: crate::sync::relay::mime_for(path).to_owned(),
+                blob_ref: None,
+                bytes: std::fs::metadata(path).ok().map(|m| m.len()),
+                kind: None,
+                chart_part: None,
+                url: None,
+                title: None,
+                source: None,
+            },
+        })
+        .collect();
+    if !entry.text.is_empty() {
+        parts.push(Part::Text {
+            id: format!("{}:text", entry.message_id),
+            text: entry.text.clone(),
+        });
+    }
+    Message {
+        id: entry.message_id.clone(),
+        chat_id: entry.chat_id.clone(),
+        role: Role::User,
+        sender: me.to_owned(),
+        status: if entry.failed {
+            MessageStatus::Error
+        } else {
+            MessageStatus::Done
+        },
+        turn: None,
+        decision: None,
+        subagent_id: None,
+        subagent_name: None,
+        handoff_messages: None,
+        notice: None,
+        worker: false,
+        job: None,
+        hidden: false,
+        agent_reply_to: None,
+        reactions: Default::default(),
+        in_reply_to: None,
+        routine_name: None,
+        sender_name: None,
+        sender_icon: None,
+        sender_handle: None,
+        sender_avatar: None,
+        sender_avatar_color: None,
+        mentions: entry.mentions.clone(),
+        reply_to: entry.reply_to.clone(),
+        forwarded_from: None,
+        reply_ref: None,
+        asked_by_handle: None,
+        owner_handle: None,
+        usage: None,
+        return_contract: None,
+        waiting_user: false,
+        waiting_approval: false,
+        model: None,
+        effort: None,
+        created_at: entry.created_at,
+        completed_at: None,
+        call_id: None,
+        activity: None,
+        // Still uploading reads as sending; stopped reads as failed.
+        pending: !entry.failed,
+        parts,
+        hidden_parts: Vec::new(),
+        greeting: false,
+        preview: None,
+    }
+}
+
+/// Put `entries` on the end of a chat's transcript, replacing a row already drawn for the
+/// same entry. Outbox rows are always last: they are the newest, and they are in no
+/// document, so no index into the document's rows can ever mean one.
+fn merge_outbox_rows(rows: &mut Vec<Message>, entries: &[OutboxSend], me: &str) {
+    for entry in entries {
+        let row = outbox_row(entry, me);
+        match rows.iter_mut().find(|m| m.id == row.id) {
+            Some(slot) => *slot = row,
+            None => rows.push(row),
+        }
+    }
+}
+
+/// Drop every outbox entry whose row the document now carries — those sends landed.
+/// Returns whether anything went, so the caller knows to write the outbox out again.
+fn drop_landed_outbox(entries: &mut Vec<OutboxSend>, rows: &[Message]) -> bool {
+    let before = entries.len();
+    entries.retain(|o| !rows.iter().any(|m| m.id == o.message_id));
+    entries.len() != before
+}
+
 /// FNV-1a 64 for cache keys.
 pub fn fnv1a64(s: &str) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -15046,5 +15271,357 @@ fn sync_event_label(event: &SyncEvent) -> String {
         "event".to_owned()
     } else {
         head.0
+    }
+}
+
+#[cfg(test)]
+mod outbox_tests {
+    //! Scout (Arbonites, 2026-10-30): a picture or video whose upload fails disappears, but
+    //! the caption typed with it is sent on its own — the recipient sees a bare caption and
+    //! the sender is never told ([feedback caption-sent-without-media]).
+    //!
+    //! Words and media are one message. A send with files is committed to the outbox before
+    //! the first upload byte leaves and is written to the chat document only once every
+    //! upload has landed, so nothing reaches the chat until all of it can — whatever stopped
+    //! the upload, including a quit mid-upload.
+    use std::sync::{Arc, Mutex};
+
+    use futures::future::BoxFuture;
+    use gpui::{AppContext as _, Entity, TestAppContext};
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::model::{AccountView, ChatKind, SpaceKind};
+
+    type Commands = Arc<Mutex<Option<mpsc::UnboundedReceiver<ClientCommand>>>>;
+
+    struct Recording(Commands);
+
+    impl SyncSource for Recording {
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            *self.0.lock().expect("commands slot") = Some(commands);
+            Box::pin(std::future::pending())
+        }
+    }
+
+    /// One agent, one chat, open, signed in as Scout.
+    fn mount(cx: &mut TestAppContext) -> (tokio::runtime::Runtime, Commands, Entity<AppState>) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| gpui_tokio::init_from_handle(cx, handle));
+        let commands: Commands = Arc::new(Mutex::new(None));
+        let state = cx.new(|cx| AppState::new(Box::new(Recording(commands.clone())), cx));
+        cx.run_until_parked();
+        for _ in 0..3 {
+            rt.block_on(tokio::task::yield_now());
+        }
+        state.update(cx, |s, cx| {
+            s.account = Some(AccountView {
+                id: "gh_1".into(),
+                login: "scout".into(),
+                name: "Scout".into(),
+                avatar_url: String::new(),
+                device_name: "test".into(),
+                balance_usd: 0.0,
+                spent_today_usd: 0.0,
+                daily_cap_usd: None,
+            });
+            s.projects.push(Project {
+                id: "arbos".into(),
+                name: "arbos".into(),
+                kind: SpaceKind::Project,
+                ..Project::default()
+            });
+            s.chats.insert(
+                "arbos".into(),
+                vec![Chat {
+                    id: "arbos-main".into(),
+                    project_id: "arbos".into(),
+                    title: String::new(),
+                    is_pinned: true,
+                    is_system: false,
+                    unread: false,
+                    unread_count: 0,
+                    last_message_at: 1_000,
+                    archived_at: None,
+                    kind: ChatKind::Chat,
+                    participants: Vec::new(),
+                }],
+            );
+            s.messages.insert("arbos-main".into(), Vec::new());
+            s.select_project("arbos".into(), cx);
+        });
+        let _ = drain(&commands);
+        (rt, commands, state)
+    }
+
+    fn drain(commands: &Commands) -> Vec<ClientCommand> {
+        let mut out = Vec::new();
+        if let Some(rx) = commands.lock().expect("commands").as_mut() {
+            while let Ok(c) = rx.try_recv() {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    fn sends(cmds: &[ClientCommand]) -> Vec<(Id, String, Vec<PathBuf>)> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                ClientCommand::Send {
+                    message_id,
+                    text,
+                    attachments,
+                    ..
+                } => Some((message_id.clone(), text.clone(), attachments.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn saved_outbox(cmds: &[ClientCommand]) -> Option<Vec<OutboxSend>> {
+        cmds.iter().rev().find_map(|c| match c {
+            ClientCommand::SaveOutbox { entries } => Some(entries.clone()),
+            _ => None,
+        })
+    }
+
+    fn rows(state: &Entity<AppState>, cx: &mut TestAppContext) -> Vec<Message> {
+        state.read_with(cx, |s, _| s.messages_of("arbos-main").to_vec())
+    }
+
+    /// Send a caption with one picture, then let the upload fail.
+    fn send_and_fail(
+        state: &Entity<AppState>,
+        commands: &Commands,
+        cx: &mut TestAppContext,
+    ) -> (Id, Vec<ClientCommand>) {
+        state.update(cx, |s, cx| {
+            s.send_with(
+                "look at this".into(),
+                vec![PathBuf::from("/tmp/clip.mp4")],
+                None,
+                None,
+                false,
+                Vec::new(),
+                cx,
+            );
+        });
+        let cmds = drain(commands);
+        let message_id = sends(&cmds).first().expect("one send").0.clone();
+        state.update(cx, |s, cx| {
+            s.apply(
+                SyncEvent::MessageSendFailed {
+                    chat_id: "arbos-main".into(),
+                    message_id: message_id.clone(),
+                    error: UserError::from_text("send your message", "upload failed"),
+                },
+                cx,
+            );
+        });
+        let _ = drain(commands);
+        (message_id, cmds)
+    }
+
+    #[gpui::test]
+    fn a_failed_upload_posts_nothing_and_leaves_the_whole_message_unsent(cx: &mut TestAppContext) {
+        let (_rt, commands, state) = mount(cx);
+        let (message_id, _) = send_and_fail(&state, &commands, cx);
+
+        // The relay wrote nothing, so the chat document has no row: the snapshot that
+        // follows a failed send is empty, and the sender's row comes from the outbox.
+        state.update(cx, |s, cx| {
+            s.apply(
+                SyncEvent::ChatSnapshot {
+                    chat_id: "arbos-main".into(),
+                    messages: Vec::new(),
+                },
+                cx,
+            );
+        });
+
+        let rows = rows(&state, cx);
+        assert_eq!(rows.len(), 1, "the sender still has the message");
+        assert_eq!(rows[0].id, message_id);
+        assert_eq!(rows[0].status, MessageStatus::Error, "Retry is on it");
+        assert!(!rows[0].pending);
+        assert_eq!(
+            rows[0].plain_text(),
+            "look at this",
+            "the caption is still here, with its video, and went nowhere on its own"
+        );
+        assert!(
+            rows[0]
+                .parts
+                .iter()
+                .any(|p| matches!(p, Part::Attachment { attachment, .. } if attachment.name == "clip.mp4")),
+            "the video is on the row: {:?}",
+            rows[0].parts
+        );
+        assert!(state.read_with(cx, |s, _| s.is_unsent(&message_id)));
+    }
+
+    #[gpui::test]
+    fn retry_sends_the_words_and_the_files_as_one_message(cx: &mut TestAppContext) {
+        let (_rt, commands, state) = mount(cx);
+        let (message_id, _) = send_and_fail(&state, &commands, cx);
+
+        state.update(cx, |s, cx| {
+            s.resend_failed("arbos-main".into(), message_id.clone(), cx)
+        });
+        let cmds = drain(&commands);
+
+        assert_eq!(
+            sends(&cmds),
+            vec![(
+                message_id.clone(),
+                "look at this".to_owned(),
+                vec![PathBuf::from("/tmp/clip.mp4")]
+            )],
+            "one send, same id, caption and video together"
+        );
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, ClientCommand::DeleteMessage { .. })),
+            "nothing was ever posted, so there is nothing to delete first"
+        );
+        let row = rows(&state, cx).remove(0);
+        assert!(row.pending, "it reads as sending again");
+        assert_eq!(row.status, MessageStatus::Done);
+
+        // The upload lands this time: the document's row replaces the outbox's.
+        state.update(cx, |s, cx| {
+            let mut posted = super::outbox_row(
+                &OutboxSend {
+                    chat_id: "arbos-main".into(),
+                    message_id: message_id.clone(),
+                    text: "look at this".into(),
+                    attachments: vec![PathBuf::from("/tmp/clip.mp4")],
+                    reply_to: None,
+                    mentions: Vec::new(),
+                    created_at: 1,
+                    failed: false,
+                },
+                "user:gh_1",
+            );
+            posted.pending = false;
+            s.apply(
+                SyncEvent::ChatSnapshot {
+                    chat_id: "arbos-main".into(),
+                    messages: vec![posted],
+                },
+                cx,
+            );
+        });
+        assert_eq!(rows(&state, cx).len(), 1, "one row, not two");
+        assert!(
+            !state.read_with(cx, |s, _| s.is_unsent(&message_id)),
+            "the outbox let go of it"
+        );
+        assert_eq!(
+            saved_outbox(&drain(&commands)),
+            Some(Vec::new()),
+            "and the device's copy went with it"
+        );
+    }
+
+    #[gpui::test]
+    fn delete_on_an_unsent_message_asks_the_relay_for_nothing(cx: &mut TestAppContext) {
+        let (_rt, commands, state) = mount(cx);
+        let (message_id, _) = send_and_fail(&state, &commands, cx);
+
+        state.update(cx, |s, cx| {
+            s.delete_message("arbos-main".into(), message_id.clone(), cx)
+        });
+        let cmds = drain(&commands);
+
+        assert!(rows(&state, cx).is_empty(), "the row is gone from the chat");
+        assert!(!state.read_with(cx, |s, _| s.is_unsent(&message_id)));
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, ClientCommand::DeleteMessage { .. })),
+            "no row exists for anyone, so there is nothing to delete on the relay"
+        );
+        assert_eq!(saved_outbox(&cmds), Some(Vec::new()));
+    }
+
+    #[gpui::test]
+    fn an_unsent_message_comes_back_after_a_restart(cx: &mut TestAppContext) {
+        let (_rt, commands, state) = mount(cx);
+        let (message_id, _) = send_and_fail(&state, &commands, cx);
+        let kept = saved_outbox(&drain(&commands))
+            .or_else(|| state.read_with(cx, |s, _| Some(s.outbox.clone())))
+            .expect("the outbox was written to the device");
+        assert_eq!(kept.len(), 1);
+
+        // A second launch: the store hands back what was in flight. The process that was
+        // uploading is gone, so it reads as stopped rather than as still sending.
+        let (_rt2, _commands2, restarted) = mount(cx);
+        restarted.update(cx, |s, cx| {
+            s.apply(SyncEvent::Outbox { entries: kept }, cx);
+        });
+        let rows = rows(&restarted, cx);
+        assert_eq!(rows.len(), 1, "still in the chat after the restart");
+        assert_eq!(rows[0].id, message_id);
+        assert_eq!(rows[0].status, MessageStatus::Error);
+        assert!(!rows[0].pending, "nothing is uploading it any more");
+        assert_eq!(rows[0].plain_text(), "look at this");
+    }
+
+    #[gpui::test]
+    fn a_send_with_no_files_is_written_straight_through(cx: &mut TestAppContext) {
+        let (_rt, commands, state) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.send_with(
+                "just words".into(),
+                Vec::new(),
+                None,
+                None,
+                false,
+                Vec::new(),
+                cx,
+            );
+        });
+        let cmds = drain(&commands);
+        assert_eq!(sends(&cmds).len(), 1);
+        assert!(
+            saved_outbox(&cmds).is_none(),
+            "a message with nothing to upload never waits"
+        );
+        assert!(state.read_with(cx, |s, _| s.outbox.is_empty()));
+    }
+
+    #[test]
+    fn a_caption_less_send_is_a_row_with_its_media_and_no_empty_bubble() {
+        let row = super::outbox_row(
+            &OutboxSend {
+                chat_id: "arbos-main".into(),
+                message_id: "m1".into(),
+                text: String::new(),
+                attachments: vec![PathBuf::from("/tmp/clip.mp4")],
+                reply_to: None,
+                mentions: Vec::new(),
+                created_at: 7,
+                failed: true,
+            },
+            "user:gh_1",
+        );
+        assert_eq!(row.parts.len(), 1, "no empty text part: {:?}", row.parts);
+        assert!(matches!(&row.parts[0], Part::Attachment { .. }));
+        assert_eq!(row.sender, "user:gh_1", "the sender's own side of the chat");
+        assert_eq!(row.created_at, 7);
     }
 }

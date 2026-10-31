@@ -49,14 +49,18 @@ final class DeviceStore {
         return base.appendingPathComponent("Arbos", isDirectory: true)
     }
 
-    static func fileURL(relayUrl: String, account: String) -> URL {
+    /// One account's file-name stem, shared by the SQLite store and the outbox directory.
+    static func slug(relayUrl: String, account: String) -> String {
         var slug = ""
         for c in (relayUrl + "|" + account).unicodeScalars {
             slug.append(CharacterSet.alphanumerics.contains(c) ? Character(c) : "_")
         }
         // Keep the name readable but bounded.
-        let name = slug.count > 80 ? String(slug.suffix(80)) : slug
-        return directory().appendingPathComponent("store-\(name).sqlite")
+        return slug.count > 80 ? String(slug.suffix(80)) : slug
+    }
+
+    static func fileURL(relayUrl: String, account: String) -> URL {
+        directory().appendingPathComponent("store-\(slug(relayUrl: relayUrl, account: account)).sqlite")
     }
 
     static func open(relayUrl: String, account: String) -> DeviceStore? {
@@ -386,5 +390,86 @@ final class DeviceStore {
 
     private func columnText(_ s: OpaquePointer, _ ix: Int32) -> String? {
         sqlite3_column_text(s, ix).map { String(cString: $0) }
+    }
+}
+
+/// The outbox on disk: one directory per account holding `index.json` and the staged bytes
+/// of every message that is waiting to be posted.
+///
+/// This is deliberately not a `kv` row in the SQLite store. A video is tens of megabytes and
+/// the whole point is that it survives a kill, so the bytes go to their own files and the
+/// index names them. The store is wiped on sign-out; so is this.
+final class OutboxStore {
+    private static let log = Logger(subsystem: "com.unarbos.arbos.ios", category: "outbox")
+    private let root: URL
+
+    static func directory(relayUrl: String, account: String) -> URL {
+        DeviceStore.directory()
+            .appendingPathComponent("outbox-\(DeviceStore.slug(relayUrl: relayUrl, account: account))", isDirectory: true)
+    }
+
+    init(relayUrl: String, account: String) {
+        root = OutboxStore.directory(relayUrl: relayUrl, account: account)
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        var excluded = URLResourceValues()
+        excluded.isExcludedFromBackup = true
+        var u = root
+        try? u.setResourceValues(excluded)
+    }
+
+    static func wipe(relayUrl: String, account: String) {
+        try? FileManager.default.removeItem(at: directory(relayUrl: relayUrl, account: account))
+    }
+
+    private var indexURL: URL { root.appendingPathComponent("index.json") }
+    private func messageDir(_ id: Id) -> URL { root.appendingPathComponent(id, isDirectory: true) }
+
+    func load() -> [OutboxMessage] {
+        guard let data = try? Data(contentsOf: indexURL),
+              let list = try? JSONDecoder().decode([OutboxMessage].self, from: data)
+        else { return [] }
+        // An entry whose bytes are gone cannot be retried, so it is not an outbox entry.
+        return list.filter { entry in
+            entry.attachments.allSatisfy { FileManager.default.fileExists(atPath: fileURL(entry.id, $0).path) }
+        }
+    }
+
+    func save(_ list: [OutboxMessage]) {
+        guard let data = try? JSONEncoder().encode(list) else { return }
+        do {
+            try data.write(to: indexURL, options: .atomic)
+        } catch {
+            OutboxStore.log.error("outbox: could not write the index: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Write one attachment's bytes and return the entry that names them.
+    func stage(_ attachment: AppModel.PendingAttachment, of messageId: Id, at index: Int,
+               kind: String?) -> OutboxAttachment? {
+        let dir = messageDir(messageId)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        // The name is the index, not the user's file name: two pictures can share a name,
+        // and a name from a picker is not a safe path component.
+        let file = "\(index)"
+        do {
+            try attachment.data.write(to: dir.appendingPathComponent(file), options: .atomic)
+        } catch {
+            OutboxStore.log.error("outbox: could not stage \(attachment.name, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+        return OutboxAttachment(name: attachment.name, mime: attachment.mime, kind: kind,
+                                bytes: Int64(attachment.data.count), file: file)
+    }
+
+    func fileURL(_ messageId: Id, _ attachment: OutboxAttachment) -> URL {
+        messageDir(messageId).appendingPathComponent(attachment.file)
+    }
+
+    func bytes(_ messageId: Id, _ attachment: OutboxAttachment) -> Data? {
+        try? Data(contentsOf: fileURL(messageId, attachment))
+    }
+
+    func discard(_ messageId: Id) {
+        try? FileManager.default.removeItem(at: messageDir(messageId))
     }
 }
