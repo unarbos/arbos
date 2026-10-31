@@ -37,7 +37,7 @@ use crate::ui::highlight;
 use crate::ui::key_layout::{self, KeyboardLayout, SystemLayout};
 use crate::ui::mention::{self, Mention, MentionToken, Mentions};
 use crate::ui::photo_edit::{self, PhotoEdit};
-use crate::ui::photo_editor::{self, PhotoEditor, PhotoEditorEvent};
+use crate::ui::photo_editor::{self, Mode, PhotoEditor, PhotoEditorEvent};
 use crate::ui::select::{self, word_range};
 use crate::ui::sf_symbols;
 use crate::ui::theme::{
@@ -2879,6 +2879,11 @@ pub struct Composer {
     /// field once the mention table is known (`@s` leaves the picker open,
     /// `@sam deck ready?` shows the resolved chip).
     rig_draft: Option<String>,
+    /// Rig: `ARBOS_COMPOSER_EDIT_PHOTO=crop|draw` opens the crop-and-draw sheet
+    /// on the first staged picture at launch. Synthetic pointer events do not
+    /// reach the GUI session on the shared Mac, so a screenshot of the sheet
+    /// has no other way in.
+    rig_edit_photo: Option<Mode>,
     /// The `+` menu and the Emoji · Stickers · GIFs picker (ARB-544).
     fun: fun::FunState,
     /// The crop-and-draw sheet while it is open, over the staged picture that
@@ -2994,6 +2999,9 @@ impl Composer {
             rig_draft: std::env::var("ARBOS_COMPOSER_DRAFT")
                 .ok()
                 .filter(|v| !v.is_empty()),
+            rig_edit_photo: std::env::var("ARBOS_COMPOSER_EDIT_PHOTO")
+                .ok()
+                .and_then(|v| Mode::named(&v)),
             fun: fun::FunState::new(fun_search),
             photo_editor: None,
             // A new composer starts on an empty field: mic + phone, settled.
@@ -3854,6 +3862,12 @@ impl Render for Composer {
                 input.set_text(rig, cx);
                 input.resolve_exact_handles(cx);
             });
+        }
+        if let Some(mode) = self.rig_edit_photo.take() {
+            self.open_photo_editor(0, cx);
+            if let Some(editor) = self.photo_editor.clone() {
+                editor.update(cx, |editor, cx| editor.rig_mode(mode, cx));
+            }
         }
         let mode = self.mode(cx);
         let state = self.state.read(cx);

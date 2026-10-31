@@ -61,6 +61,11 @@ const RADIUS: f32 = PANEL_RADIUS + 6.0;
 /// Behind the picture: near-black, so a photograph with transparent margins
 /// reads as a picture on a mount and not as a hole in the plate.
 const CANVAS_BG: f32 = 0.043;
+/// A mount between the picture and the canvas's edges. Without it the crop
+/// frame sits on the canvas boundary and the corner brackets are half clipped,
+/// so the one control the mode is about has nowhere to be drawn. Photos and the
+/// iPhone editor inset for the same reason.
+const CANVAS_PAD: f32 = 24.0;
 /// How far one arrow-key press moves the crop, in canvas points.
 const NUDGE: f32 = 1.0;
 
@@ -94,6 +99,15 @@ impl Mode {
         match self {
             Mode::Crop => "photo-editor-mode-crop",
             Mode::Draw => "photo-editor-mode-draw",
+        }
+    }
+
+    /// The rig's spelling (`ARBOS_COMPOSER_EDIT_PHOTO=crop|draw`).
+    pub fn named(s: &str) -> Option<Self> {
+        match s {
+            "crop" | "1" => Some(Mode::Crop),
+            "draw" => Some(Mode::Draw),
+            _ => None,
         }
     }
 }
@@ -190,7 +204,11 @@ impl PhotoEditor {
     }
 
     fn placement(&self) -> Placement {
-        Placement::fit(self.visible(), (CANVAS_W, CANVAS_H))
+        Placement::fit(
+            self.visible(),
+            (CANVAS_W - 2.0 * CANVAS_PAD, CANVAS_H - 2.0 * CANVAS_PAD),
+        )
+        .shifted((CANVAS_PAD, CANVAS_PAD))
     }
 
     fn crop(&self) -> CropRect {
@@ -215,6 +233,12 @@ impl PhotoEditor {
     }
 
     // ----- actions ---------------------------------------------------------
+
+    /// Rig: start the sheet on `mode` instead of Crop, so one shot can show
+    /// the tool row. Only the launch flag calls it.
+    pub fn rig_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
+        self.set_mode(mode, cx);
+    }
 
     fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
         if self.mode != mode {
@@ -748,19 +772,28 @@ impl PhotoEditor {
                 move |bounds, _, window, _| {
                     let o = bounds.origin;
                     let at = |p: (f32, f32)| point(o.x + px(p.0), o.y + px(p.1));
-                    // The visible window clips the strokes, which is also the
-                    // proof that a stroke outside the crop is kept rather than
-                    // deleted: go back to Crop and it is still there.
-                    let (vx, vy, vw, vh) = placement.rect_in_view(visible);
-                    let clip = Bounds::new(at((vx, vy)), size(px(vw), px(vh)));
-                    window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
-                        for stroke in &strokes {
-                            paint_stroke(window, stroke, &placement, o);
+                    // Its own layer, because within one layer GPUI draws every
+                    // sprite after every quad and path — so the photograph,
+                    // which is a sprite, would cover the ink and the crop
+                    // frame that are drawn here. (The staged strip solves the
+                    // same problem with `deferred`; that is not available
+                    // inside a paint closure, and a layer is the narrower fix.)
+                    window.paint_layer(bounds, |window| {
+                        // The visible window clips the strokes, which is also
+                        // the proof that a stroke outside the crop is kept
+                        // rather than deleted: go back to Crop and it is still
+                        // there.
+                        let (vx, vy, vw, vh) = placement.rect_in_view(visible);
+                        let clip = Bounds::new(at((vx, vy)), size(px(vw), px(vh)));
+                        window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
+                            for stroke in &strokes {
+                                paint_stroke(window, stroke, &placement, o);
+                            }
+                        });
+                        if overlay {
+                            paint_crop(window, placement.rect_in_view(crop), bounds);
                         }
                     });
-                    if overlay {
-                        paint_crop(window, placement.rect_in_view(crop), bounds);
-                    }
                 },
             )
             .absolute()
@@ -831,6 +864,14 @@ fn paint_stroke(
 
 /// The crop overlay: shade outside it, a thirds grid inside, a 1 pt rim, four
 /// corner brackets and four mid-edge bars.
+///
+/// Every light part is drawn over a dark one inflated by [`HALO`]. Plain white
+/// is what the mockup shows and what Photos appears to draw, but a crop sits
+/// over whatever the picture happens to be, and the first thing most people
+/// crop is a screenshot — a white frame on a white page is not there at all.
+/// Measured, not guessed: the first build of this overlay was invisible in the
+/// shot of a pale picture, and nothing but the halo changed between that shot
+/// and the one in the pull request.
 fn paint_crop(window: &mut Window, rect: (f32, f32, f32, f32), bounds: Bounds<Pixels>) {
     /// How far a corner bracket runs along each edge.
     const BRACKET: f32 = 22.0;
@@ -838,6 +879,8 @@ fn paint_crop(window: &mut Window, rect: (f32, f32, f32, f32), bounds: Bounds<Pi
     const BAR: f32 = 28.0;
     /// The brackets' and bars' thickness.
     const THICK: f32 = 3.0;
+    /// How far the dark backing stands out past the light part it carries.
+    const HALO: f32 = 1.5;
 
     let o = bounds.origin;
     let (x, y, w, h) = rect;
@@ -862,20 +905,34 @@ fn paint_crop(window: &mut Window, rect: (f32, f32, f32, f32), bounds: Bounds<Pi
     ] {
         quad(rx, ry, rw, rh, dim);
     }
-    // Rule of thirds: the crop guide everybody already knows.
-    let grid = white(0.22);
+    // One light bar on its dark backing. Two quads, because a quad has no
+    // outline and a shadow on a 1 pt line is a blur nobody can see.
+    let mut lit = |bx: f32, by: f32, bw: f32, bh: f32, light: Hsla, backing: Hsla| {
+        quad(
+            bx - HALO,
+            by - HALO,
+            bw + 2.0 * HALO,
+            bh + 2.0 * HALO,
+            backing,
+        );
+        quad(bx, by, bw, bh, light);
+    };
+    // Rule of thirds: the crop guide everybody already knows. Quieter than the
+    // frame — it is a reading aid, not an edge.
+    let grid = white(0.5);
+    let grid_backing = Theme::with_alpha(gpui::black(), 0.22);
     for i in 1..3 {
         let f = i as f32 / 3.0;
-        quad(x, y + h * f, w, 1.0, grid);
-        quad(x + w * f, y, 1.0, h, grid);
+        lit(x, y + h * f, w, 1.0, grid, grid_backing);
+        lit(x + w * f, y, 1.0, h, grid, grid_backing);
     }
-    // A 1 pt rim just inside the edge, so the boundary reads even where the
-    // picture under it is pale.
-    let rim = white(0.55);
-    quad(x, y, w, 1.0, rim);
-    quad(x, y + h - 1.0, w, 1.0, rim);
-    quad(x, y, 1.0, h, rim);
-    quad(x + w - 1.0, y, 1.0, h, rim);
+    // The rim, just inside the edge, so the boundary reads wherever it lands.
+    let rim = white(0.8);
+    let backing = Theme::with_alpha(gpui::black(), 0.55);
+    lit(x, y, w, 1.0, rim, backing);
+    lit(x, y + h - 1.0, w, 1.0, rim, backing);
+    lit(x, y, 1.0, h, rim, backing);
+    lit(x + w - 1.0, y, 1.0, h, rim, backing);
     // Corner brackets, drawn inside the rectangle so a crop sitting on the
     // picture's edge does not lose them off the canvas.
     let b = BRACKET.min(w / 2.0).min(h / 2.0);
@@ -893,26 +950,16 @@ fn paint_crop(window: &mut Window, rect: (f32, f32, f32, f32), bounds: Bounds<Pi
             if sx > 0.0 { corner_x } else { corner_x - THICK },
             if sy > 0.0 { corner_y } else { corner_y - b },
         );
-        quad(hx, hy, b, THICK, gpui::white());
-        quad(vx, vy, THICK, b, gpui::white());
+        lit(hx, hy, b, THICK, gpui::white(), backing);
+        lit(vx, vy, THICK, b, gpui::white(), backing);
     }
     // The four side handles, the same affordance Photos uses.
     let bar_w = BAR.min(w / 3.0);
     let bar_h = BAR.min(h / 3.0);
-    quad(x + (w - bar_w) / 2.0, y, bar_w, THICK, gpui::white());
-    quad(
-        x + (w - bar_w) / 2.0,
-        y + h - THICK,
-        bar_w,
-        THICK,
-        gpui::white(),
-    );
-    quad(x, y + (h - bar_h) / 2.0, THICK, bar_h, gpui::white());
-    quad(
-        x + w - THICK,
-        y + (h - bar_h) / 2.0,
-        THICK,
-        bar_h,
-        gpui::white(),
-    );
+    let mid_x = x + (w - bar_w) / 2.0;
+    let mid_y = y + (h - bar_h) / 2.0;
+    lit(mid_x, y, bar_w, THICK, gpui::white(), backing);
+    lit(mid_x, y + h - THICK, bar_w, THICK, gpui::white(), backing);
+    lit(x, mid_y, THICK, bar_h, gpui::white(), backing);
+    lit(x + w - THICK, mid_y, THICK, bar_h, gpui::white(), backing);
 }

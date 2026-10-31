@@ -274,6 +274,15 @@ impl Placement {
         }
     }
 
+    /// Move the whole placement across the canvas. [`Self::fit`] centres in a
+    /// box that starts at the origin; a caller that fits into an inset box adds
+    /// the inset back with this.
+    pub fn shifted(mut self, by: (f32, f32)) -> Self {
+        self.origin.0 += by.0;
+        self.origin.1 += by.1;
+        self
+    }
+
     pub fn to_view(self, p: (f32, f32)) -> (f32, f32) {
         (
             self.origin.0 + p.0 * self.scale,
