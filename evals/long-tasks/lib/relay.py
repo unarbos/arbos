@@ -47,17 +47,51 @@ def admin_token():
 
 
 def ensure_test_user(handle, name):
-    """Create the test user once; afterwards reuse the saved token pair."""
+    """The token pair for the scratch user, from the saved state, or freshly attached to it.
+
+    `POST /admin/users/test` answers 409 `handle_taken` once the user exists, so creation only ever
+    works the first time. Any later run on a machine without `$LT_STATE_DIR/tokens.json` — a fresh
+    VM, a cleared /tmp — therefore has to adopt the existing user instead of creating one.
+    """
     if TOKENS.exists():
         return json.loads(TOKENS.read_text())
     st, v = http("POST", f"{RELAY}/admin/users/test", token=admin_token(), body={"handle": handle, "name": name})
-    if st != 201:
+    if st == 409:
+        v = _adopt_test_user(handle)
+    elif st != 201:
         raise SystemExit(f"create test user: {st} {v}")
     v["issued_at"] = time.time()
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     TOKENS.write_text(json.dumps(v))
     write_ctl_config(v["access_token"], v.get("device_id", ""))
     return v
+
+
+def _adopt_test_user(handle):
+    """Find the existing scratch user by handle and attach a new signed-in device to it.
+
+    Refuses anything that is not a scratch user: adopting a real account would run the suite, which
+    writes files and sends messages, against someone's own box.
+    """
+    st, rows = http("GET", f"{RELAY}/admin/users", token=admin_token())
+    if st != 200:
+        raise SystemExit(f"adopt {handle}: list users {st} {rows}")
+    rows = rows if isinstance(rows, list) else (rows.get("users") or rows.get("items") or [])
+    want = handle.lstrip("@").lower()
+    found = [u for u in rows if (u.get("login") or u.get("handle") or "").lstrip("@").lower() == want]
+    if len(found) != 1:
+        raise SystemExit(f"adopt {handle}: expected one user with that handle, found {len(found)}")
+    user = found[0]
+    if not user.get("test") or not str(user.get("id", "")).startswith("test_"):
+        raise SystemExit(f"adopt {handle}: {user.get('id')} is not a scratch test user; refusing")
+    st, dev = http("POST", f"{RELAY}/admin/users/{user['id']}/devices", token=admin_token(),
+                   body={"name": f"lt-eval harness (adopted {time.strftime('%Y-%m-%d %H:%M')} UTC)"})
+    if st != 201:
+        raise SystemExit(f"adopt {handle}: attach device {st} {dev}")
+    dev.setdefault("user", user)
+    dev.setdefault("test", True)
+    print(f"adopted the existing scratch user {user['id']} on device {dev.get('device_id')}", flush=True)
+    return dev
 
 
 def write_ctl_config(access_token, device_id):
