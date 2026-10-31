@@ -70,9 +70,11 @@ if [[ -n "$FROM_SOURCE" ]]; then
           || git -C repo rev-parse -q --verify "$REF^{commit}" 2>/dev/null) \
       || { echo "cannot resolve $REF in unarbos/arbos" >&2; exit 1; }
     # Never roll the relay back by accident: refuse a commit that is an ancestor of the one
-    # running now (ALLOW_OLDER=1 overrides, for a deliberate rollback).
+    # running now (ALLOW_OLDER=1 overrides, for a deliberate rollback). sudo drops the environment
+    # of the caller, so ALLOW_OLDER is passed into this shell as text, like REF.
     CUR=$(cat /etc/arbos/relay.deployed-sha 2>/dev/null || true)
-    if [[ -n "$CUR" && "$CUR" != "$COMMIT" && "${ALLOW_OLDER:-}" != 1 ]] && git -C repo merge-base --is-ancestor "$COMMIT" "$CUR" 2>/dev/null; then
+    ALLOW_OLDER="'"${ALLOW_OLDER:-}"'"
+    if [[ -n "$CUR" && "$CUR" != "$COMMIT" && "$ALLOW_OLDER" != 1 ]] && git -C repo merge-base --is-ancestor "$COMMIT" "$CUR" 2>/dev/null; then
       echo "refusing: $COMMIT is older than the deployed relay ($CUR); set ALLOW_OLDER=1 to roll back" >&2
       exit 1
     fi
@@ -82,8 +84,13 @@ if [[ -n "$FROM_SOURCE" ]]; then
   '
   install -m 0755 "$BUILD_DIR/repo/target/release/arbos-relay" /usr/local/bin/arbos-relay
   install -m 0755 "$BUILD_DIR/repo/target/release/arbosctl" /usr/local/bin/arbosctl
-  git -C "$BUILD_DIR/repo" rev-parse HEAD > /etc/arbos/relay.deployed-sha && chmod 0644 /etc/arbos/relay.deployed-sha
-  echo "installed arbos-relay $(/usr/local/bin/arbos-relay --version | awk '{print $2}') from $FROM_SOURCE @ $(git -C "$BUILD_DIR/repo" rev-parse --short HEAD)"
+  # Read as $BUILD_USER: root without SUDO_UID (a systemd unit) is refused by git's safe.directory
+  # check, and the marker must never be written empty — the rollback guard above trusts it.
+  DEPLOYED_SHA=$(sudo -u "$BUILD_USER" -H git -C "$BUILD_DIR/repo" rev-parse HEAD)
+  [[ "$DEPLOYED_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "cannot read the built commit ($DEPLOYED_SHA); relay.deployed-sha not written" >&2; exit 1; }
+  printf '%s\n' "$DEPLOYED_SHA" > /etc/arbos/relay.deployed-sha
+  chmod 0644 /etc/arbos/relay.deployed-sha
+  echo "installed arbos-relay $(/usr/local/bin/arbos-relay --version | awk '{print $2}') from $FROM_SOURCE @ ${DEPLOYED_SHA:0:9}"
 else
 if [[ -z "$RELAY_VERSION" ]]; then
   RELAY_VERSION=$(curl -fsSL "https://api.github.com/repos/unarbos/arbos/releases?per_page=20" \
@@ -489,6 +496,9 @@ install -m 0755 "$REPO_DIR/scripts/deploy/oauth-secret-watch.sh" /usr/local/bin/
 if [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
   umask 077; printf 'OP_SERVICE_ACCOUNT_TOKEN=%s\n' "$OP_SERVICE_ACCOUNT_TOKEN" > /etc/arbos/op.env; chmod 0600 /etc/arbos/op.env; umask 022
 fi
+# Each tick reads the vault, whose account budget every lane shares; an operator who disabled (or
+# masked) the timer meant it, so a redeploy leaves it that way. Read before the units are rewritten.
+OAUTH_WATCH_STATE=$(systemctl is-enabled arbos-oauth-secret-watch.timer 2>/dev/null || true)
 cat > /etc/systemd/system/arbos-oauth-secret-watch.service <<'UNIT'
 [Unit]
 Description=Pull the GitHub OAuth client id/secret from the Arbos vault into relay.env
@@ -506,8 +516,13 @@ OnUnitActiveSec=2min
 WantedBy=timers.target
 UNIT
 systemctl daemon-reload
-systemctl enable --now arbos-oauth-secret-watch.timer >/dev/null
-/usr/local/bin/arbos-oauth-secret-watch || true
+case "$OAUTH_WATCH_STATE" in
+  disabled|masked|masked-runtime)
+    echo "oauth secret watcher: timer is $OAUTH_WATCH_STATE by an operator; left as it is (restore: systemctl unmask arbos-oauth-secret-watch.timer; systemctl enable --now arbos-oauth-secret-watch.timer)";;
+  *)
+    systemctl enable --now arbos-oauth-secret-watch.timer >/dev/null
+    /usr/local/bin/arbos-oauth-secret-watch || true;;
+esac
 
 say "done"
 echo "relay: $PUBLIC_URL (listening on $LISTEN, data $DATA_DIR, env $ENV_FILE)"
