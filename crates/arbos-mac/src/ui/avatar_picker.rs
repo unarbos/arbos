@@ -26,6 +26,10 @@
 //! the same `/me/avatar/generate`, Set sends `PUT /me/avatar {image_key}` or the file, Reset is
 //! `DELETE /me/avatar`.
 //!
+//! The one line in a Generate / Upload body whose height is its text's — the Upload hint, the
+//! Generate status — is in the card's flow between the body's box and the footer, never in an
+//! absolute slot inside the box ([`hint_line`], Affinity 2026-10-31).
+//!
 //! Sizes are Grok's, measured on the 2x reference (612 × 794 px → 306 × 397 pt): the bar 44 pt
 //! with a hairline, 32 pt icons on a 57 pt pitch (we keep the Create sheet's 33 / 40 / 56 so the
 //! two sheets agree), 23 pt swatches, two equal 28 pt footer pills 8 pt apart.
@@ -34,6 +38,7 @@ use std::path::PathBuf;
 
 use gpui::{
     div, prelude::*, px, Context, Div, ElementId, FontWeight, Hsla, MouseButton, SharedString,
+    Stateful,
 };
 
 use crate::app::AppState;
@@ -65,11 +70,24 @@ const SWATCH_RING: f32 = 29.0;
 const FOOTER_H: f32 = 56.5;
 /// The body box between the bar and the footer (the tab bodies' absolute slots live in it).
 const BODY_H: f32 = HEIGHT - BAR_H - FOOTER_H;
+/// A Generate / Upload body's box: the body less [`HINT_RESERVED`], because the line under it
+/// is in the card's flow, not in the box (see [`hint_line`]).
+const TAB_BODY_H: f32 = BODY_H - HINT_RESERVED;
 const PILL_H: f32 = 28.0;
 const PILL_GAP: f32 = 8.0;
 const PREVIEW: f32 = 114.0;
 const FIELD_INSET: f32 = 16.5;
 const FIELD_H: f32 = 35.0;
+/// One row of the hint line, at 12 / 16.
+const HINT_LINE_H: f32 = 16.0;
+/// The least space between the hint line's last row and the footer's hairline.
+const HINT_GAP: f32 = 14.0;
+/// The band this sheet keeps between the body's box and the hairline for the hint line: **two**
+/// rows and the gap, because the Upload tab's "PNG, JPEG, HEIC, GIF or WebP; kept at up to 1024
+/// px." takes two at 306 pt. It is a floor, not a cap — a line that needs a third row grows the
+/// band, the card and the footer with it — and a floor of two keeps the card at Grok's 397 and
+/// the footer still while the tab changes.
+const HINT_RESERVED: f32 = 2.0 * HINT_LINE_H + HINT_GAP;
 
 /// Which body is up.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -379,27 +397,98 @@ pub(crate) fn tab_pill(
     row
 }
 
-/// Where a tab body sits in its sheet (points from the card's top): the body's first element
-/// at `top`, the status / hint line at `status_top`.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Slots {
-    pub top: f32,
-    pub status_top: f32,
+/// Which end of its band the hint line sits at — the anchor each sheet already had.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HintAnchor {
+    /// The picker sheet: the line is placed from the footer up (it was `BODY_H - 30`), so its
+    /// last row stays `gap` over the hairline whatever the row count.
+    Footer,
+    /// The Create sheets: the line is placed from the body down (12 under the "Choose a photo…"
+    /// pill), and the band's spare room is under it.
+    Body,
 }
 
-/// The Generate tab's body, absolutely placed in a sheet: the prompt field at `slots.top`, the
-/// Generate pill under it, `preview` (when given) under that, and the status line at
-/// `slots.status_top`. Shared by the picker sheet and the Create sheets.
+/// The band a sheet keeps for its hint line between the body's box and the footer's hairline
+/// (see [`hint_line`]).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HintSlot {
+    /// The band's floor: what the sheet already kept there, so a line that fits leaves the
+    /// sheet's measured height exactly as it was.
+    pub reserved: f32,
+    /// The least space under the line's last row.
+    pub gap: f32,
+    /// Which end of the band the line sits at.
+    pub anchor: HintAnchor,
+}
+
+impl HintSlot {
+    /// The picker sheet's band: [`HINT_RESERVED`], the line hanging off the footer.
+    const SHEET: HintSlot = HintSlot {
+        reserved: HINT_RESERVED,
+        gap: HINT_GAP,
+        anchor: HintAnchor::Footer,
+    };
+}
+
+/// The line under a Generate / Upload body — the Generate status, the Upload hint — **in the
+/// card's flow**, between the body's box and the footer, never in an absolute slot inside the
+/// box. It is the one element in these sheets whose height is its text's: "PNG, JPEG, HEIC, GIF
+/// or WebP; kept at up to 1024 px." takes two rows at the picker's width, and from a fixed box
+/// the second row drew over the footer's hairline ([feedback
+/// avatar-upload-hint-divider-mac-2026-10-31], Affinity: "1024 px." sitting on the divider). In
+/// flow the band holds it and a longer line grows the card, the way `error_slot`'s note already
+/// grows it — the sheet rule is that content above the footer takes space and is never drawn
+/// over it.
+///
+/// `slot.reserved` is a floor, not a height: while the line fits in the band the sheet measures
+/// exactly as it did before, and `slot.gap` keeps the last row off the hairline either way.
+pub(crate) fn hint_line(
+    id: &'static str,
+    text: SharedString,
+    slot: HintSlot,
+    p: &Palette,
+) -> Stateful<Div> {
+    let line = format!("{id}-line");
+    let selector = line.clone();
+    div()
+        .id(id)
+        .debug_selector(move || id.to_owned())
+        .flex_none()
+        .w_full()
+        .min_h(px(slot.reserved))
+        .px(px(FIELD_INSET))
+        .pb(px(slot.gap))
+        // The line keeps its own height inside the band, at the end the sheet anchors it to;
+        // spare room goes to the other end, so the line stays where it has always been.
+        .map(|el| match slot.anchor {
+            HintAnchor::Footer => el.items_end(),
+            HintAnchor::Body => el.items_start(),
+        })
+        .child(
+            div()
+                .id(SharedString::from(line))
+                .debug_selector(move || selector.clone())
+                .w_full()
+                .text_size(px(12.0))
+                .line_height(px(HINT_LINE_H))
+                .text_center()
+                .text_color(p.placeholder)
+                .child(text),
+        )
+}
+
+/// The Generate tab's body, absolutely placed in a sheet: the prompt field at `top`, the
+/// Generate pill under it, and `preview` (when given) under that. Shared by the picker sheet
+/// and the Create sheets; the status line is [`generate_status`] in the sheet's [`hint_line`].
 pub(crate) fn generate_body(
     shell: &Shell,
     picker: &Picker,
-    slots: Slots,
+    top: f32,
     preview: Option<Div>,
     p: &Palette,
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> Vec<gpui::AnyElement> {
-    let Slots { top, status_top } = slots;
     let mut body: Vec<gpui::AnyElement> = Vec::new();
     let input = shell.avatar_prompt_input.clone();
     let typed = input.read(cx).text().trim().to_string();
@@ -503,51 +592,29 @@ pub(crate) fn generate_body(
                 .into_any_element(),
         );
     }
+    body
+}
+
+/// What the Generate tab's line says — progress, the keep hint, or the prompt hint. Never a
+/// failure: that is the note at the top of the body (`error_slot`).
+pub(crate) fn generate_status(picker: &Picker, cx: &mut Context<Shell>) -> SharedString {
+    if picker.generating {
+        // The seconds tick while it paints.
+        crate::ui::motion::PulseClock::request(cx);
+    }
     let keeps = match picker.target {
         Target::Draft => "Create keeps this one.",
         Target::Agent(_) | Target::Group(_) | Target::Server(_) | Target::Me(_) => {
             "Set avatar keeps this one."
         }
     };
-    if picker.generating {
-        // The seconds tick while it paints.
-        crate::ui::motion::PulseClock::request(cx);
-    }
-    // The status line never carries a failure (that is the note): progress, the keep hint, or
-    // the prompt hint. One line, 30 pt over the footer.
-    let status: SharedString = if let Some(s) = picker.generating_for_s() {
+    if let Some(s) = picker.generating_for_s() {
         format!("Painting a picture — {s} s").into()
     } else if picker.generated.is_some() {
         keeps.into()
     } else {
         "A few words about the picture you want.".into()
-    };
-    body.push(
-        div()
-            .id("avatar-generate-status")
-            .debug_selector(|| "avatar-generate-status".into())
-            .absolute()
-            .left(px(FIELD_INSET))
-            .right(px(FIELD_INSET))
-            .top(px(status_top))
-            .h(px(16.0))
-            .overflow_hidden()
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_size(px(12.0))
-            .line_height(px(16.0))
-            .text_color(p.placeholder)
-            .child(
-                div()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(status),
-            )
-            .into_any_element(),
-    );
-    body
+    }
 }
 
 /// The picker's note (the shared error element) for the top of a sheet's body: inset like the
@@ -579,17 +646,16 @@ pub(crate) fn error_slot(picker: &Picker, theme: &Theme, cx: &mut Context<Shell>
     )
 }
 
-/// The Upload tab's body: `preview` (when given) at `slots.top` with the "Choose a photo…" pill
-/// under it — else the pill at `slots.top` — and the hint at `slots.status_top`. Shared by the
-/// picker sheet and the Create sheets.
+/// The Upload tab's body: `preview` (when given) at `top` with the "Choose a photo…" pill under
+/// it — else the pill at `top`. Shared by the picker sheet and the Create sheets; the hint is
+/// [`upload_hint`] in the sheet's [`hint_line`].
 pub(crate) fn upload_body(
     picker: &Picker,
-    slots: Slots,
+    top: f32,
     preview: Option<Div>,
     p: &Palette,
     cx: &mut Context<Shell>,
 ) -> Vec<gpui::AnyElement> {
-    let Slots { top, status_top } = slots;
     let mut body: Vec<gpui::AnyElement> = Vec::new();
     let mut pill_top = top;
     if let Some(preview) = preview {
@@ -637,7 +703,12 @@ pub(crate) fn upload_body(
             .on_click(cx.listener(|this, _, _, cx| this.choose_avatar_file(cx)))
             .into_any_element(),
     );
-    let hint: SharedString = match &picker.upload {
+    body
+}
+
+/// What the Upload tab's line says: the chosen file's name, else the formats and the cap.
+pub(crate) fn upload_hint(picker: &Picker) -> SharedString {
+    match &picker.upload {
         Some(path) => path
             .file_name()
             .and_then(|n| n.to_str())
@@ -645,23 +716,7 @@ pub(crate) fn upload_body(
             .to_owned()
             .into(),
         None => "PNG, JPEG, HEIC, GIF or WebP; kept at up to 1024 px.".into(),
-    };
-    body.push(
-        div()
-            .id("avatar-upload-hint")
-            .debug_selector(|| "avatar-upload-hint".into())
-            .absolute()
-            .left(px(FIELD_INSET))
-            .right(px(FIELD_INSET))
-            .top(px(status_top))
-            .text_size(px(12.0))
-            .line_height(px(16.0))
-            .text_center()
-            .text_color(p.placeholder)
-            .child(hint)
-            .into_any_element(),
-    );
-    body
+    }
 }
 
 /// The target's picture as it is now — `(name, url)` — what the bar's View opens; `None` for a
@@ -818,6 +873,9 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
 
     // ----- body ---------------------------------------------------------------------------------
     let mut body: Vec<gpui::AnyElement> = Vec::new();
+    // The Generate / Upload line, in the card's flow under the body's box (see `hint_line`);
+    // the Bot tab has none, so its box keeps the whole body.
+    let mut hint: Option<Stateful<Div>> = None;
     match picker.tab {
         Tab::Bot => {
             let pick = picker.pick(&project);
@@ -896,26 +954,26 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
             body.extend(generate_body(
                 shell,
                 picker,
-                Slots {
-                    top: 16.0,
-                    status_top: BODY_H - 30.0,
-                },
+                16.0,
                 Some(tab_preview),
                 &p,
                 &theme,
                 cx,
             ));
+            hint = Some(hint_line(
+                "avatar-generate-status",
+                generate_status(picker, cx),
+                HintSlot::SHEET,
+                &p,
+            ));
         }
         Tab::Upload => {
-            body.extend(upload_body(
-                picker,
-                Slots {
-                    top: 24.0,
-                    status_top: BODY_H - 30.0,
-                },
-                Some(tab_preview),
+            body.extend(upload_body(picker, 24.0, Some(tab_preview), &p, cx));
+            hint = Some(hint_line(
+                "avatar-upload-hint",
+                upload_hint(picker),
+                HintSlot::SHEET,
                 &p,
-                cx,
             ));
         }
     }
@@ -969,8 +1027,9 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
             pill("avatar-set", "Set avatar", p.create_bg, p.create_text).right(px(BAR_INSET))
         });
 
-    // A column: bar · note (when a generation failed) · the body's fixed box · footer. Without
-    // a note the card is exactly `HEIGHT`; with one it grows by the note, never the other way.
+    // A column: bar · note (when a generation failed) · the body's fixed box · the hint line's
+    // band (Generate / Upload) · footer. Without a note, and with a line the band holds, the
+    // card is exactly `HEIGHT`; a note or a longer line grows it, never the other way.
     let card = div()
         .id("avatar-card")
         .debug_selector(|| "avatar-card".into())
@@ -995,9 +1054,10 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
                 .relative()
                 .flex_none()
                 .w_full()
-                .h(px(BODY_H))
+                .h(px(if hint.is_some() { TAB_BODY_H } else { BODY_H }))
                 .children(body),
         )
+        .children(hint)
         .child(footer);
     div()
         .absolute()
@@ -1532,6 +1592,101 @@ mod me_picker_tests {
             "Set closes the sheet"
         );
         assert!(vcx.debug_bounds("avatar-set").is_none());
+    }
+
+    /// [feedback avatar-upload-hint-divider-mac-2026-10-31] (Affinity, on the Mac): the Upload
+    /// tab's "PNG, JPEG, HEIC, GIF or WebP; kept at up to 1024 px." wrapped, and its second row
+    /// — "1024 px." — was drawn over the footer's hairline. The line sits in the card's flow
+    /// now, in a band the sheet keeps for it: the two rows fit with the gap clear and the sheet
+    /// keeps Grok's height, a longer line grows the card instead of crossing the hairline, and
+    /// the Generate tab's status is the same element in the same band, one row, unmoved.
+    #[gpui::test]
+    fn a_wrapped_hint_grows_the_sheet_instead_of_crossing_the_footer(cx: &mut TestAppContext) {
+        let (_rt, _state, shell, vcx) = mount(cx, "");
+        settle(&shell, vcx);
+        click(vcx, &shell, "me-avatar");
+        // `line` is the text's own box inside the band; the hairline is the footer's top edge.
+        let measure = |vcx: &mut VisualTestContext, which: &'static str| {
+            let card = vcx.debug_bounds("avatar-card").expect("card");
+            let line = vcx
+                .debug_bounds(which)
+                .unwrap_or_else(|| panic!("{which} is on screen"));
+            let hairline = card.bottom() - px(FOOTER_H);
+            (
+                f32::from(card.size.height),
+                f32::from(line.size.height),
+                f32::from(hairline - line.bottom()),
+            )
+        };
+        // Grok's 397, plus the card's own 1 pt border top and bottom. How many rows a string
+        // takes is the platform's font metrics, so the sheet's height is asserted against the
+        // band instead: exactly `want` while the rows fit it, `want` plus the overflow when
+        // they do not. That holds for any string on any metrics.
+        let want = HEIGHT + 2.0;
+        let band = |rows: f32| want + (rows + HINT_GAP - HINT_RESERVED).max(0.0);
+        for (tab, line) in [
+            // The reported line: two rows at this width, inside the band — the second row no
+            // longer reaches the hairline under it.
+            ("avatar-tab-upload", "avatar-upload-hint-line"),
+            ("avatar-tab-generate", "avatar-generate-status-line"),
+        ] {
+            click(vcx, &shell, tab);
+            let (height, rows, clear) = measure(vcx, line);
+            assert!(
+                rows >= HINT_LINE_H - 1.0,
+                "{tab}: the line is drawn with its own rows: {rows}"
+            );
+            assert!(
+                (height - band(rows)).abs() < 1.5,
+                "{tab}: {rows} of line leaves the sheet at {}, measured {height}",
+                band(rows)
+            );
+            assert!(
+                clear >= HINT_GAP - 1.0,
+                "{tab}: the line is {clear} over the hairline, not {HINT_GAP}"
+            );
+        }
+
+        // A chosen file's name is the same line, and a name too long for the band is what the
+        // next format or translation would be: the card grows by the rows the band cannot
+        // hold, the footer goes down with it, and the gap over the hairline holds.
+        click(vcx, &shell, "avatar-tab-upload");
+        shell.update(vcx, |sh, _| {
+            if let Some(pk) = sh.avatar_picker.as_mut() {
+                pk.upload = Some(PathBuf::from(
+                    "/tmp/the whole team at the offsite in lisbon on a long evening in late \
+                     autumn with the sea behind us and nobody looking at the camera 2026.heic",
+                ));
+            }
+        });
+        settle(&shell, vcx);
+        let (grown, rows, clear) = measure(vcx, "avatar-upload-hint-line");
+        assert!(
+            rows > HINT_RESERVED - HINT_GAP + 1.0,
+            "the long file name takes more rows than the band holds: {rows}"
+        );
+        assert!(
+            (grown - band(rows)).abs() < 1.5,
+            "the card grew by those rows only: {} expected, measured {grown}",
+            band(rows)
+        );
+        assert!(
+            grown > want + 1.0,
+            "and it did grow: {want} → {grown} for {rows} of line"
+        );
+        assert!(
+            clear >= HINT_GAP - 1.0,
+            "the wrapped line is {clear} over the hairline, not {HINT_GAP}"
+        );
+        let cancel = vcx.debug_bounds("avatar-cancel").expect("Cancel");
+        let set = vcx.debug_bounds("avatar-set").expect("Set avatar");
+        let line = vcx
+            .debug_bounds("avatar-upload-hint-line")
+            .expect("the line");
+        assert!(
+            line.bottom() <= cancel.top() && line.bottom() <= set.top(),
+            "nothing reaches the footer's pills: {line:?} {cancel:?}"
+        );
     }
 
     #[gpui::test]

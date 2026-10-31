@@ -43,12 +43,15 @@ const OPTIONS_H: f32 = 28.0;
 /// The chosen option's body starts 16 under the capsules.
 pub(crate) const BODY_TOP: f32 = OPTIONS_TOP + OPTIONS_H + 16.0;
 /// Upload: the "Choose a photo…" pill (28) then its hint 12 under.
-const UPLOAD_HINT_TOP: f32 = BODY_TOP + 28.0 + 12.0;
+const UPLOAD_HINT_TOP: f32 = BODY_TOP + 28.0 + HINT_GAP;
 /// Generate: the prompt field (35), the Generate pill 12 under (28), the status 12 under that.
-const GENERATE_STATUS_TOP: f32 = BODY_TOP + 35.0 + 12.0 + 28.0 + 12.0;
-/// The footer sits 12 under the Generate status line's 16 pt box, the taller of the two bodies,
-/// so the sheet does not jump when the option changes.
-pub(crate) const FOOTER_TOP: f32 = GENERATE_STATUS_TOP + 16.0 + 12.0;
+const GENERATE_STATUS_TOP: f32 = BODY_TOP + 35.0 + 12.0 + 28.0 + HINT_GAP;
+/// The gap above and below the option's line (the Upload hint, the Generate status); under it,
+/// the least the line's last row keeps off the footer's hairline.
+const HINT_GAP: f32 = 12.0;
+/// The footer sits a gap under the Generate status line's row, the taller of the two bodies, so
+/// the sheet does not jump when the option changes.
+pub(crate) const FOOTER_TOP: f32 = GENERATE_STATUS_TOP + 16.0 + HINT_GAP;
 const FOOTER_H: f32 = 56.5;
 const PILL_H: f32 = 27.0;
 pub(crate) const HEIGHT: f32 = FOOTER_TOP + FOOTER_H;
@@ -397,23 +400,11 @@ pub fn sheet(shell: &Shell, kind: Kind, cx: &mut Context<Shell>) -> Div {
             cx,
         ));
     let body: Vec<gpui::AnyElement> = match picker.tab {
-        Tab::Upload => avatar_picker::upload_body(
-            &picker,
-            avatar_picker::Slots {
-                top: BODY_TOP + shift - HEADER,
-                status_top: UPLOAD_HINT_TOP + shift - HEADER,
-            },
-            None,
-            &p,
-            cx,
-        ),
+        Tab::Upload => avatar_picker::upload_body(&picker, BODY_TOP + shift - HEADER, None, &p, cx),
         Tab::Generate => avatar_picker::generate_body(
             shell,
             &picker,
-            avatar_picker::Slots {
-                top: BODY_TOP + shift - HEADER,
-                status_top: GENERATE_STATUS_TOP + shift - HEADER,
-            },
+            BODY_TOP + shift - HEADER,
             None,
             &p,
             &theme,
@@ -422,6 +413,44 @@ pub fn sheet(shell: &Shell, kind: Kind, cx: &mut Context<Shell>) -> Div {
         // Never offered on a draft (`options()`); nothing to draw.
         Tab::Bot => Vec::new(),
     };
+    // The chosen option's line (the Upload hint, the Generate status) sits in the card's flow
+    // between the body's box and the footer — `avatar_picker::hint_line`: it is the one element
+    // whose height is its text's, and from an absolute slot a wrapped row drew over the footer's
+    // hairline. The band is the room this sheet already kept for it — the taller Generate body's
+    // on both options, so the sheet still does not jump when the option changes — and `HINT_GAP`
+    // keeps the last row off the hairline.
+    let hint = match picker.tab {
+        Tab::Upload => Some((
+            "avatar-upload-hint",
+            UPLOAD_HINT_TOP,
+            avatar_picker::upload_hint(&picker),
+        )),
+        Tab::Generate => Some((
+            "avatar-generate-status",
+            GENERATE_STATUS_TOP,
+            avatar_picker::generate_status(&picker, cx),
+        )),
+        Tab::Bot => None,
+    }
+    .map(|(id, line_top, text)| {
+        avatar_picker::hint_line(
+            id,
+            text,
+            avatar_picker::HintSlot {
+                reserved: FOOTER_TOP - line_top,
+                gap: HINT_GAP,
+                anchor: avatar_picker::HintAnchor::Body,
+            },
+            &p,
+        )
+    });
+    // The box above the line: everything down to where the line starts. Without a line (no
+    // option body) the box runs to the footer.
+    let body_h = match picker.tab {
+        Tab::Upload => UPLOAD_HINT_TOP - HEADER,
+        Tab::Generate => GENERATE_STATUS_TOP - HEADER,
+        Tab::Bot => HEIGHT - HEADER - FOOTER_H,
+    } + shift;
 
     let pill = |id: &'static str, label: &'static str, w: f32, bg: Hsla, fg: Hsla| {
         div()
@@ -443,10 +472,9 @@ pub fn sheet(shell: &Shell, kind: Kind, cx: &mut Context<Shell>) -> Div {
     let footer = div()
         .id("create-entity-footer")
         .debug_selector(|| "create-entity-footer".into())
-        .absolute()
-        .left_0()
-        .right_0()
-        .top(px(FOOTER_TOP + shift - HEADER))
+        .relative()
+        .flex_none()
+        .w_full()
         .h(px(FOOTER_H))
         .border_t_1()
         .border_color(p.line)
@@ -483,8 +511,9 @@ pub fn sheet(shell: &Shell, kind: Kind, cx: &mut Context<Shell>) -> Div {
         });
 
     // A column: header · the note (a failed generation, Jacob 2026-10-26) · the body's fixed
-    // box with everything else in its absolute slots · (the footer is the box's last slot).
-    // Without a note the card is exactly `HEIGHT + shift`; a note grows it by itself.
+    // box with everything else in its absolute slots · the option line's band · footer.
+    // Without a note, and with a line the band holds, the card is exactly `HEIGHT + shift`; a
+    // note or a longer line grows it by itself.
     let note = avatar_picker::error_slot(&picker, &theme, cx);
     let card = div()
         .id("create-entity-card")
@@ -508,15 +537,16 @@ pub fn sheet(shell: &Shell, kind: Kind, cx: &mut Context<Shell>) -> Div {
                 .relative()
                 .flex_none()
                 .w_full()
-                .h(px(HEIGHT + shift - HEADER))
+                .h(px(body_h))
                 .child(preview)
                 .child(field)
                 .children(explainer)
                 .children(transport_row)
                 .child(options)
-                .children(body)
-                .child(footer),
-        );
+                .children(body),
+        )
+        .children(hint)
+        .child(footer);
     // The same modal backdrop as the New Message sheet: a click outside closes.
     div()
         .absolute()
