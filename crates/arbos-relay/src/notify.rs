@@ -891,6 +891,9 @@ pub async fn me_unread(State(state): State<AppState>, principal: Principal) -> R
                             .clone()
                             .unwrap_or_else(|| people::PEOPLE_PROJECT.to_owned()),
                         unread: c.unread,
+                        // Counted from the next commit on; the field ships first so the
+                        // clients have a typed `mentions` to build against.
+                        mentions: 0,
                     })
                     .collect(),
                 total,
