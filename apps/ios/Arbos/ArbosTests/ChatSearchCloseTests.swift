@@ -15,6 +15,14 @@ final class ChatSearchCloseTests: XCTestCase {
         return (try? String(contentsOf: url, encoding: .utf8)) ?? ""
     }
 
+    private var transcript: String {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Arbos/UI/Transcript.swift")
+        return (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+    }
+
     func testTheCloseButtonIsAFullHeightCellNotTheGlyph() {
         XCTAssertGreaterThanOrEqual(ChatSearchClose.closeHitWidth, 44, "Apple's minimum touch target")
         let src = chatView
@@ -61,5 +69,52 @@ final class ChatSearchCloseTests: XCTestCase {
             XCTAssertTrue(body.contains(line), "closeSearch must do: \(line)")
         }
         XCTAssertTrue(src.contains("accessibilityIdentifier(\"chat-search-no-matches\")"), "zero hits say so instead of a blank transcript")
+    }
+
+    func testAResultRowOwnsTheTapsInsideIt() {
+        XCTAssertTrue(ChatSearchClose.rowOwnsInnerTap(resultRow: true))
+        XCTAssertFalse(ChatSearchClose.rowOwnsInnerTap(resultRow: false),
+                       "no filter, no suppression: an avatar or a chip opens as it always has")
+    }
+
+    /// Every route from inside a row to something other than the reveal asks that one rule:
+    /// the sender's avatar and the in-bubble name on a text row, the same two on a media
+    /// row, the mention chip and the hidden spoiler. The rule takes nothing but "a filter is
+    /// on", so an agent sender is covered by the same call as a person — the page that
+    /// opened in the measurement was an agent's. An ordinary web link is left alone.
+    func testEveryRouteOutOfAResultRowAsksThatOneRule() {
+        let rows = transcript
+        XCTAssertTrue(rows.contains("guard !ChatSearchClose.rowOwnsInnerTap(resultRow: searchHit) else { return }"),
+                      "the row's decision point")
+        XCTAssertEqual(rows.components(separatedBy: "model.toggleProfile(").count - 1, 1,
+                       "a row opens a page through openProfile and nowhere else")
+        XCTAssertEqual(rows.components(separatedBy: "= openProfile(").count - 1, 4,
+                       "person and agent, text row and media row — four bindings, eight buttons")
+        // The flag is a stored input on a compared view, not an environment read: the row is
+        // used `.equatable()`, so an environment read would not re-run its body on a flip.
+        XCTAssertTrue(rows.contains("var searchHit: Bool = false"))
+        XCTAssertTrue(rows.contains("&& lhs.searchHit == rhs.searchHit"), "…and it is compared")
+        let src = chatView
+        XCTAssertTrue(src.contains(".equatable()"), "the row list compares rows rather than re-reading them")
+        XCTAssertTrue(src.contains("searchHit: searchHitsActive && Self.isMessageBubble(row)"),
+                      "the row gets exactly the flag that mounts the result tap")
+        // The chip and the spoiler, through the transcript's OpenURLAction.
+        XCTAssertTrue(src.contains("let rowOwnsIt = ChatSearchClose.rowOwnsInnerTap(resultRow: searchHitsActive)"))
+        XCTAssertTrue(src.contains("if !rowOwnsIt { SpoilerState.shared.toggle(key) }"), "hidden spoiler")
+        XCTAssertTrue(src.contains("if !rowOwnsIt { model.toggleProfile(target) }"), "mention chip")
+        // Deliberately untouched: a link out to the web still goes to the system, and the
+        // row's gesture stays simultaneous, so no tap changes shape.
+        XCTAssertTrue(src.contains("guard let target = MentionTable.target(from: url, model: model) else { return .systemAction }"))
+        XCTAssertTrue(src.contains("content.simultaneousGesture(TapGesture().onEnded { action() })"))
+    }
+
+    /// A reveal is one animated hop. The repeated `scrollTo` that briefly stood here was
+    /// written against a landing measurement that turned out to be read from behind a
+    /// pushed profile pane, so it corrected something that was never shown to be wrong.
+    func testARevealIsOneHopWithNoFollowUpCorrections() {
+        let src = chatView
+        XCTAssertFalse(src.contains("settleOnRevealed"))
+        XCTAssertFalse(src.contains("revealSettleDelays"))
+        XCTAssertTrue(src.contains("withAnimation(.easeInOut(duration: 0.35)) { scroller?.scrollTo(target.id, anchor: .center) }"))
     }
 }
