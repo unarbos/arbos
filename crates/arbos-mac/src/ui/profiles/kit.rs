@@ -610,10 +610,7 @@ mod tests {
         // The slot sits inside the leading box, which stays the avatar's width:
         // the add rows share a card with the member rows, so every label in it
         // starts at one left edge.
-        assert!(
-            ROW_GLYPH_SLOT < AVATAR,
-            "the {ROW_GLYPH_SLOT} pt slot has to fit the {AVATAR} pt box"
-        );
+        const { assert!(ROW_GLYPH_SLOT < AVATAR) };
         assert_eq!(ROW_GLYPH_RADIUS, 10.0, "the iPhone's PaneKit.glyphRadius");
     }
 
