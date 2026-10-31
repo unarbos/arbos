@@ -1417,11 +1417,56 @@ final class AppModel: ObservableObject {
                 let code = try await webAuth.signIn(startURL: start)
                 let (toks, who) = try await api.exchange(grantCode: code)
                 adopt(tokens: toks, user: who)
-                needsProfileSetup = true
+                needsProfileSetup = AppModel.profileSetupApplies(to: who)
             } catch {
                 signInError = UserError.classify("sign in", error)
             }
         }
+    }
+
+    /// Whether the name/handle setup form applies to the account in `who` — true only for an
+    /// account the relay says was created by the sign-in that sent this payload.
+    ///
+    /// Only the relay can answer this. A phone that has just signed in holds no profile
+    /// whether the account is a minute old or a year old, so "nothing stored here" was never
+    /// evidence of a new account: it is exactly the state a returning user is in on a new
+    /// device ([feedback ios-signin-onboarding-repeat-2026-10-31]). An absent answer is a no,
+    /// because the form's harm is one-directional — asking a returning user is how an
+    /// existing name, handle and avatar get replaced.
+    nonisolated static func profileSetupApplies(to who: AuthUser?) -> Bool {
+        guard let who else { return false }
+        return !who.accountPredatesThisSignIn
+    }
+
+    /// Onboarding's Continue. Saves only to an account this sign-in created; for an account
+    /// that already existed the sheet closes and the profile on the account is left alone.
+    ///
+    /// This asks the same question `signInWithGitHub` asked, on purpose, and asks it of a
+    /// fresh `GET /me` instead of the payload held in memory since sign-in. Checking once
+    /// would be enough only if nothing else could ever raise this sheet, and several things
+    /// can: the rig hook that presents it, a flag left set by an older build, the next
+    /// regression in the condition itself. Showing the form is a nuisance; writing what it
+    /// collects over a profile somebody chose is the half that destroys data, so the write
+    /// refuses on its own evidence.
+    @discardableResult
+    func completeProfileSetup(name: String, handle: String) async -> String? {
+        let onRecord = await serverProfile() ?? user
+        guard AppModel.profileSetupApplies(to: onRecord) else {
+            NSLog("profile setup: account \(onRecord?.id ?? "unknown") was not created by this sign-in — closing without a write")
+            needsProfileSetup = false
+            return nil
+        }
+        return await updateProfile(name: name, handle: handle)
+    }
+
+    /// The account as the relay has it right now, or nil when it could not be asked.
+    /// `/me`'s decoder substitutes a placeholder with an empty id when the relay sends no
+    /// user block; that is an unanswered question, not an account, so it comes back nil.
+    private func serverProfile() async -> AuthUser? {
+        guard !isFixture else { return user }
+        guard let answer = try? await api.me() else { return nil }
+        let who = answer.0
+        return who.id.isEmpty ? nil : who
     }
 
     /// Settings / onboarding: save display name and handle via `PATCH /me`.

@@ -163,6 +163,7 @@
 		A1C5440000000000000004 /* ShellApprovalCardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C5440000000000000003 /* ShellApprovalCardTests.swift */; };
 		A1BD00000000000000000002 /* NewMessageSheetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BD00000000000000000001 /* NewMessageSheetTests.swift */; };
 		A15A00000000000000000031 /* ProfilePaneStructureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000030 /* ProfilePaneStructureTests.swift */; };
+		A15E60000000000000000011 /* ProfileSetupGateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15E60000000000000000010 /* ProfileSetupGateTests.swift */; };
 		A1F7B0000000000000000004 /* BlockedStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F7B0000000000000000003 /* BlockedStateTests.swift */; };
 		A1DE9C000000000000000004 /* DevicesVisibleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DE9C000000000000000003 /* DevicesVisibleTests.swift */; };
 		A1C0F1000000000000000004 /* ConfirmFormTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C0F1000000000000000003 /* ConfirmFormTests.swift */; };
@@ -408,6 +409,7 @@
 		A1C5440000000000000003 /* ShellApprovalCardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellApprovalCardTests.swift; sourceTree = "<group>"; };
 		A1BD00000000000000000001 /* NewMessageSheetTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewMessageSheetTests.swift; sourceTree = "<group>"; };
 		A15A00000000000000000030 /* ProfilePaneStructureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfilePaneStructureTests.swift; sourceTree = "<group>"; };
+		A15E60000000000000000010 /* ProfileSetupGateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileSetupGateTests.swift; sourceTree = "<group>"; };
 		A1F7B0000000000000000003 /* BlockedStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlockedStateTests.swift; sourceTree = "<group>"; };
 		A1DE9C000000000000000003 /* DevicesVisibleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevicesVisibleTests.swift; sourceTree = "<group>"; };
 		A1C0F1000000000000000003 /* ConfirmFormTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfirmFormTests.swift; sourceTree = "<group>"; };
@@ -679,6 +681,7 @@
 				A15A00000000000000000020 /* AddMembersPlanTests.swift */,
 				A15A00000000000000000040 /* MessageDeleteRuleTests.swift */,
 				A15A00000000000000000030 /* ProfilePaneStructureTests.swift */,
+				A15E60000000000000000010 /* ProfileSetupGateTests.swift */,
 				A1F7B0000000000000000003 /* BlockedStateTests.swift */,
 				A1DE9C000000000000000003 /* DevicesVisibleTests.swift */,
 				A1C0F1000000000000000003 /* ConfirmFormTests.swift */,
@@ -1064,6 +1067,7 @@
 				A15A00000000000000000021 /* AddMembersPlanTests.swift in Sources */,
 				A15A00000000000000000041 /* MessageDeleteRuleTests.swift in Sources */,
 				A15A00000000000000000031 /* ProfilePaneStructureTests.swift in Sources */,
+				A15E60000000000000000011 /* ProfileSetupGateTests.swift in Sources */,
 				A1F7B0000000000000000004 /* BlockedStateTests.swift in Sources */,
 				A1DE9C000000000000000004 /* DevicesVisibleTests.swift in Sources */,
 				A1C0F1000000000000000004 /* ConfirmFormTests.swift in Sources */,
