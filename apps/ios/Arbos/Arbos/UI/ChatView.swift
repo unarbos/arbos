@@ -228,7 +228,9 @@ struct ChatSession: View {
     @State private var showPhotos = false
     @State private var showFiles = false
     @State private var showAttach = false
-    /// The Emoji · Stickers · GIFs picker (ARB-544), from the attach sheet's third row.
+    /// Camera capture from the attach sheet ([feedback app-01M69JAX33K8JCAKZ8P2ZGNEEK]).
+    @State private var showCamera = false
+    /// The Emoji · Stickers · GIFs picker (ARB-544), from the attach sheet's Fun row.
     @State private var showFun = false
     @State private var scroller: ScrollViewProxy?
     /// Scrolled more than ~120 pt above the end: show Grok's round chevron
@@ -3297,7 +3299,7 @@ struct ChatSession: View {
         return Array(list.dropLast())
     }
 
-    /// The "+" before the field: photos and files. Channels send text only (C1), so none there.
+    /// The "+" before the field: camera, photos and files. Channels send text only (C1), so none there.
     private var attachButton: some View {
         Button { showAttach = true } label: {
             ZStack {
@@ -3313,6 +3315,10 @@ struct ChatSession: View {
         .buttonStyle(.plain)
         .sheet(isPresented: $showAttach, onDismiss: demoDismissed) {
             AttachSheet {
+                showAttach = false
+                guard UIImagePickerController.isSourceTypeAvailable(.camera) else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showCamera = true }
+            } onPhoto: {
                 showAttach = false
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showPhotos = true }
             } onFile: {
@@ -3340,6 +3346,16 @@ struct ChatSession: View {
             })
             .environmentObject(model)
             .environment(\.theme, theme)
+        }
+        .fullScreenCover(isPresented: $showCamera) {
+            CameraPicker(
+                onCapture: { image in
+                    showCamera = false
+                    stageCapturedPhoto(image)
+                },
+                onCancel: { showCamera = false }
+            )
+            .ignoresSafeArea()
         }
         .photosPicker(isPresented: $showPhotos, selection: $photoItem, matching: .any(of: [.images, .videos]))
         .fileImporter(isPresented: $showFiles, allowedContentTypes: [.item], allowsMultipleSelection: false) { result in
@@ -3369,6 +3385,15 @@ struct ChatSession: View {
                 photoItem = nil
             }
         }
+    }
+
+    /// Stage a photo taken with the camera the same way a library pick is staged.
+    private func stageCapturedPhoto(_ image: UIImage) {
+        guard let data = image.jpegData(compressionQuality: 0.9) else { return }
+        let picked = ChatView.imageForUpload(data, type: .jpeg)
+        let stamp = ChatView.photoStamp.string(from: Date())
+        pending.append(.init(name: "Photo \(stamp).\(picked.ext)", mime: picked.mime, data: picked.data))
+        composerFocused = true
     }
 
     /// Picture or video pending in the composer — the field is their description bar.
@@ -3924,10 +3949,11 @@ private struct ScrollInterruptTap: UIViewRepresentable {
     }
 }
 
-/// "+" sheet: Photo or video, File, and — ARB-544, Jacob's option B — Emoji, stickers & GIFs,
-/// as a short bottom sheet.
+/// "+" sheet: Camera, Photo or video, File, and — ARB-544, Jacob's option B — Emoji,
+/// stickers & GIFs, as a short bottom sheet.
 struct AttachSheet: View {
     @Environment(\.theme) private var theme
+    let onCamera: () -> Void
     let onPhoto: () -> Void
     let onFile: () -> Void
     var onFun: (() -> Void)? = nil
@@ -3935,6 +3961,8 @@ struct AttachSheet: View {
     var body: some View {
         VStack(spacing: 0) {
             Capsule().fill(theme.muted.opacity(0.4)).frame(width: 36, height: 5).padding(.top, 8).padding(.bottom, 14)
+            row(icon: "camera", title: "Camera", subtitle: "Take a photo", action: onCamera)
+                .accessibilityIdentifier("attach-camera")
             row(icon: "photo", title: "Photo or video", subtitle: "From your library", action: onPhoto)
             row(icon: "doc", title: "File", subtitle: "From Files or iCloud Drive", action: onFile)
             if let onFun {
@@ -3945,7 +3973,8 @@ struct AttachSheet: View {
         }
         .padding(.horizontal, 16)
         .background(theme.bg)
-        .presentationDetents([.height(onFun == nil ? 190 : 258)])
+        // Three fixed rows (Camera · Photo · File) = 258; Fun adds a fourth = 326.
+        .presentationDetents([.height(onFun == nil ? 258 : 326)])
         .presentationDragIndicator(.hidden)
         .presentationBackground(theme.bg)
     }
@@ -3966,6 +3995,45 @@ struct AttachSheet: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// System camera for the attach sheet: take one photo, then stage it in the composer.
+struct CameraPicker: UIViewControllerRepresentable {
+    var onCapture: (UIImage) -> Void
+    var onCancel: () -> Void
+
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let picker = UIImagePickerController()
+        picker.sourceType = .camera
+        picker.cameraCaptureMode = .photo
+        picker.allowsEditing = false
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
+
+    final class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
+        let parent: CameraPicker
+        init(parent: CameraPicker) { self.parent = parent }
+
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+            parent.onCancel()
+        }
+
+        func imagePickerController(
+            _ picker: UIImagePickerController,
+            didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]
+        ) {
+            if let image = info[.originalImage] as? UIImage {
+                parent.onCapture(image)
+            } else {
+                parent.onCancel()
+            }
+        }
     }
 }
 
