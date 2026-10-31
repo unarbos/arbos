@@ -63,6 +63,20 @@ fn can_edit(scope: Option<&str>, principal: &Principal, s: &Skill) -> bool {
     }
 }
 
+/// Whether a device may act on this skill, which `can_edit` above does **not** answer: that one
+/// returns `true` for every device principal and only constrains boxes.
+///
+/// `skills` has no owner column, so the only owner a skill can have is the user behind its
+/// origin project. A skill with no origin project therefore has nobody to check the caller
+/// against and keeps its previous behaviour — the honest limit of a fix that adds no column
+/// (#1953). Deciding that an ownerless skill is admin-only is a product call.
+fn owns_skill(state: &AppState, principal: &Principal, s: &Skill) -> bool {
+    match s.origin_project_id.as_deref() {
+        Some(project) => state.allows(principal, project),
+        None => true,
+    }
+}
+
 /// `POST`/`PUT` body: structured fields, or `{ "markdown": "---\n…" }` with the frontmatter.
 #[derive(Deserialize, Default)]
 pub struct SkillBody {
@@ -238,6 +252,14 @@ pub async fn create(
         Principal::Box { .. } => scope.clone(),
         Principal::Device { .. } | Principal::Admin => b.origin_project_id.clone(),
     };
+    // A device names its own origin project, and `delete` checks ownership against that field,
+    // so it has to be a project the caller actually has. A foreign project answers like an
+    // unknown one.
+    if let Some(project) = origin.as_deref() {
+        if !state.allows(&principal, project) {
+            return Err((StatusCode::NOT_FOUND, "no such project".to_owned()));
+        }
+    }
     let base = Skill {
         id: ulid(),
         origin_project_id: origin,
@@ -332,8 +354,119 @@ pub async fn delete(
         .skill(&id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such skill".to_owned()))?;
+    if !owns_skill(&state, &principal, &existing) {
+        // Another user's skill looks like no skill at all: no enumeration oracle either.
+        return Err((StatusCode::NOT_FOUND, "no such skill".to_owned()));
+    }
     state.db.delete_skill(&existing.id).map_err(internal)?;
     notify_boxes(&state, &existing.slug);
     tracing::info!(slug = %existing.slug, "skill deleted");
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::people::tests_support::{person, project_of};
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    fn status(r: ApiResult) -> StatusCode {
+        match r {
+            Ok(resp) => resp.status(),
+            Err((s, _)) => s,
+        }
+    }
+
+    fn skill_of(state: &AppState, origin: Option<&str>, slug: &str) -> String {
+        let now = now_ms();
+        let s = Skill {
+            id: ulid(),
+            slug: slug.to_owned(),
+            name: slug.to_owned(),
+            origin_project_id: origin.map(str::to_owned),
+            version: 1,
+            created_at: now,
+            updated_at: now,
+            ..Skill::default()
+        };
+        state.db.insert_skill(&s).expect("skill");
+        s.id
+    }
+
+    /// #1953: `delete` refused boxes and nothing else, so any signed-in device could delete
+    /// another user's skill.
+    ///
+    /// The gate the issue proposed, `can_edit`, would not have changed that: it returns `true`
+    /// for every device principal and only constrains boxes. The first assertion here keeps
+    /// that on the record, so nobody applies the suggested fix, sees a green test and believes
+    /// the hole is closed.
+    #[tokio::test]
+    async fn delete_refuses_a_skill_of_another_users_project() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (_bob, bob_dev) = person(&state, 2);
+        let project = project_of(&state, &alice, "Comms");
+        let owned = skill_of(&state, Some(&project), "deploy-the-relay");
+        let row = state.db.skill(&owned).unwrap().unwrap();
+
+        assert!(
+            can_edit(None, &bob_dev, &row),
+            "can_edit is open to every device principal, so #1953's gate is not a check"
+        );
+
+        let foreign = delete(State(state.clone()), bob_dev, Path(owned.clone())).await;
+        assert_eq!(status(foreign), StatusCode::NOT_FOUND);
+        assert!(
+            state.db.skill(&owned).unwrap().is_some(),
+            "another user's skill survives"
+        );
+
+        let own = delete(State(state.clone()), alice_dev, Path(owned.clone())).await;
+        assert_eq!(status(own), StatusCode::NO_CONTENT);
+        assert!(state.db.skill(&owned).unwrap().is_none());
+    }
+
+    /// The honest limit of a fix with no schema change: `skills` has no owner column, so a
+    /// skill with no origin project has nobody to check the caller against and stays deletable
+    /// by any device. Recorded as a test so the gap is visible instead of assumed closed;
+    /// whoever decides that ownerless skills are admin-only will change this expectation.
+    #[tokio::test]
+    async fn an_ownerless_skill_stays_deletable_by_any_device() {
+        let state = test_state(AuthMode::Github);
+        let (_bob, bob_dev) = person(&state, 2);
+        let orphan = skill_of(&state, None, "no-owner-anywhere");
+
+        let r = delete(State(state.clone()), bob_dev, Path(orphan.clone())).await;
+        assert_eq!(status(r), StatusCode::NO_CONTENT);
+        assert!(state.db.skill(&orphan).unwrap().is_none());
+    }
+
+    /// The delete check reads `origin_project_id`, and `create` takes that field straight from
+    /// the request body, so a device must not be able to file a skill under a project it does
+    /// not own — otherwise the library it is checked against is whatever the caller claims.
+    #[tokio::test]
+    async fn create_refuses_an_origin_project_the_caller_does_not_own() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _alice_dev) = person(&state, 1);
+        let (_bob, bob_dev) = person(&state, 2);
+        let project = project_of(&state, &alice, "Comms");
+
+        let r = create(
+            State(state.clone()),
+            bob_dev,
+            HeaderMap::new(),
+            Json(SkillBody {
+                name: Some("planted".into()),
+                origin_project_id: Some(project.clone()),
+                ..SkillBody::default()
+            }),
+        )
+        .await;
+        assert_eq!(status(r), StatusCode::NOT_FOUND);
+        assert!(
+            state.db.list_skills(Some(&project)).unwrap().is_empty(),
+            "nothing lands in another user's library"
+        );
+    }
 }
