@@ -7022,9 +7022,11 @@ fn seed_people_chats_base() -> Vec<Chat> {
             is_system: false,
             kind: ChatKind::Chat,
             participants: Vec::new(),
-            unread: false,
-            unread_count: 0,
-            mention_count: 0,
+            unread: true,
+            unread_count: 4,
+            // Two of those four name me directly; the `@here` in the same
+            // group does not count.
+            mention_count: 2,
             last_message_at: now_ms().saturating_sub(25 * 60_000),
             archived_at: None,
         },
@@ -7266,6 +7268,27 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
         "On it. @arbos pull the latest signup numbers into slide 4 while I read.",
         base + 330_000,
     );
+    // Two direct `@jacob` lines and one `@here`, so the fixture shows the
+    // unread-mention mark on the row, the count on the transcript's jump
+    // capsule, and — through the `@here` — that a collective lights neither.
+    let tagged_early = human_message(
+        GROUP_LAUNCH,
+        &samir,
+        "@jacob can you take the embargo list? I am out until Monday.",
+        base + 336_000,
+    );
+    let collective = human_message(
+        GROUP_LAUNCH,
+        &sara,
+        "Reminder @here: the run-through is at four.",
+        base + 342_000,
+    );
+    let tagged_late = human_message(
+        GROUP_LAUNCH,
+        &sam(),
+        "One more for you @jacob — the DMG link in the post is still the old one.",
+        base + 348_000,
+    );
     if std::env::var("ARBOS_FIXTURE_REPLY_DM").is_ok_and(|v| v == "1") {
         // Sam answers Samir's group line privately, here; I answer Sam's group ask.
         let mut theirs = human_message(DM_SAM, &sam(), "Works", base + 400_000);
@@ -7356,6 +7379,9 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
     }
     insert_message_via_core(&group, &deck);
     insert_message_via_core(&group, &ask);
+    insert_message_via_core(&group, &tagged_early);
+    insert_message_via_core(&group, &collective);
+    insert_message_via_core(&group, &tagged_late);
     // Scout's photo (Jacob, 2026-10-27, [feedback forward-attachments-mac-2026-10-27]): an
     // agent's picture-only message in a group right before its words — it must carry the
     // same disc and name as the bubble under it.
@@ -8816,6 +8842,9 @@ mod seed_parity_tests {
         ("01J9GROUPLAUNCH00000000000", &[
             "User Done user:gh_457 name=Some(\"Samir Haddad\") h=Some(\"samir\") asked=None turn=None wa=false [text] hidden=[] text=93 r=0 dt=0 ct=Some(0)",
             "User Done user:gh_456 name=Some(\"Sam Rivera\") h=Some(\"sam\") asked=None turn=None wa=false [text] hidden=[] text=71 r=0 dt=30000 ct=Some(0)",
+            "User Done user:gh_457 name=Some(\"Samir Haddad\") h=Some(\"samir\") asked=None turn=None wa=false [text] hidden=[] text=60 r=0 dt=36000 ct=Some(0)",
+            "User Done user:gh_458 name=Some(\"Sara Lind\") h=Some(\"sara\") asked=None turn=None wa=false [text] hidden=[] text=43 r=0 dt=42000 ct=Some(0)",
+            "User Done user:gh_456 name=Some(\"Sam Rivera\") h=Some(\"sam\") asked=None turn=None wa=false [text] hidden=[] text=72 r=0 dt=48000 ct=Some(0)",
             "Assistant Done agent:01J9ARBOS00000000000000000 name=Some(\"Arbos\") h=Some(\"arbos\") asked=Some(\"sam\") turn=None wa=false [attachment:Slide 4 · signups:Some(212000):Image] hidden=[] text=0 r=0 dt=58000 ct=Some(0)",
             "Assistant Done agent:01J9ARBOS00000000000000000 name=Some(\"Arbos\") h=Some(\"arbos\") asked=Some(\"sam\") turn=None wa=false [text] hidden=[] text=96 r=0 dt=60000 ct=Some(0)",
             "User Done user:gh_457 name=Some(\"Samir Haddad\") h=Some(\"samir\") asked=None turn=None wa=false [attachment:Slide 4 · signups:Some(212000):Image,attachment:Launch dashboard:Some(348000):Image,attachment:Launch day, the team:Some(1204000):Image,attachment:Signup funnel:Some(156000):Image,attachment:Press kit v3:Some(1840000):Pdf,attachment:Launch teaser:Some(6420000):Video,text] hidden=[] text=54 r=0 dt=80000 ct=Some(0)",
