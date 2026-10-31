@@ -887,6 +887,9 @@ mod tests {
         let msgs = body["messages"].as_array().unwrap();
         assert_eq!(body["has_more"], false);
         assert_eq!(body["chat"]["id"], chat);
+        // An untitled chat's export title is its roster, in roster order. Both members join in
+        // the same millisecond, so `members_of`'s tiebreak decides which handle leads; pinning
+        // it here is the point, because an export is a document a person keeps.
         assert_eq!(body["chat"]["title"], "@user3003, @user3004");
 
         // What the Matrix backfill would mirror for the same chat, in stream order.

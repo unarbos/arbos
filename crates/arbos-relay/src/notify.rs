@@ -2501,7 +2501,11 @@ mod chat_meta_tests {
         assert_eq!(m.kind, "group");
         assert_eq!(m.title.as_deref(), Some("Arbonites"));
         assert_eq!(m.image_key.as_deref(), Some("pic.png"));
-        // Untitled group: the *other* members' handles, so it differs per recipient.
+        // Untitled group: the *other* members' handles, so it differs per recipient. The handle
+        // order is pinned on purpose. All three join in the same millisecond, so `members_of`'s
+        // tiebreak is what decides it, and that orders people by `member` — user41 before
+        // user43. This is a string a person reads on a notification, so two devices rendering
+        // it differently would be a bug, not a detail.
         let u = group(&state, &[&alice, &bob, &carol], None);
         let for_bob = chat_meta(&state, &ChatRef::people(&u), &bob);
         let for_carol = chat_meta(&state, &ChatRef::people(&u), &carol);
