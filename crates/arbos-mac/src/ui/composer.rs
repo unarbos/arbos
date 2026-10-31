@@ -7770,4 +7770,42 @@ mod photo_editor_tests {
         let resumed = draft(&composer, vcx).expect("reopened");
         assert_eq!(resumed, kept);
     }
+
+    /// Caught in a Mac screenshot, not here: the tile's remove disc is a
+    /// deferred draw, so it painted over the open sheet and its hitbox — made
+    /// later than the backdrop's — took the click. Pressing where the disc is
+    /// must reach the sheet, not drop the picture out from under it
+    /// (`ui::modal::PRIORITY`).
+    #[gpui::test]
+    fn the_tiles_remove_disc_does_not_reach_through_the_open_sheet(cx: &mut TestAppContext) {
+        let (_rt, shell, composer, vcx) = mount(cx);
+        let (_dir, png, _doc) = fixtures();
+        composer.update(vcx, |c, cx| c.add_paths([png.clone()].into_iter(), cx));
+        settle(&shell, vcx);
+
+        let disc = vcx
+            .debug_bounds("composer-remove-attachment-0")
+            .expect("the remove disc");
+        // Control: with no sheet up, that same point does remove the picture.
+        open_on(&shell, "composer-staged-tile-0", vcx);
+        assert!(is_open(&composer, vcx), "the sheet is up");
+
+        vcx.simulate_click(centre(disc), Modifiers::default());
+        settle(&shell, vcx);
+        assert_eq!(
+            composer.read_with(vcx, |c, _| c.staged_paths()),
+            vec![png.clone()],
+            "the picture is still staged"
+        );
+
+        let cancel = vcx.debug_bounds("photo-editor-cancel").expect("Cancel");
+        vcx.simulate_click(centre(cancel), Modifiers::default());
+        settle(&shell, vcx);
+        vcx.simulate_click(centre(disc), Modifiers::default());
+        settle(&shell, vcx);
+        assert!(
+            composer.read_with(vcx, |c, _| c.staged_paths()).is_empty(),
+            "and with no sheet up the disc still works"
+        );
+    }
 }

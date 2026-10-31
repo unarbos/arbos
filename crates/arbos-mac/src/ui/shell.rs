@@ -9,9 +9,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    actions, div, prelude::*, px, Animation, AnimationExt, AnyElement, App, Bounds, Context, Div,
-    Entity, FocusHandle, Focusable, FontWeight, Pixels, Render, ScrollHandle, SharedString,
-    Stateful, Window,
+    actions, deferred, div, prelude::*, px, Animation, AnimationExt, AnyElement, App, Bounds,
+    Context, Div, Entity, FocusHandle, Focusable, FontWeight, Pixels, Render, ScrollHandle,
+    SharedString, Stateful, Window,
 };
 
 use crate::app::SignInMode;
@@ -5418,9 +5418,11 @@ impl Render for Shell {
         }
         // The composer's crop-and-draw sheet. It hangs off the root like every
         // other modal, because a backdrop inside a flex item lands off-screen
-        // (`ui::modal`), even though the composer owns it.
+        // (`ui::modal`), even though the composer owns it. Deferred, because the
+        // staged tile it opens from defers its own remove disc
+        // (`ui::modal::PRIORITY`).
         if let Some(editor) = self.composer.read(cx).photo_editor() {
-            root = root.child(editor);
+            root = root.child(deferred(editor).with_priority(modal::PRIORITY));
         }
         if viewer_open {
             // Focus moves into the viewer once per opening (← → page, Esc
