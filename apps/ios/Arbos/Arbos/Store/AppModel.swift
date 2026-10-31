@@ -124,6 +124,7 @@ private enum StoreKey {
     static let serversAvailable = "serversAvailable"
     static let me = "me"
     static let unread = "unread"
+    static let mentions = "mentions"
     static let lastChat = "lastChat"
 }
 
@@ -287,6 +288,11 @@ final class AppModel: ObservableObject {
     }
     /// Per-chat unread counts from `GET /me/unread` (empty on relays without it).
     @Published private(set) var unreadCounts: [String: Int] = [:]
+    /// Per-chat unread **mentions of me** from the same call, holding only the chats that
+    /// have one. Separate state from `unreadCounts` on purpose: a chat whose messages are all
+    /// read can still hold a mention nobody has scrolled to, and the row says so with the `@`
+    /// (Jacob, 2026-10-31). Direct `@handle` mentions only — `@here` is not one of these.
+    @Published private(set) var unreadMentions: [String: Int] = [:]
     /// A chat a notification asked for before its list had loaded.
     private var pendingOpen: (chatId: String, projectId: String)?
     private var notifiedPushIds: Set<String> = []
@@ -938,6 +944,12 @@ final class AppModel: ObservableObject {
     /// Newest value waiting for the throttle window to end.
     private var pendingReadPutValue: [Id: Int64] = [:]
     private var readPutTasks: [Id: Task<Void, Never>] = [:]
+    /// Mention rows this device has had on screen in the transcript's live band, per chat.
+    /// Kept as a set, not a high-water mark, because rows can be seen out of order and the
+    /// cursor may only advance over a run that starts at the oldest unread one.
+    private var mentionsSeen: [Id: Set<Id>] = [:]
+    /// The mention cursor last handed to the relay per chat — never sent twice.
+    private var mentionSeenSent: [Id: Id] = [:]
     /// Consecutive HTTP 403/404 endings per room key (cleared when the room reaches live).
     private var roomUnavailableFailures: [Id: Int] = [:]
     private var roomUnavailableAt: [Id: Date] = [:]
@@ -1309,6 +1321,7 @@ final class AppModel: ObservableObject {
         guard credentials != nil, !isFixture else { applyBadge(); return }
         if let r = (try? await api.unread()) ?? nil {
             unreadCounts = r.chats
+            unreadMentions = r.mentions
             saveUnreadCache()
         }
         applyBadge()
@@ -1396,6 +1409,129 @@ final class AppModel: ObservableObject {
 
     func applyBadge() {
         PushManager.shared.setBadge(unreadTotal)
+    }
+
+    #if DEBUG
+    /// Fixture rig only (`Fixture.swift`): the relay's per-chat unread picture, as
+    /// `GET /me/unread` would hand it over. The counts are `private(set)` so that nothing
+    /// outside this file invents them.
+    func seedFixtureUnread(counts: [String: Int], mentions: [String: Int]) {
+        unreadCounts = counts
+        unreadMentions = mentions
+    }
+    #endif
+
+    // MARK: Unread mentions (the `@` mark)
+
+    /// The `@` on a people row: unread mentions of me in this chat.
+    ///
+    /// Unlike `peopleUnreadCount` this does **not** zero for the chat on screen. Opening a
+    /// chat reads its messages; it does not read a mention further up that nobody has
+    /// scrolled to, and the open chat losing its `@` is exactly the state the in-chat jump
+    /// control exists to resolve.
+    func mentionCount(for chat: PeopleChat) -> Int {
+        isHiddenChat(chat.id) ? 0 : (unreadMentions[chat.id] ?? 0)
+    }
+
+    /// Unread mentions of me across an agent's chats — the `@` on an agent row.
+    func mentionCount(project projectId: Id) -> Int {
+        chats(of: projectId).reduce(0) { $0 + (isHiddenChat($1.id) ? 0 : (unreadMentions[$1.id] ?? 0)) }
+    }
+
+    /// Messages in this chat that mention me directly, oldest first: the rows the `@` counts
+    /// and the in-chat jump visits.
+    func mentionIds(chatId: Id) -> [Id] {
+        guard let handle = user?.login else { return [] }
+        return Self.directMentions(in: messages(of: chatId), handle: handle, me: myUserId)
+    }
+
+    /// The unread ones: the last `n` of them.
+    ///
+    /// The relay sends a count, not a list, and that is enough to name them. Its cursor is
+    /// monotone and it only ever accepts a clear that starts at the oldest unread mention, so
+    /// everything below the cursor is read and the unread ones are the tail of the list.
+    nonisolated static func unreadMentionIds(all: [Id], count: Int) -> [Id] {
+        count <= 0 ? [] : Array(all.suffix(count))
+    }
+
+    /// Rows of `messages` that mention `handle` directly, oldest first. My own lines and
+    /// system lines never count.
+    ///
+    /// **Direct only** (Jacob, 2026-10-31): `@here` does not put an `@` on a chat. The row's
+    /// own `mentions` field cannot answer this — the apps expand `@here` into member ids
+    /// before the row is written (`AppModel.mentions(in:)`), so a `@here` row names me there
+    /// exactly as a direct mention does. The text is what separates them, and a committed
+    /// mention chip always writes `@handle` into the text, so the token rule covers chips too.
+    /// A `@here` push therefore arrives with no `@` badge, which Jacob knows and accepts.
+    nonisolated static func directMentions(in messages: [Message], handle: String, me: String?) -> [Id] {
+        messages.compactMap { m in
+            guard m.role != .system, m.sender != me else { return nil }
+            return textMentions(handle: handle, in: m.plainText) ? m.id : nil
+        }
+    }
+
+    /// Does `text` name `handle` after an `@`, as a whole word? The apps' token rule (the
+    /// relay's `people::at_token`): the character before the `@` is not part of a word, and
+    /// the handle is not continued by one — so `@mira` does not match inside `@mira-k`.
+    nonisolated static func textMentions(handle: String, in text: String) -> Bool {
+        let name = handle.trimmingCharacters(in: CharacterSet(charactersIn: "@ ")).lowercased()
+        guard !name.isEmpty else { return false }
+        let needle = "@" + name
+        let lower = text.lowercased()
+        var from = lower.startIndex
+        while let hit = lower.range(of: needle, range: from..<lower.endIndex) {
+            let openEnd = hit.lowerBound == lower.startIndex
+                || !isMentionWordCharacter(lower[lower.index(before: hit.lowerBound)])
+            let closeEnd = hit.upperBound == lower.endIndex
+                || !isMentionWordCharacter(lower[hit.upperBound])
+            if openEnd, closeEnd { return true }
+            from = lower.index(after: hit.lowerBound)
+        }
+        return false
+    }
+
+    /// Part of a handle: letters, digits, `_` and `-` (so `@jo` is not `@jo-b`).
+    private nonisolated static func isMentionWordCharacter(_ c: Character) -> Bool {
+        c.isLetter || c.isNumber || c == "_" || c == "-"
+    }
+
+    /// A mention row has been on screen in the open chat's live band (D1, "seen" = actually
+    /// on screen). Clears what that proves and nothing more.
+    func noteMentionSeen(chatId: Id, messageId: Id) {
+        var seen = mentionsSeen[chatId] ?? []
+        guard seen.insert(messageId).inserted else { return }
+        mentionsSeen[chatId] = seen
+        advanceMentionCursor(chatId)
+    }
+
+    /// Move the chat's mention cursor over the run of seen mentions that starts at the oldest
+    /// unread one, and tell the relay where it now stands.
+    ///
+    /// A run, not a set: the cursor is one monotone value, so clearing a mention the reader
+    /// has seen while an older one is still unseen would clear that older one too. Seeing
+    /// them out of order (a jump straight to the newest) therefore clears nothing until the
+    /// gap before it closes — the `@` stays, which is the honest answer while an unread
+    /// mention is still up there.
+    private func advanceMentionCursor(_ chatId: Id) {
+        let count = unreadMentions[chatId] ?? 0
+        guard count > 0 else { return }
+        let unread = Self.unreadMentionIds(all: mentionIds(chatId: chatId), count: count)
+        let seen = mentionsSeen[chatId] ?? []
+        var cursor: Id?
+        var cleared = 0
+        for id in unread {
+            guard seen.contains(id) else { break }
+            cursor = id
+            cleared += 1
+        }
+        guard let cursor, cleared > 0 else { return }
+        let left = count - cleared
+        if left > 0 { unreadMentions[chatId] = left } else { unreadMentions[chatId] = nil }
+        saveUnreadCache()
+        guard !isFixture, mentionSeenSent[chatId] != cursor else { return }
+        mentionSeenSent[chatId] = cursor
+        let api = self.api
+        Task { try? await api.markMentionsRead(chatId: chatId, messageId: cursor) }
     }
 
     // MARK: Sign in with GitHub (self-serve relay)
@@ -1783,6 +1919,8 @@ final class AppModel: ObservableObject {
         peopleChats = []
         peopleUnread = []
         unreadCounts = [:]
+        unreadMentions = [:]
+        mentionSeenSent = [:]
         stopMatrix()
         servers = []
         serversAvailable = false
@@ -1797,6 +1935,7 @@ final class AppModel: ObservableObject {
         lastReadPutValue = [:]
         lastReadPutAt = [:]
         pendingReadPutValue = [:]
+        mentionsSeen = [:]
         roomUnavailableFailures = [:]
         roomUnavailableAt = [:]
         roomCreatedAt = [:]
@@ -2010,6 +2149,9 @@ final class AppModel: ObservableObject {
         if let data = store.get(StoreKey.unread), let counts = try? JSONDecoder().decode([String: Int].self, from: data) {
             unreadCounts = counts
         }
+        if let data = store.get(StoreKey.mentions), let counts = try? JSONDecoder().decode([String: Int].self, from: data) {
+            unreadMentions = counts
+        }
         // One copy of each agent's avatar everywhere, before the first frame: the record and
         // the roster copies came back from two caches written at different times; the
         // newest wins and every picture URL is rebuilt on the public versioned route (a
@@ -2104,8 +2246,9 @@ final class AppModel: ObservableObject {
     }
 
     private func saveUnreadCache() {
-        guard let store, let data = try? JSONEncoder().encode(unreadCounts) else { return }
-        store.put(StoreKey.unread, data)
+        guard let store else { return }
+        if let data = try? JSONEncoder().encode(unreadCounts) { store.put(StoreKey.unread, data) }
+        if let data = try? JSONEncoder().encode(unreadMentions) { store.put(StoreKey.mentions, data) }
     }
 
     /// A room's doc or cursor moved: save soon (coalesced per 1.5 s).

@@ -95,6 +95,10 @@ enum DebugHooks {
     /// `ARBOS_FIXTURE_LINKS=1`: four links from unconst in the fixture DM, for the Links tab's
     /// tiles ([feedback link-icons-ios-tile-2026-10-27]).
     static var fixtureLinks: Bool { value("ARBOS_FIXTURE_LINKS") == "1" }
+    /// `ARBOS_FIXTURE_MENTIONS=1` (unread-mention rig, 2026-10-31): "Launch week" holds two
+    /// old lines that name me by handle, and the relay's unread picture says both are still
+    /// unread — the home row's `@` beside its count, and the `@` jump control in the chat.
+    static var fixtureMentions: Bool { value("ARBOS_FIXTURE_MENTIONS") == "1" }
     /// Presence-row rig: `1` (the chat's other person) or comma-separated handles typing.
     static var fixtureTyping: String? { value("ARBOS_FIXTURE_TYPING").flatMap { $0.isEmpty || $0 == "0" ? nil : $0 } }
     /// Join a call seen via presence automatically (two-simulator relay tests).
