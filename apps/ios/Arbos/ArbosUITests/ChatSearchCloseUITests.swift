@@ -109,6 +109,34 @@ final class ChatSearchCloseUITests: XCTestCase {
         XCTAssertTrue(hit.isHittable, "…and visible")
     }
 
+    /// A keyword WITH hits draws them. This is the iOS 27 regression
+    /// ([feedback iphone-search-blank-ios27-2026-10-31]): the filter ran — the newest
+    /// unfiltered row went and no "No matches" line appeared — but the transcript was blank,
+    /// no row existed under any label or identifier at 1, 5 or 15 s, and the scroll view
+    /// claimed two pages of content at 100 % while holding nothing. The lazy stack had kept
+    /// the space it reserved for the rows the filter removed and built none of the ones that
+    /// stayed.
+    ///
+    /// Before the fix this case fails on **iOS 27.0 only**. The same binary passes it on iOS
+    /// 26.5, so an older simulator cannot catch it; the gate Mac's simulator is 27.
+    func testAKeywordWithHitsDrawsThem() {
+        let app = openLaunchWeekSearch()
+        let field = app.textFields["chat-search-field"]
+        field.tap()
+        field.typeText("embargo")
+        // Label OR identifier, so a row that is built but unlabelled still counts as drawn.
+        let hit = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@ OR identifier CONTAINS %@", "embargo note", "embargo note"))
+            .firstMatch
+        XCTAssertTrue(hit.waitForExistence(timeout: settle), "the filtered transcript holds the hit")
+        shot(app, "9-filtered-transcript-draws-the-hit")
+        // Existence alone would pass on a row parked below the viewport in reserved space;
+        // the symptom is that nothing is on screen, so assert it is.
+        XCTAssertTrue(hit.isHittable, "…and the hit is on screen, not parked outside the viewport")
+        XCTAssertFalse(app.descendants(matching: .any)["chat-search-no-matches"].exists,
+                       "a keyword with hits never says No matches")
+    }
+
     /// A keyword with no hit is never a blank transcript.
     func testNoMatchesIsSaidNotBlank() {
         let app = openLaunchWeekSearch()

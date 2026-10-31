@@ -263,6 +263,32 @@ struct ChatSession: View {
         showSearch && !searchText.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
+    /// The transcript's lazy stack is keyed by the keyword while one is set, so a filter that
+    /// replaces the whole row set gets a **new** stack rather than the one that was holding
+    /// the other 437 rows.
+    ///
+    /// Why it has to be the identity. A keyword swaps the row set for its hits in one step.
+    /// iOS 27 does not re-measure the rows that stay: it keeps the space it had reserved for
+    /// the rows that left, reports a content height built from it — 608 pt of content for a
+    /// single 98 pt row — and builds none of the survivors. The transcript is blank while the
+    /// scroll view still reports two pages at 100 %, with no row in the accessibility tree,
+    /// and it stays that way, because nothing built is nothing measured
+    /// ([feedback iphone-search-blank-ios27-2026-10-31]). iOS 26.5 re-measures by itself from
+    /// the same binary.
+    ///
+    /// Scrolling does not cure it, and that was measured rather than assumed: an arm that
+    /// scrolled to the surviving row by id on every filter change — which should force the
+    /// stack to resolve and build that row — left the transcript just as blank, 3 runs out of
+    /// 3. So the stale state is the stack's own per-child bookkeeping, not the scroll offset,
+    /// and the only thing that clears it is a stack that has none.
+    ///
+    /// The cost is bounded: unfiltered the key never changes, so the transcript's hot path
+    /// (streaming, window growth, scrolling) still never rebuilds, and a rebuilt filtered
+    /// stack is lazy, so it builds the few rows at the viewport and not the window.
+    private var transcriptStackIdentity: String {
+        searchHitsActive ? "filtered:\(searchText.trimmingCharacters(in: .whitespaces))" : "all"
+    }
+
     static func shownStamp(_ rowsVersion: Int, _ windowCount: Int, _ windowSkipEnd: Int, _ query: String, _ searching: Bool) -> Int {
         var h = Hasher()
         h.combine(rowsVersion); h.combine(windowCount); h.combine(windowSkipEnd)
@@ -2075,6 +2101,9 @@ struct ChatSession: View {
                 )
                 // Fill the short-thread frame so taps on empty chrome hit this view.
                 .contentShape(Rectangle())
+                // A keyword replaces the whole row set, and iOS 27 keeps the space it reserved
+                // for the rows that left unless the stack itself is new (`transcriptStackIdentity`).
+                .id(transcriptStackIdentity)
             }
             .defaultScrollAnchor(.bottom)
             .modifier(ChatBarIndicatorMargin(bar: chatBarHeight))
