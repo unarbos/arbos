@@ -1,0 +1,109 @@
+name: Swift iOS 27 (advisory)
+
+# The Swift core check's build and `fastlane test`, on GitHub's hosted `xcode-27` image (a public
+# preview): the toolchain and simulator testers' builds meet, which the macos-15 gate has neither of
+# (Xcode 26.3, iOS 26.2). Advisory only. It is its own workflow file so nothing in it can feed the
+# Swift core check's jobs or its verdict: a red, cancelled or queued run here says nothing about
+# that check. The EC2 Mac stays the real gate.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/arbos-core/**"
+      - "crates/arbos-client/**"
+      - "crates/arbos-ffi/**"
+      - "scripts/build-xcframework.sh"
+      - "packages/ArbosFFI/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "apps/ios/Arbos/**"
+      - ".github/workflows/swift-ios27-advisory.yml"
+  pull_request:
+    paths:
+      - "crates/arbos-core/**"
+      - "crates/arbos-client/**"
+      - "crates/arbos-ffi/**"
+      - "scripts/build-xcframework.sh"
+      - "packages/ArbosFFI/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "apps/ios/Arbos/**"
+      - ".github/workflows/swift-ios27-advisory.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: swift-ios27-advisory-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The job id is `check`, as in swift-core-check.yml, because rust-cache keys on the job id: that is
+  # what lets this job find the gate's Rust cache.
+  check:
+    name: xcode-27 build + fastlane test (advisory)
+    runs-on: xcode-27
+    timeout-minutes: 80
+    env:
+      APP_DIR: apps/ios/Arbos
+    steps:
+      - uses: actions/checkout@v4
+      # Read-only: the gate's caches are restored, never saved. A misbehaving preview image must not
+      # write a key the gate restores.
+      - name: Swift package cache (restore only)
+        uses: actions/cache/restore@v4
+        with:
+          path: apps/ios/Arbos/build/spm
+          key: spm-${{ runner.os }}-${{ hashFiles('apps/ios/Arbos/Arbos.xcodeproj/project.pbxproj', 'apps/ios/Arbos/Arbos.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved', 'packages/ArbosFFI/Package.swift') }}
+          restore-keys: spm-${{ runner.os }}-
+      - name: Select Xcode 27.0
+        run: |
+          set -euo pipefail
+          # Pinned to the Xcode the build Mac archives TestFlight builds with (27.0, 27A266a); the
+          # image's default is 27.1. When the build Mac moves to another Xcode, this pin and the build
+          # number below have to move with it, or this lane stops testing what testers install.
+          sudo xcode-select -s /Applications/Xcode_27.0.app
+          xcodebuild -version
+          xcodebuild -version | grep -q 'Build version 27A266a' || {
+            echo "::error title=Xcode 27.0 is not 27A266a::the image's Xcode_27.0.app changed; check it against the build Mac"
+            exit 1
+          }
+          xcrun simctl list devices available | grep -E '^-- iOS|iPhone 17 \(' || true
+      - name: Rust toolchain
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: swift-core-check
+          save-if: false
+      - name: Build ArbosFFI xcframework
+        run: |
+          set -euo pipefail
+          ./scripts/build-xcframework.sh
+          test -d packages/ArbosFFI/ArbosFFIRust.xcframework
+          test -f packages/ArbosFFI/Sources/ArbosFFI/ArbosFFI.swift
+      - name: fastlane test
+        env:
+          ARBOS_SPM_DIR: ${{ github.workspace }}/apps/ios/Arbos/build/spm
+        run: |
+          set -euo pipefail
+          cd "$APP_DIR"
+          fastlane test
+      - name: Keep the xcodebuild logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: swift-ios27-advisory-logs-${{ github.sha }}
+          path: apps/ios/Arbos/build/xcodebuild-*.log
+          if-no-files-found: ignore
+          retention-days: 14
