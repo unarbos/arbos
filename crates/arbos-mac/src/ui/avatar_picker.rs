@@ -458,11 +458,14 @@ pub(crate) fn hint_line(
         .min_h(px(slot.reserved))
         .px(px(FIELD_INSET))
         .pb(px(slot.gap))
-        // The line keeps its own height inside the band, at the end the sheet anchors it to;
-        // spare room goes to the other end, so the line stays where it has always been.
+        // A flex column — `div()` is a block, which would ignore the alignment below — so the
+        // band's spare room goes on the vertical: the line keeps its own rows at the end the
+        // sheet anchors it to, and so stays where it has always been.
+        .flex()
+        .flex_col()
         .map(|el| match slot.anchor {
-            HintAnchor::Footer => el.items_end(),
-            HintAnchor::Body => el.items_start(),
+            HintAnchor::Footer => el.justify_end(),
+            HintAnchor::Body => el.justify_start(),
         })
         .child(
             div()
@@ -1646,6 +1649,27 @@ mod me_picker_tests {
                 "{tab}: the line is {clear} over the hairline, not {HINT_GAP}"
             );
         }
+
+        // A line of one row hangs off the footer, where the old absolute slot put it: the band
+        // is two rows deep so the sheet does not jump between tabs, and its spare row is over
+        // the line, not under it (`HintAnchor::Footer`). Without the band's `flex()` the
+        // alignment is dropped — `div()` is a block — and the row drifts up by the spare row.
+        click(vcx, &shell, "avatar-tab-upload");
+        shell.update(vcx, |sh, _| {
+            if let Some(pk) = sh.avatar_picker.as_mut() {
+                pk.upload = Some(PathBuf::from("/tmp/a.png"));
+            }
+        });
+        settle(&shell, vcx);
+        let (height, rows, clear) = measure(vcx, "avatar-upload-hint-line");
+        assert!(
+            (height - want).abs() < 1.5 && (rows - HINT_LINE_H).abs() < 1.5,
+            "one row of line leaves the sheet at {want}: measured {height} for {rows} of line"
+        );
+        assert!(
+            (clear - HINT_GAP).abs() < 1.5,
+            "one row of line sits {HINT_GAP} over the hairline, not {clear}"
+        );
 
         // A chosen file's name is the same line, and a name too long for the band is what the
         // next format or translation would be: the card grows by the rows the band cannot
