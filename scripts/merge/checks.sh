@@ -109,12 +109,13 @@ commit_files() {
 # loud, for the reason #2467 documents.
 #
 # CONSTRAINT — what a run-level conclusion is allowed to mean, and why it is not this file's to
-# guarantee. This reads the RUN's conclusion rather than a named check row. That is only sound
-# because the gate workflow ends in a job that fails closed: swift-core-check.yml's `verdict` job
-# ("Swift verdict", added in #2448) is `if: always()` and exits non-zero unless a check actually
-# passed on this head. GitHub concludes a run `success` when every job is success-or-skipped, so
-# without such a job a run whose check was skipped concludes `success` — which is precisely the bug
-# this file was written to end.
+# guarantee. This reads the RUN's conclusion rather than a named check row. GitHub concludes a run
+# `success` when every one of its jobs is success-or-skipped, so that equals a real verdict only
+# while no job in the workflow can succeed without testing. Today that holds because the workflow
+# has exactly one job, `check`. Once #2448 lands it holds for a different reason: the workflow ends
+# in a job that fails closed — `verdict` ("Swift verdict") is `if: always()` and exits non-zero
+# unless a check actually passed on this head. Without such a job a run whose check was skipped
+# concludes `success`, which is precisely the bug this file was written to end.
 #
 # So the dependency lives in a YAML file nobody reviewing this one would think to open. If that job
 # gains `continue-on-error: true`, or the workflow gains any other job that always succeeds, this
