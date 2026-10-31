@@ -49,14 +49,29 @@ final class UnreadMentionCursorTests: XCTestCase {
         XCTAssertEqual(AppModel.directMentions(in: rows, handle: "jacob", me: me), [])
     }
 
-    /// The relay's `people::at_token` rule: a handle is not continued by a word character,
-    /// so `@jo` is not `@jo-b`.
+    /// A port of the relay's `people::at_token`, and it has to stay one: the two sides must
+    /// name the same rows or the client marks the wrong id and the `@` sticks. These cases
+    /// are the character classes, not a sample of nice inputs.
     func testHandleIsAWholeToken() {
         XCTAssertFalse(AppModel.textMentions(handle: "jo", in: "ping @jo-b about it"))
         XCTAssertTrue(AppModel.textMentions(handle: "jo-b", in: "ping @jo-b about it"))
         XCTAssertFalse(AppModel.textMentions(handle: "jacob", in: "mail jacob@example.com"))
         XCTAssertTrue(AppModel.textMentions(handle: "jacob", in: "(@jacob) take a look"))
         XCTAssertTrue(AppModel.textMentions(handle: "Jacob", in: "@jacob"))
+        XCTAssertFalse(AppModel.textMentions(handle: "jo", in: "@jo_b shipped it"))
+    }
+
+    /// The two classes that differ from "word characters", and the two the first draft of
+    /// this client got wrong. `.` continues the token on the relay, so a handle followed by
+    /// a full stop is not a direct mention there; `@` before the `@` is not an opening.
+    func testTokenBoundariesMatchTheRelay() {
+        XCTAssertFalse(AppModel.textMentions(handle: "jacob", in: "thanks @jacob."),
+                       "a trailing `.` continues the token in people::at_token")
+        XCTAssertFalse(AppModel.textMentions(handle: "jacob", in: "see @jacob.smith"))
+        XCTAssertFalse(AppModel.textMentions(handle: "jacob", in: "@@jacob"),
+                       "`@` before the `@` is not an opening boundary in people::at_token")
+        XCTAssertTrue(AppModel.textMentions(handle: "jacob", in: "cc_@jacob please"),
+                      "`_` before the `@` is an opening boundary, unlike a word-character rule")
     }
 
     func testMentionsAreOldestFirst() {

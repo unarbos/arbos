@@ -1475,9 +1475,19 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Does `text` name `handle` after an `@`, as a whole word? The apps' token rule (the
-    /// relay's `people::at_token`): the character before the `@` is not part of a word, and
-    /// the handle is not continued by one — so `@mira` does not match inside `@mira-k`.
+    /// Does `text` name `handle` after an `@`, as a whole token?
+    ///
+    /// A character-for-character port of the relay's `people::at_token`, which is the rule
+    /// that decides the count this client has to agree with. The two sides must name the
+    /// *same* rows: the mention-read route takes only the oldest unread mention, so a client
+    /// whose idea of the list differs by one row names the wrong id, gets a 204 that did
+    /// nothing, and leaves the `@` stuck. Matching it by eye is not enough — keep the two
+    /// character classes below identical to the Rust.
+    ///
+    /// Before the `@`: anything that is not alphanumeric and not another `@` (so `@@jacob`
+    /// is not a mention). After the handle: anything that is not alphanumeric, `_`, `-` or
+    /// `.` (so `@jo` is not `@jo-b`, and a trailing `.` ends the token rather than being
+    /// swallowed).
     nonisolated static func textMentions(handle: String, in text: String) -> Bool {
         let name = handle.trimmingCharacters(in: CharacterSet(charactersIn: "@ ")).lowercased()
         guard !name.isEmpty else { return false }
@@ -1485,19 +1495,14 @@ final class AppModel: ObservableObject {
         let lower = text.lowercased()
         var from = lower.startIndex
         while let hit = lower.range(of: needle, range: from..<lower.endIndex) {
-            let openEnd = hit.lowerBound == lower.startIndex
-                || !isMentionWordCharacter(lower[lower.index(before: hit.lowerBound)])
-            let closeEnd = hit.upperBound == lower.endIndex
-                || !isMentionWordCharacter(lower[hit.upperBound])
-            if openEnd, closeEnd { return true }
+            let before = hit.lowerBound == lower.startIndex ? nil : lower[lower.index(before: hit.lowerBound)]
+            let after = hit.upperBound == lower.endIndex ? nil : lower[hit.upperBound]
+            let opens = before.map { !$0.isLetter && !$0.isNumber && $0 != "@" } ?? true
+            let closes = after.map { !($0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" || $0 == ".") } ?? true
+            if opens, closes { return true }
             from = lower.index(after: hit.lowerBound)
         }
         return false
-    }
-
-    /// Part of a handle: letters, digits, `_` and `-` (so `@jo` is not `@jo-b`).
-    private nonisolated static func isMentionWordCharacter(_ c: Character) -> Bool {
-        c.isLetter || c.isNumber || c == "_" || c == "-"
     }
 
     /// A mention row has been on screen in the open chat's live band (D1, "seen" = actually
