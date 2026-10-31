@@ -535,6 +535,14 @@ pub struct AccountUserDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[typeshare(serialized_as = "Option<Option<I54>>")]
     pub last_login_at: Option<Option<i64>>,
+    /// Where `name` came from: `"user"` (the person set it through `PATCH /me`) or
+    /// `"github"` (seeded from the GitHub profile, including the `invited` placeholder
+    /// someone else created). A client that must decide whether to ask the person to
+    /// name themselves reads this, not `name`: an invited account arrives with a name
+    /// already filled in, so a non-empty `name` does not mean the person chose it.
+    /// `"user"` with a null `name` is a deliberate clear — do not ask again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_source: Option<String>,
 }
 
 /// Credits block on `GET /me`.
