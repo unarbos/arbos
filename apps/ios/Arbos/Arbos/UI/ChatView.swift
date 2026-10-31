@@ -173,6 +173,45 @@ struct ChatSession: View {
     /// Newest rows dropped below the viewport while reading history; 0 when the
     /// window is the tail of the transcript.
     @State private var windowSkipEnd = 0
+    /// The animated hop a reveal makes to a row the stack has already built.
+    static let revealHop: Double = 0.35
+    /// How long `settleOnRevealed` waits between its corrections, and how many it makes.
+    /// Three over 0.45 s: long enough for the lazy rows around the landing to be measured,
+    /// short enough to be over before the reader could have started scrolling themselves.
+    ///
+    /// The count was four and was cut on measurement. Across all twenty-six laddered
+    /// reveals recorded for #2404 — several runtimes, including two ten-iteration
+    /// repetitions that varied nothing but timing — the first correction moved the scroll
+    /// in eighteen, the second in three, and the third in none. The fourth never moved it
+    /// in the ten reveals where it could be measured, which is what it was cut on. Read
+    /// the trace with care when checking this: the `settle` line is printed *before* its
+    /// own `scrollTo`, so the offset logged at `step=N` is what correction N achieved, not
+    /// N+1.
+    ///
+    /// The rule the count follows: **keep the deepest pass ever measured to do work, plus
+    /// one of margin.** The deepest real correction is the second, so the count is three.
+    /// The margin is there because the costs are not symmetrical — a pass that never fires
+    /// costs one no-op `scrollTo` against a layout that already agrees, while one pass too
+    /// few costs exactly the bug this corrects. Every one of the twenty-six was a simulator
+    /// on one Mac; real devices, slower main threads and deeper transcripts are unmeasured.
+    ///
+    /// The second pass is not a rarity kept out of caution. It did nothing in the first
+    /// sixteen reveals but one, and then moved the landing in two of the ten taken after
+    /// the count was cut — 7131 to 7368 and 7131 to 7591, both onto a correct landing.
+    ///
+    /// Cut this to two when measurements on hardware justify it, rather than re-deriving
+    /// the argument.
+    static let revealSettleGap: Double = 0.15
+    static let revealSettleSteps = 3
+    /// How long after the last correction `traceAtRest` reports where the transcript ended
+    /// up. Three seconds, to land beside the moment the UI test reads the resting frame
+    /// rather than somewhere before it; the test sleeps 3 s after the bar closes.
+    static let revealAtRestAfter: Double = 3.0
+    /// How long after a result tap the reveal trace records scroll samples. It has to outlast
+    /// `revealAtRestAfter`, or the at-rest line reports a stillness that is only the trace
+    /// having stopped watching. Nothing scrolls between the correction and the read, so in
+    /// practice this costs no lines at all — which is the measurement.
+    static let revealTraceWindow: Double = 5.0
     @State private var showModelPicker = false
     /// Rig: the media viewer opened by `ARBOS_SHOW=media…` (media-viewer-2026-10-23).
     @State private var rigViewer: MediaViewerState?
@@ -204,6 +243,14 @@ struct ChatSession: View {
     @State private var firstRowMarked = false
     /// When the history window last grew (the near-top reporter fires per scroll sample).
     @State private var lastGrowAt = Date.distantPast
+    /// Rig (#2404): while this is in the future the trace reports every scroll offset sample.
+    /// Outside it they are left alone — a chat scroll samples per frame, and a `print` on each
+    /// one changes the thing being measured.
+    @State private var traceOffsetsUntil = Date.distantPast
+    /// Rig (#2404): the last scroll offset seen, so a reveal can report where it started from.
+    /// A reference box and not `@State`: this is written on every scroll sample, and a state
+    /// write per sample would invalidate the view on every frame of every scroll.
+    @State private var scrollProbe = ScrollProbe()
     /// Rows that arrived while the reader was away from the end — drives the
     /// "New messages" pill. Cleared when they re-pin or jump to the latest.
     @State private var newBelowCount = 0
@@ -289,6 +336,17 @@ struct ChatSession: View {
         searchHitsActive ? "filtered:\(searchText.trimmingCharacters(in: .whitespaces))" : "all"
     }
 
+    /// `transcriptStackIdentity` with the keyword taken out, for the reveal trace.
+    ///
+    /// The identity has to carry the keyword — that is the whole point of it, a new stack per
+    /// filter. A log line must not. What someone types into a chat search is their content:
+    /// a name, a diagnosis, a fragment of a secret they are looking for. The trace only ever
+    /// needs to know **which of the two stacks** a reveal is scrolling, so the keyword never
+    /// reaches the line and there is nothing to redact later.
+    private var stackIdentityForTrace: String {
+        searchHitsActive ? "filtered" : "all"
+    }
+
     static func shownStamp(_ rowsVersion: Int, _ windowCount: Int, _ windowSkipEnd: Int, _ query: String, _ searching: Bool) -> Int {
         var h = Hasher()
         h.combine(rowsVersion); h.combine(windowCount); h.combine(windowSkipEnd)
@@ -303,6 +361,24 @@ struct ChatSession: View {
         return kept.count > windowCount ? Array(kept.suffix(windowCount)) : Array(kept)
     }
 
+    /// Rig (`ARBOS_TRACE_REVEAL=1`, #2404): one line per thing that moves the transcript.
+    /// Compiled out of Release; `detail` is an autoclosure, so a run without the flag pays
+    /// nothing for the list walks some of these lines do.
+    private func revealTrace(_ what: String, _ detail: @autoclosure () -> String = "") {
+        #if DEBUG
+        guard DebugHooks.traceReveal else { return }
+        print("[arbos reveal] t=\(LaunchClock.msSinceLaunch())ms \(what) \(detail())")
+        #endif
+    }
+
+    /// A scroll offset for the trace. `NearTopReporter` reports `.infinity` for a content that
+    /// is not taller than its container, which is what the first layout of a chat looks like,
+    /// and `Int(_: CGFloat)` traps on a value that is infinite or NaN. Formatting the number
+    /// was enough to kill the app on every chat open and cost a heavy slot's run.
+    private static func offsetText(_ v: CGFloat) -> String {
+        v.isFinite ? String(Int(v)) : "inf"
+    }
+
     /// Nearing the top: bring the next older slice into the view tree. The scroll view is
     /// anchored at the bottom, so the rows on screen stay put while the content grows above.
     /// Never inside the caller's animation: an animated change to the row list makes
@@ -313,6 +389,7 @@ struct ChatSession: View {
         guard windowCount < available else { return }
         let step = min(Self.windowStep, available - windowCount)
         let firstShown = windowedRows.first?.id
+        revealTrace("grow", "step=\(step) window=\(windowCount)->\(windowCount + step) skipEnd=\(windowSkipEnd) firstShown=\(firstShown ?? "-")")
         var t = Transaction()
         t.disablesAnimations = true
         withTransaction(t) {
@@ -343,11 +420,58 @@ struct ChatSession: View {
     }
 
     /// Make sure the row for `messageId` is in the window (quote taps into older history).
-    /// Returns true when the window had to grow (the caller scrolls after the next layout).
+    /// Returns true when the window had to move (the caller scrolls after the next layout).
+    ///
+    /// The window SLIDES onto the target; it does not stretch back to it from the tail
+    /// (#2404). Stretching is what a reveal into older history used to do, and it put every
+    /// row between the tail and the target into the stack at once — 107 of them in the
+    /// measured case — so the scroll that followed had 172 rows of estimated height between
+    /// it and where it was going, and came to rest 18 to 35 rows away. A slice that ends
+    /// just after the target is one page instead, whatever the distance, and the scroll that
+    /// follows it starts from the bottom anchor a dozen rows away.
+    ///
+    /// Sliding bounds the error; it does not remove it, and the measured landing after this
+    /// change alone was still 13 rows out. `settleOnRevealed` is the other half.
     private func includeInWindow(messageId: Id) -> Bool {
         let all = visibleRows
         guard let ix = all.firstIndex(where: { $0.messageId == messageId }) else { return false }
+        if DebugHooks.revealPreFix { return stretchWindowToTail(all: all, ix: ix, messageId: messageId) }
+        // Nothing to do when the stack has already built the row: `scrollTo` can reach it and
+        // the window is the reader's, not this function's, to change.
+        guard !windowedRows.contains(where: { $0.messageId == messageId }) else {
+            revealTrace("include-in-window", "id=\(messageId) already shown; window untouched")
+            return false
+        }
+        // Rows kept below the target. Half a step is a comfortable margin either way: enough
+        // that the end of the window is well clear of the viewport, so `AwayFromBottomReporter`
+        // does not read the landing as "back at the end" and settle the reader to the real
+        // tail; few enough that the scroll from the bottom anchor up to the target crosses
+        // rows the stack has just built.
+        let below = Self.windowStep / 2
+        let skip = max(0, all.count - ix - 1 - below)
+        let count = min(all.count - skip, Self.windowInitial)
+        revealTrace("include-in-window",
+                    "id=\(messageId) ix=\(ix)/\(all.count) fromTail=\(all.count - ix) "
+                    + "window=\(windowCount)->\(count) skipEnd=\(windowSkipEnd)->\(skip)")
+        guard count != windowCount || skip != windowSkipEnd else { return false }
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            windowSkipEnd = skip
+            windowCount = count
+        }
+        return true
+    }
+
+    /// Rig (`ARBOS_REVEAL_PRE_FIX=1`, #2404): the reveal windowing as it was before the fix —
+    /// every row between the tail and the target joins the stack at once. Kept so one build
+    /// can measure the symptom beside the fix; it goes away with the rig.
+    private func stretchWindowToTail(all: [Row], ix: Int, messageId: Id) -> Bool {
         let needed = all.count - ix + Self.windowStep / 2
+        revealTrace("include-in-window",
+                    "stretch id=\(messageId) ix=\(ix)/\(all.count) fromTail=\(all.count - ix) needed=\(needed) "
+                    + "window=\(windowCount) skipEnd=\(windowSkipEnd) "
+                    + "grows=\(needed > windowCount || windowSkipEnd > 0)")
         guard needed > windowCount || windowSkipEnd > 0 else { return false }
         var t = Transaction()
         t.disablesAnimations = true
@@ -449,6 +573,15 @@ struct ChatSession: View {
     /// (the quote-tap path, `revealQuoted`), once the unfiltered rows have laid out.
     private func openSearchResult(_ messageId: Id) {
         guard ChatSearchClose.resultTapReveals(open: showSearch, query: searchText) else { return }
+        // Where the result list was standing when the reader tapped. A reveal animates from
+        // wherever the scroll view already is, so this is the one number that says which
+        // reveal was asked for, and it is not recoverable afterwards.
+        revealTrace("result-tap", "id=\(messageId) hits=\(visibleRows.count) window=\(windowCount) "
+                    + "skipEnd=\(windowSkipEnd) offset=\(Self.offsetText(scrollProbe.last))")
+        // The reveal lands inside a second. The window is far longer than that because the
+        // interesting part is the silence after it: whether anything moves the transcript
+        // between the correction and the moment the test reads the resting frame.
+        traceOffsetsUntil = Date().addingTimeInterval(Self.revealTraceWindow)
         searchResultTapped = messageId
         closeSearch(scrollToTail: false)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { revealQuoted(messageId) }
@@ -569,6 +702,9 @@ struct ChatSession: View {
     /// Drives the connection pill's dot pulse while it is reconnecting / syncing.
     /// The original a quote tap scrolled to; tinted until the fade timer clears it.
     @State private var highlightedMessage: Id?
+    /// Rig (#2404): the last message a reveal was asked for, kept after the highlight fades
+    /// so a UI test can tell a mis-aimed tap from a bad landing. See `revealedMessageProbe`.
+    @State private var lastRevealedMessage: Id?
     /// After a quote tap: the reply we came from. The ↓ disc returns here once
     /// (not to the latest message); cleared on use, send, or a real jump-to-latest.
     @State private var jumpBackTo: Id?
@@ -1851,9 +1987,35 @@ struct ChatSession: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Search in chat")
             .accessibilityIdentifier("chat-search-button")
+            // Rig (#2404): which reveal this build is running, where a UI test can read it.
+            // A launch variable that does not arrive makes the A/B arm silently become the
+            // control arm, and a run then reports the fix working against no baseline at
+            // all. The app says which arm it is in, and the test asserts it before it taps.
+            .accessibilityValue(DebugHooks.revealPreFix ? "reveal-pre-fix" : "reveal-fixed")
             .background { searchKeyboardShortcuts }
+            .background { revealedMessageProbe }
         }
         .controlBar()
+    }
+
+    /// Rig (#2404): which message the app was last asked to reveal, where a UI test can read
+    /// it after the highlight has faded.
+    ///
+    /// A result tap is a touch at a coordinate, and a coordinate can land on a row the test
+    /// did not mean. When that happens the app reveals the row that was actually tapped —
+    /// correctly — and a test that asserts about the row it *aimed* at reports a perfectly
+    /// good landing as a failure tens of rows short. That is not hypothetical: it is what
+    /// both iOS 26 failures in this lane turned out to be.
+    ///
+    /// So the app names the row it revealed and the test checks that against the row it
+    /// meant to tap. A mis-tap then fails as a mis-tap instead of being blamed on the fix.
+    @ViewBuilder private var revealedMessageProbe: some View {
+        if DebugHooks.traceReveal {
+            Color.clear
+                .frame(width: 0, height: 0)
+                .accessibilityIdentifier("reveal-probe")
+                .accessibilityValue(lastRevealedMessage.map(String.init(describing:)) ?? "none")
+        }
     }
 
     private var composerSideInset: CGFloat {
@@ -2140,7 +2302,10 @@ struct ChatSession: View {
             })
             // Nearing the top: the next older slice of rows joins the view tree; a channel
             // also asks the server for one older page.
-            .modifier(NearTopReporter(enabled: true) {
+            .modifier(NearTopReporter(enabled: true, onNear: { offset in
+                revealTrace("near-top", "offset=\(Self.offsetText(offset)) window=\(windowCount) skipEnd=\(windowSkipEnd) "
+                            + "sinceAppear=\(Int(Date().timeIntervalSince(appearedAt) * 1000))ms "
+                            + "sinceGrow=\(Int(Date().timeIntervalSince(lastGrowAt) * 1000))ms")
                 // The first layout reports offset 0 before the bottom anchor applies; a
                 // grow step there (30 more bubbles) landed inside the open and cost a
                 // 200–300 ms frame on a long group. History waits a beat after appear.
@@ -2155,7 +2320,13 @@ struct ChatSession: View {
                 } else if isChannel {
                     model.loadOlderChannel(chatId)
                 }
-            })
+            }, onSample: { old, new in
+                scrollProbe.last = new
+                scrollProbe.samples += 1
+                guard Date() < traceOffsetsUntil else { return }
+                revealTrace("offset", "\(Self.offsetText(old))->\(Self.offsetText(new)) "
+                            + "window=\(windowCount) skipEnd=\(windowSkipEnd) shown=\(windowedRows.count)")
+            }))
             // Top fade is `headerBlur` over the transcript — a ScrollView `.mask`
             // forced an offscreen pass of every row on each scroll frame and made
             // long / group chats feel sticky (feedback app-01M5MQ2GFB1681YXNJMZV4EK7J).
@@ -2434,21 +2605,120 @@ struct ChatSession: View {
 
     private func revealQuoted(_ messageId: Id) {
         guard let target = rows.first(where: { $0.messageId == messageId && $0.role != .system }) else { return }
+        // `scrollTo` can only move to a row the stack has actually built, so whether the
+        // target is in `windowedRows` decides whether the reveal can do anything at all.
+        revealTrace("reveal-begin",
+                    "id=\(messageId) row=\(target.id) rows=\(rows.count) visible=\(visibleRows.count) "
+                    + "window=\(windowCount) skipEnd=\(windowSkipEnd) shown=\(windowedRows.count) "
+                    + "windowTop=\(windowedRows.first?.id ?? "-") windowBottom=\(windowedRows.last?.id ?? "-") "
+                    + "targetShown=\(windowedRows.contains { $0.id == target.id }) "
+                    + "offset=\(Self.offsetText(scrollProbe.last)) "
+                    // Which lazy stack this reveal is scrolling. A result tap closes the bar
+                    // first, and closing changes `transcriptStackIdentity`, so the stack is
+                    // rebuilt around the reveal (#2450). "filtered" would mean the reveal is
+                    // scrolling a stack about to be thrown away, which is the one ordering
+                    // these two fixes must not have.
+                    //
+                    // Read it for that and nothing more. The identity flips synchronously
+                    // with the close; the rebuild it triggers does not. So "all" proves the
+                    // reveal is addressing the new stack, not that the new stack has laid
+                    // out, and those are different facts: on iOS 26 a single hop issued in
+                    // this gap rests tens of rows short of the target. Covering the gap is
+                    // what the corrections in `settleOnRevealed` are for.
+                    + "stack=\(stackIdentityForTrace)")
         // Leave stick-to-bottom so a window grow (or the ↓ disc) does not yank
         // the reader off the revealed row / the reply they jumped back to.
         pinnedToBottom = false
-        if includeInWindow(messageId: messageId) {
-            // The original was outside the window: let the grown VStack lay out first.
-            DispatchQueue.main.async {
-                withAnimation(.easeInOut(duration: 0.35)) { scroller?.scrollTo(target.id, anchor: .center) }
-            }
-        } else {
-            withAnimation(.easeInOut(duration: 0.35)) { scroller?.scrollTo(target.id, anchor: .center) }
-        }
+        // Before the scroll, so the corrections can tell this reveal from the next one.
         highlightedMessage = messageId
+        lastRevealedMessage = messageId
+        if includeInWindow(messageId: messageId) {
+            // The window has just moved onto the target, so the rows on screen are not the
+            // rows that were there a moment ago. A jump across a hundred rows of history has
+            // no animation worth keeping, and an animated scroll over a window that changed
+            // in the same frame makes SwiftUI diff the whole stack per frame. Let the moved
+            // window lay out first.
+            DispatchQueue.main.async { settleOnRevealed(target.id, messageId: messageId, animated: false) }
+        } else {
+            settleOnRevealed(target.id, messageId: messageId, animated: true)
+        }
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(1600))
             if highlightedMessage == messageId { highlightedMessage = nil }
+        }
+    }
+
+    /// Scroll onto a revealed row, then scroll onto it once more as the rows gain real heights.
+    ///
+    /// `scrollTo` on a `LazyVStack` is resolved against *estimated* heights for every row the
+    /// stack has not laid out, and a reveal into older history has just moved the window, so
+    /// at the moment of the first call almost nothing around the destination is measured. One
+    /// scroll therefore lands wherever the estimate error puts it, and on a 420-row fixture
+    /// group that is tens of rows away with the message not even realized (#2404): 18 to 35
+    /// rows *newer* than it when the window stretched back to the tail, and 13 rows *older*
+    /// than it when the window slid onto it. Same fault, opposite signs — which is why the
+    /// shape of the window alone cannot be the whole fix.
+    ///
+    /// Each repeat is resolved against a layout that knows more than the last one did, so the
+    /// error shrinks with every pass. The ladder is deliberately short and stands down the
+    /// moment another reveal claims the highlight: a correction that outlived the jump would
+    /// be fighting the reader's own scroll, and `settleToBottom` corrects the tail the same
+    /// way and for the same reason.
+    private func settleOnRevealed(_ rowId: String, messageId: Id, animated: Bool) {
+        if animated {
+            withAnimation(.easeInOut(duration: Self.revealHop)) { scroller?.scrollTo(rowId, anchor: .center) }
+        } else {
+            withTransaction(Transaction(animation: nil)) { scroller?.scrollTo(rowId, anchor: .center) }
+        }
+        guard !DebugHooks.revealPreFix else { return }
+        // An animated hop owns the scroll view until its curve ends; correcting into it would
+        // cancel the animation the reader is watching.
+        let first = (animated ? Self.revealHop : 0) + Self.revealSettleGap
+        for step in 0..<Self.revealSettleSteps {
+            DispatchQueue.main.asyncAfter(deadline: .now() + first + Double(step) * Self.revealSettleGap) {
+                guard highlightedMessage == messageId else { return }
+                // `stack` again on every correction, not only at the start: the question a
+                // ladder has to answer is whether its later passes are still scrolling the
+                // stack its first pass aimed at, or one that was torn down underneath it.
+                revealTrace("settle", "id=\(messageId) step=\(step) "
+                            + "offset=\(Self.offsetText(scrollProbe.last)) stack=\(stackIdentityForTrace)")
+                withTransaction(Transaction(animation: nil)) { scroller?.scrollTo(rowId, anchor: .center) }
+                if step == Self.revealSettleSteps - 1 {
+                    traceAtRest(messageId: messageId, after: scrollProbe.samples)
+                }
+            }
+        }
+    }
+
+    /// Where the transcript actually came to rest, logged late enough to be read beside the
+    /// frame the UI test asserts on.
+    ///
+    /// This closes the one window the rest of the trace left dark (#2404). The reveal's own
+    /// lines stop at the last correction, under a second after the tap; the test reads the
+    /// resting frame about three seconds after it. Two very different faults fit that
+    /// silence — the scroll estimate was still wrong when the ladder ran and stayed wrong,
+    /// or the layout moved again afterwards — and they want different fixes, so the gap is
+    /// worth a line rather than a guess.
+    ///
+    /// `moved` is what separates them. It counts scroll samples taken since the last rung
+    /// was issued, so a **zero** is the load-bearing reading: the transcript has not moved a
+    /// pixel since the ladder finished, and the residual was already baked in by then. A
+    /// non-zero is weaker, because it also catches that last rung's own effect; the `offset`
+    /// lines carry the timestamps that tell the two apart.
+    ///
+    /// It is a count and a scroll offset: no row content, no sender, nothing a reader typed.
+    private func traceAtRest(messageId: Id, after samplesAtLastRung: Int) {
+        guard DebugHooks.traceReveal else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.revealAtRestAfter) {
+            // The highlight clears on its own well before this fires, so nil is the normal
+            // case. A *different* id means a second reveal has taken over and this line
+            // would be reporting its scroll position under the first one's name.
+            guard highlightedMessage == nil || highlightedMessage == messageId else { return }
+            revealTrace("at-rest", "id=\(messageId) "
+                        + "offset=\(Self.offsetText(scrollProbe.last)) "
+                        + "moved=\(scrollProbe.samples - samplesAtLastRung) "
+                        + "window=\(windowCount) skipEnd=\(windowSkipEnd) "
+                        + "shown=\(windowedRows.count) stack=\(stackIdentityForTrace)")
         }
     }
 
@@ -3867,18 +4137,34 @@ extension ChatSession {
     }
 }
 
+/// Rig (#2404): the last scroll offset, held by reference so writing it per sample does not
+/// invalidate the transcript.
+private final class ScrollProbe {
+    var last: CGFloat = .infinity
+    /// Scroll samples seen, so a reveal can say whether the transcript moved after its
+    /// correction rather than leaving that to be read out of an absence of trace lines.
+    var samples = 0
+}
+
 /// Fires when the scroll view comes near its top (channel older page / grow window).
 /// iOS 18+ uses scroll geometry; iOS 17 watches a top-of-content frame in a named
 /// coordinate space so the row window can grow (feedback app-01M5NNJ001NHHYBHXTASM5NXBZ).
 private struct NearTopReporter: ViewModifier {
     let enabled: Bool
-    let onNear: () -> Void
+    /// The scroll offset that looked near the top, for the rig to report; nothing reads it
+    /// to decide anything.
+    let onNear: (CGFloat) -> Void
+    /// Rig (`ARBOS_TRACE_REVEAL=1`, #2404): every offset sample, in the band or not, so a
+    /// run shows the whole trajectory of a reveal and where it came to rest — not only the
+    /// samples that happened to ask for a grow.
+    let onSample: (CGFloat, CGFloat) -> Void
 
     func body(content: Content) -> some View {
         if #available(iOS 18, *), enabled {
             content.onScrollGeometryChange(for: CGFloat.self) { g in
                 g.contentSize.height > g.containerSize.height ? g.contentOffset.y : .infinity
             } action: { old, new in
+                onSample(old, new)
                 // About a screen ahead of the top edge, so the next slice is in place before
                 // the reader reaches it. Fires on every sample inside the band while the offset
                 // is still falling: with lazy rows (#2149) the rows a grow step prepends have
@@ -3886,14 +4172,15 @@ private struct NearTopReporter: ViewModifier {
                 // across the step — a one-shot "near" flag never re-armed and the window
                 // stopped at its cap (rig: 90 flicks into history stuck after ~90 s). The
                 // caller rate-limits the steps.
-                if new < 900, new < old || old == .infinity { onNear() }
+                if new < 900, new < old || old == .infinity { onNear(new) }
             }
         } else if enabled {
             content
                 .coordinateSpace(name: "arbosChatScroll")
                 .onPreferenceChange(ChatScrollTopKey.self) { minY in
+                    onSample(.infinity, minY)
                     // Content top near the scroll view's top → grow the row window.
-                    if minY > -40 && minY < 900 { onNear() }
+                    if minY > -40 && minY < 900 { onNear(minY) }
                 }
         } else {
             content
