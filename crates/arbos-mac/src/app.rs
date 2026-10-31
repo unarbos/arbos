@@ -2535,6 +2535,41 @@ impl AppState {
                             .detach();
                         }
                     }
+                    // Rig: `ARBOS_RIG_SEND_MEDIA=<caption>|<path>[|<delay ms>[|<retry ms>]]`
+                    // sends that file to the restored chat through the composer's own send
+                    // after the delay (default 2 s), and taps Retry on it after `retry ms`
+                    // if given. There is no file picker under a frame grabber, and with
+                    // `ARBOS_FIXTURE_UPLOAD_FAILS` this is the bad connection Scout reported
+                    // ([feedback caption-sent-without-media]).
+                    if let Ok(spec) = std::env::var("ARBOS_RIG_SEND_MEDIA") {
+                        let mut f = spec.split('|');
+                        let caption = f.next().unwrap_or_default().to_owned();
+                        let path = PathBuf::from(f.next().unwrap_or_default());
+                        let delay_ms: u64 = f.next().and_then(|d| d.parse().ok()).unwrap_or(2_000);
+                        let retry_ms: Option<u64> = f.next().and_then(|d| d.parse().ok());
+                        cx.spawn(async move |this, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(delay_ms))
+                                .await;
+                            let _ = this.update(cx, |s, cx| {
+                                s.send_with(caption, vec![path], None, None, false, Vec::new(), cx)
+                            });
+                            let Some(retry_ms) = retry_ms else { return };
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(retry_ms))
+                                .await;
+                            let _ = this.update(cx, |s, cx| {
+                                let unsent = s
+                                    .outbox
+                                    .first()
+                                    .map(|o| (o.chat_id.clone(), o.message_id.clone()));
+                                if let Some((chat, message)) = unsent {
+                                    s.resend_failed(chat, message, cx);
+                                }
+                            });
+                        })
+                        .detach();
+                    }
                     // Rig: `ARBOS_REPLY_TO=1` arms a reply to the restored chat's
                     // last message (the composer's reply preview bar).
                     if std::env::var("ARBOS_REPLY_TO").is_ok_and(|v| v == "1") {
