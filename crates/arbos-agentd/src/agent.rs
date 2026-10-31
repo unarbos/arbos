@@ -3717,7 +3717,7 @@ impl Agent {
                 m.decision_cfg.scorer.clone(),
                 self.people
                     .asker(chat_id)
-                    .map(|a| format!("{} ({})", a.spoken(), a.role))
+                    .map(|a| format!("{} ({})", a.spoken(), a.role()))
                     .unwrap_or_else(|| "the project owner".to_owned()),
             )
         };

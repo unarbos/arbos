@@ -35,6 +35,7 @@ use crate::agent::Agent;
 use crate::approval::WaitMode;
 use crate::config::Config;
 use crate::mcp::{err_result, text_result};
+use crate::people::AskerStanding;
 
 const POLL: Duration = Duration::from_secs(2);
 const DEFAULT_WAIT_S: u64 = 180;
@@ -343,20 +344,58 @@ fn asked_by_user_id(agent: &Agent) -> Option<String> {
 }
 
 /// The person asking this turn when they are not the owner (a people-chat guest or member).
+/// Display and record only: this is who the owner's card names. The gate below reads a
+/// standing instead, because `None` here answers two different questions.
 fn non_owner_asker(agent: &Agent) -> Option<crate::people::Asker> {
     let asker = agent.people.current_asker()?;
     let owner = agent.people.project_owner();
-    if asker.role == "owner" || (!owner.is_empty() && asker.user_id == owner) {
+    if asker.role() == "owner" || (!owner.is_empty() && asker.user_id == owner) {
         return None;
     }
     Some(asker)
 }
 
-/// May the current asker direct use of this grant? Owner / no asker → yes; else the People list.
-fn asker_may_direct(agent: &Agent, g: &Grant) -> bool {
-    match non_owner_asker(agent) {
-        None => true,
-        Some(asker) => g.director_ids.iter().any(|id| id == &asker.user_id),
+/// Where the person directing this turn stands. `Unresolved` when no prelude set an asker.
+fn asker_standing(agent: &Agent) -> AskerStanding {
+    let Some(asker) = agent.people.current_asker() else {
+        return AskerStanding::Unresolved;
+    };
+    let owner = agent.people.project_owner();
+    if !owner.is_empty() && asker.user_id == owner {
+        return AskerStanding::Owner;
+    }
+    asker.standing
+}
+
+/// May the current asker direct use of this grant without the owner being asked?
+///
+/// This used to be `match non_owner_asker(agent) { None => true, .. }`, where `None` meant
+/// both "the owner is asking" and "no asker was resolved for this turn" — so anything that
+/// produced the second was treated as the first, and the only visible symptom was a secret
+/// used without a card. The two are separate branches now.
+fn asker_may_direct(agent: &Agent, chat_id: &str, g: &Grant) -> bool {
+    standing_may_direct(
+        &asker_standing(agent),
+        g,
+        agent.people.is_people_chat(chat_id),
+    )
+}
+
+/// The policy itself, without the plumbing.
+fn standing_may_direct(standing: &AskerStanding, g: &Grant, in_people_chat: bool) -> bool {
+    match standing {
+        AskerStanding::Owner => true,
+        AskerStanding::Identified(uid) => g.director_ids.iter().any(|id| id == uid),
+        // Somebody is asking and the box cannot name them: there is no account to check a
+        // People list against, so this is not a turn that may spend the owner's secrets.
+        AskerStanding::Unidentified => false,
+        // No asker at all. In the Project's own chats only the owner and people the owner
+        // invited write, and an invited guest's row *does* set an asker
+        // (`people::shared_project_guest_note`), so absence there is the owner working alone.
+        // In a people chat absence means no prelude ran — a roster that has not loaded, or
+        // another prelude that matched first — and a room with guests in it must not read as
+        // the owner on the strength of a missing value.
+        AskerStanding::Unresolved => !in_people_chat,
     }
 }
 
@@ -1156,7 +1195,7 @@ async fn obtain_grant(
     let asker = non_owner_asker(agent);
     if let Some(g) = grant_for(&project, &name) {
         if g.request_id.is_none() && host_ok(&g) && use_kind != "browser_fill" {
-            if asker_may_direct(agent, &g) {
+            if asker_may_direct(agent, chat_id, &g) {
                 return Ok(g);
             }
             if g.others_ask != "card" {
@@ -1681,6 +1720,59 @@ pub async fn browser_fill(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> Va
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn listed_grant() -> Grant {
+        let item = json!({ "env": "STRIPE_KEY", "kind": "key", "enabled": true, "hosts": [],
+            "placeholders": { "value": "arbos-secret://STRIPE_KEY/value" }, "note": "",
+            "vault_name": "Arbos", "others_ask": "refuse",
+            "people": [ { "user_id": "gh_guest", "enabled": true } ] });
+        Grant::from_item("p1", &item).expect("grant")
+    }
+
+    /// The gate's four branches, one of which used to be two questions sharing an answer.
+    ///
+    /// `asker_may_direct` was `match non_owner_asker(agent) { None => true, .. }`, and `None`
+    /// meant both "the owner is asking" and "no asker was resolved for this turn". Anything
+    /// that produced the second was therefore treated as the first and could direct every
+    /// grant without the owner being asked — and because the allow branch returns before
+    /// `append_audit("secret_requested")`, it left nothing behind to notice.
+    #[test]
+    fn a_turn_with_no_asker_is_not_the_owner_in_a_people_chat() {
+        let g = listed_grant();
+
+        // The Project's own chats: only the owner and invited guests write there, and a guest's
+        // row sets an asker of its own, so no asker means the owner working alone.
+        assert!(standing_may_direct(&AskerStanding::Unresolved, &g, false));
+
+        // A people chat with no asker resolved: the prelude did not run (roster not loaded, or
+        // another prelude matched first). A room that can hold guests must not read as the
+        // owner because a value is missing.
+        assert!(
+            !standing_may_direct(&AskerStanding::Unresolved, &g, true),
+            "a people-chat turn with no asker must not direct the owner's secrets"
+        );
+
+        // Someone is asking and the box cannot name them: no account, so no People list to be
+        // on. Not a turn that spends the owner's secrets.
+        assert!(!standing_may_direct(&AskerStanding::Unidentified, &g, true));
+        assert!(
+            !standing_may_direct(&AskerStanding::Unidentified, &g, false),
+            "an unnameable asker is not the owner in a Project chat either"
+        );
+
+        // The two branches that were always right.
+        assert!(standing_may_direct(&AskerStanding::Owner, &g, true));
+        assert!(standing_may_direct(
+            &AskerStanding::Identified("gh_guest".into()),
+            &g,
+            true
+        ));
+        assert!(!standing_may_direct(
+            &AskerStanding::Identified("gh_stranger".into()),
+            &g,
+            true
+        ));
+    }
 
     /// The People list reaches the box as `people[]` (rows that are on) plus `others_ask`;
     /// an older relay's `directors[]` still works; the rule line follows the switch.
