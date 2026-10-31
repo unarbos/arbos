@@ -1136,10 +1136,19 @@ struct ChatSession: View {
                 .transition(.opacity.combined(with: .scale(scale: 0.92)))
             }
         }
-        // Trailing-only overlay so the hit target is just the disc (not a full-width
-        // bar). UIKit tap inside the disc still works while the transcript decelerates.
-        // The `@` chip stacks above the disc at the composer's control gap and stays up
-        // while the reader is at the end, because an unread mention is behind them.
+        // Trailing-only overlay so the hit target is just the controls (not a full-width
+        // bar). UIKit tap inside them still works while the transcript decelerates.
+        //
+        // One trailing column, bottom-anchored, filled in a fixed order: jump-to-latest in
+        // the slot nearest the composer, the `@` chip `Controls.gap` above it. The order
+        // never changes, so neither control moves while both are up and a control only
+        // shifts when its neighbour below leaves. The `@` stays up even at the end of the
+        // chat, because an unread mention is behind the reader, not below them.
+        //
+        // The corner is not this column's alone. `newMessagesPill` is centred in the same
+        // band and is mutually exclusive with the disc, and the disc itself multiplexes a
+        // "Back to reply" state, so three floating controls can be on screen at once.
+        // Consolidating them is Jacob's call and is not done here.
         .overlay(alignment: .bottomTrailing) {
             ChatBarHeightReader(bar: chatBarHeight) { bar in
                 VStack(alignment: .trailing, spacing: Controls.gap) {
