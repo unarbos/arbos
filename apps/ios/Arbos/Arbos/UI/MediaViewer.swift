@@ -1237,18 +1237,23 @@ enum FixtureMedia {
         return img.pngData()
     }
 
-    /// A 1400 × 900 landscape "dashboard screenshot" for the composer photo-editor rig
+    /// A 1000 × 2000 portrait "dashboard screenshot" for the composer photo-editor rig
     /// (`ARBOS_SHOW=pending-photo`): light, colourful and full of distinct regions, so a
     /// crop rectangle visibly frames one of them and ink reads over any of them. Every
     /// number on it is invented.
+    ///
+    /// Portrait on purpose. A phone screenshot is the picture people actually crop and
+    /// scribble on, and it is the only shape that fills the editor's viewport top to bottom:
+    /// a landscape picture letterboxes, the floating controls then sit over black, and Glass
+    /// and Matte photograph identically because there is no colour behind them.
     static func composerPhoto() -> Data? {
-        let (w, h) = (1400, 900)
+        let (w, h) = (1000, 2000)
         let tiles: [(CGRect, UIColor, String, String)] = [
-            (CGRect(x: 60, y: 150, width: 380, height: 230), UIColor(red: 0.18, green: 0.47, blue: 0.95, alpha: 1), "Sessions", "12,480"),
-            (CGRect(x: 470, y: 150, width: 380, height: 230), UIColor(red: 0.16, green: 0.70, blue: 0.42, alpha: 1), "Delivered", "99.2%"),
-            (CGRect(x: 880, y: 150, width: 460, height: 230), UIColor(red: 0.98, green: 0.62, blue: 0.10, alpha: 1), "Queue", "41 s"),
-            (CGRect(x: 60, y: 420, width: 790, height: 420), UIColor(red: 0.42, green: 0.32, blue: 0.86, alpha: 1), "Throughput", "8.6 k/min"),
-            (CGRect(x: 880, y: 420, width: 460, height: 420), UIColor(red: 0.90, green: 0.25, blue: 0.33, alpha: 1), "Errors/h", "318"),
+            (CGRect(x: 60, y: 200, width: 420, height: 300), UIColor(red: 0.18, green: 0.47, blue: 0.95, alpha: 1), "Sessions", "12,480"),
+            (CGRect(x: 520, y: 200, width: 420, height: 300), UIColor(red: 0.16, green: 0.70, blue: 0.42, alpha: 1), "Delivered", "99.2%"),
+            (CGRect(x: 60, y: 540, width: 880, height: 360), UIColor(red: 0.98, green: 0.62, blue: 0.10, alpha: 1), "Queue", "41 s"),
+            (CGRect(x: 60, y: 940, width: 880, height: 480), UIColor(red: 0.42, green: 0.32, blue: 0.86, alpha: 1), "Throughput", "8.6 k/min"),
+            (CGRect(x: 60, y: 1460, width: 880, height: 480), UIColor(red: 0.90, green: 0.25, blue: 0.33, alpha: 1), "Errors/h", "318"),
         ]
         return UIGraphicsImageRenderer(size: CGSize(width: w, height: h), format: {
             let f = UIGraphicsImageRendererFormat(); f.scale = 1; return f

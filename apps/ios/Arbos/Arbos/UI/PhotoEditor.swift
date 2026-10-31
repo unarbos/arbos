@@ -73,6 +73,12 @@ enum PhotoCropHandle: String, CaseIterable, Identifiable {
     var movesBottom: Bool { self == .bottomLeading || self == .bottom || self == .bottomTrailing }
     var isCorner: Bool { (movesLeading || movesTrailing) && (movesTop || movesBottom) }
 
+    var label: String {
+        let down = movesTop ? "top" : (movesBottom ? "bottom" : "")
+        let across = movesLeading ? "left" : (movesTrailing ? "right" : "")
+        return "Crop \([down, across].filter { !$0.isEmpty }.joined(separator: " ")) \(isCorner ? "corner" : "edge")"
+    }
+
     func point(of rect: CGRect) -> CGPoint {
         CGPoint(x: movesLeading ? rect.minX : (movesTrailing ? rect.maxX : rect.midX),
                 y: movesTop ? rect.minY : (movesBottom ? rect.maxY : rect.midY))
@@ -561,6 +567,11 @@ private struct PhotoCropOverlay: View {
                     }
                     .onEnded { _ in dragFrom = nil }
             )
+            // A clear view with a drag on it is not an accessibility element by itself, and
+            // an identifier alone does not make one: without this the handles were invisible
+            // to VoiceOver and unaddressable by name, however plainly they were drawn.
+            .accessibilityElement()
+            .accessibilityLabel(handle.label)
             .accessibilityIdentifier("photo-editor-handle-\(handle.rawValue)")
             .position(x: p.x, y: p.y)
     }
