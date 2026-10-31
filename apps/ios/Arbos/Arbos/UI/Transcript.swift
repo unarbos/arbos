@@ -1437,6 +1437,21 @@ struct RowView: View, Equatable {
         return same
     }
 
+    /// Every route this row has for opening the sender's page — the avatar on the lane and
+    /// the name inside the bubble, on a text row and on a media row, for a person and for
+    /// an agent — is built here, so the rule that stands them down inside a search result
+    /// (`ChatSearchClose.rowOwnsInnerTap`) is asked once. `searchHit` is the same flag that
+    /// mounts the row's result tap in ChatView, so exactly the rows that take that tap
+    /// suppress. It is a stored input rather than an `@Environment` read for the reason the
+    /// inputs above are: this view is used `.equatable()`, and an environment read here
+    /// would not re-run the body when the filter opens or closes.
+    private func openProfile(_ target: ProfileTarget) -> () -> Void {
+        return {
+            guard !ChatSearchClose.rowOwnsInnerTap(resultRow: searchHit) else { return }
+            model.toggleProfile(target)
+        }
+    }
+
     /// The widest a bubble on this row may be: the screen minus the chat kind's inset
     /// (`Theme.bubbleInset(people:)`); an incoming people-chat bubble also loses the lane.
     private var maxBubble: CGFloat { Self.maxBubble(width: width, people: people) }
@@ -1569,7 +1584,7 @@ struct RowView: View, Equatable {
             let personTarget = model.personTarget(handle: handle, avatarUrl: avatar, chatId: chatId)
             let personName = model.personName(handle: handle) ?? "@\(handle)"
             let personLabel = ProfileToggle.label(name: personName, showing: model.profileShows(personTarget))
-            let openPerson = { model.toggleProfile(personTarget) }
+            let openPerson = openProfile(personTarget)
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
                 avatarColumn {
                     Button(action: openPerson) {
@@ -1622,7 +1637,7 @@ struct RowView: View, Equatable {
             let memberTarget: ProfileTarget = agentId.map { ProfileTarget.agent(projectId: $0) }
                 ?? model.personTarget(handle: handle, avatarUrl: avatar, chatId: chatId)
             let memberLabel = ProfileToggle.label(name: agent.name, showing: model.profileShows(memberTarget))
-            let openMember = { model.toggleProfile(memberTarget) }
+            let openMember = openProfile(memberTarget)
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
                 avatarColumn {
                     Button(action: openMember) { memberAvatar(agent) }
@@ -2020,7 +2035,7 @@ struct RowView: View, Equatable {
             let personTarget = model.personTarget(handle: handle, avatarUrl: avatar, chatId: chatId)
             let personName = model.personName(handle: handle) ?? "@\(handle)"
             let personLabel = ProfileToggle.label(name: personName, showing: model.profileShows(personTarget))
-            let openPerson = { model.toggleProfile(personTarget) }
+            let openPerson = openProfile(personTarget)
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
                 avatarColumn {
                     Button(action: openPerson) {
@@ -2050,7 +2065,7 @@ struct RowView: View, Equatable {
             let memberTarget: ProfileTarget = id.map { ProfileTarget.agent(projectId: $0) }
                 ?? model.personTarget(handle: handle, avatarUrl: avatar, chatId: chatId)
             let memberLabel = ProfileToggle.label(name: agent.name, showing: model.profileShows(memberTarget))
-            let openMember = { model.toggleProfile(memberTarget) }
+            let openMember = openProfile(memberTarget)
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
                 avatarColumn {
                     Button(action: openMember) { memberAvatar(agent) }

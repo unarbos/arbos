@@ -19,7 +19,7 @@ use arbos_core::wire::{BoxState, PROJECT_DOC_CHAT_ID};
 
 use crate::auth::Principal;
 use crate::boxes::{self, Provider};
-use crate::db::{Chat, Project};
+use crate::db::{Chat, Project, SkillScope};
 use crate::state::{AppState, AuthMode};
 
 pub(crate) type ApiResult = Result<Response, (StatusCode, String)>;
@@ -73,8 +73,37 @@ pub async fn healthz(State(state): State<AppState>) -> Response {
         // a retired model shows here before a person's Generate fails.
         let images = state.image_health.try_lock().ok().and_then(|g| g.clone());
         obj.insert("images".into(), serde_json::json!(images));
+        // Root-volume headroom on the host (the relay DB, the deploy worker's image builds and the
+        // poller's state all live on it): the operators' guards read `disk_low` here and stop
+        // queueing image builds / gate runs instead of letting the host fill up (94–99 % on
+        // 2026-10-26 13:16; the consumer was outside Arbos, the consequence would not have been).
+        obj.insert("disk".into(), disk_json());
     }
     Json(v).into_response()
+}
+
+/// `{"free_gb": N, "total_gb": N, "disk_low": bool}` for the filesystem under `ARBOS_DISK_WATCH_PATH` (default
+/// `/var/lib/arbos-relay`, i.e. the host root volume in production);
+/// `disk_low` when free space is under `ARBOS_DISK_LOW_GB` (default 40).
+fn disk_json() -> serde_json::Value {
+    let path = std::env::var("ARBOS_DISK_WATCH_PATH")
+        .unwrap_or_else(|_| "/var/lib/arbos-relay".to_owned());
+    let low_gb: u64 = std::env::var("ARBOS_DISK_LOW_GB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(40);
+    // statvfs field widths differ per libc (u32 on macOS, u64 on Linux): the casts are needed on one of them.
+    #[allow(clippy::unnecessary_cast)]
+    match nix::sys::statvfs::statvfs(path.as_str()) {
+        Ok(st) => {
+            let bsize = st.fragment_size() as u64;
+            let avail = st.blocks_available() as u64 * bsize;
+            let total = st.blocks() as u64 * bsize;
+            let free_gb = avail / 1_000_000_000;
+            serde_json::json!({ "free_gb": free_gb, "total_gb": total / 1_000_000_000, "disk_low": free_gb < low_gb, "low_gb": low_gb })
+        }
+        Err(_) => serde_json::json!(null),
+    }
 }
 
 // ---- pairing (D35) ----------------------------------------------------------------------------
@@ -177,10 +206,9 @@ pub async fn revoke_device(
     // Same revocation as `DELETE /auth/devices/{id}`: the legacy path only flagged the device row
     // and left its refresh tokens live (14 such devices since Oct 14), so a "revoked" device could
     // still mint access tokens.
-    let ok = state.db.revoke_device_fully(&id).map_err(internal)?;
-    if ok {
-        crate::matrix::servers::revoke_device(&state, &id).await;
-    }
+    let ok = crate::signin::revoke_device_everywhere(&state, &id)
+        .await
+        .map_err(internal)?;
     Ok(if ok {
         StatusCode::NO_CONTENT
     } else {
@@ -564,7 +592,10 @@ pub async fn get_project(
         .usage_since(&p.id, start_of_day())
         .map_err(internal)?;
     // The box polls this every 3 s; a changed marker tells it to refetch `/skills/index` (F5).
-    let skills_rev = state.db.skills_rev(Some(&p.id)).map_err(internal)?;
+    let skills_rev = state
+        .db
+        .skills_rev(&SkillScope::Project(p.id.clone()))
+        .map_err(internal)?;
     let mut v = serde_json::to_value(GetProjectResponseDto {
         project: project_dto(&state, &p).await,
         chats,
@@ -1918,7 +1949,10 @@ fn workspace_json(state: &AppState, p: &Project) -> Result<Value, (StatusCode, S
     let chats = state.db.list_chats(&p.id).map_err(internal)?;
     let pushes = state.db.take_pushes(&p.id).map_err(internal)?;
     let mut project = serde_json::to_value(p).unwrap_or(Value::Null);
-    project["skills_rev"] = json!(state.db.skills_rev(Some(&p.id)).map_err(internal)?);
+    project["skills_rev"] = json!(state
+        .db
+        .skills_rev(&SkillScope::Project(p.id.clone()))
+        .map_err(internal)?);
     project["primary_chat_id"] = json!(primary_chat_id(state, p));
     project["avatar_color_index_effective"] = json!(crate::avatar::effective_color_index(
         &p.id,
@@ -2018,7 +2052,10 @@ pub async fn box_projects(State(state): State<AppState>, principal: Principal) -
             .avatar
             .clone()
             .unwrap_or_else(|| crate::avatar::default_for(&p.id, &state.cfg.avatar_slugs)));
-        project["skills_rev"] = json!(state.db.skills_rev(Some(&p.id)).map_err(internal)?);
+        project["skills_rev"] = json!(state
+            .db
+            .skills_rev(&SkillScope::Project(p.id.clone()))
+            .map_err(internal)?);
         if let Ok(Some(src)) = state.db.project_fork_source(&p.id) {
             project["forked_from"] = json!(src);
         }
