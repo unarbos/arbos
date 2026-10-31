@@ -1,0 +1,47 @@
+# Throwaway probe (not for merging): which hosted macOS images carry an iOS 27 simulator runtime,
+# and can one be added to macos-15 inside a job.
+name: hosted iOS 27 probe
+on:
+  push:
+    branches: ["cursor/hosted-ios27-probe-ac8d"]
+permissions: {}
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [xcode-27, macos-15, macos-26]
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 25
+    steps:
+      - name: Image, Xcode, runtimes
+        run: |
+          set -uo pipefail
+          sw_vers
+          echo "ImageVersion=${ImageVersion:-?} ImageOS=${ImageOS:-?}"
+          ls -d /Applications/Xcode*.app
+          xcode-select -p
+          xcodebuild -version
+          xcrun simctl list runtimes
+          echo "--- iPhone 17 devices"
+          xcrun simctl list devices available | grep -E '^-- |iPhone 17 \(' || true
+      - name: Boot iPhone 17 on the newest iOS runtime
+        run: |
+          set -uo pipefail
+          rt=$(xcrun simctl list runtimes -j | python3 -c 'import json,sys; r=[x for x in json.load(sys.stdin)["runtimes"] if x["platform"]=="iOS" and x["isAvailable"]]; r.sort(key=lambda x: [int(p) for p in x["version"].split(".")]); print(r[-1]["identifier"], r[-1]["version"])')
+          echo "newest iOS runtime: $rt"
+          udid=$(xcrun simctl create probe-iphone17 "iPhone 17" "${rt%% *}")
+          start=$(date +%s)
+          xcrun simctl boot "$udid"
+          xcrun simctl bootstatus "$udid" -b >/dev/null
+          echo "booted iPhone 17 on iOS ${rt##* } in $(( $(date +%s) - start )) s"
+          xcrun simctl shutdown "$udid"; xcrun simctl delete "$udid"
+      - name: Try to add the iOS 27 platform to this Xcode
+        if: matrix.image != 'xcode-27'
+        run: |
+          set -uo pipefail
+          df -h / | tail -1
+          start=$(date +%s)
+          timeout 600 xcodebuild -downloadPlatform iOS -buildVersion 27.0 2>&1 | tail -15
+          echo "exit=${PIPESTATUS[0]} after $(( $(date +%s) - start )) s"
+          xcrun simctl list runtimes | grep -i 'iOS 27' || echo "no iOS 27 runtime after the attempt"
