@@ -136,12 +136,19 @@ pub const LEGACY_USER: &str = "u_default";
 fn resolve_legacy(state: &AppState, token: &str) -> Option<Principal> {
     let h = hash(token);
     if let Ok(Some(id)) = state.db.device_by_token_hash(&h) {
-        let user_id = state
-            .db
-            .device_user(&id)
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| LEGACY_USER.to_owned());
+        // `Ok(None)` is a row with no owner, which is the legacy bucket and is what the default
+        // means. `Err` is a database failure and means nothing of the kind: treating it as the
+        // bucket resolved a legitimately-owned device as a `LEGACY_USER` principal, which on a
+        // GitHub relay carries `allows()` over every project left in that bucket. A transient
+        // SQLite error must refuse, not widen.
+        let user_id = match state.db.device_user(&id) {
+            Ok(Some(user_id)) => user_id,
+            Ok(None) => LEGACY_USER.to_owned(),
+            Err(e) => {
+                tracing::error!(device = %id, error = %e, "auth: a device's owner could not be read; refusing rather than defaulting to the legacy bucket");
+                return None;
+            }
+        };
         return Some(Principal::Device {
             id,
             token: token.to_owned(),
@@ -261,5 +268,57 @@ impl FromRequestParts<AppState> for HeaderPrincipal {
         // The header is present, and `token_from` prefers it, so whatever is in the query
         // string cannot be what gets resolved.
         Ok(Self(Principal::from_request_parts(parts, state).await?))
+    }
+}
+
+#[cfg(test)]
+mod legacy_bucket_tests {
+    //! `LEGACY_USER` means "nobody gave this row an owner". A database failure means nothing of
+    //! the kind, and the two must not resolve to the same principal.
+
+    use arbos_core::auth::hash;
+    use arbos_core::ids::ulid;
+
+    use super::*;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    /// Adversarial re-review of #2460, L3. `device_user(..).ok().flatten()` swallowed a genuine
+    /// `Err` as well as "no row", so a transient SQLite failure resolved a legitimately-owned
+    /// device as a `LEGACY_USER` principal — which on a GitHub relay carries `allows()` over
+    /// every project still sitting in that bucket. Widening a principal is never the safe
+    /// reading of an error.
+    #[test]
+    fn a_database_error_refuses_instead_of_widening_a_device_into_the_legacy_bucket() {
+        let state = test_state(AuthMode::Github);
+        let id = ulid();
+        let token = format!("adv_{}", ulid().to_ascii_lowercase());
+        state
+            .db
+            .insert_device(&id, "Alice's Mac", &hash(&token), "gh_alice", "github")
+            .expect("device");
+        assert!(
+            matches!(resolve_legacy(&state, &token), Some(Principal::Device { user_id, .. })
+                if user_id == "gh_alice"),
+            "the owned device resolves to its owner"
+        );
+
+        // Make the owner read fail the way a transient storage error does, and only that read:
+        // `device_by_token_hash` selects `id` alone, so the token still resolves to a row and
+        // the refusal has to come from the owner lookup rather than from the row going missing.
+        state
+            .db
+            .with(|c| c.execute_batch("ALTER TABLE devices RENAME COLUMN user_id TO user_id_gone"))
+            .expect("break the column");
+        assert_eq!(
+            state.db.device_by_token_hash(&hash(&token)).unwrap(),
+            Some(id),
+            "the row is still found, so this is a failed owner read and not a missing device"
+        );
+        assert!(state.db.device_user("anything").is_err(), "the read fails");
+        assert!(
+            resolve_legacy(&state, &token).is_none(),
+            "a device whose owner cannot be read is refused, not promoted into the bucket"
+        );
     }
 }
