@@ -4386,6 +4386,19 @@ impl AppState {
             chat.unread = false;
             chat.unread_count = 0;
         }
+        // `mention_count` is deliberately NOT cleared here, and this is the
+        // place someone will want to clear it. Opening a chat reads its
+        // messages; it does not mean the user saw the line that named them,
+        // which may be hours above the newest page. The `@` is cleared only by
+        // the mention actually being on screen (`Transcript::clear_seen_mentions`)
+        // and only one mention at a time, oldest first, because the relay's
+        // cursor is a watermark.
+        //
+        // So an open chat showing the `@` with no unread count is the specified
+        // behaviour (Jacob, 2026-10-31), not a bug: its messages are read and
+        // its mention is not. Clearing it here would also put the mark back to
+        // being a second unread indicator, which is the thing it exists not to
+        // be.
         self.sync_badge();
         // Reading it here clears its banners here too (the relay tells the other devices).
         notify::withdraw_chat(&chat_id);

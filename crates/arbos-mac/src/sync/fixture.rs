@@ -7009,7 +7009,13 @@ fn seed_people_chats_base() -> Vec<Chat> {
             kind: ChatKind::Chat,
             participants: Vec::new(),
             unread: true,
-            unread_count: 0,
+            // The control for the unread-mention mark: unread, and named by
+            // nobody. Sitting next to Launch week it is what makes a shot of
+            // the sidebar prove something — the `@` is beside one count and
+            // not the other, so the mark is visibly about being mentioned
+            // rather than about being unread. Keep the two rows adjacent and
+            // keep this one's `mention_count` at zero.
+            unread_count: 3,
             mention_count: 0,
             last_message_at: now_ms().saturating_sub(12 * 60_000),
             archived_at: None,
@@ -7023,8 +7029,8 @@ fn seed_people_chats_base() -> Vec<Chat> {
             kind: ChatKind::Chat,
             participants: Vec::new(),
             unread: true,
-            unread_count: 4,
-            // Two of those four name me directly; the `@here` in the same
+            unread_count: 6,
+            // Two of those six name me directly; the `@here` in the same
             // group does not count.
             mention_count: 2,
             last_message_at: now_ms().saturating_sub(25 * 60_000),

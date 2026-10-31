@@ -3991,7 +3991,7 @@ mod status_cell_tests {
     use gpui::{AppContext as _, Bounds, Entity, Pixels, TestAppContext, VisualTestContext};
     use tokio::sync::mpsc;
 
-    use super::RowStatus;
+    use super::{RowStatus, STATUS_MARK_GAP};
     use crate::app::AppState;
     use crate::model::{Chat, Message, Person, Project, SpaceKind};
     use crate::sync::{ClientCommand, SyncEvent, SyncSource};
@@ -4253,6 +4253,125 @@ mod status_cell_tests {
             vcx.debug_bounds("row-status-unread-dm").is_none(),
             "a person typing shows no mark in the cell (the preview says typing…)"
         );
+    }
+
+    /// The staged pair the shipped shots are taken of, asserted as geometry so
+    /// a frame cannot quietly lose it: a mentioned group carrying 6 unread and
+    /// 2 mentions, beside an unread DM carrying 3 unread and no mention.
+    ///
+    /// The control row is the whole point. With it, the frame proves the `@` is
+    /// about being *mentioned* — the mark is beside one count and absent from
+    /// the other. Without it a reviewer only has our word that the mark is not
+    /// a second unread indicator. The fixture
+    /// (`sync::fixture::seed_people_chats_base`) stages the same two rows for
+    /// the real capture; keep the two in step.
+    #[gpui::test]
+    fn the_mention_mark_is_beside_one_count_and_not_the_other(cx: &mut TestAppContext) {
+        let (_rt, _state, _shell, vcx) = mount_mention_pair(cx);
+
+        let mentioned = vcx
+            .debug_bounds("row-status-mentioned-mentioned")
+            .expect("the mentioned row draws the @ beside its count");
+        let count = vcx
+            .debug_bounds("row-status-unread-mentioned")
+            .expect("…and still draws the count itself");
+        let at = vcx.debug_bounds("mention-pill").expect("the @ pill");
+
+        // Both marks really are in the cell, the `@` first.
+        assert!(
+            f32::from(at.right()) <= f32::from(count.origin.x) + 0.5,
+            "the @ sits in front of the count ({} then {})",
+            f32::from(at.right()),
+            f32::from(count.origin.x)
+        );
+        assert!(
+            close(
+                f32::from(count.origin.x) - f32::from(at.right()),
+                STATUS_MARK_GAP
+            ),
+            "{STATUS_MARK_GAP} pt apart, got {}",
+            f32::from(count.origin.x) - f32::from(at.right())
+        );
+        assert!(
+            close(centre_y(at), centre_y(count)),
+            "the two marks share a centre line"
+        );
+        assert_eq!(
+            f32::from(at.size.height),
+            UNREAD_PILL_H,
+            "the @ is the count pill's capsule, so the pair reads as one cell"
+        );
+        // The wrapper holds both, so the cell grew rather than one mark
+        // replacing the other.
+        assert!(
+            f32::from(mentioned.size.width)
+                >= f32::from(at.size.width) + f32::from(count.size.width),
+            "the cell holds both marks"
+        );
+
+        // The control: unread, named by nobody, so a count and no `@`.
+        assert!(
+            vcx.debug_bounds("row-status-unread-control").is_some(),
+            "the control row draws its unread count"
+        );
+        assert!(
+            vcx.debug_bounds("row-status-mentioned-control").is_none(),
+            "…and no @ — the mark is about being mentioned, not about being unread"
+        );
+    }
+
+    /// Two rows staged exactly as the shipped shots stage them: `mentioned`
+    /// (6 unread, 2 of them naming me) and `control` (3 unread, none).
+    fn mount_mention_pair(
+        cx: &mut TestAppContext,
+    ) -> (
+        tokio::runtime::Runtime,
+        Entity<AppState>,
+        Entity<Shell>,
+        &mut VisualTestContext,
+    ) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| {
+            gpui_tokio::init_from_handle(cx, handle);
+            cx.set_global(Theme::dark(Surface::Matte));
+            if !cx.has_global::<PulseClock>() {
+                PulseClock::init(cx);
+            }
+            WorkingClock::init(cx);
+        });
+        let state = cx.new(|cx| AppState::new(Box::new(Idle), cx));
+        let now = crate::model::now_ms();
+        state.update(cx, |s, cx| {
+            for (pid, name, unread_count, mention_count) in [
+                ("mentioned", "Launch week", 6u32, 2u32),
+                ("control", "Sam Rivera", 3, 0),
+            ] {
+                s.projects.push(Project {
+                    id: pid.into(),
+                    name: name.into(),
+                    kind: SpaceKind::Group,
+                    ..Project::default()
+                });
+                let room = format!("room-{pid}");
+                let at = now - 60_000;
+                let mut row = chat(&room, pid, true, at);
+                row.unread_count = unread_count;
+                row.mention_count = mention_count;
+                s.chats.insert(pid.into(), vec![row]);
+                s.messages.insert(
+                    room.clone(),
+                    vec![message("u", &room, "user", "done", "Morning.", at)],
+                );
+            }
+            cx.notify();
+        });
+        let (shell, vcx) = cx.add_window_view(|window, cx| Shell::new(state.clone(), window, cx));
+        vcx.run_until_parked();
+        (rt, state, shell, vcx)
     }
 
     /// One spinning row (the typing DM pulses, it does not spin), one ticker;
