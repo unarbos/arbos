@@ -4,7 +4,7 @@
 //! opaque bytes.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -339,6 +339,29 @@ impl MessageView {
                     && p.get("hidden").and_then(Value::as_bool) != Some(true)
             })
     }
+}
+
+/// What a `role: assistant` row says about where it came from, for
+/// [`ChatDoc::assistant_rows`]. Every field is payload the writer chose, so none of it is
+/// evidence on its own — it is what a caller that *does* know the authenticated author
+/// (the relay, on the push path) checks that claim against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssistantRowClaim {
+    /// `sender`, which a box writes as `agent:<projectId>`. Empty when the row omits it.
+    pub sender: String,
+    /// `greeting: true`: the D82 canned first line, the one assistant row a client writes
+    /// ([`ChatDoc::append_greeting`]).
+    pub greeting: bool,
+    /// Whether the row names a `senderHandle`. Only a box writes one; `append_greeting` does
+    /// not, and it is the field agentd turns into the `@handle (agent)` label.
+    pub names_handle: bool,
+}
+
+/// Whether `needle` appears anywhere in a Loro update blob. See
+/// [`ChatDoc::update_may_set_notice`] for why a byte scan is sound as a pre-filter and why it
+/// may only ever be used to decide *not* to look further.
+fn update_mentions(update: &[u8], needle: &[u8]) -> bool {
+    update.windows(needle.len()).any(|w| w == needle)
 }
 
 /// A chat doc with handles cached for the streaming hot path.
@@ -733,8 +756,63 @@ impl ChatDoc {
     /// `update_blob_keys_are_plain_utf8` guards the assumption: if a Loro upgrade ever starts
     /// compressing, that test fails rather than this quietly returning `false` for a real one.
     pub fn update_may_set_notice(update: &[u8]) -> bool {
-        const KEY: &[u8] = b"notice";
-        update.windows(KEY.len()).any(|w| w == KEY)
+        update_mentions(update, b"notice")
+    }
+
+    /// What each `role: assistant` row in this doc claims about its own authorship — the fields
+    /// the relay weighs when deciding whether the row could have come from the client that
+    /// pushed it. Keyed by message id; the text is not included because the relay does not judge
+    /// it. Reads the keys off each message map directly, like [`Self::notice_message_ids`].
+    pub fn assistant_rows(&self) -> BTreeMap<String, AssistantRowClaim> {
+        let list = self.messages_list();
+        let mut out = BTreeMap::new();
+        for i in 0..list.len() {
+            let Some(ValueOrContainer::Container(Container::Map(m))) = list.get(i) else {
+                continue;
+            };
+            let Some(ValueOrContainer::Value(LoroValue::String(role))) = m.get("role") else {
+                continue;
+            };
+            if role.as_str() != "assistant" {
+                continue;
+            }
+            let Some(ValueOrContainer::Value(LoroValue::String(id))) = m.get("id") else {
+                continue;
+            };
+            let sender = match m.get("sender") {
+                Some(ValueOrContainer::Value(LoroValue::String(s))) => s.to_string(),
+                _ => String::new(),
+            };
+            let greeting = matches!(
+                m.get("greeting"),
+                Some(ValueOrContainer::Value(LoroValue::Bool(true)))
+            );
+            let names_handle = matches!(
+                m.get("senderHandle"),
+                Some(ValueOrContainer::Value(LoroValue::String(h))) if !h.is_empty()
+            );
+            out.insert(
+                id.to_string(),
+                AssistantRowClaim {
+                    sender,
+                    greeting,
+                    names_handle,
+                },
+            );
+        }
+        out
+    }
+
+    /// Cheap pre-filter for [`Self::assistant_rows`] diffing, on the same terms as
+    /// [`Self::update_may_set_notice`]: could this update possibly write `assistant` as a `role`?
+    /// A blob without those bytes cannot be. **False positives are expected** — any message whose
+    /// text contains the word matches — so a `true` answer means "look properly", never "refuse".
+    ///
+    /// The reason this stays cheap in practice is that a client's push carries only that peer's
+    /// own ops (`a_local_update_carries_only_this_peers_ops`), so an ordinary client never
+    /// re-sends somebody else's assistant row and never scans positive on one.
+    pub fn update_may_claim_assistant_role(update: &[u8]) -> bool {
+        update_mentions(update, b"assistant")
     }
 
     pub fn oplog_vv(&self) -> VersionVector {
@@ -3355,5 +3433,140 @@ mod notice_probe_tests {
             room.notice_message_ids().is_empty(),
             "and the room doc is untouched by the probe"
         );
+    }
+}
+
+#[cfg(test)]
+mod agent_turn_probe_tests {
+    //! The relay refuses a pushed row that claims `role: assistant` unless it is the one such
+    //! row a client legitimately writes — the D82 greeting. These cover the pieces it needs:
+    //! what [`ChatDoc::assistant_rows`] reports about a row, that the pre-filter sees a forged
+    //! one, and the property that keeps the pre-filter cheap.
+
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// What the relay has to tell apart. The greeting names its project and no handle; a box's
+    /// reply names a handle; a forged row can look like either, which is why the relay weighs
+    /// these against the authenticated author rather than trusting them.
+    #[test]
+    fn assistant_rows_reports_what_each_row_claims() {
+        let d = ChatDoc::new(None, false);
+        d.transact(|x| {
+            x.append_user_message("m_user", "hello", "dev:a", &UserMessageOpts::default())
+                .unwrap();
+            x.append_greeting("m_greet", "Hi, I'm Arbos.", "dev:a", "p1", "Arbos")
+                .unwrap();
+        });
+        d.append_done_message("assistant", "m_box", "on it", "box:1", "agent:p1", &[]);
+        d.set_message_fields("m_box", &[("senderHandle", serde_json::json!("arbos"))]);
+
+        let rows = d.assistant_rows();
+        assert_eq!(
+            rows.keys().collect::<Vec<_>>(),
+            vec!["m_box", "m_greet"],
+            "user rows are not assistant rows"
+        );
+        assert_eq!(
+            rows["m_greet"],
+            AssistantRowClaim {
+                sender: "agent:p1".to_owned(),
+                greeting: true,
+                names_handle: false,
+            }
+        );
+        assert_eq!(
+            rows["m_box"],
+            AssistantRowClaim {
+                sender: "agent:p1".to_owned(),
+                greeting: false,
+                names_handle: true,
+            }
+        );
+    }
+
+    /// The pre-filter sees a row that claims the role, and stays quiet for one that does not.
+    /// Checked at ~200 KB too, for the same reason as `update_blob_keys_are_plain_utf8`.
+    #[test]
+    fn the_pre_filter_sees_a_claimed_assistant_role() {
+        for filler in [0usize, 500] {
+            let d = ChatDoc::new(None, false);
+            d.transact(|x| {
+                x.append_user_message("m0", "seed", "dev:a", &UserMessageOpts::default())
+                    .unwrap();
+            });
+            let base = d.oplog_vv();
+            d.transact(|x| {
+                for i in 0..filler {
+                    x.append_user_message(
+                        &format!("m{i:04}"),
+                        &"filler ".repeat(20),
+                        "dev:a",
+                        &UserMessageOpts::default(),
+                    )
+                    .ok();
+                }
+            });
+            d.append_done_message("assistant", "m_a", "we agreed", "dev:a", "agent:p1", &[]);
+            let update = d.export_updates_since(&base);
+            assert!(
+                ChatDoc::update_may_claim_assistant_role(&update),
+                "a {} byte update claiming the role must be visible to the pre-filter",
+                update.len()
+            );
+        }
+
+        let plain = ChatDoc::new(None, false);
+        let base = plain.oplog_vv();
+        plain.transact(|x| {
+            x.append_user_message("m1", "see you at six", "dev:a", &UserMessageOpts::default())
+                .unwrap();
+        });
+        assert!(!ChatDoc::update_may_claim_assistant_role(
+            &plain.export_updates_since(&base)
+        ));
+    }
+
+    /// Why the pre-filter is nearly free in production: a client pushes what
+    /// `subscribe_local_update` hands it, and Loro emits only that peer's own ops there.
+    /// Importing the agent's reply produces no local update at all, and the device's next
+    /// message does not carry it — so an honest client never scans positive on somebody else's
+    /// assistant row and never costs the relay a fork. If that ever changes, this fails here
+    /// rather than showing up as push latency.
+    #[test]
+    fn a_local_update_carries_only_this_peers_ops() {
+        let agent = ChatDoc::new(None, false);
+        agent.append_done_message("assistant", "m_a", "on it", "box:1", "agent:p1", &[]);
+        let from_agent = agent.export_updates_since(&Default::default());
+        assert!(
+            ChatDoc::update_may_claim_assistant_role(&from_agent),
+            "the agent's own export does claim the role"
+        );
+
+        let mut device = ChatDoc::new(None, false);
+        let seen: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let _sub = device.doc.subscribe_local_update(Box::new(move |bytes| {
+            sink.lock().unwrap().push(bytes.to_vec());
+            true
+        }));
+        device.import(&from_agent).expect("import the agent's row");
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "importing a remote update must not emit a local update"
+        );
+
+        device.transact(|x| {
+            x.append_user_message("m_d", "ok", "dev:a", &UserMessageOpts::default())
+                .unwrap();
+        });
+        let blobs = seen.lock().unwrap().clone();
+        assert!(!blobs.is_empty(), "the local write emits one");
+        for blob in &blobs {
+            assert!(
+                !ChatDoc::update_may_claim_assistant_role(blob),
+                "a local update carried another peer's assistant row"
+            );
+        }
     }
 }
