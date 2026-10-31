@@ -2213,6 +2213,7 @@ struct ChatSession: View {
                     if windowSkipEnd > 0 { settleToBottom(proxy) }
                 }
             }
+            .onChange(of: transcriptStackIdentity) { _, _ in pinFilteredStackToEnd(proxy) }
         }
     }
 
@@ -2365,6 +2366,39 @@ struct ChatSession: View {
         proxy.scrollTo("bottom", anchor: .bottom)
         DispatchQueue.main.async { proxy.scrollTo("bottom", anchor: .bottom) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { proxy.scrollTo("bottom", anchor: .bottom) }
+    }
+
+    /// Put the rebuilt filtered stack back on its end after a keyword re-keys it.
+    ///
+    /// `transcriptStackIdentity` is what makes the hits draw on iOS 27 at all, and it costs the
+    /// list its bottom anchor there: the rebuilt stack starts with no measured child heights,
+    /// iOS 27 never re-measures it, and the scroll view comes to rest on the estimates. On the
+    /// 420-row search fixture that left 219 pt of reserved space under the last hit where the
+    /// tail is really 82 pt: the newest hit floats 161 pt clear of the composer instead of
+    /// 25 pt, the match above it is pushed entirely behind the search bar, and the reader sees
+    /// two matches over a block of black where the same build without the re-key shows three.
+    /// iOS 26.5 re-measures by itself and is 24 pt with the re-key or without it.
+    ///
+    /// Scrolling the rebuilt stack to its end puts the offset back on the real geometry. This is
+    /// not the scroll re-settle that was measured and discarded for the blank transcript: that
+    /// one scrolled *instead of* re-keying, so it addressed rows that were never built and could
+    /// not resolve them. Here the re-key has already built them.
+    ///
+    /// Only on the way *into* a keyword. Leaving one belongs to `closeSearch`, and a result tap
+    /// closes search in order to land on its own message — hence the identity re-check before
+    /// each deferred hop, so a tap taken mid-ladder is not dragged back to the tail.
+    private func pinFilteredStackToEnd(_ proxy: ScrollViewProxy) {
+        guard searchHitsActive else { return }
+        let key = transcriptStackIdentity
+        proxy.scrollTo("bottom", anchor: .bottom)
+        DispatchQueue.main.async {
+            guard transcriptStackIdentity == key else { return }
+            proxy.scrollTo("bottom", anchor: .bottom)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            guard transcriptStackIdentity == key else { return }
+            proxy.scrollTo("bottom", anchor: .bottom)
+        }
     }
 
     private func m_text(_ row: Row) -> String {

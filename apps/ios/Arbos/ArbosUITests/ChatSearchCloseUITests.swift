@@ -137,6 +137,56 @@ final class ChatSearchCloseUITests: XCTestCase {
                        "a keyword with hits never says No matches")
     }
 
+    /// A filtered list is pinned to the composer, not floating above a block of empty space.
+    ///
+    /// The re-key that `testAKeywordWithHitsDrawsThem` protects costs the filtered list its
+    /// bottom anchor on iOS 27: the rebuilt stack has no measured child heights, iOS 27 never
+    /// re-measures it, and the scroll view rests on the estimates. Measured on the rig on a
+    /// 420-row thread, the newest hit came to rest 161 pt clear of the composer with that much
+    /// black under it, and the match above it was pushed entirely behind the search bar: two
+    /// matches on screen where the same build without the re-key shows three.
+    ///
+    /// The slack is 24–25 pt in every healthy cell (both runtimes, both with and without the
+    /// re-key) and 161 pt in the broken one, so 60 pt separates them with room either side.
+    ///
+    /// Needs the deep fixture: the shipped "Launch week" thread is ~10 rows, which is shorter
+    /// than the viewport, so the short-thread `minHeight` frame pins it regardless and this
+    /// case cannot express the failure. Before the fix it fails on **iOS 27.0 only** — the
+    /// same binary passes on iOS 26.5, which re-measures by itself.
+    func testAFilteredListStaysPinnedToTheComposer() {
+        let app = XCUIApplication()
+        app.launchEnvironment = ["ARBOS_FIXTURE": "1", "ARBOS_OPEN_PEOPLE": "fx-group-launch",
+                                 "ARBOS_FIXTURE_LONG_ROWS": "420"]
+        app.launch()
+        let search = app.descendants(matching: .any)["chat-search-button"].firstMatch
+        XCTAssertTrue(search.waitForExistence(timeout: appear), "the chat header's search disc is on screen")
+        let field = app.textFields["chat-search-field"]
+        for _ in 0..<3 where !field.exists {
+            sleep(1)
+            search.tap()
+            _ = field.waitForExistence(timeout: 6)
+        }
+        XCTAssertTrue(field.exists, "the Search-in-chat bar opened")
+        field.tap()
+        field.typeText("embargo")
+        // The newest hit: the shipped rows sit after the synthetic history, so the fixture's
+        // own "draft the embargo note" message is the last row of the filtered list.
+        let newestHit = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@", "embargo note"))
+            .firstMatch
+        XCTAssertTrue(newestHit.waitForExistence(timeout: settle), "the filtered transcript holds its hits")
+        XCTAssertTrue(newestHit.isHittable, "…and the newest hit is on screen")
+        // The chat bar's own top edge (`ChatBarHeightProbe`, DEBUG): where the rows must end.
+        let composer = app.descendants(matching: .any)["chat-bar-height"].firstMatch
+        XCTAssertTrue(composer.waitForExistence(timeout: settle), "the chat bar probe is up")
+        // Let the stack settle: the pin runs again 0.25 s after the rebuild.
+        sleep(2)
+        shot(app, "10-filtered-list-pinned-to-the-composer")
+        let slack = composer.frame.minY - newestHit.frame.maxY
+        XCTAssertLessThan(slack, 60,
+                          "the filtered list ends at the composer (slack \(slack) pt; healthy is 24–25, the iOS 27 re-key regression was 161)")
+    }
+
     /// A keyword with no hit is never a blank transcript.
     func testNoMatchesIsSaidNotBlank() {
         let app = openLaunchWeekSearch()
