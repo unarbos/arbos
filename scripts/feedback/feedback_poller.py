@@ -30,7 +30,8 @@ Runs every 2 minutes from arbos-feedback-poller.timer (see install-feedback-loop
      is submitted for Beta App Review (TESTFLIGHT_PUBLIC_GROUP, default "Arbos public").
 
 Feedback text is data that describes the wanted change; the agent prompt says so. Tester identity in the
-public issue is a short tag (and the Apple first name / GitHub login when known), never an email.
+public issue is a short tag (and the Apple first name / GitHub login when known), never an email — and
+never a live GitHub mention: every issue body and comment leaves through `plain()`, which defuses them.
 
 Config comes from the environment (systemd EnvironmentFile=/etc/arbos/feedback.env, root only):
   ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8_B64 (base64 of the .p8), ASC_APP_ID
@@ -162,6 +163,18 @@ def touches_ios(files: list[str] | None) -> bool:
     return any(f.startswith(IOS_PATH_PREFIXES) or f == ".github/workflows/ios.yml" for f in files or [])
 
 
+# What else the iPhone build compiles, for the gate's iOS half only (the shipping expectations stay on touches_ios, so
+# none of these makes an item wait for TestFlight). arbos-ffi depends on arbos-matrix, whose Apple-only TLS dependencies
+# Linux CI never compiles; arbos-core embeds assets/avatars/leaves with include_str!; a dependency or toolchain bump can
+# break only the iOS targets. Keep this a superset of swift-core-check.yml's paths.
+IOS_BUILD_PREFIXES = IOS_PATH_PREFIXES + ("crates/arbos-matrix/", "assets/avatars/leaves/")
+IOS_BUILD_FILES = ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "scripts/build-xcframework.sh")
+
+
+def needs_ios_gate(files: list[str] | None) -> bool:
+    return touches_ios(files) or any(f.startswith(IOS_BUILD_PREFIXES) or f in IOS_BUILD_FILES for f in files or [])
+
+
 def parse_iso(s: str) -> dt.datetime:
     s = s.strip()
     if s.endswith("Z"):
@@ -178,6 +191,26 @@ def minutes_between(a: str, b: str) -> float:
 
 def log(msg: str) -> None:
     print(f"{iso()} {msg}", flush=True)
+
+
+# A bare `@name` in an issue body or comment is a GitHub mention: it pings whoever owns that login and
+# subscribes them to the thread for good, however unrelated they are to Arbos. Every name the poller writes
+# comes from somewhere else — a tester's Arbos handle, their words, a device name, an agent's summary — and
+# none of them is a GitHub identity, so `GitHub.create_issue` and `GitHub.comment` put the whole body through
+# `plain()` on the way out. 2026-10-31: tester `grant`'s handle reached Grant Timmerman on #2457-#2459, and
+# `@allan`, `@a`, `@t`, `@z`, `@sami` and `@bittensor` had been doing the same for weeks. The loop never wants
+# to ping anybody — it addresses Jacob by name, not by handle — so one gate on the way out beats defusing at
+# each of the forty-odd places a body is built.
+_CODE_SPAN_RE = re.compile(r"(```.*?```|`[^`\n]*`)", re.S)
+_MENTION_RE = re.compile(r"(?<![A-Za-z0-9_@`.+-])@([A-Za-z0-9](?:-?[A-Za-z0-9]){0,38})")
+
+
+def plain(text: Any) -> str:
+    """`text` with every GitHub mention in it wrapped in backticks, which GitHub does not resolve. Text
+    already inside a code span or a fence is left alone: a mention there never resolved. So is a `@` that
+    follows a word character, which is an address (`foo@bar.com`) and not a mention either."""
+    parts = _CODE_SPAN_RE.split("" if text is None else str(text))
+    return "".join(p if i % 2 else _MENTION_RE.sub(r"`@\1`", p) for i, p in enumerate(parts))
 
 
 # ---------------------------------------------------------------- config
@@ -568,10 +601,10 @@ class GitHub:
             self.repo_api("POST", "/labels", json_body={"name": name, "color": color, "description": description})
 
     def create_issue(self, title: str, body: str, labels: list[str]) -> dict:
-        return self.repo_api("POST", "/issues", json_body={"title": title, "body": body, "labels": labels})
+        return self.repo_api("POST", "/issues", json_body={"title": title, "body": plain(body), "labels": labels})
 
     def comment(self, number: int, body: str) -> None:
-        self.repo_api("POST", f"/issues/{number}/comments", json_body={"body": body})
+        self.repo_api("POST", f"/issues/{number}/comments", json_body={"body": plain(body)})
 
     def set_labels(self, number: int, add: list[str], remove: list[str]) -> None:
         for name in remove:
@@ -1783,7 +1816,8 @@ class Loop:
             for k in ("platform", "app_version", "os", "device", "screen", "agent_name", "agent_id", "chat_id",
                       "box_image_version", "agentd_sha", "talking_model", "subagent_model", "screenshot", "screenshot_skipped", "filed_at"):
                 if ctx.get(k) not in (None, ""):
-                    lines.append(f"| {k} | `{str(ctx[k]).replace('|', '/')[:200]}` |")
+                    # A backtick in the value would close the code span and let what follows it render.
+                    lines.append(f"| {k} | `{str(ctx[k]).replace('|', '/').replace(chr(96), chr(39))[:200]}` |")
             if isinstance(ctx.get("turn"), dict):
                 t = ctx["turn"]
                 lines.append(f"| turn | tool calls {t.get('tool_calls', '?')} · {t.get('elapsed_ms', '?')} ms so far · route {t.get('route') or '-'} |")
@@ -2389,7 +2423,7 @@ class Loop:
         under pool-first they run one after another without ending pool-first."""
         def group(st: dict) -> int:
             files = st.get("files") or []
-            if touches_ios(files) or st.get("expects_ios"):
+            if needs_ios_gate(files) or st.get("expects_ios"):
                 return 2
             if files and all(f.startswith(("crates/arbos-mac/", "crates/arbos-update/", "docs/", "scripts/runner/")) for f in files):
                 return 0
@@ -2486,7 +2520,7 @@ class Loop:
             cur.pop("rust_gate_tree", None)
             tfiles = [f["filename"] for c in self.gh.compare(tree["base"], tree["tree"]).get("commits", []) for f in self.gh.commit(c["sha"]).get("files", [])]
             tree.update(started=iso(), warm=False, needs_mac=True, linux="pending", mac="pending", mac_started=None, land_tree=True,
-                        needs_ios=touches_ios(tfiles), ios="pending" if touches_ios(tfiles) else "skipped")
+                        needs_ios=needs_ios_gate(tfiles), ios="pending" if needs_ios_gate(tfiles) else "skipped")
             cur["rust_gate"] = tree
             self.store.save_cursor(cur)
             log(f"Rust gate {tree['id']}: integration tree {tree['tree'][:8]} with {len(tree['members'])} fixes (CI on {tree['branch']}; Mac release build)")
@@ -2998,7 +3032,7 @@ class Loop:
             files += self.store.state(fid).get("files") or []
         crates = self.rust_crates(files)
         mac = "arbos-mac" in crates or crates == ["workspace"]
-        ios = touches_ios(files)
+        ios = needs_ios_gate(files)
         linux = any(not f.startswith("apps/ios/") for f in files)  # ci.yml ignores apps/ios-only pushes
         cur = self.store.cursor()
         cur["rust_gate"] = {"id": run_id, "branch": branch, "base": base, "tree": tree, "members": {fid: members[fid] for fid in merged},
@@ -3478,8 +3512,8 @@ class Loop:
             return
         # Per-item, per-half verdict (coordinator 2026-10-27 22:01, the #2031 spirit): a member whose footprint does not
         # reach the half that failed was proven by the halves that passed — it lands now instead of riding the bisect
-        # of a sibling's red. iOS red with Linux+Mac green: members with no iOS footprint (no apps/ios, no FFI /
-        # client-core crates) land. Mac red with Linux+iOS green: apps/ios-only members land. A Linux red (fmt /
+        # of a sibling's red. iOS red with Linux+Mac green: members with no iOS footprint (needs_ios_gate: no apps/ios,
+        # no FFI / client-core / matrix crates, no Cargo or toolchain bump) land. Mac red with Linux+iOS green: apps/ios-only members land. A Linux red (fmt /
         # clippy / tests / typeshare) can come from anything, so nothing lands on it. #2053/#2082, Mac-only, had
         # sat 6 h behind iOS siblings' reds (ChatView switch, PerfCounters).
         ios_only_red = active.get("ios") == "fail" and active["linux"] in ("ok", "skipped") and active["mac"] in ("ok", "skipped")
@@ -3491,7 +3525,7 @@ class Loop:
                 if st.get("status") != "gating" or st.get("branch_head") != members[fid]:
                     continue
                 files = st.get("files") or []
-                if ios_only_red and not touches_ios(files) and not st.get("expects_ios"):
+                if ios_only_red and not needs_ios_gate(files) and not st.get("expects_ios"):
                     innocent.append(fid)
                 elif mac_only_red and files and all(f.startswith("apps/ios/") for f in files):
                     innocent.append(fid)

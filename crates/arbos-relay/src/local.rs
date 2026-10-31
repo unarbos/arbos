@@ -513,6 +513,48 @@ mod owner_tests {
         assert_eq!(ids, vec![alice_id.as_str()], "no other user's helper");
     }
 
+    /// The other two arms of the same `match`, which the test above does not reach: a box asks
+    /// on behalf of the user it serves (that is what the `local_devices` tool is for, so an
+    /// empty answer there would break it silently), and the admin token has no user and keeps
+    /// the whole list. Both would survive a change that only kept the device arm honest.
+    #[tokio::test]
+    async fn a_box_sees_its_own_users_helpers_and_the_admin_token_sees_every_one() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 29);
+        let (_bob, bob_dev) = person(&state, 30);
+        let (Principal::Device { id: alice_id, .. }, Principal::Device { id: bob_id, .. }) =
+            (&alice_dev, &bob_dev)
+        else {
+            panic!("devices")
+        };
+        let (alice_id, bob_id) = (alice_id.clone(), bob_id.clone());
+        helper(&state, &alice_id);
+        helper(&state, &bob_id);
+
+        let ids = |r: ApiResult| -> Vec<String> {
+            let body = r.expect("list").into_body();
+            let bytes = futures::executor::block_on(to_bytes(body, 1 << 20)).expect("body");
+            let v: Value = serde_json::from_slice(&bytes).unwrap();
+            v["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|d| d["device_id"].as_str().map(str::to_owned))
+                .collect()
+        };
+
+        assert_eq!(
+            ids(list(State(state.clone()), box_of(&alice)).await),
+            vec![alice_id.clone()],
+            "Alice's box must still see Alice's helper"
+        );
+        let mut all = ids(list(State(state.clone()), Principal::Admin).await);
+        all.sort();
+        let mut both = vec![alice_id, bob_id];
+        both.sort();
+        assert_eq!(all, both, "the admin token keeps the whole list");
+    }
+
     /// A box runs ops on a computer. It may only reach its own user's.
     #[tokio::test]
     async fn a_box_cannot_run_ops_on_another_users_computer() {

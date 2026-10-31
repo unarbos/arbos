@@ -326,6 +326,10 @@ async fn people_chat_json_matches_fixtures() {
         .db
         .add_member(&dm.id, &format!("user:{bob}"), "member", &alice, &json!({}))
         .unwrap();
+    // Both joined at the same instant, so `members_of`'s tiebreak alone decides the roster
+    // order — and the fixture pins that order, in the `members` array the apps render and in
+    // the title derived from it. That is deliberate: the clients decode this shape, so the
+    // order is part of it and a change here is a change they would see.
     fix_member_joined(&state, &dm.id, &format!("user:{alice}"));
     fix_member_joined(&state, &dm.id, &format!("user:{bob}"));
     let cm = ChatWithMembers {
