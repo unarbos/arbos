@@ -521,6 +521,34 @@ impl Db {
         })
     }
 
+    /// Arbos device ids of one user that have a Matrix identity (a device, a token, and
+    /// usually a pusher), revoked devices included.
+    pub fn matrix_devices_of_user(&self, user_id: &str) -> Result<Vec<String>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT device_id FROM matrix_devices WHERE user_id = ?1 ORDER BY created_at",
+            )?;
+            let rows = st.query_map(params![user_id], |r| r.get(0))?;
+            rows.collect()
+        })
+    }
+
+    /// Drop the relay's own Matrix rows for a deleted user: its devices (whose tokens the
+    /// caller logs out first) and its `matrix_users` row, keyed by the member string.
+    pub fn matrix_forget_user(&self, user_id: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "DELETE FROM matrix_devices WHERE user_id = ?1",
+                params![user_id],
+            )?;
+            c.execute(
+                "DELETE FROM matrix_users WHERE id = ?1",
+                params![format!("user:{user_id}")],
+            )?;
+            Ok(())
+        })
+    }
+
     /// Every user that has at least one device with a Matrix identity (pusher backfill).
     pub fn matrix_device_users(&self) -> Result<Vec<String>> {
         self.with(|c| {
@@ -548,13 +576,19 @@ impl Db {
         })
     }
 
-    pub fn matrix_delete_device(&self, device_id: &str) -> Result<Option<(String, String)>> {
+    /// Forget a device's Matrix identity, handing back `(mxid, matrix device id, encrypted
+    /// access token)` — the token so the caller can log it out, which is the only thing that
+    /// makes the device gone at the homeserver.
+    pub fn matrix_delete_device(
+        &self,
+        device_id: &str,
+    ) -> Result<Option<(String, String, String)>> {
         self.with(|c| {
             let row = c
                 .query_row(
-                    "SELECT mxid, mx_device_id FROM matrix_devices WHERE device_id = ?1",
+                    "SELECT mxid, mx_device_id, mx_token_enc FROM matrix_devices WHERE device_id = ?1",
                     params![device_id],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
                 .optional()?;
             c.execute(
