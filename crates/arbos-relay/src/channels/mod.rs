@@ -762,6 +762,7 @@ mod tests {
             default_provider: None,
             fleet: crate::fleet::FleetCfg::default(),
             connectors_mock: true,
+            connector_users: Vec::new(),
             channels_mock: true,
             openai_images_base: String::new(),
             image_mock: false,

@@ -46,6 +46,11 @@ pub struct Config {
     pub fleet: crate::fleet::FleetCfg,
     /// `ARBOS_CONNECTORS_MOCK=1`: connectors answer with canned data (F1).
     pub connectors_mock: bool,
+    /// `ARBOS_CONNECTORS_USERS`: the user ids allowed to list and use connectors, comma
+    /// separated. The `connectors` table has no owner column, so the relay cannot tell whose
+    /// grant a row holds; until it can, this names the owner from configuration instead.
+    /// Empty — the default — means the admin token only.
+    pub connector_users: Vec<String>,
     /// `ARBOS_CHANNELS_MOCK=1`: channel sends land in `channel_outbox`; `/channels/mock/inbound` is open (F7).
     pub channels_mock: bool,
     /// `ARBOS_IMAGE_MOCK=1`: image generation answers with a labelled placeholder PNG (F10).
@@ -613,6 +618,7 @@ pub(crate) mod test_support {
             default_provider: None,
             fleet: crate::fleet::FleetCfg::default(),
             connectors_mock: true,
+            connector_users: Vec::new(),
             channels_mock: true,
             openai_images_base: String::new(),
             openai_direct_base: "https://api.openai.com/v1".into(),
