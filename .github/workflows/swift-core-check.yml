@@ -110,15 +110,26 @@ jobs:
         run: |
           set -uo pipefail
           start=$(date +%s)
-          verdict=late; why="the push run had no verdict after 330 min"
+          verdict=late; why="the push run started but had no verdict after 330 min"
           while (( $(date +%s) - start < 330 * 60 )); do
-            read -r id status < <(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/swift-core-check.yml/runs?event=push&branch=$BRANCH&head_sha=$SHA&per_page=20" \
-              -q '[.workflow_runs[]] | sort_by(.created_at) | last | "\(.id // "") \(.status // "")"' 2>/dev/null || echo "")
+            read -r id status created < <(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/swift-core-check.yml/runs?event=push&branch=$BRANCH&head_sha=$SHA&per_page=20" \
+              -q '[.workflow_runs[]] | sort_by(.created_at) | last | "\(.id // "") \(.status // "") \(.created_at // "")"' 2>/dev/null || echo "")
             if [[ -z "${id:-}" ]]; then
               if (( $(date +%s) - start > 10 * 60 )); then verdict=none; why="no push run for $SHA"; break; fi
               sleep 30; continue
             fi
-            if [[ "$status" != completed ]]; then sleep 60; continue; fi
+            if [[ "$status" != completed ]]; then
+              # A push run waiting for GitHub's macOS pool counts as no verdict after 15 min: on 2026-10-29/31
+              # only 6% of hosted jobs here started within 15 min and the median wait was 209 min. One queued
+              # for the EC2 Mac is waited for: a second run would queue behind it on the same runner.
+              read -r jstatus jcreated jlabels < <(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs" \
+                -q ".jobs[] | select(.name == \"$JOB\") | \"\(.status) \(.created_at) \(.labels | join(\",\"))\"" 2>/dev/null | head -1 || echo "")
+              if [[ "${jstatus:-}" != in_progress && "${jlabels:-}" != *arbos-mac* ]] &&
+                 (( $(date +%s) - $(date -d "${jcreated:-$created}" +%s) > 15 * 60 )); then
+                verdict=none; why="push run $id has had no runner since ${jcreated:-$created}"; break
+              fi
+              sleep 60; continue
+            fi
             conclusion=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs" -q ".jobs[] | select(.name == \"$JOB\") | .conclusion" 2>/dev/null | head -1)
             case "$conclusion" in
               success) verdict=success; why="push run $id passed" ;;
@@ -160,12 +171,13 @@ jobs:
           xcrun simctl list devices booted 2>/dev/null | grep -oE '[0-9A-F-]{36}' | sort -u > "$RUNNER_TEMP/sims-before.txt" || true
           heavy=/usr/local/bin/arbos-heavy-slot.sh
           if [[ ! -x "$heavy" ]]; then echo "slot=none" >> "$GITHUB_OUTPUT"; exit 0; fi
-          flag=""
+          # Not an array: the Mac's /bin/bash is 3.2, where an empty "${a[@]}" fails under set -u.
+          acquire() { "$heavy" acquire swift-check --pid "$PPID"; }
           usage=$("$heavy" 2>&1 || true)
-          case "$usage" in *--wait-max*) flag="--wait-max 600" ;; esac
+          case "$usage" in *--wait-max*) acquire() { "$heavy" acquire swift-check --pid "$PPID" --wait-max 600; } ;; esac
           while :; do
             rc=0
-            slot=$("$heavy" acquire swift-check --pid "$PPID" $flag) || rc=$?
+            slot=$(acquire) || rc=$?
             if [[ "$rc" -eq 0 && -n "$slot" ]]; then break; fi
             if [[ "$rc" -ne 0 && "$rc" -ne 75 ]]; then echo "::error title=Heavy-job slot::acquire exited $rc"; exit 1; fi
             echo "$(date -u +%H:%M:%SZ) no slot (exit $rc); asking again in 60 s"
