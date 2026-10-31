@@ -10,8 +10,10 @@ on:
       - "crates/arbos-core/**"
       - "crates/arbos-client/**"
       - "crates/arbos-ffi/**"
+      - "crates/arbos-matrix/**"
       - "scripts/build-xcframework.sh"
       - "packages/ArbosFFI/**"
+      - "assets/avatars/leaves/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
@@ -22,8 +24,10 @@ on:
       - "crates/arbos-core/**"
       - "crates/arbos-client/**"
       - "crates/arbos-ffi/**"
+      - "crates/arbos-matrix/**"
       - "scripts/build-xcframework.sh"
       - "packages/ArbosFFI/**"
+      - "assets/avatars/leaves/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
@@ -155,8 +159,10 @@ jobs:
       !cancelled() && needs.route.result == 'success' &&
       (needs.route.outputs.mode == 'check' || needs.push-run.outputs.verdict == 'none')
     runs-on: ${{ needs.route.outputs.runner }}
+    # 46-63 min measured on identical content, the spread being runner draw not diff. The old 60
+    # killed runs mid-bundle, which is no verdict rather than a red one; this change took 63.4.
     # The EC2 Mac's extra 50 min: the heavy-job slot wait (bounded at 45 min below) comes out of this.
-    timeout-minutes: ${{ needs.route.outputs.runner == 'arbos-mac' && 110 || 60 }}
+    timeout-minutes: ${{ needs.route.outputs.runner == 'arbos-mac' && 140 || 90 }}
     env:
       APP_DIR: apps/ios/Arbos
       TEST_SIM: iPhone 17

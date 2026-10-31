@@ -508,7 +508,8 @@ pub fn people_chat_dto(
         .filter(|m| m.member.starts_with("user:") && m.member != format!("user:{me}"))
         .collect();
     // Untitled group: the other people's handles — or, with no other human
-    // (a group of my agents), the agents' handles.
+    // (a group of my agents), the agents' handles. Bare, no `@`: a generated group name reads
+    // the same on every surface (see `group_name_tests`).
     let named: Vec<&ChatMemberDto> = if others.is_empty() {
         members
             .iter()
@@ -2633,7 +2634,9 @@ pub struct ProjectMemberBody {
 }
 
 /// `POST /projects/{id}/members {"handle"}` — the owner invites a person into the project: they
-/// see its chats in their rail and drive its agent.
+/// see its chats in their rail and drive its agent. Because that is an add into chats the
+/// person did not ask for, their `group_add` privacy decides, exactly as it does for a people
+/// group; the owner is the adder.
 pub async fn project_member_add(
     State(state): State<AppState>,
     principal: Principal,
@@ -2679,6 +2682,9 @@ pub async fn project_member_add(
             "not_available",
             "this person is not available",
         );
+    }
+    if !may_add_to_group(&state, &me, &other_id) {
+        return group_add_forbidden();
     }
     match state.db.add_project_member(&project.id, &other_id, &me) {
         Ok(true) => state.matrix.touch_project(&state, &project.id),
@@ -5243,17 +5249,37 @@ mod create_group_tests {
 
 #[cfg(test)]
 mod group_add_privacy_tests {
-    //! A person's `group_add` privacy blocks others from putting them into a new group or
-    //! adding them to an existing one (spam-group guard).
+    //! A person's `group_add` privacy blocks others from putting them into a new group,
+    //! adding them to an existing one, or sharing a project with them (spam-group guard).
+    //! Sharing a project drops the person into the project's chats, so it is an add in the
+    //! same sense and the owner is the adder.
 
     use axum::extract::{Path, State};
     use axum::http::StatusCode;
     use axum::Json;
 
-    use super::tests_support::person;
+    use super::tests_support::{person, project_of};
     use super::*;
     use crate::state::test_support::test_state;
     use crate::state::AuthMode;
+
+    /// Share `alice`'s project with the owner of `handle`.
+    async fn share(
+        state: &AppState,
+        owner_dev: &Principal,
+        project: &str,
+        handle: &str,
+    ) -> Response {
+        project_member_add(
+            State(state.clone()),
+            owner_dev.clone(),
+            Path(project.to_owned()),
+            Json(ProjectMemberBody {
+                handle: handle.to_owned(),
+            }),
+        )
+        .await
+    }
 
     #[tokio::test]
     async fn nobody_refuses_create_and_add() {
@@ -5382,6 +5408,107 @@ mod group_add_privacy_tests {
         )
         .await;
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn nobody_refuses_a_shared_project() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 41);
+        let (bob, _) = person(&state, 42);
+        let project = project_of(&state, &alice, "Shared");
+        state.db.set_group_add_policy(&bob, "nobody").unwrap();
+
+        let r = share(&state, &alice_dev, &project, "user42").await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        assert!(
+            !state.db.is_project_member(&project, &bob).unwrap(),
+            "a refused share leaves no membership row"
+        );
+    }
+
+    #[tokio::test]
+    async fn people_i_know_shares_only_with_an_existing_dm() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 43);
+        let (bob, _) = person(&state, 44);
+        let (carol, _) = person(&state, 45);
+        let project = project_of(&state, &alice, "Shared");
+        for p in [&bob, &carol] {
+            state.db.set_group_add_policy(p, "people_i_know").unwrap();
+        }
+
+        // Alice knows Bob through a DM; Carol is a stranger.
+        let r = dm_create(
+            State(state.clone()),
+            alice_dev.clone(),
+            Json(DmBody {
+                handle: "user44".into(),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+
+        let r = share(&state, &alice_dev, &project, "user44").await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert!(state.db.is_project_member(&project, &bob).unwrap());
+
+        let r = share(&state, &alice_dev, &project, "user45").await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        assert!(!state.db.is_project_member(&project, &carol).unwrap());
+    }
+
+    /// The default policy keeps the share route and both group paths open: the fix must not
+    /// tighten anything.
+    #[tokio::test]
+    async fn anyone_still_allows_every_add_path() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 48);
+        let (bob, _) = person(&state, 49);
+        let (_carol, _) = person(&state, 50);
+        let project = project_of(&state, &alice, "Shared");
+        assert_eq!(state.db.group_add_policy(&bob).unwrap(), "anyone");
+
+        let r = share(&state, &alice_dev, &project, "user49").await;
+        assert_eq!(r.status(), StatusCode::OK, "no DM with Bob is needed");
+        assert!(state.db.is_project_member(&project, &bob).unwrap());
+
+        let r = chats_create_group(
+            State(state.clone()),
+            alice_dev.clone(),
+            Json(CreateGroupBody {
+                kind: "group".into(),
+                members: vec!["user49".into()],
+                agent_ids: vec![],
+                title: Some("Strangers".into()),
+                avatar_leaf: None,
+                avatar_leaf_color: None,
+                description: None,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let chat_id = state
+            .db
+            .chats_of_member(&format!("user:{alice}"))
+            .unwrap()
+            .into_iter()
+            .find(|cm| cm.chat.kind == "group")
+            .unwrap()
+            .chat
+            .id;
+
+        let r = member_add(
+            State(state.clone()),
+            alice_dev,
+            Path(chat_id),
+            Json(AddMemberBody {
+                handle: Some("user50".into()),
+                handles: vec![],
+                agent_ids: vec![],
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
     }
 }
 
@@ -5636,10 +5763,16 @@ mod mention_resolution_tests {
         );
 
         // A handle on its own still resolves, and only once when the collective names it too.
-        assert_eq!(
-            resolve_mentions(&state, &cm, "@lium and @here", &me),
-            resolve_mentions(&state, &cm, "@here", &me)
-        );
+        // Sorted, because what is being compared is who was named: a collective walks the
+        // roster, and `members_of` orders that by `joined_at` with no tiebreak, so members who
+        // joined in the same millisecond come back in whatever order SQLite chooses. Sorting
+        // still catches a duplicate, which is what this assertion is for — the lists would
+        // differ in length.
+        let mut handle_and_collective = resolve_mentions(&state, &cm, "@lium and @here", &me);
+        let mut collective_alone = resolve_mentions(&state, &cm, "@here", &me);
+        handle_and_collective.sort();
+        collective_alone.sort();
+        assert_eq!(handle_and_collective, collective_alone);
     }
 
     /// A collective that names nobody adds nothing — the array is a list of members. The word is
