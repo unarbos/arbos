@@ -857,7 +857,13 @@ impl Db {
         })
     }
 
-    /// Consume a pairing code and register a device. Returns the device id.
+    /// Consume a pairing code and register a device. Returns whether the code was good.
+    ///
+    /// The device joins [`crate::auth::LEGACY_USER`], which is what a paircode relay means by
+    /// "the account": the operator mints the codes, one relay serves one person, and `projects`
+    /// defaults to the same id. Written out rather than left to the column default, because
+    /// account-wide operations key on this column and the default made the choice invisible —
+    /// `sign_out_everywhere` reads it and ends every session that shares it.
     pub fn redeem_pairing_code(
         &self,
         code: &str,
@@ -875,8 +881,8 @@ impl Db {
                 return Ok(false);
             }
             c.execute(
-                "INSERT INTO devices(id, name, token_hash, created_at) VALUES (?1, ?2, ?3, ?4)",
-                params![device_id, name, token_hash, now],
+                "INSERT INTO devices(id, name, token_hash, user_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![device_id, name, token_hash, crate::auth::LEGACY_USER, now],
             )?;
             Ok(true)
         })

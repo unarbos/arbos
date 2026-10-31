@@ -181,6 +181,15 @@ async fn fail_pending(conn: &LocalConn, why: &str) {
     }
 }
 
+/// Unregister a helper socket and fail whatever it was asked to do. Revoking the device row
+/// does not reach the socket: the helper registered once and stays in `local_conns` until it
+/// disconnects, so without this a signed-out machine still answers ops.
+pub(crate) async fn disconnect(state: &AppState, device_id: &str, why: &str) {
+    if let Some(conn) = state.local_conns.lock().await.remove(device_id) {
+        fail_pending(&conn, why).await;
+    }
+}
+
 /// `POST /projects/{id}/local/{device}/exec` (box token): body = one `LocalOp`.
 pub async fn exec(
     State(state): State<AppState>,
@@ -338,12 +347,12 @@ pub async fn delete(
         return Err(no_such_device());
     }
     let ok = state.db.local_device_delete(&device_id).map_err(internal)?;
+    // `revoke_device_everywhere` disconnects the helper too; this says why in the error the
+    // pending ops get.
+    disconnect(&state, &device_id, "device removed").await;
     crate::signin::revoke_device_everywhere(&state, &device_id)
         .await
         .map_err(internal)?;
-    if let Some(conn) = state.local_conns.lock().await.remove(&device_id) {
-        fail_pending(&conn, "device removed").await;
-    }
     Ok(if ok {
         StatusCode::NO_CONTENT
     } else {

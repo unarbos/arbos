@@ -284,6 +284,16 @@ fn restart_close() -> Message {
     }))
 }
 
+/// The close frame a revoked device gets: 1008 Policy, which clients treat as a fault rather
+/// than "redial now". A redial is refused at the upgrade anyway, because the bearer no longer
+/// resolves, and that 401 is the app's existing signed-out path.
+fn signed_out_close() -> Message {
+    Message::Close(Some(axum::extract::ws::CloseFrame {
+        code: axum::extract::ws::close_code::POLICY,
+        reason: "signed out".into(),
+    }))
+}
+
 /// Counts this socket in `RestartSignal::open_sockets` for as long as it lives, so a restart
 /// can drain (wait for the 1012 closes to go out) before the process exits.
 struct OpenSocket(Arc<crate::state::RestartSignal>);
@@ -333,6 +343,11 @@ async fn run(
         let _ = sink.send(restart_close()).await;
         return;
     }
+    // Sign-out has to reach a socket that is already open. The principal was resolved once, at
+    // upgrade, so without this a revoked device keeps reading the room and keeps writing rows
+    // that post as its owner until it disconnects of its own accord (#2460 review, finding 1).
+    let mut revocations = state.revocations.subscribe();
+    revocations.mark_unchanged();
     let _open = OpenSocket::new(&state);
     let is_box = principal.is_box();
     // Rows from the box carry the box's device id (`box:<sandbox>` / `box:local-<user>`), the same
@@ -382,6 +397,16 @@ async fn run(
                         continue;
                     }
                 };
+                // A frame already in flight when the device was revoked would race the
+                // revocation arm below, so every frame asks the rows again: nothing is read
+                // and nothing is written for a device the account signed out.
+                if let Principal::Device { id, .. } = &principal {
+                    if !state.device_is_live(id) {
+                        tracing::info!(%room_name, device = %id, conn_id, "room frame refused: device signed out");
+                        let _ = sink.send(signed_out_close()).await;
+                        break;
+                    }
+                }
                 let was_hello = f.ty == FrameType::Hello;
                 match handle_frame(&state, &room, &project_id, &room_name, conn_id, &mut device, &principal, f, &mut sink, &mut delivery).await {
                     Ok(()) => {}
@@ -440,6 +465,19 @@ async fn run(
                 if changed.is_err() || *closing.borrow_and_update() {
                     let _ = sink.send(restart_close()).await;
                     break;
+                }
+            }
+            changed = revocations.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                // Some device was revoked. The counter does not say which, so ask the rows.
+                if let Principal::Device { id, .. } = &principal {
+                    if !state.device_is_live(id) {
+                        tracing::info!(%room_name, device = %id, conn_id, "room socket closed: device signed out");
+                        let _ = sink.send(signed_out_close()).await;
+                        break;
+                    }
                 }
             }
         }
@@ -2333,5 +2371,157 @@ mod covered_push_tests {
         assert_ne!(vv1, vv_cached);
         // And it equals encoding the writer's own vv once the room holds the same ops.
         assert_eq!(vv_cached, encode_vv(&doc.oplog_vv()));
+    }
+}
+
+#[cfg(test)]
+mod revoked_socket_tests {
+    //! A room socket resolves its principal once, at the upgrade. Sign-out therefore has to
+    //! reach the connection itself: until the #2460 review a signed-out laptop kept reading its
+    //! chats and kept posting rows that appear as the owner, with the relay having already
+    //! answered "every session closed".
+
+    use axum::routing::get;
+    use axum::Router;
+    use futures::{SinkExt, StreamExt};
+    use serde_json::json;
+    use std::net::SocketAddr;
+    use std::time::Duration;
+    use tokio_tungstenite::tungstenite::Message as TMsg;
+
+    use arbos_core::doc::{ChatDoc, UserMessageOpts};
+    use arbos_core::ids::ulid;
+    use arbos_core::wire::{Frame, FrameType};
+
+    use crate::people::tests_support::{dm, person};
+    use crate::state::test_support::test_state;
+    use crate::state::{AppState, AuthMode};
+
+    async fn serve(state: AppState) -> SocketAddr {
+        let app = Router::new()
+            .route("/room/{project}/{chat}", get(super::ws_room))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        addr
+    }
+
+    fn device_token(state: &AppState, user: &str) -> (String, String) {
+        let id = ulid();
+        let token = format!("adv_{}", ulid().to_ascii_lowercase());
+        state
+            .db
+            .insert_device(&id, "t", &arbos_core::auth::hash(&token), user, "paircode")
+            .unwrap();
+        (id, token)
+    }
+
+    fn decode(m: TMsg) -> Option<Frame> {
+        match m {
+            TMsg::Binary(b) => Frame::decode(b).ok().flatten(),
+            _ => None,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_revoked_device_is_cut_off_its_open_room_socket() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 4601);
+        let (bob, _) = person(&state, 4602);
+        let chat = dm(&state, &alice, &bob);
+        let room = format!("people/{chat}");
+        let (dev_id, token) = device_token(&state, &alice);
+        let addr = serve(state.clone()).await;
+
+        // The laptop opens its socket and catches up while it is still signed in.
+        let url = format!("ws://{addr}/room/{room}?token={token}");
+        let (ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+        let (mut sink, mut stream) = ws.split();
+        sink.send(TMsg::Binary(
+            Frame::new(
+                FrameType::Hello,
+                json!({ "cursor": 0, "device": "dev:laptop", "room": room,
+                        "proto": arbos_core::PROTO_VERSION }),
+                bytes::Bytes::new(),
+            )
+            .encode(),
+        ))
+        .await
+        .unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let m = tokio::time::timeout_at(deadline, stream.next())
+                .await
+                .expect("relay answers")
+                .unwrap()
+                .unwrap();
+            let Some(f) = decode(m) else { continue };
+            if f.ty == FrameType::State {
+                sink.send(TMsg::Binary(
+                    Frame::new(
+                        FrameType::RowsReq,
+                        json!({ "after": 0, "excludeOwn": false }),
+                        bytes::Bytes::new(),
+                    )
+                    .encode(),
+                ))
+                .await
+                .unwrap();
+            }
+            if f.ty == FrameType::RowsDone {
+                break;
+            }
+        }
+        let head_before = state.db.room_state(&room).unwrap().head;
+
+        crate::signin::revoke_device_everywhere(&state, &dev_id)
+            .await
+            .unwrap();
+
+        // Whatever the laptop does next, the row does not land. The write is attempted without
+        // waiting for the close, so this covers the frame that was already in flight as well as
+        // the one typed afterwards.
+        let doc = ChatDoc::new(Some(9), false);
+        let base = doc.oplog_vv();
+        doc.init_meta(&chat, "people", 1);
+        doc.append_user_message(
+            "after-revoke",
+            "written by a device the account signed out",
+            "dev:laptop",
+            &UserMessageOpts::default(),
+        )
+        .unwrap();
+        let _ = sink
+            .send(TMsg::Binary(
+                Frame::new(
+                    FrameType::Push,
+                    json!({ "batchId": "after-revoke-1" }),
+                    bytes::Bytes::from(doc.export_updates_since(&base)),
+                )
+                .encode(),
+            ))
+            .await;
+
+        // The relay closes the socket rather than serving it.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let mut closed = false;
+        while !closed {
+            match tokio::time::timeout_at(deadline, stream.next()).await {
+                Err(_) => panic!("the socket was neither closed nor errored"),
+                Ok(None) => closed = true,
+                Ok(Some(Err(_))) => closed = true,
+                Ok(Some(Ok(TMsg::Close(_)))) => closed = true,
+                Ok(Some(Ok(m))) => assert!(
+                    !matches!(decode(m), Some(f) if f.ty == FrameType::Ack),
+                    "a revoked device's write was accepted"
+                ),
+            }
+        }
+        assert_eq!(
+            state.db.room_state(&room).unwrap().head,
+            head_before,
+            "nothing the revoked device sent was stored"
+        );
     }
 }
