@@ -1226,7 +1226,8 @@ struct ChatSession: View {
                                                 hasPreview: Transcript.linkPreviewsEnabled && messageById[row.messageId]?.linkPreview != nil,
                                                 // Reply in DM only in people groups — not in a
                                                 // DM or 1:1 agent chat you're already in (#1871).
-                                                inPrivateChat: people?.isGroup != true),
+                                                inPrivateChat: people?.isGroup != true,
+                                                unsent: model.isUnsent(row.messageId)),
                         onReact: { emoji in
                             // One toggle per overlay: a second report of the same pick
                             // (the emoji keyboard reports an insert twice, or a cell tapped

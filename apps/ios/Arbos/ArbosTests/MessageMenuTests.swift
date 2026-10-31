@@ -82,4 +82,22 @@ final class MessageMenuTests: XCTestCase {
             XCTAssertTrue(m.plainText.contains(p), "copy misses paragraph: \(p)")
         }
     }
+
+    /// A message whose pictures never uploaded is in no chat document, so nobody else has
+    /// it: Reply, Forward, Reply in DM, View thread and Edit have nothing to act on, and
+    /// Delete is offered whatever the document would say ([feedback
+    /// caption-sent-without-media]).
+    func testAnUnsentMessageOffersCopyAndDeleteOnly() {
+        XCTAssertEqual(
+            MessageMenu.items(forMessage: true, canEdit: true, canDelete: false,
+                              hasReplies: true, hasPreview: true, unsent: true),
+            [.copy, .delete]
+        )
+        XCTAssertEqual(
+            MessageMenu.items(forMessage: true, canEdit: true, canDelete: true,
+                              hasReplies: true, hasPreview: true, unsent: false),
+            [.copy, .reply, .viewThread, .forward, .replyInDM, .edit, .removePreview, .delete],
+            "a posted message is unchanged"
+        )
+    }
 }

@@ -691,6 +691,12 @@ pub enum RowKind {
         /// reply quotes like a text one ([feedback picture-reply-quote-mac-2026-10-28]);
         /// the caption bubble under it then carries none.
         quote: Option<Quote>,
+        /// Where my own send is, on the first card of the message, so a card can carry
+        /// the red "! Retry" ([feedback failed-upload-retry]). The own-bubble delivery
+        /// rule (`docs/mac-design-rules.md`) was only ever wired to text bubbles, and a
+        /// picture or video with no words has no bubble — so a failed media send showed
+        /// nothing at all. `None` on someone else's card and on later cards.
+        delivery: Option<Delivery>,
     },
     /// S8: the agent asked a question.
     AskUser {
@@ -3251,6 +3257,7 @@ impl Transcript {
                 time,
                 forwarded_from,
                 quote,
+                delivery,
             } => {
                 // The blob `ref`, or `url:<url>` for a picked GIF that lives with its
                 // provider (ARB-544) — the sync layer fetches either.
@@ -3305,7 +3312,11 @@ impl Transcript {
                 let (row_el, reveal) = self.hover_row(&row.id, &row.id, now, window, cx);
                 let actions = self.hover_rail(&row.id, &row.message_id, reveal, &theme, cx);
                 if mine {
-                    // My media sits right; the rail is on its outer (left) edge.
+                    // My media sits right; the rail is on its outer (left) edge, and so is
+                    // the red "! Retry" when the send did not land — the same place and the
+                    // same glyph as on a text bubble of mine, because a picture or video
+                    // with no words has no bubble to put it on
+                    // ([feedback failed-upload-retry]).
                     div()
                         .w_full()
                         .py(px(4.0))
@@ -3318,6 +3329,10 @@ impl Transcript {
                                 .items_center()
                                 .children(hover_time(time, reveal, &theme).map(|t| t.mr(px(8.0))))
                                 .child(actions.mr(px(6.0)))
+                                .children((delivery == Some(Delivery::Failed)).then(|| {
+                                    self.failed_retry(&row.id, &row.message_id, &theme, cx)
+                                        .mr(px(8.0))
+                                }))
                                 .child(card),
                         )
                         .into_any_element()
@@ -4509,9 +4524,13 @@ pub fn build_rows_with_cache(
                                 .map(|id| Quote::for_reply(id, messages))
                         })
                 };
+                // The failed mark goes once per message, on its first card — where the
+                // forward label and the reply quote already go.
+                let card_delivery = delivery_state(message, is_mine);
                 for (ix, (part_id, attachment)) in attachment_parts.iter().enumerate() {
                     let forwarded = forwarded.clone().filter(|_| ix == 0);
                     let quote = quote.clone().filter(|_| ix == 0);
+                    let delivery = card_delivery.filter(|_| ix == 0);
                     let has_thumb = attachment
                         .blob_ref
                         .as_deref()
@@ -4535,6 +4554,7 @@ pub fn build_rows_with_cache(
                                 card_named,
                                 disc,
                                 &quote,
+                                delivery,
                             ),
                             false,
                         ),
@@ -4550,6 +4570,7 @@ pub fn build_rows_with_cache(
                             time: clock_label(message.created_at),
                             forwarded_from: forwarded.clone(),
                             quote,
+                            delivery,
                         },
                     });
                 }
@@ -4968,6 +4989,7 @@ pub fn build_rows_with_cache(
                                     time: clock_label(message.created_at),
                                     forwarded_from: None,
                                     quote: None,
+                                    delivery: None,
                                 },
                             })
                         }

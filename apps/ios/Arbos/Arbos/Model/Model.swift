@@ -582,6 +582,12 @@ struct Attachment: Codable, Equatable {
         return !ref.isEmpty && !ref.hasPrefix("local:")
     }
 
+    /// The outbox row's picture/video before it has a `ref`, so the sender's own card
+    /// draws its name, kind and size exactly as it will once the upload lands.
+    init(outbox a: OutboxAttachment) {
+        self.init(name: a.name, mime: a.mime, blobRef: nil, kind: a.kind, bytes: a.bytes)
+    }
+
     /// "1.8 MB" style size, empty when unknown (Mac `size_label`).
     var sizeLabel: String {
         guard let b = bytes else { return "" }
@@ -621,6 +627,52 @@ struct Attachment: Codable, Equatable {
             return String(name[name.index(after: dot)...]).lowercased()
         }()
         return ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "bmp", "tif", "tiff"].contains(ext)
+    }
+}
+
+/// A picture or video waiting in the outbox. The bytes are not here: they are staged on
+/// disk under `file`, so a message the user has committed to survives the app being killed
+/// mid-upload instead of taking the only copy of the clip with it.
+struct OutboxAttachment: Codable, Equatable {
+    var name: String
+    var mime: String
+    var kind: String?
+    var bytes: Int64
+    /// File name under this message's outbox directory.
+    var file: String
+}
+
+/// A message the sender has committed to that is NOT in the chat document.
+///
+/// Text and media are posted by a single document write, and that write only happens once
+/// every attachment has a relay `ref` ([feedback caption-sent-without-media]). Until then
+/// the whole message lives here: the sender sees it in the transcript, nobody else sees
+/// anything at all, and Retry re-runs the upload and posts text and media together.
+struct OutboxMessage: Codable, Equatable, Identifiable {
+    enum Kind: String, Codable { case people, agent }
+
+    var id: Id
+    var chatId: Id
+    var kind: Kind
+    var text: String
+    var attachments: [OutboxAttachment]
+    var createdAt: Int64
+    /// The upload stopped. Until it is set, the row draws as still sending.
+    var failed: Bool = false
+    var replyTo: Id? = nil
+    var mentions: [String] = []
+    var forwardedFrom: String? = nil
+    var replyRef: ReplyRef? = nil
+    /// `extraParts` (a forwarded chart and its fallback picture), already JSON.
+    var extraPartsJSON: Data? = nil
+    /// The project a non-people chat belongs to, for the relay slot on retry.
+    var projectId: Id? = nil
+
+    var extraParts: [[String: Any]] {
+        guard let extraPartsJSON,
+              let any = try? JSONSerialization.jsonObject(with: extraPartsJSON) as? [[String: Any]]
+        else { return [] }
+        return any
     }
 }
 
@@ -1055,7 +1107,7 @@ struct JobRollout: Equatable {
 /// A cross-chat reply reference (crdt-sync §6.2 `replyRef`, core `ReplyRef`): where the
 /// quoted message lives plus a snapshot of it, so a reader who is not in the source chat
 /// still sees the quote.
-struct ReplyRef: Equatable, Hashable {
+struct ReplyRef: Equatable, Hashable, Codable {
     var chatId: Id
     /// `"people"` for DMs and people groups, else the project id.
     var projectId: String

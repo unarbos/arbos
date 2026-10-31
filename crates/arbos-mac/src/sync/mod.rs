@@ -338,6 +338,12 @@ pub enum SyncEvent {
         pins: Vec<String>,
         cap: usize,
     },
+    /// The on-device outbox at launch: sends with pictures or videos whose uploads never
+    /// finished, so nothing was ever written to a chat document. The app puts them back in
+    /// their chats as unsent, with Retry and Delete ([feedback caption-sent-without-media]).
+    Outbox {
+        entries: Vec<crate::model::OutboxSend>,
+    },
     /// `notifications_cleared` push: I read `chat_id` on another device. This Mac drops the
     /// chat's delivered banners, stops showing it unread and re-badges; `badge` is the relay's
     /// unread total after that read.
@@ -938,6 +944,13 @@ pub enum ClientCommand {
     /// `SyncEvent::Pins` ([feedback sidebar-pinning-mac-2026-10-28]).
     SetPins {
         pins: Vec<String>,
+    },
+    /// Hold the whole outbox on the device (no relay call). Written before the first
+    /// upload byte of a send with files leaves and again whenever the list changes, so a
+    /// quit mid-upload leaves the message in the chat rather than losing it, and nothing
+    /// half-sent is ever in a chat document ([feedback caption-sent-without-media]).
+    SaveOutbox {
+        entries: Vec<crate::model::OutboxSend>,
     },
     /// Rename a chat tab (`PATCH /projects/{id}/chats/{chat}` + a `retitle`
     /// command in the chat doc so the box's local index matches).

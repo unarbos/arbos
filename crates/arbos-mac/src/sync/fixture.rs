@@ -46,6 +46,18 @@ use crate::model::{
 pub const STREAM_FRAME_MS: u64 = arbos_core::STREAM_COMMIT_MS;
 const DEVICE: &str = "mac:fixture";
 
+/// Rig: `ARBOS_FIXTURE_UPLOAD_FAILS` — the bad connection Scout reported, with no relay in
+/// it. `1` refuses every send that carries a file; `once` refuses the first and lets Retry
+/// through, which is the half that has to be seen working.
+fn upload_fails() -> bool {
+    static REFUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    match std::env::var("ARBOS_FIXTURE_UPLOAD_FAILS").as_deref() {
+        Ok("1") => true,
+        Ok("once") => !REFUSED.swap(true, std::sync::atomic::Ordering::Relaxed),
+        _ => false,
+    }
+}
+
 pub const PROJECT_ARBOS: &str = "01J9ARBOS00000000000000000";
 pub const PROJECT_AFFINE: &str = "01J9AFFINE0000000000000000";
 pub const PROJECT_COMMS: &str = "01J9COMMS00000000000000000";
@@ -1217,7 +1229,9 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::ChannelOpen { .. }
         | ClientCommand::ChannelLoadOlder { .. }
         | ClientCommand::ChannelSend { .. }
-        | ClientCommand::ChannelMarkRead { .. } => {}
+        | ClientCommand::ChannelMarkRead { .. }
+        // Nothing to persist: the fixture has no on-device store.
+        | ClientCommand::SaveOutbox { .. } => {}
         // The relay keeps the pin list and answers with it; the fixture echoes
         // the list it was given, capped like the relay.
         ClientCommand::SetPins { pins } => {
@@ -1324,6 +1338,18 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             reply_ref,
             mentions,
         } => {
+            // Rig: `ARBOS_FIXTURE_UPLOAD_FAILS=1` is a bad connection. The fixture has no
+            // uploads of its own, so this stands in for one — and it refuses the way the
+            // relay now does: nothing is written to the document at all, so no caption
+            // goes out without its picture ([feedback caption-sent-without-media]).
+            if !attachments.is_empty() && upload_fails() {
+                let _ = shared.events.send(SyncEvent::MessageSendFailed {
+                    chat_id,
+                    message_id,
+                    error: UserError::from_text("upload the attachment", "the network went away"),
+                });
+                return;
+            }
             let attachments: Vec<Attachment> = attachments
                 .iter()
                 .map(|path| Attachment {
