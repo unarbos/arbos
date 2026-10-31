@@ -84,18 +84,40 @@ final class SwipeDirectionsUITests: XCTestCase {
             ?? matches.firstMatch
     }
 
-    /// Scroll `bubble:<id>` clear of the header and the composer and return it.
+    /// Wait until a row has stopped moving.
     ///
-    /// Which way to scroll is read off the bubble rather than assumed. A chat does not always
-    /// open at its newest message — the Comms chat opens part-way up, so `c5` starts *below*
-    /// the viewport — and a helper that only ever drags toward older messages walks away from
-    /// a bubble like that until it gives up. XCUITest reports a frame for a row the list has
-    /// built but not shown, so "below the middle of the window" is enough to pick a direction:
-    /// drag up to travel toward newer messages, down to travel toward older.
+    /// A scroll does not end when the finger lifts, and `revealBubble` can hand back a bubble
+    /// that is in the right place but still decelerating. A swipe delivered into a moving
+    /// scroll view belongs to the scroll view, so the gesture under test never happens and the
+    /// failure is recorded against the app.
+    private func settleRow(_ element: XCUIElement, timeout: TimeInterval = 4) {
+        var previous = CGRect.null
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let current = element.frame
+            if !current.isEmpty, current == previous { return }
+            previous = current
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+    }
+
+    /// Scroll `bubble:<id>` clear of the header and the composer, let it come to rest, and
+    /// return it.
+    ///
+    /// Each pass drags by the offset that would centre the bubble rather than by a fixed third
+    /// of a screen. A fixed step is both coarser and blinder: it has to guess a direction, and
+    /// it can be wider than the band a tall row has to land in and step straight over it. `g6`
+    /// is a 526 pt screenshot in an 874 pt window, which leaves it a 188 pt band to land in
+    /// against a 288 pt step — measured at y = −31 on one pass and y = +248 on the next, over
+    /// the top of the only positions that would have counted.
+    ///
+    /// Centring also subsumes the direction question. A chat does not always open at its newest
+    /// message — the Comms chat opens part-way up, so `c5` starts below the viewport — and the
+    /// sign of the offset points the drag the right way without being told.
     private func revealBubble(_ app: XCUIApplication, _ id: String,
                               file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
         let window = app.windows.firstMatch.frame
-        var settled = CGRect.null
+        var previous = CGRect.null
         for _ in 0..<12 {
             // Resolved every pass, not once up front: which element is the largest match only
             // settles after the list has built the row.
@@ -104,23 +126,24 @@ final class SwipeDirectionsUITests: XCTestCase {
             // Size before hittability. A degenerate match has no activation point, and asking
             // whether it is hittable throws rather than answering false.
             if bubble.exists, frame.width > 1, frame.height > 1, bubble.isHittable {
-                if frame.midY > window.height * 0.3, frame.maxY < window.maxY - 160 {
-                    return bubble
-                }
+                let clear = frame.midY > window.height * 0.3 && frame.maxY < window.maxY - 160
                 // The transcript can simply run out of room. `c5` is the second-newest message
                 // in the Comms chat, so nothing lifts it a full 160 pt clear of the composer.
                 // Once a drag stops moving the bubble, "fully on screen and clear of the
                 // composer" is as good as the position gets, and it is enough to swipe.
-                if frame == settled, frame.minY > window.minY, frame.maxY < window.maxY - 110 {
+                let stuck = frame == previous && frame.minY > window.minY
+                    && frame.maxY < window.maxY - 110
+                if clear || stuck {
+                    settleRow(bubble)
                     return bubble
                 }
-                settled = frame
+                previous = frame
             }
-            // An unbuilt row has no frame, which reads as "above us" and sends the drag toward
-            // the history — the right default, since that is where unbuilt rows are.
-            let towardNewer = frame.midY > window.midY
+            // An unbuilt row has no frame, which centres as a downward drag — the right
+            // default, since the history is where unbuilt rows are.
+            let reach = window.height * 0.4
+            let step = max(-reach, min(reach, window.midY - frame.midY))
             let mid = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.45))
-            let step = window.height * 0.33 * (towardNewer ? -1 : 1)
             mid.press(forDuration: 0.05, thenDragTo: mid.withOffset(CGVector(dx: 0, dy: step)),
                       withVelocity: .slow, thenHoldForDuration: 0.1)
             usleep(400_000)
