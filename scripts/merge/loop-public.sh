@@ -32,8 +32,25 @@ for r in $(git for-each-ref --format='%(refname)' refs/remotes/gate/); do
   if [ $age_h -lt "$GATE_FRESH_H" ]; then unsafe+=("gate/$b is unlanded and ${age_h} h old (a gated landing may be in flight)")
   else [ -n "$V" ] && echo "  gate/$b: unlanded, ${age_h} h old (abandoned)"; fi
 done
-for run in $(gh run list -R $R --workflow ci.yml --limit 30 --json headBranch,status --jq '.[] | select(.headBranch|startswith("gate/")) | select(.status!="completed") | .headBranch'); do
-  unsafe+=("CI is running on $run")
+# In-flight CI, filtered by status on the server so no amount of newer activity can push a gate run out of
+# the read. Each answer carries its own total_count: a failed read, or one that returned fewer runs than the
+# total, is a finding of its own and never reads as "nothing running".
+for st in queued in_progress waiting requested pending; do
+  e=$(mktemp)
+  if ! got=$(gh api --paginate "repos/$R/actions/workflows/ci.yml/runs?status=$st&per_page=100" \
+      --jq '"TOTAL \(.total_count)", (.workflow_runs[] | "RUN \(.id) \(.head_branch)")' 2>"$e"); then
+    unsafe+=("cannot list $st ci.yml runs: $(tr '\n' ' ' <"$e" | cut -c1-160)"); rm -f "$e"; continue
+  fi
+  rm -f "$e"
+  total=$(printf '%s\n' "$got" | awk '$1=="TOTAL"{print $2; exit}')
+  n=$(printf '%s\n' "$got" | grep -c '^RUN ')
+  if [ -z "$total" ] || [ "$n" -lt "$total" ]; then
+    unsafe+=("$st ci.yml runs read incompletely: $n of ${total:-an unknown total}"); continue
+  fi
+  [ -n "$V" ] && echo "  ci.yml $st: $n of $total read"
+  for b in $(printf '%s\n' "$got" | awk '$1=="RUN" && $3 ~ /^gate\// {print $3}' | sort -u); do
+    unsafe+=("CI is $st on $b")
+  done
 done
 
 # Release/deploy trigger paths a feedback branch can reach without the Rust/iOS gate.
