@@ -57,7 +57,31 @@ final class SwipeDirectionsUITests: XCTestCase {
     }
 
     private func replyPreview(_ app: XCUIApplication) -> XCUIElement {
-        app.descendants(matching: .any)["composer-reply-preview"]
+        app.descendants(matching: .any).matching(identifier: "composer-reply-preview").firstMatch
+    }
+
+    /// The element published as `bubble:<id>`, resolved to exactly one.
+    ///
+    /// A row that draws several accessibility elements publishes the identifier on each of them
+    /// — an album carries one per attachment — and the plain `query[id]` subscript raises
+    /// "Multiple matching elements found" as soon as anything reads a frame or hittability.
+    /// That ambiguity, not the gesture, is why every `g2b` case in this file used to fail with
+    /// "never came into reach": the loop below asked `isHittable`, never got an answer, and
+    /// scrolled past a bubble that was on screen the whole time.
+    ///
+    /// Of the matches, take the largest by area: that is the row, and the rest are the pieces
+    /// drawn inside it. Some of those pieces have no size at all, and XCUITest answers a
+    /// hittability question about one of them with "Activation point invalid".
+    private func bubbleElement(_ app: XCUIApplication, _ id: String) -> XCUIElement {
+        let matches = app.descendants(matching: .any).matching(identifier: "bubble:\(id)")
+        let all = matches.allElementsBoundByIndex
+        guard all.count > 1 else { return matches.firstMatch }
+        // Say it out loud, in the log, every time. Picking a winner in silence is how this
+        // cost a day: the suite reported "never came into reach" and the gesture took the
+        // blame, with nothing anywhere to show that the identifier was the ambiguous part.
+        print("bubble:\(id) matches \(all.count) elements — taking the largest")
+        return all.max { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }
+            ?? matches.firstMatch
     }
 
     /// Scroll `bubble:<id>` clear of the header and the composer and return it.
@@ -70,16 +94,31 @@ final class SwipeDirectionsUITests: XCTestCase {
     /// drag up to travel toward newer messages, down to travel toward older.
     private func revealBubble(_ app: XCUIApplication, _ id: String,
                               file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
-        let bubble = app.descendants(matching: .any)["bubble:\(id)"]
         let window = app.windows.firstMatch.frame
+        var settled = CGRect.null
         for _ in 0..<12 {
-            if bubble.exists, bubble.isHittable,
-               bubble.frame.midY > window.height * 0.3, bubble.frame.maxY < window.maxY - 160 {
-                return bubble
+            // Resolved every pass, not once up front: which element is the largest match only
+            // settles after the list has built the row.
+            let bubble = bubbleElement(app, id)
+            let frame = bubble.frame
+            // Size before hittability. A degenerate match has no activation point, and asking
+            // whether it is hittable throws rather than answering false.
+            if bubble.exists, frame.width > 1, frame.height > 1, bubble.isHittable {
+                if frame.midY > window.height * 0.3, frame.maxY < window.maxY - 160 {
+                    return bubble
+                }
+                // The transcript can simply run out of room. `c5` is the second-newest message
+                // in the Comms chat, so nothing lifts it a full 160 pt clear of the composer.
+                // Once a drag stops moving the bubble, "fully on screen and clear of the
+                // composer" is as good as the position gets, and it is enough to swipe.
+                if frame == settled, frame.minY > window.minY, frame.maxY < window.maxY - 110 {
+                    return bubble
+                }
+                settled = frame
             }
             // An unbuilt row has no frame, which reads as "above us" and sends the drag toward
             // the history — the right default, since that is where unbuilt rows are.
-            let towardNewer = bubble.exists && bubble.frame.midY > window.midY
+            let towardNewer = frame.midY > window.midY
             let mid = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.45))
             let step = window.height * 0.33 * (towardNewer ? -1 : 1)
             mid.press(forDuration: 0.05, thenDragTo: mid.withOffset(CGVector(dx: 0, dy: step)),
@@ -87,7 +126,7 @@ final class SwipeDirectionsUITests: XCTestCase {
             usleep(400_000)
         }
         XCTFail("bubble:\(id) never came into reach", file: file, line: line)
-        return bubble
+        return bubbleElement(app, id)
     }
 
     /// Swipe left across `bubble`, starting near its trailing edge so the finger has room to
