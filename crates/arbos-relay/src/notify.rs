@@ -391,6 +391,31 @@ pub async fn announce(
     announce_with(state, chat, sender, message_id, text, None, &[]).await
 }
 
+/// `declared` plus whoever `text` names, resolved from the chat's roster
+/// ([`crate::people::resolve_mentions`]). A project chat has no people roster, so there is
+/// nothing to resolve against and the caller's list stands.
+fn union_resolved_mentions(
+    state: &AppState,
+    chat: &ChatRef,
+    sender_member: &str,
+    text: &str,
+    declared: &[String],
+) -> Vec<String> {
+    let mut out = declared.to_vec();
+    if chat.project_id.is_some() {
+        return out;
+    }
+    let Ok(cm) = crate::people::load_chat(state, &chat.chat_id) else {
+        return out;
+    };
+    for m in crate::people::resolve_mentions(state, &cm, text, sender_member) {
+        if !out.contains(&m) {
+            out.push(m);
+        }
+    }
+    out
+}
+
 /// [`announce`] with an optional cross-chat reply reference (Reply in DM): the
 /// alert body says what it answers and each recipient's payload carries the
 /// address only when they can open the source chat.
@@ -418,12 +443,20 @@ pub async fn announce_with(
     if let Some(u) = sender.user_id.as_deref() {
         let _ = state.db.mark_chat_read(u, &chat.chat_id);
     }
-    // Outside agents in this chat get the message as an ASP event (#2140).
-    crate::outside::on_announce(state, chat, sender, message_id, text, None, mentions);
     let member = match sender.kind {
         "agent" => format!("agent:{}", sender.id),
         _ => format!("user:{}", sender.id),
     };
+    // The announce is the writing client's account of its own message, and no app fills
+    // `mentions` in: each resolves them into the row it writes and then posts the message id
+    // and the text alone. The relay has the roster, so it resolves them here rather than
+    // depending on the announce being complete — the same lesson as #2406, where the body
+    // itself was only the client's push preview. The caller's list is kept and added to: a
+    // declared id the prose does not name (a chip, an attachment with nothing but a tag) must
+    // not be dropped.
+    let mentions = &union_resolved_mentions(state, chat, &member, text, mentions);
+    // Outside agents in this chat get the message as an ASP event (#2140).
+    crate::outside::on_announce(state, chat, sender, message_id, text, None, mentions);
     state.matrix.message(
         state,
         &chat.chat_id,

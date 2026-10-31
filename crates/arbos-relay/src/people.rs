@@ -3737,12 +3737,13 @@ pub fn serving_agents(state: &AppState, cm: &ChatWithMembers) -> Vec<crate::boxe
     agents
 }
 
-/// `@here` — everyone in the chat, its people and its agents — one of the two collective
-/// mentions the apps offer (Jacob, 2026-10-24; the other is `@agents`, every agent, which names
-/// no person). The apps expand them into member ids on the row
-/// (`expand_collectives`, `arbos-mac/src/sync/mod.rs`), so a reader of the row sees members and
-/// never these words, while a reader of the announce sees only the words.
+/// The two collective mentions the apps offer (Jacob, 2026-10-24): `@here` is everyone in the
+/// chat — its people and its agents — and `@agents` is every agent, so it names no person. The
+/// apps expand them into member ids on the row (`expand_collectives`,
+/// `arbos-mac/src/sync/mod.rs`), so a reader of the row sees members and never these words,
+/// while a reader of the announce sees only the words.
 pub const COLLECTIVE_HERE: &str = "here";
+pub const COLLECTIVE_AGENTS: &str = "agents";
 
 /// `@token` as a whole word in `lower` (already lower-case), by the apps' rule: the character
 /// before the `@` is not part of a word and the token is not continued by one. Stricter than
@@ -3759,10 +3760,27 @@ pub fn at_token(lower: &str, token: &str) -> bool {
     })
 }
 
-/// `@handle` tokens in `text` that name a member of the chat, as the row's `mentions`
-/// (`agent:<project>` by the agent's slug, `user:<id>` by the person's handle) — what the
-/// apps' autocomplete writes, for a message posted through `POST /chats/{id}/messages`.
-pub fn resolve_mentions(state: &AppState, cm: &ChatWithMembers, text: &str) -> Vec<String> {
+/// Does `lower` (already lower-case) name a collective?
+pub fn names_a_collective(lower: &str) -> bool {
+    at_token(lower, COLLECTIVE_HERE) || at_token(lower, COLLECTIVE_AGENTS)
+}
+
+/// Who `text` mentions, as the row's `mentions`: every `@handle` that names a member
+/// (`agent:<project>` by the agent's slug, `user:<id>` by the person's handle), then the
+/// collectives expanded into member ids the way the apps expand them — `@here` to everyone but
+/// `me`, `@agents` to the chat's agents. `me` is the writer's own member id, who is never a
+/// mention of their own message; pass an empty string when there is no writer to exclude.
+///
+/// A collective that names nobody (`@agents` where the chat has none) adds nothing: the array is
+/// a list of members, so when there are no members to name it stays as it was. The prose still
+/// says the word, which is what `push::eligibility::mentioned` reads, so a person on
+/// `mentions` is still told either way.
+pub fn resolve_mentions(
+    state: &AppState,
+    cm: &ChatWithMembers,
+    text: &str,
+    me: &str,
+) -> Vec<String> {
     let mut by_handle: Vec<(String, String)> = Vec::new();
     for m in &cm.members {
         if let Some(pid) = m.project_id() {
@@ -3788,6 +3806,21 @@ pub fn resolve_mentions(state: &AppState, cm: &ChatWithMembers, text: &str) -> V
         if let Some((_, member)) = by_handle.iter().find(|(h, _)| *h == handle) {
             if !out.contains(member) {
                 out.push(member.clone());
+            }
+        }
+    }
+    let lower = text.to_lowercase();
+    let here = at_token(&lower, COLLECTIVE_HERE);
+    if here || at_token(&lower, COLLECTIVE_AGENTS) {
+        for m in &cm.members {
+            // A soft-deleted agent is no longer a member to name, as the handle scan above has
+            // it: `project()` is `None` for one.
+            let names_it = match m.project_id() {
+                Some(pid) => state.db.project(pid).ok().flatten().is_some(),
+                None => here,
+            };
+            if names_it && m.member != me && !out.contains(&m.member) {
+                out.push(m.member.clone());
             }
         }
     }
@@ -5559,6 +5592,75 @@ pub(crate) mod tests_support {
             })
             .expect("pinned chat");
         project.id
+    }
+}
+
+#[cfg(test)]
+mod mention_resolution_tests {
+    //! What `@here` and `@agents` resolve to on the relay, which must be what the apps resolve
+    //! them to on the row they write (`expand_collectives`, `arbos-mac/src/sync/mod.rs`):
+    //! everyone in the chat and every agent, never the writer.
+
+    use serde_json::json;
+
+    use super::tests_support::{group, person, project_of};
+    use super::*;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    #[test]
+    fn here_and_agents_resolve_to_members_and_nobody_mentions_themselves() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 8101);
+        let (bob, _) = person(&state, 8102);
+        let pid = project_of(&state, &alice, "Lium");
+        let g = group(&state, &[&alice, &bob]);
+        state
+            .db
+            .add_member(&g, &format!("agent:{pid}"), "agent", &alice, &json!({}))
+            .unwrap();
+        let Ok(cm) = load_chat(&state, &g) else {
+            panic!("chat")
+        };
+        let me = format!("user:{alice}");
+
+        let here = resolve_mentions(&state, &cm, "@here standup in five", &me);
+        assert!(here.contains(&format!("user:{bob}")));
+        assert!(here.contains(&format!("agent:{pid}")));
+        assert!(!here.contains(&me), "the writer is not mentioned by @here");
+
+        assert_eq!(
+            resolve_mentions(&state, &cm, "@agents take this one", &me),
+            vec![format!("agent:{pid}")],
+            "@agents names the agents and no person"
+        );
+
+        // A handle on its own still resolves, and only once when the collective names it too.
+        assert_eq!(
+            resolve_mentions(&state, &cm, "@lium and @here", &me),
+            resolve_mentions(&state, &cm, "@here", &me)
+        );
+    }
+
+    /// A collective that names nobody adds nothing — the array is a list of members. The word is
+    /// still in the prose, which is what `push::eligibility::mentioned` reads, so the people are
+    /// told either way.
+    #[test]
+    fn a_collective_with_nobody_to_name_resolves_to_nothing() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 8111);
+        let (bob, _) = person(&state, 8112);
+        let g = group(&state, &[&alice, &bob]);
+        let Ok(cm) = load_chat(&state, &g) else {
+            panic!("chat")
+        };
+        let me = format!("user:{alice}");
+
+        assert!(resolve_mentions(&state, &cm, "@agents anyone there?", &me).is_empty());
+        assert_eq!(
+            resolve_mentions(&state, &cm, "@here", &me),
+            vec![format!("user:{bob}")]
+        );
     }
 }
 

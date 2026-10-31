@@ -456,7 +456,7 @@ pub async fn send_message(
     // The card's handle is never empty: a legacy device-token account gets its device-name
     // slug, so the row is attributable even without a GitHub login (#1580).
     let me = state.db.user_card(user_id).ok().flatten();
-    let mentions = people::resolve_mentions(&state, &cm, &text);
+    let mentions = people::resolve_mentions(&state, &cm, &text, &format!("user:{user_id}"));
     let opts = UserMessageOpts {
         reply_to: b.reply_to.filter(|r| !r.trim().is_empty()),
         mentions: mentions.clone(),
