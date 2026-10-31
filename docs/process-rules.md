@@ -99,6 +99,41 @@ Working path for iPhone shots and flows:
 
 Do not install Simulator.app or any other system-wide tool on the shared Mac without the coordinator's go-ahead.
 
+## A gate that cannot test does not pass the branch — and how to ship anyway (2026-10-30 23:50 UTC)
+
+When the iOS gate's unit run never reaches a verdict — no simulator named `iPhone 17` on the rig, no
+`.xctestrun`, a kill before the first case — **no test ran, so the branch was not checked.** Until
+2026-10-30 `ios-gate.sh` printed "could not run — not blamed" and returned a pass for that, which let
+branches merge as tested when nothing had run. "Not the branch's fault" and "the branch passed" are
+different statements and only the first one is true.
+
+It now exits 2, the gate's infrastructure code, the same as a failed fetch: `rust-gate.sh` reports
+`infra`, the poller retries on the next tick, no verdict is recorded and no issue is told its branch
+failed. A transient rig fault heals by itself.
+
+A lasting one summons a person. The gate keeps retrying — red would blame branches for the rig — but
+after **six infrastructure verdicts in a row**, about twelve minutes at the poller's two-minute tick,
+the poller files **one** issue labelled `gate-rig`: how long the rig has been untestable, which items
+are waiting, and the gate's own repair steps. One issue per untestable stretch, not one per tick, and
+it closes itself as soon as the iOS half returns a real verdict. `arbos-feedback status` shows the
+same thing as `iOS GATE RIG UNTESTABLE since …` from the first verdict, before the issue exists.
+
+Two operator overrides, both one-line files in `~/arbos-gate` on the gate Mac (ssh via the relay
+host, below). The gate's failure message names both, with the commands, so nobody has to read the
+script at 3am:
+
+| File | Effect | Lifetime |
+|---|---|---|
+| `.test-sim` | The simulator to run on, when the rig has no device under the default name. `echo 'iPhone 16' > ~/arbos-gate/.test-sim` | Stands until removed |
+| `.allow-untested` | Ships **one** branch the rig could not test. `echo 'jacob: P0 relay fix must go tonight' > ~/arbos-gate/.allow-untested` | Consumed by the next gate run |
+
+`.allow-untested` is deliberately one-shot and deliberately requires a reason: the reason is printed
+into the gate output, which the poller posts on the issue, so a merge without a test run is on the
+record with a name against it. It does not weaken anything else — the compile halves, the
+test-target compile and the known-red baseline rules all still apply. `ARBOS_GATE_TEST_SIM` does what
+`.test-sim` does for a gate you run by hand; the poller's ssh session carries no environment of
+yours, which is why the pins are files.
+
 ## Rigs take a heavy slot on the shared EC2 Mac (2026-10-26 20:30 UTC)
 
 The Mac's heavy-job cap (`/usr/local/bin/arbos-heavy-slot.sh`, versioned at `scripts/runner/arbos-heavy-slot.sh`;
