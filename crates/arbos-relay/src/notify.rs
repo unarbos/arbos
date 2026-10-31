@@ -2302,6 +2302,47 @@ mod eligibility_tests {
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
     }
 
+    /// An app announces a message as `{message_id, text}` and nothing else: it resolves the
+    /// mentions into the row it writes and leaves them out of `…/notify`. So `@here` — everyone
+    /// in the chat, since Jacob's 2026-10-24 decision — reaches a `mentions`-only member only if
+    /// the relay reads it out of the prose. Before that scan knew the word, a message whose
+    /// whole point was to reach the room reached nobody on that level: no push, so no alert and
+    /// no badge, and nothing said about it to the sender. `@agents` is the other collective and
+    /// it names no person.
+    #[tokio::test]
+    async fn here_in_an_app_announce_reaches_a_mentions_only_member() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let g = group(&state, &[&alice, &bob]);
+        register(&state, &alice_dev, &alice);
+        let bob_tok = register(&state, &bob_dev, &bob);
+        let mut seen = 0;
+
+        assert_eq!(
+            set_level(&state, &bob_dev, &g, "mentions").await["notifications"],
+            "mentions"
+        );
+        // The announce an app actually sends: the text, and `mentions` left empty.
+        assert_eq!(
+            notify(&state, &alice_dev, &g, "@here standup in five").await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            pushed_since(&state, &mut seen).await,
+            vec![bob_tok.clone()],
+            "@here is everyone in the chat, so it mentions Bob"
+        );
+        assert_eq!(
+            notify(&state, &alice_dev, &g, "@agents take this one").await,
+            StatusCode::OK
+        );
+        assert!(
+            pushed_since(&state, &mut seen).await.is_empty(),
+            "@agents addresses the chat's agents, not Bob"
+        );
+    }
+
     #[tokio::test]
     async fn a_large_group_is_mentions_only_unless_all_is_chosen() {
         let state = test_state(AuthMode::Github);

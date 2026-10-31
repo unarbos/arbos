@@ -3737,6 +3737,28 @@ pub fn serving_agents(state: &AppState, cm: &ChatWithMembers) -> Vec<crate::boxe
     agents
 }
 
+/// `@here` — everyone in the chat, its people and its agents — one of the two collective
+/// mentions the apps offer (Jacob, 2026-10-24; the other is `@agents`, every agent, which names
+/// no person). The apps expand them into member ids on the row
+/// (`expand_collectives`, `arbos-mac/src/sync/mod.rs`), so a reader of the row sees members and
+/// never these words, while a reader of the announce sees only the words.
+pub const COLLECTIVE_HERE: &str = "here";
+
+/// `@token` as a whole word in `lower` (already lower-case), by the apps' rule: the character
+/// before the `@` is not part of a word and the token is not continued by one. Stricter than
+/// the handle scan in `push::eligibility`, which looks only at the character after — that is
+/// tolerable for a handle nobody writes in an address, and not for `@here`, which would
+/// otherwise make a group-wide ping out of `mail me@here.example`.
+pub fn at_token(lower: &str, token: &str) -> bool {
+    let needle = format!("@{token}");
+    lower.match_indices(&needle).any(|(i, _)| {
+        let before = lower[..i].chars().last();
+        let after = lower[i + needle.len()..].chars().next();
+        before.is_none_or(|c| !c.is_alphanumeric() && c != '@')
+            && after.is_none_or(|c| !(c.is_alphanumeric() || c == '_' || c == '-' || c == '.'))
+    })
+}
+
 /// `@handle` tokens in `text` that name a member of the chat, as the row's `mentions`
 /// (`agent:<project>` by the agent's slug, `user:<id>` by the person's handle) — what the
 /// apps' autocomplete writes, for a message posted through `POST /chats/{id}/messages`.
