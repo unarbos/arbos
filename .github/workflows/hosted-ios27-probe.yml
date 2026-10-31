@@ -1,6 +1,6 @@
-# Throwaway probe (not for merging): which hosted macOS images carry an iOS 27 simulator runtime,
-# whether one can be added to macos-15 / macos-26 inside a job, and what main's Swift gate does on
-# the hosted xcode-27 image.
+# Throwaway probe (not for merging): can macos-15 run the gate's UI tests on an iOS 27.0 simulator
+# runtime downloaded inside the job, with the gate's Xcode 26.3? (Run 41186520451 has the image
+# survey and main's gate on xcode-27.)
 name: hosted iOS 27 probe
 on:
   push:
@@ -8,93 +8,56 @@ on:
 permissions:
   contents: read
 jobs:
-  probe:
-    strategy:
-      fail-fast: false
-      matrix:
-        image: [xcode-27, macos-15, macos-26]
-    runs-on: ${{ matrix.image }}
-    timeout-minutes: 25
-    steps:
-      - name: Image, Xcode, runtimes
-        run: |
-          set -uo pipefail
-          sw_vers
-          echo "ImageVersion=${ImageVersion:-?} ImageOS=${ImageOS:-?}"
-          ls -d /Applications/Xcode*.app
-          xcodebuild -version
-          xcrun simctl list runtimes
-          xcrun simctl list devices available | grep -E '^-- |iPhone 17 \(' || true
-      - name: Boot iPhone 17 on iOS 27.0
-        if: matrix.image == 'xcode-27'
-        run: |
-          set -euo pipefail
-          udid=$(xcrun simctl create probe-iphone17 "iPhone 17" com.apple.CoreSimulator.SimRuntime.iOS-27-0)
-          start=$(date +%s)
-          xcrun simctl boot "$udid"
-          xcrun simctl bootstatus "$udid" -b >/dev/null
-          echo "booted iPhone 17 on iOS 27.0 in $(( $(date +%s) - start )) s"
-          xcrun simctl shutdown "$udid"; xcrun simctl delete "$udid"
-      - name: Try to add the iOS 27 platform to this Xcode
-        if: matrix.image != 'xcode-27'
-        timeout-minutes: 10
-        continue-on-error: true
-        run: |
-          set -uo pipefail
-          df -h / | tail -1
-          start=$(date +%s)
-          xcodebuild -downloadPlatform iOS -buildVersion 27.0 2>&1 | tail -15
-          echo "exit=${PIPESTATUS[0]} after $(( $(date +%s) - start )) s"
-          xcrun simctl list runtimes | grep -i 'iOS 27' || echo "no iOS 27 runtime after the attempt"
-
-  # main's swift-core-check job as it is on main, on the hosted xcode-27 image with Xcode 27.0 (the
-  # EC2 Mac's build, 27A266a). "iPhone 17" exists there only on iOS 27.0.
-  gate:
-    name: main's Swift gate on xcode-27
-    runs-on: xcode-27
-    timeout-minutes: 75
-    env:
-      APP_DIR: apps/ios/Arbos
+  macos15-ios27:
+    name: macos-15, Xcode 26.3, downloaded iOS 27.0, ChatSearch cases
+    runs-on: macos-15
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
-      - name: Swift package cache
-        uses: actions/cache@v4
-        with:
-          path: apps/ios/Arbos/build/spm
-          key: spm-xcode27-${{ hashFiles('apps/ios/Arbos/Arbos.xcodeproj/project.pbxproj', 'apps/ios/Arbos/Arbos.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved', 'packages/ArbosFFI/Package.swift') }}
-      - name: Select Xcode 27.0
+      - name: Xcode 26.3 and the iOS 27.0 runtime
         run: |
           set -euo pipefail
-          sudo xcode-select -s /Applications/Xcode_27.0.app
+          sudo xcode-select -s /Applications/Xcode_26.3.app
           xcodebuild -version
+          start=$(date +%s)
+          if ! xcodebuild -downloadPlatform iOS -buildVersion 27.0 2>&1 | grep -vE 'Downloading iOS|Hash =|asset' | tail -5; then
+            echo "Xcode 26.3 cannot fetch it; fetching through the image's default Xcode 16.4"
+            sudo xcode-select -s /Applications/Xcode_16.4.app
+            xcodebuild -downloadPlatform iOS -buildVersion 27.0 2>&1 | grep -vE 'Downloading iOS|Hash =|asset' | tail -5
+            sudo xcode-select -s /Applications/Xcode_26.3.app
+          fi
+          echo "runtime in place after $(( $(date +%s) - start )) s"
+          xcrun simctl list runtimes | grep iOS
+          udid=$(xcrun simctl create "iPhone 17 iOS27" "iPhone 17" com.apple.CoreSimulator.SimRuntime.iOS-27-0)
+          echo "UDID=$udid" >> "$GITHUB_ENV"
+          echo "created $udid"
       - name: Rust toolchain
         run: |
           set -euo pipefail
-          if ! command -v rustup >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-          fi
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           export PATH="$HOME/.cargo/bin:$PATH"
           rustup show active-toolchain || rustup toolchain install
           rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
       - name: Build ArbosFFI xcframework
+        run: ./scripts/build-xcframework.sh
+      - name: Destinations Xcode 26.3 offers
+        working-directory: apps/ios/Arbos
+        run: xcodebuild -showdestinations -project Arbos.xcodeproj -scheme Arbos 2>&1 | grep -E "iPhone 17|Ineligible|error" | head -20 || true
+      - name: ChatSearch cases on iOS 27.0
+        working-directory: apps/ios/Arbos
         run: |
           set -euo pipefail
-          ./scripts/build-xcframework.sh
-          test -d packages/ArbosFFI/ArbosFFIRust.xcframework
-      - name: fastlane test
-        env:
-          ARBOS_SPM_DIR: ${{ github.workspace }}/apps/ios/Arbos/build/spm
-        run: |
-          set -euo pipefail
-          command -v fastlane || gem install fastlane --no-document
-          cd "$APP_DIR"
-          fastlane test
-      - name: Keep the xcodebuild logs
+          xcodebuild test -project Arbos.xcodeproj -scheme Arbos -configuration Debug \
+            -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath build/dd \
+            -clonedSourcePackagesDirPath build/spm -collect-test-diagnostics never \
+            -only-testing:ArbosUITests/ChatSearchCloseUITests CODE_SIGNING_ALLOWED=NO 2>&1 | tee build/xcodebuild-test.log \
+            | grep -E "Test Case .*(passed|failed)|error: -\[|Executed|OS:|\*\* TEST|xcodebuild: error" || true
+          exit "${PIPESTATUS[0]}"
+      - name: Keep the log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: hosted-xcode27-gate-logs-${{ github.sha }}
+          name: macos15-ios27-chatsearch-${{ github.sha }}
           path: apps/ios/Arbos/build/xcodebuild-*.log
           if-no-files-found: ignore
           retention-days: 14
