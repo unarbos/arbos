@@ -127,6 +127,10 @@ pub struct Notification {
     /// How many events this one stands for.
     pub count: usize,
     pub chat_id: Option<String>,
+    /// A coalesced banner ("N updates in <Project>") names every chat it stands for,
+    /// the one its body shows last; empty for a single banner, and empty for a batch
+    /// that also held an event belonging to no chat.
+    pub chats: Vec<String>,
     pub image: Option<PathBuf>,
 }
 
@@ -139,9 +143,49 @@ pub struct Gate {
     pub visible: bool,
 }
 
+/// At most this many chats are named in one coalesced identifier: the identifier goes
+/// into the notification center's own store, so a server with hundreds of busy channels
+/// must not grow it without bound. Past the cap the oldest chat drops out of the name
+/// and a read of it no longer finds the banner.
+const BATCH_CHATS_MAX: usize = 16;
+
 struct Pending {
     latest: NotifyEvent,
     count: usize,
+    /// The chats folded in, the latest last. Emptied for good once an event with no chat
+    /// lands in the batch: such a batch stands for more than chats, so reading one of
+    /// them must not take the banner down.
+    chats: Vec<String>,
+    chatless: bool,
+}
+
+impl Pending {
+    fn new(latest: NotifyEvent) -> Self {
+        Self {
+            latest,
+            count: 0,
+            chats: Vec::new(),
+            chatless: false,
+        }
+    }
+
+    fn fold(&mut self, event: NotifyEvent) {
+        match &event.chat_id {
+            Some(chat) if !self.chatless => {
+                self.chats.retain(|c| c != chat);
+                self.chats.push(chat.clone());
+                if self.chats.len() > BATCH_CHATS_MAX {
+                    self.chats.remove(0);
+                }
+            }
+            _ => {
+                self.chatless = true;
+                self.chats.clear();
+            }
+        }
+        self.latest = event;
+        self.count += 1;
+    }
 }
 
 #[derive(Default)]
@@ -166,16 +210,15 @@ impl Coalescer {
             .is_some_and(|last| now_ms.saturating_sub(*last) < WINDOW_MS);
         let held = self.pending.contains_key(&project);
         if gate.streaming || in_window || held {
-            let slot = self.pending.entry(project).or_insert(Pending {
-                latest: event.clone(),
-                count: 0,
-            });
-            slot.latest = event;
-            slot.count += 1;
+            let slot = self
+                .pending
+                .entry(project)
+                .or_insert_with(|| Pending::new(event.clone()));
+            slot.fold(event);
             return None;
         }
         self.last_sent.insert(project.clone(), now_ms);
-        Some(render(&event, 1))
+        Some(render(&event, 1, &[]))
     }
 
     /// Flush batches whose window has elapsed. `gate_of` answers for each
@@ -206,7 +249,7 @@ impl Coalescer {
             }
             if let Some(p) = self.pending.remove(&project) {
                 self.last_sent.insert(project, now_ms);
-                out.push(render(&p.latest, p.count));
+                out.push(render(&p.latest, p.count, &p.chats));
             }
         }
         out
@@ -218,7 +261,7 @@ impl Coalescer {
     }
 }
 
-fn render(event: &NotifyEvent, count: usize) -> Notification {
+fn render(event: &NotifyEvent, count: usize, chats: &[String]) -> Notification {
     if count > 1 {
         return Notification {
             project_id: event.project_id.clone(),
@@ -226,6 +269,7 @@ fn render(event: &NotifyEvent, count: usize) -> Notification {
             body: event.detail.clone(),
             count,
             chat_id: event.chat_id.clone(),
+            chats: chats.to_vec(),
             image: event.image.clone(),
         };
     }
@@ -239,12 +283,62 @@ fn render(event: &NotifyEvent, count: usize) -> Notification {
         body: event.detail.clone(),
         count: 1,
         chat_id: event.chat_id.clone(),
+        chats: Vec::new(),
         image: event.image.clone(),
     }
 }
 
+/// What the app handed the notification center, for tests only: nothing reaches the OS
+/// from a test run, so a test can read the banners and the reads that take them down.
+#[cfg(test)]
+pub mod record {
+    use super::Notification;
+
+    #[derive(Default)]
+    pub struct Record {
+        pub delivered: Vec<Notification>,
+        pub withdrawn: Vec<String>,
+    }
+
+    pub fn log() -> &'static super::Mutex<Record> {
+        static LOG: std::sync::OnceLock<super::Mutex<Record>> = std::sync::OnceLock::new();
+        LOG.get_or_init(|| super::Mutex::new(Record::default()))
+    }
+
+    /// Everything since the last call.
+    pub fn take() -> Record {
+        std::mem::take(&mut *log().lock().expect("notify record"))
+    }
+}
+
+/// Always true: a test records instead of posting, and the caller returns.
+#[cfg(test)]
+fn recorded_banner(n: &Notification) -> bool {
+    record::log()
+        .lock()
+        .expect("notify record")
+        .delivered
+        .push(n.clone());
+    true
+}
+
+/// Always true: a test records instead of asking the center, and the caller returns.
+#[cfg(test)]
+fn recorded_read(chat_id: &str) -> bool {
+    record::log()
+        .lock()
+        .expect("notify record")
+        .withdrawn
+        .push(chat_id.to_owned());
+    true
+}
+
 /// Deliver through the platform's notification center.
 pub fn deliver(n: &Notification) {
+    #[cfg(test)]
+    if recorded_banner(n) {
+        return;
+    }
     if std::env::var_os("ARBOS_NOTIFY_DRY_RUN").is_some() {
         eprintln!(
             "notify: {} — {}{}{}",
@@ -368,6 +462,10 @@ pub fn withdraw_chat(chat_id: &str) {
     if chat_id.is_empty() {
         return;
     }
+    #[cfg(test)]
+    if recorded_read(chat_id) {
+        return;
+    }
     if std::env::var_os("ARBOS_NOTIFY_DRY_RUN").is_some() {
         eprintln!("notify: withdraw chat {chat_id}");
     } else {
@@ -378,15 +476,65 @@ pub fn withdraw_chat(chat_id: &str) {
     }
 }
 
-/// Which delivered request identifiers a read of `chat_id` withdraws: the chat's message
-/// banners (`chat:<id>:<stamp>`) and nothing else — not another chat's, not a call's.
+/// One chat's banner: `chat:<id>:<stamp>`.
+const CHAT_PREFIX: &str = "chat:";
+/// A coalesced banner: `chats:<stamp>:<id>|<id>…`, every chat it stands for in its own
+/// name. Nothing is remembered here — the center's delivered list is the only state, so
+/// a read still finds the banner after a relaunch, as `withdraw_chat` has always relied on.
+const CHATS_PREFIX: &str = "chats:";
+/// A banner that belongs to no chat: `event:<project>:<stamp>`.
+const EVENT_PREFIX: &str = "event:";
+/// Between the chats of a coalesced identifier. A relay chat id is a ULID and a channel's
+/// room id is `!opaque:server`; neither can hold it. One that does anyway keeps the
+/// single-chat shape below rather than becoming ambiguous.
+const CHATS_SEP: &str = "|";
+
+/// The identifier the notification center files `n` under, `stamp` being the delivery time
+/// in milliseconds (two banners of one chat must not replace each other).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn request_id(n: &Notification, stamp: u128) -> String {
+    if n.chats.len() > 1 && !n.chats.iter().any(|c| c.contains(CHATS_SEP)) {
+        return format!("{CHATS_PREFIX}{stamp}:{}", n.chats.join(CHATS_SEP));
+    }
+    match &n.chat_id {
+        Some(chat) => format!("{CHAT_PREFIX}{chat}:{stamp}"),
+        None => format!("{EVENT_PREFIX}{}:{stamp}", n.project_id),
+    }
+}
+
+/// The chats named by a coalesced identifier, latest last; `None` for any other shape.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn id_chats(id: &str) -> Option<&str> {
+    let (stamp, chats) = id.strip_prefix(CHATS_PREFIX)?.split_once(':')?;
+    let stamped = !stamp.is_empty() && stamp.bytes().all(|b| b.is_ascii_digit());
+    (stamped && !chats.is_empty()).then_some(chats)
+}
+
+/// The chat a click on the delivered request `id` opens: its own chat, or for a coalesced
+/// banner the last chat folded in — the one whose line the banner shows.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn clicked_chat(id: &str) -> Option<String> {
+    if let Some(chats) = id_chats(id) {
+        return chats.rsplit(CHATS_SEP).next().map(str::to_owned);
+    }
+    let (chat, stamp) = id.strip_prefix(CHAT_PREFIX)?.rsplit_once(':')?;
+    (!chat.is_empty() && !stamp.is_empty()).then(|| chat.to_owned())
+}
+
+/// Which delivered request identifiers a read of `chat_id` withdraws: the chat's own message
+/// banners (`chat:<id>:<stamp>`), and the coalesced banners that name it among the chats they
+/// stand for. Nothing else — not another chat's, not a call's, and not a coalesced banner that
+/// only shares the Project: one of the chats it speaks for has to be read.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn withdrawn_ids<'a>(chat_id: &str, ids: impl IntoIterator<Item = &'a str>) -> Vec<String> {
-    let prefix = format!("chat:{chat_id}:");
+    if chat_id.is_empty() {
+        return Vec::new();
+    }
+    let own = format!("{CHAT_PREFIX}{chat_id}:");
     ids.into_iter()
-        .filter(|id| {
-            id.strip_prefix(&prefix)
-                .is_some_and(|stamp| !stamp.contains(':'))
+        .filter(|id| match id.strip_prefix(&own) {
+            Some(stamp) => !stamp.contains(':'),
+            None => id_chats(id).is_some_and(|c| c.split(CHATS_SEP).any(|r| r == chat_id)),
         })
         .map(str::to_owned)
         .collect()
@@ -680,8 +828,6 @@ mod mac {
 
     use super::Notification;
 
-    /// Request identifiers carry the chat: `chat:<id>:<stamp>`.
-    const CHAT_PREFIX: &str = "chat:";
     /// Ringing banners: `call:<call_id>:<chat_id>`; category `ARBOS_CALL`.
     const CALL_PREFIX: &str = "call:";
     const CALL_CATEGORY: &str = "ARBOS_CALL";
@@ -721,10 +867,8 @@ mod mac {
                 completion: &block2::DynBlock<dyn Fn()>,
             ) {
                 let id = response.notification().request().identifier().to_string();
-                if let Some(rest) = id.strip_prefix(CHAT_PREFIX) {
-                    if let Some((chat, _stamp)) = rest.rsplit_once(':') {
-                        super::push_click(chat.to_string());
-                    }
+                if let Some(chat) = super::clicked_chat(&id) {
+                    super::push_click(chat);
                 } else if let Some(rest) = id.strip_prefix(CALL_PREFIX) {
                     let call_id = rest.split_once(':').map(|(c, _)| c).unwrap_or(rest);
                     let action = response.actionIdentifier().to_string();
@@ -984,10 +1128,7 @@ mod mac {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or(0);
-        let id = match &n.chat_id {
-            Some(chat) => format!("{CHAT_PREFIX}{chat}:{stamp}"),
-            None => format!("event:{}:{stamp}", n.project_id),
-        };
+        let id = super::request_id(n, stamp);
         let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
             &NSString::from_str(&id),
             &content,
@@ -1091,6 +1232,19 @@ mod tests {
         NotifyEvent::new("comms", "Comms", kind, detail)
     }
 
+    /// A channel message of server `server`, keyed the way `notify_channel_message` keys it:
+    /// one coalescer key per server, the channel's room id as the chat.
+    fn channel_ev(server: &str, room: &str, detail: &str) -> NotifyEvent {
+        let mut e = NotifyEvent::new(
+            format!("server:{server}"),
+            "Arbos HQ",
+            NotifyKind::DirectMessage,
+            detail,
+        );
+        e.chat_id = Some(room.to_string());
+        e
+    }
+
     const OFF: Gate = Gate {
         streaming: false,
         visible: false,
@@ -1192,6 +1346,7 @@ mod tests {
             "chat:01XYZ:1700000000000",
             "call:c1:01ABC",
             "event:p1:1700000000000",
+            "chats:1700000000000:01XYZ|01OTHER",
         ];
         assert_eq!(
             withdrawn_ids("01ABC", delivered),
@@ -1244,5 +1399,138 @@ mod tests {
             c.offer(e, 0, OFF).unwrap().title,
             "Comms · needs your input"
         );
+    }
+
+    /// The leftover of #2411: a coalesced banner is rendered from the *last* folded event, so
+    /// it used to carry one channel's room id and a read of any other channel of that server
+    /// left it in Notification Center. It now names every channel it stands for.
+    #[test]
+    fn a_coalesced_banner_is_withdrawn_by_every_channel_it_names() {
+        let mut c = Coalescer::default();
+        // The first message fires on its own; the three after it fold into one banner.
+        assert!(c
+            .offer(channel_ev("hq", "!general:hq", "a"), 0, OFF)
+            .is_some());
+        for (i, (room, line)) in [("!general:hq", "b"), ("!design:hq", "c"), ("!ops:hq", "d")]
+            .iter()
+            .enumerate()
+        {
+            assert!(c
+                .offer(channel_ev("hq", room, line), 1_000 * (i as u64 + 1), OFF)
+                .is_none());
+        }
+        let out = c.tick(WINDOW_MS, |_| OFF);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].title, "3 updates in Arbos HQ");
+        assert_eq!(out[0].chats, ["!general:hq", "!design:hq", "!ops:hq"]);
+        assert_eq!(
+            out[0].chat_id.as_deref(),
+            Some("!ops:hq"),
+            "the body's line"
+        );
+
+        let id = request_id(&out[0], 1_700_000_000_000);
+        assert_eq!(id, "chats:1700000000000:!general:hq|!design:hq|!ops:hq");
+        for room in ["!general:hq", "!design:hq", "!ops:hq"] {
+            assert_eq!(
+                withdrawn_ids(room, [id.as_str()]),
+                vec![id.clone()],
+                "reading {room} left the server's banner up"
+            );
+        }
+        // A click still opens the channel whose line the banner shows.
+        assert_eq!(clicked_chat(&id).as_deref(), Some("!ops:hq"));
+    }
+
+    /// Never withdrawn too eagerly: only a chat the banner itself names takes it down.
+    #[test]
+    fn a_coalesced_banner_stays_up_for_a_chat_it_does_not_name() {
+        let mut c = Coalescer::default();
+        assert!(c
+            .offer(channel_ev("hq", "!general:hq", "a"), 0, OFF)
+            .is_some());
+        assert!(c
+            .offer(channel_ev("hq", "!design:hq", "b"), 1_000, OFF)
+            .is_none());
+        assert!(c
+            .offer(channel_ev("hq", "!ops:hq", "c"), 2_000, OFF)
+            .is_none());
+        let id = request_id(&c.tick(WINDOW_MS, |_| OFF)[0], 7);
+        for other in [
+            "!random:hq",     // a quiet channel of the same server
+            "!general:other", // a channel of another server
+            "!design",        // a prefix of a channel it does name
+            "!ops:hq:extra",
+            "",
+        ] {
+            assert!(
+                withdrawn_ids(other, [id.as_str()]).is_empty(),
+                "{other} took down a banner that does not speak for it"
+            );
+        }
+    }
+
+    /// A batch that is not all chats — a spend cap, a wake failure — keeps the old
+    /// single-chat identifier: such a banner stands for more than the chats in it, so
+    /// reading one chat must not clear what the user has not seen.
+    #[test]
+    fn a_batch_with_a_chatless_event_is_not_withdrawn_by_one_chat() {
+        let chat = |id: &str, detail: &str| {
+            let mut e = ev(NotifyKind::TurnFinished, detail);
+            e.chat_id = Some(id.to_string());
+            e
+        };
+        let mut c = Coalescer::default();
+        assert!(c.offer(chat("c1", "done"), 0, OFF).is_some());
+        assert!(c.offer(chat("c2", "done"), 1_000, OFF).is_none());
+        assert!(c
+            .offer(ev(NotifyKind::SpendCapReached, "cap"), 2_000, OFF)
+            .is_none());
+        assert!(c.offer(chat("c3", "done"), 3_000, OFF).is_none());
+
+        let out = c.tick(WINDOW_MS, |_| OFF);
+        assert!(out[0].chats.is_empty());
+        let id = request_id(&out[0], 7);
+        assert_eq!(id, "chat:c3:7");
+        assert!(withdrawn_ids("c2", [id.as_str()]).is_empty());
+        assert_eq!(withdrawn_ids("c3", [id.as_str()]), vec![id.clone()]);
+    }
+
+    /// A DM or people group is one Project with exactly one chat, whose id *is* the Project
+    /// id (`sync::dto::space_from`), and the Project id is the coalescer's key. So a DM batch
+    /// can only ever name that one chat — the chat whose banners `select_tab` already
+    /// withdraws. The leftover needs a key that spans several chats, which a DM never has.
+    #[test]
+    fn a_dm_batch_names_the_one_chat_of_its_space() {
+        let space = "01SAMDMCHAT";
+        let line = |text: &str| {
+            let mut e = NotifyEvent::new(space, "Sam", NotifyKind::DirectMessage, text);
+            e.chat_id = Some(space.to_string());
+            e.sender = Some("Sam".into());
+            e
+        };
+        let mut c = Coalescer::default();
+        assert!(c.offer(line("hey"), 0, OFF).is_some());
+        assert!(c.offer(line("you there"), 1_000, OFF).is_none());
+        assert!(c.offer(line("?"), 2_000, OFF).is_none());
+
+        let out = c.tick(WINDOW_MS, |_| OFF);
+        assert_eq!(out[0].title, "2 updates in Sam");
+        assert_eq!(out[0].chats, [space]);
+        let id = request_id(&out[0], 7);
+        assert_eq!(
+            id,
+            format!("chat:{space}:7"),
+            "the shape #2411 already clears"
+        );
+        assert_eq!(withdrawn_ids(space, [id.as_str()]), vec![id.clone()]);
+    }
+
+    #[test]
+    fn an_identifier_that_names_no_chat_is_opened_and_withdrawn_by_nothing() {
+        assert_eq!(clicked_chat("event:p1:1700000000000"), None);
+        assert_eq!(clicked_chat("call:c1:01ABC"), None);
+        assert_eq!(clicked_chat("chats:nostamp:c1|c2"), None);
+        assert!(withdrawn_ids("c1", ["chats:nostamp:c1|c2", "event:c1:1"]).is_empty());
     }
 }

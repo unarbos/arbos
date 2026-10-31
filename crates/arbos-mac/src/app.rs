@@ -12266,6 +12266,7 @@ impl AppState {
                 body: missed.notification_body(),
                 count: 1,
                 chat_id: Some(missed.chat_id.clone()),
+                chats: Vec::new(),
                 image,
             });
         }
@@ -14980,5 +14981,238 @@ fn sync_event_label(event: &SyncEvent) -> String {
         "event".to_owned()
     } else {
         head.0
+    }
+}
+
+#[cfg(test)]
+mod coalesced_banner_withdraw_tests {
+    //! #2427: channel banners coalesce per server, so a "N updates in <server>" banner stands
+    //! for several channels at once. A read of any channel it names takes it down; a channel it
+    //! does not name leaves it up. The DM question the issue leaves open is settled here too: a
+    //! people space is one chat under the space's own id, so a DM batch can only ever name the
+    //! chat the DM opens.
+    use std::sync::{Arc, Mutex};
+
+    use futures::future::BoxFuture;
+    use gpui::{AppContext as _, Entity, TestAppContext};
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::model::{AccountView, ChatKind, Sender, ServerChannel, ServerInfo, SpaceKind};
+
+    const HQ: &str = "hq";
+    const GENERAL: (&str, &str, &str) = ("c-general", "general", "!general:hq.example");
+    const DESIGN: (&str, &str, &str) = ("c-design", "design", "!design:hq.example");
+    const RANDOM: (&str, &str, &str) = ("c-random", "random", "!random:hq.example");
+    /// A people space: the Project id and its one chat's id are the same string.
+    const DM: &str = "01SAMDMCHAT";
+
+    type Commands = Arc<Mutex<Option<mpsc::UnboundedReceiver<ClientCommand>>>>;
+
+    struct Recording(Commands);
+
+    impl SyncSource for Recording {
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            *self.0.lock().expect("commands slot") = Some(commands);
+            Box::pin(std::future::pending())
+        }
+    }
+
+    fn channel((id, name, room): (&str, &str, &str)) -> ServerChannel {
+        ServerChannel {
+            id: id.into(),
+            server_id: HQ.into(),
+            name: name.into(),
+            room_id: Some(room.into()),
+            ..ServerChannel::default()
+        }
+    }
+
+    /// Server "Arbos HQ" with three channels, and a DM with Sam. The window is not focused,
+    /// so every arrival is news.
+    fn mount(cx: &mut TestAppContext) -> (tokio::runtime::Runtime, Entity<AppState>) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| gpui_tokio::init_from_handle(cx, handle));
+        let commands: Commands = Arc::new(Mutex::new(None));
+        let state = cx.new(|cx| AppState::new(Box::new(Recording(commands)), cx));
+        cx.run_until_parked();
+        for _ in 0..3 {
+            rt.block_on(tokio::task::yield_now());
+        }
+        state.update(cx, |s, _cx| {
+            s.account = Some(AccountView {
+                id: "gh_1".into(),
+                login: "scout".into(),
+                name: "Scout".into(),
+                avatar_url: String::new(),
+                device_name: "test".into(),
+                balance_usd: 0.0,
+                spent_today_usd: 0.0,
+                daily_cap_usd: None,
+            });
+            s.servers = vec![ServerInfo {
+                id: HQ.into(),
+                name: "Arbos HQ".into(),
+                channels: vec![channel(GENERAL), channel(DESIGN), channel(RANDOM)],
+                ..ServerInfo::default()
+            }];
+            s.projects = vec![Project {
+                id: DM.into(),
+                name: "Sam".into(),
+                kind: SpaceKind::Dm,
+                people: vec![Person {
+                    id: "gh_2".into(),
+                    handle: "sam".into(),
+                    ..Person::default()
+                }],
+                ..Project::default()
+            }];
+            s.chats.insert(
+                DM.into(),
+                vec![Chat {
+                    id: DM.into(),
+                    project_id: DM.into(),
+                    title: "sam".into(),
+                    is_pinned: true,
+                    is_system: false,
+                    unread: false,
+                    unread_count: 0,
+                    last_message_at: 1_000,
+                    archived_at: None,
+                    kind: ChatKind::Chat,
+                    participants: Vec::new(),
+                }],
+            );
+            s.window_active = false;
+        });
+        let _ = notify::record::take();
+        (rt, state)
+    }
+
+    fn from_sam() -> Sender {
+        Sender {
+            kind: "user".into(),
+            id: "gh_2".into(),
+            name: "Sam".into(),
+            handle: "sam".into(),
+            ..Sender::default()
+        }
+    }
+
+    fn channel_message((id, name, room): (&str, &str, &str), text: &str) -> SyncEvent {
+        SyncEvent::ChannelMessage {
+            server_id: HQ.into(),
+            server_name: "Arbos HQ".into(),
+            channel_id: id.into(),
+            channel_name: name.into(),
+            room_id: room.into(),
+            sender: from_sam(),
+            text: Some(text.into()),
+        }
+    }
+
+    fn dm_message(n: usize, text: &str) -> SyncEvent {
+        SyncEvent::MessageUpsert {
+            chat_id: DM.into(),
+            message: Box::new(
+                serde_json::from_value(serde_json::json!({
+                    "id": format!("m{n}"), "chatId": DM, "role": "user", "sender": "user:gh_2",
+                    "senderHandle": "sam", "senderName": "Sam", "status": "done",
+                    "createdAt": 1_000 + n as u64, "completedAt": 1_000 + n as u64,
+                    "parts": [{ "id": format!("m{n}-t"), "kind": "text", "text": text }],
+                }))
+                .expect("message"),
+            ),
+        }
+    }
+
+    /// Flush the batch the way the notification tick does, a window later.
+    fn flush(s: &mut AppState) {
+        s.notifier
+            .tick(now_ms() + notify::WINDOW_MS, |_| Gate::default());
+    }
+
+    #[gpui::test]
+    fn a_server_banner_comes_down_when_any_channel_it_names_is_opened(cx: &mut TestAppContext) {
+        let (_rt, state) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.apply(channel_message(GENERAL, "gate is green"), cx);
+            s.apply(channel_message(DESIGN, "new mock up"), cx);
+            s.apply(channel_message(RANDOM, "coffee?"), cx);
+            flush(s);
+        });
+
+        let posted = notify::record::take().delivered;
+        assert_eq!(posted.len(), 2, "#general on its own, then the batch");
+        let batch = &posted[1];
+        assert_eq!(batch.title, "2 updates in Arbos HQ");
+        assert_eq!(batch.body, "@sam: coffee?", "the last line folded in");
+        assert_eq!(batch.chats, [DESIGN.2, RANDOM.2]);
+        let id = notify::request_id(batch, 1_700_000_000_000);
+
+        // Opening #design is the reported case: the banner's body names #random, not #design.
+        state.update(cx, |s, cx| {
+            s.select_channel(HQ.into(), DESIGN.0.into(), cx);
+        });
+        assert!(
+            notify::record::take().withdrawn.contains(&DESIGN.2.into()),
+            "opening the channel reads it"
+        );
+        assert_eq!(
+            notify::withdrawn_ids(DESIGN.2, [id.as_str()]),
+            vec![id.clone()],
+            "the server's coalesced banner stayed up"
+        );
+        // #general's own banner is a separate request; the batch does not speak for it.
+        assert!(notify::withdrawn_ids(GENERAL.2, [id.as_str()]).is_empty());
+    }
+
+    #[gpui::test]
+    fn a_dm_banner_names_the_one_chat_the_dm_opens(cx: &mut TestAppContext) {
+        let (_rt, state) = mount(cx);
+        state.update(cx, |s, cx| {
+            for (n, text) in ["hey", "you there", "?"].iter().enumerate() {
+                s.apply(dm_message(n, text), cx);
+            }
+            flush(s);
+        });
+
+        let posted = notify::record::take().delivered;
+        assert_eq!(posted.len(), 2);
+        let batch = &posted[1];
+        assert_eq!(batch.title, "2 updates in Sam");
+        assert_eq!(
+            batch.chats,
+            [DM],
+            "a people space is one chat, so its batch can name only that chat"
+        );
+        let id = notify::request_id(batch, 7);
+        assert_eq!(
+            id,
+            format!("chat:{DM}:7"),
+            "the shape #2411 already cleared"
+        );
+
+        state.update(cx, |s, cx| {
+            s.select_project(DM.into(), cx);
+        });
+        let _ = notify::record::take();
+        state.update(cx, |s, cx| {
+            s.select_tab(DM.into(), cx);
+        });
+        assert!(notify::record::take().withdrawn.contains(&DM.into()));
+        assert_eq!(notify::withdrawn_ids(DM, [id.as_str()]), vec![id]);
     }
 }
