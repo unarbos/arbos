@@ -399,3 +399,54 @@ mod mac {
         Some(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// Both `flex_shrink_0` calls in [`super::symbol`] — the slot's and the
+    /// symbol's — read from this file, the way `ui::icons` lints the surfaces.
+    /// The symbol's one cannot be checked by drawing: it is inside a
+    /// `cfg(macos)` branch that needs AppKit, so it is unreachable from the
+    /// tests, and that is exactly the kind of line a later edit drops without
+    /// anything going red.
+    ///
+    /// What it protects: a GPUI `Style::default()` shrinks at 1, so a flex child
+    /// wider than its parent is compressed to fit. Apple's canvases are often
+    /// wider than they are tall — `sidebar.left` is 21 pt of artwork in the
+    /// collapse disc's 17 pt slot — so without the pin the image was squeezed to
+    /// the slot's width at its full height: the artwork out of proportion, its
+    /// vertical strokes thinned, and its ink pulled off the slot's centre. That
+    /// is Jacob's squashed search button and the chat info pane's thin row icons,
+    /// one defect ([feedback chat-info-pane-icon-defaults-2026-10-31],
+    /// [feedback mac-sidebar-search-field-squashed-2026-10-31]).
+    #[test]
+    fn a_symbol_and_its_slot_are_both_pinned_against_shrinking() {
+        let src = include_str!("sf_symbols.rs");
+        let body = src
+            .split_once("pub fn symbol(")
+            .expect("symbol() is still here")
+            .1;
+
+        let (frame, rest) = body
+            .split_once("let frame = div()")
+            .expect("symbol() still builds a frame")
+            .1
+            .split_once(';')
+            .expect("the frame's builder chain still ends in a semicolon");
+        assert!(
+            frame.contains(".flex_shrink_0()"),
+            "the slot has to hold its size, or a cramped row shrinks the box itself"
+        );
+
+        let drawn = rest
+            .split_once("mac::element(")
+            .expect("the macOS branch still draws through mac::element")
+            .1
+            .split_once(");")
+            .expect("the mac::element chain still ends in a semicolon")
+            .0;
+        assert!(
+            drawn.contains(".flex_shrink_0()"),
+            "a symbol wider than its slot would be compressed into it again"
+        );
+    }
+}
