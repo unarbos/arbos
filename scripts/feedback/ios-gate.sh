@@ -299,6 +299,11 @@ run_unit_tests() {
   fi
   echo "== tests: FAIL — failing and NOT red on main (${base:0:8}):"
   printf '%s\n' "$new" | head -20
+  # Supplementary assertion text, never the blame: this shape is printed only by the serial reporter,
+  # which is what run_suite gets because it runs with parallelisation off. A parallel-clone failure
+  # prints no `error:` line at all, so a gate that counted these would report fewer failures than
+  # there are — hosted run 41239073951 announced three of its four that way. The names above come
+  # from the per-case tally, which reads both shapes, and they are what decides.
   grep -E "error: -\[ArbosTests\." "$log" | sed 's#/Users/[^/]*/arbos-gate/##' | head -20 | cut -c1-300
   rm -f "$log"; return 1
 }

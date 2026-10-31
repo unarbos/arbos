@@ -134,6 +134,40 @@ test-target compile and the known-red baseline rules all still apply. `ARBOS_GAT
 `.test-sim` does for a gate you run by hand; the poller's ssh session carries no environment of
 yours, which is why the pins are files.
 
+## The per-case tally is the failure count, and a disagreement is itself a failure (2026-10-31 22:30 UTC)
+
+**Never count `error:` lines to count test failures, and never read `Executed N tests` to decide
+whether a suite ran.** The two test targets report in two formats and only one of them prints either.
+
+| | reporter | a failure prints an `error:` line | an `Executed N tests` summary |
+|---|---|---|---|
+| `ArbosUITests` | serial | yes | yes |
+| `ArbosTests` | parallel clones | **no** | **no** |
+
+So a failing unit test cannot appear in a count of `error:` lines. Not "is easy to miss" — cannot
+appear. Measured on hosted run
+[41239073951](https://github.com/unarbos/arbos/actions/runs/41239073951) at head `4c2db3338`:
+`Fastfile`'s `lines.grep(/error:/)` announced `xcodebuild test failed (3 error lines)` and named
+three UI tests. **There were four failures.** The fourth,
+`HomeListFilterTests/testTheWiderRowStillFitsEveryPhoneAtTheDefaultTextSize`, sat at line 11,989 of
+12,405 with no `error:` line and no `Executed` summary anywhere near it. The `** TEST FAILED **`
+banner was there and no failing-test list printed at all. That log holds 512 parallel-shape case
+lines and 39 serial ones, and all nine of its `Executed N tests` summaries belong to the UI target.
+
+A tally of per-case lines across **both** formats is the only reading that finds it:
+
+```
+Test case 'Suite.testName()' failed on 'Clone 1 of iPhone 17 - Arbos (41549)' (0.002 seconds)
+Test Case '-[ArbosTests.Suite testName]' failed (0.002 seconds).
+```
+
+**When the two readings disagree, the tally wins and the disagreement is printed.** The lane names
+every failing case, says that the console showed a different number of `error:` lines, and says why
+they differ. It is not reconciled quietly: a gate that prefers the smaller number is how four
+failures were announced as three. The rule runs in both directions — if xcodebuild exits 0 while a
+case reports failed, the lane fails on the tally, which is the more dangerous direction because
+nothing downstream would look again.
+
 ## Rigs take a heavy slot on the shared EC2 Mac (2026-10-26 20:30 UTC)
 
 The Mac's heavy-job cap (`/usr/local/bin/arbos-heavy-slot.sh`, versioned at `scripts/runner/arbos-heavy-slot.sh`;
