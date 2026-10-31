@@ -248,10 +248,20 @@ final class OneAddRowPerPaneTests: XCTestCase {
         XCTAssertEqual(PaneKit.glyphPoint, Theme.body)
         XCTAssertEqual(PaneKit.glyphWeight, .medium)
         XCTAssertEqual(PaneKit.glyphRadius, 10)
+        // The rows reach the box through `PaneRow`, so an inline `Image` drawn back into
+        // `leadingView` would put the muted tint back without `PaneGlyphBox` noticing.
+        let row = body(of: "PaneRow", in: pages)
+        XCTAssertTrue(row.contains("PaneGlyphBox(symbol: icon)"), "a .glyph row draws the one box")
         let box = body(of: "PaneGlyphBox", in: pages)
         XCTAssertTrue(box.contains("Image(systemName: symbol)"), "the system symbol, not a drawn glyph")
         XCTAssertTrue(box.contains("foregroundStyle(theme.text)"), "the label's colour")
         XCTAssertFalse(box.contains("theme.muted"), "never the muted tint")
+        // The box is as wide as a member row's avatar, which is what `separatorInset`
+        // measures: every label in the card starts at one left edge.
+        XCTAssertTrue(box.contains("width: PaneKit.avatar, height: PaneKit.avatar"),
+                      "the icon box is the avatar's box")
+        XCTAssertEqual(PaneKit.separatorInset(.glyph("")), PaneKit.inset + PaneKit.avatar + PaneKit.gap)
+        XCTAssertNotEqual(PaneKit.separatorInset(.glyph("")), PaneKit.separatorInset(.tile("")))
     }
 
     func testThePickerHasAnAgentsSectionMineFirstThenTheOthersAlreadyIn() throws {
