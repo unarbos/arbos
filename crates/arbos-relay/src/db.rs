@@ -903,16 +903,6 @@ impl Db {
         })
     }
 
-    pub fn revoke_device(&self, id: &str) -> Result<bool> {
-        self.with(|c| {
-            c.execute(
-                "UPDATE devices SET revoked_at = ?2 WHERE id = ?1 AND revoked_at IS NULL",
-                params![id, now_ms()],
-            )
-            .map(|n| n > 0)
-        })
-    }
-
     pub fn list_devices(&self) -> Result<Vec<serde_json::Value>> {
         self.with(|c| {
             let mut st = c.prepare("SELECT id, name, created_at, revoked_at, last_seen_at FROM devices ORDER BY created_at")?;
@@ -2734,6 +2724,24 @@ impl Db {
                 Self::LOCAL_COLS
             ))?;
             let rows = st.query_map([], Self::row_to_local)?;
+            rows.collect()
+        })
+    }
+
+    /// The helpers belonging to one user. `local_devices` has no owner column; a helper's row is
+    /// keyed by the relay `devices.id` its token was minted for, so ownership comes from there.
+    pub fn local_devices_of_user(&self, user_id: &str) -> Result<Vec<LocalDevice>> {
+        self.with(|c| {
+            let cols = Self::LOCAL_COLS
+                .split(", ")
+                .map(|col| format!("l.{col}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut st = c.prepare(&format!(
+                "SELECT {cols} FROM local_devices l JOIN devices d ON d.id = l.device_id
+                 WHERE d.user_id = ?1 ORDER BY l.first_seen"
+            ))?;
+            let rows = st.query_map(params![user_id], Self::row_to_local)?;
             rows.collect()
         })
     }
