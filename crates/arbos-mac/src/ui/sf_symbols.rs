@@ -198,12 +198,12 @@ pub fn symbol(name: &str, size: f32, weight: Weight, slot: f32, color: Hsla) -> 
         // `flex_shrink_0`: GPUI's default shrink is 1, so a symbol whose canvas
         // is wider than the slot was squeezed to the slot's width while keeping
         // its height — Apple's artwork drawn out of proportion, with thinner
-        // vertical strokes and the ink pulled off the slot's centre. The widest
-        // in the app, `person.badge.plus`, is half again as wide as it is tall,
-        // so every row that led with it was drawing a narrowed person
-        // ([feedback chat-info-pane-icon-defaults-2026-10-31]). The slot does
-        // not clip, so a symbol wider than its slot now overflows it evenly and
-        // stays centred on it.
+        // vertical strokes and the ink pulled off the slot's centre. Measured,
+        // the worst was `sidebar.left` at 21 pt of artwork in the collapse
+        // disc's 17 pt slot, 19 % narrow; `person.badge.plus` on a chat info
+        // row was 10 % ([feedback chat-info-pane-icon-defaults-2026-10-31]).
+        // The slot does not clip, so a symbol wider than its slot now overflows
+        // it evenly and stays centred on it.
         return frame.child(
             mac::element(name, size, weight, color)
                 .flex_shrink_0()
@@ -402,22 +402,46 @@ mod mac {
 
 #[cfg(test)]
 mod tests {
-    /// Both `flex_shrink_0` calls in [`super::symbol`] — the slot's and the
-    /// symbol's — read from this file, the way `ui::icons` lints the surfaces.
-    /// The symbol's one cannot be checked by drawing: it is inside a
-    /// `cfg(macos)` branch that needs AppKit, so it is unreachable from the
-    /// tests, and that is exactly the kind of line a later edit drops without
-    /// anything going red.
+    //! Apple's canvases, measured on macOS 26.6.2 at the point sizes
+    //! [`super::glyph`] derives (`NSImage(systemSymbolName:)` plus
+    //! `NSImageSymbolConfiguration(pointSize, weight, .medium)`), against the
+    //! slot each call site asks for. `glyph` fixes `slot / point` at
+    //! `1 / GLYPH_POINT_RATIO` ≈ 1.176, so a symbol whose canvas is wider than
+    //! that cannot fit, whatever size it is drawn at:
+    //!
+    //! | call site | symbol | pt | slot | canvas | fits |
+    //! |---|---|---|---|---|---|
+    //! | menu row | `trash` | 13 | 20 | 15 × 17 | yes |
+    //! | chat info row (old slot 18) | `person.badge.plus` | 15.3 | 18 | 20 × 20 | **no** |
+    //! | chat info row (`ROW_GLYPH_SLOT`) | `person.badge.plus` | 15 | 24 | 20 × 20 | yes |
+    //! | sidebar search disc | `magnifyingglass` | 16.15 | 19 | 20 × 18 | **no** |
+    //! | sidebar plus disc | `plus` | 16.15 | 19 | 18 × 16 | yes |
+    //! | sidebar collapse disc | `sidebar.left` | 14.45 | 17 | 21 × 16 | **no** |
+    //! | ⌘K palette field | `magnifyingglass` | 14.45 | 17 | 18 × 17 | **no** |
+    //! | ⌘F chat search bar | `magnifyingglass` | 12.75 | 15 | 15 × 15 | exactly |
+    //! | new-chat people field | `magnifyingglass` | 9.78 | 11.5 | 12 × 12 | **no** |
+    //!
+    //! So overflow is normal here, not a thing to design out: five live call
+    //! sites ask for a slot narrower than Apple's artwork, and `sidebar.left`
+    //! (1.45 × its point size) overflows every slot `glyph` could derive. What
+    //! has to hold is that the overflow is even and visible rather than taken
+    //! out of the artwork's width. Both tests read this file's own source, the
+    //! way `ui::icons` lints the surfaces, so they run off macOS too — where
+    //! `natural_size` does not exist and an AppKit test could not.
+
+    /// Both `flex_shrink_0` calls in [`super::symbol`]: the slot's and the
+    /// symbol's. The symbol's one cannot be checked by drawing — it is inside a
+    /// `cfg(macos)` branch that needs AppKit — and that is exactly the kind of
+    /// line a later edit drops without anything going red.
     ///
     /// What it protects: a GPUI `Style::default()` shrinks at 1, so a flex child
-    /// wider than its parent is compressed to fit. Apple's canvases are often
-    /// wider than they are tall — `sidebar.left` is 21 pt of artwork in the
-    /// collapse disc's 17 pt slot — so without the pin the image was squeezed to
-    /// the slot's width at its full height: the artwork out of proportion, its
-    /// vertical strokes thinned, and its ink pulled off the slot's centre. That
-    /// is Jacob's squashed search button and the chat info pane's thin row icons,
-    /// one defect ([feedback chat-info-pane-icon-defaults-2026-10-31],
-    /// [feedback mac-sidebar-search-field-squashed-2026-10-31]).
+    /// wider than its parent is compressed to fit. Without the pin the image was
+    /// squeezed to the slot's width at its full height: the artwork out of
+    /// proportion, its vertical strokes thinned, its ink pulled off the slot's
+    /// centre. That is the chat info pane's thin row icons and the same
+    /// mechanism behind the squashed sidebar search button ([feedback
+    /// chat-info-pane-icon-defaults-2026-10-31], [feedback
+    /// mac-sidebar-search-field-squashed-2026-10-31]).
     #[test]
     fn a_symbol_and_its_slot_are_both_pinned_against_shrinking() {
         let src = include_str!("sf_symbols.rs");
@@ -447,6 +471,28 @@ mod tests {
         assert!(
             drawn.contains(".flex_shrink_0()"),
             "a symbol wider than its slot would be compressed into it again"
+        );
+    }
+
+    /// The companion rule to the pin above. Once the artwork stops being
+    /// compressed, cropping it to the slot is the next thing reached for, and
+    /// that trades a squashed symbol for a cut-off one — which reads as a fix
+    /// and is not one. Every symbol the app draws overflows its slot at some
+    /// size, so this would shave Apple's artwork app-wide, not in one place.
+    #[test]
+    fn the_slot_does_not_crop_what_overflows_it() {
+        let src = include_str!("sf_symbols.rs");
+        let body = src
+            .split_once("pub fn symbol(")
+            .expect("symbol() is still here")
+            .1;
+        // Bounded at symbol()'s own closing brace: `include_str!` pulls this
+        // module in too, and the name being searched for appears in it.
+        let end = body.find("\n}\n").expect("symbol()'s closing brace");
+        assert!(
+            !body[..end].contains("overflow_hidden"),
+            "the slot has to let a wide symbol overflow it evenly and stay \
+             centred; clipping Apple's artwork is no better than compressing it"
         );
     }
 }

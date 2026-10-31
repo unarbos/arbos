@@ -271,6 +271,15 @@ final class OneAddRowPerPaneTests: XCTestCase {
             XCTAssertFalse(box.contains(stretches), "\(stretches) would distort Apple's canvas")
         }
         XCTAssertTrue(box.contains(".overlay("), "the symbol draws at its own size")
+        // The companion rule, and the twin of
+        // `sf_symbols::tests::the_slot_does_not_crop_what_overflows_it`. A symbol that
+        // keeps its proportions has to overflow a box narrower than its canvas, so the
+        // tempting tidy-up is to clip it away. That swaps a squashed symbol for a
+        // cropped one, which looks like a fix and is not one. The rounded rectangle
+        // here is the box's fill, never a mask.
+        for crops in [".clipped()", ".clipShape("] {
+            XCTAssertFalse(box.contains(crops), "\(crops) would crop Apple's canvas instead")
+        }
     }
 
     func testThePickerHasAnAgentsSectionMineFirstThenTheOthersAlreadyIn() throws {
