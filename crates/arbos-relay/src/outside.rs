@@ -514,6 +514,23 @@ fn mentions_agent(text: &str, mentions: &[String], project: &Project) -> bool {
         })
 }
 
+/// Does this message answer a line the agent itself wrote? Answering an agent is addressing it
+/// without naming it, which is why the wake rule has always been documented as "mentioned or
+/// replies to it" — but [`mentions_agent`] only ever read the text, so a follow-up typed into the
+/// agent's own thread left it asleep. The parent's sender comes from the stored row, so a reply
+/// whose parent is not in the relay's doc cannot be resolved and falls back to the mention alone.
+fn replies_to_agent(doc: Option<&ChatDoc>, reply_to: Option<&str>, project: &Project) -> bool {
+    let Some(id) = reply_to.filter(|r| !r.is_empty()) else {
+        return false;
+    };
+    doc.and_then(|d| d.message(id)).is_some_and(|parent| {
+        parent.rest["sender"]
+            .as_str()
+            .and_then(|s| s.strip_prefix("agent:"))
+            == Some(project.id.as_str())
+    })
+}
+
 /// How long an announce waits for its own row to reach the relay's doc. The apps send
 /// `POST …/notify` and the room push side by side, so the announce often lands first
 /// (Arbonites 01M64SV6F5…, #2305: the row was stored 440 ms after the announce).
@@ -731,9 +748,20 @@ fn deliver_announced(state: &AppState, ev: &Announced, doc: Option<&ChatDoc>) {
         // stored row when it arrived. A tag typed past the client's preview cut is in the row
         // and not in the preview, and deciding from the preview dropped the message entirely:
         // the agent was never woken and nobody answered the tester (#2413).
-        let wake = match rule {
-            WakeRule::Always => true,
-            WakeRule::WhenMentioned => mentions_agent(&text, &ev.mentions, p),
+        // The mention is asked first and on its own, so an explicit tag wakes the agent it names
+        // whatever else is true of the message. Everything else is an additional way to wake,
+        // never a condition on this one.
+        let (wake, via) = match rule {
+            WakeRule::Always => (true, "rule"),
+            WakeRule::WhenMentioned => {
+                if mentions_agent(&text, &ev.mentions, p) {
+                    (true, "mention")
+                } else if replies_to_agent(doc, ev.reply_to.as_deref(), p) {
+                    (true, "reply")
+                } else {
+                    (false, "nothing")
+                }
+            }
         };
         // `body` says which text the decision was put to: the stored row, or the announce
         // preview because the row was not in the doc. Without it a wake has to be inferred
@@ -748,6 +776,7 @@ fn deliver_announced(state: &AppState, ev: &Announced, doc: Option<&ChatDoc>) {
                 WakeRule::Always => "always",
                 WakeRule::WhenMentioned => "when_mentioned",
             },
+            via,
             body = if row.is_some() { "row" } else { "preview" },
             body_chars = text.chars().count(),
             announce_chars = ev.text.chars().count(),
@@ -3030,6 +3059,146 @@ mod tests {
         assert_eq!(
             events[0].1["wake"], false,
             "nobody was tagged: {}",
+            events[0].1
+        );
+    }
+
+    /// A line the agent wrote, so a reply to it has a parent to resolve.
+    async fn agent_line(state: &AppState, chat: &str, pid: &str) -> String {
+        let id = ulid();
+        let (i, sender) = (id.clone(), format!("agent:{pid}"));
+        crate::notices::write_doc(state, None, chat, move |doc| {
+            // `append_voice_line` is the plain "finished row with this sender" append: a role, a
+            // sender and no `send` command, which is what an agent's own reply looks like here.
+            doc.append_voice_line(
+                "assistant",
+                &i,
+                "Looks like the bf16 path.",
+                "dev:agent",
+                &sender,
+                &[],
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+        id
+    }
+
+    /// The wake rule has read "mentioned **or replies to it**" since it was written, and
+    /// `mentions_agent` only ever looked at the text. So answering the agent's own line — which
+    /// is addressing it without naming it — left it asleep, in the one thread where it had
+    /// already been asked something. The judge counts the same case as being for that agent
+    /// ("a reply to {name}'s line that asks or tells it something", `agentd/responders.rs`).
+    #[tokio::test]
+    async fn a_reply_to_the_agents_own_line_wakes_it_without_a_tag() {
+        let (state, pid, g, other) = outside_group(7261);
+        let parent = agent_line(&state, &g, &pid).await;
+
+        let text = "and does that hold when the batch is smaller?";
+        assert!(
+            !text.contains('@'),
+            "the follow-up must name nobody, or the test proves nothing"
+        );
+        let msg_id = ulid();
+        let (m, o, p, t) = (
+            msg_id.clone(),
+            other.clone(),
+            parent.clone(),
+            text.to_owned(),
+        );
+        crate::notices::write_doc(&state, None, &g, move |doc| {
+            doc.append_user_message(
+                &m,
+                &t,
+                "dev:phone",
+                &arbos_core::doc::UserMessageOpts {
+                    sender: Some(format!("user:{o}")),
+                    reply_to: Some(p),
+                    ..Default::default()
+                },
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let me = Sender::user(&state, &other);
+        on_announce_waiting(
+            &state,
+            &ChatRef::people(&g),
+            &me,
+            &msg_id,
+            text,
+            Some(&parent),
+            &[],
+            std::time::Duration::from_secs(1),
+        );
+        let events = events_eventually(&state, &pid).await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].1["wake"], true,
+            "the message answers the agent's own line: {}",
+            events[0].1
+        );
+    }
+
+    /// The other side of it: a reply aimed at a person is not for the agent. Resolving the parent
+    /// must not turn every quoted message in the room into a wake.
+    #[tokio::test]
+    async fn a_reply_to_another_persons_line_does_not_wake_the_agent() {
+        let (state, pid, g, other) = outside_group(7271);
+        let parent = ulid();
+        let (pa, o) = (parent.clone(), other.clone());
+        crate::notices::write_doc(&state, None, &g, move |doc| {
+            doc.append_user_message(
+                &pa,
+                "I think the trainer is fine",
+                "dev:phone",
+                &arbos_core::doc::UserMessageOpts {
+                    sender: Some(format!("user:{o}")),
+                    ..Default::default()
+                },
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let msg_id = ulid();
+        let (m, o2, p) = (msg_id.clone(), other.clone(), parent.clone());
+        crate::notices::write_doc(&state, None, &g, move |doc| {
+            doc.append_user_message(
+                &m,
+                "agreed, same here",
+                "dev:phone",
+                &arbos_core::doc::UserMessageOpts {
+                    sender: Some(format!("user:{o2}")),
+                    reply_to: Some(p),
+                    ..Default::default()
+                },
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let me = Sender::user(&state, &other);
+        on_announce_waiting(
+            &state,
+            &ChatRef::people(&g),
+            &me,
+            &msg_id,
+            "agreed, same here",
+            Some(&parent),
+            &[],
+            std::time::Duration::from_secs(1),
+        );
+        let events = events_eventually(&state, &pid).await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].1["wake"], false,
+            "the reply answers a person, not the agent: {}",
             events[0].1
         );
     }
