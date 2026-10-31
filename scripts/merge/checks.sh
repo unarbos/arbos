@@ -12,6 +12,18 @@
 # Silence is a refusal. Every uncertainty — an unparseable filter, a short read, an unreadable API —
 # is BLOCKED, never "not required".
 #
+# That shape has now turned up three times in this one kit, which makes it a pattern rather than a
+# tally: "nothing is there" standing in for "the query was wrong".
+#   1. the deny-list described above, which had no entry for skipped, for neutral, or for absence;
+#   2. verdict()'s run read, which looked at one page and reported "found nothing" when the truth
+#      was "did not look at everything" (#2467);
+#   3. gate_state's run lookup, which gets total_count 0 for an abbreviated head_sha and so reported
+#      "no run exists for this sha at all" about a head whose gate had in fact run and failed.
+# All three failed closed, and all three gave a false reason. The false reason is the harm: it points
+# at the wrong remedy, and "no run exists" sends the reader to push and wait out a saturated macOS
+# pool when the real answer is to go read the failed run. So the rule here is to assert a floor, and
+# to let an unanswerable question be BLOCKED rather than letting it become an answer.
+#
 # This list IS the repository's required-check policy. main has no branch protection and no ruleset
 # (branches/main reports "protected": false; rulesets and rules/branches/main are both empty), and
 # the protection endpoint needs a token with Administration:Read, which the merge lane's token is
@@ -95,6 +107,22 @@ commit_files() {
 # push run's and the pull_request run's), and the rollup gives no way to tell which result belongs
 # to which event. The runs API keyed on the sha is exact. Every page is read, and a short read is
 # loud, for the reason #2467 documents.
+#
+# CONSTRAINT — what a run-level conclusion is allowed to mean, and why it is not this file's to
+# guarantee. This reads the RUN's conclusion rather than a named check row. GitHub concludes a run
+# `success` when every one of its jobs is success-or-skipped, so that equals a real verdict only
+# while no job in the workflow can succeed without testing. Today that holds because the workflow
+# has exactly one job, `check`. Once #2448 lands it holds for a different reason: the workflow ends
+# in a job that fails closed — `verdict` ("Swift verdict") is `if: always()` and exits non-zero
+# unless a check actually passed on this head. Without such a job a run whose check was skipped
+# concludes `success`, which is precisely the bug this file was written to end.
+#
+# So the dependency lives in a YAML file nobody reviewing this one would think to open. If that job
+# gains `continue-on-error: true`, or the workflow gains any other job that always succeeds, this
+# function goes quietly permissive again without a line here changing. The matching constraint
+# comment is on the workflow side. Reading rows by name instead would only trade this dependency for
+# a worse one: `build-xcframework + fastlane test` is skipped in the mirror run exactly when the
+# push twin passed, so requiring it by name would refuse when coverage exists.
 gate_state() {
   local wf=$1 sha=$2 base total list got
   base="repos/$R/actions/workflows/${wf##*/}/runs?head_sha=$sha"
@@ -117,6 +145,15 @@ gate_state() {
   # A job skipped by an `if:` condition did no work, so it proves nothing about this commit.
   red=$(printf '%s\n' "$list" | awk '$4!="success" && $4!="skipped" && $4!="neutral"')
   [ -n "$red" ] && { echo "RED $got run(s) on this head, none successful: $all"; return; }
+  # A canary, not a live path — and kept deliberately. Under #2448 every run reaches the always()
+  # verdict job, so a wholly skipped or neutral run should be unreachable for a fresh head. It stays
+  # because it is still live for historical heads, whose all-skipped runs sit on main's history
+  # permanently and are read by the audit paths, and because the red= filter above deliberately
+  # excludes skipped and neutral, so this case arrives here by falling through everything else.
+  # Delete the branch and the case has to be reclassified; the convenient reclassification is "pass",
+  # which restores the original bug inside the one function written to prevent it. If this line ever
+  # fires for a fresh head, the verdict job's fail-closed guarantee has been broken — read it as that
+  # alarm, not as a routine skip.
   echo "NOVERDICT $got run(s) on this head, every one skipped or neutral, so none of them tested it: $all"
 }
 
@@ -152,6 +189,21 @@ gate_applies() {
 # <files> is the newline-separated diff for this head, from pr_files or commit_files.
 require_gates() {
   local sha=$1 files=$2 wf name phead pbase pats state rc=0
+  # GitHub's head_sha run filter matches the full 40-character sha only. An abbreviated one is not
+  # an error: it returns total_count 0, which gate_state would report as "no run exists for this
+  # sha at all". That is this file's own bug one level down — "nothing is there" standing in for
+  # "the query was wrong" — and it sends the reader to push a new commit when the gate in fact ran
+  # and failed. Measured on d127f8df2960c81b84753077933635986f86d0d5, whose gate run 41207432393
+  # failed: the full sha reports RED, and `d127f8df2` reported no run at all. So a sha this cannot
+  # query is BLOCKED, never "no verdict" and never "not required". Callers inside this kit pass
+  # %H, headRefOid or the pinned head; the operator subcommand resolves its argument first.
+  local norm; norm=$(printf '%s' "$sha" | tr 'A-F' 'a-f')
+  case "$norm" in *[!0-9a-f]*) norm='' ;; esac
+  if [ "${#norm}" -ne 40 ]; then
+    echo "    required checks on '$sha': BLOCKED — a gate is judged by the full 40-character head sha and this is not one, so no run lookup for it can be trusted. Resolve it first: gh api repos/\$R/commits/<ref> --jq .sha"
+    return 2
+  fi
+  sha=$norm
   while IFS='|' read -r wf name; do
     [ -n "$wf" ] || continue
     state=$(gate_applies "$wf" "$sha" "$files")
