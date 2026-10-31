@@ -347,12 +347,13 @@ pub async fn export_chat(
         .clone()
         .filter(|t| !t.trim().is_empty())
         .unwrap_or_else(|| {
+            // Bare handles, no `@`: a generated group name reads the same on every surface
+            // (see `group_name_tests`).
             let handles: Vec<String> = members
                 .iter()
                 .filter_map(|m| m.member.strip_prefix("user:"))
                 .filter_map(|uid| state.db.user(uid).ok().flatten())
                 .filter_map(|u| u.login)
-                .map(|l| format!("@{l}"))
                 .collect();
             handles.join(", ")
         });
@@ -889,8 +890,9 @@ mod tests {
         assert_eq!(body["chat"]["id"], chat);
         // An untitled chat's export title is its roster, in roster order. Both members join in
         // the same millisecond, so `members_of`'s tiebreak decides which handle leads; pinning
-        // it here is the point, because an export is a document a person keeps.
-        assert_eq!(body["chat"]["title"], "@user3003, @user3004");
+        // it here is the point, because an export is a document a person keeps. The handles are
+        // bare: the generated name has one form on every surface (see `group_name_tests`).
+        assert_eq!(body["chat"]["title"], "user3003, user3004");
 
         // What the Matrix backfill would mirror for the same chat, in stream order.
         backfill::run(
@@ -961,7 +963,7 @@ mod tests {
         // Markdown carries the same lines.
         let (_, md) =
             text_of(export(&state, &reader, &chat, 0, None, None, Some("md")).await).await;
-        assert!(md.starts_with("# @user3003, @user3004\n"));
+        assert!(md.starts_with("# user3003, user3004\n"));
         assert_eq!(md.matches("**@alice**").count(), 3);
         assert!(md.contains("**system**"));
         assert!(md.contains("- attachment: plan.pdf (application/pdf) http://"));
