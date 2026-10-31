@@ -51,4 +51,26 @@ enum ChatSearchClose {
     static func resultTapReveals(open: Bool, query: String) -> Bool {
         open && !query.trimmingCharacters(in: .whitespaces).isEmpty
     }
+
+    /// A result row's tap is *simultaneous* (`SearchResultTap`), deliberately, so that a tap
+    /// on a link or a mention chip inside a bubble still wins while the reader is reading
+    /// the chat. The cost is that the bubble's own buttons fire alongside the reveal: a
+    /// result tapped on the sender's avatar, or on the name inside the bubble, revealed the
+    /// message and pushed that sender's page over it, which is how a reader hunting a
+    /// result landed somewhere they never asked for ([feedback
+    /// iphone-search-result-jump-2026-10-29], #2404). So while a keyword filters the list,
+    /// a tap inside a hit means "take me to this message" and nothing else.
+    ///
+    /// Every route a row has to something other than the reveal asks here — the avatar and
+    /// the in-bubble name on a text row, the same two on a media row, a mention chip, a
+    /// hidden spoiler — so this is one decision rather than five, and the next such route
+    /// has one place to ask. The gesture itself is untouched: with no keyword `resultRow` is
+    /// false and every one of those taps behaves exactly as it does today.
+    ///
+    /// Two things deliberately not keyed on: the sender's kind, so an agent's page is
+    /// suppressed by the same call as a person's (the page that opened in the measurement
+    /// was an agent's, through the same `toggleProfile`); and an ordinary web link, which
+    /// stays live because it leaves the app instead of covering the message — unmistakable,
+    /// plausibly what the tap meant, and recoverable by coming back.
+    static func rowOwnsInnerTap(resultRow: Bool) -> Bool { resultRow }
 }
