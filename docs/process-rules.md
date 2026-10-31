@@ -109,9 +109,14 @@ different statements and only the first one is true.
 
 It now exits 2, the gate's infrastructure code, the same as a failed fetch: `rust-gate.sh` reports
 `infra`, the poller retries on the next tick, no verdict is recorded and no issue is told its branch
-failed. A transient rig fault heals by itself. A lasting one stops the merge queue, visibly — items
-stay gating and the loop log repeats "iOS half infrastructure error, retrying next tick". **There is
-no retry cap**, so a rig that stays sick needs a human; the gate output says so in its last line.
+failed. A transient rig fault heals by itself.
+
+A lasting one summons a person. The gate keeps retrying — red would blame branches for the rig — but
+after **six infrastructure verdicts in a row**, about twelve minutes at the poller's two-minute tick,
+the poller files **one** issue labelled `gate-rig`: how long the rig has been untestable, which items
+are waiting, and the gate's own repair steps. One issue per untestable stretch, not one per tick, and
+it closes itself as soon as the iOS half returns a real verdict. `arbos-feedback status` shows the
+same thing as `iOS GATE RIG UNTESTABLE since …` from the first verdict, before the issue exists.
 
 Two operator overrides, both one-line files in `~/arbos-gate` on the gate Mac (ssh via the relay
 host, below). The gate's failure message names both, with the commands, so nobody has to read the

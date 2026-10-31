@@ -254,20 +254,23 @@ run_unit_tests() {
         tail -n 12 "$log" | cut -c1-200
         rm -f "$log"; return 0
       fi
-      echo "== tests: NOT RUN — the suite never reached a verdict (rc=$trc), so this branch was NOT"
-      echo "   checked. The rig could not test, which is not the branch's fault and is not a pass:"
-      echo "   the gate reports infrastructure, the poller retries next tick, nothing merges untested."
-      echo "   On the gate Mac (ssh via the relay host, docs/process-rules.md), in this order:"
-      echo "     1. xcrun simctl list devices available | grep -F '$TEST_SIM_NAME'"
-      echo "        — it is there: nothing to fix, the retry will pass. Stop here."
-      echo "     2. No device of any name: CoreSimulator is sick. Restart it with"
-      echo "        'sudo killall -9 com.apple.CoreSimulator.CoreSimulatorService' and let the gate retry."
-      echo "     3. Devices exist under other names: pin one with"
-      echo "        \"echo '<device name>' > $SIM_PIN\" (stands until you remove it)."
-      echo "     4. None of that, or a hotfix must ship now: allow ONE untested run with"
-      echo "        \"echo '<your name>: <why>' > $ALLOW_UNTESTED\". It is consumed by the next run."
-      echo "     5. Still stuck: escalate — items stay gating and the merge queue stops draining."
-      tail -n 12 "$log" | cut -c1-200
+      # Every line of the repair starts with "== ", because that is the only shape rust-gate.sh's
+      # `status` forwards to the poller (`grep -E "^== "`). An indented continuation line is dropped
+      # on the way out and the operator would have to be on the Mac to read it — which is exactly
+      # the person we do not have at 3am.
+      echo "== tests: NOT RUN — the suite never reached a verdict (rc=$trc), so this branch was NOT checked."
+      echo "== tests: the rig could not test. That is not the branch's fault and it is not a pass: the gate"
+      echo "== tests: reports infrastructure, the poller retries, and nothing merges untested meanwhile."
+      echo "== rig fix, on the gate Mac (ssh via the relay host, docs/process-rules.md), in this order:"
+      echo "== rig fix: 1. xcrun simctl list devices available | grep -F '$TEST_SIM_NAME'"
+      echo "== rig fix:    it is listed? nothing to repair, the retry will pass. Stop here."
+      echo "== rig fix: 2. no device of any name? CoreSimulator is sick. Restart it:"
+      echo "== rig fix:    sudo killall -9 com.apple.CoreSimulator.CoreSimulatorService"
+      echo "== rig fix: 3. devices under other names? pin one: echo '<device name>' > $SIM_PIN"
+      echo "== rig fix: 4. a hotfix must ship now? allow ONE untested run, consumed by it:"
+      echo "== rig fix:    echo '<your name>: <why>' > $ALLOW_UNTESTED"
+      echo "== rig fix: 5. none of those? escalate: items stay gating and the merge queue stops draining."
+      tail -n 12 "$log" | cut -c1-200 | sed 's/^/== rig: /'
       rm -f "$log"; return 2 ;;
   esac
   if [[ "$trc" -eq 0 && -z "$fails" ]]; then

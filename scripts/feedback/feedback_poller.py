@@ -2962,6 +2962,68 @@ class Loop:
             log(f"ALERT main's iOS unit-test target does not compile at {m.group(1)} (seen by gate {active['id']}); branches are not blamed — "
                 f"route the fix to the test's owner: " + " | ".join(errors[:3]))
 
+    # An untestable rig (no simulator, no .xctestrun) is infrastructure: ios-gate.sh exits 2, the half is
+    # retried, and no branch is blamed for it — see docs/process-rules.md. Retrying for ever is right, since
+    # the fault is usually gone in minutes, but silence for ever is not: nothing merges meanwhile and the
+    # only trace is one log line per tick that nobody reads at 3am. After this many infrastructure verdicts
+    # in a row, summon a person ONCE and keep retrying. Six ticks at two minutes each is about twelve.
+    IOS_RIG_ALERT_AFTER = 6
+
+    def note_ios_rig_untestable(self, active: dict, body: str, cur: dict) -> None:
+        """Count the consecutive infrastructure verdicts of the iOS half and, past IOS_RIG_ALERT_AFTER, file
+        one issue carrying the gate's own repair steps and how long the rig has been untestable — "four
+        minutes" and "forty minutes" want different reactions. One issue per untestable stretch, never one
+        per tick; it closes itself when the rig tests again (clear_ios_rig_untestable)."""
+        rec = cur.get("ios_rig_untestable") or {"since": iso(), "tries": 0}
+        rec["tries"] += 1
+        rec["run"] = active["id"]
+        # The repair steps come from the gate, so there is one copy of them and it is the one that knows
+        # the rig's own paths. rust-gate.sh forwards only `^== ` lines, which is the shape they are in.
+        steps = [l for l in body.splitlines() if l.startswith(("== tests:", "== rig"))][:20] \
+            or [l for l in body.splitlines() if l.startswith("== ")][:20]
+        if steps:
+            rec["steps"] = steps
+        cur["ios_rig_untestable"] = rec
+        if rec["tries"] < self.IOS_RIG_ALERT_AFTER or rec.get("issue") or rec.get("alerted"):
+            return
+        mins = int(minutes_between(rec["since"], iso()))
+        rec["alerted"] = iso()
+        detail = "\n".join(rec.get("steps") or ["(the gate reported no `== ` line)"])
+        members = ", ".join(f"#{st['issue']}" for st in
+                            ((self.store.state(f) or {}) for f in (active.get("members") or {}))
+                            if st.get("issue"))
+        log(f"ALERT the gate Mac has not run the iOS suite for {mins} min ({rec['tries']} infrastructure "
+            f"verdicts in a row, gate {active['id']}); no branch is blamed and the gate keeps retrying, but "
+            f"nothing merges until someone repairs the rig or arms ~/arbos-gate/.allow-untested")
+        with contextlib.suppress(HttpError):
+            self.gh.ensure_label("gate-rig", "D93F0B", "The gate Mac cannot run the iOS suite; nothing merges")
+            issue = self.gh.create_issue(
+                f"gate Mac cannot run the iOS suite ({mins} min) — nothing is merging",
+                f"The iOS gate half has come back `infra` **{rec['tries']} times in a row**, the first at "
+                f"{rec['since']} (**{mins} min** ago). No test has run in that time, so no branch is judged and "
+                f"the gate keeps retrying every tick — but the merge queue does not move until the rig can test "
+                f"or someone allows one untested run.\n\n"
+                f"Waiting behind it: {members or 'the current gate batch'} (gate `{active['id']}`).\n\n"
+                f"The gate's own repair steps, in order:\n\n```\n{detail}\n```\n\n"
+                f"This issue closes itself as soon as the iOS half returns a real verdict. Background: "
+                f"docs/process-rules.md → a gate that cannot test does not pass the branch.",
+                ["gate-rig"])
+            rec["issue"] = issue["number"]
+            log(f"ALERT gate-rig → #{issue['number']}")
+
+    def clear_ios_rig_untestable(self, cur: dict) -> None:
+        """The iOS half returned a real verdict, so the rig tests again: drop the record and close the issue
+        the stretch opened, saying how long it lasted."""
+        rec = cur.pop("ios_rig_untestable", None)
+        if not rec:
+            return
+        mins = int(minutes_between(rec["since"], iso()))
+        log(f"the gate Mac runs the iOS suite again after {mins} min ({rec['tries']} infrastructure verdict(s))")
+        if rec.get("issue"):
+            with contextlib.suppress(HttpError):
+                self.gh.close_issue(rec["issue"], "completed",
+                                    f"The iOS half returned a verdict again after {mins} min. Merges resume.")
+
     def gate_priority(self, active: dict) -> str:
         """A batch with a pinned member (hotfix / operator gate-next) tells the Mac's heavy-job cap it has
         priority: it may take the extra slot instead of queueing behind a pool gate and the TF lane."""
@@ -3115,10 +3177,12 @@ class Loop:
                     elif verdict == "infra":
                         log(f"Gate {active['id']}: iOS half infrastructure error, retrying next tick: {body[-300:]}")
                         active["ios_started"] = None
+                        self.note_ios_rig_untestable(active, body, cur)
                         self.store.save_cursor(cur)
                     else:
                         active["ios"] = verdict  # ok | fail
                         active["ios_tail"] = body[-5000:]
+                        self.clear_ios_rig_untestable(cur)
                         self.store.save_cursor(cur)
                         log(f"Gate {active['id']}: iOS half {active['ios']}")
                         self.note_main_tests_broken(active, body)
@@ -5169,6 +5233,13 @@ class Loop:
                   + ", ".join(f"{k} {v}" for k, v in sorted(by.items())) + " — `arbos-feedback unfreeze` lifts it")
         self.print_gate_queue(cur)
         self.print_deploy_lane()
+        rig = cur.get("ios_rig_untestable")
+        if rig:
+            print(f"iOS GATE RIG UNTESTABLE since {rig.get('since')} ({int(minutes_between(rig['since'], iso()))} min, "
+                  f"{rig.get('tries')} infrastructure verdict(s)"
+                  + (f", issue #{rig['issue']}" if rig.get("issue") else f", alert at {self.IOS_RIG_ALERT_AFTER}")
+                  + "); no test ran, no branch is blamed, the gate keeps retrying and nothing merges — "
+                  "repair the rig or allow one untested run with ~/arbos-gate/.allow-untested")
         broken = cur.get("main_ios_tests_broken")
         if broken:
             print(f"MAIN iOS UNIT TESTS BROKEN at {broken.get('main')} since {broken.get('since')} (gate {broken.get('run')}); branches are not blamed — route the fix: "
