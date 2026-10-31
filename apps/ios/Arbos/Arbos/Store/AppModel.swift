@@ -1434,6 +1434,10 @@ final class AppModel: ObservableObject {
     /// chat reads its messages; it does not read a mention further up that nobody has
     /// scrolled to, and the open chat losing its `@` is exactly the state the in-chat jump
     /// control exists to resolve.
+    ///
+    /// So the open chat's row shows the `@` **with no count beside it**, and that is the
+    /// specified behaviour rather than a half-drawn pair: the two counts are allowed to
+    /// disagree (D4), and this is the case where they do.
     func mentionCount(for chat: PeopleChat) -> Int {
         isHiddenChat(chat.id) ? 0 : (unreadMentions[chat.id] ?? 0)
     }
