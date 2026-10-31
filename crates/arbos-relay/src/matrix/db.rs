@@ -454,6 +454,18 @@ impl Db {
         self.with(|c| c.query_row("SELECT COUNT(*) FROM matrix_events", [], |r| r.get(0)))
     }
 
+    /// Relay members (`user:<id>` / `agent:<project>`) that have written into a chat, newest
+    /// first. A close reads the room as one of them when nothing else knows who was in it.
+    pub fn matrix_event_senders(&self, chat_id: &str) -> Result<Vec<String>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT sender FROM matrix_events WHERE chat_id = ?1 GROUP BY sender ORDER BY MAX(ts) DESC",
+            )?;
+            let rows = st.query_map(params![chat_id], |r| r.get(0))?;
+            rows.collect()
+        })
+    }
+
     /// `(message_id, event_id, ts)` of a chat, oldest first (shadow-compare).
     pub fn matrix_events_of(&self, chat_id: &str) -> Result<Vec<(String, String, i64)>> {
         self.with(|c| {
