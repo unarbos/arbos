@@ -1,0 +1,116 @@
+name: BackSwipe flake hunt (temporary, #2326 proof)
+
+# Temporary, and never merged: this branch exists only to run it: proof for the
+# BackSwipeUITests fix, not a check anyone should inherit.
+#
+# The two cases under test failed on 18 of 18 hosted runs that reached the test
+# phase, so "it went green once" proves nothing here. This runs that pair — and
+# only that pair — 20 times inside a single job, which costs one slot on a macOS
+# pool that is already this repository's bottleneck instead of the twenty slots
+# twenty pushes would take. `swift-core-check.yml` cancels in-progress runs per
+# ref, so repeated pushes to one branch could not produce twenty runs anyway.
+#
+# The verdict is counted from the log, not taken from xcodebuild's exit status: a
+# run that selected nothing also exits 0, and a green that ran no tests is the
+# failure mode this whole fix is about.
+
+on:
+  push:
+    branches:
+      - cursor/backswipe-pair-loop-proof-ac8d
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backswipe-flake-hunt-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  repeat:
+    name: the pair, 20 times
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      APP_DIR: apps/ios/Arbos
+      ITERATIONS: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift package cache
+        uses: actions/cache@v4
+        with:
+          path: apps/ios/Arbos/build/spm
+          key: spm-${{ runner.os }}-${{ hashFiles('apps/ios/Arbos/Arbos.xcodeproj/project.pbxproj', 'apps/ios/Arbos/Arbos.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved', 'packages/ArbosFFI/Package.swift') }}
+          restore-keys: spm-${{ runner.os }}-
+      - name: Select Xcode
+        run: |
+          set -euo pipefail
+          newest="$(find /Applications -maxdepth 1 -name 'Xcode_*.app' | sort -V | tail -1)"
+          if [[ -n "$newest" ]]; then sudo xcode-select -s "$newest"; fi
+          xcodebuild -version
+      - name: Rust toolchain
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: swift-core-check
+          cache-on-failure: true
+      - name: Build ArbosFFI xcframework
+        run: |
+          set -euo pipefail
+          ./scripts/build-xcframework.sh
+          test -d packages/ArbosFFI/ArbosFFIRust.xcframework
+      - name: Run the pair ITERATIONS times
+        run: |
+          set -euo pipefail
+          cd "$APP_DIR"
+          mkdir -p build
+          # -run-tests-until-failure stops at the first red, so a complete log is a
+          # clean sweep and a short one names the iteration that broke.
+          set +e
+          xcodebuild test \
+            -project Arbos.xcodeproj -scheme Arbos -configuration Debug \
+            -destination 'platform=iOS Simulator,name=iPhone 17' \
+            -derivedDataPath build/dd -clonedSourcePackagesDirPath build/spm \
+            -only-testing:ArbosUITests/BackSwipeUITests/testSwipeRightOnABubbleGoesBackAndStartsNoReply \
+            -only-testing:ArbosUITests/BackSwipeUITests/testVerticalDragOnABubbleDoesNotGoBack \
+            -test-iterations "$ITERATIONS" -run-tests-until-failure \
+            CODE_SIGNING_ALLOWED=NO > build/xcodebuild-flake-hunt.log 2>&1
+          status=$?
+          set -e
+          grep -E "error:|Test Case .* (passed|failed)|Executed [0-9]+ test" build/xcodebuild-flake-hunt.log | tail -60 || true
+          echo "xcodebuild exit status: $status"
+      - name: Count the verdict
+        run: |
+          set -euo pipefail
+          cd "$APP_DIR"
+          log=build/xcodebuild-flake-hunt.log
+          pattern="Test Case '-\[ArbosUITests.BackSwipeUITests test(SwipeRightOnABubbleGoesBackAndStartsNoReply|VerticalDragOnABubbleDoesNotGoBack)\]'"
+          passed=$(grep -cE "$pattern passed" "$log" || true)
+          failed=$(grep -cE "$pattern failed" "$log" || true)
+          want=$((ITERATIONS * 2))
+          echo "passed=$passed failed=$failed wanted=$want (${ITERATIONS} iterations x 2 cases)"
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::$failed of the repeated runs failed"
+            exit 1
+          fi
+          if [ "$passed" -lt "$want" ]; then
+            echo "::error::only $passed case runs passed, wanted $want — the pair did not run $ITERATIONS times"
+            exit 1
+          fi
+          echo "$ITERATIONS consecutive runs of both cases, $passed passes, zero failures"
+      - name: Keep the log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backswipe-flake-hunt-${{ github.sha }}
+          path: apps/ios/Arbos/build/xcodebuild-flake-hunt.log
+          if-no-files-found: warn
+          retention-days: 14
