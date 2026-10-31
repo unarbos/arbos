@@ -1583,6 +1583,29 @@ struct GroupProfileView: View {
             .disabled(sharingInvite)
             .accessibilityLabel("Share invite link")))
         }
+        // People groups only: the owner and admins pick who may pin a message (#1547).
+        if projectId == nil, people?.isGroup == true, canManageMembers {
+            let policy = model.pinPolicy(for: chatId)
+            list.append(AnyView(
+                Menu {
+                    Picker("Who can pin", selection: Binding(
+                        get: { policy },
+                        set: { model.setPinPolicy($0, chatId: chatId) }
+                    )) {
+                        Text("Admins").tag(AppModel.GroupPinPolicy.admins)
+                        Text("Everyone").tag(AppModel.GroupPinPolicy.everyone)
+                    }
+                } label: {
+                    PaneRow(
+                        leading: .glyph("pin"),
+                        title: "Who can pin",
+                        value: policy == .everyone ? "Everyone" : "Admins",
+                        chevron: true
+                    )
+                }
+                .accessibilityLabel("Who can pin messages")
+            ))
+        }
         // People groups only: the activity log is built from this chat's system lines.
         if projectId == nil, people?.isGroup == true, canManageMembers {
             list.append(AnyView(Button { showActivity = true } label: {

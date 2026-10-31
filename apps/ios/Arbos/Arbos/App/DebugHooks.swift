@@ -64,6 +64,9 @@ enum DebugHooks {
     static var fixtureLongReply: Bool { value("ARBOS_FIXTURE_LONG_REPLY") == "1" }
     /// Presence-row rig (typing-indicator-left-2026-10-23): n agents working in the fixture group.
     static var fixtureWorking: Int { value("ARBOS_FIXTURE_WORKING").flatMap { Int($0) } ?? 0 }
+    /// Pin rig (#1547): `ARBOS_FIXTURE_PINNED=1` pins a message in the fixture group, so the
+    /// strip under the header can be shot without driving the long-press menu.
+    static var fixturePinned: Bool { value("ARBOS_FIXTURE_PINNED") == "1" }
     /// `ARBOS_FIXTURE_MACHINE=near-limit`: the box report says disk 92 % and memory 88 % used
     /// (Settings › Machine's warning state on the rig).
     static var fixtureMachineNearLimit: Bool { value("ARBOS_FIXTURE_MACHINE") == "near-limit" }
