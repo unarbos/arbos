@@ -262,6 +262,15 @@ final class OneAddRowPerPaneTests: XCTestCase {
                       "the icon box is the avatar's box")
         XCTAssertEqual(PaneKit.separatorInset(.glyph("")), PaneKit.inset + PaneKit.avatar + PaneKit.gap)
         XCTAssertNotEqual(PaneKit.separatorInset(.glyph("")), PaneKit.separatorInset(.tile("")))
+        // The twin of the Mac's `sf_symbols::symbol` pin. An `.overlay` draws the
+        // symbol at its own size, so Apple's canvas keeps its proportions however
+        // wide it is; `resizable` or a fill content mode would stretch it to the
+        // box and bring the Mac's squash here — a narrowed glyph with thinned
+        // strokes, which is what Scout reported.
+        for stretches in [".resizable()", ".scaledToFill()", "contentMode: .fill"] {
+            XCTAssertFalse(box.contains(stretches), "\(stretches) would distort Apple's canvas")
+        }
+        XCTAssertTrue(box.contains(".overlay("), "the symbol draws at its own size")
     }
 
     func testThePickerHasAnAgentsSectionMineFirstThenTheOthersAlreadyIn() throws {
