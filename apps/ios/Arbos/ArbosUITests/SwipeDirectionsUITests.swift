@@ -60,8 +60,14 @@ final class SwipeDirectionsUITests: XCTestCase {
         app.descendants(matching: .any)["composer-reply-preview"]
     }
 
-    /// Scroll `bubble:<id>` into the middle of the transcript and return it. The chat opens at
-    /// the newest message, so the older media rows need dragging down to reach.
+    /// Scroll `bubble:<id>` clear of the header and the composer and return it.
+    ///
+    /// Which way to scroll is read off the bubble rather than assumed. A chat does not always
+    /// open at its newest message — the Comms chat opens part-way up, so `c5` starts *below*
+    /// the viewport — and a helper that only ever drags toward older messages walks away from
+    /// a bubble like that until it gives up. XCUITest reports a frame for a row the list has
+    /// built but not shown, so "below the middle of the window" is enough to pick a direction:
+    /// drag up to travel toward newer messages, down to travel toward older.
     private func revealBubble(_ app: XCUIApplication, _ id: String,
                               file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
         let bubble = app.descendants(matching: .any)["bubble:\(id)"]
@@ -71,9 +77,12 @@ final class SwipeDirectionsUITests: XCTestCase {
                bubble.frame.midY > window.height * 0.3, bubble.frame.maxY < window.maxY - 160 {
                 return bubble
             }
-            // Drag down from mid-screen: back through the history, one third of a screen.
+            // An unbuilt row has no frame, which reads as "above us" and sends the drag toward
+            // the history — the right default, since that is where unbuilt rows are.
+            let towardNewer = bubble.exists && bubble.frame.midY > window.midY
             let mid = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.45))
-            mid.press(forDuration: 0.05, thenDragTo: mid.withOffset(CGVector(dx: 0, dy: window.height * 0.33)),
+            let step = window.height * 0.33 * (towardNewer ? -1 : 1)
+            mid.press(forDuration: 0.05, thenDragTo: mid.withOffset(CGVector(dx: 0, dy: step)),
                       withVelocity: .slow, thenHoldForDuration: 0.1)
             usleep(400_000)
         }
