@@ -89,7 +89,7 @@ loop_gating() {
   local sock apid rc; sock=$(mktemp -u "$K/agent.XXXXXX")
   apid=$(env -i PATH=/usr/bin:/bin ssh-agent -a "$sock" -s | sed -n 's/^SSH_AGENT_PID=\([0-9]*\);.*/\1/p')
   [ -n "$apid" ] || { echo "ssh-agent did not start"; echo "rc=1"; return; }
-  opread 'op://Arbos/nlijfp36ed4aqbkp2svh2lefbi/private key?ssh-format=openssh' | SSH_AUTH_SOCK=$sock ssh-add -q - 2>/dev/null
+  opread 'op://Arbos/nlijfp36ed4aqbkp2svh2lefbi/private key?ssh-format=openssh' | SSH_AUTH_SOCK=$sock ssh-add -q -t 180 - 2>/dev/null
   timeout 60 ssh -F "$K/config" -o IdentityAgent="$sock" -o IdentitiesOnly=no -o IdentityFile=none relay 'sudo -n /usr/bin/python3 - <<EOF
 import json, os
 d="/var/lib/arbos-feedback"
