@@ -76,7 +76,9 @@ pub enum Ink {
 }
 
 impl Ink {
-    pub const ALL: [Ink; 5] = [Ink::Red, Ink::White, Ink::Amber, Ink::Green, Ink::Blue];
+    /// Swatch order, left to right, as the approved mockup has it: white
+    /// leads, red is merely the one selected on open (`PhotoEditor::new`).
+    pub const ALL: [Ink; 5] = [Ink::White, Ink::Red, Ink::Amber, Ink::Green, Ink::Blue];
 
     fn srgb(self) -> u32 {
         match self {
