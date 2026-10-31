@@ -280,8 +280,8 @@ pub(crate) const STRIP_INSET: f32 = 12.0;
 /// capsule, 4 pt gap) with 10 pt side padding instead of the iPhone's 16 —
 /// four segments at 16 would be wider than the 296 pt default sidebar.
 pub(crate) const FILTER_HEIGHT: f32 = 32.0;
-pub(crate) const FILTER_GAP: f32 = 4.0;
-pub(crate) const FILTER_PAD_X: f32 = 10.0;
+pub(crate) const FILTER_GAP: f32 = sidebar_fit::FILTER_STEPS[0].gap;
+pub(crate) const FILTER_PAD_X: f32 = sidebar_fit::FILTER_STEPS[0].pad_x;
 /// Space between the strip's bottom edge and the capsules: Grok Bot's first
 /// chat card starts 64 pt under the window top, 16 under its discs (bottom
 /// 48). The filter is the first thing under our strip, so its capsules start
@@ -440,6 +440,117 @@ pub(crate) fn strip_controls(in_server: bool, show_plus: bool) -> Vec<StripContr
 /// never inside a server (the channel list has nothing to scope).
 pub(crate) fn filter_shown(in_server: bool) -> bool {
     !in_server
+}
+
+/// The filter row's box at `fit`: the scrolling, centred capsule row.
+/// `render_with` adds the scroll handle and the capsules; the layout tests
+/// build the row from here, so what they measure is what ships.
+fn filter_row_box(fit: sidebar_fit::FilterFit) -> gpui::Stateful<Div> {
+    div()
+        .id("sidebar-filter")
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap(px(fit.gap))
+        .pt(px(FILTER_TOP))
+        .pb(px(FILTER_BOTTOM))
+        .px(px(sidebar_fit::FILTER_ROW_PAD_X))
+        .overflow_x_scroll()
+}
+
+/// One filter capsule's box — everything that decides where it lands: the
+/// fit's padding and type size, the reserved-width label, and the `auto` side
+/// margins on the first and last capsule that centre the set while there is
+/// room. `render_with` paints the fill and wires the click on top; neither
+/// changes the box.
+fn filter_capsule_box(
+    f: ListFilter,
+    ix: usize,
+    count: usize,
+    fit: sidebar_fit::FilterFit,
+    on: bool,
+) -> gpui::Stateful<Div> {
+    let name = format!("sidebar-filter-{}", f.label().to_ascii_lowercase());
+    div()
+        .id(ElementId::Name(SharedString::from(name.clone())))
+        .debug_selector(move || name.clone())
+        .h(px(FILTER_HEIGHT))
+        .px(px(fit.pad_x))
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .justify_center()
+        .map(|mut el| {
+            if ix == 0 {
+                el.style().margin.left = Some(gpui::Length::Auto);
+            }
+            if ix + 1 == count {
+                el.style().margin.right = Some(gpui::Length::Auto);
+            }
+            el
+        })
+        .rounded_full()
+        .cursor_pointer()
+        .text_size(px(fit.text_size))
+        .child(filter_label(f.label(), on))
+}
+
+/// A capsule's label over a box as wide as that label in the **selected**
+/// (semibold) weight: the transparent copy sets the width, the drawn one —
+/// semibold when selected, plain when not — sits over it. So selecting a
+/// filter changes its weight and its fill and never its width, and the other
+/// three stay where they are (Scout, 2026-10-31: "switching filters moves
+/// everything"). The iPhone twin is `PaneTabs` in `ProfilePages.swift`.
+fn filter_label(label: &'static str, on: bool) -> impl IntoElement {
+    div()
+        .relative()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .opacity(0.0)
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(label),
+        )
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .font_weight(if on {
+                    FontWeight::SEMIBOLD
+                } else {
+                    FontWeight::NORMAL
+                })
+                .child(label),
+        )
+}
+
+/// Each filter label's width at [`TEXT_BODY`] in the **selected** weight —
+/// what every capsule reserves whatever its own state, so switching filters
+/// changes colour and weight and moves nothing (Scout, 2026-10-31).
+///
+/// Measured from the live font instead of written down as a constant: the Mac
+/// draws `.SystemUIFont` and the Linux build a fall-back of its own, and the
+/// width where the four capsules stop fitting has to be right on both. Summed
+/// per-glyph advances, which is what the shaper lays these Latin words out to.
+pub(crate) fn filter_label_widths(theme: &Theme, cx: &App) -> Vec<f32> {
+    let text_system = cx.text_system();
+    let mut font = gpui::font(theme.font_sans);
+    font.weight = FontWeight::SEMIBOLD;
+    let font_id = text_system.resolve_font(&font);
+    ListFilter::ALL
+        .iter()
+        .map(|f| {
+            f.label()
+                .chars()
+                .map(|c| f32::from(text_system.layout_width(font_id, px(TEXT_BODY), c)))
+                .sum()
+        })
+        .collect()
 }
 
 /// The segment under the strip — the iPhone home's `HomeListFilter`
@@ -1259,15 +1370,23 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
     let strip = strip.window_drag();
     // ----- filter: All · Agents · People · Servers (the iPhone home's PaneTabs) --
     // Bare labels, the selected one on a capsule, centred; no track, no border.
-    // Narrow column ([feedback sidebar-narrow-wrap-2026-10-27]): the capsules
-    // scroll horizontally under an edge fade when they do not fit, like Grok
-    // Bot's iPhone filter row — the first and last capsule carry `auto` side
-    // margins, which centre the set while there is room and resolve to 0 (a
-    // left-aligned, scrollable row) once there is not; the selected capsule
-    // is scrolled into view (`Shell::filter_scroll`) once per selection /
-    // width — not every frame, or a scroll back toward "All" is undone by the
-    // next paint (`sidebar_fit::FilterPin`, [feedback
-    // server-strip-scroll-2026-10-28]).
+    //
+    // Narrow column (Scout 2026-10-31; [feedback sidebar-narrow-wrap-2026-10-27]
+    // before it): the four capsules **tighten** until they fit — padding and
+    // gap, then the label's type size (`sidebar_fit::filter_fit`) — so each one
+    // is whole and clickable at every width the handle allows. The horizontal
+    // scroll under it is the floor, not the plan: the first and last capsule
+    // carry `auto` side margins, which centre the set while there is room and
+    // resolve to 0 (a left-aligned, scrollable row) if a font is wider than the
+    // last step. The selected capsule is scrolled into view
+    // (`Shell::filter_scroll`) once per selection / width — not every frame, or
+    // a scroll back toward "All" is undone by the next paint
+    // (`sidebar_fit::FilterPin`, [feedback server-strip-scroll-2026-10-28]).
+    //
+    // Every capsule is as wide as its label in the SELECTED weight — an
+    // invisible semibold copy sets the box and the drawn label sits over it —
+    // so selecting one changes its fill and weight and moves nothing (Scout
+    // 2026-10-31: "switching filters moves everything").
     let filter_count = ListFilter::ALL.len();
     if let Some(ix) = ListFilter::ALL.iter().position(|f| *f == filter) {
         let measured = shell.filter_scroll.bounds().size.width > px(0.0);
@@ -1275,41 +1394,12 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
             shell.filter_scroll.scroll_to_item(ix);
         }
     }
-    let filter_bar = div()
-        .id("sidebar-filter")
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .gap(px(FILTER_GAP))
-        .pt(px(FILTER_TOP))
-        .pb(px(FILTER_BOTTOM))
-        .px(px(8.0))
-        .overflow_x_scroll()
+    let fit = sidebar_fit::filter_fit(&filter_label_widths(&theme, cx), sidebar_width);
+    let filter_bar = filter_row_box(fit)
         .track_scroll(&shell.filter_scroll)
         .children(ListFilter::ALL.into_iter().enumerate().map(|(ix, f)| {
             let on = f == filter;
-            div()
-                .id(ElementId::Name(SharedString::from(format!(
-                    "sidebar-filter-{}",
-                    f.label().to_ascii_lowercase()
-                ))))
-                .h(px(FILTER_HEIGHT))
-                .px(px(FILTER_PAD_X))
-                .flex()
-                .flex_shrink_0()
-                .items_center()
-                .justify_center()
-                .map(|mut el| {
-                    if ix == 0 {
-                        el.style().margin.left = Some(gpui::Length::Auto);
-                    }
-                    if ix + 1 == filter_count {
-                        el.style().margin.right = Some(gpui::Length::Auto);
-                    }
-                    el
-                })
-                .rounded_full()
-                .cursor_pointer()
+            filter_capsule_box(f, ix, filter_count, fit, on)
                 // On: the bubble fill, Grok's (§ Chat-list filter); off: the
                 // highlight token's washes plus the label brightening.
                 .map(|el| {
@@ -1320,14 +1410,7 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
                         highlight::button_with(el, &theme, move |s| s.text_color(text))
                     }
                 })
-                .text_size(px(TEXT_BODY))
-                .font_weight(if on {
-                    FontWeight::SEMIBOLD
-                } else {
-                    FontWeight::NORMAL
-                })
                 .text_color(if on { theme.text } else { theme.text_muted })
-                .child(f.label())
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.menu_open = false;
@@ -3325,13 +3408,15 @@ mod strip_tests {
         assert_eq!(ListFilter::default(), ListFilter::All);
     }
 
-    /// The filter row as `render_with` builds it in a column too narrow for
-    /// the four capsules: a horizontal scroll under `scroll`, the selected
-    /// capsule pinned into view through `pin` — once per selection / width,
-    /// or on every frame when `pin_every_frame` (the behaviour before
-    /// [feedback server-strip-scroll-2026-10-28], kept here to show the test
-    /// tells the two apart).
-    struct NarrowFilter {
+    /// The filter row exactly as `render_with` lays it out — the same
+    /// `filter_row_box` and `filter_capsule_box`, so the measurements below
+    /// are of the shipping layout, not of a copy that can drift from it — in
+    /// a column `width` wide. The selected capsule is pinned into view through
+    /// `pin`, once per selection / width, or on every frame when
+    /// `pin_every_frame` (the behaviour before [feedback
+    /// server-strip-scroll-2026-10-28], kept here to show the test tells the
+    /// two apart).
+    struct FilterRow {
         scroll: gpui::ScrollHandle,
         pin: crate::ui::sidebar_fit::FilterPin,
         pin_every_frame: bool,
@@ -3339,46 +3424,33 @@ mod strip_tests {
         width: f32,
     }
 
-    impl gpui::Render for NarrowFilter {
+    impl gpui::Render for FilterRow {
         fn render(
             &mut self,
             _: &mut gpui::Window,
-            _: &mut gpui::Context<Self>,
+            cx: &mut gpui::Context<Self>,
         ) -> impl IntoElement {
             let measured = self.scroll.bounds().size.width > px(0.0);
             if self.pin_every_frame || self.pin.take(self.selected, self.width, measured) {
                 self.scroll.scroll_to_item(self.selected);
             }
             let count = ListFilter::ALL.len();
-            let row = div()
-                .id("narrow-filter")
+            let theme = crate::ui::theme::Theme::of(cx).clone();
+            let fit = crate::ui::sidebar_fit::filter_fit(
+                &super::filter_label_widths(&theme, cx),
+                self.width,
+            );
+            let row = super::filter_row_box(fit)
                 .debug_selector(|| "filter-row".into())
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .gap(px(super::FILTER_GAP))
-                .px(px(8.0))
-                .overflow_x_scroll()
                 .track_scroll(&self.scroll)
-                .children(ListFilter::ALL.into_iter().enumerate().map(|(ix, f)| {
-                    let sel: &'static str =
-                        Box::leak(format!("capsule-{}", f.label()).into_boxed_str());
-                    div()
-                        .h(px(FILTER_HEIGHT))
-                        .px(px(super::FILTER_PAD_X))
-                        .flex_shrink_0()
-                        .map(|mut el| {
-                            if ix == 0 {
-                                el.style().margin.left = Some(gpui::Length::Auto);
-                            }
-                            if ix + 1 == count {
-                                el.style().margin.right = Some(gpui::Length::Auto);
-                            }
-                            el
-                        })
-                        .debug_selector(move || sel.into())
-                        .child(f.label())
-                }));
+                .children(
+                    ListFilter::ALL
+                        .into_iter()
+                        .enumerate()
+                        .map(|(ix, f)| {
+                            super::filter_capsule_box(f, ix, count, fit, ix == self.selected)
+                        }),
+                );
             div()
                 .w(px(self.width))
                 .h(px(120.0))
@@ -3388,14 +3460,117 @@ mod strip_tests {
         }
     }
 
-    fn narrow_filter(scroll: &gpui::ScrollHandle, pin_every_frame: bool) -> NarrowFilter {
-        NarrowFilter {
+    fn filter_row(scroll: &gpui::ScrollHandle, pin_every_frame: bool, width: f32) -> FilterRow {
+        FilterRow {
             scroll: scroll.clone(),
             pin: Default::default(),
             pin_every_frame,
             selected: 3,
-            // Narrower than the four capsules need: the row scrolls.
-            width: 150.0,
+            width,
+        }
+    }
+
+    fn narrow_filter(scroll: &gpui::ScrollHandle, pin_every_frame: bool) -> FilterRow {
+        // Narrower than the column can be dragged, so the scroll floor under
+        // the fit ladder is what is under test here.
+        filter_row(scroll, pin_every_frame, 150.0)
+    }
+
+    fn capsule_selector(f: ListFilter) -> &'static str {
+        Box::leak(format!("sidebar-filter-{}", f.label().to_ascii_lowercase()).into_boxed_str())
+    }
+
+    /// Scout, 2026-10-31: dragged narrow, the row's fourth capsule was cut to
+    /// a bare "S" against the column's edge. Every width the handle allows —
+    /// 220 (`SNAP_WIDTH`, where it snaps to the rail) up to 480 — now draws all
+    /// four capsules whole and inside the column, with no scrolling needed.
+    ///
+    /// Measured on the window's real font, which is the point: the ladder is
+    /// chosen from the labels as the text system shapes them, so the breakpoint
+    /// is right on the Mac's `.SystemUIFont` and on the Linux build's fall-back
+    /// alike.
+    #[gpui::test]
+    fn every_capsule_is_whole_at_every_width_the_handle_allows(cx: &mut TestAppContext) {
+        use crate::ui::theme::{SIDEBAR_WIDTH, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN};
+
+        cx.update(|cx| cx.set_global(crate::ui::theme::Theme::dark(crate::ui::theme::Surface::Matte)));
+        for width in [
+            SIDEBAR_WIDTH_MIN,
+            225.0,
+            240.0,
+            260.0,
+            SIDEBAR_WIDTH,
+            360.0,
+            SIDEBAR_WIDTH_MAX,
+        ] {
+            let scroll = gpui::ScrollHandle::new();
+            let (view, vcx) = cx.add_window_view(|_, _| filter_row(&scroll, false, width));
+            for _ in 0..3 {
+                view.update(vcx, |_, cx| cx.notify());
+                vcx.run_until_parked();
+            }
+            let row = vcx.debug_bounds("filter-row").expect("the row");
+            for f in ListFilter::ALL {
+                let sel = capsule_selector(f);
+                let cap = vcx.debug_bounds(sel).expect(sel);
+                assert!(
+                    cap.left() >= row.left() - px(0.5) && cap.right() <= row.right() + px(0.5),
+                    "{width} pt: {sel} is whole inside the column — {cap:?} in {row:?}"
+                );
+                assert!(
+                    f32::from(cap.size.width) > 0.0,
+                    "{width} pt: {sel} has a box to click"
+                );
+            }
+            assert_eq!(
+                f32::from(scroll.max_offset().x),
+                0.0,
+                "{width} pt: the row fits, so there is nothing to scroll"
+            );
+        }
+    }
+
+    /// Scout, 2026-10-31: selecting a filter made its label bolder, so the
+    /// capsule grew and shoved the rest of the row sideways. Every capsule now
+    /// reserves its label's semibold width, so the four boxes are where they
+    /// were whichever one is on — at the default column and at the narrowest.
+    #[gpui::test]
+    fn selecting_a_filter_moves_no_capsule(cx: &mut TestAppContext) {
+        use crate::ui::theme::{SIDEBAR_WIDTH, SIDEBAR_WIDTH_MIN};
+
+        cx.update(|cx| cx.set_global(crate::ui::theme::Theme::dark(crate::ui::theme::Surface::Matte)));
+        for width in [SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH] {
+            let mut first: Option<Vec<(f32, f32)>> = None;
+            for selected in 0..ListFilter::ALL.len() {
+                let scroll = gpui::ScrollHandle::new();
+                let (view, vcx) = cx.add_window_view(|_, _| FilterRow {
+                    scroll: scroll.clone(),
+                    pin: Default::default(),
+                    pin_every_frame: false,
+                    selected,
+                    width,
+                });
+                for _ in 0..3 {
+                    view.update(vcx, |_, cx| cx.notify());
+                    vcx.run_until_parked();
+                }
+                let boxes: Vec<(f32, f32)> = ListFilter::ALL
+                    .into_iter()
+                    .map(|f| {
+                        let sel = capsule_selector(f);
+                        let b = vcx.debug_bounds(sel).expect(sel);
+                        (f32::from(b.left()), f32::from(b.size.width))
+                    })
+                    .collect();
+                match &first {
+                    None => first = Some(boxes),
+                    Some(want) => assert_eq!(
+                        &boxes, want,
+                        "{width} pt, {} selected: every capsule is where it was with All selected",
+                        ListFilter::ALL[selected].label()
+                    ),
+                }
+            }
         }
     }
 
@@ -3406,6 +3581,11 @@ mod strip_tests {
     /// reach 0 with "All" fully in view, and stay there across repaints.
     #[gpui::test]
     fn the_strip_scrolls_back_to_all_and_stays_there(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::ui::theme::Theme::dark(
+                crate::ui::theme::Surface::Matte,
+            ))
+        });
         let scroll = gpui::ScrollHandle::new();
         let (view, vcx) = cx.add_window_view(|_, _| narrow_filter(&scroll, false));
         // The pin lands on the frame after the one that measured the capsules.
@@ -3414,8 +3594,12 @@ mod strip_tests {
             vcx.run_until_parked();
         }
         let row = vcx.debug_bounds("filter-row").expect("the row");
-        let all = vcx.debug_bounds("capsule-All").expect("All");
-        let servers = vcx.debug_bounds("capsule-Servers").expect("Servers");
+        let all = vcx
+            .debug_bounds(capsule_selector(ListFilter::All))
+            .expect("All");
+        let servers = vcx
+            .debug_bounds(capsule_selector(ListFilter::Servers))
+            .expect("Servers");
         assert!(
             f32::from(scroll.max_offset().x) > 0.0,
             "the column is narrow enough for the row to scroll"
@@ -3437,7 +3621,9 @@ mod strip_tests {
         view.update(vcx, |_, cx| cx.notify());
         vcx.run_until_parked();
         let row = vcx.debug_bounds("filter-row").expect("the row");
-        let all = vcx.debug_bounds("capsule-All").expect("All");
+        let all = vcx
+            .debug_bounds(capsule_selector(ListFilter::All))
+            .expect("All");
         assert_eq!(
             f32::from(scroll.offset().x),
             0.0,

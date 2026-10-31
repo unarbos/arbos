@@ -381,9 +381,21 @@ struct PaneTabs: View {
         HStack(spacing: 0) {
             ForEach(tabs, id: \.self) { t in
                 Button { withAnimation(.snappy(duration: 0.2)) { selected = t } } label: {
+                    // Every tab is as wide as its label in the SELECTED weight: the
+                    // hidden semibold copy sets the box and the drawn label sits over
+                    // it. Selecting a tab then changes its weight and its capsule and
+                    // moves nothing — before this, picking a filter made its label
+                    // bolder, so it grew and shoved its neighbours sideways (Scout,
+                    // 2026-10-31; the Mac twin is `sidebar::filter_label`).
                     Text(t)
-                        .font(theme.font(Theme.body, weight: selected == t ? .semibold : .regular))
-                        .foregroundStyle(selected == t ? theme.text : theme.muted)
+                        .font(theme.font(Theme.body, weight: .semibold))
+                        .hidden()
+                        .accessibilityHidden(true)
+                        .overlay {
+                            Text(t)
+                                .font(theme.font(Theme.body, weight: selected == t ? .semibold : .regular))
+                                .foregroundStyle(selected == t ? theme.text : theme.muted)
+                        }
                         .padding(.horizontal, PaneTabsMetrics.labelPad).frame(height: PaneTabsMetrics.pill)
                         .background(Capsule().fill(selected == t ? theme.bubbleAssistant : .clear))
                         .padding(.horizontal, PaneTabsMetrics.gap / 2)
