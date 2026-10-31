@@ -107,13 +107,15 @@ jobs:
           SHA: ${{ github.event.pull_request.head.sha }}
           BRANCH: ${{ github.head_ref }}
           JOB: build-xcframework + fastlane test
+        # The step runs under `bash -e`, and `read` returns 1 on empty input (no run yet, or a run whose check
+        # job does not exist yet), so every read and lookup carries `|| true`: the loop decides, not -e.
         run: |
           set -uo pipefail
           start=$(date +%s)
           verdict=late; why="the push run started but had no verdict after 330 min"
           while (( $(date +%s) - start < 330 * 60 )); do
             read -r id status created < <(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/swift-core-check.yml/runs?event=push&branch=$BRANCH&head_sha=$SHA&per_page=20" \
-              -q '[.workflow_runs[]] | sort_by(.created_at) | last | "\(.id // "") \(.status // "") \(.created_at // "")"' 2>/dev/null || echo "")
+              -q '[.workflow_runs[]] | sort_by(.created_at) | last | "\(.id // "") \(.status // "") \(.created_at // "")"' 2>/dev/null) || true
             if [[ -z "${id:-}" ]]; then
               if (( $(date +%s) - start > 10 * 60 )); then verdict=none; why="no push run for $SHA"; break; fi
               sleep 30; continue
@@ -123,14 +125,14 @@ jobs:
               # only 6% of hosted jobs here started within 15 min and the median wait was 209 min. One queued
               # for the EC2 Mac is waited for: a second run would queue behind it on the same runner.
               read -r jstatus jcreated jlabels < <(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs" \
-                -q ".jobs[] | select(.name == \"$JOB\") | \"\(.status) \(.created_at) \(.labels | join(\",\"))\"" 2>/dev/null | head -1 || echo "")
+                -q ".jobs[] | select(.name == \"$JOB\") | \"\(.status) \(.created_at) \(.labels | join(\",\"))\"" 2>/dev/null | head -1) || true
               if [[ "${jstatus:-}" != in_progress && "${jlabels:-}" != *arbos-mac* ]] &&
                  (( $(date +%s) - $(date -d "${jcreated:-$created}" +%s) > 15 * 60 )); then
                 verdict=none; why="push run $id has had no runner since ${jcreated:-$created}"; break
               fi
               sleep 60; continue
             fi
-            conclusion=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs" -q ".jobs[] | select(.name == \"$JOB\") | .conclusion" 2>/dev/null | head -1)
+            conclusion=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs" -q ".jobs[] | select(.name == \"$JOB\") | .conclusion" 2>/dev/null | head -1) || true
             case "$conclusion" in
               success) verdict=success; why="push run $id passed" ;;
               failure) verdict=failure; why="push run $id failed" ;;
