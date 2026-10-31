@@ -49,6 +49,64 @@ final class BackSwipeUITests: XCTestCase {
         return visible.last!
     }
 
+    /// Wait until the transcript has stopped moving, so a frame read now still describes where
+    /// the finger will land. A chat opens by scrolling to its newest message; the first bubble
+    /// exists before that scroll has finished, and a frame read mid-scroll describes where a row
+    /// was rather than where it will be.
+    private func settleTranscript(_ app: XCUIApplication, timeout: TimeInterval = 8) {
+        let bubbles = app.descendants(matching: .any).matching(bubbleQuery)
+        var previous = CGRect.null
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let current = bubbles.firstMatch.frame
+            if !current.isEmpty, current == previous { return }
+            previous = current
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+    }
+
+    /// Where to begin a `dx` pt rightward drag so the whole path stays on screen, and the bubble
+    /// it begins on.
+    ///
+    /// XCUITest clamps a drag destination to the screen **silently**. Asking to drag 180 pt right
+    /// from a point 45 pt inside the trailing edge hands the app a 45 pt drag, with nothing in the
+    /// log to say the gesture was shortened. The test then fails on the app's behaviour — "the
+    /// chat did not go back" — for a gesture that was never delivered, which is the most expensive
+    /// kind of red: it accuses the code under test of a fault in the harness.
+    ///
+    /// That is exactly why this test failed on every hosted run rather than intermittently.
+    /// `fx-comms-main` ends with `c5`, the word "Hey": a short own-message bubble hard against the
+    /// trailing edge. "The lowest bubble" is the natural one to reach for and the one bubble in
+    /// the chat with no room to swipe. So choose by the room the gesture needs, and assert it.
+    private func rightSwipeStart(_ app: XCUIApplication, dx: CGFloat,
+                                 file: StaticString = #filePath, line: UInt = #line) -> XCUICoordinate {
+        let bubbles = app.descendants(matching: .any).matching(bubbleQuery)
+        XCTAssertTrue(bubbles.firstMatch.waitForExistence(timeout: settle), "the transcript shows bubbles", file: file, line: line)
+        settleTranscript(app)
+        let window = app.windows.firstMatch.frame
+        // Clear of the edge zone (24 pt, the system pop's) with margin, and clear of the screen's
+        // trailing edge at the far end so nothing is clamped away.
+        let inset: CGFloat = 44
+        let rightLimit = window.maxX - 8
+        let roomy = bubbles.allElementsBoundByIndex.filter {
+            $0.isHittable
+                && $0.frame.maxY < window.maxY - 120 && $0.frame.minY > 120
+                && $0.frame.minX + inset > 32
+                && $0.frame.minX + inset + dx < rightLimit
+        }
+        XCTAssertFalse(roomy.isEmpty,
+                       "no bubble has room for a \(Int(dx)) pt rightward swipe inside a \(Int(window.width)) pt screen",
+                       file: file, line: line)
+        let bubble = roomy.last!
+        // Re-assert against the frame actually used, so a later layout change fails here, naming
+        // the geometry, instead of as a mysterious "the chat did not go back".
+        let startX = bubble.frame.minX + inset
+        XCTAssertLessThan(startX + dx, rightLimit,
+                          "the \(Int(dx)) pt drag would be clamped at the screen edge and never reach the app",
+                          file: file, line: line)
+        return bubble.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0.5)).withOffset(CGVector(dx: inset, dy: 0))
+    }
+
     /// Tap the composer so the keyboard is up (what every sent message leaves behind).
     private func raiseKeyboard(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
         let field = app.descendants(matching: .any)["composer-field"]
@@ -222,8 +280,7 @@ final class BackSwipeUITests: XCTestCase {
         let app = launch(["ARBOS_OPEN_PROJECT": "fx-comms"])
         let back = chatBack(app, "fx-comms-main")
         XCTAssertTrue(back.waitForExistence(timeout: appear), "the Comms chat opened")
-        let bubble = lastBubble(app)
-        let start = bubble.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        let start = rightSwipeStart(app, dx: 180)
         start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 180, dy: 0)), withVelocity: .fast, thenHoldForDuration: 0.05)
         assertGone(back)
         XCTAssertFalse(app.descendants(matching: .any)["composer-reply-preview"].exists, "no reply started")
@@ -264,10 +321,16 @@ final class BackSwipeUITests: XCTestCase {
         XCTAssertTrue(back.waitForExistence(timeout: appear), "the Launch week group opened")
         let bubbles = app.descendants(matching: .any).matching(bubbleQuery)
         XCTAssertTrue(bubbles.firstMatch.waitForExistence(timeout: settle), "the transcript shows bubbles")
+        settleTranscript(app)
         let window = app.windows.firstMatch.frame
-        // A bubble in the lower half of the transcript, clear of the composer.
-        let onBubble = bubbles.allElementsBoundByIndex.last { $0.frame.minY > window.midY && $0.frame.maxY < window.maxY - 200 }
-        XCTAssertNotNil(onBubble, "a bubble is on screen")
+        // A bubble whose middle sits in the mid-screen band: room above for the 200 pt drag and
+        // clear of the composer. Not "wholly below the midpoint and 200 pt clear of the bottom",
+        // which is a 237 pt slot on this screen — taller than most rows of this fixture, so no
+        // row qualified and the test failed before it had swiped anything.
+        let onBubble = bubbles.allElementsBoundByIndex.last {
+            $0.isHittable && $0.frame.midY > window.height * 0.3 && $0.frame.midY < window.height * 0.7
+        }
+        XCTAssertNotNil(onBubble, "a bubble sits in the middle of the screen to drag on")
         let start = onBubble!.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
         start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 6, dy: -200)), withVelocity: .slow, thenHoldForDuration: 0.1)
         sleep(1)
