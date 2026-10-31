@@ -18,13 +18,14 @@ final class MemoRecorder: ObservableObject {
     private var url: URL?
 
     func start() {
-        let session = AVAudioSession.sharedInstance()
-        session.requestRecordPermission { [weak self] granted in
-            Task { @MainActor in
-                guard let self else { return }
-                if !granted { self.permissionDenied = true; return }
-                self.begin()
-            }
+        // Same path as calls (`CallManager.micGranted`): `AVAudioSession
+        // .requestRecordPermission` is deprecated and its callback can fail to
+        // fire on current iOS, so a mic tap looked dead ([feedback
+        // app-01M69J94RZRMZXKGMC6XDGWBFH]).
+        Task { @MainActor in
+            let granted = await CallManager.micGranted()
+            if !granted { permissionDenied = true; return }
+            begin()
         }
     }
 
