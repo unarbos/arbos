@@ -36,6 +36,8 @@ use crate::ui::glass;
 use crate::ui::highlight;
 use crate::ui::key_layout::{self, KeyboardLayout, SystemLayout};
 use crate::ui::mention::{self, Mention, MentionToken, Mentions};
+use crate::ui::photo_edit::{self, PhotoEdit};
+use crate::ui::photo_editor::{self, PhotoEditor, PhotoEditorEvent};
 use crate::ui::select::{self, word_range};
 use crate::ui::sf_symbols;
 use crate::ui::theme::{
@@ -2780,18 +2782,37 @@ impl Focusable for ComposerInput {
 
 /// A file staged in the composer; image paths carry a decoded thumbnail for the pill.
 struct StagedAttachment {
+    /// What the send path uploads: the file the user picked, or — once an edit
+    /// has been accepted — the flattened copy of it. The wire shape is
+    /// unchanged either way, which is why crop-and-draw needs no relay or
+    /// schema change (`ui::photo_edit::flatten`).
     path: PathBuf,
+    /// The file the user picked. Never written to, and what `path` returns to
+    /// when the edit is cleared, so `Original` is always reachable.
+    original: PathBuf,
     preview: Option<Arc<RenderImage>>,
     bytes: u64,
+    /// The original's pixel size when it is a still picture the crop-and-draw
+    /// editor takes, `None` otherwise (a video, a document, an animated GIF).
+    /// `Some` is also exactly the condition for the tile having a click.
+    editable: Option<(u32, u32)>,
+    /// The accepted crop and strokes. Held here rather than inside the editor
+    /// so Cancel is free — it drops a working copy, not the edit — and
+    /// reopening the sheet resumes where the user left off.
+    edit: PhotoEdit,
 }
 
 impl StagedAttachment {
     fn new(path: PathBuf) -> Self {
         let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let (preview, editable) = staged_picture(&path);
         Self {
-            preview: image_preview_for(&path),
+            original: path.clone(),
             path,
+            preview,
             bytes,
+            editable,
+            edit: PhotoEdit::default(),
         }
     }
 
@@ -2860,6 +2881,10 @@ pub struct Composer {
     rig_draft: Option<String>,
     /// The `+` menu and the Emoji · Stickers · GIFs picker (ARB-544).
     fun: fun::FunState,
+    /// The crop-and-draw sheet while it is open, over the staged picture that
+    /// opened it. The shell renders it (a modal backdrop has to be a child of
+    /// the root, not of a flex item), so it is readable from outside.
+    photo_editor: Option<Entity<PhotoEditor>>,
     /// Where the trailing controls are between the empty field's mic + phone
     /// and the send arrow, so typing and clearing cross-fade them.
     send_swap: SendSwap,
@@ -2970,6 +2995,7 @@ impl Composer {
                 .ok()
                 .filter(|v| !v.is_empty()),
             fun: fun::FunState::new(fun_search),
+            photo_editor: None,
             // A new composer starts on an empty field: mic + phone, settled.
             send_swap: SendSwap::settled(false, Instant::now()),
         }
@@ -3175,6 +3201,29 @@ impl Composer {
             .h(px(STAGED_TILE))
             .rounded(px(STAGED_RADIUS))
             .bg(theme.surface_2);
+        // Clicking a staged picture opens the crop-and-draw editor. The tile
+        // had no click at all before this feature, so the pointer cursor and
+        // the tooltip are the whole of the Mac entry point's discoverability —
+        // the Mac idiom, and the reason no badge is drawn on the tile.
+        //
+        // A video, a document and an animated GIF keep exactly today's
+        // behaviour: no click, no cursor, no tooltip. A thing that is not
+        // offered is gone, not greyed out.
+        let tile = match staged.editable {
+            Some(_) => tile
+                .cursor_pointer()
+                .role(AriaRole::Button)
+                .aria_label(photo_editor::EDIT_TILE_LABEL)
+                .tooltip(|_, cx| {
+                    cx.new(|_| TextTip(photo_editor::EDIT_TILE_LABEL.into()))
+                        .into()
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.open_photo_editor(i, cx);
+                })),
+            None => tile,
+        };
         // The hairline is an overlay ring on both kinds (not a box border): the
         // picture never paints over it, and the remove disc's inset measures
         // from the tile's outer edge on every tile.
@@ -3255,9 +3304,99 @@ impl Composer {
     /// Drop staged file `i`; the others and the typed text stay.
     fn remove_attachment(&mut self, i: usize, cx: &mut Context<Self>) {
         if i < self.attachments.len() {
+            // The sheet names its attachment by index, so removing anything at
+            // all would leave it pointing at a different picture. It closes.
+            self.photo_editor = None;
             self.attachments.remove(i);
             cx.notify();
         }
+    }
+
+    /// The crop-and-draw sheet while it is up. The shell renders it, because a
+    /// modal backdrop has to be a child of the root (`ui::modal`).
+    pub(crate) fn photo_editor(&self) -> Option<Entity<PhotoEditor>> {
+        self.photo_editor.clone()
+    }
+
+    /// Esc on the sheet: the working copy goes, the accepted edit stays.
+    /// Returns whether a sheet was open.
+    pub(crate) fn close_photo_editor(&mut self, cx: &mut Context<Self>) -> bool {
+        let was_open = self.photo_editor.take().is_some();
+        if was_open {
+            cx.notify();
+        }
+        was_open
+    }
+
+    /// Click a staged picture: open the crop-and-draw sheet on it.
+    ///
+    /// The canvas gets its own decode rather than the 256 px tile thumbnail —
+    /// that one is far too coarse to draw on, and it is trimmed
+    /// (`photo_edit::decode_for_canvas` says why that matters).
+    fn open_photo_editor(&mut self, i: usize, cx: &mut Context<Self>) {
+        let Some(staged) = self.attachments.get(i) else {
+            return;
+        };
+        let Some(source) = staged.editable else {
+            return;
+        };
+        let picture = std::fs::read(&staged.original)
+            .ok()
+            .and_then(|bytes| photo_edit::decode_for_canvas(&bytes, photo_editor::CANVAS_DECODE_PX))
+            .map(|(image, _)| Arc::new(image));
+        let edit = staged.edit.clone();
+        let editor = cx.new(|cx| PhotoEditor::new(i, picture, source, edit, cx));
+        cx.subscribe(&editor, |this, editor, event: &PhotoEditorEvent, cx| {
+            let i = editor.read(cx).staged;
+            match event {
+                PhotoEditorEvent::Done => this.apply_photo_edit(i, editor.read(cx).edit(), cx),
+                PhotoEditorEvent::Cancel => {}
+            }
+            this.photo_editor = None;
+            cx.notify();
+        })
+        .detach();
+        self.photo_editor = Some(editor);
+        cx.notify();
+    }
+
+    /// Done on the sheet: flatten the crop and the strokes onto a copy and
+    /// point the send path at it.
+    ///
+    /// The original file is never written to, and an edit that comes back to
+    /// nothing points `path` back at it — so "Original" is reachable from any
+    /// state, and the flattened copy is a temporary file the send path reads
+    /// like any other (no relay or schema change: see `StagedAttachment`).
+    fn apply_photo_edit(&mut self, i: usize, edit: PhotoEdit, cx: &mut Context<Self>) {
+        let Some(staged) = self.attachments.get_mut(i) else {
+            return;
+        };
+        if edit.is_empty() {
+            staged.path = staged.original.clone();
+        } else {
+            match photo_edit::flatten(&staged.original, &edit, &photo_edit::edited_dir()) {
+                Ok(path) => staged.path = path,
+                Err(e) => {
+                    // The picture is still staged and still sendable as it was;
+                    // losing the edit is the whole of the damage.
+                    log::warn!("edited photo not written: {e}");
+                    return;
+                }
+            }
+        }
+        staged.edit = edit;
+        staged.bytes = std::fs::metadata(&staged.path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        // The tile shows what will be sent, so its thumbnail is re-decoded from
+        // the flattened copy. `editable` stays the original's: the editor always
+        // reopens on the picture the user picked, with the edit laid back over
+        // it, which is what keeps a crop widenable and a stroke undoable.
+        let (preview, _) = staged_picture(&staged.path);
+        if preview.is_some() {
+            staged.preview = preview;
+        }
+        cx.notify();
     }
 
     /// ⌫ / ⌦ reaching the composer from a field with nothing to delete: with
@@ -3275,6 +3414,19 @@ impl Composer {
     #[cfg(test)]
     fn staged_paths(&self) -> Vec<PathBuf> {
         self.attachments.iter().map(|a| a.path.clone()).collect()
+    }
+
+    #[cfg(test)]
+    fn staged_originals(&self) -> Vec<PathBuf> {
+        self.attachments
+            .iter()
+            .map(|a| a.original.clone())
+            .collect()
+    }
+
+    #[cfg(test)]
+    fn staged_edit(&self, i: usize) -> Option<PhotoEdit> {
+        self.attachments.get(i).map(|a| a.edit.clone())
     }
 
     /// ⌘V with files (Finder copy) or an image (screenshot, copied picture):
@@ -4347,15 +4499,21 @@ fn is_image_path(path: &Path) -> bool {
     )
 }
 
-/// Decode a small thumbnail for a staged picture (local file only): the tile
-/// at 2 px/pt plus the room `ObjectFit::Cover` may crop, never the full
-/// pasted screenshot.
-fn image_preview_for(path: &Path) -> Option<Arc<RenderImage>> {
+/// What a newly staged file gives the strip: the tile's thumbnail, decoded at
+/// 2 px/pt plus the room `ObjectFit::Cover` may crop (never the full pasted
+/// screenshot), and its pixel size when the crop-and-draw editor takes it.
+///
+/// One read serves both, because a pasted screenshot can be tens of megabytes
+/// and staging already happens on the window's thread.
+fn staged_picture(path: &Path) -> (Option<Arc<RenderImage>>, Option<(u32, u32)>) {
     if !is_image_path(path) {
-        return None;
+        return (None, None);
     }
-    let bytes = std::fs::read(path).ok()?;
-    decode_thumbnail(&bytes, STAGED_THUMBNAIL_PX).map(Arc::new)
+    let Ok(bytes) = std::fs::read(path) else {
+        return (None, None);
+    };
+    let preview = decode_thumbnail(&bytes, STAGED_THUMBNAIL_PX).map(Arc::new);
+    (preview, photo_edit::editable(&bytes).ok())
 }
 
 /// Longest side of a staged thumbnail's bitmap: 4 × the 64 pt tile covers a
@@ -4363,7 +4521,7 @@ fn image_preview_for(path: &Path) -> Option<Arc<RenderImage>> {
 pub(crate) const STAGED_THUMBNAIL_PX: u32 = 4 * STAGED_TILE as u32;
 
 /// The remove disc's hover tooltip: one line in the theme's small type.
-struct TextTip(SharedString);
+pub(crate) struct TextTip(pub(crate) SharedString);
 
 impl Render for TextTip {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -7248,5 +7406,354 @@ mod overlay_tests {
             "and it is back, full size, in one frame"
         );
         assert_eq!(trailing_frame(&shell, vcx), rest);
+    }
+}
+
+#[cfg(test)]
+mod photo_editor_tests {
+    //! The crop-and-draw sheet as the user reaches it: the staged tile's click
+    //! (the Mac entry point, which did not exist before this feature), a crop
+    //! drag that leaves the plate, and what Done and Cancel do to the file the
+    //! send path uploads. The maths itself is tested in `ui::photo_edit`; this
+    //! module is about the wiring between the tile, the sheet and the strip.
+    use futures::future::BoxFuture;
+    use gpui::{
+        point, Bounds, Entity, Modifiers, MouseButton, MouseDownEvent, Pixels, TestAppContext,
+        VisualTestContext,
+    };
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::model::{Chat, Project, SpaceKind};
+    use crate::sync::{ClientCommand, SyncEvent, SyncSource};
+    use crate::ui::motion::PulseClock;
+    use crate::ui::shell::Shell;
+
+    struct Idle;
+
+    impl SyncSource for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            _commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    /// A scratch dir with one picture and one text file, so the test can check
+    /// both what is offered and what is not.
+    fn fixtures() -> (PathBuf, PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "arbos-photo-editor-{}-{}",
+            std::process::id(),
+            crate::model::now_ms()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let png = dir.join("screenshot.png");
+        image::RgbaImage::from_pixel(400, 240, image::Rgba([40, 120, 220, 255]))
+            .save(&png)
+            .expect("png");
+        let doc = dir.join("notes.txt");
+        std::fs::write(&doc, "hello").expect("txt");
+        (dir, png, doc)
+    }
+
+    fn mount(
+        cx: &mut TestAppContext,
+    ) -> (
+        tokio::runtime::Runtime,
+        Entity<Shell>,
+        Entity<Composer>,
+        &mut VisualTestContext,
+    ) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| {
+            gpui_tokio::init_from_handle(cx, handle);
+            cx.set_global(Theme::dark(crate::ui::theme::Surface::Matte));
+            if !cx.has_global::<PulseClock>() {
+                PulseClock::init(cx);
+            }
+        });
+        let state = cx.new(|cx| AppState::new(Box::new(Idle), cx));
+        let now = crate::model::now_ms();
+        state.update(cx, |s, cx| {
+            s.projects.push(Project {
+                id: "p1".into(),
+                name: "Arbonites".into(),
+                kind: SpaceKind::Group,
+                ..Project::default()
+            });
+            let chat: Chat = serde_json::from_value(serde_json::json!({
+                "id": "c1", "project_id": "p1", "title": "Arbonites", "is_pinned": true,
+                "is_system": false, "unread": false, "last_message_at": now,
+            }))
+            .expect("chat");
+            s.chats.insert("p1".into(), vec![chat]);
+            s.selected_project = Some("p1".into());
+            s.active_tab.insert("p1".into(), "c1".into());
+            cx.notify();
+        });
+        let (shell, vcx) = cx.add_window_view(|window, cx| Shell::new(state.clone(), window, cx));
+        vcx.run_until_parked();
+        let composer = shell.read_with(&*vcx, |sh, _| sh.composer.clone());
+        settle(&shell, vcx);
+        (rt, shell, composer, vcx)
+    }
+
+    fn settle(shell: &Entity<Shell>, vcx: &mut VisualTestContext) {
+        for _ in 0..3 {
+            shell.update(vcx, |_, cx| cx.notify());
+            vcx.run_until_parked();
+        }
+    }
+
+    fn centre(b: Bounds<Pixels>) -> gpui::Point<Pixels> {
+        point(b.left() + b.size.width / 2.0, b.top() + b.size.height / 2.0)
+    }
+
+    fn open_on(shell: &Entity<Shell>, tile: &'static str, vcx: &mut VisualTestContext) {
+        let bounds = vcx.debug_bounds(tile).expect("the staged tile is drawn");
+        vcx.simulate_click(centre(bounds), Modifiers::default());
+        settle(shell, vcx);
+    }
+
+    fn is_open(composer: &Entity<Composer>, vcx: &VisualTestContext) -> bool {
+        composer.read_with(vcx, |c, _| c.photo_editor.is_some())
+    }
+
+    /// The working copy inside the open sheet.
+    fn draft(composer: &Entity<Composer>, vcx: &VisualTestContext) -> Option<PhotoEdit> {
+        composer.read_with(vcx, |c, cx| {
+            c.photo_editor.as_ref().map(|e| e.read(cx).edit())
+        })
+    }
+
+    /// A point on the crop rectangle's top-left corner handle, in window
+    /// coordinates. The picture is letterboxed inside the canvas, so this is
+    /// not the canvas's own corner; `GRAB` moves it just inside the canvas,
+    /// because the very edge pixel is not hit-tested as inside it.
+    fn crop_corner(
+        composer: &Entity<Composer>,
+        vcx: &mut VisualTestContext,
+    ) -> gpui::Point<Pixels> {
+        const GRAB: f32 = 4.0;
+        let canvas = vcx.debug_bounds("photo-editor-canvas").expect("the canvas");
+        let (x, y, _, _) = composer
+            .read_with(&*vcx, |c, cx| {
+                c.photo_editor.as_ref().map(|e| e.read(cx).crop_in_view())
+            })
+            .expect("the sheet is open");
+        point(
+            canvas.origin.x + px(x + GRAB),
+            canvas.origin.y + px(y + GRAB),
+        )
+    }
+
+    /// Press, move, release — the three events a drag really is, each with a
+    /// fresh frame between them, because the sheet re-renders on every notify
+    /// and the drag has to survive that.
+    fn drag(
+        shell: &Entity<Shell>,
+        from: gpui::Point<Pixels>,
+        to: gpui::Point<Pixels>,
+        vcx: &mut VisualTestContext,
+    ) {
+        // The pointer has to be over the canvas before the press: GPUI decides
+        // which element a mouse-down belongs to from the hit test of the last
+        // painted frame, so a press with no move before it lands on whatever
+        // was under (0, 0).
+        vcx.simulate_mouse_move(from, MouseButton::Left, Modifiers::default());
+        vcx.run_until_parked();
+        vcx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: from,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        shell.update(vcx, |_, cx| cx.notify());
+        vcx.run_until_parked();
+        vcx.simulate_mouse_move(to, MouseButton::Left, Modifiers::default());
+        vcx.run_until_parked();
+        vcx.simulate_event(gpui::MouseUpEvent {
+            button: MouseButton::Left,
+            position: to,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        });
+        vcx.run_until_parked();
+    }
+
+    /// The entry point. A staged picture takes a click and says so; a document
+    /// keeps exactly the behaviour it had before the feature existed — no
+    /// click, no tooltip, nothing greyed out.
+    #[gpui::test]
+    fn clicking_a_staged_picture_opens_the_sheet_and_a_document_does_nothing(
+        cx: &mut TestAppContext,
+    ) {
+        let (_rt, shell, composer, vcx) = mount(cx);
+        let (_dir, png, doc) = fixtures();
+        composer.update(vcx, |c, cx| c.add_paths([png, doc].into_iter(), cx));
+        settle(&shell, vcx);
+
+        open_on(&shell, "composer-staged-tile-1", vcx);
+        assert!(
+            !is_open(&composer, vcx),
+            "a text file has no editor to open"
+        );
+
+        open_on(&shell, "composer-staged-tile-0", vcx);
+        assert!(
+            is_open(&composer, vcx),
+            "the picture's tile opens the sheet"
+        );
+        assert!(
+            vcx.debug_bounds("photo-editor").is_some(),
+            "and the sheet is on screen"
+        );
+    }
+
+    /// The one that would have shipped broken: GPUI delivers `on_mouse_move`
+    /// only while the element's own hitbox is hovered, so a crop drag handled
+    /// on the plate freezes the moment the pointer leaves it — which a corner
+    /// drag does almost at once. The handlers live on the full-window backdrop
+    /// for exactly this reason.
+    #[gpui::test]
+    fn a_crop_drag_keeps_working_after_the_pointer_leaves_the_plate(cx: &mut TestAppContext) {
+        let (_rt, shell, composer, vcx) = mount(cx);
+        let (_dir, png, _doc) = fixtures();
+        composer.update(vcx, |c, cx| c.add_paths([png].into_iter(), cx));
+        settle(&shell, vcx);
+        open_on(&shell, "composer-staged-tile-0", vcx);
+
+        let plate = vcx.debug_bounds("photo-editor").expect("the plate");
+        let canvas = vcx.debug_bounds("photo-editor-canvas").expect("the canvas");
+        // Grab the crop's top-left corner and pull it down and left — off the
+        // plate entirely, which is where a real corner drag goes.
+        let from = crop_corner(&composer, vcx);
+        let to = point(plate.left() - px(120.0), canvas.center().y);
+        drag(&shell, from, to, vcx);
+
+        let edit = draft(&composer, vcx).expect("the sheet is still open");
+        let crop = edit.crop.expect("the drag set a crop");
+        assert!(
+            crop.y > 1.0,
+            "the vertical part of the drag landed ({crop:?})"
+        );
+        assert!(
+            crop.x >= 0.0 && crop.w >= super::photo_edit::MIN_CROP,
+            "and it stayed inside the picture and above the floor ({crop:?})"
+        );
+    }
+
+    /// Drawing: the sheet opens on Crop, the segment switches to Draw, and a
+    /// drag across the picture lays down one stroke of many points. GPUI has
+    /// no freehand surface, so this is the one path that proves the hand-built
+    /// one captures a drag at all.
+    #[gpui::test]
+    fn switching_to_draw_turns_a_drag_into_one_stroke(cx: &mut TestAppContext) {
+        let (_rt, shell, composer, vcx) = mount(cx);
+        let (_dir, png, _doc) = fixtures();
+        composer.update(vcx, |c, cx| c.add_paths([png].into_iter(), cx));
+        settle(&shell, vcx);
+        open_on(&shell, "composer-staged-tile-0", vcx);
+
+        let draw = vcx
+            .debug_bounds("photo-editor-mode-draw")
+            .expect("the Draw segment");
+        vcx.simulate_click(centre(draw), Modifiers::default());
+        settle(&shell, vcx);
+        assert!(
+            vcx.debug_bounds("photo-editor-tools").is_some(),
+            "Draw brings up the tool row"
+        );
+
+        let canvas = vcx.debug_bounds("photo-editor-canvas").expect("canvas");
+        let from = point(canvas.center().x - px(80.0), canvas.center().y);
+        let to = point(canvas.center().x + px(80.0), canvas.center().y - px(40.0));
+        drag(&shell, from, to, vcx);
+
+        let edit = draft(&composer, vcx).expect("the sheet is open");
+        assert_eq!(edit.strokes.len(), 1, "one press, one stroke");
+        assert!(
+            edit.strokes[0].points.len() > 1,
+            "and the drag was sampled along the way ({} points)",
+            edit.strokes[0].points.len()
+        );
+        assert!(
+            edit.crop.is_none(),
+            "drawing never touches the crop ({:?})",
+            edit.crop
+        );
+    }
+
+    /// Done sends the edit; Cancel does not. Either way the file the user
+    /// picked is left on disk untouched, which is what makes "Original"
+    /// reachable from any state.
+    #[gpui::test]
+    fn done_repoints_the_send_path_and_cancel_leaves_it_alone(cx: &mut TestAppContext) {
+        let (_rt, shell, composer, vcx) = mount(cx);
+        let (_dir, png, _doc) = fixtures();
+        composer.update(vcx, |c, cx| c.add_paths([png.clone()].into_iter(), cx));
+        settle(&shell, vcx);
+
+        // Cancel after a crop: the strip is as it was.
+        open_on(&shell, "composer-staged-tile-0", vcx);
+        let canvas = vcx.debug_bounds("photo-editor-canvas").expect("canvas");
+        drag(&shell, crop_corner(&composer, vcx), canvas.center(), vcx);
+        let cancel = vcx.debug_bounds("photo-editor-cancel").expect("Cancel");
+        vcx.simulate_click(centre(cancel), Modifiers::default());
+        settle(&shell, vcx);
+        assert!(!is_open(&composer, vcx), "Cancel closes the sheet");
+        assert_eq!(
+            composer.read_with(vcx, |c, _| c.staged_paths()),
+            vec![png.clone()],
+            "and the send path still points at the file the user picked"
+        );
+        assert_eq!(
+            composer.read_with(vcx, |c, _| c.staged_edit(0)),
+            Some(PhotoEdit::default()),
+            "and nothing was accepted"
+        );
+
+        // Done after the same crop: a flattened copy, and the original intact.
+        open_on(&shell, "composer-staged-tile-0", vcx);
+        let canvas = vcx.debug_bounds("photo-editor-canvas").expect("canvas");
+        drag(&shell, crop_corner(&composer, vcx), canvas.center(), vcx);
+        let done = vcx.debug_bounds("photo-editor-done").expect("Done");
+        vcx.simulate_click(centre(done), Modifiers::default());
+        settle(&shell, vcx);
+
+        assert!(!is_open(&composer, vcx), "Done closes the sheet");
+        let sent = composer.read_with(vcx, |c, _| c.staged_paths());
+        assert_ne!(sent, vec![png.clone()], "the send path moved to the copy");
+        assert!(sent[0].exists(), "and the copy is on disk ({:?})", sent[0]);
+        assert_eq!(
+            composer.read_with(vcx, |c, _| c.staged_originals()),
+            vec![png.clone()],
+            "the original is remembered, so Original stays reachable"
+        );
+        assert!(png.exists(), "and it was never written to");
+        let kept = composer
+            .read_with(vcx, |c, _| c.staged_edit(0))
+            .expect("staged");
+        assert!(
+            kept.crop.is_some(),
+            "the accepted crop is kept for reopening"
+        );
+
+        // Reopening resumes on that crop rather than starting again.
+        open_on(&shell, "composer-staged-tile-0", vcx);
+        let resumed = draft(&composer, vcx).expect("reopened");
+        assert_eq!(resumed, kept);
     }
 }

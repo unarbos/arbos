@@ -12931,7 +12931,7 @@ fn rgba_to_bgra(img: image::RgbaImage) -> Option<image::RgbaImage> {
 }
 
 /// RGBA pixels → the BGRA frame GPUI draws.
-fn bgra_frame(img: image::RgbaImage) -> Option<RenderImage> {
+pub(crate) fn bgra_frame(img: image::RgbaImage) -> Option<RenderImage> {
     let buffer = rgba_to_bgra(img)?;
     Some(RenderImage::new(vec![image::Frame::new(buffer)]))
 }

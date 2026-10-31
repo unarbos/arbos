@@ -1382,6 +1382,11 @@ impl Shell {
         if self.palette.open {
             return Some(self.search_input.read(cx).focus_handle(cx));
         }
+        // The crop-and-draw sheet owns ⌘Z, ⌘⏎ and the arrows while it is up;
+        // the composer behind it must not type.
+        if let Some(editor) = self.composer.read(cx).photo_editor() {
+            return Some(editor.read(cx).focus_handle(cx));
+        }
         let state = self.state.read(cx);
         if state.forward_message.is_some() {
             return Some(self.viewer_search.read(cx).focus_handle(cx));
@@ -2948,6 +2953,13 @@ impl Shell {
     fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette.open {
             self.close_palette(window, cx);
+            return;
+        }
+        if self
+            .composer
+            .update(cx, |composer, cx| composer.close_photo_editor(cx))
+        {
+            Composer::focus(&self.composer, window, cx);
             return;
         }
         if self.state.read(cx).forward_message.is_some() {
@@ -5403,6 +5415,12 @@ impl Render for Shell {
         }
         if self.feedback.read(cx).is_open() {
             root = root.child(self.feedback.clone());
+        }
+        // The composer's crop-and-draw sheet. It hangs off the root like every
+        // other modal, because a backdrop inside a flex item lands off-screen
+        // (`ui::modal`), even though the composer owns it.
+        if let Some(editor) = self.composer.read(cx).photo_editor() {
+            root = root.child(editor);
         }
         if viewer_open {
             // Focus moves into the viewer once per opening (← → page, Esc

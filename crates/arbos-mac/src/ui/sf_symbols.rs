@@ -157,6 +157,15 @@ pub const FALLBACKS: &[(&str, &str)] = &[
     ("pin", "pin"),
     ("pin.slash", "pin-slash"),
     ("pin.fill", "pin-fill"),
+    // The composer's crop-and-draw editor (`ui::photo_editor`): its tools,
+    // its undo and its `Original`. The pack is frozen, so these fall back to
+    // the nearest glyph already in it rather than adding four hand-drawn
+    // paths; the fallback is only ever seen on a non-mac build.
+    ("pencil.tip", "pencil"),
+    ("highlighter", "square-pencil"),
+    ("eraser", "minus"),
+    ("arrow.uturn.backward", "reply"),
+    ("arrow.counterclockwise", "reply"),
 ];
 
 /// The pack glyph that stands in for `name`, if `name` is a registered symbol.
