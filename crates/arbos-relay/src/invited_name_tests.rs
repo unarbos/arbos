@@ -65,7 +65,12 @@ fn device_for(state: &AppState, user_id: &str) -> Principal {
 fn invited_by_someone_else(state: &AppState, gh: &GithubIdentity) -> String {
     state
         .db
-        .upsert_invited_user(gh.id, &gh.login, gh.avatar_url.as_deref(), gh.name.as_deref())
+        .upsert_invited_user(
+            gh.id,
+            &gh.login,
+            gh.avatar_url.as_deref(),
+            gh.name.as_deref(),
+        )
         .expect("invited placeholder")
 }
 
@@ -194,7 +199,12 @@ async fn an_ordinary_signup_is_unchanged() {
         "a profile name is a label on this path too"
     );
 
-    let mut keys: Vec<&str> = user.as_object().expect("user object").keys().map(String::as_str).collect();
+    let mut keys: Vec<&str> = user
+        .as_object()
+        .expect("user object")
+        .keys()
+        .map(String::as_str)
+        .collect();
     keys.sort_unstable();
     assert_eq!(
         keys,
