@@ -268,6 +268,7 @@ struct HomeView: View {
                          streaming: model.isStreaming(project: project.id),
                          unread: model.chats(of: project.id).contains { model.chatHasUnread($0) },
                          unreadCount: model.unreadCount(project: project.id),
+                         mentioned: model.mentionCount(project: project.id) > 0,
                          pinned: pinned)
             }
             .buttonStyle(.borderless)
@@ -351,7 +352,8 @@ struct HomeView: View {
                 PeopleRow(chat: chat, preview: entry.hit.reason ?? peoplePreview(chat), time: timeLabel(ms: peopleActivity(chat)),
                           unread: model.peopleUnread.contains(chat.id) || model.unreadCount(for: chat) > 0,
                           streaming: model.isStreaming(chat.id),
-                          count: model.unreadCount(for: chat), me: model.user?.id,
+                          count: model.unreadCount(for: chat),
+                          mentioned: model.mentionCount(for: chat) > 0, me: model.user?.id,
                           pinned: pinned)
             }
             .buttonStyle(.borderless)
@@ -1311,6 +1313,9 @@ struct AgentRow: View {
     let unread: Bool
     /// Missed messages across the agent's chats (≥ 1 whenever `unread`).
     var unreadCount: Int = 0
+    /// Unread mentions of me across the agent's chats: the `@` beside whatever the status
+    /// slot is already showing (`RowStatus`).
+    var mentioned: Bool = false
     var pinned: Bool = false
 
     var body: some View {
@@ -1353,6 +1358,7 @@ struct AgentRow: View {
                         .foregroundStyle(theme.muted)
                         .lineLimit(1)
                     Spacer(minLength: 0)
+                    if mentioned { MentionBadge() }
                     switch RowStatus.of(streaming: streaming, unread: unread) {
                     case .working:
                         WorkingSpinner()
@@ -1374,6 +1380,13 @@ struct AgentRow: View {
 /// working-braille-spinner-ios-2026-10-27]; the Mac's `sidebar::RowStatus`): one
 /// thing — the spinner while the chat's agent works, else the unread mark,
 /// else nothing.
+///
+/// The `@` mention mark is the one thing allowed beside it (Jacob, 2026-10-31,
+/// overruling one-thing-per-status-cell). A mention is state the count cannot
+/// carry: a chat whose messages are all read can still hold a mention nobody has
+/// scrolled to, so hiding one behind the other would lose the fact Affinity asked
+/// for. The slot therefore draws `MentionBadge` and then this, 6 pt apart, and
+/// nothing else may join the pair.
 enum RowStatus: Equatable {
     case working
     case unread
@@ -1400,6 +1413,10 @@ struct PeopleRow: View {
     var streaming: Bool = false
     /// Unread messages (Grok/Telegram-style count pill); 0 → the dot only.
     var count: Int = 0
+    /// Unread mentions of me in this chat: the `@` beside whatever the status slot is
+    /// already showing. May be lit while `count` is 0 — the messages were read, the mention
+    /// was never scrolled to.
+    var mentioned: Bool = false
     let me: String?
     var pinned: Bool = false
 
@@ -1463,6 +1480,8 @@ struct PeopleRow: View {
                         .foregroundStyle(theme.muted)
                         .lineLimit(1)
                     Spacer(minLength: 0)
+                    // The `@` first, then the slot (Jacob, 2026-10-31 — see `RowStatus`).
+                    if mentioned { MentionBadge() }
                     // Information over animation (coordinator, 2026-10-27): an unread
                     // count pill wins the slot; the spinner replaces only the plain dot.
                     if count > 0 {
@@ -1492,6 +1511,26 @@ struct PulseDot: View {
             .onAppear {
                 withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) { on = true }
             }
+    }
+}
+
+/// The `@` mention mark: `UnreadBadge`'s pill with the glyph in place of the digits,
+/// so the pair beside it reads as one object instead of two shapes.
+///
+/// It carries no number on a row. A number next to a number invites arithmetic, and
+/// these two counts are allowed to disagree — the count is how many messages are
+/// unread, the mark is "one of them is about you". The number lives on the in-chat
+/// jump control, where there is nothing to compare it against.
+struct MentionBadge: View {
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        Image(systemName: "at")
+            .font(theme.font(12, weight: .bold))
+            .foregroundStyle(.white)
+            .frame(minWidth: 20, minHeight: 20)
+            .background(Capsule().fill(theme.unread))
+            .accessibilityLabel("Mentions you")
     }
 }
 

@@ -115,6 +115,7 @@
 		A1C4A2700000000000000014 /* LinkPreviewCardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C4A2700000000000000013 /* LinkPreviewCardTests.swift */; };
 		A1DE700000000000000000C2 /* MentionComposer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DE700000000000000000C1 /* MentionComposer.swift */; };
 		A1DE700000000000000000D2 /* MentionDraftTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DE700000000000000000D1 /* MentionDraftTests.swift */; };
+		A1DE700000000000000000E2 /* UnreadMentionCursorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DE700000000000000000E1 /* UnreadMentionCursorTests.swift */; };
 		A1D8800000000000000000D2 /* LeafAvatar.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D8800000000000000000D1 /* LeafAvatar.swift */; };
 		A1D8800000000000000000A8 /* AvatarPickerSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D8800000000000000000A7 /* AvatarPickerSheet.swift */; };
 		A1D8800000000000000000F2 /* MediaViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D8800000000000000000F1 /* MediaViewer.swift */; };
@@ -359,6 +360,7 @@
 		A1C4A2700000000000000013 /* LinkPreviewCardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkPreviewCardTests.swift; sourceTree = "<group>"; };
 		A1DE700000000000000000C1 /* MentionComposer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MentionComposer.swift; sourceTree = "<group>"; };
 		A1DE700000000000000000D1 /* MentionDraftTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MentionDraftTests.swift; sourceTree = "<group>"; };
+		A1DE700000000000000000E1 /* UnreadMentionCursorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnreadMentionCursorTests.swift; sourceTree = "<group>"; };
 		A1D8800000000000000000D1 /* LeafAvatar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LeafAvatar.swift; sourceTree = "<group>"; };
 		A1D8800000000000000000A7 /* AvatarPickerSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AvatarPickerSheet.swift; sourceTree = "<group>"; };
 		A1D8800000000000000000F1 /* MediaViewer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaViewer.swift; sourceTree = "<group>"; };
@@ -712,6 +714,7 @@
 				A1D8800000000000000000E5 /* ProfilePictureViewTests.swift */,
 				A1D8800000000000000000E7 /* AvatarGenerateErrorStateTests.swift */,
 				A1DE700000000000000000D1 /* MentionDraftTests.swift */,
+				A1DE700000000000000000E1 /* UnreadMentionCursorTests.swift */,
 				A1BC00000000000000000003 /* MessageMenuTests.swift */,
 				A1BC00000000000000000007 /* ReactionCapsuleTests.swift */,
 				A1BC00000000000000000013 /* MessageActionsLayoutTests.swift */,
@@ -1095,6 +1098,7 @@
 				A1D8800000000000000000E6 /* ProfilePictureViewTests.swift in Sources */,
 				A1D8800000000000000000E8 /* AvatarGenerateErrorStateTests.swift in Sources */,
 				A1DE700000000000000000D2 /* MentionDraftTests.swift in Sources */,
+				A1DE700000000000000000E2 /* UnreadMentionCursorTests.swift in Sources */,
 				A1BC00000000000000000004 /* MessageMenuTests.swift in Sources */,
 				A1BC00000000000000000008 /* ReactionCapsuleTests.swift in Sources */,
 				A1BC00000000000000000014 /* MessageActionsLayoutTests.swift in Sources */,

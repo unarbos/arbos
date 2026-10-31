@@ -718,6 +718,15 @@ struct ChatSession: View {
     /// with the person until a chip / `@` / reply picks an agent. Several agent chips can be
     /// on at once so that combination all reply (and "hey agents" / every agent chip → everyone).
     @State private var talkTo: Set<String> = []
+    /// The window is in the foreground. Half of the "seen" rule: a mention behind the app
+    /// switcher or a sheet is on screen in the layout sense and read by nobody.
+    @Environment(\.scenePhase) private var scenePhase
+    /// The unread mentions of me in this chat, oldest first — the `@` control's targets.
+    /// Held as state, not recomputed per body: naming them is a scan of every message, and
+    /// this body runs on every keystroke, presence tick and streaming token.
+    @State private var unreadMentionRows: [Id] = []
+    /// The transcript's visible height, for the live band the "seen" rule measures against.
+    @State private var viewportHeight: CGFloat = 0
 
     private var project: Project? { model.project(projectId) }
     private var chat: Chat? { model.chat(chatId) ?? model.jobTab(chatId) }
@@ -1127,20 +1136,38 @@ struct ChatSession: View {
                 .transition(.opacity.combined(with: .scale(scale: 0.92)))
             }
         }
-        // Trailing-only overlay so the hit target is just the disc (not a full-width
-        // bar). UIKit tap inside the disc still works while the transcript decelerates.
+        // Trailing-only overlay so the hit target is just the controls (not a full-width
+        // bar). UIKit tap inside them still works while the transcript decelerates.
+        //
+        // One trailing column, bottom-anchored, filled in a fixed order: jump-to-latest in
+        // the slot nearest the composer, the `@` chip `Controls.gap` above it. The order
+        // never changes, so neither control moves while both are up and a control only
+        // shifts when its neighbour below leaves. The `@` stays up even at the end of the
+        // chat, because an unread mention is behind the reader, not below them.
+        //
+        // The corner is not this column's alone. `newMessagesPill` is centred in the same
+        // band and is mutually exclusive with the disc, and the disc itself multiplexes a
+        // "Back to reply" state, so three floating controls can be on screen at once.
+        // Consolidating them is Jacob's call and is not done here.
         .overlay(alignment: .bottomTrailing) {
-            if newBelowCount == 0, awayFromBottom {
-                ChatBarHeightReader(bar: chatBarHeight) { bar in
-                    scrollToBottomButton
-                        .padding(.trailing, composerSideInset)
-                        .padding(.bottom, bar + 10)
+            ChatBarHeightReader(bar: chatBarHeight) { bar in
+                VStack(alignment: .trailing, spacing: Controls.gap) {
+                    if !unreadMentionRows.isEmpty {
+                        mentionJumpChip
+                            .transition(.opacity.combined(with: .scale(scale: 0.8)))
+                    }
+                    if newBelowCount == 0, awayFromBottom {
+                        scrollToBottomButton
+                            .transition(.opacity.combined(with: .scale(scale: 0.8)))
+                    }
                 }
-                .transition(.opacity.combined(with: .scale(scale: 0.8)))
+                .padding(.trailing, composerSideInset)
+                .padding(.bottom, bar + 10)
             }
         }
         .animation(.easeOut(duration: 0.2), value: awayFromBottom)
         .animation(.easeOut(duration: 0.2), value: newBelowCount > 0)
+        .animation(.easeOut(duration: 0.2), value: unreadMentionRows.isEmpty)
         .environment(\.composerInset, composerSideInset)
         // The bar floats over the transcript instead of being a bottom safe-area inset: every
         // change of its height (the chat opening, the status row, a reply or edit banner,
@@ -1482,6 +1509,8 @@ struct ChatSession: View {
             refreshRows()
         }
         .onChange(of: model.user?.name) { _, _ in refreshRows() }
+        // `GET /me/unread` moved the chat's mention count, or this device just cleared one.
+        .onChange(of: model.unreadMentions[chatId] ?? 0, initial: true) { _, _ in refreshMentionRows() }
         .onChange(of: model.caughtUp.contains(chatId), initial: true) { _, ready in
             model.repaintIfBlank(chatId)
             handleCaughtUpAutoSend(ready)
@@ -1590,6 +1619,17 @@ struct ChatSession: View {
         }
         // A channel's read marker moves when a new row lands while it is on screen.
         if isChannel, old.last?.id != newMessages.last?.id { model.markChannelRead(chatId) }
+        refreshMentionRows()
+    }
+
+    /// Re-name the unread mentions after the relay's count moves or a row lands. The list is
+    /// the tail of this chat's direct mentions of me, as long as the relay says is unread.
+    private func refreshMentionRows() {
+        let count = model.unreadMentions[chatId] ?? 0
+        let next = count > 0
+            ? AppModel.unreadMentionIds(all: model.mentionIds(chatId: chatId), count: count)
+            : []
+        if next != unreadMentionRows { unreadMentionRows = next }
     }
 
     /// Rig auto-send once the chat is caught up (`ARBOS_AUTO_SEND`).
@@ -2101,6 +2141,87 @@ struct ChatSession: View {
         .accessibilityAction { jumpBackOrLatest() }
     }
 
+    /// Unread mentions of me in this chat: tap to land on the oldest one.
+    ///
+    /// Oldest first, always, and never reordered: a mention that arrives while you are
+    /// reading raises the count and is visited last. Newest-first would walk the reader
+    /// backwards and forwards through the chat as messages land.
+    ///
+    /// Same treatment as the ↓ disc and the new-messages pill above the composer — the field
+    /// colour, a 1 pt rim, `Theme.voiceButton` tall. **No Glass arm**: the transcript's jump
+    /// chips are the recorded `transcriptJumpChip` control-size exception and are drawn flat
+    /// on both surfaces, so this one is too.
+    private var mentionJumpChip: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "at")
+                .font(theme.font(14, weight: .bold))
+            Text("\(unreadMentionRows.count)")
+                .font(theme.font(Theme.small, weight: .semibold))
+                .monospacedDigit()
+        }
+        .foregroundStyle(theme.text)
+        .padding(.horizontal, 12)
+        .frame(height: Theme.voiceButton)
+        .background(Capsule().fill(theme.field)) // control-size: exception transcriptJumpChip
+        .overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1)) // control-size: exception transcriptJumpChip
+        .contentShape(Capsule().inset(by: -4))
+        .overlay { ScrollInterruptTap(action: jumpToOldestMention) }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(unreadMentionRows.count == 1 ? "1 unread mention" : "\(unreadMentionRows.count) unread mentions")
+        .accessibilityHint("Scrolls to the oldest message that mentions you")
+        .accessibilityIdentifier("chat-jump-to-mention")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { jumpToOldestMention() }
+    }
+
+    /// Land on the oldest unread mention. Nothing is marked read here: the row is cleared
+    /// when it is actually on screen, which this jump is about to make true, so the one
+    /// "seen" rule covers a jump and a scroll alike.
+    private func jumpToOldestMention() {
+        guard let oldest = unreadMentionRows.first else { return }
+        revealQuoted(oldest)
+    }
+
+    // MARK: Seen means on screen
+
+    /// The space a mention row measures itself in: the scroll view's own frame.
+    static let transcriptViewport = "arbosMentionViewport"
+
+    /// The transcript's live band in that space — the viewport less the header fade at the
+    /// top and the chat bar with its fade at the bottom.
+    ///
+    /// Those two ramps are where a row is present but not readable. A mention that has only
+    /// slid under the composer has not been read, and clearing it there is the failure the
+    /// whole mark exists to prevent.
+    private var liveBand: ClosedRange<CGFloat>? {
+        let top = Controls.top + Controls.diameter + 6 + (showsMemberChips ? 38 : 0) + headerExtra
+        let bottom = viewportHeight - chatBarHeight.value - BottomBarFade.fade
+        guard bottom > top else { return nil }
+        return top...bottom
+    }
+
+    /// Is a row of this height and position readable inside `band`?
+    ///
+    /// A row taller than the band can never sit inside it, so for those the test is the
+    /// other way round: the band is full of the row.
+    static func rowIsOnScreen(_ row: CGRect, band: ClosedRange<CGFloat>) -> Bool {
+        if row.height >= band.upperBound - band.lowerBound {
+            return row.minY <= band.lowerBound && row.maxY >= band.upperBound
+        }
+        return row.minY >= band.lowerBound && row.maxY <= band.upperBound
+    }
+
+    /// A mention row reported its place in the viewport. Seen = inside the live band, with
+    /// this chat on screen in a foreground window (D1).
+    ///
+    /// Focus-on-arrival needs no branch here: a mention that lands while the reader is at the
+    /// end of the chat is laid out inside the band straight away, so it arrives seen.
+    private func noteMentionFrame(_ messageId: Id, _ frame: CGRect) {
+        guard scenePhase == .active, model.visibleChatId == chatId, let band = liveBand else { return }
+        guard Self.rowIsOnScreen(frame, band: band) else { return }
+        model.noteMentionSeen(chatId: chatId, messageId: messageId)
+    }
+
     /// Shown when rows land below while the reader is up in history — tap jumps
     /// to the end (iMessage / Slack style; Grok's bare chevron stays for scroll-up alone).
     private var newMessagesPill: some View {
@@ -2231,7 +2352,8 @@ struct ChatSession: View {
                     // lazy (wrapped in another view it is one child, and every row is built).
                     // Keystrokes do not reach this body (the composer is isolated); the other
                     // publishes re-diff the ids and let each realized `RowView` skip by `==`.
-                    transcriptRows(shown: shown, mentions: mentions, width: width)
+                    transcriptRows(shown: shown, mentions: mentions, width: width,
+                                   watchedMentions: Set(unreadMentionRows))
                     // Who is working is the presence row over the composer
                     // (`PresenceRow`), not a transcript row.
                     // Clears the chat bar and the `Theme.composerFade` above it, so the
@@ -2268,6 +2390,11 @@ struct ChatSession: View {
                 .id(transcriptStackIdentity)
             }
             .defaultScrollAnchor(.bottom)
+            // A mention row measures itself against this space, whose origin is the scroll
+            // view's own top edge — so a row's `minY` is where it sits in the viewport, not
+            // where it sits in the content.
+            .coordinateSpace(name: Self.transcriptViewport)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { viewportHeight = $0 }
             .modifier(ChatBarIndicatorMargin(bar: chatBarHeight))
             // iOS 26's automatic edge effect under a bottom inset would blur the rows under the
             // composer a second time; the canvas fade is the one treatment.
@@ -4072,7 +4199,8 @@ extension ChatSession {
     /// The transcript's rows, keyed by id, never by position: a grow step prepends older
     /// rows and must not touch the ones already laid out (arbonites-chat-lag).
     @ViewBuilder
-    fileprivate func transcriptRows(shown: [Row], mentions: MentionTable, width: CGFloat) -> some View {
+    fileprivate func transcriptRows(shown: [Row], mentions: MentionTable, width: CGFloat,
+                                    watchedMentions: Set<Id>) -> some View {
         let people = isPeople || isChannel
         let composerInset = composerSideInset
         let actionsRowId = actionsRow?.id
@@ -4123,6 +4251,9 @@ extension ChatSession {
                                         model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: "❤️")
                                     },
                                     onCopyMenu: { runMessageMenu($0, row: row) })
+                .modifier(MentionSeenReporter(active: watchedMentions.contains(row.messageId)) {
+                    noteMentionFrame(row.messageId, $0)
+                })
         }
     }
 
@@ -4133,6 +4264,28 @@ extension ChatSession {
             return false
         case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
             return true
+        }
+    }
+}
+
+/// Reports where an unread mention's row sits in the viewport, so the chat can clear it once
+/// it is actually on screen.
+///
+/// Only the unread mention rows carry it. A geometry observer on every bubble would be a
+/// per-frame cost on a list whose whole design (`LazyVStack`, the windowed row set, the
+/// equatable rows) exists to avoid exactly that, and there is rarely more than a handful of
+/// mentions to watch.
+private struct MentionSeenReporter: ViewModifier {
+    let active: Bool
+    let onFrame: (CGRect) -> Void
+
+    func body(content: Content) -> some View {
+        if active {
+            content.onGeometryChange(for: CGRect.self) {
+                $0.frame(in: .named(ChatSession.transcriptViewport))
+            } action: { onFrame($0) }
+        } else {
+            content
         }
     }
 }

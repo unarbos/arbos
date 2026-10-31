@@ -793,7 +793,8 @@ enum Controls {
         case rowIconTiles
         /// 72 / 92 / 112 pt illustration discs (primer, feedback done, link, hero pictures).
         case illustrationDiscs
-        /// Grok's 36 pt scroll-to-bottom circle and the "New messages" chip in the transcript.
+        /// Grok's 36 pt scroll-to-bottom circle and the transcript's jump chips beside it
+        /// ("New messages", the unread-mention `@`). Flat on both surfaces — no Glass arm.
         case transcriptJumpChip
         /// Small inline chips and segmented controls (32 pt or less) inside cards.
         case inlineChips

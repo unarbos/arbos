@@ -306,6 +306,29 @@ extension AppModel {
                         senderHandle: "jacob", senderName: "Jacob Steeves"),
             ])
         }
+        // Unread-mention rig (2026-10-31): two old lines in "Launch week" that name me by
+        // handle, well above the end of the transcript so the chat opens with them off
+        // screen — which is the state the `@` describes. Mira's `@here` is there on purpose:
+        // it names me too and must leave no mark, because only direct mentions count.
+        if DebugHooks.fixtureMentions {
+            let mentioning = [
+                Message(id: "g1a", chatId: "fx-group-launch", role: .user, sender: "user:fx-u3", status: .done, turn: nil, decision: nil, subagentId: nil,
+                        subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 3 * 3_600_000 + 120_000, completedAt: nil, pending: false,
+                        parts: [.text(id: "g1at", text: "@jacob can you sign off the embargo note before five?")], hiddenCount: 0,
+                        senderHandle: "mira-k", senderName: "Mira Kaplan", mentions: ["user:fx-me"]),
+                Message(id: "g1b", chatId: "fx-group-launch", role: .user, sender: "user:gh_32490803", status: .done, turn: nil, decision: nil, subagentId: nil,
+                        subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 3 * 3_600_000 + 180_000, completedAt: nil, pending: false,
+                        parts: [.text(id: "g1bt", text: "@jacob the press list is in the doc — shout if the order is wrong.")], hiddenCount: 0,
+                        senderHandle: "unconst", senderName: "Unconst", mentions: ["user:fx-me"]),
+                Message(id: "g1c", chatId: "fx-group-launch", role: .user, sender: "user:fx-u3", status: .done, turn: nil, decision: nil, subagentId: nil,
+                        subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 3 * 3_600_000 + 240_000, completedAt: nil, pending: false,
+                        parts: [.text(id: "g1ct", text: "@here run-through is at four, in the usual room.")], hiddenCount: 0,
+                        senderHandle: "mira-k", senderName: "Mira Kaplan", mentions: ["user:fx-me", "user:gh_32490803", "user:fx-u4"]),
+            ]
+            messages["fx-group-launch", default: []].insert(contentsOf: mentioning, at: 2)
+            seedFixtureUnread(counts: ["fx-group-launch": 6, "fx-dm-unconst": 3],
+                              mentions: ["fx-group-launch": 2])
+        }
         if let rows = DebugHooks.fixtureLongRows, rows > 0 {
             messages["fx-group-launch"] = Self.longGroupTranscript(rows: rows, before: now - 4 * 3_600_000, rich: DebugHooks.fixtureLongRich)
                 + (messages["fx-group-launch"] ?? [])

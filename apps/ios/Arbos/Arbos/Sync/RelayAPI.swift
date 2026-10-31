@@ -864,16 +864,24 @@ final class RelayAPI {
         _ = try await request("DELETE", "/devices/\(deviceId)/push")
     }
 
-    /// `GET /me/unread` → total + per-chat counts. nil when the relay has no route yet.
-    func unread() async throws -> (total: Int, chats: [String: Int])? {
+    /// `GET /me/unread` → total + per-chat counts, and per-chat unread mentions of me.
+    /// nil when the relay has no route yet. `mentions` holds only the chats with one, so a
+    /// relay that does not count them yet leaves it empty rather than zero-filled — the DTO
+    /// field is optional (`#[serde(default)]` on the Rust side), and absent means none.
+    func unread() async throws -> (total: Int, chats: [String: Int], mentions: [String: Int])? {
         do {
             let v = try await json("GET", "/me/unread")
             guard JSONSerialization.isValidJSONObject(v),
                   let data = try? JSONSerialization.data(withJSONObject: v),
                   let dto = try? JSONDecoder().decode(UnreadDto.self, from: data) else { return nil }
             var chats: [String: Int] = [:]
-            for c in dto.chats { chats[c.chat_id] = Int(c.unread) }
-            return (Int(dto.total), chats)
+            var mentions: [String: Int] = [:]
+            for c in dto.chats {
+                chats[c.chat_id] = Int(c.unread)
+                let named = Int(c.mentions ?? 0)
+                if named > 0 { mentions[c.chat_id] = named }
+            }
+            return (Int(dto.total), chats, mentions)
         } catch let e as RelayError where e.status == 404 || e.status == 405 {
             return nil
         }
@@ -1240,6 +1248,26 @@ final class RelayAPI {
 
     func markRead(chatId: String, seq: Int64) async throws {
         _ = try await request("PUT", "/chats/\(chatId)/read", body: ["seq": seq])
+    }
+
+    /// `PUT /chats/{id}/mentions/read {message_id}` — the viewer has seen that mention. The
+    /// relay resolves the row from the CRDT message id (no client ever sees a
+    /// `chat_events.id`) and moves its mention cursor, which only ever goes forward.
+    ///
+    /// **It takes only the chat's oldest unread mention, so call it one at a time, oldest
+    /// first.** The cursor is a watermark: honouring a newer id would swallow the older
+    /// mentions under it, so the relay makes anything else a no-op. It is still a 204, not an
+    /// error, because two devices marking the same mention and a client re-sending on
+    /// foreground are both normal — which means a caller that names the wrong one gets a
+    /// success back and a count that returns on the next `GET /me/unread`. The ordered walk
+    /// is `AppModel.walkMentionReads`.
+    ///
+    /// Deliberately **not** `clear_on_read`. That payload makes every other device run
+    /// `AppModel.clearingChat`, which zeroes the chat's unread **message** count — so clearing
+    /// a mention here would wrongly mark the chat's messages read elsewhere. Other devices
+    /// pick the cleared mention up on their next `GET /me/unread` instead.
+    func markMentionsRead(chatId: String, messageId: String) async throws {
+        _ = try await request("PUT", "/chats/\(chatId)/mentions/read", body: ["message_id": messageId])
     }
 
     /// Announce a message we just wrote so recipients get a real preview
