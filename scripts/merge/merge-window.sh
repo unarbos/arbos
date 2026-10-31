@@ -5,16 +5,23 @@
 #                                     Prints WAIT, LIVE (new tag published), NO-TAG (Release plan judged it
 #                                     "no Mac change", nothing to publish) or STOP.
 # merge-window.sh verdict <sha>     — the Release plan's verdict for one commit on main.
-# Read only. Run from the repo checkout. Needs: gh (read), op (Arbos vault), check3.sh and loop-public.sh next to
-# this file, and in $MERGE_KIT (default /tmp/k): config (ssh, relay host entry; LOOP_SRC=host only) and,
-# optionally, watch-solo ("<feedback-id>:<recorded-head-sha>" pairs; a push to any of them is a NO-GO).
+# merge-window.sh checks <sha>  — the required-check reading for one head, on its own. Read only.
+# Read only. Run from the repo checkout. Needs: gh (read), op (Arbos vault), check3.sh, checks.sh and
+# loop-public.sh next to this file, and in $MERGE_KIT (default /tmp/k): config (ssh, relay host entry;
+# LOOP_SRC=host only) and, optionally, watch-solo ("<feedback-id>:<recorded-head-sha>" pairs; a push to
+# any of them is a NO-GO).
 #
-# Required checks: branch protection is not readable with this worker's GitHub token (HTTP 403), so
-# "checks green" below is INFERRED from the PR's mergeStateStatus, never read from branch protection.
+# Required checks are READ, from checks.sh, which names them. They are not inferred from
+# mergeStateStatus, which cannot report on required checks because main has none: branches/main says
+# "protected": false, and rulesets and rules/branches/main are both empty. An earlier version of this
+# file inferred "checks green" from mergeStateStatus because the protection endpoint returns HTTP 403.
+# The 403 is real, but there was nothing behind it, so the inference had no premise and UNSTABLE — the
+# state a red or skipped check produces — was on its accept list.
 # Rebase-merge is not allowed: one merge = one first-parent commit on main (merge commit or squash).
 set -u
 D=$(cd "$(dirname "$0")" && pwd); K=${MERGE_KIT:-/tmp/k}
 source "$D/opread.sh"
+source "$D/checks.sh"
 R=unarbos/arbos
 WATCH_SOLO=$(sed 's/#.*//' "$K/watch-solo" 2>/dev/null | tr -s ' \t\n' ' ')
 ACTIVE="queued in_progress waiting requested pending"
@@ -24,12 +31,7 @@ newest_tag() { git ls-remote --tags origin 'v*' | awk '{print $2}' | grep -E '^r
 # First-parent commits on main after <ref>, minus release bumps: the changes that landed.
 changes_since() { git log --format='%H %s' --first-parent "$1..${MW_TEST_HEAD:-origin/main}" | grep -v ' release: '; }
 
-# rd <gh api args>: the read, or "BLOCKED:<error>" with a non-zero status. A failed read never becomes a verdict.
-rd() {
-  local o e; e=$(mktemp)
-  if o=$(gh api "$@" 2>"$e"); then rm -f "$e"; printf '%s' "$o"
-  else echo "BLOCKED:$(tr '\n' ' ' <"$e" | cut -c1-200)"; rm -f "$e"; return 1; fi
-}
+# rd() lives in checks.sh, which both this file and merge.sh source.
 
 # verdict <sha>: one line — TAG <vX> | NOMAC <vY> <reason> | COVERED <vY> | RED | WAIT <why> | BLOCKED <unreadable>
 verdict() {
@@ -38,6 +40,24 @@ verdict() {
   if [ -z "${MW_TEST_HISTORY:-}" ]; then
     for t in $(git tag --contains "$sha" 2>/dev/null | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | head -1); do echo "TAG $t"; return; done
   fi
+  # The Swift gate, before anything else, because a green CI says nothing about the iPhone client
+  # core: ci.yml's push trigger ignores apps/ios/**, and the gate is a separate workflow. This read
+  # has to come before the NOPATH branch below, not after it — an apps/ios-only commit returns NOPATH
+  # precisely because it has no CI, and those are the commits whose gate matters most. Nothing in this
+  # kit used to read the gate at all, so a main commit whose gate was red, cancelled or never run
+  # still earned NOMAC and cleared the merge window.
+  local gfiles gout grc
+  gfiles=$(commit_files "$sha") || { echo "BLOCKED reading the files $s8 changed: ${gfiles#BLOCKED:}"; return; }
+  if [ "$(printf '%s\n' "$gfiles" | grep -c .)" -ge 300 ]; then
+    echo "BLOCKED $s8 changes 300 files or more, GitHub's listing cap, so whether a gate applies to it cannot be read"; return
+  fi
+  gout=$(require_gates "$sha" "$gfiles"); grc=$?
+  gout=$(printf '%s' "$gout" | sed 's/^ *//' | paste -sd'; ' -)
+  case $grc in
+    1) echo "RED GATE $gout"; return ;;
+    2) echo "BLOCKED $gout"; return ;;
+    3) echo "WAIT $gout"; return ;;
+  esac
   ci=$(rd "repos/$R/actions/workflows/ci.yml/runs?head_sha=$sha&per_page=5" --jq '[.workflow_runs[]|select(.event=="push")][0]|"\(.status) \(.conclusion)"') || { echo "BLOCKED reading CI runs for $s8: ${ci#BLOCKED:}"; return; }
   case "$ci" in
     ""|null*)
@@ -166,11 +186,22 @@ go() {
     else echo "    solo slot $fid: PUSHED or changed (recorded ${rec:0:8}, live ${live:-none})"; nogo+=("push to solo slot $fid"); fi
   done
   if [ -n "${1:-}" ]; then
-    echo "4 PR #$1 (checks INFERRED from mergeStateStatus; branch protection is not readable — HTTP 403):"
-    gh pr view "$1" -R $R --json title,headRefName,headRefOid,isDraft,mergeable,mergeStateStatus,baseRefName \
-      --jq '"    \(.title)\n    \(.headRefName)@\(.headRefOid[0:9]) base=\(.baseRefName) draft=\(.isDraft) mergeable=\(.mergeable) state=\(.mergeStateStatus)"'
+    echo "4 PR #$1 (required checks are read from checks.sh, not inferred):"
+    gh pr view "$1" -R $R --json title,headRefName,headRefOid,isDraft,mergeable,baseRefName \
+      --jq '"    \(.title)\n    \(.headRefName)@\(.headRefOid[0:9]) base=\(.baseRefName) draft=\(.isDraft) mergeable=\(.mergeable)"'
     gh pr checks "$1" -R $R 2>&1 | awk -F'\t' '{print "    "$1": "$2}' | sort | uniq -c | sed 's/^/  /' | head -30
-    gh pr view "$1" -R $R --json mergeStateStatus --jq .mergeStateStatus | grep -qE '^(CLEAN|HAS_HOOKS|UNSTABLE)$' || nogo+=("PR #$1 not in a clean merge state")
+    # mergeable is about conflicts and draft state, which are facts about the branch. It is not a
+    # statement about checks: see the header.
+    local ms; ms=$(gh pr view "$1" -R $R --json mergeable,isDraft --jq '"\(.mergeable) \(.isDraft)"')
+    case "$ms" in "MERGEABLE false") ;; *) nogo+=("PR #$1 is not mergeable or is a draft ($ms)") ;; esac
+    local phead pfiles
+    phead=$(gh pr view "$1" -R $R --json headRefOid --jq .headRefOid)
+    pfiles=$(pr_files "$1")
+    if [ -z "$pfiles" ] || [ "${pfiles#BLOCKED}" != "$pfiles" ]; then
+      echo "    required checks: BLOCKED — cannot read #$1's changed files"; nogo+=("PR #$1 required checks unreadable")
+    else
+      require_gates "$phead" "$pfiles" || nogo+=("PR #$1 has a required check with no passing run on $phead")
+    fi
   fi
   echo
   if [ ${#nogo[@]} -eq 0 ]; then echo "VERDICT $(ts): GO — ONE merge (merge commit or squash, not rebase), within ~5 min; then nothing until 'after $( [ -z "$ch" ] && echo "$tag" || git rev-parse --short=9 origin/main)' clears"
@@ -207,9 +238,28 @@ after() {
   esac
 }
 
+# checks <sha> [<pr>]: the required-check reading for one head on its own, so it can be checked
+# against a known commit without running a GO. With <pr>, the diff is that PR's three-dot diff;
+# without it, the commit's diff against its first parent.
+checks() {
+  local sha=$1 files
+  if [ -n "${2:-}" ]; then files=$(pr_files "$2"); else files=$(commit_files "$sha"); fi
+  [ -n "$files" ] && [ "${files#BLOCKED}" = "$files" ] || { echo "BLOCKED reading changed files: ${files#BLOCKED:}"; return 2; }
+  echo "required checks for ${sha:0:9}, $(printf '%s\n' "$files" | grep -c .) file(s) changed:"
+  require_gates "$sha" "$files"; local rc=$?
+  case $rc in
+    0) echo "RESULT: SATISFIED — every gate that applies to this head has a successful run on it" ;;
+    1) echo "RESULT: REFUSE — a gate that applies to this head has no successful run on it" ;;
+    2) echo "RESULT: BLOCKED — a gate could not be read, so nothing is inferred" ;;
+    3) echo "RESULT: WAIT — a gate that applies to this head is still running" ;;
+  esac
+  return $rc
+}
+
 case "${1:-}" in
   go) shift; go "$@" ;;
   after) after "$2" ;;
   verdict) verdict "$2" ;;
-  *) echo "usage: merge-window.sh go [<pr>] | after <prev-ref> | verdict <sha>"; exit 2 ;;
+  checks) checks "$2" "${3:-}" ;;
+  *) echo "usage: merge-window.sh go [<pr>] | after <prev-ref> | verdict <sha> | checks <sha> [<pr>]"; exit 2 ;;
 esac
