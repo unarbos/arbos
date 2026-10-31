@@ -2873,7 +2873,88 @@ class Loop:
                            "say so on the issue and the operator requeues it.\n\n" + "\n".join(hits))
         return hits
 
+    # Disk guard (#1890): the relay host root at 94–99 % on 2026-10-26 13:16 (consumer outside Arbos). Below
+    # DISK_LOW_GB free on the state volume the poller starts no gate run (each integration tree, CI dispatch
+    # and the Mac halves write here and on GitHub), prints the alert in `status`, and keeps one `disk-low`
+    # issue open while it lasts; the deploy worker pauses image builds on the same threshold.
+    DISK_LOW_GB = int(os.environ.get("ARBOS_DISK_LOW_GB", "40"))
+
+    def disk_free_gb(self) -> int | None:
+        try:
+            st = os.statvfs(self.cfg.state_dir)
+            return int(st.f_bavail * st.f_frsize / 1_000_000_000)
+        except OSError:
+            return None
+
+    def disk_low(self) -> bool:
+        free = self.disk_free_gb()
+        return free is not None and free < self.DISK_LOW_GB
+
+    # Operator alert (coordinator 2026-10-26 13:58, Jacob's decision: his data under /home/const is his to manage,
+    # the loop only warns): one line in <state>/alerts/disk.log when free space on the host crosses below
+    # DISK_WARN_GB or below the guard, then one per hour while it stays below; the loop operator's session
+    # forwards new lines to the coordinator. Not a GitHub issue to Jacob.
+    DISK_WARN_GB = int(os.environ.get("ARBOS_DISK_WARN_GB", "60"))
+
+    def disk_operator_alert(self, free: int, cur: dict) -> None:
+        w = cur.get("disk_warn_watch") or {}
+        level = "GUARD" if free < self.DISK_LOW_GB else ("WARN" if free < self.DISK_WARN_GB else "")
+        prev = w.get("level") or ""
+        due = level and (level != prev or minutes_between(w.get("last") or "1970-01-01T00:00:00Z", iso()) >= 60)
+        if due:
+            line = (f"{iso()} DISK {level}: {free} GB free on /dev/vda1 (warn < {self.DISK_WARN_GB}, guard < {self.DISK_LOW_GB})"
+                    + (" — gate runs and image builds PAUSED" if level == "GUARD" else ""))
+            p = self.cfg.state_dir / "alerts"
+            p.mkdir(exist_ok=True)
+            with (p / "disk.log").open("a") as f:
+                f.write(line + "\n")
+            log("ALERT " + line)
+            w = {"level": level, "last": iso()}
+        elif not level and prev:
+            p = self.cfg.state_dir / "alerts"
+            p.mkdir(exist_ok=True)
+            with (p / "disk.log").open("a") as f:
+                f.write(f"{iso()} DISK OK: {free} GB free on /dev/vda1 (back above {self.DISK_WARN_GB})\n")
+            w = {}
+        cur["disk_warn_watch"] = w
+
+    def watch_disk(self) -> None:
+        """One `disk-low` issue while the host is low (opened once, a comment per hour, closed when back)."""
+        free = self.disk_free_gb()
+        if free is None:
+            return
+        cur = self.store.cursor()
+        self.disk_operator_alert(free, cur)
+        watch = cur.get("disk_low_watch") or {}
+        low = free < self.DISK_LOW_GB
+        if low and not watch.get("issue"):
+            with contextlib.suppress(HttpError):
+                self.gh.ensure_label("disk-low", "B60205", "The relay host's root volume is low; gate runs and image builds are paused")
+                issue = self.gh.create_issue(f"relay host disk low: {free} GB free (< {self.DISK_LOW_GB} GB) — gate runs and image builds paused",
+                                             f"The feedback poller and the deploy worker degrade instead of filling the host: no new gate run and no image build "
+                                             f"start while free space on the state volume is under {self.DISK_LOW_GB} GB; queued requests wait. Arbos's own "
+                                             f"reclaimable data (old agent image tags, journal) is pruned by the worker every tick. If this is not enough the "
+                                             f"consumer is outside Arbos — see `df -h /` and `du -xsh /home/* /tmp` on the host.\n\nOpened by the poller at {iso()}.",
+                                             ["disk-low", "infrastructure"])
+                watch = {"issue": issue["number"], "since": iso(), "last_note": iso()}
+                log(f"ALERT disk-low: {free} GB free on the relay host → #{issue['number']}; gate runs paused")
+        elif low and watch.get("issue") and minutes_between(watch.get("last_note") or iso(), iso()) >= 60:
+            with contextlib.suppress(HttpError):
+                self.gh.comment(watch["issue"], f"Still low at {iso()}: {free} GB free.")
+            watch["last_note"] = iso()
+        elif not low and watch.get("issue"):
+            with contextlib.suppress(HttpError):
+                self.gh.comment(watch["issue"], f"Back above the threshold at {iso()}: {free} GB free; gate runs and image builds resume.")
+                self.gh.close_issue(watch["issue"], "completed")
+            log(f"disk-low cleared: {free} GB free; #{watch['issue']} closed")
+            watch = {}
+        cur["disk_low_watch"] = watch
+        self.store.save_cursor(cur)
+
     def rust_gate_start(self, members: dict[str, str]) -> None:
+        if self.disk_low():
+            log(f"Gate: DISK LOW — {self.disk_free_gb()} GB free on the relay host < {self.DISK_LOW_GB}; no gate run started ({len(members)} ready wait)")
+            return
         """Build the integration branch gate/<run> on GitHub (main + every member, in order); CI starts on the
         push; the Mac release build starts if the Mac answers (else it is started on a later tick)."""
         run_id = f"{utcnow().strftime('%Y%m%dT%H%M%S')}-{len(members)}"
@@ -4356,6 +4437,7 @@ class Loop:
         try:
             self.watch_main_red()
             self.watch_relay_restarts()
+            self.watch_disk()
         except Exception as e:  # noqa: BLE001
             log(f"main-red watch failed: {e}")
         try:
@@ -5097,6 +5179,8 @@ class Loop:
             return f"{fid}{' ' + issue if issue else ''}"
         note = self.cfg.state_dir / "gate-note.txt"
         print("gate queue:")
+        if self.disk_low():
+            print(f"  ** DISK LOW: {self.disk_free_gb()} GB free on the relay host (< {self.DISK_LOW_GB} GB) — no gate run or image build starts until space is back **")
         if note.is_file() and note.read_text().strip():
             print(f"  note: {note.read_text().strip()}")
         active = cur.get("rust_gate") or {}

@@ -40,6 +40,10 @@ concurrency:
 jobs:
   check:
     name: build-xcframework + fastlane test
+    # A branch in this repo already gets the push run; its pull_request run is the same commit again on
+    # GitHub's macOS pool, which allows this repo five jobs at once (2026-10-30: 33 queued, ~4 h wait).
+    # Pull requests from forks have no push run here, so they keep theirs.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: macos-15
     timeout-minutes: 60
     env:
