@@ -22,10 +22,12 @@ import XCTest
 /// long-press then Reply, because typing has no menu lookup to miss (the actions menu has
 /// already been seen to go missing while on screen) and the field grows by several lines.
 ///
-/// The probes come from #2390: invisible accessibility elements reading SwiftUI's
-/// `ScrollGeometry.contentInsets.bottom` through `onScrollGeometryChange` (so the safe area
-/// is included — keyboard down reads about 34, not 0) and the bar view's own measured
-/// height. Both emit one-decimal strings, and `-1.0` until the first geometry sample.
+/// The probes come from #2390, now on main: invisible accessibility elements reading
+/// SwiftUI's `ScrollGeometry.contentInsets.bottom` through `onScrollGeometryChange` (so the
+/// safe area is included — keyboard down reads about 34, not 0) and the bar view's own
+/// measured height. Both emit one-decimal strings, and `-1.0` until the first geometry
+/// sample. A reading near zero means the probe is not measuring the safe area; treat the
+/// run as void rather than as a pass.
 final class ChatBarInsetUITests: XCTestCase {
     /// The shared Mac runs the gate and releases at the same time; waits are generous.
     private let appear: TimeInterval = 90
@@ -69,6 +71,14 @@ final class ChatBarInsetUITests: XCTestCase {
         if byId.exists { return byId }
         let byLabel = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", label)).firstMatch
         return byLabel.exists ? byLabel : nil
+    }
+
+    /// Why a probe can go missing, now that it is never because #2390 has not landed. The
+    /// iOS 18 floor is real: the inset probe is built on `onScrollGeometryChange`.
+    private func probeMissing(_ id: String, _ label: String) -> String {
+        "no probe found by identifier '\(id)' or label '\(label)'. #2390's probes are on main, "
+        + "so this is a renamed key, a dropped pbxproj registration, or a simulator older "
+        + "than iOS 18 — not a reason to skip."
     }
 
     private func insetElement(_ app: XCUIApplication) -> XCUIElement? {
@@ -116,18 +126,10 @@ final class ChatBarInsetUITests: XCTestCase {
     func testGrowingTheChatBarLeavesTheTranscriptInsetWhereItWas() throws {
         let app = launch()
 
-        if insetElement(app) == nil || barElement(app) == nil {
-            // Bridge while #2390's probe commit is not yet in the build under test. Delete
-            // this branch and `ARBOS_PROBE_PENDING` when #2390 merges: after that, a probe
-            // this test cannot find means its identifier or label was renamed, and that has
-            // to fail loudly. Skipping by default would hide the rename for ever.
-            try XCTSkipIf(ProcessInfo.processInfo.environment["ARBOS_PROBE_PENDING"] == "1",
-                          "ARBOS_PROBE_PENDING=1: #2390's probes are not in this build yet")
-            XCTFail("no probe found by identifier '\(insetId)' / '\(barId)' or by label "
-                    + "'\(insetLabel)' / '\(barLabel)'. #2390's probe commit is missing from "
-                    + "this build, or a key was renamed and this test needs updating.")
-            return
-        }
+        // #2390 is on main, so both probes are in every Debug build this runs against and a
+        // probe it cannot find is never a reason to skip.
+        XCTAssertNotNil(insetElement(app), probeMissing(insetId, insetLabel))
+        XCTAssertNotNil(barElement(app), probeMissing(barId, barLabel))
 
         // Keyboard first, and let it settle: the keyboard is a safe-area change in both
         // builds, so it must not be part of what this test measures.
