@@ -3028,6 +3028,9 @@ pub async fn invite_create(
                 "only the project's owner invites people",
             );
         }
+        if !may_add_to_group(&state, &me, &other_id) {
+            return group_add_forbidden();
+        }
         let _ = state.db.add_project_member(&project.id, &other_id, &me);
         state.matrix.touch_project(&state, &project.id);
         ("project", project.id)
@@ -5281,6 +5284,25 @@ mod group_add_privacy_tests {
         .await
     }
 
+    /// Mint a sign-in invite link that carries project membership.
+    async fn invite_into(
+        state: &AppState,
+        owner_dev: &Principal,
+        project: &str,
+        handle: &str,
+    ) -> Response {
+        invite_create(
+            State(state.clone()),
+            owner_dev.clone(),
+            Json(InviteBody {
+                handle: handle.to_owned(),
+                chat_id: None,
+                project_id: Some(project.to_owned()),
+            }),
+        )
+        .await
+    }
+
     #[tokio::test]
     async fn nobody_refuses_create_and_add() {
         let state = test_state(AuthMode::Github);
@@ -5457,20 +5479,39 @@ mod group_add_privacy_tests {
         assert!(!state.db.is_project_member(&project, &carol).unwrap());
     }
 
-    /// The default policy keeps the share route and both group paths open: the fix must not
-    /// tighten anything.
+    #[tokio::test]
+    async fn nobody_refuses_a_project_invite_link() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 46);
+        let (bob, _) = person(&state, 47);
+        let project = project_of(&state, &alice, "Shared");
+        state.db.set_group_add_policy(&bob, "nobody").unwrap();
+
+        let r = invite_into(&state, &alice_dev, &project, "user47").await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        assert!(
+            !state.db.is_project_member(&project, &bob).unwrap(),
+            "the invite link writes membership up front, so it must be refused up front"
+        );
+    }
+
+    /// The default policy keeps every add path open: the fix must not tighten anything.
     #[tokio::test]
     async fn anyone_still_allows_every_add_path() {
         let state = test_state(AuthMode::Github);
         let (alice, alice_dev) = person(&state, 48);
         let (bob, _) = person(&state, 49);
-        let (_carol, _) = person(&state, 50);
+        let (carol, _) = person(&state, 50);
         let project = project_of(&state, &alice, "Shared");
         assert_eq!(state.db.group_add_policy(&bob).unwrap(), "anyone");
 
         let r = share(&state, &alice_dev, &project, "user49").await;
         assert_eq!(r.status(), StatusCode::OK, "no DM with Bob is needed");
         assert!(state.db.is_project_member(&project, &bob).unwrap());
+
+        let r = invite_into(&state, &alice_dev, &project, "user50").await;
+        assert_eq!(r.status(), StatusCode::CREATED);
+        assert!(state.db.is_project_member(&project, &carol).unwrap());
 
         let r = chats_create_group(
             State(state.clone()),
