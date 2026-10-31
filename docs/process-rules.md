@@ -109,9 +109,10 @@ builds took the 8-core box to load 263 and ssh timed out for every worker (same 
 load 66–167). Rule, for every rig script under `/Users/Shared/arbos-*/` and every ad-hoc run on the box:
 
 - Before `xcrun simctl boot`, `xcodebuild`, `cargo build`/`cargo run`, `swift build` or launching the Mac app
-  from a rig: `slot=$(/usr/local/bin/arbos-heavy-slot.sh acquire <rig-name> --pid $$)`; after the heavy step
-  (the simulator is up and the app is running, or the build finished): `/usr/local/bin/arbos-heavy-slot.sh
-  release "$slot"`. Screenshots, clicks and `screencapture` on an already-running app need no slot — hold
+  from a rig: acquire a slot in the guarded shape at the top of `arbos-heavy-slot.sh` (the acquire runs in the
+  background, its pid held, and is killed from an `INT`/`TERM` trap), not as a bare `slot=$(… acquire …)`,
+  which leaves the acquire waiting after the rig is killed. After the heavy step (the simulator is up and the
+  app is running, or the build finished): `/usr/local/bin/arbos-heavy-slot.sh release "$slot"`. Screenshots, clicks and `screencapture` on an already-running app need no slot — hold
   the GUI lock (`gui-lock.sh`) for those as before. A slot is for the burst, not the whole session.
 - Builds in a rig run `nice -n 12` with `CARGO_BUILD_JOBS=4` (the gate does the same); a rig never needs the
   `--priority` slot — that is for a pinned hotfix.
@@ -122,6 +123,8 @@ load 66–167). Rule, for every rig script under `/Users/Shared/arbos-*/` and ev
   `uncapped-*` slot, but never during a release or while one is queued.
 - To ask without queueing, pass `--no-wait`: it writes no waiting marker, returns a slot (exit 0) or nothing
   (exit 75) at once, and signals no one. Use it whenever you were told to ask rather than queue.
+- To wait a moment for a handover but not sit in the queue, pass `--wait-max <seconds>`: it queues, and if it
+  is not granted in time it clears its own marker and exits 75. It is never promoted to an `uncapped-*` slot.
 - A waiter whose `--pid` owner has died gives up and clears its queue marker; a rig that holds a slot with no
   heavy process alive is stale and gets reclaimed.
 - Shared simulators stay shut down when the rig is done (`xcrun simctl shutdown <udid>`): a booted idle
