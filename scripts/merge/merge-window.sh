@@ -60,9 +60,19 @@ verdict() {
   esac
   since=$(date -u -d "@$(git show -s --format=%ct "$sha")" +%Y-%m-%dT%H:%M:%SZ)
   local window=">=$since"; [ -n "${MW_TEST_UNTIL:-}" ] && window="$since..$MW_TEST_UNTIL"
-  local runs; runs=$(rd "repos/$R/actions/workflows/release.yml/runs?created=$window&per_page=30" \
-      --jq '.workflow_runs[]|select(.event!="push" and .status=="completed")|.id') || { echo "BLOCKED listing Release runs: ${runs#BLOCKED:}"; return; }
+  # Every page: the list grows all day (one scheduled run per 15 min), so page 1 alone loses the run that
+  # judged an older commit. The total is read first, so a run created mid-read cannot fake a shortfall.
+  local total list got runs scanned=0
+  total=$(rd "repos/$R/actions/workflows/release.yml/runs?created=$window&per_page=1" --jq '.total_count') || { echo "BLOCKED counting Release runs: ${total#BLOCKED:}"; return; }
+  list=$(rd --paginate "repos/$R/actions/workflows/release.yml/runs?created=$window&per_page=100" \
+      --jq '.workflow_runs[]|"\(.id) \(.event) \(.status) \(.head_sha)"') || { echo "BLOCKED listing Release runs: ${list#BLOCKED:}"; return; }
+  got=$(printf '%s\n' "$list" | grep -c .)
+  [ "$got" -ge "${total:-0}" ] || { echo "BLOCKED Release-run lookup incomplete for $s8: read $got of $total runs created since $since"; return; }
+  # Runs on this commit first (its own workflow_run plan); the rest, newest first, cover schedule runs.
+  runs=$(printf '%s\n' "$list" | awk -v s="$sha" '$2!="push" && $3=="completed" && $4==s {print $1}'
+         printf '%s\n' "$list" | awk -v s="$sha" '$2!="push" && $3=="completed" && $4!=s {print $1}')
   for r in $runs; do
+    scanned=$((scanned + 1))
     j=$(rd "repos/$R/actions/runs/$r/jobs" --jq '.jobs[]|select(.name=="What to publish")|.id') || { echo "BLOCKED listing jobs of Release run $r: ${j#BLOCKED:}"; return; }
     j=$(echo "$j" | head -1)
     [ -n "$j" ] || continue
@@ -80,7 +90,7 @@ verdict() {
     n=$(gh run list -R $R --workflow release.yml --status $st --limit 5 --json databaseId --jq length 2>&1) || { echo "BLOCKED listing $st Release runs: $(echo "$n" | tr '\n' ' ' | cut -c1-160)"; return; }
     [ "${n:-0}" -gt 0 ] && { echo "WAIT Release run $st"; return; }
   done
-  echo "WAIT no Release plan has judged ${s8} yet (the 15-min backstop judges it next)"
+  echo "WAIT no Release plan has judged ${s8} yet: read all $got Release runs created since $since (every page), none of the $scanned completed non-push plans names it (the 15-min backstop judges it next)"
 }
 
 loop_gating() {
