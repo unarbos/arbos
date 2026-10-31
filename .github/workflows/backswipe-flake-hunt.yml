@@ -1,4 +1,4 @@
-name: BackSwipe flake hunt (temporary, #2326 proof)
+name: "Flake hunt: the four pool cases (temporary, #2326 proof)"
 
 # Temporary, and never merged: this branch exists only to run it: proof for the
 # BackSwipeUITests fix, not a check anyone should inherit.
@@ -24,11 +24,11 @@ permissions:
 
 concurrency:
   group: backswipe-flake-hunt-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   repeat:
-    name: the pair, 20 times
+    name: the four cases, 20 times
     runs-on: macos-15
     timeout-minutes: 90
     env:
@@ -67,7 +67,7 @@ jobs:
           set -euo pipefail
           ./scripts/build-xcframework.sh
           test -d packages/ArbosFFI/ArbosFFIRust.xcframework
-      - name: Run the pair ITERATIONS times
+      - name: Run the four cases ITERATIONS times
         run: |
           set -euo pipefail
           cd "$APP_DIR"
@@ -81,6 +81,8 @@ jobs:
             -derivedDataPath build/dd -clonedSourcePackagesDirPath build/spm \
             -only-testing:ArbosUITests/BackSwipeUITests/testSwipeRightOnABubbleGoesBackAndStartsNoReply \
             -only-testing:ArbosUITests/BackSwipeUITests/testVerticalDragOnABubbleDoesNotGoBack \
+            -only-testing:ArbosUITests/ChatSearchCloseUITests/testCloseButtonClosesTheBar \
+            -only-testing:ArbosUITests/ChatSearchCloseUITests/testNoMatchesIsSaidNotBlank \
             -test-iterations "$ITERATIONS" -run-tests-until-failure \
             CODE_SIGNING_ALLOWED=NO > build/xcodebuild-flake-hunt.log 2>&1
           status=$?
