@@ -44,6 +44,9 @@ final class ChatSearchCloseUITests: XCTestCase {
         let deadline = Date().addingTimeInterval(settle)
         while field.exists, Date() < deadline { usleep(150_000) }
         XCTAssertFalse(field.exists, "\(what): the bar is gone", file: file, line: line)
+        // The keyboard slides down after the field has gone (0.02–0.22 s on hosted macos-15).
+        let keyboardDeadline = Date().addingTimeInterval(settle)
+        while app.keyboards.count > 0, Date() < keyboardDeadline { usleep(100_000) }
         XCTAssertEqual(app.keyboards.count, 0, "\(what): the keyboard is down", file: file, line: line)
     }
 
