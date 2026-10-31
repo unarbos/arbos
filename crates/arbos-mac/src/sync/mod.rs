@@ -1585,14 +1585,66 @@ pub fn is_collective(handle: &str) -> bool {
 /// exactly like a direct mention there. A mention chip also serialises as
 /// `@<handle>` ([`crate::ui::mention::MentionToken::plain`]), so a picked
 /// chip and a typed handle both land here.
+///
+/// # This must agree with the relay exactly
+///
+/// The relay decides the `@` count with `push::eligibility::mentioned_directly`,
+/// whose text scan is `word_at` — **not** `people::at_token`, which is a
+/// different and stricter tokeniser used for collectives and for resolving a
+/// sent row's member ids. The two disagree on real sentences, and the client
+/// must follow the one the relay actually counts with. Disagreement does not
+/// show up as a wrong number: the Mac derives *which* message is the oldest
+/// unread mention, `PUT /chats/{id}/mentions/read` takes only the oldest, and
+/// anything else is a no-op answered `204`. One extra or missing row and the
+/// mark can never be cleared.
+///
+/// The relay's declared-list branch is deliberately not mirrored. No app fills
+/// `mentions` in on the announce — the Mac posts `/notify` with the message id
+/// and the text alone — so the text scan is what answers in practice. A sender
+/// that did declare a list would make the relay count a mention this scan
+/// cannot see; [`crate::app::UnreadMentions::oldest_markable`] then declines to
+/// mark rather than marking the wrong row.
 pub fn mentions_me_directly(text: &str, me_handle: &str) -> bool {
-    if me_handle.is_empty() {
+    let handle = me_handle.trim().trim_start_matches('@');
+    if handle.is_empty() {
         return false;
     }
-    text_has_at_token(&text.to_lowercase(), &me_handle.to_lowercase())
+    mention_word_at(&text.to_lowercase(), &format!("@{}", handle.to_lowercase()))
+}
+
+/// `push::eligibility::word_at`, ported character for character: `needle` is
+/// followed by a non-handle character or the end of the text.
+///
+/// Note what it does **not** do, because both are load-bearing and both differ
+/// from [`text_has_at_token`]:
+///
+/// - It never looks at the character *before* the `@`, so `@@jacob` and
+///   `me@jacob.com` both name jacob.
+/// - `.` ends a handle rather than continuing one, so `thanks @jacob.` — a
+///   handle at the end of a sentence, the common case — names jacob.
+///
+/// Scanning every occurrence rather than the first also matters: in
+/// `@jacobs and @jacob`, the first is not a boundary and the second is.
+fn mention_word_at(lower: &str, needle: &str) -> bool {
+    let mut from = 0;
+    while let Some(i) = lower[from..].find(needle) {
+        let end = from + i + needle.len();
+        let boundary = lower[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '_' || c == '-'));
+        if boundary {
+            return true;
+        }
+        from = end;
+    }
+    false
 }
 
 /// `@token` as a whole word in `lower` (lower-case text).
+///
+/// `people::at_token`, for collectives and for the member ids a send resolves
+/// to. **Not** the rule for the `@` mark — see [`mentions_me_directly`].
 pub fn text_has_at_token(lower: &str, token: &str) -> bool {
     let needle = format!("@{token}");
     lower.match_indices(&needle).any(|(i, _)| {
@@ -1850,6 +1902,74 @@ mod collective_tests {
             !mentions_me_directly("@jacob", ""),
             "signed out: nothing is a mention of me"
         );
+    }
+
+    /// Every boundary class of the relay's `push::eligibility::word_at`, which
+    /// is what `mentioned_directly` scans with and therefore what the `@` count
+    /// is built from. A client that disagrees by one row names the wrong
+    /// message as oldest, and the read route answers `204` without doing
+    /// anything — a badge nobody can clear.
+    #[test]
+    fn the_mark_scan_matches_the_relays_word_at() {
+        // Ends a handle: anything that is not alphanumeric, `_` or `-`.
+        for text in [
+            "thanks @jacob.",       // the common case: end of a sentence
+            "thanks @jacob",        // end of the text
+            "@jacob, can you look", // comma
+            "(@jacob)",             // brackets
+            "@jacob's call",        // apostrophe
+            "ask @jacob/@sam",      // slash
+            "@jacob\nnext line",    // newline
+        ] {
+            assert!(mentions_me_directly(text, "jacob"), "{text:?} names jacob");
+        }
+
+        // Continues a handle: alphanumeric, `_`, `-`.
+        for text in ["@jacobs", "@jacob2", "@jacob_k", "@jacob-ops"] {
+            assert!(
+                !mentions_me_directly(text, "jacob"),
+                "{text:?} is a different handle"
+            );
+        }
+
+        // No character *before* the `@` is examined, so both of these count.
+        assert!(mentions_me_directly("@@jacob", "jacob"));
+        assert!(mentions_me_directly("mail me@jacob.com", "jacob"));
+
+        // Every occurrence is scanned, not just the first.
+        assert!(mentions_me_directly("@jacobs and @jacob", "jacob"));
+
+        // The handle is trimmed the way the relay trims it.
+        assert!(mentions_me_directly("ping @jacob", "@jacob"));
+        assert!(mentions_me_directly("ping @jacob", " jacob "));
+        assert!(!mentions_me_directly("ping @jacob", "   "));
+    }
+
+    /// The two tokenisers are different on purpose, because the relay has two.
+    /// `text_has_at_token` is `people::at_token` (collectives, and the member
+    /// ids a send resolves to); `mentions_me_directly` is
+    /// `push::eligibility::word_at` (the `@` mark). Unifying them would break
+    /// whichever side lost. This pins the cases where they part company.
+    #[test]
+    fn the_collective_scan_and_the_mark_scan_are_not_the_same_rule() {
+        for text in ["thanks @jacob.", "@@jacob", "mail me@jacob.com"] {
+            assert!(
+                mentions_me_directly(text, "jacob"),
+                "{text:?} marks: the relay's word_at says yes"
+            );
+            assert!(
+                !text_has_at_token(text, "jacob"),
+                "{text:?} does not resolve: the relay's at_token says no"
+            );
+        }
+        // Where they agree they must keep agreeing.
+        for text in ["ping @jacob now", "@jacobs-ladder"] {
+            assert_eq!(
+                mentions_me_directly(text, "jacob"),
+                text_has_at_token(text, "jacob"),
+                "{text:?}"
+            );
+        }
     }
 }
 
