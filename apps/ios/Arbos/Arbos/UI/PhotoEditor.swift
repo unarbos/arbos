@@ -492,8 +492,9 @@ private struct PhotoCropOverlay: View {
                 grab(handle, in: rect)
             }
         }
+        // No identifier on this container either: it would replace the identifier of all
+        // eight handles inside it, exactly as the root's did to everything in the sheet.
         .frame(width: viewport.width, height: viewport.height)
-        .accessibilityIdentifier("photo-editor-crop")
     }
 
     private func dim(_ rect: CGRect) -> some View {
