@@ -1,10 +1,12 @@
 # Throwaway probe (not for merging): which hosted macOS images carry an iOS 27 simulator runtime,
-# and can one be added to macos-15 inside a job.
+# whether one can be added to macos-15 / macos-26 inside a job, and what main's Swift gate does on
+# the hosted xcode-27 image.
 name: hosted iOS 27 probe
 on:
   push:
     branches: ["cursor/hosted-ios27-probe-ac8d"]
-permissions: {}
+permissions:
+  contents: read
 jobs:
   probe:
     strategy:
@@ -20,28 +22,79 @@ jobs:
           sw_vers
           echo "ImageVersion=${ImageVersion:-?} ImageOS=${ImageOS:-?}"
           ls -d /Applications/Xcode*.app
-          xcode-select -p
           xcodebuild -version
           xcrun simctl list runtimes
-          echo "--- iPhone 17 devices"
           xcrun simctl list devices available | grep -E '^-- |iPhone 17 \(' || true
-      - name: Boot iPhone 17 on the newest iOS runtime
+      - name: Boot iPhone 17 on iOS 27.0
+        if: matrix.image == 'xcode-27'
         run: |
-          set -uo pipefail
-          rt=$(xcrun simctl list runtimes -j | python3 -c 'import json,sys; r=[x for x in json.load(sys.stdin)["runtimes"] if x["platform"]=="iOS" and x["isAvailable"]]; r.sort(key=lambda x: [int(p) for p in x["version"].split(".")]); print(r[-1]["identifier"], r[-1]["version"])')
-          echo "newest iOS runtime: $rt"
-          udid=$(xcrun simctl create probe-iphone17 "iPhone 17" "${rt%% *}")
+          set -euo pipefail
+          udid=$(xcrun simctl create probe-iphone17 "iPhone 17" com.apple.CoreSimulator.SimRuntime.iOS-27-0)
           start=$(date +%s)
           xcrun simctl boot "$udid"
           xcrun simctl bootstatus "$udid" -b >/dev/null
-          echo "booted iPhone 17 on iOS ${rt##* } in $(( $(date +%s) - start )) s"
+          echo "booted iPhone 17 on iOS 27.0 in $(( $(date +%s) - start )) s"
           xcrun simctl shutdown "$udid"; xcrun simctl delete "$udid"
       - name: Try to add the iOS 27 platform to this Xcode
         if: matrix.image != 'xcode-27'
+        timeout-minutes: 10
+        continue-on-error: true
         run: |
           set -uo pipefail
           df -h / | tail -1
           start=$(date +%s)
-          timeout 600 xcodebuild -downloadPlatform iOS -buildVersion 27.0 2>&1 | tail -15
+          xcodebuild -downloadPlatform iOS -buildVersion 27.0 2>&1 | tail -15
           echo "exit=${PIPESTATUS[0]} after $(( $(date +%s) - start )) s"
           xcrun simctl list runtimes | grep -i 'iOS 27' || echo "no iOS 27 runtime after the attempt"
+
+  # main's swift-core-check job as it is on main, on the hosted xcode-27 image with Xcode 27.0 (the
+  # EC2 Mac's build, 27A266a). "iPhone 17" exists there only on iOS 27.0.
+  gate:
+    name: main's Swift gate on xcode-27
+    runs-on: xcode-27
+    timeout-minutes: 75
+    env:
+      APP_DIR: apps/ios/Arbos
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift package cache
+        uses: actions/cache@v4
+        with:
+          path: apps/ios/Arbos/build/spm
+          key: spm-xcode27-${{ hashFiles('apps/ios/Arbos/Arbos.xcodeproj/project.pbxproj', 'apps/ios/Arbos/Arbos.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved', 'packages/ArbosFFI/Package.swift') }}
+      - name: Select Xcode 27.0
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode_27.0.app
+          xcodebuild -version
+      - name: Rust toolchain
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+      - name: Build ArbosFFI xcframework
+        run: |
+          set -euo pipefail
+          ./scripts/build-xcframework.sh
+          test -d packages/ArbosFFI/ArbosFFIRust.xcframework
+      - name: fastlane test
+        env:
+          ARBOS_SPM_DIR: ${{ github.workspace }}/apps/ios/Arbos/build/spm
+        run: |
+          set -euo pipefail
+          command -v fastlane || gem install fastlane --no-document
+          cd "$APP_DIR"
+          fastlane test
+      - name: Keep the xcodebuild logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hosted-xcode27-gate-logs-${{ github.sha }}
+          path: apps/ios/Arbos/build/xcodebuild-*.log
+          if-no-files-found: ignore
+          retention-days: 14
