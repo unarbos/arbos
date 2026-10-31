@@ -72,6 +72,65 @@ final class ComposerMetricsTests: XCTestCase {
         XCTAssertEqual(bounds.height, 14.5, accuracy: 0.01)
     }
 
+    // MARK: The trailing swap ([feedback composer-send-crossfade-2026-10-30])
+
+    /// Jacob's one hard rule: typing trades the grey mic + white call pill for
+    /// the send arrow, and the text field must not move or resize while it
+    /// happens. Before the swap was animated the mic was inside an `if`, so the
+    /// field grew by a 44 pt frame and the 2 pt gap the moment a character
+    /// landed. The mic keeps its frame now, so the trailing cluster is one
+    /// width whatever the field holds.
+    func testTheTrailingControlsTakeOneWidthWhateverTheFieldHolds() {
+        // 132 + 6 + 120 + 26 px: the mic's hit frame, the gap, the pill, the inset.
+        XCTAssertEqual(Theme.composerTrailingWidth * 3, 284, accuracy: 0.001)
+        XCTAssertEqual(
+            Theme.composerTrailingWidth,
+            Theme.micHitWidth + Theme.micPillGap + Theme.actionPillWidth + Theme.actionPillTrailing)
+        // `scaleEffect` does not change a view's layout size, so the mic's slot
+        // is this wide at every point of the swap, not only at its two ends.
+        XCTAssertGreaterThan(Theme.composerSwapScale, 0)
+        XCTAssertLessThan(Theme.composerSwapScale, 1)
+    }
+
+    /// Quick, and inside the 150–200 ms band: fast enough that the arrow being
+    /// tappable from the first frame is not something the eye has to wait for.
+    func testTheSwapIsQuick() {
+        XCTAssertGreaterThanOrEqual(Theme.composerSwapDuration, 0.15)
+        XCTAssertLessThanOrEqual(Theme.composerSwapDuration, 0.2)
+    }
+
+    /// Typing fast, deleting fast or clearing the field mid-swap must never
+    /// leave the trailing slot without a control that answers a tap. The pill
+    /// is mounted in every state — the swap only trades the mark inside it —
+    /// so `sendShown` says which mark, and the property that can break is the
+    /// mic's: it may only leave once the mark has become the arrow. Both marks
+    /// show at once in two states, and neither is a glitch: a recording, which
+    /// wants the mic to finish it and the arrow to send it, and an empty draft
+    /// in a server channel, which has no call to offer (C1) so the arrow is
+    /// already there, dimmed.
+    func testTheMicOnlyLeavesOnceThePillHasBecomeSend() {
+        for draftEmpty in [true, false] {
+            for recording in [true, false] {
+                for isChannel in [true, false] {
+                    // An empty draft cannot send; a non-empty one always can.
+                    let mic = ComposerTrailing.micShown(draftEmpty: draftEmpty, recording: recording)
+                    let send = ComposerTrailing.sendShown(
+                        canSend: !draftEmpty, recording: recording, isChannel: isChannel)
+                    let state = "empty \(draftEmpty) recording \(recording) channel \(isChannel)"
+                    if !mic {
+                        XCTAssertTrue(send, "the mic left before the arrow arrived: \(state)")
+                    }
+                    XCTAssertEqual(mic && send, recording || (draftEmpty && isChannel),
+                                   "both marks at once: \(state)")
+                }
+            }
+        }
+        // Pending attachments on an empty draft: the mic is still there, and
+        // the pill sends them.
+        XCTAssertTrue(ComposerTrailing.micShown(draftEmpty: true, recording: false))
+        XCTAssertTrue(ComposerTrailing.sendShown(canSend: true, recording: false, isChannel: false))
+    }
+
     func testMicGlyphIsGroksFilledMicWithoutABase() {
         // Box 36 × 49 px; head 17 × 31 px; cradle 36 px wide with a 4.5 px stroke; the
         // glyph's centre sits 72 px before the pill (22 pt hit half-width + 2 pt).
@@ -164,7 +223,9 @@ final class ComposerMetricsTests: XCTestCase {
             ("plusFieldGap", Theme.plusFieldGap), ("composerInsetKeyboard", Theme.composerInsetKeyboard),
             ("composerTextInset", Theme.composerTextInset), ("composerTextPadY", Theme.composerTextPadY),
             ("actionPillWidth", Theme.actionPillWidth), ("actionPillHeight", Theme.actionPillHeight),
-            ("actionPillTrailing", Theme.actionPillTrailing), ("micGlyphWidth", Theme.micGlyphWidth),
+            ("actionPillTrailing", Theme.actionPillTrailing),
+            ("composerTrailingWidth", Theme.composerTrailingWidth),
+            ("micGlyphWidth", Theme.micGlyphWidth),
             ("micGlyphHeight", Theme.micGlyphHeight), ("composerBottomKeyboard", Theme.composerBottomKeyboard),
             ("presenceAvatar", Theme.presenceAvatar), ("presenceAvatarOffset", Theme.presenceAvatarOffset),
             ("presenceGap", Theme.presenceGap), ("presenceBottomGap", Theme.presenceBottomGap),
