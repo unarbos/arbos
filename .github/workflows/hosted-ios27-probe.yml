@@ -46,18 +46,24 @@ jobs:
       - name: ChatSearch cases on iOS 27.0
         working-directory: apps/ios/Arbos
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          mkdir -p build
           xcodebuild test -project Arbos.xcodeproj -scheme Arbos -configuration Debug \
             -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath build/dd \
             -clonedSourcePackagesDirPath build/spm -collect-test-diagnostics never \
-            -only-testing:ArbosUITests/ChatSearchCloseUITests CODE_SIGNING_ALLOWED=NO 2>&1 | tee build/xcodebuild-test.log \
-            | grep -E "Test Case .*(passed|failed)|error: -\[|Executed|OS:|\*\* TEST|xcodebuild: error" || true
-          exit "${PIPESTATUS[0]}"
+            -resultBundlePath build/ios27-chatsearch.xcresult \
+            -only-testing:ArbosUITests/ChatSearchCloseUITests CODE_SIGNING_ALLOWED=NO > build/xcodebuild-test.log 2>&1
+          rc=$?
+          grep -E "[Tt]est [Cc]ase .*(passed|failed)|error|Executed|\*\* (TEST|BUILD)" build/xcodebuild-test.log | cut -c1-300 | tail -60
+          echo "xcodebuild exit=$rc"
+          exit "$rc"
       - name: Keep the log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: macos15-ios27-chatsearch-${{ github.sha }}
-          path: apps/ios/Arbos/build/xcodebuild-*.log
+          path: |
+            apps/ios/Arbos/build/xcodebuild-*.log
+            apps/ios/Arbos/build/ios27-chatsearch.xcresult
           if-no-files-found: ignore
           retention-days: 14
