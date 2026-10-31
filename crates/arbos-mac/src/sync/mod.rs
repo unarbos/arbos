@@ -1936,8 +1936,13 @@ mod collective_tests {
         assert!(mentions_me_directly("@@jacob", "jacob"));
         assert!(mentions_me_directly("mail me@jacob.com", "jacob"));
 
-        // Every occurrence is scanned, not just the first.
+        // Every occurrence is scanned, not just the first, and the scan
+        // resumes past the whole needle rather than one character into it. So
+        // a continued handle earlier in a line can neither hide a real mention
+        // after it nor be mistaken for one itself.
         assert!(mentions_me_directly("@jacobs and @jacob", "jacob"));
+        assert!(mentions_me_directly("@jacobson and @jacob", "jacob"));
+        assert!(!mentions_me_directly("@jacobson and @jacobs", "jacob"));
 
         // The handle is trimmed the way the relay trims it.
         assert!(mentions_me_directly("ping @jacob", "@jacob"));
