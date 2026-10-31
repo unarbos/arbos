@@ -530,7 +530,7 @@ typed text (search is the palette); the segment alone scopes it.
 |---|---|---|
 | Capsule height / gap | 32 / 4 | 32 / 4 |
 | Label | `TEXT_BODY` 15, semibold when selected | `Theme.body` 17, semibold when selected |
-| Side padding | **10** (`FILTER_PAD_X`; four segments at 16 overflow the 296 pt default sidebar) | 16 |
+| Side padding | **10** (`FILTER_STEPS[0].pad_x`; four segments at 16 overflow the 296 pt default sidebar, and a narrower column steps down the ladder below) | 16 |
 | Selected fill / text | `bubble_assistant` / `text` | `bubbleAssistant` / `text` |
 | Other labels | `text_muted` | `muted` |
 | Scope | All: everything · Agents: my agents (not shared-in) · People: DMs + groups · Servers: servers only | same (`HomeView.homeRows`) |

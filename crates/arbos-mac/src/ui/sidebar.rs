@@ -277,11 +277,11 @@ pub(crate) const STRIP_GAP: f32 = CONTROL_GAP;
 /// Grok's do (rows are inset 8; 12 − 8).
 pub(crate) const STRIP_INSET: f32 = 12.0;
 /// The filter capsules under the strip: the iPhone `PaneTabs` geometry (32 pt
-/// capsule, 4 pt gap) with 10 pt side padding instead of the iPhone's 16 —
-/// four segments at 16 would be wider than the 296 pt default sidebar.
+/// capsule) with the 4 pt gap and 10 pt side padding of the ladder's first
+/// step instead of the iPhone's 16 — four segments at 16 would be wider than
+/// the 296 pt default sidebar. A narrower column steps down the ladder
+/// (`sidebar_fit::FILTER_STEPS`).
 pub(crate) const FILTER_HEIGHT: f32 = 32.0;
-pub(crate) const FILTER_GAP: f32 = sidebar_fit::FILTER_STEPS[0].gap;
-pub(crate) const FILTER_PAD_X: f32 = sidebar_fit::FILTER_STEPS[0].pad_x;
 /// Space between the strip's bottom edge and the capsules: Grok Bot's first
 /// chat card starts 64 pt under the window top, 16 under its discs (bottom
 /// 48). The filter is the first thing under our strip, so its capsules start
@@ -3088,6 +3088,9 @@ mod strip_tests {
         TRAFFIC_LIGHT_LINE, TRAFFIC_LIGHT_POSITION,
     };
 
+    /// The fit ladder's first step — the default column's capsule geometry.
+    const ROOMY: crate::ui::sidebar_fit::FilterFit = crate::ui::sidebar_fit::FILTER_STEPS[0];
+
     /// Grok Bot's strip, measured on `ref-grok-round-search-plus.png` (project
     /// store, 2 px/pt, window top at image row 2) — Jacob 2026-10-24: "the
     /// top bar on mac is now too high. Make it identical to the size and
@@ -3198,7 +3201,7 @@ mod strip_tests {
                 .flex()
                 .items_center()
                 .justify_center()
-                .gap(px(super::FILTER_GAP))
+                .gap(px(ROOMY.gap))
                 .pt(px(FILTER_TOP))
                 .pb(px(super::FILTER_BOTTOM))
                 .px(px(8.0))
@@ -3207,7 +3210,7 @@ mod strip_tests {
                         Box::leak(format!("capsule-{}", f.label()).into_boxed_str());
                     div()
                         .h(px(FILTER_HEIGHT))
-                        .px(px(super::FILTER_PAD_X))
+                        .px(px(ROOMY.pad_x))
                         .debug_selector(move || sel.into())
                         .child(f.label())
                 }));
@@ -3443,14 +3446,9 @@ mod strip_tests {
             let row = super::filter_row_box(fit)
                 .debug_selector(|| "filter-row".into())
                 .track_scroll(&self.scroll)
-                .children(
-                    ListFilter::ALL
-                        .into_iter()
-                        .enumerate()
-                        .map(|(ix, f)| {
-                            super::filter_capsule_box(f, ix, count, fit, ix == self.selected)
-                        }),
-                );
+                .children(ListFilter::ALL.into_iter().enumerate().map(|(ix, f)| {
+                    super::filter_capsule_box(f, ix, count, fit, ix == self.selected)
+                }));
             div()
                 .w(px(self.width))
                 .h(px(120.0))
@@ -3493,7 +3491,11 @@ mod strip_tests {
     fn every_capsule_is_whole_at_every_width_the_handle_allows(cx: &mut TestAppContext) {
         use crate::ui::theme::{SIDEBAR_WIDTH, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN};
 
-        cx.update(|cx| cx.set_global(crate::ui::theme::Theme::dark(crate::ui::theme::Surface::Matte)));
+        cx.update(|cx| {
+            cx.set_global(crate::ui::theme::Theme::dark(
+                crate::ui::theme::Surface::Matte,
+            ))
+        });
         for width in [
             SIDEBAR_WIDTH_MIN,
             225.0,
@@ -3538,7 +3540,11 @@ mod strip_tests {
     fn selecting_a_filter_moves_no_capsule(cx: &mut TestAppContext) {
         use crate::ui::theme::{SIDEBAR_WIDTH, SIDEBAR_WIDTH_MIN};
 
-        cx.update(|cx| cx.set_global(crate::ui::theme::Theme::dark(crate::ui::theme::Surface::Matte)));
+        cx.update(|cx| {
+            cx.set_global(crate::ui::theme::Theme::dark(
+                crate::ui::theme::Surface::Matte,
+            ))
+        });
         for width in [SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH] {
             let mut first: Option<Vec<(f32, f32)>> = None;
             for selected in 0..ListFilter::ALL.len() {
@@ -3565,7 +3571,8 @@ mod strip_tests {
                 match &first {
                     None => first = Some(boxes),
                     Some(want) => assert_eq!(
-                        &boxes, want,
+                        &boxes,
+                        want,
                         "{width} pt, {} selected: every capsule is where it was with All selected",
                         ListFilter::ALL[selected].label()
                     ),

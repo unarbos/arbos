@@ -137,24 +137,32 @@ pub struct FilterFit {
 /// the column's edge. The row did scroll — that was the 2026-10-27 answer —
 /// but a filter you must find by swiping a row with no handle on it is the
 /// same complaint one layer down, so the capsules now **fit** instead. The
-/// first step is the default column's look, unchanged; the two under it trade
-/// padding and then type size, as a row trades its time away before its name
-/// (`RowTime`). Type sizes are `TEXT_BODY` 15 → 13.5 → 12.5; 12.5 is still
-/// over the 11.5 the rows' time reads at.
-pub const FILTER_STEPS: [FilterFit; 3] = [
+/// first step is the default column's look, unchanged; the three under it
+/// give up padding and a point of type at a time, as a row gives up its
+/// `@handle` and then its time before its name (`RowTime`). Type sizes are
+/// `TEXT_BODY` 15 → 14 → 13 → 12; the last is still over the 11.5 the rows'
+/// time reads at, and it leaves room at [`SNAP_WIDTH`] on the widest face the
+/// app has been measured against (the Linux build's fall-back, some 4 % wider
+/// than the Mac's `.SystemUIFont`).
+pub const FILTER_STEPS: [FilterFit; 4] = [
     FilterFit {
         text_size: TEXT_BODY,
         pad_x: 10.0,
         gap: 4.0,
     },
     FilterFit {
-        text_size: 13.5,
-        pad_x: 7.0,
+        text_size: 14.0,
+        pad_x: 8.0,
+        gap: 4.0,
+    },
+    FilterFit {
+        text_size: 13.0,
+        pad_x: 6.0,
         gap: 3.0,
     },
     FilterFit {
-        text_size: 12.5,
-        pad_x: 5.0,
+        text_size: 12.0,
+        pad_x: 4.0,
         gap: 2.0,
     },
 ];
@@ -473,7 +481,10 @@ mod tests {
         let labels = [24.0, 50.0, 48.0, 55.0];
         let roomy = FILTER_STEPS[0];
         let tight = FILTER_STEPS[FILTER_STEPS.len() - 1];
-        assert_eq!(roomy.text_size, TEXT_BODY, "the default column is unchanged");
+        assert_eq!(
+            roomy.text_size, TEXT_BODY,
+            "the default column is unchanged"
+        );
         assert_eq!(roomy.pad_x, 10.0);
         assert_eq!(roomy.gap, 4.0);
         // Every step down is narrower than the one above it, and none grows.
@@ -488,7 +499,22 @@ mod tests {
             assert!(pair[1].pad_x <= pair[0].pad_x);
             assert!(pair[1].gap <= pair[0].gap);
         }
-        assert_eq!(filter_fit(&labels, SIDEBAR_WIDTH), roomy, "the default column");
+        // The tightest step fits the narrowest column for any four labels up
+        // to 207 pt wide together at TEXT_BODY semibold. The Linux build's
+        // face — the widest the row has been measured on — totals 198, and
+        // the Mac's `.SystemUIFont` is narrower than that, so both have room
+        // to spare before the scroll underneath has anything to do.
+        let widest = [207.0 / 4.0; 4];
+        assert!(
+            tight.row_width(&widest) <= SNAP_WIDTH,
+            "the last step needs {} at the snap width",
+            tight.row_width(&widest)
+        );
+        assert_eq!(
+            filter_fit(&labels, SIDEBAR_WIDTH),
+            roomy,
+            "the default column"
+        );
         assert_eq!(filter_fit(&labels, SIDEBAR_WIDTH_MAX), roomy);
         assert_eq!(
             filter_fit(&labels, roomy.row_width(&labels)),
@@ -498,7 +524,7 @@ mod tests {
         assert_eq!(
             filter_fit(&labels, roomy.row_width(&labels) - 1.0),
             FILTER_STEPS[1],
-            "one point short: the next step down"
+            "one point short of the roomiest: the next step down"
         );
         assert_eq!(
             filter_fit(&labels, 10.0),
