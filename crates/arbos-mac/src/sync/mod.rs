@@ -949,6 +949,21 @@ pub enum ClientCommand {
     MarkRead {
         chat_id: Id,
     },
+    /// A direct `@mention` was actually on screen, so move the user's mention
+    /// cursor to it (`PUT /chats/{id}/mentions/read {message_id}`).
+    ///
+    /// Deliberately **not** folded into [`Self::MarkRead`], and the route it
+    /// calls deliberately does not go through the relay's `clear_on_read`:
+    /// that payload makes every other device run `AppModel.clearingChat`,
+    /// which zeroes the chat's unread **message** count. Seeing a mention
+    /// must never mark the chat's messages read.
+    MarkMentionsRead {
+        chat_id: Id,
+        /// The newest mention the user has now seen. The relay resolves it to
+        /// a `chat_events` row and merges the cursor with `MAX`, so the mark
+        /// can only move forward.
+        message_id: Id,
+    },
     /// Name a people group (`PATCH /chats/{id} {title}`), any human member may.
     RenameGroup {
         chat_id: Id,
@@ -1560,6 +1575,23 @@ pub fn is_collective(handle: &str) -> bool {
     handle.eq_ignore_ascii_case(COLLECTIVE_HERE) || handle.eq_ignore_ascii_case(COLLECTIVE_AGENTS)
 }
 
+/// Does `text` mention `me_handle` **directly** — `@<handle>` as a whole
+/// token in the prose? Only a direct mention earns the `@` mark (Jacob,
+/// 2026-10-31); `@here` arrives as a push and shows nothing.
+///
+/// The text is the only place the two can be told apart. A sent row's
+/// resolved `mentions` list cannot: [`expand_collectives`] writes
+/// `user:<id>` for every person `@here` reaches, so a collective looks
+/// exactly like a direct mention there. A mention chip also serialises as
+/// `@<handle>` ([`crate::ui::mention::MentionToken::plain`]), so a picked
+/// chip and a typed handle both land here.
+pub fn mentions_me_directly(text: &str, me_handle: &str) -> bool {
+    if me_handle.is_empty() {
+        return false;
+    }
+    text_has_at_token(&text.to_lowercase(), &me_handle.to_lowercase())
+}
+
 /// `@token` as a whole word in `lower` (lower-case text).
 pub fn text_has_at_token(lower: &str, token: &str) -> bool {
     let needle = format!("@{token}");
@@ -1780,6 +1812,44 @@ mod collective_tests {
         assert!(!text_has_at_token("mail a@here.com", "here"));
         assert!(!text_has_at_token("@agents-2", "agents"));
         assert!(is_collective("Here") && is_collective("agents") && !is_collective("sam"));
+    }
+
+    /// Only a direct `@mention` earns the `@` mark (Jacob, 2026-10-31).
+    ///
+    /// The second half of this test is the part that matters: `@here` reaches
+    /// me, puts `user:gh_me` in the sent row's resolved mentions, and wakes
+    /// my phone — and still must not light the mark. That is why the test is
+    /// on the text and not on the resolved list, which cannot tell the two
+    /// apart.
+    #[test]
+    fn only_a_direct_mention_of_me_counts() {
+        assert!(mentions_me_directly("can you look @jacob", "jacob"));
+        assert!(mentions_me_directly("@Jacob — one more", "jacob"));
+        assert!(mentions_me_directly("ping @mira-k please", "mira-k"));
+
+        let here = "shipping in ten @here";
+        assert!(
+            !mentions_me_directly(here, "jacob"),
+            "@here reaches me and still shows no mark"
+        );
+        assert_eq!(
+            expand_collectives(&space(), here, &["here".to_string()], "gh_sam"),
+            vec![
+                "user:gh_me",
+                "user:gh_mira",
+                "agent:p-comms",
+                "agent:p-test"
+            ],
+            "…even though it resolves to me by id, which is why the text decides"
+        );
+
+        assert!(!mentions_me_directly("all hands @everyone", "jacob"));
+        assert!(!mentions_me_directly("@jacobs-ladder", "jacob"));
+        assert!(!mentions_me_directly("mail jacob@example.com", "jacob"));
+        assert!(
+            !mentions_me_directly("@jacob", ""),
+            "signed out: nothing is a mention of me"
+        );
     }
 }
 

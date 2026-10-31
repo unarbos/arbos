@@ -46,9 +46,9 @@ use super::doc::ChatDoc;
 use super::dto::{
     account_view_from_me, apply_machine_status, chat_from_create, chat_from_dto,
     connectors_view_from_dto, credentials_from_token, local_view_from_dto, merge_chats,
-    merged_unread, model_ids_from_dto, people_space_from, project_from_dto, relay_unread_for,
-    remap_queued_send_targets, routine_from_dto, secrets_view_from_dto, skill_from_dto,
-    transcript_text, voices_from_dto,
+    merged_mentions, merged_unread, model_ids_from_dto, people_space_from, project_from_dto,
+    relay_mentions_for, relay_unread_for, remap_queued_send_targets, routine_from_dto,
+    secrets_view_from_dto, skill_from_dto, transcript_text, voices_from_dto, RelayUnread,
 };
 use super::store::{self, Store};
 use super::user_error::{ErrorClass, Fault, UserError};
@@ -235,6 +235,9 @@ struct Shared {
     /// When this device last sent `PUT /chats/{id}/read` (ms). Used so a
     /// registry refresh does not resurrect unread before the relay catches up.
     local_read_at: Mutex<HashMap<Id, i64>>,
+    /// When this device last sent `PUT /chats/{id}/mentions/read` (ms), so a
+    /// refresh that overlapped it does not light the `@` again.
+    local_mention_read_at: Mutex<HashMap<Id, i64>>,
     /// When this Mac last archived or renamed a chat (ms). A refresh that
     /// started earlier must not overwrite that field with the relay's older value.
     local_changed_at: Mutex<HashMap<Id, u64>>,
@@ -859,6 +862,7 @@ impl SyncSource for RelaySource {
                 room_seq: Mutex::new(HashMap::new()),
                 caught_up: Mutex::new(HashSet::new()),
                 local_read_at: Mutex::new(HashMap::new()),
+                local_mention_read_at: Mutex::new(HashMap::new()),
                 local_changed_at: Mutex::new(HashMap::new()),
                 pending_new_chats: Mutex::new(HashMap::new()),
                 avatars_done: Mutex::new(HashSet::new()),
@@ -2531,18 +2535,27 @@ fn people_error(err: &anyhow::Error) -> String {
 }
 
 /// `GET /projects` then `GET /projects/{id}` for chats, models and spend.
-/// `GET /me/unread` → chat id → unread message count, for every chat the relay counts
-/// unread in. The list is the user's one read cursor (shared by all their devices; own
-/// messages never count), so a chat it does not name has nothing unread. `None` when the
-/// relay did not answer it (older relay, transport error): the per-chat flag decides then.
-async fn fetch_unread_map(shared: &Arc<Shared>) -> Option<HashMap<Id, u32>> {
+/// `GET /me/unread` → chat id → unread messages and unread direct `@mentions`, for every
+/// chat the relay counts either in. The list is the user's one read cursor (shared by all
+/// their devices; own messages never count), so a chat it does not name has nothing unread.
+/// `None` when the relay did not answer it (older relay, transport error): the per-chat flag
+/// decides the message count then, and the mention mark stays as it was.
+async fn fetch_unread_map(shared: &Arc<Shared>) -> Option<HashMap<Id, RelayUnread>> {
     match shared.get_json("/me/unread").await {
         Ok(v) => match serde_json::from_value::<UnreadDto>(v) {
             Ok(dto) => Some(
                 dto.chats
                     .into_iter()
-                    .filter(|c| c.unread > 0)
-                    .map(|c| (c.chat_id, c.unread as u32))
+                    .filter(|c| c.unread > 0 || c.mentions > 0)
+                    .map(|c| {
+                        (
+                            c.chat_id,
+                            RelayUnread {
+                                messages: c.unread.max(0) as u32,
+                                mentions: c.mentions.max(0) as u32,
+                            },
+                        )
+                    })
                     .collect(),
             ),
             Err(err) => {
@@ -2790,6 +2803,7 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
     // Keep local-only tabs (minted, not yet created) and recent local edits.
     // Unread comes from GET /me/unread (and people `dto.unread`) merged with local read marks.
     let local_reads = shared.local_read_at.lock().unwrap().clone();
+    let local_mention_reads = shared.local_mention_read_at.lock().unwrap().clone();
     let local_changed = shared.local_changed_at.lock().unwrap().clone();
     let pending_ids: HashSet<Id> = shared
         .pending_new_chats
@@ -2807,6 +2821,13 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
             &local_changed,
             &pending_ids,
         );
+        // The relay's chat rows carry no mention count (it rides on
+        // `GET /me/unread`), so the mark this device already holds has to be
+        // read off the local list before the merge overwrites it.
+        let held_mentions: HashMap<Id, u32> = local
+            .iter()
+            .map(|c| (c.id.clone(), c.mention_count))
+            .collect();
         for c in &mut merged {
             let relay_count =
                 relay_unread_for(unread_by_chat.as_ref(), &c.id, c.unread, c.unread_count);
@@ -2814,6 +2835,13 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
             let count = merged_unread(relay_count, local_read, c.last_message_at as i64);
             c.unread_count = count;
             c.unread = count > 0;
+            let held = held_mentions.get(&c.id).copied().unwrap_or(0);
+            c.mention_count = merged_mentions(
+                relay_mentions_for(unread_by_chat.as_ref(), &c.id, held),
+                held,
+                local_mention_reads.get(&c.id).copied(),
+                c.last_message_at as i64,
+            );
         }
         align_people_archive(&mut projects, &merged);
         *local = merged;
@@ -5462,6 +5490,37 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .await;
             });
         }
+        ClientCommand::MarkMentionsRead {
+            chat_id,
+            message_id,
+        } => {
+            // The messages stay exactly as they were. This route is separate
+            // from `/read` for that reason, and it does not notify the other
+            // devices: they pick the cleared mark up on their next
+            // `GET /me/unread`. Pushing it would mean `clear_on_read`, whose
+            // payload zeroes the chat's unread message count everywhere.
+            {
+                let mut chats = shared.chats.lock().unwrap();
+                if let Some(c) = chats.iter_mut().find(|c| c.id == chat_id) {
+                    c.mention_count = c.mention_count.saturating_sub(1);
+                }
+            }
+            shared
+                .local_mention_read_at
+                .lock()
+                .unwrap()
+                .insert(chat_id.clone(), now_ms() as i64);
+            emit_chats(shared);
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let _ = shared
+                    .put_json(
+                        &format!("/chats/{chat_id}/mentions/read"),
+                        json!({ "message_id": message_id }),
+                    )
+                    .await;
+            });
+        }
         ClientCommand::SearchPeople { query } => {
             let shared = shared.clone();
             tokio::spawn(async move {
@@ -6688,6 +6747,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         participants: Vec::new(),
                         unread: false,
                         unread_count: 0,
+                        mention_count: 0,
                         last_message_at: now_ms(),
                         archived_at: None,
                     });
@@ -9761,6 +9821,7 @@ mod people_archive_tests {
             is_system: false,
             unread: false,
             unread_count: 0,
+            mention_count: 0,
             last_message_at: 0,
             archived_at,
             kind: ChatKind::Chat,

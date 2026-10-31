@@ -46,6 +46,29 @@ pub fn unread_pill(count: usize, theme: &Theme) -> Div {
         .child(unread_label(count))
 }
 
+/// The unread-mention mark: [`unread_pill`]'s capsule with `@` where the
+/// digits go (Jacob, 2026-10-31). It carries no number — the count lives on
+/// the transcript's jump capsule, where it cannot be read as arithmetic
+/// against the message count beside it.
+///
+/// `@` is typed, not an icon: the symbol pack has no `at` glyph.
+pub fn mention_pill(theme: &Theme) -> Div {
+    div()
+        .h(px(UNREAD_PILL_H))
+        .min_w(px(UNREAD_PILL_H))
+        .px(px(5.0))
+        .rounded_full()
+        .bg(theme.accent)
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(UNREAD_PILL_TEXT))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(gpui::white())
+        .debug_selector(|| "mention-pill".into())
+        .child("@")
+}
+
 /// What a machine state shows instead of its old coloured dot: the spinner
 /// while it wakes, the red `!` glyph on a fault, nothing at rest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

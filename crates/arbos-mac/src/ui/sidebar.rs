@@ -739,6 +739,11 @@ pub(crate) struct RowView {
     pub(crate) unread: bool,
     /// Missed messages across the space's tabs (≥ 1 whenever `unread`).
     pub(crate) unread_count: usize,
+    /// An unread direct `@mention` of the viewer waits in one of the space's
+    /// tabs. Independent of `unread`: a read chat can still carry one. Read
+    /// by the expanded row only — the collapsed rail has one badge slot and
+    /// no approved design for a second mark in it.
+    pub(crate) mentioned: bool,
     pub(crate) typing: bool,
     pub(crate) preview: String,
     pub(crate) time: String,
@@ -946,6 +951,10 @@ fn unsorted_entries(shell: &Shell, cx: &Context<Shell>) -> Vec<ListEntry> {
                 .iter()
                 .map(|c| c.missed_count())
                 .sum(),
+            mentioned: state
+                .visible_tabs(&p.id)
+                .iter()
+                .any(|c| c.mention_count > 0),
             typing: !state.typing_in(&p.id).is_empty(),
             preview: hit.reason.unwrap_or_else(|| preview(state, p)),
             time: time_label(last_activity(state, p)),
@@ -2250,6 +2259,7 @@ fn render_row(
         streaming,
         unread,
         unread_count,
+        mentioned,
         typing,
         preview,
         time,
@@ -2449,10 +2459,12 @@ fn render_row(
                         // braille spinner while the chat's agent works (one shared
                         // ticker); the unread count pill; nothing for a person typing
                         // (the preview says "typing…") or a quiet read chat. Never a
-                        // coloured dot.
+                        // coloured dot. An unread direct `@mention` adds its mark in
+                        // front of whatever the cell shows (Jacob, 2026-10-31).
                         .children(row_status_cell(
                             RowStatus::of(streaming, typing, unread),
                             unread_count,
+                            mentioned,
                             &id,
                             theme,
                             cx,
@@ -2463,11 +2475,22 @@ fn render_row(
 
 /// What the status cell under a row's time shows (Jacob, 2026-10-27,
 /// [feedback working-braille-spinner-mac-2026-10-27] + [feedback
-/// neon-dots-mac-2026-10-27]). One cell, one mark, never a coloured dot: a
-/// person typing shows nothing in the cell (the spinner is the *agent's*
-/// working sign, never a human's; the preview reads "typing…"); the spinner
-/// while the chat's agent works; the unread **count pill** otherwise; a quiet
-/// read chat shows nothing.
+/// neon-dots-mac-2026-10-27]): a person typing shows nothing in the cell (the
+/// spinner is the *agent's* working sign, never a human's; the preview reads
+/// "typing…"); the spinner while the chat's agent works; the unread **count
+/// pill** otherwise; a quiet read chat shows nothing. Never a coloured dot —
+/// that part of the rule is untouched.
+///
+/// **The cell may hold two marks.** The old "one cell, one mark" rule was
+/// overruled by Jacob on 2026-10-31: an unread direct `@mention` draws the
+/// `@` pill BESIDE the unread count, 4 pt apart, because a chat you were
+/// named in has to be findable without opening it. Do not "fix" this back to
+/// one mark. The `@` carries no number of its own, so the pair is a mark and
+/// a count rather than two counts to compare; the mention count lives on the
+/// transcript's jump capsule instead. The two are separate state, so the `@`
+/// can stand alone on a chat whose messages are all read — opening a chat
+/// reads its messages, and only scrolling a mention onto the screen clears
+/// the mark.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowStatus {
     /// A person is typing: no mark in the cell (the preview carries it).
@@ -2495,14 +2518,19 @@ impl RowStatus {
     }
 }
 
+/// How far apart the `@` mark and the mark beside it sit — the row's own
+/// inner gap family (2 / 4 / 6 pt).
+const STATUS_MARK_GAP: f32 = 4.0;
+
 fn row_status_cell(
     status: RowStatus,
     unread_count: usize,
+    mentioned: bool,
     id: &Id,
     theme: &Theme,
     cx: &mut App,
 ) -> Option<AnyElement> {
-    match status {
+    let beside: Option<AnyElement> = match status {
         RowStatus::Typing | RowStatus::Quiet => None,
         RowStatus::Working => Some(
             crate::ui::working::glyph(theme, cx)
@@ -2514,7 +2542,20 @@ fn row_status_cell(
                 .debug_selector(|| format!("row-status-unread-{id}"))
                 .into_any_element(),
         ),
+    };
+    if !mentioned {
+        return beside;
     }
+    Some(
+        div()
+            .flex()
+            .items_center()
+            .gap(px(STATUS_MARK_GAP))
+            .debug_selector(|| format!("row-status-mentioned-{id}"))
+            .child(crate::ui::marks::mention_pill(theme))
+            .children(beside)
+            .into_any_element(),
+    )
 }
 
 /// The right-click menu of a sidebar row, anchored at the click. An agent
@@ -3974,6 +4015,30 @@ mod status_cell_tests {
         ) -> BoxFuture<'static, anyhow::Result<()>> {
             Box::pin(std::future::pending())
         }
+    }
+
+    /// The rule as code for the mark that shares the cell: `RowStatus` is
+    /// unchanged by the `@`, because the two are separate state. The mention
+    /// mark rides alongside whatever the status picked, including `Quiet` —
+    /// that is D4, the chat whose messages are read and whose mention is not.
+    #[test]
+    fn the_mention_mark_is_beside_the_status_not_instead_of_it() {
+        // Jacob, 2026-10-31. The old rule allowed one mark per cell.
+        assert_eq!(
+            RowStatus::of(false, false, true),
+            RowStatus::Unread,
+            "an unread chat still picks the count pill; the @ is added to it"
+        );
+        assert_eq!(
+            RowStatus::of(false, false, false),
+            RowStatus::Quiet,
+            "a read chat still picks nothing; the @ then stands alone"
+        );
+        assert_eq!(
+            RowStatus::of(true, false, true),
+            RowStatus::Working,
+            "the spinner is unaffected; the @ sits in front of it"
+        );
     }
 
     /// The rule as code: the agent's spinner beats unread, unread beats a

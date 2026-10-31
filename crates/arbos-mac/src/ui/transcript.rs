@@ -795,6 +795,13 @@ const SPRING_DAMPING: f32 = 0.55;
 pub const STICK_THRESHOLD_PX: f32 = 70.0;
 /// How far above the end the user must be before the ↓ button shows.
 const JUMP_BUTTON_AFTER_PX: f32 = 160.0;
+/// The `@` jump capsule's inset from the transcript's right edge. It sits in
+/// its own corner so it never shares the centre slot with ↓.
+const MENTION_JUMP_RIGHT_PX: f32 = 16.0;
+/// Inside the capsule: the `@`, this gap, then the count pill.
+const MENTION_JUMP_GAP: f32 = 6.0;
+const MENTION_JUMP_PAD: f32 = 12.0;
+const MENTION_GLYPH_SIZE: f32 = 15.0;
 /// ↓ from this close to the end (in viewport heights), with every row between
 /// already laid out, glides on the spring; from further away it lands on the
 /// newest page at once ([`Transcript::jump_to_latest`]).
@@ -1230,6 +1237,62 @@ impl Transcript {
         ))
     }
 
+    /// How much of a mention's row has to be readable before it counts as
+    /// seen: the whole row for a short one, about a line of a tall one.
+    const MENTION_SEEN_MIN_PX: f32 = 24.0;
+
+    /// Clear the `@` for an unread mention the user has actually looked at.
+    ///
+    /// "Seen" is the viewport rule (Jacob, 2026-10-31): a row of the mention
+    /// was painted inside the transcript last frame, clear of the header's
+    /// fade band — text under the fade is not readable — in a window that has
+    /// focus. Scrolling past is not enough on its own and neither is opening
+    /// the chat, which is why this does not ride on the read mark.
+    ///
+    /// Only the **oldest** unread mention is reported per pass. The relay
+    /// merges the cursor with `MAX`, so clearing a newer one first would
+    /// swallow the older ones silently; the jump capsule visits them
+    /// oldest-first for the same reason. Reporting one lowers the count on
+    /// the spot, which promotes the next, so a screenful clears over the next
+    /// few frames rather than all at once.
+    fn clear_seen_mentions(&mut self, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.chat_id.clone() else {
+            return;
+        };
+        let state = self.state.read(cx);
+        if !state.window_active {
+            return;
+        }
+        let Some(oldest) = state.unread_mentions_in(&chat_id).into_iter().next() else {
+            return;
+        };
+        if !self.message_is_readable(&oldest) {
+            return;
+        }
+        self.state
+            .update(cx, |s, cx| s.mention_seen(&chat_id, &oldest, cx));
+    }
+
+    /// Was a row of `message_id` painted in the readable part of the viewport
+    /// last frame — below the header's fade band, above the bottom edge?
+    fn message_is_readable(&self, message_id: &str) -> bool {
+        let measured = self.measured.borrow();
+        let viewport = measured.viewport;
+        let top = viewport.top() + px(HEADER_FADE_BAND);
+        let bottom = viewport.bottom();
+        if bottom <= top {
+            return false;
+        }
+        self.rows
+            .iter()
+            .filter(|r| r.message_id == message_id)
+            .filter_map(|r| measured.rows.get(&r.id))
+            .any(|row| {
+                let shown = row.bottom().min(bottom) - row.top().max(top);
+                shown >= row.size.height.min(px(Self::MENTION_SEEN_MIN_PX))
+            })
+    }
+
     /// An invisible, out-of-flow child that records where its parent was
     /// painted this frame (runs in prepaint with the parent's bounds): a row
     /// under `Some(row id)`, the transcript's viewport under `None`.
@@ -1443,6 +1506,20 @@ impl Transcript {
             self.snap_to_end(!cx.reduce_motion());
         }
         cx.notify();
+    }
+
+    /// The `@` capsule: land on the oldest unread mention. Goes through
+    /// `AppState::reveal_reply`, the one landing mechanism the search hits
+    /// and quote clicks already use (scroll plus the brief highlight), so
+    /// arriving at a mention looks like arriving anywhere else. The mark
+    /// itself is not cleared here — the viewport rule does that once the row
+    /// is actually on screen.
+    fn jump_to_mention(&mut self, message_id: Id, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.chat_id.clone() else {
+            return;
+        };
+        self.state
+            .update(cx, |s, cx| s.reveal_reply(chat_id, message_id, cx));
     }
 
     /// Whether the spring can glide to the end without laying out history:
@@ -3687,6 +3764,20 @@ impl Render for Transcript {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.step_spring(window, cx);
         let theme = Theme::of(cx).clone();
+        // The viewport rule runs off the last frame's geometry, so it belongs
+        // at the top of this one: a mention the user was looking at a moment
+        // ago loses its mark now.
+        self.clear_seen_mentions(cx);
+        // Oldest first (D2): the jump never reorders under the user, so the
+        // next click is always predictable. A mention that lands while they
+        // read raises the count and is visited last.
+        let mentions = self
+            .chat_id
+            .as_deref()
+            .map(|chat| self.state.read(cx).unread_mentions_in(chat))
+            .unwrap_or_default();
+        let mention_count = mentions.len();
+        let oldest_mention = mentions.into_iter().next();
         // Grok Mac (ref 58): a 40 pt ↓ circle centred above the composer once
         // the user has scrolled up; clicking re-pins and lands on the newest
         // page (`jump_to_latest`).
@@ -3811,6 +3902,52 @@ impl Render for Transcript {
                                 .on_click(cx.listener(|this, _, _, cx| this.jump_to_latest(cx)))
                                 .with_animation(
                                     "jump-in",
+                                    Animation::new(Duration::from_millis(180)),
+                                    |el, t| el.opacity(t),
+                                ),
+                        ),
+                )
+            })
+            // The `@` capsule: unread mentions in this chat, with the jump to
+            // the oldest of them. The ↓ circle's own recipe (height, rim,
+            // shadow, wash) in its own bottom-right corner, so the two
+            // controls never contend for the centre slot. This is where the
+            // mention count lives — the sidebar row carries a bare mark.
+            .when_some(oldest_mention, |el, target| {
+                el.child(
+                    div()
+                        .absolute()
+                        .right(px(MENTION_JUMP_RIGHT_PX))
+                        .bottom(px(12.0))
+                        .child(
+                            div()
+                                .id("jump-to-mention")
+                                .h(px(40.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .gap(px(MENTION_JUMP_GAP))
+                                .px(px(MENTION_JUMP_PAD))
+                                .rounded_full()
+                                .border_1()
+                                .border_color(theme.border_strong)
+                                .shadow_md()
+                                .cursor_pointer()
+                                .debug_selector(|| "jump-to-mention".into())
+                                .map(|el| highlight::washed(el, theme.card(), &theme))
+                                // Typed, not an icon: the symbol pack has no `at`.
+                                .child(
+                                    div()
+                                        .text_size(px(MENTION_GLYPH_SIZE))
+                                        .text_color(theme.text)
+                                        .child("@"),
+                                )
+                                .child(crate::ui::marks::unread_pill(mention_count, &theme))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.jump_to_mention(target.clone(), cx)
+                                }))
+                                .with_animation(
+                                    "mention-jump-in",
                                     Animation::new(Duration::from_millis(180)),
                                     |el, t| el.opacity(t),
                                 ),
@@ -10771,6 +10908,7 @@ mod system_line_tests {
             participants: Vec::new(),
             unread: false,
             unread_count: 0,
+            mention_count: 0,
             last_message_at: 0,
             archived_at: None,
         };

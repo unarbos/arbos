@@ -3675,6 +3675,66 @@ impl AppState {
             .count()
     }
 
+    /// The chat row of `chat_id` wherever it is listed, for the read state it
+    /// carries.
+    pub fn chat_row(&self, chat_id: &str) -> Option<&Chat> {
+        self.chats
+            .values()
+            .flat_map(|v| v.iter())
+            .find(|c| c.id == chat_id)
+    }
+
+    /// How many unread direct `@mentions` of the viewer the relay counts in
+    /// `chat_id`.
+    pub fn unread_mention_count(&self, chat_id: &str) -> usize {
+        self.chat_row(chat_id)
+            .map_or(0, |c| c.mention_count as usize)
+    }
+
+    /// The messages holding those unread mentions, oldest first.
+    ///
+    /// The relay sends a count, not a list, and the list is derivable: the
+    /// mention cursor only moves forward (one row per chat, merged with
+    /// `MAX`), so the unread mentions are always the *newest* ones. Taking
+    /// the last `n` direct mentions of the viewer among the loaded messages
+    /// therefore names them exactly, and a stale local answer is corrected by
+    /// the next `GET /me/unread` rather than by a second endpoint.
+    ///
+    /// Short when the chat is not fully scrolled back; the oldest one loaded
+    /// is then the oldest the user can be sent to, which is where the jump
+    /// capsule goes.
+    pub fn unread_mentions_in(&self, chat_id: &str) -> Vec<Id> {
+        let count = self.unread_mention_count(chat_id);
+        if count == 0 {
+            return Vec::new();
+        }
+        let me_handle = self.me_handle();
+        let me = format!("user:{}", self.me_id());
+        let mut hits: Vec<Id> = self
+            .messages_of(chat_id)
+            .iter()
+            .filter(|m| m.sender != me)
+            .filter(|m| crate::sync::mentions_me_directly(&m.plain_text(), &me_handle))
+            .map(|m| m.id.clone())
+            .collect();
+        let drop = hits.len().saturating_sub(count);
+        hits.drain(..drop);
+        hits
+    }
+
+    /// A direct `@mention` was actually on screen, so the mark can go. Moves
+    /// the relay's mention cursor to it and nothing else — the chat's unread
+    /// messages are untouched, and no other device is told to clear anything.
+    pub fn mention_seen(&mut self, chat_id: &str, message_id: &str, cx: &mut Context<Self>) {
+        self.command(ClientCommand::MarkMentionsRead {
+            chat_id: chat_id.to_owned(),
+            message_id: message_id.to_owned(),
+        });
+        // The command's own handler lowers the count on the sync side and
+        // re-emits the chats; the badge follows from that.
+        cx.notify();
+    }
+
     /// S8: the last assistant message ended with an `ask_user` question and
     /// nothing has been sent since. A typed widget question is answered from
     /// its card, so it does not switch the composer.
@@ -4383,6 +4443,7 @@ impl AppState {
                 participants: Vec::new(),
                 unread: false,
                 unread_count: 0,
+                mention_count: 0,
                 last_message_at: now_ms(),
                 archived_at: None,
             });
@@ -13082,6 +13143,7 @@ pub(crate) fn forked_chat(source: &Chat, project: &Project, id: Id) -> Option<Ch
         participants: Vec::new(),
         unread: false,
         unread_count: 0,
+        mention_count: 0,
         last_message_at: now_ms(),
         archived_at: None,
     })
@@ -13209,6 +13271,7 @@ mod hidden_chat_open_tests {
             is_system: false,
             unread: false,
             unread_count: 0,
+            mention_count: 0,
             last_message_at: 1_000,
             archived_at: None,
             kind: ChatKind::Chat,
@@ -14113,6 +14176,7 @@ mod fork_tests {
             participants: Vec::new(),
             unread: false,
             unread_count: 0,
+            mention_count: 0,
             last_message_at: 0,
             archived_at: None,
         }
@@ -15089,6 +15153,7 @@ mod coalesced_banner_withdraw_tests {
                     is_system: false,
                     unread: false,
                     unread_count: 0,
+                    mention_count: 0,
                     last_message_at: 1_000,
                     archived_at: None,
                     kind: ChatKind::Chat,

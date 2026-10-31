@@ -1816,6 +1816,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 participants: Vec::new(),
                 unread: false,
                 unread_count: 0,
+                mention_count: 0,
                 last_message_at: now_ms(),
                 archived_at: None,
             });
@@ -1855,6 +1856,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 participants: Vec::new(),
                 unread: false,
                 unread_count: 0,
+                mention_count: 0,
                 last_message_at: now_ms(),
                 archived_at: None,
             });
@@ -1864,6 +1866,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 .send(SyncEvent::ChatSnapshot { chat_id, messages });
         }
         ClientCommand::MarkRead { chat_id } => mark_read(shared, &chat_id),
+        ClientCommand::MarkMentionsRead { chat_id, .. } => mark_mentions_read(shared, &chat_id),
         ClientCommand::FetchVoices => {
             let _ = shared.events.send(SyncEvent::Voices {
                 default: Some("ara".into()),
@@ -2152,6 +2155,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 participants: Vec::new(),
                 unread: false,
                 unread_count: 0,
+                mention_count: 0,
                 last_message_at: now_ms(),
                 archived_at: None,
             });
@@ -3876,6 +3880,28 @@ fn mark_read(shared: &Shared, chat_id: &str) {
     }
 }
 
+/// Seeing a mention clears one `@` and nothing else — in particular not the
+/// chat's unread messages, which is the whole reason the relay route is
+/// separate from `/read`.
+fn mark_mentions_read(shared: &Shared, chat_id: &str) {
+    let changed = {
+        let mut chats = shared.chats.lock().unwrap();
+        match chats
+            .iter_mut()
+            .find(|c| c.id == chat_id && c.mention_count > 0)
+        {
+            Some(c) => {
+                c.mention_count -= 1;
+                true
+            }
+            None => false,
+        }
+    };
+    if changed {
+        emit_chats(shared);
+    }
+}
+
 fn maybe_retitle(shared: &Shared, chat_id: &str, text: &str) {
     let changed = {
         let mut chats = shared.chats.lock().unwrap();
@@ -5562,6 +5588,7 @@ fn seed_chats() -> Vec<Chat> {
         participants: Vec::new(),
         unread: false,
         unread_count: 0,
+        mention_count: 0,
         last_message_at: t.saturating_sub(ago_min * 60_000),
         archived_at: None,
     };
@@ -6956,6 +6983,7 @@ fn people_chat(id: &str, title: &str, minutes_ago: u64) -> Chat {
         participants: Vec::new(),
         unread: false,
         unread_count: 0,
+        mention_count: 0,
         last_message_at: now_ms().saturating_sub(minutes_ago * 60_000),
         archived_at: None,
     }
@@ -6982,6 +7010,7 @@ fn seed_people_chats_base() -> Vec<Chat> {
             participants: Vec::new(),
             unread: true,
             unread_count: 0,
+            mention_count: 0,
             last_message_at: now_ms().saturating_sub(12 * 60_000),
             archived_at: None,
         },
@@ -6995,6 +7024,7 @@ fn seed_people_chats_base() -> Vec<Chat> {
             participants: Vec::new(),
             unread: false,
             unread_count: 0,
+            mention_count: 0,
             last_message_at: now_ms().saturating_sub(25 * 60_000),
             archived_at: None,
         },
@@ -7008,6 +7038,7 @@ fn seed_people_chats_base() -> Vec<Chat> {
             participants: Vec::new(),
             unread: false,
             unread_count: 0,
+            mention_count: 0,
             last_message_at: now_ms().saturating_sub(50 * 60_000),
             archived_at: None,
         },
@@ -7832,6 +7863,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                 participants: Vec::new(),
                 unread: false,
                 unread_count: 0,
+                mention_count: 0,
                 last_message_at: now_ms(),
                 archived_at: None,
             });
@@ -7962,6 +7994,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                 participants: Vec::new(),
                 unread: false,
                 unread_count: 0,
+                mention_count: 0,
                 last_message_at: now_ms(),
                 archived_at: None,
             });

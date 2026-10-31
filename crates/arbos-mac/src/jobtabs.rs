@@ -47,6 +47,7 @@ pub fn tab(project_id: &str, job_id: &str, title: &str, at: u64) -> Chat {
         is_system: false,
         unread: false,
         unread_count: 0,
+        mention_count: 0,
         last_message_at: at,
         archived_at: None,
         kind: ChatKind::Job,
