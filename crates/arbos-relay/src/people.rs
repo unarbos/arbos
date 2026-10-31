@@ -4318,7 +4318,7 @@ mod tests {
             .db
             .insert_device(&old, "old phone", &ulid(), &bob, "github")
             .expect("device");
-        state.db.revoke_device(&old).expect("revoke");
+        state.db.revoke_device_fully(&old).expect("revoke");
         let cm = load_chat(&state, &chat).expect("chat");
 
         let boxed = box_chat_json(&state, &cm, &alice, "box");
