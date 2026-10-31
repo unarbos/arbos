@@ -948,8 +948,12 @@ final class AppModel: ObservableObject {
     /// Kept as a set, not a high-water mark, because rows can be seen out of order and the
     /// cursor may only advance over a run that starts at the oldest unread one.
     private var mentionsSeen: [Id: Set<Id>] = [:]
-    /// The mention cursor last handed to the relay per chat — never sent twice.
-    private var mentionSeenSent: [Id: Id] = [:]
+    /// Mention rows the relay has accepted a clear for, per chat — never sent twice.
+    private var mentionSeenSent: [Id: Set<Id>] = [:]
+    /// Chats with a mention-read walk in flight. The walk is strictly serial: the route takes
+    /// only the oldest unread mention, so two marks in parallel would race and the later one
+    /// would land first and be dropped.
+    private var mentionMarkWalking: Set<Id> = []
     /// Consecutive HTTP 403/404 endings per room key (cleared when the room reaches live).
     private var roomUnavailableFailures: [Id: Int] = [:]
     private var roomUnavailableAt: [Id: Date] = [:]
@@ -1323,6 +1327,7 @@ final class AppModel: ObservableObject {
             unreadCounts = r.chats
             unreadMentions = r.mentions
             saveUnreadCache()
+            resumeMentionReads()
         }
         applyBadge()
     }
@@ -1504,8 +1509,7 @@ final class AppModel: ObservableObject {
         advanceMentionCursor(chatId)
     }
 
-    /// Move the chat's mention cursor over the run of seen mentions that starts at the oldest
-    /// unread one, and tell the relay where it now stands.
+    /// Clear the run of seen mentions that starts at the chat's oldest unread one.
     ///
     /// A run, not a set: the cursor is one monotone value, so clearing a mention the reader
     /// has seen while an older one is still unseen would clear that older one too. Seeing
@@ -1513,25 +1517,80 @@ final class AppModel: ObservableObject {
     /// gap before it closes — the `@` stays, which is the honest answer while an unread
     /// mention is still up there.
     private func advanceMentionCursor(_ chatId: Id) {
-        let count = unreadMentions[chatId] ?? 0
-        guard count > 0 else { return }
-        let unread = Self.unreadMentionIds(all: mentionIds(chatId: chatId), count: count)
-        let seen = mentionsSeen[chatId] ?? []
-        var cursor: Id?
-        var cleared = 0
-        for id in unread {
-            guard seen.contains(id) else { break }
-            cursor = id
-            cleared += 1
+        let run = seenMentionRun(chatId)
+        guard !run.isEmpty else { return }
+        guard !isFixture else { clearMentions(chatId, by: run.count); return }
+        guard !mentionMarkWalking.contains(chatId) else { return }
+        mentionMarkWalking.insert(chatId)
+        Task { await walkMentionReads(chatId) }
+    }
+
+    private func seenMentionRun(_ chatId: Id) -> [Id] {
+        Self.seenMentionRun(unread: Self.unreadMentionIds(all: mentionIds(chatId: chatId),
+                                                          count: unreadMentions[chatId] ?? 0),
+                            seen: mentionsSeen[chatId] ?? [])
+    }
+
+    /// The unread mentions the reader has seen, oldest first, stopping at the first one they
+    /// have not — the prefix the cursor is allowed to move over, in the order it must be sent.
+    ///
+    /// A prefix, not a filter. The relay takes only the oldest unread mention, so `first` has
+    /// to be the oldest one outstanding; a seen mention with an unseen one above it waits.
+    nonisolated static func seenMentionRun(unread: [Id], seen: Set<Id>) -> [Id] {
+        Array(unread.prefix { seen.contains($0) })
+    }
+
+    /// Hand the run to the relay **one mention at a time, oldest first**, each only after the
+    /// one before it has landed.
+    ///
+    /// `PUT /chats/{id}/mentions/read` accepts only the chat's oldest unread mention: the
+    /// cursor is a watermark, so honouring a newer id would silently swallow the older ones
+    /// under it. Anything else is a no-op — and still a 204, because two devices marking the
+    /// same mention and a client re-sending are both normal. So a batch that named the newest
+    /// of three would clear nothing, the count would come back on the next `GET /me/unread`,
+    /// and it would present as a stuck `@` with a 204 saying it worked.
+    ///
+    /// The count drops as each mark is accepted, never before. A failed call leaves the `@`
+    /// up and the run unspent; the next row that comes on screen, or the next refresh, walks
+    /// it again from the oldest.
+    private func walkMentionReads(_ chatId: Id) async {
+        defer { mentionMarkWalking.remove(chatId) }
+        while let oldest = seenMentionRun(chatId).first {
+            if mentionSeenSent[chatId]?.contains(oldest) != true {
+                do { try await api.markMentionsRead(chatId: chatId, messageId: oldest) } catch { return }
+                mentionSeenSent[chatId, default: []].insert(oldest)
+            }
+            clearMentions(chatId, by: 1)
         }
-        guard let cursor, cleared > 0 else { return }
-        let left = count - cleared
-        if left > 0 { unreadMentions[chatId] = left } else { unreadMentions[chatId] = nil }
+    }
+
+    /// Re-walk every chat whose seen run the relay has not taken yet: a mark that failed on a
+    /// dead network, or one this device never got to send. Without this the retry would wait
+    /// for a *new* row to come on screen, because a row already in `mentionsSeen` reports
+    /// again on foreground and is correctly ignored.
+    ///
+    /// The counts have just come from the relay, so what is still unread is what it still
+    /// holds — which also makes this the point to drop bookkeeping for mentions it no longer
+    /// counts, and that is what bounds both maps over a long session.
+    private func resumeMentionReads() {
+        for chatId in Array(mentionsSeen.keys) {
+            let unread = Set(Self.unreadMentionIds(all: mentionIds(chatId: chatId),
+                                                   count: unreadMentions[chatId] ?? 0))
+            guard !unread.isEmpty else {
+                mentionsSeen[chatId] = nil
+                mentionSeenSent[chatId] = nil
+                continue
+            }
+            mentionsSeen[chatId] = mentionsSeen[chatId]?.intersection(unread)
+            mentionSeenSent[chatId] = mentionSeenSent[chatId]?.intersection(unread)
+            advanceMentionCursor(chatId)
+        }
+    }
+
+    private func clearMentions(_ chatId: Id, by n: Int) {
+        let left = (unreadMentions[chatId] ?? 0) - n
+        unreadMentions[chatId] = left > 0 ? left : nil
         saveUnreadCache()
-        guard !isFixture, mentionSeenSent[chatId] != cursor else { return }
-        mentionSeenSent[chatId] = cursor
-        let api = self.api
-        Task { try? await api.markMentionsRead(chatId: chatId, messageId: cursor) }
     }
 
     // MARK: Sign in with GitHub (self-serve relay)
@@ -1921,6 +1980,7 @@ final class AppModel: ObservableObject {
         unreadCounts = [:]
         unreadMentions = [:]
         mentionSeenSent = [:]
+        mentionMarkWalking = []
         stopMatrix()
         servers = []
         serversAvailable = false

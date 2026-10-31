@@ -1250,10 +1250,17 @@ final class RelayAPI {
         _ = try await request("PUT", "/chats/\(chatId)/read", body: ["seq": seq])
     }
 
-    /// `PUT /chats/{id}/mentions/read {message_id}` — the viewer has seen every mention of
-    /// themselves up to and including that message. The relay resolves the row from the CRDT
-    /// message id (no client ever sees a `chat_events.id`) and moves its mention cursor, which
-    /// only ever goes forward.
+    /// `PUT /chats/{id}/mentions/read {message_id}` — the viewer has seen that mention. The
+    /// relay resolves the row from the CRDT message id (no client ever sees a
+    /// `chat_events.id`) and moves its mention cursor, which only ever goes forward.
+    ///
+    /// **It takes only the chat's oldest unread mention, so call it one at a time, oldest
+    /// first.** The cursor is a watermark: honouring a newer id would swallow the older
+    /// mentions under it, so the relay makes anything else a no-op. It is still a 204, not an
+    /// error, because two devices marking the same mention and a client re-sending on
+    /// foreground are both normal — which means a caller that names the wrong one gets a
+    /// success back and a count that returns on the next `GET /me/unread`. The ordered walk
+    /// is `AppModel.walkMentionReads`.
     ///
     /// Deliberately **not** `clear_on_read`. That payload makes every other device run
     /// `AppModel.clearingChat`, which zeroes the chat's unread **message** count — so clearing
