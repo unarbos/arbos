@@ -102,7 +102,7 @@ Do not install Simulator.app or any other system-wide tool on the shared Mac wit
 ## Rigs take a heavy slot on the shared EC2 Mac (2026-10-26 20:30 UTC)
 
 The Mac's heavy-job cap (`/usr/local/bin/arbos-heavy-slot.sh`, versioned at `scripts/runner/arbos-heavy-slot.sh`;
-2 slots + 1 priority slot for hotfix pins) already covers the gate's Mac and iOS halves, the TestFlight archive
+1 slot + 1 priority slot for hotfix pins, #1997) already covers the gate's Mac and iOS halves, the TestFlight archive
 and the Mac release job. Rigs did not take part: at 20:23 UTC on 2026-10-26 one rig's simulator boot
 (`launchd_sim` + healthd/healthappd/STExtraction/diagnosticd, ~490 % CPU for 90 s) on top of the two capped
 builds took the 8-core box to load 263 and ssh timed out for every worker (same at 20:0x and at 13:00,
