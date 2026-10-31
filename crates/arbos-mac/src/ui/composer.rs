@@ -7485,6 +7485,18 @@ mod photo_editor_tests {
         Entity<Composer>,
         &mut VisualTestContext,
     ) {
+        mount_on(crate::ui::theme::Surface::Matte, cx)
+    }
+
+    fn mount_on(
+        surface: crate::ui::theme::Surface,
+        cx: &mut TestAppContext,
+    ) -> (
+        tokio::runtime::Runtime,
+        Entity<Shell>,
+        Entity<Composer>,
+        &mut VisualTestContext,
+    ) {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -7492,7 +7504,7 @@ mod photo_editor_tests {
         let handle = rt.handle().clone();
         cx.update(|cx| {
             gpui_tokio::init_from_handle(cx, handle);
-            cx.set_global(Theme::dark(crate::ui::theme::Surface::Matte));
+            cx.set_global(Theme::dark(surface));
             if !cx.has_global::<PulseClock>() {
                 PulseClock::init(cx);
             }
@@ -7675,9 +7687,23 @@ mod photo_editor_tests {
     /// one captures a drag at all.
     #[gpui::test]
     fn switching_to_draw_turns_a_drag_into_one_stroke(cx: &mut TestAppContext) {
-        let (_rt, shell, composer, vcx) = mount(cx);
+        draw_drag_lays_one_stroke(crate::ui::theme::Surface::Matte, cx);
+    }
+
+    /// On Glass the card is a frosted paint layer, and the floating controls
+    /// are deferred draws so the photograph does not cover their plates
+    /// (`photo_editor::CHROME_PRIORITY`). The paint order is not observable
+    /// here — the Mac shot is what caught it — but the controls must still take
+    /// their clicks and the canvas must still take the drag.
+    #[gpui::test]
+    fn switching_to_draw_turns_a_drag_into_one_stroke_on_glass(cx: &mut TestAppContext) {
+        draw_drag_lays_one_stroke(crate::ui::theme::Surface::Glass, cx);
+    }
+
+    fn draw_drag_lays_one_stroke(surface: crate::ui::theme::Surface, cx: &mut TestAppContext) {
+        let (_rt, shell, composer, vcx) = mount_on(surface, cx);
         let (_dir, png, _doc) = fixtures();
-        composer.update(vcx, |c, cx| c.add_paths([png].into_iter(), cx));
+        composer.update(vcx, |c, cx| c.add_paths([png], cx));
         settle(&shell, vcx);
         open_on(&shell, "composer-staged-tile-0", vcx);
 

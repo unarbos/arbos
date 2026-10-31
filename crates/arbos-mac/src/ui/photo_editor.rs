@@ -34,7 +34,7 @@ use crate::ui::composer::TextTip;
 use crate::ui::frost::{frosted, PANEL_BLUR};
 use crate::ui::glass;
 use crate::ui::highlight;
-use crate::ui::modal::modal_overlay;
+use crate::ui::modal::{self, modal_overlay};
 use crate::ui::photo_edit::{
     drag_crop, handle_at, CropRect, Handle, Ink, PhotoEdit, Placement, Stroke, Tool,
 };
@@ -68,6 +68,21 @@ const CANVAS_BG: f32 = 0.043;
 const CANVAS_PAD: f32 = 24.0;
 /// How far one arrow-key press moves the crop, in canvas points.
 const NUDGE: f32 = 1.0;
+
+/// The floating controls paint after the card rather than inside it.
+///
+/// On Glass the card is a frosted paint layer (`glass::plate`), and inside one
+/// layer GPUI draws every sprite after every quad — so the photograph, which is
+/// a sprite, covered the controls' plates and left white glyphs standing on a
+/// bright picture with nothing behind them. Measured on the Mac: over the
+/// picture the tool row's plate was absent, and it appeared only past the
+/// picture's bottom edge. Matte has no such layer and was always right, which
+/// is why this is invisible in every test and in the solid shot.
+///
+/// A deferred draw paints after the layer. It is the same remedy the staged
+/// strip uses for its ring and its disc (`composer::tile`), one priority above
+/// the sheet, which is itself deferred over that strip (`ui::modal::PRIORITY`).
+const CHROME_PRIORITY: usize = modal::PRIORITY + 1;
 
 /// How large the original is decoded for the canvas. The canvas is at most
 /// 720 × 500 pt, which is 1440 × 1000 px on a Retina display, so this is the
@@ -451,8 +466,8 @@ impl Render for PhotoEditor {
             .overflow_hidden()
             .bg(gpui::hsla(0.0, 0.0, CANVAS_BG, 1.0))
             .child(self.canvas_layer(cx))
-            .child(self.segment(&theme, cx))
-            .children(self.mode_controls(&theme, cx));
+            .child(lift(self.segment(&theme, cx)))
+            .children(self.mode_controls(&theme, cx).into_iter().map(lift));
         let card = div()
             .id("photo-editor")
             .debug_selector(|| "photo-editor".into())
@@ -809,6 +824,14 @@ impl PhotoEditor {
 /// press is stopped by the control instead; see [`swallow`].
 fn floating(el: Div) -> Div {
     el.absolute().flex()
+}
+
+/// Paint a floating control above the card's frosted layer, keeping its layout
+/// where it is. See [`CHROME_PRIORITY`].
+fn lift(el: impl IntoElement) -> AnyElement {
+    gpui::deferred(el)
+        .with_priority(CHROME_PRIORITY)
+        .into_any_element()
 }
 
 /// A press on this control stops here rather than reaching the canvas: a press
