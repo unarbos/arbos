@@ -735,6 +735,24 @@ fn deliver_announced(state: &AppState, ev: &Announced, doc: Option<&ChatDoc>) {
             WakeRule::Always => true,
             WakeRule::WhenMentioned => mentions_agent(&text, &ev.mentions, p),
         };
+        // `body` says which text the decision was put to: the stored row, or the announce
+        // preview because the row was not in the doc. Without it a wake has to be inferred
+        // from the delivered payload, which is the same field either way.
+        tracing::info!(
+            chat = %chat.chat_id,
+            agent = %p.id,
+            handle = %handle_of(p),
+            message = %message_id,
+            wake,
+            rule = match rule {
+                WakeRule::Always => "always",
+                WakeRule::WhenMentioned => "when_mentioned",
+            },
+            body = if row.is_some() { "row" } else { "preview" },
+            body_chars = text.chars().count(),
+            announce_chars = ev.text.chars().count(),
+            "outside agent wake decided"
+        );
         let mut message = json!({
             "id": message_id,
             "text": text,
