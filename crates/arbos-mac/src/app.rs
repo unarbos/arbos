@@ -1920,8 +1920,12 @@ impl AppState {
                 cx.notify();
             }
             SyncEvent::Account(account) => {
+                // `GET /me` also arrives on the registry poll whenever the balance moves; the
+                // sign-in work below runs once per account, not on every re-read.
+                let signed_in =
+                    account.as_ref().map(|a| &a.id) != self.account.as_ref().map(|a| &a.id);
                 self.account = account;
-                if self.account.is_some() {
+                if signed_in && self.account.is_some() {
                     self.maybe_prompt_notifications();
                     self.prefetch_directory();
                     // Align the sync source with the saved Settings → Notifications

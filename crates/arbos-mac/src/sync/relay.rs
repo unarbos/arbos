@@ -245,6 +245,9 @@ struct Shared {
     avatars_done: Mutex<HashSet<String>>,
     /// `/me` user when the stored credentials carry none (env token, legacy adv_).
     me: Mutex<Option<credentials::AccountUser>>,
+    /// What the last `GET /me` put on screen: the registry poll re-reads `/me` and only
+    /// sends events when this changes.
+    me_seen: Mutex<Option<(AccountView, GroupAdd)>>,
     /// The chat on screen in a focused window; presence frames carry it as
     /// `focused_chat` so the relay does not push this device for it (§7c).
     focused_chat: Mutex<Option<Id>>,
@@ -863,6 +866,7 @@ impl SyncSource for RelaySource {
                 pending_new_chats: Mutex::new(HashMap::new()),
                 avatars_done: Mutex::new(HashSet::new()),
                 me: Mutex::new(None),
+                me_seen: Mutex::new(None),
                 store: Mutex::new(None),
                 secrets_inflight: AtomicBool::new(false),
                 secrets_poll_failures: AtomicU32::new(0),
@@ -964,6 +968,7 @@ async fn refresh_me(shared: &Arc<Shared>) {
             .as_ref()
             .and_then(|c| c.user.clone());
         if let Some(user) = user {
+            *shared.me_seen.lock().unwrap() = None;
             let _ = shared.events.send(SyncEvent::Account(Some(AccountView {
                 id: user.id,
                 login: user.login,
@@ -977,14 +982,38 @@ async fn refresh_me(shared: &Arc<Shared>) {
     let Ok(dto) = serde_json::from_value::<MeResponseDto>(v) else {
         return;
     };
+    apply_me(shared, &dto);
+}
+
+/// The registry poll's `GET /me`, so a change made on another device (Settings › Privacy on
+/// the iPhone) reaches an open Mac within one poll, as the iPhone's own poll does. Quiet when
+/// the relay is unreachable (the connection pill speaks) and while nothing shown has changed.
+async fn poll_me(shared: &Arc<Shared>) {
+    let Ok(v) = shared.get_json("/me").await else {
+        return;
+    };
+    let Ok(dto) = serde_json::from_value::<MeResponseDto>(v) else {
+        return;
+    };
+    let seen = (
+        account_view_from_me(&dto),
+        GroupAdd::from_wire(&dto.privacy.group_add),
+    );
+    if shared.me_seen.lock().unwrap().as_ref() == Some(&seen) {
+        return;
+    }
+    apply_me(shared, &dto);
+}
+
+fn apply_me(shared: &Arc<Shared>, dto: &MeResponseDto) {
     let u: credentials::AccountUser = (&dto.user).into();
     shared.with_store(|s| s.put_json(store::KEY_ACCOUNT, &u));
     *shared.me.lock().unwrap() = Some(u);
-    let view = account_view_from_me(&dto);
+    let view = account_view_from_me(dto);
+    let group_add = GroupAdd::from_wire(&dto.privacy.group_add);
+    *shared.me_seen.lock().unwrap() = Some((view.clone(), group_add));
     let _ = shared.events.send(SyncEvent::Account(Some(view)));
-    let _ = shared.events.send(SyncEvent::GroupAdd(GroupAdd::from_wire(
-        &dto.privacy.group_add,
-    )));
+    let _ = shared.events.send(SyncEvent::GroupAdd(group_add));
     // D92 remote flags: leaf avatars for agents, and their Lottie playback (absent = on).
     crate::ui::avatars::set_leaf_avatars(dto.features.leaf_avatars.unwrap_or(true));
     crate::ui::avatars::set_leaf_lottie(dto.features.leaf_lottie.unwrap_or(true));
@@ -1105,6 +1134,7 @@ fn start_after_pairing(shared: &Arc<Shared>) {
             // Pending secret requests show up without a manual refresh; a failing poll
             // backs off and stays quiet (the pane's own note / the connection pill speak).
             poll_secrets(&shared).await;
+            poll_me(&shared).await;
             match refresh_registry(&shared).await {
                 Ok(()) => {
                     let _ = shared.events.send(SyncEvent::RelayLink(LinkState::Live));
