@@ -1237,6 +1237,41 @@ enum FixtureMedia {
         return img.pngData()
     }
 
+    /// A 1400 × 900 landscape "dashboard screenshot" for the composer photo-editor rig
+    /// (`ARBOS_SHOW=pending-photo`): light, colourful and full of distinct regions, so a
+    /// crop rectangle visibly frames one of them and ink reads over any of them. Every
+    /// number on it is invented.
+    static func composerPhoto() -> Data? {
+        let (w, h) = (1400, 900)
+        let tiles: [(CGRect, UIColor, String, String)] = [
+            (CGRect(x: 60, y: 150, width: 380, height: 230), UIColor(red: 0.18, green: 0.47, blue: 0.95, alpha: 1), "Sessions", "12,480"),
+            (CGRect(x: 470, y: 150, width: 380, height: 230), UIColor(red: 0.16, green: 0.70, blue: 0.42, alpha: 1), "Delivered", "99.2%"),
+            (CGRect(x: 880, y: 150, width: 460, height: 230), UIColor(red: 0.98, green: 0.62, blue: 0.10, alpha: 1), "Queue", "41 s"),
+            (CGRect(x: 60, y: 420, width: 790, height: 420), UIColor(red: 0.42, green: 0.32, blue: 0.86, alpha: 1), "Throughput", "8.6 k/min"),
+            (CGRect(x: 880, y: 420, width: 460, height: 420), UIColor(red: 0.90, green: 0.25, blue: 0.33, alpha: 1), "Errors/h", "318"),
+        ]
+        return UIGraphicsImageRenderer(size: CGSize(width: w, height: h), format: {
+            let f = UIGraphicsImageRendererFormat(); f.scale = 1; return f
+        }()).image { ctx in
+            let cg = ctx.cgContext
+            cg.setFillColor(UIColor(white: 0.97, alpha: 1).cgColor)
+            cg.fill(CGRect(x: 0, y: 0, width: w, height: h))
+            "Relay health · last 24 hours".draw(at: CGPoint(x: 60, y: 62),
+                                                withAttributes: [.font: UIFont.boldSystemFont(ofSize: 42),
+                                                                 .foregroundColor: UIColor(white: 0.12, alpha: 1)])
+            for (rect, colour, label, value) in tiles {
+                cg.setFillColor(colour.cgColor)
+                cg.addPath(UIBezierPath(roundedRect: rect, cornerRadius: 18).cgPath)
+                cg.fillPath()
+                label.draw(at: CGPoint(x: rect.minX + 28, y: rect.minY + 26),
+                           withAttributes: [.font: UIFont.systemFont(ofSize: 26, weight: .medium),
+                                            .foregroundColor: UIColor.white.withAlphaComponent(0.85)])
+                value.draw(at: CGPoint(x: rect.minX + 28, y: rect.minY + 70),
+                           withAttributes: [.font: UIFont.boldSystemFont(ofSize: 64), .foregroundColor: UIColor.white])
+            }
+        }.pngData()
+    }
+
     private static func pdf(title: String) -> Data {
         let page = CGRect(x: 0, y: 0, width: 612, height: 792)
         return UIGraphicsPDFRenderer(bounds: page).pdfData { ctx in

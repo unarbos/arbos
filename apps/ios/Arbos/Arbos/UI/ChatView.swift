@@ -224,6 +224,8 @@ struct ChatSession: View {
     @State private var pending: [AppModel.PendingAttachment] = []
     /// Quick Look URL for a staged picture/video (tap the chip while writing a description).
     @State private var pendingPreviewURL: URL?
+    /// The staged still picture open in the crop-and-draw editor.
+    @State private var editingPhoto: PhotoEditorTarget?
     @State private var photoItem: PhotosPickerItem?
     @State private var showPhotos = false
     @State private var showFiles = false
@@ -1712,6 +1714,14 @@ struct ChatSession: View {
                         pending = [.init(name: "Q3 board deck v5.pdf", mime: "application/pdf", data: Data()),
                                    .init(name: "Photo Oct 15.jpg", mime: "image/jpeg", data: Data())]
                         composerFocused = true
+                    // `pending-photo`: one staged still picture with real bytes, the only way
+                    // to reach the crop-and-draw editor without the Photos picker (rig).
+                    case "pending-photo":
+                        #if DEBUG
+                        if let bytes = FixtureMedia.composerPhoto() {
+                            pending = [.init(name: "Relay health.png", mime: "image/png", data: bytes)]
+                        }
+                        #endif
                     case "reply":
                         // Rig: the composer's reply preview on the newest agent message.
                         replyTo = messages.last { $0.role == .assistant && !$0.isStreaming }
@@ -3207,9 +3217,10 @@ struct ChatSession: View {
                             // description bar is focused ([feedback app-01M5Z01FAES7QFEDGC1RKGS9DK]).
                             let thumb = a.mime.hasPrefix("image/") ? UIImage(data: a.data) : nil
                             let canPreview = Self.isCaptionablePending(a)
+                            let canEdit = Self.editorTarget(for: a) != nil
                             HStack(spacing: 6) {
                                 Button {
-                                    openPendingPreview(a)
+                                    openPending(a)
                                 } label: {
                                     HStack(spacing: 6) {
                                         if let thumb {
@@ -3227,7 +3238,8 @@ struct ChatSession: View {
                                 }
                                 .buttonStyle(.plain)
                                 .disabled(!canPreview)
-                                .accessibilityLabel(canPreview ? "\(a.name), tap to open" : a.name)
+                                .accessibilityLabel(canEdit ? "\(a.name), tap to edit" : (canPreview ? "\(a.name), tap to open" : a.name))
+                                .accessibilityIdentifier("composer-attachment")
                                 // The remove ✕: always drawn, a full-size hit target
                                 // (not the 10 pt glyph alone), named for VoiceOver
                                 // ([feedback composer-attachment-removal-ios-2026-10-27]).
@@ -3275,6 +3287,14 @@ struct ChatSession: View {
             }
         }
         .quickLookPreview($pendingPreviewURL)
+        // Full-screen, not a sheet: every sheet here is pinned to a detent, and a full-bleed
+        // picture with Apple's tool picker under it does not fit one.
+        .fullScreenCover(item: $editingPhoto) { target in
+            PhotoEditorSheet(target: target) { result in
+                pending = Self.applyingPhotoEdit(result, to: pending)
+            }
+            .environment(\.theme, theme)
+        }
     }
 
     /// The chip's ✕: that one goes, the others and the draft stay.
@@ -3375,6 +3395,42 @@ struct ChatSession: View {
     private static func isCaptionablePending(_ a: AppModel.PendingAttachment) -> Bool {
         let mime = a.mime.lowercased()
         return mime.hasPrefix("image/") || mime.hasPrefix("video/")
+    }
+
+    /// The chip opens the editor for a staged still picture and the Quick Look preview for
+    /// everything else it can show — a video, or an animated picture the editor does not take.
+    private func openPending(_ a: AppModel.PendingAttachment) {
+        if let target = Self.editorTarget(for: a) {
+            editingPhoto = target
+            return
+        }
+        openPendingPreview(a)
+    }
+
+    /// What the editor would open this attachment with, or `nil` when it does not take it.
+    /// An already-edited attachment reopens on its own original, so the crop can be widened
+    /// and the strokes outside it come back.
+    static func editorTarget(for a: AppModel.PendingAttachment) -> PhotoEditorTarget? {
+        // An attachment that already carries an edit was taken once; its `data` is the
+        // flattened result and would not be the thing to reopen anyway.
+        if let edit = a.edit {
+            return PhotoEditorTarget(id: a.id, name: a.name, mime: a.mime, edit: edit)
+        }
+        guard PhotoEditorEligibility.canEdit(mime: a.mime, data: a.data) else { return nil }
+        return PhotoEditorTarget(id: a.id, name: a.name, mime: a.mime, edit: PhotoEdit(original: a.data))
+    }
+
+    /// Done: the flattened bytes become what the composer sends, and the reversible edit
+    /// rides along so a second tap resumes it.
+    static func applyingPhotoEdit(_ r: PhotoEditResult,
+                                  to list: [AppModel.PendingAttachment]) -> [AppModel.PendingAttachment] {
+        guard let ix = list.firstIndex(where: { $0.id == r.id }) else { return list }
+        var out = list
+        out[ix].data = r.data
+        out[ix].mime = r.mime
+        out[ix].name = r.name
+        out[ix].edit = r.edit
+        return out
     }
 
     /// Open a staged picture/video in Quick Look so the description can still be written after.

@@ -173,6 +173,8 @@
 		A1F6000000000000000000C4 /* ChatSearchShortcutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F6000000000000000000C3 /* ChatSearchShortcutTests.swift */; };
 		A1F6000000000000000000C6 /* ChatSearchCloseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F6000000000000000000C5 /* ChatSearchCloseTests.swift */; };
 		A1AD0000000000000000B002 /* SheetHeader.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1AD0000000000000000B001 /* SheetHeader.swift */; };
+		A1FE0000000000000000E002 /* PhotoEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1FE0000000000000000E001 /* PhotoEditor.swift */; };
+		A1FE0000000000000000E004 /* PhotoEditorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1FE0000000000000000E003 /* PhotoEditorTests.swift */; };
 		A1AD0000000000000000B004 /* SheetHeaderLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1AD0000000000000000B003 /* SheetHeaderLayoutTests.swift */; };
 		A1AD0000000000000000B006 /* AddMembersActionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1AD0000000000000000B005 /* AddMembersActionTests.swift */; };
 		A1670000000000000000A051 /* ControlTokenLintTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1670000000000000000A050 /* ControlTokenLintTests.swift */; };
@@ -418,6 +420,8 @@
 		A1F6000000000000000000C3 /* ChatSearchShortcutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSearchShortcutTests.swift; sourceTree = "<group>"; };
 		A1F6000000000000000000C5 /* ChatSearchCloseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSearchCloseTests.swift; sourceTree = "<group>"; };
 		A1AD0000000000000000B001 /* SheetHeader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SheetHeader.swift; sourceTree = "<group>"; };
+		A1FE0000000000000000E001 /* PhotoEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoEditor.swift; sourceTree = "<group>"; };
+		A1FE0000000000000000E003 /* PhotoEditorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoEditorTests.swift; sourceTree = "<group>"; };
 		A1AD0000000000000000B003 /* SheetHeaderLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SheetHeaderLayoutTests.swift; sourceTree = "<group>"; };
 		A1AD0000000000000000B005 /* AddMembersActionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddMembersActionTests.swift; sourceTree = "<group>"; };
 		A1670000000000000000A050 /* ControlTokenLintTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlTokenLintTests.swift; sourceTree = "<group>"; };
@@ -610,6 +614,7 @@
 				A1F0A5440000000000000001 /* FunPicker.swift */,
 				A1BB00000000000000000001 /* BackSwipe.swift */,
 				A1AD0000000000000000B001 /* SheetHeader.swift */,
+				A1FE0000000000000000E001 /* PhotoEditor.swift */,
 				A124D4FA40F4E5025A2B2C9D,
 				A1EE5A7A5FF12E4EF7FE7B27,
 				A1686D5A87F44B94E76A8761,
@@ -693,6 +698,7 @@
 				A1680000000000000000A060 /* ListTopFadeTests.swift */,
 				A1CF0000000000000000B080 /* PillGlassTests.swift */,
 				A1D0C10500000000000000A0 /* ViewerChromeTests.swift */,
+				A1FE0000000000000000E003 /* PhotoEditorTests.swift */,
 				A1CF0000000000000000B070 /* HomeBarFadeTests.swift */,
 				A1CF0000000000000000B060 /* BottomBarFadeTests.swift */,
 				A1670000000000000000A040 /* ControlMetricsTests.swift */,
@@ -1023,6 +1029,7 @@
 				A16B7487AC090D4969019FDF /* SignInView.swift in Sources */,
 				A19E8F90C26169886405B87C /* Theme.swift in Sources */,
 				A1AD0000000000000000B002 /* SheetHeader.swift in Sources */,
+				A1FE0000000000000000E002 /* PhotoEditor.swift in Sources */,
 				A1AF934D450F6DEFF67E0212 /* Transcript.swift in Sources */,
 				A1CC00000000000000000032 /* ChatImageCache.swift in Sources */,
 				A1BC00000000000000000002 /* MessageMenu.swift in Sources */,
@@ -1078,6 +1085,7 @@
 				A1680000000000000000A061 /* ListTopFadeTests.swift in Sources */,
 				A1CF0000000000000000B081 /* PillGlassTests.swift in Sources */,
 				A1D0C10500000000000000A1 /* ViewerChromeTests.swift in Sources */,
+				A1FE0000000000000000E004 /* PhotoEditorTests.swift in Sources */,
 				A1CF0000000000000000B071 /* HomeBarFadeTests.swift in Sources */,
 				A1CF0000000000000000B061 /* BottomBarFadeTests.swift in Sources */,
 				A1670000000000000000A041 /* ControlMetricsTests.swift in Sources */,
