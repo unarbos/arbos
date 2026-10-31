@@ -118,8 +118,7 @@ const SETTINGS_WIDTH: f32 = crate::ui::profiles::SHEET_WIDTH;
 pub(crate) enum SettingsPage {
     #[default]
     Root,
-    /// Hidden from Settings until credits UI ships again.
-    #[allow(dead_code)]
+    /// Balance and today's spend from `GET /me` (the iPhone's Settings › Credits).
     Credits,
     Machine,
     Appearance,
@@ -148,6 +147,8 @@ impl SettingsPage {
     /// The pages my pane's Settings list shows today (`profiles/me.rs`, in
     /// its order); the search index must find each of them
     /// ([feedback search-settings-mac-2026-10-26], `palette::tests`).
+    /// Credits is listed but not here yet: `arbos_core::settings_search` still
+    /// marks it iPhone-only, and that crate ships on the agentd deploy lane.
     #[cfg(test)]
     pub(crate) const LISTED: [SettingsPage; 9] = [
         SettingsPage::Appearance,

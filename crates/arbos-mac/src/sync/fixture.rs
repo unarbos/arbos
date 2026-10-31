@@ -202,16 +202,11 @@ impl SyncSource for FixtureSource {
 
             let _ = events.send(SyncEvent::Link(Link::Connecting));
             // The signed-in user, so Settings shows its profile header and credits.
-            let _ = events.send(SyncEvent::Account(Some(crate::model::AccountView {
-                id: ME_ID.into(),
-                login: ME_HANDLE.into(),
-                name: "Jacob Steeves".into(),
-                avatar_url: String::new(),
-                device_name: "Fixture".into(),
-                balance_usd: 84.5,
-                spent_today_usd: 1.6,
-                daily_cap_usd: Some(20.0),
-            })));
+            let _ = events.send(SyncEvent::Account(Some(me_view(
+                ME_HANDLE.into(),
+                "Jacob Steeves".into(),
+                String::new(),
+            ))));
             // Same default as the relay (off); `ARBOS_FIXTURE_VOICE_MODE=1` shows the voice UI.
             let _ = events.send(SyncEvent::Features {
                 voice_mode: std::env::var("ARBOS_FIXTURE_VOICE_MODE")
@@ -1949,64 +1944,36 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 "fixture://avatar/me-picture".to_string()
             };
             emit_avatar(shared, &url);
-            let _ = shared
-                .events
-                .send(SyncEvent::Account(Some(crate::model::AccountView {
-                    id: ME_ID.into(),
-                    login: ME_HANDLE.into(),
-                    name: "Jacob Steeves".into(),
-                    avatar_url: url,
-                    device_name: "Fixture".into(),
-                    balance_usd: 84.5,
-                    spent_today_usd: 1.6,
-                    daily_cap_usd: Some(20.0),
-                })));
+            let _ = shared.events.send(SyncEvent::Account(Some(me_view(
+                ME_HANDLE.into(),
+                "Jacob Steeves".into(),
+                url,
+            ))));
         }
         ClientCommand::SetMyAvatarKey { key } => {
             // The Generate tab's preview (seeded by `GenerateImage`) becomes my picture.
             let url = format!("fixture://avatar/me-{key}");
             emit_avatar(shared, &url);
-            let _ = shared
-                .events
-                .send(SyncEvent::Account(Some(crate::model::AccountView {
-                    id: ME_ID.into(),
-                    login: ME_HANDLE.into(),
-                    name: "Jacob Steeves".into(),
-                    avatar_url: url,
-                    device_name: "Fixture".into(),
-                    balance_usd: 84.5,
-                    spent_today_usd: 1.6,
-                    daily_cap_usd: Some(20.0),
-                })));
+            let _ = shared.events.send(SyncEvent::Account(Some(me_view(
+                ME_HANDLE.into(),
+                "Jacob Steeves".into(),
+                url,
+            ))));
         }
         ClientCommand::RemoveMyAvatar => {
-            let _ = shared
-                .events
-                .send(SyncEvent::Account(Some(crate::model::AccountView {
-                    id: ME_ID.into(),
-                    login: ME_HANDLE.into(),
-                    name: "Jacob Steeves".into(),
-                    avatar_url: String::new(),
-                    device_name: "Fixture".into(),
-                    balance_usd: 84.5,
-                    spent_today_usd: 1.6,
-                    daily_cap_usd: Some(20.0),
-                })));
+            let _ = shared.events.send(SyncEvent::Account(Some(me_view(
+                ME_HANDLE.into(),
+                "Jacob Steeves".into(),
+                String::new(),
+            ))));
         }
         ClientCommand::UpdateProfile { name, handle } => {
             // The fixture keeps it: Settings shows the new name and handle.
-            let _ = shared
-                .events
-                .send(SyncEvent::Account(Some(crate::model::AccountView {
-                    id: ME_ID.into(),
-                    login: handle,
-                    name,
-                    avatar_url: String::new(),
-                    device_name: "Fixture".into(),
-                    balance_usd: 84.5,
-                    spent_today_usd: 1.6,
-                    daily_cap_usd: Some(20.0),
-                })));
+            let _ = shared.events.send(SyncEvent::Account(Some(me_view(
+                handle,
+                name,
+                String::new(),
+            ))));
         }
         ClientCommand::SetGroupAdd(choice) => {
             let _ = shared.events.send(SyncEvent::GroupAdd(choice));
@@ -7714,6 +7681,23 @@ fn draft_picture_url(kind: &str, picture: &DraftPicture) -> String {
                 .unwrap_or("picture")
         ),
         DraftPicture::Generated { key } => format!("fixture://avatar/draft-{key}"),
+    }
+}
+
+/// The signed-in fixture user as `GET /me` puts it on screen. `ARBOS_FIXTURE_NO_CAP=1`: an
+/// account with no daily cap (Jacob's own accounts run uncapped).
+fn me_view(login: String, name: String, avatar_url: String) -> crate::model::AccountView {
+    let uncapped = std::env::var("ARBOS_FIXTURE_NO_CAP").is_ok_and(|v| v == "1");
+    crate::model::AccountView {
+        id: ME_ID.into(),
+        login,
+        name,
+        avatar_url,
+        device_name: "Fixture".into(),
+        balance_usd: 84.5,
+        granted_usd: 100.0,
+        spent_today_usd: 1.6,
+        daily_cap_usd: (!uncapped).then_some(20.0),
     }
 }
 
