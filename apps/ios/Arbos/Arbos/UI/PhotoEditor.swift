@@ -142,8 +142,11 @@ enum PhotoEditorEligibility {
         mime.lowercased().hasPrefix("image/") && frames == 1
     }
 
+    /// The mime prefix is checked first so a staged PDF or video never reaches ImageIO: this
+    /// is asked once per chip per composer render, and most chips are not pictures at all.
     static func canEdit(mime: String, data: Data) -> Bool {
-        canEdit(mime: mime, frames: frameCount(of: data))
+        guard mime.lowercased().hasPrefix("image/") else { return false }
+        return canEdit(mime: mime, frames: frameCount(of: data))
     }
 
     /// Frames in the encoded bytes; 0 when nothing can read them.
