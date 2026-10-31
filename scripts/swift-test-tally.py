@@ -2,11 +2,19 @@
 """Count the Swift cases an `xcodebuild test` log actually ran, case by case, and
 reconcile them against the cases declared in the tree.
 
-    scripts/swift-test-tally.py <xcodebuild-test.log> [--ref HEAD]
+    scripts/swift-test-tally.py <xcodebuild-test.log> --ref <commit>
+    scripts/swift-test-tally.py <xcodebuild-test.log> --worktree <path>
 
 Exits 0 only when every declared case is accounted for, nothing ran that is not
 declared, and no case failed. Anything else is a non-zero exit and a named list,
 because a counter that can only report is a counter people talk themselves past.
+
+THE EXPECTED TOTAL IS COMPUTED HERE, NOT PASSED IN, and the commit it was computed
+from is printed with its subject so a report says what was counted. Main moves
+under you: on 2026-10-31 `9818583d1` declared 510 unit + 39 UI = 549 and
+`482bd9103` declared 512 + 44 = 556 the same evening. A tool that takes the
+expected number as an argument gets fed a stale one, and a branch's own base is
+the wrong ref for a merge — count the commit the log was produced from.
 
 The log comes from the `Swift core check` workflow's artifact
 (`swift-core-check-logs-<sha>`), or from `apps/ios/Arbos/build/xcodebuild-test.log`
@@ -69,28 +77,43 @@ def git(*args: str) -> str:
     return subprocess.run(["git", *args], capture_output=True, text=True, check=True).stdout
 
 
-def declared_cases(ref: str) -> list[str]:
-    """Every `Suite.testName` declared under the test targets at `ref`."""
-    found: list[str] = []
+def cases_in(source: str, text: str, found: dict[str, list[str]]) -> None:
+    """Add every `Suite.testName` declared in one file's `text` to `found[source]`."""
+    suite = None
+    for line in text.splitlines():
+        m = SUITE.search(line)
+        if m:
+            suite = m.group(1)
+        m = DECLARED.search(line)
+        if m:
+            found[source].append(f"{suite}.{m.group(1)}")
+
+
+def declared_at_ref(ref: str) -> tuple[dict[str, list[str]], str]:
+    found: dict[str, list[str]] = {d: [] for d in TEST_DIRS}
     for d in TEST_DIRS:
         for path in git("ls-tree", "--name-only", "-r", ref, f"{d}/").split():
-            if not path.endswith(".swift"):
-                continue
-            suite = None
-            for line in git("show", f"{ref}:{path}").splitlines():
-                m = SUITE.search(line)
-                if m:
-                    suite = m.group(1)
-                m = DECLARED.search(line)
-                if m:
-                    found.append(f"{suite}.{m.group(1)}")
-    return sorted(found)
+            if path.endswith(".swift"):
+                cases_in(d, git("show", f"{ref}:{path}"), found)
+    sha = git("rev-parse", ref).strip()
+    subject = git("log", "-1", "--format=%s", ref).strip()
+    return found, f"{sha} ({subject})"
+
+
+def declared_in_worktree(root: Path) -> tuple[dict[str, list[str]], str]:
+    found: dict[str, list[str]] = {d: [] for d in TEST_DIRS}
+    for d in TEST_DIRS:
+        for path in sorted((root / d).glob("*.swift")):
+            cases_in(d, path.read_text(errors="replace"), found)
+    return found, f"worktree {root.resolve()} (files on disk, not a commit)"
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("log", type=Path)
-    ap.add_argument("--ref", default="HEAD", help="git ref the log was produced from")
+    src = ap.add_mutually_exclusive_group()
+    src.add_argument("--ref", help="the commit the log was produced from (not the branch's base)")
+    src.add_argument("--worktree", type=Path, help="count the files on disk under this repo root")
     args = ap.parse_args()
 
     text = args.log.read_text(errors="replace")
@@ -110,7 +133,11 @@ def main() -> int:
             if m:
                 damaged.append((f"{m.group(1)}.{m.group(2)}", line.strip()[:140]))
 
-    want = declared_cases(args.ref)
+    if args.worktree:
+        per_target, counted = declared_in_worktree(args.worktree)
+    else:
+        per_target, counted = declared_at_ref(args.ref or "HEAD")
+    want = sorted(c for cases in per_target.values() for c in cases)
     wantset = set(want)
 
     recovered: dict[str, str] = {}
@@ -135,7 +162,9 @@ def main() -> int:
     errors = [l for l in lines if "error:" in l]
 
     print(f"log            {args.log}")
-    print(f"ref            {args.ref}")
+    print(f"counted at     {counted}")
+    for d, cases in per_target.items():
+        print(f"  {Path(d).name:<16} {len(cases)} declared")
     print(f"declared       {len(wantset)}")
     print(f"passed         {len(passed)}")
     print(f"failed         {len(failed)}")
