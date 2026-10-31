@@ -768,10 +768,14 @@ pub async fn logout(State(state): State<AppState>, principal: Principal) -> Resp
 /// `audit` rows written by [`sign_out_everywhere`], under the slot `account:<user id>`.
 pub const SIGN_OUT_AUDIT_KIND: &str = "account";
 
-/// One audit row per sign-out-everywhere. The account's devices are gone by the time this runs,
-/// so a push notification would reach nobody; the row is what the owner (or an operator helping
-/// them) can read afterwards to see that the sign-out happened, from which device, and how much
-/// of it worked.
+/// One audit row per sign-out-everywhere: what happened, from which device, and how much of it
+/// worked. It is the only record the call leaves, and it is deliberately the only one.
+///
+/// **There is no owner notification, and that is not an omission.** Every other destructive
+/// account operation pushes a `/me/pushes` event (`db_people::push_user_event`), which fans out
+/// to the account's live devices. This call revokes all of them, so by the time there is
+/// anything to say there is nobody left to say it to: the push would be queued for zero
+/// devices. The owner learns what happened by signing in again and reading this row.
 fn note_sign_out_audit(state: &AppState, user_id: &str, from_device: &str, revoked: usize) {
     let entry = json!({
         "ts": now_ms(),
