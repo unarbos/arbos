@@ -56,6 +56,15 @@ separate lanes rediscovered them from scratch on 2026-10-31.
 Declared cases are counted as `func test[A-Z][A-Za-z0-9_]*\\(\\)`. A bare `func test`
 also matches helpers whose names merely begin with "test" — `private func
 testingGroup()` in AddMembersPlanTests.swift is one — and inflates the target.
+
+A fifth error is not in the log at all, and no amount of care with the log finds it.
+`Arbos.xcodeproj` is NOT filesystem-synchronized, so a new test file compiles into
+nothing until it is registered in the project file by hand. Its cases are declared in
+the tree and absent from the log, and the two agree with each other while both are
+wrong about reality: the gate goes green covering none of them. So the project file is
+read here too, every test file is checked in all four places it has to appear, and an
+unregistered file is its own exit code (3) — "never built" is a different failure from
+"built and failing", and a caller should not have to guess which it has.
 """
 
 import argparse
@@ -65,6 +74,20 @@ import sys
 from pathlib import Path
 
 TEST_DIRS = ("apps/ios/Arbos/ArbosTests", "apps/ios/Arbos/ArbosUITests")
+PBXPROJ = "apps/ios/Arbos/Arbos.xcodeproj/project.pbxproj"
+
+# Object ids are matched structurally, never by width. This project holds 795 ids of 24
+# characters and 7 hand-written ones of 22, and a fixed `{24}` silently skips the short
+# ones — which reads as "this file is unregistered" for a file that is registered fine.
+ID = r"[A-Za-z0-9]+"
+BUILD_FILE = re.compile(rf"^\t+({ID}) /\* .*? \*/ = \{{isa = PBXBuildFile; fileRef = ({ID})", re.M)
+FILE_REF = re.compile(rf"^\t+({ID}) /\* .*? \*/ = \{{isa = PBXFileReference;([^}}]*)\}}", re.M)
+PATH_IN = re.compile(r"path = (\"?)([^\";]+)\1;")
+BLOCK = r"^\t+({id}) /\* (.*?) \*/ = \{{\s*isa = {isa};(.*?)\n\t\t\}};"
+GROUP = re.compile(BLOCK.format(id=ID, isa="PBXGroup"), re.S | re.M)
+SOURCES = re.compile(BLOCK.format(id=ID, isa="PBXSourcesBuildPhase"), re.S | re.M)
+TARGET = re.compile(BLOCK.format(id=ID, isa="PBXNativeTarget"), re.S | re.M)
+LISTED = re.compile(rf"^\t+({ID})[ ,]", re.M)
 
 DECLARED = re.compile(r"func (test[A-Z][A-Za-z0-9_]*)\(\)")
 SUITE = re.compile(r"\b(?:final\s+)?class\s+([A-Za-z0-9_]+)\s*:\s*XCTestCase")
@@ -77,35 +100,100 @@ def git(*args: str) -> str:
     return subprocess.run(["git", *args], capture_output=True, text=True, check=True).stdout
 
 
-def cases_in(source: str, text: str, found: dict[str, list[str]]) -> None:
-    """Add every `Suite.testName` declared in one file's `text` to `found[source]`."""
-    suite = None
+def cases_in(text: str) -> list[str]:
+    """Every `Suite.testName` declared in one file's `text`."""
+    found, suite = [], None
     for line in text.splitlines():
         m = SUITE.search(line)
         if m:
             suite = m.group(1)
         m = DECLARED.search(line)
         if m:
-            found[source].append(f"{suite}.{m.group(1)}")
+            found.append(f"{suite}.{m.group(1)}")
+    return found
 
 
-def declared_at_ref(ref: str) -> tuple[dict[str, list[str]], str]:
-    found: dict[str, list[str]] = {d: [] for d in TEST_DIRS}
+def section(text: str, name: str) -> str:
+    m = re.search(rf"/\* Begin {name} section \*/(.*?)/\* End {name} section \*/", text, re.S)
+    return m.group(1) if m else ""
+
+
+def unregistered(pbxproj: str, names_by_dir: dict[str, list[str]]) -> dict[str, list[str]]:
+    """Test files that will not compile into their bundle, and why, keyed by target.
+
+    A test file has to appear in four places, and three of them looking right is the
+    same as none: a PBXFileReference, a PBXBuildFile pointing at it, the group's
+    children, and the Sources phase **of the target that should own it**. A file in the
+    app target's Sources phase instead looks registered and still never runs in the test
+    bundle.
+    """
+    refs = {i: PATH_IN.search(body) for i, body in FILE_REF.findall(section(pbxproj, "PBXFileReference"))}
+    ref_path = {i: m.group(2) for i, m in refs.items() if m}
+    build_of: dict[str, list[str]] = {}
+    for build_id, ref_id in BUILD_FILE.findall(section(pbxproj, "PBXBuildFile")):
+        build_of.setdefault(ref_id, []).append(build_id)
+
+    group_kids: dict[str, set[str]] = {}
+    for _, label, body in GROUP.findall(section(pbxproj, "PBXGroup")):
+        kids = re.search(r"children = \((.*?)\);", body, re.S)
+        group_kids.setdefault(label, set()).update(LISTED.findall(kids.group(1)) if kids else [])
+
+    phase_files = {}
+    for phase_id, _, body in SOURCES.findall(section(pbxproj, "PBXSourcesBuildPhase")):
+        files = re.search(r"files = \((.*?)\);", body, re.S)
+        phase_files[phase_id] = set(LISTED.findall(files.group(1)) if files else [])
+
+    # Which target's Sources phase each build file ends up in.
+    owner: dict[str, str] = {}
+    for _, label, body in TARGET.findall(section(pbxproj, "PBXNativeTarget")):
+        phases = re.search(r"buildPhases = \((.*?)\);", body, re.S)
+        for phase_id in LISTED.findall(phases.group(1)) if phases else []:
+            for build_id in phase_files.get(phase_id, ()):
+                owner[build_id] = label
+
+    problems: dict[str, list[str]] = {}
+    for d, names in names_by_dir.items():
+        target = Path(d).name
+        for name in names:
+            ids = [i for i, p in ref_path.items() if Path(p).name == name]
+            if not ids:
+                problems.setdefault(target, []).append(f"{name}: no PBXFileReference")
+                continue
+            ref_id = ids[0]
+            builds = build_of.get(ref_id, [])
+            missing = []
+            if not builds:
+                missing.append("no PBXBuildFile")
+            if ref_id not in group_kids.get(target, set()):
+                missing.append(f"not in the {target} group's children")
+            owners = {owner[b] for b in builds if b in owner}
+            if not owners:
+                missing.append("in no target's Sources phase")
+            elif target not in owners:
+                missing.append(f"in the Sources phase of {', '.join(sorted(owners))}, not {target}")
+            if missing:
+                problems.setdefault(target, []).append(f"{name}: " + "; ".join(missing))
+    return problems
+
+
+def read_at_ref(ref: str) -> tuple[dict[str, dict[str, list[str]]], str, str]:
+    found: dict[str, dict[str, list[str]]] = {d: {} for d in TEST_DIRS}
     for d in TEST_DIRS:
         for path in git("ls-tree", "--name-only", "-r", ref, f"{d}/").split():
             if path.endswith(".swift"):
-                cases_in(d, git("show", f"{ref}:{path}"), found)
+                found[d][Path(path).name] = cases_in(git("show", f"{ref}:{path}"))
     sha = git("rev-parse", ref).strip()
     subject = git("log", "-1", "--format=%s", ref).strip()
-    return found, f"{sha} ({subject})"
+    return found, git("show", f"{ref}:{PBXPROJ}"), f"{sha} ({subject})"
 
 
-def declared_in_worktree(root: Path) -> tuple[dict[str, list[str]], str]:
-    found: dict[str, list[str]] = {d: [] for d in TEST_DIRS}
+def read_worktree(root: Path) -> tuple[dict[str, dict[str, list[str]]], str, str]:
+    found: dict[str, dict[str, list[str]]] = {d: {} for d in TEST_DIRS}
     for d in TEST_DIRS:
         for path in sorted((root / d).glob("*.swift")):
-            cases_in(d, path.read_text(errors="replace"), found)
-    return found, f"worktree {root.resolve()} (files on disk, not a commit)"
+            found[d][path.name] = cases_in(path.read_text(errors="replace"))
+    pbx = (root / PBXPROJ).read_text(errors="replace")
+    return found, pbx, f"worktree {root.resolve()} (files on disk, not a commit)"
 
 
 def main() -> int:
@@ -134,9 +222,24 @@ def main() -> int:
                 damaged.append((f"{m.group(1)}.{m.group(2)}", line.strip()[:140]))
 
     if args.worktree:
-        per_target, counted = declared_in_worktree(args.worktree)
+        by_file, pbxproj, counted = read_worktree(args.worktree)
     else:
-        per_target, counted = declared_at_ref(args.ref or "HEAD")
+        by_file, pbxproj, counted = read_at_ref(args.ref or "HEAD")
+
+    problems = unregistered(pbxproj, {d: sorted(files) for d, files in by_file.items()})
+    broken = {p.split(":", 1)[0] for names in problems.values() for p in names}
+
+    # Declarations come from registered files only: a file that compiles into nothing
+    # would otherwise be counted as expected and then never accounted for, which reads
+    # as a mystery gap rather than as the real error.
+    per_target = {
+        d: [c for name, cases in files.items() if name not in broken for c in cases]
+        for d, files in by_file.items()
+    }
+    skipped = {
+        d: {name: cases for name, cases in files.items() if name in broken}
+        for d, files in by_file.items()
+    }
     want = sorted(c for cases in per_target.values() for c in cases)
     wantset = set(want)
 
@@ -164,7 +267,9 @@ def main() -> int:
     print(f"log            {args.log}")
     print(f"counted at     {counted}")
     for d, cases in per_target.items():
-        print(f"  {Path(d).name:<16} {len(cases)} declared")
+        excluded = sum(len(c) for c in skipped[d].values())
+        note = f"  (+{excluded} in unregistered files, excluded)" if excluded else ""
+        print(f"  {Path(d).name:<16} {len(cases)} declared{note}")
     print(f"declared       {len(wantset)}")
     print(f"passed         {len(passed)}")
     print(f"failed         {len(failed)}")
@@ -178,6 +283,19 @@ def main() -> int:
         for e in dict.fromkeys(errors[:10]):
             print(f"    {e.strip()}")
         return 2
+
+    if problems:
+        total = sum(len(c) for d in skipped for c in skipped[d].values())
+        print(f"\nUNREGISTERED TEST FILES ({len(broken)}, holding {total} case(s) that never build):")
+        for target, names in sorted(problems.items()):
+            for note in sorted(names):
+                print(f"    {target}: {note}")
+        for d in skipped:
+            for name, cases in sorted(skipped[d].items()):
+                print(f"    {name} declares {len(cases)} case(s): {', '.join(sorted(cases))}")
+        print("    A test file needs all four: PBXBuildFile, PBXFileReference, the group's")
+        print("    children, and the Sources phase of its own target. Three of four is none.")
+        return 3
 
     if failed:
         print(f"\nFAILED CASES ({len(failed)}):")
