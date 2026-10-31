@@ -289,7 +289,9 @@ struct PhotoEditorSheet: View {
         // near the bottom of the picture, and the loser is the stroke.
         .interactiveDismissDisabled(true)
         .preferredColorScheme(.dark)
-        .accessibilityIdentifier("photo-editor")
+        // No identifier on the root: `accessibilityIdentifier` on a container replaces the
+        // identifier of every element inside it, so one here left Crop, Draw, Undo, Original
+        // and all eight crop handles answering to the container's name and to nothing else.
         .onAppear(perform: load)
     }
 
