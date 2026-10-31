@@ -6,6 +6,8 @@ struct ArbosApp: App {
     @StateObject private var model = AppModel()
     @Environment(\.colorScheme) private var systemScheme
 
+    init() { DebugHooks.logEnvironment() }
+
     var body: some Scene {
         WindowGroup {
             RootView()
