@@ -12,7 +12,7 @@ use gpui::{
 };
 
 use crate::app::ProfilePage;
-use crate::model::{now_ms, GroupAdd, MachineState};
+use crate::model::{now_ms, AccountView, GroupAdd, MachineState};
 use crate::sync::user_error::UserError;
 use crate::ui::devices;
 use crate::ui::error_note;
@@ -205,19 +205,11 @@ impl Shell {
         let credits_body = {
             let mut body = div().flex().flex_col().gap(px(22.0));
             if let Some(account) = account.as_ref() {
-                let mut group = settings_group(&theme).child(
-                    glass::row("Credits", &theme)
-                        .child(value(format!("${:.2} left", account.balance_usd), &theme)),
-                );
-                group = group.child(glass::row("Today", &theme).child(value(
-                    match account.daily_cap_usd {
-                        Some(cap) => {
-                            format!("${:.2} of ${cap:.0} cap", account.spent_today_usd)
-                        }
-                        None => format!("${:.2}", account.spent_today_usd),
-                    },
-                    &theme,
-                )));
+                let group = settings_group(&theme)
+                    .child(
+                        glass::row("Balance", &theme).child(value(account.balance_line(), &theme)),
+                    )
+                    .child(glass::row("Today", &theme).child(value(account.today_line(), &theme)));
                 body = body.child(group).child(footnote(
                     "Credits pay for your agents' model use. Machine time is billed separately. During the beta, usage credit is included — request a top-up when you run low.".into(),
                     &theme,
@@ -1479,8 +1471,19 @@ impl Shell {
                 .debug_selector(|| "settings-privacy".into())
                 .into_any_element(),
             ]));
-            // Secrets · Devices (Credits · Connected apps hidden until implemented).
+            // Credits · Secrets · Devices, the iPhone's account card (Connected apps hidden
+            // until implemented).
             body.push(Section::Card(vec![
+                page_row(
+                    "settings-credits",
+                    "creditcard",
+                    SettingsPage::Credits,
+                    account.as_ref().map(AccountView::credits_summary),
+                    &theme,
+                    cx,
+                )
+                .debug_selector(|| "settings-credits".into())
+                .into_any_element(),
                 page_row(
                     "settings-secrets",
                     "key",

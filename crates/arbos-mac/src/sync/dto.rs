@@ -548,6 +548,7 @@ pub fn account_view_from_me(dto: &MeResponseDto) -> AccountView {
             .map(|d| d.name.clone())
             .unwrap_or_default(),
         balance_usd: dto.credits.balance_usd,
+        granted_usd: dto.credits.granted_usd,
         spent_today_usd: dto.credits.spent_today_usd,
         daily_cap_usd: dto.credits.daily_cap_usd,
     }

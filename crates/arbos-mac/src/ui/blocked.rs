@@ -322,6 +322,7 @@ mod render_tests {
                 avatar_url: String::new(),
                 device_name: "test".into(),
                 balance_usd: 0.0,
+                granted_usd: 0.0,
                 spent_today_usd: 0.0,
                 daily_cap_usd: None,
             });
@@ -841,6 +842,7 @@ mod hidden_tests {
                 avatar_url: String::new(),
                 device_name: "test".into(),
                 balance_usd: 0.0,
+                granted_usd: 0.0,
                 spent_today_usd: 0.0,
                 daily_cap_usd: None,
             });

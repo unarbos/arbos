@@ -4118,9 +4118,43 @@ pub struct AccountView {
     pub name: String,
     pub avatar_url: String,
     pub device_name: String,
+    /// `GET /me` → `credits`, the block the iPhone's Settings › Credits reads.
     pub balance_usd: f64,
+    pub granted_usd: f64,
     pub spent_today_usd: f64,
+    /// `None` = no daily cap on this account (`users.cap_unlimited`), not zero.
     pub daily_cap_usd: Option<f64>,
+}
+
+impl AccountView {
+    /// Settings list value: the iPhone's "$84 left". An account allowed below zero says how far.
+    pub fn credits_summary(&self) -> String {
+        if self.balance_usd < 0.0 {
+            format!("${:.0} over", -self.balance_usd)
+        } else {
+            format!("${:.0} left", self.balance_usd)
+        }
+    }
+
+    /// Settings › Credits › Balance: the iPhone's "$84.50 left of $100".
+    pub fn balance_line(&self) -> String {
+        if self.balance_usd < 0.0 {
+            format!(
+                "${:.2} over the ${:.0} granted",
+                -self.balance_usd, self.granted_usd
+            )
+        } else {
+            format!("${:.2} left of ${:.0}", self.balance_usd, self.granted_usd)
+        }
+    }
+
+    /// Settings › Credits › Today: spend against the daily cap, or "no daily cap".
+    pub fn today_line(&self) -> String {
+        match self.daily_cap_usd {
+            Some(cap) => format!("${:.2} of ${cap:.0} cap", self.spent_today_usd),
+            None => format!("${:.2} · no daily cap", self.spent_today_usd),
+        }
+    }
 }
 
 /// Settings → Privacy: who may add me to a people group (`GET /me` →

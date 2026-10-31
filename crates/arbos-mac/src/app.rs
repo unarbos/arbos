@@ -13269,6 +13269,7 @@ mod hidden_chat_open_tests {
                 avatar_url: String::new(),
                 device_name: "test".into(),
                 balance_usd: 0.0,
+                granted_usd: 0.0,
                 spent_today_usd: 0.0,
                 daily_cap_usd: None,
             });
@@ -13863,6 +13864,7 @@ mod channel_sender_tests {
                 avatar_url: String::new(),
                 device_name: "test".into(),
                 balance_usd: 0.0,
+                granted_usd: 0.0,
                 spent_today_usd: 0.0,
                 daily_cap_usd: None,
             });
@@ -15081,6 +15083,7 @@ mod coalesced_banner_withdraw_tests {
                 avatar_url: String::new(),
                 device_name: "test".into(),
                 balance_usd: 0.0,
+                granted_usd: 0.0,
                 spent_today_usd: 0.0,
                 daily_cap_usd: None,
             });
