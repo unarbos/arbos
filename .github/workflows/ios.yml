@@ -55,7 +55,7 @@ on:
         type: boolean
         default: true
       runner:
-        description: "runs-on label for this run; empty = GitHub's hosted macos-15 (arbos-mac = the self-hosted EC2 Mac, on purpose only)"
+        description: "runs-on label for this run; empty = the self-hosted EC2 Mac (arbos-mac); macos-15 = GitHub's hosted pool, to re-measure it"
         type: string
         default: ""
 
@@ -76,11 +76,13 @@ concurrency:
 jobs:
   phone:
     name: Build and upload the phone app
-    # GitHub's hosted macos-15, always (Jacob, 2026-10-30). The self-hosted EC2 Mac (`arbos-mac`) is one
-    # runner, and release.yml's Mac sign/notarize job needs it: on 2026-10-30 an archive here held it and
-    # v0.6.372's Mac job queued 6.5 min (22:15:10–22:21:40Z). Only a dispatch's `runner` input picks the
-    # self-hosted Mac. The ARBOS_IOS_RUNNER repository variable is not read.
-    runs-on: ${{ inputs.runner || 'macos-15' }}
+    # The self-hosted EC2 Mac (`arbos-mac`) by default. The hosted macos-15 pool left main's run
+    # 41140683364 queued 103 min with no runner (2026-10-30/31), while the same job on the EC2 Mac waited
+    # 14 s and finished in 14.5 min (run 41151237110). The cost: the EC2 Mac is one runner, shared with
+    # release.yml's Mac sign/notarize job, which queued 6.5 min behind an archive on 2026-10-30
+    # (22:15:10–22:21:40Z). A dispatch with `runner: macos-15` still uses the hosted pool, to re-measure it.
+    # The ARBOS_IOS_RUNNER repository variable is not read.
+    runs-on: ${{ inputs.runner || 'arbos-mac' }}
     # 45 was hit on 2026-10-27 23:15 (#2122's build): the archive waited for the shared Mac's heavy slot, then
     # Apple's processing took > 18 min and the job was cancelled inside "Wait for processing" with the build
     # already uploaded — the run had to be redone by the next push. The wait itself is bounded in the step.
