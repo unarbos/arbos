@@ -267,13 +267,19 @@ struct ChatSession: View {
     @State private var memoPressStartedAt: Date?
     /// Hold-to-talk: finger slid left far enough to discard on release.
     @State private var memoCancelArmed = false
+    /// Hold-to-talk: finger slid up far enough to lock (hands-free) on release.
+    @State private var memoLockArmed = false
     /// Hold-to-talk: horizontal drag (≤ 0) while the mic is pressed.
     @State private var memoDragX: CGFloat = 0
+    /// Hold-to-talk: vertical drag (≤ 0 = up) while the mic is pressed.
+    @State private var memoDragY: CGFloat = 0
     /// The field (a `UITextView`, #1596) follows this both ways.
     @State private var composerFocused = false
 
     /// Hold-to-talk: slide the mic this far left to discard instead of send.
     private static let memoCancelDistance: CGFloat = 56
+    /// Hold-to-talk: slide the mic this far up to lock (keep recording after release).
+    private static let memoLockDistance: CGFloat = 56
 
     @State private var showProfile = false
     /// Unblock asks first ([feedback blocked-state-ios-2026-10-26]).
@@ -3409,8 +3415,11 @@ struct ChatSession: View {
             hasPending: !pending.isEmpty,
             memoHoldActive: memoHoldActive,
             memoCancelArmed: memoCancelArmed,
+            memoLockArmed: memoLockArmed,
             memoDragX: memoDragX,
+            memoDragY: memoDragY,
             cancelDistance: Self.memoCancelDistance,
+            lockDistance: Self.memoLockDistance,
             prompt: { composerPrompt(for: $0) },
             onDeleteBackwardEmpty: removeLastPending,
             // Pasted pictures / files arrive through `onPasteMedia` below (every item,
@@ -3422,7 +3431,9 @@ struct ChatSession: View {
                     memoPressStartedAt = Date()
                     memoFinishWhenPermission = false
                     memoCancelArmed = false
+                    memoLockArmed = false
                     memoDragX = 0
+                    memoDragY = 0
                     if recorder.recording {
                         memoIgnoreRelease = true
                         finishMemoHold()
@@ -3432,23 +3443,37 @@ struct ChatSession: View {
                         recorder.start()
                     }
                 }
-                // Slide left while holding to arm cancel (hold-to-talk).
+                // Slide left to arm cancel; swipe up to arm lock (Discord-style).
                 guard !memoIgnoreRelease else { return }
                 let dx = value.translation.width
+                let dy = value.translation.height
                 memoDragX = min(0, dx)
-                let armed = dx < -Self.memoCancelDistance
-                if armed != memoCancelArmed {
-                    memoCancelArmed = armed
-                    if armed { Haptics.pick() }
+                memoDragY = min(0, dy)
+                // Once locked for this press, stay locked until release.
+                if memoLockArmed { return }
+                let cancelArmed = dx < -Self.memoCancelDistance
+                if cancelArmed != memoCancelArmed {
+                    memoCancelArmed = cancelArmed
+                    if cancelArmed { Haptics.pick() }
+                }
+                if !cancelArmed && dy < -Self.memoLockDistance {
+                    memoLockArmed = true
+                    memoCancelArmed = false
+                    Haptics.pick()
                 }
             },
             onMicEnd: { value in
                 let held = Date().timeIntervalSince(memoPressStartedAt ?? Date())
-                let cancel = memoCancelArmed || value.translation.width < -Self.memoCancelDistance
+                // Sticky lock (armed mid-press) wins over a final leftward position.
+                let wasLocked = memoLockArmed
+                let cancel = !wasLocked && (memoCancelArmed || value.translation.width < -Self.memoCancelDistance)
+                let lock = wasLocked || (!cancel && value.translation.height < -Self.memoLockDistance)
                 memoHoldActive = false
                 memoPressStartedAt = nil
                 memoDragX = 0
+                memoDragY = 0
                 memoCancelArmed = false
+                memoLockArmed = false
                 if memoIgnoreRelease {
                     memoIgnoreRelease = false
                     return
@@ -3459,6 +3484,8 @@ struct ChatSession: View {
                     if recorder.recording { recorder.cancel() }
                     return
                 }
+                // Swipe-up lock: leave recording on (hands-free), same as a short tap.
+                if lock { return }
                 // Hold-to-talk: release after the threshold sends.
                 if held >= 0.25 {
                     if recorder.recording {
@@ -3477,7 +3504,9 @@ struct ChatSession: View {
                     memoFinishWhenPermission = false
                     memoPressStartedAt = nil
                     memoCancelArmed = false
+                    memoLockArmed = false
                     memoDragX = 0
+                    memoDragY = 0
                     finishMemoHold()
                 } else if canSend {
                     send()
@@ -3517,7 +3546,9 @@ struct ChatSession: View {
         memoFinishWhenPermission = false
         memoPressStartedAt = nil
         memoCancelArmed = false
+        memoLockArmed = false
         memoDragX = 0
+        memoDragY = 0
         recorder.cancel()
     }
 
@@ -4379,11 +4410,14 @@ private struct ComposerField: View {
     let isChannel: Bool
     let needsAnswer: Bool
     let hasPending: Bool
-    /// Hold-to-talk state owned by the chat screen (slide-to-cancel).
+    /// Hold-to-talk state owned by the chat screen (slide-to-cancel / swipe-up-to-lock).
     let memoHoldActive: Bool
     let memoCancelArmed: Bool
+    let memoLockArmed: Bool
     let memoDragX: CGFloat
+    let memoDragY: CGFloat
     let cancelDistance: CGFloat
+    let lockDistance: CGFloat
     let prompt: (String) -> String
     /// ⌫ on an empty field: the chat screen drops its last pending attachment.
     let onDeleteBackwardEmpty: () -> Void
@@ -4420,11 +4454,13 @@ private struct ComposerField: View {
         reduceMotion ? nil : .easeOut(duration: Theme.composerSwapDuration)
     }
 
-    /// Grok's filled mic (`MicGlyph`); the armed slide-to-cancel shows the bin instead.
+    /// Grok's filled mic (`MicGlyph`); slide-to-cancel shows the bin, swipe-up-to-lock the lock.
     @ViewBuilder
     private var micGlyph: some View {
         if memoCancelArmed {
             Image(systemName: "trash").font(theme.font(17))
+        } else if memoLockArmed {
+            Image(systemName: "lock.fill").font(theme.font(17))
         } else {
             MicGlyph().frame(width: Theme.micGlyphWidth, height: Theme.micGlyphHeight)
         }
@@ -4466,7 +4502,7 @@ private struct ComposerField: View {
             .id("memo-mic")
             .accessibilityIdentifier("composer-mic")
             // Press/release like Mac: tap toggles recording on; hold ≥0.25s then
-            // release sends. Slide left while holding to discard (WhatsApp-style).
+            // release sends. Slide left to discard; swipe up to lock (Discord-style).
             // highPriorityGesture so a focused TextField cannot steal the touch.
             .highPriorityGesture(
                 DragGesture(minimumDistance: 0)
@@ -4495,8 +4531,8 @@ private struct ComposerField: View {
     var body: some View {
         HStack(spacing: 8) {
             if recorder.recording {
-                // Visible discard control (tap) — also used after a short tap that
-                // left recording on; hold-to-talk can slide left instead.
+                // Visible discard control (tap) — also used after a short tap / swipe-up
+                // lock that left recording on; hold-to-talk can slide left instead.
                 Button(action: onCancelRecording) {
                     Image(systemName: "xmark")
                         .font(.system(size: 15, weight: .semibold))
@@ -4512,12 +4548,23 @@ private struct ComposerField: View {
                         // error-ui: exception status-mark
                         .foregroundStyle(theme.danger)
                         .frame(maxWidth: .infinity, alignment: .center)
+                } else if memoLockArmed {
+                    Text("Release to lock")
+                        .font(theme.font(Theme.small))
+                        .foregroundStyle(theme.muted)
+                        .frame(maxWidth: .infinity, alignment: .center)
                 } else if memoHoldActive && memoDragX < -12 {
                     Text("Slide to cancel")
                         .font(theme.font(Theme.small))
                         .foregroundStyle(theme.muted)
                         .frame(maxWidth: .infinity, alignment: .center)
                         .opacity(min(1, -memoDragX / cancelDistance))
+                } else if memoHoldActive && memoDragY < -12 {
+                    Text("Swipe up to lock")
+                        .font(theme.font(Theme.small))
+                        .foregroundStyle(theme.muted)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .opacity(min(1, -memoDragY / lockDistance))
                 } else {
                     HStack(spacing: 8) {
                         // The braille spinner, not a red dot (Jacob, 2026-10-27).
