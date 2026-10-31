@@ -16,6 +16,33 @@ use super::{Job, Matrix};
 use crate::people::PEOPLE_PROJECT;
 use crate::state::AppState;
 
+/// Creator and joined members of a room, from its full state.
+///
+/// Up to room version 11 `m.room.create` carries the creator in `content.creator`. Room v12
+/// (MSC4291) removed that field and made the create event's **sender** the creator, so a lookup
+/// of `content.creator` alone returns nothing for every room made since v12 became the default.
+fn creator_and_joined(state: &[Value]) -> (Option<String>, Vec<String>) {
+    let mut creator = None;
+    let mut joined = Vec::new();
+    for ev in state {
+        match ev["type"].as_str() {
+            Some("m.room.create") => {
+                creator = ev["content"]["creator"]
+                    .as_str()
+                    .or_else(|| ev["sender"].as_str())
+                    .map(str::to_owned);
+            }
+            Some("m.room.member") if ev["content"]["membership"] == "join" => {
+                if let Some(who) = ev["state_key"].as_str() {
+                    joined.push(who.to_owned());
+                }
+            }
+            _ => {}
+        }
+    }
+    (creator, joined)
+}
+
 /// One live member: its Matrix id, relay role and relay member string (`user:<id>` /
 /// `agent:<project>`, original case).
 #[derive(Debug, Clone)]
@@ -522,6 +549,12 @@ impl Worker {
         Ok(())
     }
 
+    /// The chat is gone: every relay-minted member leaves the room and the row is marked closed.
+    ///
+    /// The row is marked closed only once the homeserver has agreed. A close that cannot act —
+    /// the state read failed, a leave was refused — returns an error so the job retries and is
+    /// finally parked with a log line, because a close marked done while its members are still
+    /// joined leaves a room nobody can see that still receives everything (#2433).
     async fn close_room(&self, chat_id: &str) -> MxResult<()> {
         let Some(room) = self.state.db.matrix_room(chat_id).ok().flatten() else {
             return Ok(());
@@ -530,49 +563,137 @@ impl Worker {
             return Ok(());
         }
         let cfg = &self.state.matrix.cfg;
-        let creator = self
-            .client
-            .state(&room.room_id, &cfg.user_mxid("gh_0"), "m.room.create", "")
-            .await
-            .ok()
-            .flatten()
-            .and_then(|v| v["creator"].as_str().map(str::to_owned));
-        // Room v12 omits `creator` from the content; fall back to the first joined relay member.
-        let members = match &creator {
-            Some(c) => self
-                .client
-                .joined_members(&room.room_id, c)
-                .await
-                .unwrap_or_default(),
-            None => Vec::new(),
-        };
-        let actor = creator.or_else(|| {
-            members
-                .iter()
-                .find(|m| cfg.member_of_mxid(m).is_some())
-                .cloned()
-        });
-        if let Some(actor) = actor {
-            let mut content =
-                json!({ "chat_id": chat_id, "kind": room.kind, "closed_at": now_ms() });
-            content["project_id"] = json!(room.project_id);
-            let _ = self
-                .client
-                .send_state(&room.room_id, &actor, "life.arbos.chat", "", &content)
-                .await;
-            for m in members
-                .iter()
-                .filter(|m| **m != actor && cfg.member_of_mxid(m).is_some())
-            {
-                let _ = self.client.leave(&room.room_id, m).await;
-            }
-            let _ = self.client.leave(&room.room_id, &actor).await;
+        let known: Vec<String> = self
+            .known_members(&room)
+            .into_iter()
+            .filter(|m| cfg.member_of_mxid(m).is_some())
+            .collect();
+        if known.is_empty() {
+            return Err(MatrixError::Shape(format!(
+                "no member of {} is known to the relay, so its members cannot be removed",
+                room.room_id
+            )));
         }
+        // Only a user that is, or was, in the room may read it, so the first candidate that
+        // answers is the reader. A candidate that has left sees the room as it was when it
+        // left, which is why the relay's own list is used alongside what the room says.
+        let mut room_state = None;
+        let mut refused = None;
+        for who in &known {
+            match self.client.room_state(&room.room_id, who).await {
+                Ok(s) => {
+                    room_state = Some(s);
+                    break;
+                }
+                // The homeserver has no such room: there is nobody left to remove.
+                Err(e) if e.errcode() == "M_NOT_FOUND" => return self.mark_closed(chat_id),
+                Err(e) => refused = Some(e),
+            }
+        }
+        let Some(room_state) = room_state else {
+            return Err(refused.unwrap_or_else(|| {
+                MatrixError::Shape(format!("{} could not be read by anyone", room.room_id))
+            }));
+        };
+        let (creator, joined) = creator_and_joined(&room_state);
+        let mut members: Vec<String> = joined
+            .into_iter()
+            .filter(|m| cfg.member_of_mxid(m).is_some())
+            .collect();
+        members.sort();
+        for k in known {
+            if !members.contains(&k) {
+                members.push(k);
+            }
+        }
+        // The creator can always send state (infinite power in v12, PL 100 before it); any other
+        // member is better than nobody when the creator has already left.
+        let actor = creator
+            .filter(|c| members.contains(c))
+            .or_else(|| members.first().cloned())
+            .expect("members is not empty");
+        let mut content = json!({ "chat_id": chat_id, "kind": room.kind, "closed_at": now_ms() });
+        content["project_id"] = json!(room.project_id);
+        if let Err(e) = self
+            .client
+            .send_state(&room.room_id, &actor, "life.arbos.chat", "", &content)
+            .await
+        {
+            // The marker is for clients that still have the room open; failing to write it does
+            // not stop the removal, which is what makes the close real.
+            tracing::warn!(chat = %chat_id, room = %room.room_id, error = %e, "matrix close: closed marker not written");
+        }
+        for m in members.iter().filter(|m| **m != actor) {
+            self.client.leave(&room.room_id, m).await?;
+        }
+        self.client.leave(&room.room_id, &actor).await?;
+        self.mark_closed(chat_id)
+    }
+
+    /// Matrix ids that are, or were, in a room, best first.
+    ///
+    /// The homeserver will not say who is in a room except through a user that is or was in it:
+    /// an appservice may only act as a user it has registered, and a room read from anyone else
+    /// is `M_FORBIDDEN`. So a close has to bring its own list. Every source here outlives the
+    /// delete that triggers the close — chats, channels and servers are soft-deleted and their
+    /// membership rows stay — which the create event's `creator` field did not.
+    fn known_members(&self, room: &super::db::MatrixRoom) -> Vec<String> {
+        fn push(out: &mut Vec<String>, mxid: String) {
+            if !out.contains(&mxid) {
+                out.push(mxid);
+            }
+        }
+        let cfg = &self.state.matrix.cfg;
+        let db = &self.state.db;
+        let mut out = Vec::new();
+        // A project chat is only soft-closed and a sync-driven close races the delete, so the
+        // chat's own spec is often still there, and it is the best list there is.
+        if let Some(spec) = room_spec(&self.state, &room.chat_id, room.project_id.as_deref()) {
+            push(&mut out, spec.creator);
+            for m in spec.members {
+                push(&mut out, m.mxid);
+            }
+        }
+        for m in db.members_of(&room.chat_id).unwrap_or_default() {
+            if let Some(mxid) = cfg.member_mxid(&m.member) {
+                push(&mut out, mxid);
+            }
+        }
+        // A space room *is* the server's room (`chat_id` is the server id); a channel room
+        // reaches its server through the channel row.
+        let server_id = match room.kind.as_str() {
+            "space" => Some(room.chat_id.clone()),
+            "channel" => db.channel_server_id(&room.chat_id).ok().flatten(),
+            _ => None,
+        };
+        if let Some(server_id) = server_id {
+            for m in db.server_members(&server_id).unwrap_or_default() {
+                push(&mut out, cfg.user_mxid(&m.user_id));
+            }
+        }
+        if let Some(project_id) = &room.project_id {
+            if let Ok(Some(p)) = db.project(project_id) {
+                push(&mut out, cfg.user_mxid(&p.user_id));
+            }
+            for (user_id, _, _) in db.project_members(project_id).unwrap_or_default() {
+                push(&mut out, cfg.user_mxid(&user_id));
+            }
+            push(&mut out, cfg.agent_mxid(project_id));
+        }
+        // Last resort: whoever the relay has already written into the room.
+        for sender in db.matrix_event_senders(&room.chat_id).unwrap_or_default() {
+            if let Some(mxid) = cfg.member_mxid(&sender) {
+                push(&mut out, mxid);
+            }
+        }
+        out
+    }
+
+    fn mark_closed(&self, chat_id: &str) -> MxResult<()> {
         self.state
             .db
             .matrix_close_room(chat_id)
-            .map_err(|e| MatrixError::Shape(format!("db: {e}")))?;
-        Ok(())
+            .map_err(|e| MatrixError::Shape(format!("db: {e}")))
     }
 
     // ---- messages -------------------------------------------------------------------------------
@@ -733,6 +854,7 @@ pub fn spawn(state: AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::matrix::Config;
     use crate::people::tests_support::{dm, person, project_of};
     use crate::state::test_support::test_state;
     use crate::state::AuthMode;
@@ -765,6 +887,125 @@ mod tests {
             .iter()
             .any(|m| m.mxid.starts_with("@_a_") && m.role == "agent"));
         assert!(room_spec(&state, "nope", None).is_none());
+    }
+
+    /// A close against a real homeserver, which is the only place the room version is real.
+    /// Skipped unless `ARBOS_MATRIX_TEST_HS` points at a throwaway Synapse whose
+    /// `default_room_version` is 12 and whose `app_service_config_files` holds an appservice
+    /// over `@.*` with `ARBOS_MATRIX_TEST_AS_TOKEN` as its `as_token`:
+    ///
+    /// ```text
+    /// ARBOS_MATRIX_TEST_HS=http://127.0.0.1:8008 ARBOS_MATRIX_TEST_AS_TOKEN=… \
+    ///   cargo test -p arbos-relay -- closes_a_room_the_homeserver_made --nocapture
+    /// ```
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn closes_a_room_the_homeserver_made() {
+        let (Ok(hs_url), Ok(as_token)) = (
+            std::env::var("ARBOS_MATRIX_TEST_HS"),
+            std::env::var("ARBOS_MATRIX_TEST_AS_TOKEN"),
+        ) else {
+            return;
+        };
+        let cfg = Config {
+            mode: crate::matrix::Mode::Dual,
+            hs_url,
+            server_name: "arbos.life".into(),
+            as_token_users: as_token.clone(),
+            as_token_agents: as_token.clone(),
+            as_token_bridges: as_token,
+            ..Config::off()
+        };
+        let mut state = test_state(AuthMode::Github);
+        state.matrix = Matrix::new(cfg.clone());
+        let (alice, _) = person(&state, 2001);
+        let (bob, _) = person(&state, 2002);
+        let chat = dm(&state, &alice, &bob);
+        let worker = Worker::new(state.clone());
+        worker
+            .handle(&Job::SyncRoom {
+                chat_id: chat.clone(),
+                project_id: None,
+            })
+            .await
+            .expect("the room is made");
+        let room = state.db.matrix_room(&chat).expect("row").expect("room");
+        let client = Client::new(state.http.clone(), cfg);
+        let create = client
+            .state(
+                &room.room_id,
+                &state.matrix.cfg.user_mxid(&alice),
+                "m.room.create",
+                "",
+            )
+            .await
+            .expect("create event")
+            .expect("create content");
+        assert_eq!(
+            create["room_version"].as_str(),
+            Some("12"),
+            "this proves nothing unless the room really is v12: {create}"
+        );
+        assert!(
+            create["creator"].is_null(),
+            "v12 carries no creator in the content; that is the whole bug: {create}"
+        );
+        let joined = client
+            .joined_members(&room.room_id, &state.matrix.cfg.user_mxid(&alice))
+            .await
+            .expect("members");
+        assert_eq!(joined.len(), 2, "both people are in the room: {joined:?}");
+
+        // A close that cannot reach the homeserver must fail loudly and leave the row open,
+        // never mark the chat closed while its members are still joined.
+        let mut blind = state.clone();
+        blind.matrix = Matrix::new(Config {
+            as_token_users: "not-a-token".into(),
+            ..state.matrix.cfg.clone()
+        });
+        Worker::new(blind)
+            .handle(&Job::CloseRoom {
+                chat_id: chat.clone(),
+            })
+            .await
+            .expect_err("a close that cannot read the room is an error");
+        assert!(
+            state
+                .db
+                .matrix_room(&chat)
+                .expect("row")
+                .expect("room")
+                .closed_at
+                .is_none(),
+            "a failed close leaves the room open for the retry"
+        );
+
+        state.db.delete_people_chat(&chat).expect("chat deleted");
+        worker
+            .handle(&Job::CloseRoom {
+                chat_id: chat.clone(),
+            })
+            .await
+            .expect("the close succeeds");
+        // A member that has left can still read the room, which is how the close is checked.
+        let left = client
+            .room_state(&room.room_id, &state.matrix.cfg.user_mxid(&alice))
+            .await
+            .expect("state after the close");
+        let (_, still_joined) = creator_and_joined(&left);
+        assert!(
+            still_joined.is_empty(),
+            "nobody is left in the room after a close: {still_joined:?}"
+        );
+        assert!(
+            state
+                .db
+                .matrix_room(&chat)
+                .expect("row")
+                .expect("room")
+                .closed_at
+                .is_some(),
+            "the row is closed once the homeserver agrees"
+        );
     }
 
     #[test]

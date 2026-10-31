@@ -46,6 +46,35 @@ fn internal(e: impl std::fmt::Display) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }
 
+/// Whether this principal may act on `device_id`.
+///
+/// `local_devices` has no owner column: a helper's row is keyed by the relay `devices.id` its
+/// token was minted for, so the owner is that device row's user. Nothing in this module checked
+/// it, and a device id is not a secret — `GET /local/devices` listed every helper on the relay to
+/// any caller, and the `reachable` block of a call start hands out each callee's device ids — so
+/// one signed-in user could sign another user's device out, flip their helper's "read without
+/// asking" switch, and have a box run ops against their computer.
+///
+/// A device that is not the caller's answers like a device that does not exist, so these handlers
+/// cannot be used to test whether an id is real.
+fn owns_device(
+    state: &AppState,
+    principal: &Principal,
+    device_id: &str,
+) -> Result<bool, (StatusCode, String)> {
+    let Some(caller) = principal.user_id() else {
+        // The admin token acts for no user and may reach any device, as it does on
+        // `DELETE /auth/devices/{id}`.
+        return Ok(matches!(principal, Principal::Admin));
+    };
+    let owner = state.db.device_user(device_id).map_err(internal)?;
+    Ok(owner.as_deref() == Some(caller))
+}
+
+fn no_such_device() -> (StatusCode, String) {
+    (StatusCode::NOT_FOUND, "no such local device".to_owned())
+}
+
 /// `WS /local/{deviceId}` — the helper's own device token only.
 pub async fn ws_local(
     ws: WebSocketUpgrade,
@@ -168,9 +197,14 @@ pub async fn exec(
     if state.db.project(&project_id).map_err(internal)?.is_none() {
         return Err((StatusCode::NOT_FOUND, "no such project".into()));
     }
+    // The project is the caller's (`allows` above); the computer has to be the caller's too.
+    // Without this a box could run ops against any helper whose device id it had seen.
+    if !owns_device(&state, &principal, &device_id)? {
+        return Err(no_such_device());
+    }
     let known = state.db.local_device(&device_id).map_err(internal)?;
     if known.is_none() {
-        return Err((StatusCode::NOT_FOUND, "no such local device".into()));
+        return Err(no_such_device());
     }
     let conn = state.local_conns.lock().await.get(&device_id).cloned();
     let Some(conn) = conn else {
@@ -215,9 +249,15 @@ pub async fn exec(
     Ok(Json(serde_json::to_value(result).map_err(internal)?).into_response())
 }
 
-/// `GET /local/devices` — device tokens (Settings → This Mac) and box tokens (`local_devices` tool).
-pub async fn list(State(state): State<AppState>, _principal: Principal) -> ApiResult {
-    let devices = state.db.local_devices().map_err(internal)?;
+/// `GET /local/devices` — device tokens (Settings → This Mac) and box tokens (`local_devices`
+/// tool). The caller's own helpers only: this list used to be every helper on the relay, which
+/// is where another user's device ids came from.
+pub async fn list(State(state): State<AppState>, principal: Principal) -> ApiResult {
+    let devices = match principal.user_id() {
+        Some(user) => state.db.local_devices_of_user(user),
+        None => state.db.local_devices(),
+    }
+    .map_err(internal)?;
     let online = state.local_conns.lock().await;
     let items: Vec<LocalDeviceDto> = devices
         .into_iter()
@@ -258,24 +298,31 @@ pub async fn patch(
             "box tokens cannot change device settings".into(),
         ));
     }
+    if !owns_device(&state, &principal, &device_id)? {
+        return Err(no_such_device());
+    }
     if let Some(allow) = b.allow_reads {
         let ok = state
             .db
             .local_device_set_allow_reads(&device_id, allow)
             .map_err(internal)?;
         if !ok {
-            return Err((StatusCode::NOT_FOUND, "no such local device".into()));
+            return Err(no_such_device());
         }
     }
     let d = state
         .db
         .local_device(&device_id)
         .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such local device".to_owned()))?;
+        .ok_or_else(no_such_device)?;
     Ok(Json(serde_json::to_value(d).map_err(internal)?).into_response())
 }
 
 /// `DELETE /local/devices/{id}` (device token): forget the helper and revoke its token.
+///
+/// The revoke is the full one: the `devices` row, its refresh tokens and its Matrix session.
+/// The older weak revoke only flagged the device row, so a "removed" helper could still mint
+/// access tokens from a refresh token it already held.
 pub async fn delete(
     State(state): State<AppState>,
     principal: Principal,
@@ -287,8 +334,13 @@ pub async fn delete(
             "box tokens cannot remove devices".into(),
         ));
     }
+    if !owns_device(&state, &principal, &device_id)? {
+        return Err(no_such_device());
+    }
     let ok = state.db.local_device_delete(&device_id).map_err(internal)?;
-    let _ = state.db.revoke_device(&device_id);
+    crate::signin::revoke_device_everywhere(&state, &device_id)
+        .await
+        .map_err(internal)?;
     if let Some(conn) = state.local_conns.lock().await.remove(&device_id) {
         fail_pending(&conn, "device removed").await;
     }
@@ -298,4 +350,221 @@ pub async fn delete(
         StatusCode::NOT_FOUND
     }
     .into_response())
+}
+
+#[cfg(test)]
+mod owner_tests {
+    //! A helper belongs to one user. Every handler here used to take a device id on trust, and a
+    //! device id is not a secret: the box roster of a shared chat names each member's devices
+    //! (`people::box_roster_carries_member_devices_and_the_app_roster_does_not`), the `reachable`
+    //! block of a call start names each callee's, and `GET /local/devices` used to list every
+    //! helper on the relay to anyone who asked.
+
+    use axum::body::to_bytes;
+    use serde_json::Value;
+
+    use crate::db::Project;
+    use crate::people::tests_support::person;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    use super::*;
+
+    fn helper(state: &AppState, owner_device: &str) {
+        state
+            .db
+            .local_device_hello(owner_device, "mac.local", "macos", "/Users/t")
+            .expect("hello");
+    }
+
+    fn live(state: &AppState, device_id: &str) -> bool {
+        matches!(state.db.device_status(device_id), Ok(Some((_, false))))
+    }
+
+    fn allow_reads(state: &AppState, device_id: &str) -> bool {
+        state
+            .db
+            .local_device(device_id)
+            .unwrap()
+            .expect("row")
+            .allow_reads
+    }
+
+    /// These handlers report "no such device" as an error and success as a response, and the
+    /// older ones reported a missing row as an `Ok(404)`. The tests care about the status either
+    /// way, so that a refusal that never happened fails on what it let through, not on shape.
+    fn status_of(r: ApiResult) -> StatusCode {
+        match r {
+            Ok(res) => res.status(),
+            Err((code, _)) => code,
+        }
+    }
+
+    fn box_of(user: &str) -> Principal {
+        Principal::Box {
+            user_id: user.to_owned(),
+        }
+    }
+
+    fn project_of(state: &AppState, id: &str, user: &str) {
+        state
+            .db
+            .insert_project(&Project {
+                id: id.into(),
+                name: id.into(),
+                icon: "P".into(),
+                instructions: String::new(),
+                models: json!({}),
+                state: "awake".into(),
+                created_at: 0,
+                last_active_at: 0,
+                spend_cap_daily: 25.0,
+                color: "#000".into(),
+                user_id: user.into(),
+                workspace_state: "stopped".into(),
+                avatar: None,
+                avatar_color: None,
+                description: String::new(),
+                primary_chat_id: None,
+                avatar_color_index: None,
+                avatar_leaf: None,
+                avatar_leaf_color: None,
+                image_key: None,
+                avatar_version: 0,
+            })
+            .expect("project");
+    }
+
+    /// The one that matters: Alice signing Bob's device out. Before the owner check this
+    /// answered 404 — because Bob has no `local_devices` row — and revoked him anyway.
+    #[tokio::test]
+    async fn one_users_token_cannot_sign_another_users_device_out() {
+        let state = test_state(AuthMode::Github);
+        let (_alice, alice_dev) = person(&state, 21);
+        let (_bob, bob_dev) = person(&state, 22);
+        let Principal::Device { id: bob_id, .. } = &bob_dev else {
+            panic!("device")
+        };
+
+        let bob_id = bob_id.clone();
+        let r = delete(State(state.clone()), alice_dev, Path(bob_id.clone())).await;
+        assert!(
+            live(&state, &bob_id),
+            "Alice's token signed Bob's device out"
+        );
+        assert_eq!(
+            status_of(r),
+            StatusCode::NOT_FOUND,
+            "another user's device answers like no device at all"
+        );
+    }
+
+    /// `allow_reads` is the switch that lets an agent read files without asking each time.
+    #[tokio::test]
+    async fn one_users_token_cannot_flip_another_users_read_switch() {
+        let state = test_state(AuthMode::Github);
+        let (_alice, alice_dev) = person(&state, 23);
+        let (_bob, bob_dev) = person(&state, 24);
+        let Principal::Device { id: bob_id, .. } = &bob_dev else {
+            panic!("device")
+        };
+        let bob_id = bob_id.clone();
+        helper(&state, &bob_id);
+
+        let r = patch(
+            State(state.clone()),
+            alice_dev,
+            Path(bob_id.clone()),
+            Json(PatchBody {
+                allow_reads: Some(true),
+            }),
+        )
+        .await;
+        assert!(
+            !allow_reads(&state, &bob_id),
+            "Alice's token turned on reads-without-asking on Bob's computer"
+        );
+        assert_eq!(status_of(r), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn the_device_list_is_only_the_callers_own() {
+        let state = test_state(AuthMode::Github);
+        let (_alice, alice_dev) = person(&state, 25);
+        let (_bob, bob_dev) = person(&state, 26);
+        let (Principal::Device { id: alice_id, .. }, Principal::Device { id: bob_id, .. }) =
+            (&alice_dev, &bob_dev)
+        else {
+            panic!("devices")
+        };
+        let (alice_id, bob_id) = (alice_id.clone(), bob_id.clone());
+        helper(&state, &alice_id);
+        helper(&state, &bob_id);
+
+        let r = list(State(state.clone()), alice_dev).await.expect("list");
+        let body = to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        let ids: Vec<&str> = v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|d| d["device_id"].as_str())
+            .collect();
+        assert_eq!(ids, vec![alice_id.as_str()], "no other user's helper");
+    }
+
+    /// A box runs ops on a computer. It may only reach its own user's.
+    #[tokio::test]
+    async fn a_box_cannot_run_ops_on_another_users_computer() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _alice_dev) = person(&state, 27);
+        let (_bob, bob_dev) = person(&state, 28);
+        let Principal::Device { id: bob_id, .. } = &bob_dev else {
+            panic!("device")
+        };
+        helper(&state, bob_id);
+        project_of(&state, "p_alice", &alice);
+
+        let r = exec(
+            State(state.clone()),
+            box_of(&alice),
+            Path(("p_alice".to_owned(), bob_id.clone())),
+            Json(LocalOp::ListDir { path: "/".into() }),
+        )
+        .await;
+        assert_eq!(
+            status_of(r),
+            StatusCode::NOT_FOUND,
+            "Alice's box reached a helper belonging to Bob"
+        );
+    }
+
+    /// The owner still works, and the removal now takes the device's refresh tokens with it.
+    #[tokio::test]
+    async fn the_owner_removes_their_own_helper_and_its_tokens_die() {
+        let state = test_state(AuthMode::Github);
+        let (user, dev) = person(&state, 29);
+        let Principal::Device { id, .. } = &dev else {
+            panic!("device")
+        };
+        let id = id.clone();
+        helper(&state, &id);
+        let tokens = crate::signin::issue_tokens(&state, &user, &id).expect("tokens");
+        let h = arbos_core::auth::hash(&tokens.refresh_token);
+
+        let r = delete(State(state.clone()), dev, Path(id.clone())).await;
+        assert_eq!(status_of(r), StatusCode::NO_CONTENT);
+        assert!(state.db.local_device(&id).unwrap().is_none());
+        assert!(!live(&state, &id), "the device is signed out");
+        assert!(
+            state
+                .db
+                .refresh_row(&h)
+                .unwrap()
+                .expect("row")
+                .revoked_at
+                .is_some(),
+            "a removed helper cannot mint a new access token from a refresh token it kept"
+        );
+    }
 }
