@@ -162,6 +162,18 @@ def touches_ios(files: list[str] | None) -> bool:
     return any(f.startswith(IOS_PATH_PREFIXES) or f == ".github/workflows/ios.yml" for f in files or [])
 
 
+# What else the iPhone build compiles, for the gate's iOS half only (the shipping expectations stay on touches_ios, so
+# none of these makes an item wait for TestFlight). arbos-ffi depends on arbos-matrix, whose Apple-only TLS dependencies
+# Linux CI never compiles; arbos-core embeds assets/avatars/leaves with include_str!; a dependency or toolchain bump can
+# break only the iOS targets. Keep this a superset of swift-core-check.yml's paths.
+IOS_BUILD_PREFIXES = IOS_PATH_PREFIXES + ("crates/arbos-matrix/", "assets/avatars/leaves/")
+IOS_BUILD_FILES = ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "scripts/build-xcframework.sh")
+
+
+def needs_ios_gate(files: list[str] | None) -> bool:
+    return touches_ios(files) or any(f.startswith(IOS_BUILD_PREFIXES) or f in IOS_BUILD_FILES for f in files or [])
+
+
 def parse_iso(s: str) -> dt.datetime:
     s = s.strip()
     if s.endswith("Z"):
@@ -2389,7 +2401,7 @@ class Loop:
         under pool-first they run one after another without ending pool-first."""
         def group(st: dict) -> int:
             files = st.get("files") or []
-            if touches_ios(files) or st.get("expects_ios"):
+            if needs_ios_gate(files) or st.get("expects_ios"):
                 return 2
             if files and all(f.startswith(("crates/arbos-mac/", "crates/arbos-update/", "docs/", "scripts/runner/")) for f in files):
                 return 0
@@ -2486,7 +2498,7 @@ class Loop:
             cur.pop("rust_gate_tree", None)
             tfiles = [f["filename"] for c in self.gh.compare(tree["base"], tree["tree"]).get("commits", []) for f in self.gh.commit(c["sha"]).get("files", [])]
             tree.update(started=iso(), warm=False, needs_mac=True, linux="pending", mac="pending", mac_started=None, land_tree=True,
-                        needs_ios=touches_ios(tfiles), ios="pending" if touches_ios(tfiles) else "skipped")
+                        needs_ios=needs_ios_gate(tfiles), ios="pending" if needs_ios_gate(tfiles) else "skipped")
             cur["rust_gate"] = tree
             self.store.save_cursor(cur)
             log(f"Rust gate {tree['id']}: integration tree {tree['tree'][:8]} with {len(tree['members'])} fixes (CI on {tree['branch']}; Mac release build)")
@@ -2998,7 +3010,7 @@ class Loop:
             files += self.store.state(fid).get("files") or []
         crates = self.rust_crates(files)
         mac = "arbos-mac" in crates or crates == ["workspace"]
-        ios = touches_ios(files)
+        ios = needs_ios_gate(files)
         linux = any(not f.startswith("apps/ios/") for f in files)  # ci.yml ignores apps/ios-only pushes
         cur = self.store.cursor()
         cur["rust_gate"] = {"id": run_id, "branch": branch, "base": base, "tree": tree, "members": {fid: members[fid] for fid in merged},
@@ -3478,8 +3490,8 @@ class Loop:
             return
         # Per-item, per-half verdict (coordinator 2026-10-27 22:01, the #2031 spirit): a member whose footprint does not
         # reach the half that failed was proven by the halves that passed — it lands now instead of riding the bisect
-        # of a sibling's red. iOS red with Linux+Mac green: members with no iOS footprint (no apps/ios, no FFI /
-        # client-core crates) land. Mac red with Linux+iOS green: apps/ios-only members land. A Linux red (fmt /
+        # of a sibling's red. iOS red with Linux+Mac green: members with no iOS footprint (needs_ios_gate: no apps/ios,
+        # no FFI / client-core / matrix crates, no Cargo or toolchain bump) land. Mac red with Linux+iOS green: apps/ios-only members land. A Linux red (fmt /
         # clippy / tests / typeshare) can come from anything, so nothing lands on it. #2053/#2082, Mac-only, had
         # sat 6 h behind iOS siblings' reds (ChatView switch, PerfCounters).
         ios_only_red = active.get("ios") == "fail" and active["linux"] in ("ok", "skipped") and active["mac"] in ("ok", "skipped")
@@ -3491,7 +3503,7 @@ class Loop:
                 if st.get("status") != "gating" or st.get("branch_head") != members[fid]:
                     continue
                 files = st.get("files") or []
-                if ios_only_red and not touches_ios(files) and not st.get("expects_ios"):
+                if ios_only_red and not needs_ios_gate(files) and not st.get("expects_ios"):
                     innocent.append(fid)
                 elif mac_only_red and files and all(f.startswith("apps/ios/") for f in files):
                     innocent.append(fid)
