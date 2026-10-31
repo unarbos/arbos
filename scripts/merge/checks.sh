@@ -108,11 +108,6 @@ gate_state() {
   # Every run is named in the detail, whatever the label. The bug this replaces was a result that
   # never appeared in any output, so a result that is not a pass is listed rather than summarised.
   local pass all red pend
-  # PASS reads the RUN's conclusion, which GitHub sets to success when its jobs are success-or-skipped.
-  # That equals a real verdict only while no job in the workflow can succeed without testing: today
-  # because the workflow has one job, `check`, and once #2448 lands only because its
-  # `Swift verdict` job is `if: always()` and fails closed. A `continue-on-error: true` there, or any
-  # job that always succeeds, makes this permissive again without a change to this file.
   pass=$(printf '%s\n' "$list" | awk '$4=="success"{print $1" ("$2")"}' | head -1)
   [ -n "$pass" ] && { echo "PASS run $pass"; return; }
   all=$(printf '%s\n' "$list" | awk '{print $1" ("$2", "($3 == "completed" ? $4 : $3)")"}' | paste -sd', ' -)
