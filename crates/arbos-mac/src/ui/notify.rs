@@ -293,6 +293,7 @@ fn render(event: &NotifyEvent, count: usize, chats: &[String]) -> Notification {
 #[cfg(test)]
 pub mod record {
     use super::Notification;
+    use std::cell::RefCell;
 
     #[derive(Default)]
     pub struct Record {
@@ -300,36 +301,36 @@ pub mod record {
         pub withdrawn: Vec<String>,
     }
 
-    pub fn log() -> &'static super::Mutex<Record> {
-        static LOG: std::sync::OnceLock<super::Mutex<Record>> = std::sync::OnceLock::new();
-        LOG.get_or_init(|| super::Mutex::new(Record::default()))
+    thread_local! {
+        /// One log per thread, not per process. The harness runs tests on parallel threads,
+        /// and a single shared log let two of them take each other's banners: one saw three
+        /// where it expected two while its neighbour saw one, which reddened main after
+        /// #2431 merged. A test only ever sees what it posted itself, because every banner
+        /// reaches [`super::deliver`] synchronously on the thread driving the app.
+        static LOG: RefCell<Record> = RefCell::new(Record::default());
     }
 
-    /// Everything since the last call.
+    pub(super) fn with<R>(f: impl FnOnce(&mut Record) -> R) -> R {
+        LOG.with(|log| f(&mut log.borrow_mut()))
+    }
+
+    /// Everything this thread recorded since its last call.
     pub fn take() -> Record {
-        std::mem::take(&mut *log().lock().expect("notify record"))
+        with(std::mem::take)
     }
 }
 
 /// Always true: a test records instead of posting, and the caller returns.
 #[cfg(test)]
 fn recorded_banner(n: &Notification) -> bool {
-    record::log()
-        .lock()
-        .expect("notify record")
-        .delivered
-        .push(n.clone());
+    record::with(|r| r.delivered.push(n.clone()));
     true
 }
 
 /// Always true: a test records instead of asking the center, and the caller returns.
 #[cfg(test)]
 fn recorded_read(chat_id: &str) -> bool {
-    record::log()
-        .lock()
-        .expect("notify record")
-        .withdrawn
-        .push(chat_id.to_owned());
+    record::with(|r| r.withdrawn.push(chat_id.to_owned()));
     true
 }
 
