@@ -544,6 +544,17 @@ pub fn on_announce(
     );
 }
 
+/// Why an announced message would wake one agent. `WhenMentioned` is answered from the message
+/// body, so it is answered in [`deliver_announced`] once the stored row is in rather than at
+/// announce time: the announce body is only the sending client's push preview (#2413).
+#[derive(Clone, Copy)]
+enum WakeRule {
+    /// Its own chat, or a DM: every message in it is for the agent.
+    Always,
+    /// A group: only when the message tags the agent.
+    WhenMentioned,
+}
+
 /// The event of one announced message, waiting for its row.
 struct Announced {
     chat: ChatRef,
@@ -552,7 +563,7 @@ struct Announced {
     text: String,
     reply_to: Option<String>,
     mentions: Vec<String>,
-    targets: Vec<(Project, bool, Value)>,
+    targets: Vec<(Project, WakeRule, Value)>,
 }
 
 /// [`on_announce`] that waits up to `wait` for the row when the relay's doc does not hold it
@@ -570,7 +581,7 @@ pub(crate) fn on_announce_waiting(
     mentions: &[String],
     wait: std::time::Duration,
 ) {
-    let targets: Vec<(Project, bool, Value)> = match &chat.project_id {
+    let targets: Vec<(Project, WakeRule, Value)> = match &chat.project_id {
         Some(pid) => {
             if !is_outside(state, pid) {
                 return;
@@ -587,7 +598,7 @@ pub(crate) fn on_announce_waiting(
                 .unwrap_or_default();
             vec![(
                 p,
-                true,
+                WakeRule::Always,
                 json!({ "id": chat.chat_id, "kind": "agent", "project_id": pid, "title": title }),
             )]
         }
@@ -603,10 +614,14 @@ pub(crate) fn on_announce_waiting(
                 .filter(|pid| is_outside(state, pid))
                 .filter_map(|pid| state.db.project(&pid).ok().flatten())
                 .map(|p| {
-                    let wake = kind == "dm" || mentions_agent(text, mentions, &p);
+                    let rule = if kind == "dm" {
+                        WakeRule::Always
+                    } else {
+                        WakeRule::WhenMentioned
+                    };
                     (
                         p,
-                        wake,
+                        rule,
                         json!({ "id": chat.chat_id, "kind": kind, "project_id": Value::Null, "title": title }),
                     )
                 })
@@ -676,9 +691,9 @@ fn load_announced_doc(state: &AppState, chat: &ChatRef) -> Option<ChatDoc> {
         .flatten()
 }
 
-/// One `message.received` per target. `text` and `attachments` come from the row itself when
-/// `doc` holds it; otherwise `attachments_unknown` is set and the body falls back to the
-/// announce's own.
+/// One `message.received` per target. `text`, `attachments` and `wake` all come from the row
+/// itself when `doc` holds it; otherwise `attachments_unknown` is set and both the body and the
+/// wake decision fall back to the announce's own preview.
 fn deliver_announced(state: &AppState, ev: &Announced, doc: Option<&ChatDoc>) {
     let chat = &ev.chat;
     let sender = &ev.sender;
@@ -698,7 +713,7 @@ fn deliver_announced(state: &AppState, ev: &Announced, doc: Option<&ChatDoc>) {
         );
     }
     let reply_to = reply_json(state, doc, chat, ev.reply_to.as_deref());
-    for (p, wake, chat_json) in &ev.targets {
+    for (p, rule, chat_json) in &ev.targets {
         // Its own message, announced by the relay on its behalf: not news to it.
         if sender.kind == "agent" && sender.id == p.id {
             continue;
@@ -712,6 +727,14 @@ fn deliver_announced(state: &AppState, ev: &Announced, doc: Option<&ChatDoc>) {
         {
             continue;
         }
+        // Asked here rather than at announce time so the question is put to `text` above — the
+        // stored row when it arrived. A tag typed past the client's preview cut is in the row
+        // and not in the preview, and deciding from the preview dropped the message entirely:
+        // the agent was never woken and nobody answered the tester (#2413).
+        let wake = match rule {
+            WakeRule::Always => true,
+            WakeRule::WhenMentioned => mentions_agent(&text, &ev.mentions, p),
+        };
         let mut message = json!({
             "id": message_id,
             "text": text,
@@ -2887,6 +2910,142 @@ mod tests {
         let events = events_eventually(&state, &pid).await;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].1["message"]["text"], full);
+    }
+
+    /// #2413: the tag itself can fall past the client's preview cut. Arbonites 01M66NSXQW…
+    /// (asp_event 732) stored 142 characters ending "can you investigate the @grok"; the iPhone's
+    /// 140-character preview left "the @gr", so deciding `wake` from the preview sent the event
+    /// with `wake: false`. The agent was never woken, the attached screenshot was never opened
+    /// and nobody answered the tester. The row carries the tag, so the row is what decides.
+    #[tokio::test]
+    async fn a_mention_past_the_preview_cut_still_wakes_the_agent() {
+        let full = "On iOS often times when people send messages while im typing the chat just \
+                    goes black like in the attached image can you investigate the @grok-bot";
+        let preview: String = full.chars().take(140).collect();
+        assert!(
+            !preview.contains("@grok-bot"),
+            "the preview must not carry the tag, or the test proves nothing: {preview:?}"
+        );
+
+        let (state, pid, g, other) = outside_group(7231);
+        let msg_id = ulid();
+        let (m, o, f) = (msg_id.clone(), other.clone(), full.to_owned());
+        crate::notices::write_doc(&state, None, &g, move |doc| {
+            doc.append_user_message(
+                &m,
+                &f,
+                "dev:phone",
+                &arbos_core::doc::UserMessageOpts {
+                    sender: Some(format!("user:{o}")),
+                    ..Default::default()
+                },
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let me = Sender::user(&state, &other);
+        on_announce_waiting(
+            &state,
+            &ChatRef::people(&g),
+            &me,
+            &msg_id,
+            &preview,
+            None,
+            // The iPhone sends no `mentions`, so the text is all there is to go on.
+            &[],
+            std::time::Duration::from_secs(1),
+        );
+        let events = events_eventually(&state, &pid).await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].1["message"]["text"], full);
+        assert_eq!(
+            events[0].1["wake"], true,
+            "the tag is in the row, so the agent wakes: {}",
+            events[0].1
+        );
+    }
+
+    /// The other half of #2413: a group message that tags nobody must still not wake the agent.
+    /// Deciding from the row must not turn the wake rule into "always".
+    #[tokio::test]
+    async fn a_long_group_message_that_tags_nobody_does_not_wake_the_agent() {
+        let full = "I do also see the appeal of swipe to reply but having to swipe on a specific \
+                    area that is not another persons chat to swipe out of the chat is too \
+                    arbitrary and it keeps catching me out";
+        let preview: String = full.chars().take(140).collect();
+        assert!(full.chars().count() > 140, "the body outruns the preview");
+
+        let (state, pid, g, other) = outside_group(7241);
+        let msg_id = ulid();
+        let (m, o, f) = (msg_id.clone(), other.clone(), full.to_owned());
+        crate::notices::write_doc(&state, None, &g, move |doc| {
+            doc.append_user_message(
+                &m,
+                &f,
+                "dev:phone",
+                &arbos_core::doc::UserMessageOpts {
+                    sender: Some(format!("user:{o}")),
+                    ..Default::default()
+                },
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let me = Sender::user(&state, &other);
+        on_announce_waiting(
+            &state,
+            &ChatRef::people(&g),
+            &me,
+            &msg_id,
+            &preview,
+            None,
+            &[],
+            std::time::Duration::from_secs(1),
+        );
+        let events = events_eventually(&state, &pid).await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].1["message"]["text"], full);
+        assert_eq!(
+            events[0].1["wake"], false,
+            "nobody was tagged: {}",
+            events[0].1
+        );
+    }
+
+    /// When the row never arrives the body falls back to the preview, and so must the wake
+    /// decision — a missing row must not silently become "no". Here the preview carries the tag,
+    /// so the agent wakes even though there is no row to confirm it from.
+    #[tokio::test]
+    async fn with_no_row_the_wake_decision_falls_back_to_the_preview() {
+        let (state, pid, g, other) = outside_group(7251);
+        let me = Sender::user(&state, &other);
+        let msg_id = ulid();
+        on_announce_waiting(
+            &state,
+            &ChatRef::people(&g),
+            &me,
+            &msg_id,
+            "@grok-bot are you there?",
+            None,
+            &[],
+            std::time::Duration::ZERO,
+        );
+        let events = state.db.asp_events_after(&pid, 0, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].1["message"]["attachments_unknown"], true,
+            "no row: {}",
+            events[0].1
+        );
+        assert_eq!(
+            events[0].1["wake"], true,
+            "the preview carries the tag: {}",
+            events[0].1
+        );
     }
 
     /// #2305, divergent chat: the row is stored but depends on history the relay lost, so the

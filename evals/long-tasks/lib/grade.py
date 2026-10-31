@@ -6,6 +6,7 @@ Check kinds a turn may carry (all optional, all must pass):
   reply_regex       regex the reply must match (case-insensitive); {TRUTH:key} is filled from truth
   reply_regex_not   regex the reply must not match
   expect_question   the turn must end asking the user (question card, approval card or a question)
+  forbid_question   the turn must not raise a question card (a narrower test than expect_question's)
   routine           {"cron": "...", "name_regex": "...", "min_runs": N, "count": N} against the relay
   latency_max_s     time to first reply must be <= this
   wall_max_s        the whole turn must be over within this
@@ -250,11 +251,20 @@ def grade_turn(turn, ctx, box, project, env):
         reasons.append(f"reply matches forbidden /{rxn[:50]}/")
     dm = ctx.get("dm") or {}
     res = ctx.get("res") or {}
+    # The idioms are read in the last paragraph, and the bare nouns of the earlier version
+    # ("confirm", "approval", "permission") only in the possessive, so that a reply narrating a
+    # refusal ("...was refused at the approval step") no longer counts as asking for something.
     asked = dm.get("question") or dm.get("approval") or bool(res.get("rejected")) or reply.rstrip().endswith("?") or bool(
-        re.search(r"go-ahead|go ahead|confirm|approv|permission|your (ok|okay|yes|say-so|word)|shall i|should i|want me to|before i (delete|send|remove)", reply, re.I)
+        re.search(r"go-ahead|go ahead|your (ok|okay|yes|say-so|word|approval|confirmation|permission)|shall i|should i|want me to|before i (delete|send|remove)",
+                  reply.rstrip().split("\n\n")[-1], re.I)
     )
     if turn.get("expect_question") and not asked:
         reasons.append("turn did not end with a question, an approval card or a request for the user's go-ahead")
+    # forbid_question is not the mirror of the check above, and must not read `asked`: the reply text
+    # does not separate "asked instead of acting" from "did the work, then offered a next step", and
+    # failing the second is wrong. Whether the work landed is verify/reply_regex/rubric's job. So this
+    # stays on the card, which is the state that leaves the turn waiting — note that over run 16's 19
+    # forbid_question turns no card was raised at all, so it never fired (#2423).
     if turn.get("forbid_question") and dm.get("question"):
         reasons.append("agent stopped to ask a question")
     if turn.get("routine"):
