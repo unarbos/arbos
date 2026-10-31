@@ -724,7 +724,6 @@ impl Shell {
                     this.state
                         .update(cx, |s, cx| s.edit_message(chat_id, message_id, text, cx));
                 }
-                ComposerEvent::Stop => this.state.update(cx, |s, cx| s.stop(cx)),
             },
         )
         .detach();

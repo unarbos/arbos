@@ -6483,6 +6483,11 @@ impl AppState {
         }
     }
 
+    /// Halt the active chat's turn, or a job tab's own job. The composer's busy
+    /// Stop button that called it left on 2026-10-30 (typing "stop" cancels the
+    /// turn instead); the job-tab path stays covered and the call stays for the
+    /// next way in.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn stop(&mut self, cx: &mut Context<Self>) {
         if let Some(chat_id) = self.active_chat_id() {
             if let Some(job_id) = crate::jobtabs::job_id(&chat_id).map(str::to_owned) {
