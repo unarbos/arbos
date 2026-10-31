@@ -444,6 +444,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/auth/refresh", post(signin::refresh))
         .route("/auth/logout", post(signin::logout))
         .route(
+            "/auth/sign-out-everywhere",
+            post(signin::sign_out_everywhere),
+        )
+        .route(
             "/auth/devices",
             get(signin::devices_list).post(export::mint_reader),
         )

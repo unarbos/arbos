@@ -741,6 +741,65 @@ pub async fn logout(State(state): State<AppState>, principal: Principal) -> Resp
     }
 }
 
+/// `POST /auth/sign-out-everywhere` (Bearer): end every session of the caller's account, the
+/// calling device included. Each device goes through [`revoke_device_everywhere`], so the relay
+/// row, that device's refresh tokens and its Matrix session all close — a path that revoked the
+/// relay rows alone would leave live Matrix access tokens behind (#2433).
+///
+/// "Every session" means every live row in `devices`, whatever its `kind`: a read-only reader
+/// token (`export::READER_KIND`) is a credential on the account like any other, and a person
+/// signing out everywhere after losing a laptop means that one too.
+///
+/// The caller's own device is revoked last, so a failure part-way through cannot leave the
+/// account signed out on every machine but the one that asked. A device that was already revoked
+/// is not a failure; a database error is, and the answer says how many sessions survived rather
+/// than reporting a sign-out that did not happen.
+pub async fn sign_out_everywhere(State(state): State<AppState>, principal: Principal) -> Response {
+    let (user_id, current) = match &principal {
+        Principal::Device { id, user_id, .. } => (user_id.clone(), id.clone()),
+        Principal::Box { .. } | Principal::Admin => {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "a signed-in device is required",
+            )
+        }
+    };
+    let live = match state.db.live_devices_of_user(&user_id) {
+        Ok(list) => list,
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    };
+    let mut ids: Vec<String> = live
+        .iter()
+        .filter_map(|d| d["id"].as_str())
+        .filter(|id| *id != current)
+        .map(|id| id.to_owned())
+        .collect();
+    ids.push(current);
+
+    let mut revoked = 0usize;
+    let mut failed = 0usize;
+    for id in &ids {
+        match revoke_device_everywhere(&state, id).await {
+            Ok(true) => revoked += 1,
+            Ok(false) => {}
+            Err(e) => {
+                failed += 1;
+                tracing::error!(device = %id, user = %user_id, error = %e, "sign out everywhere: device not revoked");
+            }
+        }
+    }
+    if failed > 0 {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "db",
+            format!("{revoked} sessions were signed out and {failed} could not be; try again"),
+        );
+    }
+    tracing::info!(user = %user_id, revoked, "signed out everywhere");
+    StatusCode::NO_CONTENT.into_response()
+}
+
 /// `GET /auth/devices` — the caller's signed-in devices (this one marked `current`). Rows a
 /// sign-out or revoke already closed (`revoked_at` set) are left out: until 2026-10-28 they were
 /// listed too, so a tester who had signed four Macs out still saw "9 devices". Same-name GitHub
@@ -1794,6 +1853,134 @@ mod devices_list_tests {
         // A second list call is a no-op once collapsed.
         let (_, rows2) = list(devices_list(State(state.clone()), dev_a, query(&[])).await).await;
         assert_eq!(rows2.len(), rows.len());
+    }
+}
+
+#[cfg(test)]
+mod sign_out_everywhere_tests {
+    //! `POST /auth/sign-out-everywhere` ends every session of one account — the calling device,
+    //! the other apps and the read-only tokens — and reaches no other account.
+
+    use axum::extract::State;
+    use axum::http::StatusCode;
+
+    use arbos_core::auth::hash;
+    use arbos_core::ids::ulid;
+
+    use super::*;
+    use crate::auth::{resolve_checked, Refused};
+    use crate::export::READER_KIND;
+    use crate::people::tests_support::person;
+    use crate::state::test_support::test_state;
+
+    /// Another signed-in app of the same account, with a legacy `adv_` bearer we can present.
+    fn device(state: &AppState, user: &str, name: &str, kind: &str) -> (String, String) {
+        let id = ulid();
+        let token = format!("adv_{}", ulid());
+        state
+            .db
+            .insert_device(&id, name, &hash(&token), user, kind)
+            .expect("device");
+        (id, token)
+    }
+
+    fn live_ids(state: &AppState, user: &str) -> Vec<String> {
+        state
+            .db
+            .live_devices_of_user(user)
+            .expect("devices")
+            .iter()
+            .filter_map(|d| d["id"].as_str().map(str::to_owned))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn one_call_ends_every_session_of_the_account_and_touches_no_other() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_phone) = person(&state, 1);
+        let (bob, bob_phone) = person(&state, 2);
+        let (alice_mac, _) = device(&state, &alice, "Alice's Mac", "github");
+        let (alice_reader, reader_token) = device(&state, &alice, "Grok Bot", READER_KIND);
+        let (bob_mac, bob_token) = device(&state, &bob, "Bob's Mac", "github");
+        let phone_id = match &alice_phone {
+            Principal::Device { id, .. } => id.clone(),
+            _ => unreachable!("person() hands back a device"),
+        };
+        // An access token minted a moment ago: it must die with its device row, not an hour later.
+        let phone_jwt = mint_access(&state.jwt_key, &alice, &phone_id, ACCESS_TTL_S);
+        assert!(resolve_checked(&state, &phone_jwt).is_ok());
+        assert_eq!(live_ids(&state, &alice).len(), 3);
+
+        let r = sign_out_everywhere(State(state.clone()), alice_phone).await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+
+        assert!(
+            live_ids(&state, &alice).is_empty(),
+            "every one of Alice's sessions is closed, the calling device included"
+        );
+        for id in [&phone_id, &alice_mac, &alice_reader] {
+            assert!(
+                state.db.device_status(id).unwrap().unwrap().1,
+                "device {id} is revoked"
+            );
+        }
+        assert_eq!(
+            resolve_checked(&state, &phone_jwt).unwrap_err(),
+            Refused::Invalid,
+            "an unexpired access token of a signed-out device is refused"
+        );
+        assert_eq!(
+            resolve_checked(&state, &reader_token).unwrap_err(),
+            Refused::Invalid,
+            "a read-only token is a credential on the account and goes with the rest"
+        );
+
+        // Bob was never in it: both his sessions and his bearer still work.
+        let bob_phone_id = match &bob_phone {
+            Principal::Device { id, .. } => id.clone(),
+            _ => unreachable!("person() hands back a device"),
+        };
+        let bobs = live_ids(&state, &bob);
+        assert_eq!(bobs.len(), 2, "Bob keeps both sessions: {bobs:?}");
+        assert!(bobs.contains(&bob_phone_id) && bobs.contains(&bob_mac));
+        assert!(resolve_checked(&state, &bob_token).is_ok());
+
+        // Asking again when nothing is live is a no-op, not an error.
+        let r = sign_out_everywhere(
+            State(state.clone()),
+            Principal::Device {
+                id: phone_id,
+                token: String::new(),
+                user_id: alice.clone(),
+            },
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        assert!(live_ids(&state, &alice).is_empty());
+    }
+
+    #[tokio::test]
+    async fn only_a_signed_in_device_may_sign_an_account_out() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _alice_phone) = person(&state, 7);
+        let before = live_ids(&state, &alice);
+        assert_eq!(before.len(), 1);
+
+        // A box serves the account's projects; it is not the account's owner.
+        let r = sign_out_everywhere(
+            State(state.clone()),
+            Principal::Box {
+                user_id: alice.clone(),
+            },
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+
+        // The admin token has no account to sign out of; it revokes one device at a time.
+        let r = sign_out_everywhere(State(state.clone()), Principal::Admin).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+
+        assert_eq!(live_ids(&state, &alice), before, "nothing was signed out");
     }
 }
 
