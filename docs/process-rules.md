@@ -125,6 +125,19 @@ load 66–167). Rule, for every rig script under `/Users/Shared/arbos-*/` and ev
   (exit 75) at once, and signals no one. Use it whenever you were told to ask rather than queue.
 - To wait a moment for a handover but not sit in the queue, pass `--wait-max <seconds>`: it queues, and if it
   is not granted in time it clears its own marker and exits 75. It is never promoted to an `uncapped-*` slot.
+  Check that the copy you are calling honours the flag before you rely on it. The installed
+  `/usr/local/bin/arbos-heavy-slot.sh` was two commits behind `main` on 2026-10-30, and the older parser has no
+  branch for `--wait-max` and no `*)` catch-all, so it drops the flag with nothing on stdout and nothing in the
+  log. A rig that asked for a thirty-second handover then waits the full `WAIT_MAX_S` (2700 s) and is promoted
+  uncapped at the end of it: a silently degraded cap, not a hang. The only check available to a caller is the
+  usage text, captured into a variable rather than piped — `… 2>&1 | grep -q -- --wait-max` is always false
+  under `set -o pipefail`, because the usage path exits 2 and the pipeline takes that status, so every version
+  looks as though it lacks the flag:
+
+      usage=$(/usr/local/bin/arbos-heavy-slot.sh 2>&1 || true)
+      case "$usage" in *--wait-max*) flag="--wait-max 30" ;; esac
+
+  This paragraph is temporary: it goes once the installed copy is in step with `scripts/runner/`.
 - A waiter whose `--pid` owner has died gives up and clears its queue marker; a rig that holds a slot with no
   heavy process alive is stale and gets reclaimed.
 - Shared simulators stay shut down when the rig is done (`xcrun simctl shutdown <udid>`): a booted idle
