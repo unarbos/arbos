@@ -108,6 +108,11 @@ gate_state() {
   # Every run is named in the detail, whatever the label. The bug this replaces was a result that
   # never appeared in any output, so a result that is not a pass is listed rather than summarised.
   local pass all red pend
+  # PASS reads the RUN's conclusion, which GitHub sets to success when its jobs are success-or-skipped.
+  # That equals a real verdict only while no job in the workflow can succeed without testing: today
+  # because the workflow has one job, `check`, and once #2448 lands only because its
+  # `Swift verdict` job is `if: always()` and fails closed. A `continue-on-error: true` there, or any
+  # job that always succeeds, makes this permissive again without a change to this file.
   pass=$(printf '%s\n' "$list" | awk '$4=="success"{print $1" ("$2")"}' | head -1)
   [ -n "$pass" ] && { echo "PASS run $pass"; return; }
   all=$(printf '%s\n' "$list" | awk '{print $1" ("$2", "($3 == "completed" ? $4 : $3)")"}' | paste -sd', ' -)
@@ -151,13 +156,13 @@ gate_applies() {
 #
 # <files> is the newline-separated diff for this head, from pr_files or commit_files.
 require_gates() {
-  local sha=$1 files=$2 wf name why state rc=0
+  local sha=$1 files=$2 wf name phead pbase pats state rc=0
   while IFS='|' read -r wf name; do
     [ -n "$wf" ] || continue
-    why=$(gate_applies "$wf" "$sha" "$files")
+    state=$(gate_applies "$wf" "$sha" "$files")
     case $? in
-      1) echo "    required check '$name' on ${sha:0:9}: $why"; continue ;;
-      2) echo "    required check '$name' on ${sha:0:9}: $why"; rc=2; continue ;;
+      1) echo "    required check '$name' on ${sha:0:9}: $state"; continue ;;
+      2) echo "    required check '$name' on ${sha:0:9}: $state"; rc=2; continue ;;
     esac
     state=$(gate_state "$wf" "$sha")
     case "$state" in
