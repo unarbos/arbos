@@ -1,0 +1,20 @@
+{
+ "id": "m16-policy-exceptions",
+ "lane": "a",
+ "category": "managing",
+ "title": "Apply a written expenses policy to a receipt list, including the rows that only look like breaches",
+ "turns": [
+  {
+   "prompt": "Check {D}/receipts.csv against the policy in {D}/policy.md. This batch is being submitted on 2026-10-20. Write {D}/exceptions.csv with header receipt_id,rule,why listing only the receipts that break policy, and tell me which ones break which rule.",
+   "seed": "mkdir -p {D} && cat > {D}/policy.md <<'EOF'\n# Expenses policy\n\n1. A meal costing more than 40.00 per person needs a note explaining it.\n2. Alcohol cannot be claimed.\n3. A taxi over 60.00 needs a manager's approval reference.\n4. A receipt dated more than 30 days before the submission date cannot be claimed.\nEOF\ncat > {D}/receipts.csv <<'EOF'\nid,date,category,amount,people,note,approval\nR-1,2026-10-18,meal,38.00,1,,\nR-2,2026-10-15,meal,95.00,2,,\nR-3,2026-10-12,taxi,72.00,1,,\nR-4,2026-09-02,hotel,210.00,1,conference,\nR-5,2026-10-19,meal,120.00,3,team dinner,\nR-6,2026-10-17,taxi,45.00,1,,\nR-7,2026-10-16,bar,28.00,1,client drinks,\nR-8,2026-10-14,taxi,88.00,1,,APR-5512\nEOF",
+   "verify": "f={D}/exceptions.csv; test -f $f || { echo 'FAIL: no exceptions.csv'; exit 0; }\nsed 's/^/SHOW /' $f | head -12\npython3 - \"$f\" <<'EOF'\nimport re, sys\nrows = [l for l in open(sys.argv[1]).read().splitlines() if l.strip()]\nflagged = {}\nfor line in rows[1:]:\n    m = re.search(r'R-\\d', line)\n    if not m:\n        continue\n    rule = re.search(r'\\b([1-4])\\b', line[m.end():])\n    flagged[m.group(0)] = rule.group(1) if rule else '?'\nwant = {'R-2': '1', 'R-3': '3', 'R-4': '4', 'R-7': '2'}\nprint('SHOW flagged=' + ','.join(f'{k}:{v}' for k, v in sorted(flagged.items())))\nmissing = sorted(set(want) - set(flagged))\nextra = sorted(set(flagged) - set(want))\nwrong = sorted(k for k in want if k in flagged and flagged[k] not in ('?', want[k]))\nif missing or extra or wrong:\n    print(f'FAIL: missing={missing} wrongly_flagged={extra} wrong_rule={wrong}')\nelse:\n    print('PASS')\nEOF",
+   "forbid_question": true,
+   "timeout_s": 300,
+   "rubric": {
+    "criteria": "Pass if exactly four receipts are flagged with the right rule: R-2 breaks rule 1 (95.00 for two people is 47.50 each, over 40.00, with no note), R-3 breaks rule 3 (a 72.00 taxi with no approval reference), R-4 breaks rule 4 (2026-09-02 is more than 30 days before the 2026-10-20 submission) and R-7 breaks rule 2 (a bar receipt is alcohol). The four compliant ones must not be flagged, and each is compliant for a different reason: R-5 is exactly 40.00 per person and has a note, R-8 is a taxi over 60.00 that carries approval APR-5512, R-6 is under the taxi limit and R-1 is under the meal limit. Fail if a compliant receipt is flagged, if one of the four is missed, or if a rule number is wrong.",
+    "min": 3
+   }
+  }
+ ],
+ "notes": "Added for run 16 (2026-10-30). Grounding an answer in a short written policy, rather than in general knowledge, is a realistic ask with a checkable answer. The discriminating part is the four compliant rows: R-5 sits exactly on the per-person limit, R-8 is over the taxi limit but carries the approval the rule asks for, and both are the natural false positives for an agent that matches on amount alone. R-2 also requires dividing by the people column instead of reading the total."
+}

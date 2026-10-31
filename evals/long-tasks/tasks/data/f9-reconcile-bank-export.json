@@ -1,0 +1,21 @@
+{
+ "id": "f9-reconcile-bank-export",
+ "lane": "b",
+ "category": "data",
+ "title": "Reconcile an invoice ledger against a bank export (different columns, different date format, three kinds of mismatch)",
+ "turns": [
+  {
+   "prompt": "Reconcile {D}/invoices.csv (what we billed) against {D}/bank.csv (what the bank shows). They use different column names and date formats. Write {D}/unmatched.csv with header receipt,source,amount,reason listing only what does not reconcile, and tell me what does not reconcile and why.",
+   "seed": "mkdir -p {D} && cat > {D}/invoices.csv <<'EOF'\nref,date,amount,customer\nINV-1001,2026-09-02,1250.00,Nordwind\nINV-1002,2026-09-05,480.50,Kelp Co\nINV-1003,2026-09-11,2310.75,Nordwind\nINV-1004,2026-09-18,99.00,Tide Labs\nINV-1005,2026-09-21,1500.00,Kelp Co\nEOF\ncat > {D}/bank.csv <<'EOF'\nvalue_date,description,credit_eur\n02/09/2026,Payment INV-1001,1250.00\n05/09/2026,KELP CO INV-1002,480.50\n11/09/2026,INV-1003 part payment,2300.75\n21/09/2026,INV-1005,1500.00\n24/09/2026,REFUND INV-0999,75.00\nEOF",
+   "verify": "f={D}/unmatched.csv; test -f $f || { echo 'FAIL: no unmatched.csv'; exit 0; }\nsed 's/^/SHOW /' $f | head -12\npython3 - \"$f\" <<'EOF'\nimport re, sys\ntxt = open(sys.argv[1]).read()\nfound = set(re.findall(r'INV-\\d+', txt.upper()))\nwant = {'INV-1003', 'INV-1004', 'INV-0999'}\nclean = {'INV-1001', 'INV-1002', 'INV-1005'}\nprint('SHOW found=' + ','.join(sorted(found)))\nmissing = sorted(want - found)\nfalse_pos = sorted(found & clean)\nif missing or false_pos:\n    print(f'FAIL: missing={missing} wrongly_flagged={false_pos}')\nelse:\n    print('PASS')\nEOF",
+   "reply_regex": "(?i)1003[\\s\\S]*1004|1004[\\s\\S]*1003",
+   "forbid_question": true,
+   "timeout_s": 300,
+   "rubric": {
+    "criteria": "Pass if all three mismatches are named with the right reason: INV-1003 was paid 2300.75 against 2310.75 billed (10.00 short), INV-1004 has no bank line at all (unpaid), and the bank's INV-0999 refund of 75.00 has no matching invoice. The four clean matches (INV-1001, INV-1002, INV-1005, and the dates in the bank's day/month/year form) must not be reported as problems. Fail if the reply claims the ledger reconciles, if a clean invoice is flagged, if a mismatch is missed, or if the 10.00 shortfall is described as a missing payment rather than a short one.",
+    "min": 3
+   }
+  }
+ ],
+ "notes": "Added for run 16 (2026-10-30). A reconciliation is one of the commonest real long tasks and it has three distinct failure shapes in one file: a near-match that differs by a small amount, a record present on one side only, and a record present on the other side only. The date columns disagree in both name and format, so a join on the literal column fails and the agent has to read both headers."
+}

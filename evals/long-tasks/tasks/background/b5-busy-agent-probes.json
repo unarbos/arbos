@@ -54,5 +54,5 @@
     "no_repeated_sentence": true,
     "no_truncated_reply": true
   },
-  "regression": "busy-agent quick replies (bc-d117b386, #1349) + reply lost after act (#1355); run 15: busy probes at 5.12/7.41 s, then 7.43/7.75 s on a fresh box whose agentd idled at about 1.2 of its 2 CPUs with 17 agents"
+  "regression": "busy-agent quick replies (bc-d117b386, #1349) + reply lost after act (#1355); run 15: busy probes at 5.12/7.41 s, then 7.43/7.75 s on a fresh box whose agentd idled at about 1.2 of its 2 CPUs with 17 agents; run 16: 8.43 s and 5.51 s against the 5 s limit. The box carried 1,518 old eval chats into the run and idled at 1.22-1.33 of its 2 cores before it started (#2367), so the limit is not measurable on this box while that holds"
 }
