@@ -6552,15 +6552,14 @@ final class AppModel: ObservableObject {
         Task {
             do {
                 let id = try await api.createProject(name: name, avatarColorIndex: avatarColorIndex, leaf: leaf)
-                // The Create sheet's picture goes into the new agent's own slot first, so the
-                // list refresh already shows it.
-                if let picture, let id, let jpeg = await draftJpeg(picture) {
-                    let key = "avatar-\(Int(Date().timeIntervalSince1970 * 1000)).\(PictureMaster.ext(jpeg))"
-                    if (try? await api.putBlob(projectId: id, key: key, mime: PictureMaster.mime(jpeg), data: jpeg)) != nil {
-                        _ = try? await api.setProjectImageKey(id, key: key)
-                    }
-                }
+                // The agent first, so the resolver has a copy keyed by its id; then the Create
+                // sheet's picture through `setProjectImage` — the one apply path every other
+                // surface uses, with the relay's stamp (ARB-394). Written beside the resolver
+                // instead, the registry's picture-less copy drew over it.
                 await refreshRegistry()
+                if let picture, let id, let jpeg = await draftJpeg(picture) {
+                    _ = await setProjectImage(projectId: id, jpeg: jpeg)
+                }
             } catch {
                 fail("create the agent", error)
             }

@@ -173,6 +173,35 @@ final class CoreFixturesTests: XCTestCase {
         XCTAssertEqual(project.primaryChatId, "chat_primary")
     }
 
+    /// `POST /projects` answers a `CreateProjectResponseDto`, which nests the new agent under
+    /// `project`: there is no top-level `id`. Reading one found nothing, so the picture chosen in
+    /// the Create sheet — adopted on that id — was dropped on every new agent.
+    ///
+    /// The answer is assembled from the committed wire captures of the two records it nests and
+    /// then decoded into the generated `CreateProjectResponseDto`. That decode is the anchor: a
+    /// change to the answer's shape fails here rather than losing the picture again.
+    func testCreatedProjectId() throws {
+        let project = try XCTUnwrap(try apiFixtureJSON("project_json.json") as? [String: Any])
+        let chat = try XCTUnwrap(try apiFixtureJSON("chat_json.json") as? [String: Any])
+        let id = try XCTUnwrap(project["id"] as? String)
+        let answer: [String: Any] = [
+            "project": project,
+            "pinned_chat": chat,
+            "sandbox": ["provider": "process"],
+            "rooms": ["project": "/room/\(id)/_project", "pinned_chat": "/room/\(id)/c1"],
+        ]
+        let data = try JSONSerialization.data(withJSONObject: answer)
+        XCTAssertNoThrow(try JSONDecoder().decode(CreateProjectResponseDto.self, from: data),
+                         "the create answer decodes as CreateProjectResponseDto")
+
+        XCTAssertNil(answer["id"], "the create answer carries no top-level id")
+        XCTAssertEqual(RelayAPI.createdProjectId(answer), id)
+        XCTAssertNil(RelayAPI.createdProjectId([String: Any]()))
+        XCTAssertNil(RelayAPI.createdProjectId(["project": ["id": ""]]))
+        // The shape both clients used to read: an id at the top level is not an agent id.
+        XCTAssertNil(RelayAPI.createdProjectId(["id": id]))
+    }
+
     func testParseChatFixture() throws {
         let raw = try apiFixtureJSON("chat_json_for.json")
         let chat = try XCTUnwrap(RelayAPI.parseChat(raw))

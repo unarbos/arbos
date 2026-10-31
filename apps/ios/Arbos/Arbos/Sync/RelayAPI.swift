@@ -376,7 +376,22 @@ final class RelayAPI {
         // Fork: relay copies the source agent's workspace (files + memory) into the new one.
         if let sourceProjectId { body["source_project_id"] = sourceProjectId }
         let v = try await json("POST", "/projects", body: body)
-        return (v as? [String: Any])?["id"] as? String
+        // `CreateProjectResponseDto`: the new agent is nested under `project`, so the answer
+        // carries no top-level `id`. Reading one found nothing, so the Create sheet's picture —
+        // adopted on this id — was dropped on every new agent. The agent itself is created, so a
+        // shape we cannot read is a missing picture, never a failed create.
+        guard let id = Self.createdProjectId(v) else {
+            NSLog("CreateProjectResponseDto: no project id in the create answer")
+            return nil
+        }
+        return id
+    }
+
+    /// The new agent's id in a `POST /projects` answer.
+    static func createdProjectId(_ v: Any) -> Id? {
+        guard let project = (v as? [String: Any])?["project"] as? [String: Any],
+              let id = project["id"] as? String, !id.isEmpty else { return nil }
+        return id
     }
 
     // MARK: Outside agents (#2142) — an agent that runs elsewhere, hosted by the relay
