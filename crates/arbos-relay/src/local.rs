@@ -16,7 +16,7 @@ use axum::Json;
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 use arbos_core::api::{LocalDeviceDto, LocalDevicesDto};
 use arbos_core::ids::ulid;
@@ -36,6 +36,13 @@ const RESULT_MAX_BYTES: usize = 4 * 1024 * 1024;
 pub struct LocalConn {
     pub tx: mpsc::Sender<String>,
     pending: Mutex<HashMap<String, oneshot::Sender<LocalResult>>>,
+    /// Fired by [`disconnect`] to stop [`run`]. Taking the connection out of `local_conns` does
+    /// not end it: `run` holds its own `Arc<LocalConn>`, so the channel stays open and the loop
+    /// keeps reading. Until the re-review's probe B that meant a signed-out machine could still
+    /// rewrite its `local_devices` row — hostname, os, home and `last_seen` — and the row stayed
+    /// `connected = true` for ever, because the teardown only clears it while this connection is
+    /// still the registered one.
+    closed: Notify,
 }
 
 pub type LocalConns = Arc<Mutex<HashMap<String, Arc<LocalConn>>>>;
@@ -101,6 +108,7 @@ async fn run(socket: WebSocket, state: AppState, device_id: String) {
     let conn = Arc::new(LocalConn {
         tx,
         pending: Mutex::new(HashMap::new()),
+        closed: Notify::new(),
     });
     // A reconnect replaces the previous socket for this device; its pending ops fail below.
     let previous = state
@@ -159,6 +167,10 @@ async fn run(socket: WebSocket, state: AppState, device_id: String) {
                     break;
                 }
             }
+            _ = conn.closed.notified() => {
+                tracing::info!(%device_id, "local helper cut off: its device was signed out");
+                break;
+            }
         }
     }
     let mut conns = state.local_conns.lock().await;
@@ -181,13 +193,22 @@ async fn fail_pending(conn: &LocalConn, why: &str) {
     }
 }
 
-/// Unregister a helper socket and fail whatever it was asked to do. Revoking the device row
-/// does not reach the socket: the helper registered once and stays in `local_conns` until it
-/// disconnects, so without this a signed-out machine still answers ops.
+/// Unregister a helper socket, fail whatever it was asked to do, and end the connection.
+/// Revoking the device row does not reach the socket: the helper registered once and stays in
+/// `local_conns` until it disconnects, so without this a signed-out machine still answers ops.
+///
+/// All three steps are needed. Unregistering alone leaves `run` reading from a socket the
+/// account has signed out, which keeps writing the machine's `local_devices` row and leaves it
+/// showing as online for ever, because the teardown in `run` only clears `connected` while this
+/// connection is still the registered one — which unregistering has just made false. So the
+/// `connected` flag is cleared here instead, and `closed` stops the loop.
 pub(crate) async fn disconnect(state: &AppState, device_id: &str, why: &str) {
-    if let Some(conn) = state.local_conns.lock().await.remove(device_id) {
-        fail_pending(&conn, why).await;
-    }
+    let Some(conn) = state.local_conns.lock().await.remove(device_id) else {
+        return;
+    };
+    fail_pending(&conn, why).await;
+    let _ = state.db.local_device_seen(device_id, false);
+    conn.closed.notify_one();
 }
 
 /// `POST /projects/{id}/local/{device}/exec` (box token): body = one `LocalOp`.
@@ -209,6 +230,13 @@ pub async fn exec(
     // The project is the caller's (`allows` above); the computer has to be the caller's too.
     // Without this a box could run ops against any helper whose device id it had seen.
     if !owns_device(&state, &principal, &device_id)? {
+        return Err(no_such_device());
+    }
+    // And it has to still be signed in. `disconnect` takes a revoked device out of
+    // `local_conns`, but that is a teardown racing a request rather than a check: the
+    // re-review's probe C ran file operations against a signed-out computer for the whole of a
+    // hung Matrix logout. The map is a cache of who is reachable; `devices` is the authority.
+    if !state.device_is_live(&device_id) {
         return Err(no_such_device());
     }
     let known = state.db.local_device(&device_id).map_err(internal)?;
@@ -587,6 +615,108 @@ mod owner_tests {
             status_of(r),
             StatusCode::NOT_FOUND,
             "Alice's box reached a helper belonging to Bob"
+        );
+    }
+
+    /// Adversarial re-review of #2460, M2's second half. `disconnect` takes a revoked device
+    /// out of `local_conns`, but that is a teardown racing a request rather than a check: with a
+    /// homeserver that never answers, the row was revoked in milliseconds and the device sat in
+    /// the map for the whole ten-second Matrix timeout, dispatching file operations against a
+    /// computer the account had just signed out. `devices` is the authority, so `exec` asks it.
+    #[tokio::test]
+    async fn file_operations_are_refused_against_a_signed_out_computer() {
+        let state = test_state(AuthMode::Github);
+        let (alice, dev) = person(&state, 30);
+        let Principal::Device { id, .. } = &dev else {
+            panic!("device")
+        };
+        let id = id.clone();
+        helper(&state, &id);
+        project_of(&state, "p_alice", &alice);
+
+        // Still signed in: the op gets as far as looking for a live socket, which is the
+        // "device is offline" answer rather than a refusal.
+        let before = exec(
+            State(state.clone()),
+            box_of(&alice),
+            Path(("p_alice".to_owned(), id.clone())),
+            Json(LocalOp::ListDir { path: "/".into() }),
+        )
+        .await;
+        assert_eq!(status_of(before), StatusCode::SERVICE_UNAVAILABLE);
+
+        state.db.revoke_device_fully(&id).expect("revoke");
+        let after = exec(
+            State(state.clone()),
+            box_of(&alice),
+            Path(("p_alice".to_owned(), id.clone())),
+            Json(LocalOp::ListDir { path: "/".into() }),
+        )
+        .await;
+        assert_eq!(
+            status_of(after),
+            StatusCode::NOT_FOUND,
+            "a signed-out computer is not reachable, whatever is still in local_conns"
+        );
+    }
+
+    /// Adversarial re-review of #2460, L1. Unregistering the helper is not the same as ending
+    /// it: `run` holds its own `Arc<LocalConn>`, so the loop kept reading from a socket whose
+    /// device had been signed out, and the `local_devices` row stayed `connected = true` for
+    /// ever because the teardown only clears that flag while the connection is still the
+    /// registered one — which unregistering has just made false.
+    #[tokio::test]
+    async fn signing_a_device_out_ends_its_helper_socket_and_marks_it_offline() {
+        let state = test_state(AuthMode::Github);
+        let (_alice, dev) = person(&state, 31);
+        let Principal::Device { id, .. } = &dev else {
+            panic!("device")
+        };
+        let id = id.clone();
+        helper(&state, &id);
+        let _ = state.db.local_device_seen(&id, true);
+
+        let (tx, _rx) = mpsc::channel::<String>(4);
+        let conn = Arc::new(LocalConn {
+            tx,
+            pending: Mutex::new(HashMap::new()),
+            closed: Notify::new(),
+        });
+        state
+            .local_conns
+            .lock()
+            .await
+            .insert(id.clone(), conn.clone());
+        // A pending op, so the caller is answered rather than left hanging.
+        let (done, waiting) = oneshot::channel();
+        conn.pending.lock().await.insert("op1".into(), done);
+        // Somebody has to be listening when `disconnect` fires, the way `run`'s select arm is.
+        let woken = tokio::spawn({
+            let conn = conn.clone();
+            async move { conn.closed.notified().await }
+        });
+        tokio::task::yield_now().await;
+
+        disconnect(&state, &id, "device signed out").await;
+
+        assert!(
+            !state.local_conns.lock().await.contains_key(&id),
+            "the socket is unregistered"
+        );
+        assert!(
+            matches!(waiting.await, Ok(LocalResult::Error { .. })),
+            "whatever it was asked to do is failed rather than left pending"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), woken)
+                .await
+                .is_ok(),
+            "and the read loop is told to stop, so the machine cannot keep writing"
+        );
+        assert_eq!(
+            state.db.local_device(&id).unwrap().map(|d| d.connected),
+            Some(false),
+            "a signed-out computer must not keep showing as online"
         );
     }
 

@@ -331,6 +331,14 @@ async fn run(
     room_name: String,
 ) {
     let conn_id = state.conn_seq.fetch_add(1, Ordering::Relaxed) + 1;
+    // Subscribe before anything else this function awaits, and before the liveness check below.
+    // `Sender::subscribe` marks the current value as seen, so every revocation that lands after
+    // this line wakes the watch arm, and the check that follows catches any that landed before
+    // it — including during the upgrade, where the principal was resolved and then several more
+    // awaits ran. The re-review's probe E won exactly that window: reconnecting dialers, which
+    // is what the app does when the 1008 close arrives, put sockets past the resolve and into
+    // `run` while the revocation committed, and those sockets were deaf to it permanently.
+    let mut revocations = state.revocations.subscribe();
     let room = state.room(&room_name).await;
     // Before subscribe: Drop runs after `rx` is gone, so receiver_count excludes this socket.
     let _clear_doc = LastSocketDocCacheClear(room.clone());
@@ -346,8 +354,14 @@ async fn run(
     // Sign-out has to reach a socket that is already open. The principal was resolved once, at
     // upgrade, so without this a revoked device keeps reading the room and keeps writing rows
     // that post as its owner until it disconnects of its own accord (#2460 review, finding 1).
-    let mut revocations = state.revocations.subscribe();
-    revocations.mark_unchanged();
+    // The subscribe is at the top of this function; this is the other half, for a revocation
+    // that beat it.
+    if let Principal::Device { id, .. } = &principal {
+        if !state.device_is_live(id) {
+            let _ = sink.send(signed_out_close()).await;
+            return;
+        }
+    }
     let _open = OpenSocket::new(&state);
     let is_box = principal.is_box();
     // Rows from the box carry the box's device id (`box:<sandbox>` / `box:local-<user>`), the same
@@ -2523,5 +2537,82 @@ mod revoked_socket_tests {
             head_before,
             "nothing the revoked device sent was stored"
         );
+    }
+
+    /// Adversarial re-review of #2460, M1. The first fix subscribed to `state.revocations`
+    /// deep inside `run`, after the upgrade had resolved the principal and several more awaits
+    /// had gone by. `Sender::subscribe` marks the current value as seen, so a revocation that
+    /// committed anywhere in that span was invisible to that socket **permanently** — and the
+    /// per-frame check did not help, because a socket that only listens never sends a frame.
+    ///
+    /// The window is small, so this dials repeatedly to find it, which is what the app itself
+    /// does: the 1008 close provokes a redial. It cannot fail spuriously — a socket reading a
+    /// post made after the sign-out is a real defect every time — it can only miss one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn a_socket_opening_as_the_sign_out_lands_does_not_read_on_regardless() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 4603);
+        let (bob, _) = person(&state, 4604);
+        let chat = dm(&state, &alice, &bob);
+        let room = format!("people/{chat}");
+        let (dev_id, token) = device_token(&state, &alice);
+        let addr = serve(state.clone()).await;
+
+        let url = format!("ws://{addr}/room/{room}?token={token}");
+        let mut dialers = Vec::new();
+        for _ in 0..16 {
+            let url = url.clone();
+            dialers.push(tokio::spawn(async move {
+                let mut held = Vec::new();
+                // Until the bearer stops resolving, which is when the revocation has landed.
+                while let Ok((ws, _)) = tokio_tungstenite::connect_async(url.clone()).await {
+                    held.push(ws);
+                    if held.len() > 2 {
+                        held.remove(0);
+                    }
+                }
+                held
+            }));
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        crate::signin::revoke_device_everywhere(&state, &dev_id)
+            .await
+            .unwrap();
+
+        let mut sockets = Vec::new();
+        for d in dialers {
+            sockets.extend(d.await.unwrap());
+        }
+        // Somebody still in the chat posts. No socket of the signed-out device may see it.
+        let _ = state
+            .room(&room)
+            .await
+            .tx
+            .send(crate::state::RoomBroadcast {
+                from_conn: u64::MAX,
+                bytes: Frame::new(
+                    FrameType::Status,
+                    json!({ "after_sign_out": true }),
+                    bytes::Bytes::new(),
+                )
+                .encode(),
+                seq: 0,
+            });
+
+        for mut ws in sockets {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            // Anything that is not a binary frame — closed, errored or silent — is fine: none
+            // of them is the post being read.
+            while let Ok(Some(Ok(TMsg::Binary(b)))) =
+                tokio::time::timeout_at(deadline, ws.next()).await
+            {
+                let seen = matches!(Frame::decode(b), Ok(Some(f))
+                    if f.header.get("after_sign_out").is_some());
+                assert!(
+                    !seen,
+                    "a signed-out device read a post made after the sign-out"
+                );
+            }
+        }
     }
 }

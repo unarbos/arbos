@@ -312,7 +312,10 @@ pub async fn create_project(
     };
     let now = now_ms();
     let id = ulid();
-    let owner = principal.user_id().unwrap_or("u_default").to_owned();
+    let owner = principal
+        .user_id()
+        .unwrap_or(crate::auth::LEGACY_USER)
+        .to_owned();
     // Defaults are deduped within the user's (tree, colour) pairs so sibling tiles differ.
     let taken: Vec<(String, String)> = state
         .db
@@ -1575,7 +1578,7 @@ pub async fn machine_migrate(
 ) -> ApiResult {
     let user_id = match &principal {
         Principal::Device { user_id, .. } => user_id.clone(),
-        Principal::Admin => "u_default".to_owned(),
+        Principal::Admin => crate::auth::LEGACY_USER.to_owned(),
         Principal::Box { .. } => return Err((StatusCode::FORBIDDEN, "devices only".into())),
     };
     let reports = crate::migrate::migrate_user(&state, &user_id, q.project.as_deref(), q.force)
