@@ -323,9 +323,9 @@ struct PhotoEditorSheet: View {
             PhotoInkCanvas(drawing: $drawing, revision: revision, active: mode == .draw,
                            scale: frame.width / max(picture.size.width, 1), onBeginStroke: pushHistory)
                 .frame(width: frame.width, height: frame.height)
-                .position(x: frame.midX, y: frame.midY)
                 .allowsHitTesting(mode == .draw)
                 .accessibilityIdentifier("photo-editor-canvas")
+                .position(x: frame.midX, y: frame.midY)
         }
         .frame(width: viewport.width, height: viewport.height)
         .compositingGroup()
@@ -536,10 +536,14 @@ private struct PhotoCropOverlay: View {
 
     private func grab(_ handle: PhotoCropHandle, in rect: CGRect) -> some View {
         let p = handle.point(of: rect)
+        // The gesture and the identifier go on the 44 pt square, BEFORE `.position`:
+        // `.position` returns a view that fills the space offered to it, so a gesture or an
+        // identifier attached after it would belong to the whole viewport — eight handles
+        // would then overlap completely, and the element's own centre would be the middle of
+        // the screen rather than the corner it marks.
         return Color.clear
             .frame(width: PhotoEditorChrome.handleHit, height: PhotoEditorChrome.handleHit)
             .contentShape(Rectangle())
-            .position(x: p.x, y: p.y)
             .gesture(
                 DragGesture(minimumDistance: 1)
                     .onChanged { value in
@@ -553,6 +557,7 @@ private struct PhotoCropOverlay: View {
                     .onEnded { _ in dragFrom = nil }
             )
             .accessibilityIdentifier("photo-editor-handle-\(handle.rawValue)")
+            .position(x: p.x, y: p.y)
     }
 }
 
