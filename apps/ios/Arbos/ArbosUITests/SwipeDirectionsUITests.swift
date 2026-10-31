@@ -25,7 +25,12 @@ final class SwipeDirectionsUITests: XCTestCase {
     /// The Launch week group: a text bubble (`g3`), a five-attachment album with a caption
     /// (`g2b` — DaWizzaa's shape), a tall portrait screenshot (`g6`) and an agent's
     /// picture-only message (`g8`).
-    private let group = "fx-group-launch"
+    private static let group = "fx-group-launch"
+
+    /// The Comms agent chat, used for the own-message cases. Every `.user` row of a non-people
+    /// chat is the signed-in user's, so `c1` (long) and `c5` ("Hey") are unambiguously mine and
+    /// render trailing-aligned — no fixture flag and no guessing which member sent what.
+    private static let comms = "fx-comms-main"
 
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -33,13 +38,23 @@ final class SwipeDirectionsUITests: XCTestCase {
 
     private func launchGroup() -> XCUIApplication {
         let app = XCUIApplication()
-        app.launchEnvironment = ["ARBOS_FIXTURE": "1", "ARBOS_OPEN_PEOPLE": group]
+        app.launchEnvironment = ["ARBOS_FIXTURE": "1", "ARBOS_OPEN_PEOPLE": Self.group]
         app.launch()
         XCTAssertTrue(chatBack(app).waitForExistence(timeout: appear), "the Launch week group opened")
         return app
     }
 
-    private func chatBack(_ app: XCUIApplication) -> XCUIElement { app.buttons["chat-back:\(group)"] }
+    private func launchComms() -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchEnvironment = ["ARBOS_FIXTURE": "1", "ARBOS_OPEN_PROJECT": "fx-comms"]
+        app.launch()
+        XCTAssertTrue(chatBack(app, Self.comms).waitForExistence(timeout: appear), "the Comms chat opened")
+        return app
+    }
+
+    private func chatBack(_ app: XCUIApplication, _ chatId: String = SwipeDirectionsUITests.group) -> XCUIElement {
+        app.buttons["chat-back:\(chatId)"]
+    }
 
     private func replyPreview(_ app: XCUIApplication) -> XCUIElement {
         app.descendants(matching: .any)["composer-reply-preview"]
@@ -95,9 +110,10 @@ final class SwipeDirectionsUITests: XCTestCase {
                     withVelocity: .fast, thenHoldForDuration: 0.05)
     }
 
-    private func assertWentBack(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
+    private func assertWentBack(_ app: XCUIApplication, _ chatId: String = SwipeDirectionsUITests.group,
+                                file: StaticString = #filePath, line: UInt = #line) {
         let gone = NSPredicate(format: "exists == false")
-        let wait = XCTNSPredicateExpectation(predicate: gone, object: chatBack(app))
+        let wait = XCTNSPredicateExpectation(predicate: gone, object: chatBack(app, chatId))
         XCTAssertEqual(XCTWaiter().wait(for: [wait], timeout: settle), .completed,
                        "the chat went back to the list", file: file, line: line)
         XCTAssertTrue(app.buttons["People"].waitForExistence(timeout: settle), "Home is on screen", file: file, line: line)
@@ -141,6 +157,35 @@ final class SwipeDirectionsUITests: XCTestCase {
         XCTAssertTrue(replyPreview(app).waitForExistence(timeout: settle), "the reply quote is in the composer")
         // A left drag on a picture must not be read as a tap that opens the viewer.
         XCTAssertFalse(app.descendants(matching: .any)["media-viewer"].exists, "the viewer stayed shut")
+    }
+
+    // MARK: Your own messages reply too, and still go back
+
+    /// Affinity, 2026-10-31: swipe left on **any** message bubble replies to it, your own
+    /// included — not only other people's.
+    ///
+    /// The four cases above all happen to swipe incoming bubbles (`g3`, `g2b` and `g6` are other
+    /// members', `g8` is the agent's), so until now nothing proved the outgoing side. The app
+    /// never restricted it — `isMessageRow` admits `.user` rows and never looks at the sender —
+    /// but "never restricted it" is not the same claim as "a test holds it there".
+    func testSwipeLeftOnMyOwnBubbleReplies() {
+        let app = launchComms()
+        // `c5` is "Hey": short, mine, and hard against the trailing edge.
+        swipeLeft(on: revealBubble(app, "c5"), app)
+        XCTAssertTrue(replyPreview(app).waitForExistence(timeout: settle), "my own message's reply quote is in the composer")
+        XCTAssertTrue(chatBack(app, Self.comms).exists, "a left swipe never goes back")
+    }
+
+    /// The same bubble from the other direction, which is the half worth guarding: making reply
+    /// reach outgoing bubbles must not let it take the back gesture with it.
+    func testSwipeRightOnMyOwnBubbleGoesBackAndOpensNoReply() {
+        let app = launchComms()
+        // `c1` is mine and long, so it is wide enough to hold a 180 pt rightward drag on screen.
+        // `c5` is not: from a bubble that narrow the finger reaches the screen edge first, and
+        // XCUITest would clamp the drag and report it as the app refusing to go back.
+        swipeRight(on: revealBubble(app, "c1"), app)
+        assertWentBack(app, Self.comms)
+        XCTAssertFalse(replyPreview(app).exists, "a right swipe on my own message never replies")
     }
 
     // MARK: Right is back, and never a reply
