@@ -546,6 +546,14 @@ selected label was semibold, so selecting one grew it and shoved the rest of the
 row sideways. Reserving the bold width costs the Mac row about 5 pt and the
 iPhone row under 8 pt at the default Text Size.
 
+The iPhone has no drag handle, so it has no narrow-column problem to solve — but
+`PaneTabs` is a bare `HStack` with no scroll under it, and the four labels
+outgrow the narrowest phone this build runs on (the 360 pt 13 mini) somewhere
+around the 1.2× Text Size step, where SwiftUI squeezes them. That predates this
+change and is not fixed by it; the test only claims what the change is
+answerable for, which is that the wider row overflows no phone the narrower one
+already fitted.
+
 ### Narrow Mac column: the capsules tighten, they do not scroll away (Scout 2026-10-31)
 
 Scout, v0.6.3xx, Glass: dragged narrow, "Servers" was clipped to a bare **S**
@@ -553,8 +561,8 @@ against the column's edge. The row did scroll — the 2026-10-27 answer — but 
 filter you reach only by swiping a row that shows no handle is the same
 complaint one layer down, and raising `SIDEBAR_WIDTH_MIN` would fix it by taking
 away a drag the user meant. So the capsules now **fit**: `sidebar_fit::filter_fit`
-walks `FILTER_STEPS` — (15, pad 10, gap 4) → (13.5, 7, 3) → (12.5, 5, 2) — and
-takes the roomiest step whose row fits the column, the way a row trades its
+walks `FILTER_STEPS` — (15, pad 10, gap 4) → (14, 8, 4) → (13, 6, 3) → (12, 4, 2)
+— and takes the roomiest step whose row fits the column, the way a row trades its
 `@handle` and then its time away before its name gives (§ Narrow sidebar). The
 label widths are **measured from the live font** each frame rather than written
 down, because the Mac's `.SystemUIFont` and the Linux build's fall-back are not
@@ -567,7 +575,7 @@ selecting_a_filter_moves_no_capsule}` (the shipping `filter_row_box` /
 `filter_capsule_box` laid out for real, measured with `debug_bounds`); the
 iPhone row's two halves by
 `HomeListFilterTests::{testSelectingATabDoesNotMoveTheRow,
-testTheWiderRowStillFitsEveryPhoneAtTheDefaultTextSize}`.
+testTheWiderRowOverflowsNoPhoneTheOldOneFitted}`.
 
 Server rows draw their picture as a rounded square (corner 11/36 of the size,
 `SERVER_PICTURE_CORNER`) so servers read apart from the agent and people discs.

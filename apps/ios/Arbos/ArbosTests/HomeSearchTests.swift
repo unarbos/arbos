@@ -147,8 +147,11 @@ final class HomeListFilterTests: XCTestCase {
     // MARK: the row does not move when the selection does
 
     private let labels = HomeListFilter.allCases.map(\.rawValue)
-    /// iPhone SE / mini / 17 / 17 Pro Max logical widths.
-    private let phoneWidths: [CGFloat] = [320, 375, 393, 430]
+    /// Logical widths of the iPhones this build runs on, narrowest first: 13 mini,
+    /// SE 3rd gen, 14, 15/17, 11, 17 Pro Max. The 320 pt phone is the SE 1st gen,
+    /// which stops at iOS 15 and so cannot install a build whose deployment target
+    /// is 17.0 — the floor here is the mini's 360, not 320.
+    private let phoneWidths: [CGFloat] = [360, 375, 390, 393, 414, 430]
 
     private func labelWidth(_ text: String, size: CGFloat, weight: UIFont.Weight) -> CGFloat {
         (text as NSString).size(withAttributes: [.font: UIFont.systemFont(ofSize: size, weight: weight)]).width
@@ -188,15 +191,24 @@ final class HomeListFilterTests: XCTestCase {
         }
     }
 
-    /// What holding the row still costs in width, and what that does to the
-    /// phones it must fit: at the default Text Size the four tabs fit every
-    /// supported iPhone with room to spare, 320 pt included.
-    func testTheWiderRowStillFitsEveryPhoneAtTheDefaultTextSize() {
+    /// What holding the row still costs in width, at the default Text Size.
+    /// Reserving the semibold width makes the row a little wider at rest, so the
+    /// cost is pinned here and — the part that matters — the wider row is shown
+    /// to overflow no phone the narrower one cleared.
+    ///
+    /// A width the old row already overflowed is skipped rather than asserted:
+    /// `PaneTabs` is a bare `HStack` with no scroll, so a row too wide for the
+    /// screen is squeezed, and this change is not what put it there. That is not
+    /// hypothetical — the row outgrows the 360 pt mini around the 1.2× Text Size
+    /// step, which is why the scales above 1 are left to the row-stability test
+    /// above and not claimed here.
+    func testTheWiderRowOverflowsNoPhoneTheOldOneFitted() {
         let after = rowWidth(selected: "All", scale: 1, reserveSelectedWidth: true)
         let before = rowWidth(selected: "All", scale: 1, reserveSelectedWidth: false)
-        XCTAssertLessThan(after - before, 8, "reserving the semibold width costs only a few points")
-        for w in phoneWidths {
-            XCTAssertLessThanOrEqual(after, w, "the row fits a \(Int(w)) pt phone")
+        let measured = "before \(before) pt, after \(after) pt"
+        XCTAssertLessThan(after - before, 8, "reserving the semibold width costs only a few points (\(measured))")
+        for w in phoneWidths where before <= w {
+            XCTAssertLessThanOrEqual(after, w, "the \(Int(w)) pt phone that fitted the old row fits the new one (\(measured))")
         }
     }
 }
