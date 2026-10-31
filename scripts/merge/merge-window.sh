@@ -242,7 +242,12 @@ after() {
 # against a known commit without running a GO. With <pr>, the diff is that PR's three-dot diff;
 # without it, the commit's diff against its first parent.
 checks() {
-  local sha=$1 files
+  local sha=$1 files full
+  # The one place a ref is allowed to be loose, because a person types it. require_gates needs the
+  # full sha and refuses anything else, so resolve first rather than letting an abbreviation become
+  # a confident wrong answer about whether a run exists.
+  full=$(rd "repos/$R/commits/$sha" --jq '.sha') || { echo "BLOCKED resolving '$sha' to a full sha: ${full#BLOCKED:}"; return 2; }
+  sha=$full
   if [ -n "${2:-}" ]; then files=$(pr_files "$2"); else files=$(commit_files "$sha"); fi
   [ -n "$files" ] && [ "${files#BLOCKED}" = "$files" ] || { echo "BLOCKED reading changed files: ${files#BLOCKED:}"; return 2; }
   echo "required checks for ${sha:0:9}, $(printf '%s\n' "$files" | grep -c .) file(s) changed:"

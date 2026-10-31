@@ -128,6 +128,21 @@ gate_state() {
 # <files> is the newline-separated diff for this head, from pr_files or commit_files.
 require_gates() {
   local sha=$1 files=$2 wf name phead pbase pats state rc=0
+  # GitHub's head_sha run filter matches the full 40-character sha only. An abbreviated one is not
+  # an error: it returns total_count 0, which gate_state would report as "no run exists for this
+  # sha at all". That is this file's own bug one level down — "nothing is there" standing in for
+  # "the query was wrong" — and it sends the reader to push a new commit when the gate in fact ran
+  # and failed. Measured on d127f8df2960c81b84753077933635986f86d0d5, whose gate run 41207432393
+  # failed: the full sha reports RED, and `d127f8df2` reported no run at all. So a sha this cannot
+  # query is BLOCKED, never "no verdict" and never "not required". Callers inside this kit pass
+  # %H, headRefOid or the pinned head; the operator subcommand resolves its argument first.
+  local norm; norm=$(printf '%s' "$sha" | tr 'A-F' 'a-f')
+  case "$norm" in *[!0-9a-f]*) norm='' ;; esac
+  if [ "${#norm}" -ne 40 ]; then
+    echo "    required checks on '$sha': BLOCKED — a gate is judged by the full 40-character head sha and this is not one, so no run lookup for it can be trusted. Resolve it first: gh api repos/\$R/commits/<ref> --jq .sha"
+    return 2
+  fi
+  sha=$norm
   while IFS='|' read -r wf name; do
     [ -n "$wf" ] || continue
     # Both filters, unioned. The head's own filter explains which runs exist; the base's filter is
