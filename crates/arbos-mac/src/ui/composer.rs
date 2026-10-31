@@ -113,6 +113,17 @@ pub const COMPOSER_RADIUS: f32 = COMPOSER_HEIGHT / 2.0;
 /// it too: phone → right edge and mic → phone, so the pair never reads as one
 /// cramped blob ([feedback glass-composer-button-spacing-mac-2026-10-29]).
 const BUTTON_INSET: f32 = (COMPOSER_HEIGHT - 2.0 - PLUS_BUTTON) / 2.0;
+/// How long the trailing controls take to trade the empty field's pair (grey
+/// mic + white phone) for the send arrow, and back (Jacob, 2026-10-30: "a
+/// quick scale+fade crossfade, matching the Grok/iMessage feel"). The middle
+/// of the 150–200 ms band asked for; `ease_out_cubic` spends most of it in the
+/// first half, so the arrow reads as already there while the mic is still on
+/// its way out.
+const SEND_SWAP_MS: f32 = 170.0;
+/// How small the mic gets as it leaves (and starts from as it returns). Its
+/// circle is what scales: the glyph inside is a raster cached per point size
+/// (`sf_symbols`), so scaling that would mint one every frame.
+const SEND_SWAP_SCALE: f32 = 0.8;
 
 pub type SubmitHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 /// Returns true when the @-mention menu handled the key (skip caret / send).
@@ -2849,6 +2860,9 @@ pub struct Composer {
     rig_draft: Option<String>,
     /// The `+` menu and the Emoji · Stickers · GIFs picker (ARB-544).
     fun: fun::FunState,
+    /// Where the trailing controls are between the empty field's mic + phone
+    /// and the send arrow, so typing and clearing cross-fade them.
+    send_swap: SendSwap,
 }
 
 impl EventEmitter<ComposerEvent> for Composer {}
@@ -2956,6 +2970,8 @@ impl Composer {
                 .ok()
                 .filter(|v| !v.is_empty()),
             fun: fun::FunState::new(fun_search),
+            // A new composer starts on an empty field: mic + phone, settled.
+            send_swap: SendSwap::settled(false, Instant::now()),
         }
     }
 
@@ -3673,7 +3689,7 @@ fn mention_picture(picture: &mention::Picture, size: f32, theme: &Theme) -> gpui
 }
 
 impl Render for Composer {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_draft(cx);
         let theme = Theme::of(cx).clone();
         // Keep the field's known `@handle`s in step with the app (incl. `@here`).
@@ -3777,10 +3793,40 @@ impl Render for Composer {
         // start / end a call when idle and empty (iPhone: phone next to the
         // mic; calls start audio-only).
         let hanging_up = in_call || in_livekit;
-        let guide = running && has_text && self.attachments.is_empty();
+        let staged = !self.attachments.is_empty();
+        let guide = running && has_text && !staged;
         let action = primary_action(has_text, running, recording, guide);
         let glyph = action.glyph();
         let red = action == ButtonAction::StopMemo || (action == ButtonAction::Call && hanging_up);
+        // Typing trades the empty field's pair — grey mic, white phone — for
+        // the send arrow, and clearing the field trades back. That is the one
+        // swap the keyboard drives, so that is the one that is animated
+        // (Jacob, 2026-10-30). `level` runs 0 (pair) → 1 (arrow).
+        let now = Instant::now();
+        let snap = cx.reduce_motion();
+        let (level, moving) = self.send_swap.level(has_text, now, snap);
+        if moving {
+            window.request_animation_frame();
+        }
+        // The same round button with the field in its other state: its glyph
+        // is the one leaving (or arriving, going back). Cross-fade the two
+        // marks only when both sit in a circle of the same colour — a memo's
+        // Stop and a live call paint it red, and a colour cannot cross-fade
+        // without the disc itself dipping, which reads as a flicker.
+        let leaving = primary_action(
+            !has_text,
+            running,
+            recording,
+            running && !has_text && !staged,
+        );
+        let red_leaving =
+            leaving == ButtonAction::StopMemo || (leaving == ButtonAction::Call && hanging_up);
+        let crossfade = leaving != action
+            && action != ButtonAction::Guide
+            && leaving != ButtonAction::Guide
+            && red_leaving == red
+            && level > 0.0
+            && level < 1.0;
         let primary_button = if action == ButtonAction::Guide {
             div()
                 .id("composer-guide")
@@ -3805,6 +3851,7 @@ impl Render for Composer {
         } else {
             div()
                 .id("composer-send")
+                .debug_selector(|| "composer-send".into())
                 .size(px(SEND_BUTTON))
                 .flex_shrink_0()
                 .rounded_full()
@@ -3814,17 +3861,30 @@ impl Render for Composer {
                 .justify_center()
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.88))
-                .child(sf_symbols::glyph(
-                    glyph,
-                    if glyph == "stop.fill" { 14.0 } else { 16.0 },
-                    if action == ButtonAction::StopMemo {
-                        gpui::white()
-                    } else if red {
-                        theme.text
-                    } else {
-                        theme.on_primary
-                    },
-                ))
+                // The disc itself never fades: it is the same white circle in
+                // both states, so it holds still and only its mark changes.
+                .child(if crossfade {
+                    let ink = mark_color(action, red, &theme);
+                    let layer = |action: ButtonAction, alpha: f32| {
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .opacity(alpha)
+                            .child(sf_symbols::glyph(action.glyph(), glyph_size(action), ink))
+                    };
+                    div()
+                        .relative()
+                        .size(px(SEND_BUTTON))
+                        .child(layer(leaving, 1.0 - level))
+                        .child(layer(action, level))
+                        .into_any_element()
+                } else {
+                    sf_symbols::glyph(glyph, glyph_size(action), mark_color(action, red, &theme))
+                        .into_any_element()
+                })
                 .on_click(cx.listener(move |this, _, window, cx| match action {
                     ButtonAction::Send | ButtonAction::Guide => this.submit(window, cx),
                     ButtonAction::Stop => cx.emit(ComposerEvent::Stop),
@@ -3855,21 +3915,30 @@ impl Render for Composer {
         // ([feedback app-01M5NXFCS5N79WCN2C8PM6GTKE]); while recording it stays
         // mounted, tinted red like the iPhone, so a release (hold-to-talk) or a
         // second click also finishes the memo.
+        // A recording is not the typing swap: the mic stays solid through it
+        // whatever the field holds. Otherwise it scales down and fades out as
+        // the arrow arrives, and back in when the field is cleared.
+        let mic_live = mic_mounted(has_text, recording);
+        let (mic_alpha, mic_scale) = if recording {
+            (1.0, 1.0)
+        } else {
+            (1.0 - level, 1.0 - (1.0 - SEND_SWAP_SCALE) * level)
+        };
         let mic_button = div()
             .id("composer-mic")
-            .size(px(SEND_BUTTON))
+            .debug_selector(|| "composer-mic".into())
+            .size(px(SEND_BUTTON * mic_scale))
             .flex_shrink_0()
             .rounded_full()
             .flex()
             .items_center()
             .justify_center()
-            .cursor_pointer()
+            .opacity(mic_alpha)
             .bg(if recording {
                 theme.danger_soft
             } else {
                 theme.surface_2
             })
-            .hover(|s| s.opacity(0.88))
             .child(sf_symbols::glyph(
                 "mic",
                 16.0,
@@ -3881,24 +3950,41 @@ impl Render for Composer {
                     theme.text_muted
                 },
             ))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.voice.update(cx, |v, cx| v.mic_pressed(cx));
-                }),
-            )
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.voice.update(cx, |v, cx| v.mic_released(cx));
-                }),
-            )
-            .on_mouse_up_out(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.voice.update(cx, |v, cx| v.mic_released(cx));
-                }),
-            );
+            // A mic on its way out answers nothing: a swap that swallows the
+            // press that started it is worse than a hard cut. The hover wash
+            // rides on the fade so hovering cannot brighten a leaving mic.
+            .when(mic_live, |el| {
+                el.cursor_pointer()
+                    .hover(move |s| s.opacity(mic_alpha * 0.88))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.voice.update(cx, |v, cx| v.mic_pressed(cx));
+                        }),
+                    )
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.voice.update(cx, |v, cx| v.mic_released(cx));
+                        }),
+                    )
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.voice.update(cx, |v, cx| v.mic_released(cx));
+                        }),
+                    )
+            });
+        // The mic's own square of the pill, kept whether or not the mic is in
+        // it, so the field beside it never changes width (`TRAILING_WIDTH`).
+        let mic_slot = div()
+            .debug_selector(|| "composer-mic-slot".into())
+            .size(px(SEND_BUTTON))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(mic_alpha > 0.0, |el| el.child(mic_button));
 
         let plus = div()
             .id("composer-attach")
@@ -3946,6 +4032,7 @@ impl Render for Composer {
                 })
         } else {
             div()
+                .debug_selector(|| "composer-field-text".into())
                 .flex_1()
                 .min_w_0()
                 .flex()
@@ -3962,11 +4049,14 @@ impl Render for Composer {
 
         // Match the iPhone: mic (transcribe) + phone (call) while the field is
         // idle and empty; send / stop / hang-up replace the phone as needed.
-        let staged = !self.attachments.is_empty();
         let mut trailing = div()
             .flex()
             .items_center()
             .gap(px(BUTTON_INSET))
+            // The footprint the field cannot take back, stated once: two
+            // circles and their gap, whether or not the mic is in its slot.
+            // A minimum, not a width, because the Guide pill is wider.
+            .min_w(px(TRAILING_WIDTH))
             // In the pill the row is the pill's height; in the card the
             // circles set it and the card's padding does the rest.
             .h(px(if staged {
@@ -3975,9 +4065,7 @@ impl Render for Composer {
                 COMPOSER_HEIGHT - 2.0
             }))
             .flex_shrink_0();
-        if mic_mounted(has_text, recording) {
-            trailing = trailing.child(mic_button);
-        }
+        trailing = trailing.child(mic_slot);
         // Always show the round button: phone when idle (like the iPhone), else
         // Stop (memo) / send / stop (turn) / hang-up.
         trailing = trailing.child(primary_button);
@@ -4309,10 +4397,102 @@ fn primary_action(has_text: bool, running: bool, recording: bool, guide: bool) -
     }
 }
 
-/// The mic shows while the field is empty and stays mounted for the whole
-/// recording (a hold-to-talk release lands on it).
+/// The mic takes taps while the field is empty, and for the whole recording (a
+/// hold-to-talk release lands on it). Its **slot** is always there — see
+/// [`TRAILING_WIDTH`] — so this says who owns the pointer, not what is drawn:
+/// the moment the field has text the mic is leaving and no longer answers.
 fn mic_mounted(has_text: bool, recording: bool) -> bool {
     recording || !has_text
+}
+
+/// The trailing controls take this much of the pill whatever the field holds:
+/// two circles and the gap between them. The mic's slot is kept even when the
+/// mic is gone, so the field beside it never changes width — least of all
+/// mid-swap (Jacob, 2026-10-30: no layout jump of the text field).
+const TRAILING_WIDTH: f32 = SEND_BUTTON * 2.0 + BUTTON_INSET;
+
+/// Which glyph the round button draws at which point size. `stop.fill` is the
+/// one square mark in the set, so it is drawn smaller than the arrows.
+fn glyph_size(action: ButtonAction) -> f32 {
+    if action.glyph() == "stop.fill" {
+        14.0
+    } else {
+        16.0
+    }
+}
+
+/// The round button's mark colour: white on the red memo Stop, the text colour
+/// on the red hang-up, the on-primary colour on the white disc.
+fn mark_color(action: ButtonAction, red: bool, theme: &Theme) -> gpui::Hsla {
+    if action == ButtonAction::StopMemo {
+        gpui::white()
+    } else if red {
+        theme.text
+    } else {
+        theme.on_primary
+    }
+}
+
+/// Where the trailing controls are between the two states the field has, so
+/// typing and clearing cross-fade them instead of cutting.
+///
+/// `0` is the empty field's pair, `1` is the send button. The level is read
+/// off the clock rather than stepped once per frame, so a dropped frame cannot
+/// strand the swap half way. A flip in flight carries the level over and
+/// shortens what is left in proportion: typing fast, deleting fast, or
+/// clearing the field mid-swap never leaves both sets solid, never leaves the
+/// slot empty, and never overshoots.
+#[derive(Clone, Debug)]
+struct SendSwap {
+    /// The level when the field last changed state.
+    from: f32,
+    /// The level it is heading for: 1 the send arrow, 0 the mic + phone pair.
+    to: f32,
+    /// When that change happened.
+    since: Instant,
+}
+
+impl SendSwap {
+    /// A composer resting in one state, with nothing in flight.
+    fn settled(send: bool, now: Instant) -> Self {
+        let level = if send { 1.0 } else { 0.0 };
+        Self {
+            from: level,
+            to: level,
+            since: now,
+        }
+    }
+
+    /// The level to paint for a field that now wants `send`, and whether the
+    /// swap is still moving (the caller asks for one more frame). `snap` is
+    /// Reduce Motion: the swap lands at once, with no scale and no fade.
+    fn level(&mut self, send: bool, now: Instant, snap: bool) -> (f32, bool) {
+        let to = if send { 1.0 } else { 0.0 };
+        if snap {
+            *self = Self::settled(send, now);
+            return (to, false);
+        }
+        if self.to != to {
+            *self = Self {
+                from: self.at(now),
+                to,
+                since: now,
+            };
+        }
+        let level = self.at(now);
+        (level, level != to)
+    }
+
+    /// The eased level of the swap in flight at `now`.
+    fn at(&self, now: Instant) -> f32 {
+        let span = (self.to - self.from).abs();
+        if span == 0.0 {
+            return self.to;
+        }
+        let elapsed = now.saturating_duration_since(self.since).as_secs_f32() * 1000.0;
+        let t = (elapsed / (SEND_SWAP_MS * span)).clamp(0.0, 1.0);
+        self.from + (self.to - self.from) * crate::ui::motion::ease_out_cubic(t)
+    }
 }
 
 /// The reply preview above the field is always this tall (Jacob, Oct 23:
@@ -4674,6 +4854,8 @@ mod reply_preview_tests {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     fn image(format: gpui::ImageFormat, bytes: &[u8]) -> gpui::Image {
@@ -4771,6 +4953,108 @@ mod tests {
         );
         assert_eq!(primary_action(true, true, false, false), ButtonAction::Send);
         assert_eq!(primary_action(true, true, false, true), ButtonAction::Guide);
+    }
+
+    /// The reserved footprint, the one thing Jacob called out: the two trailing
+    /// circles and their gap take the same width whether the mic is in its
+    /// slot or not, so the field beside them never changes size.
+    #[test]
+    fn the_trailing_pair_takes_one_width_whatever_the_field_holds() {
+        assert_eq!(TRAILING_WIDTH, SEND_BUTTON * 2.0 + BUTTON_INSET);
+        // The old layout mounted the mic only while the mic answered taps, so
+        // the row was a circle and a gap narrower as soon as there was text.
+        for has_text in [false, true] {
+            for recording in [false, true] {
+                let _ = mic_mounted(has_text, recording);
+                assert_eq!(TRAILING_WIDTH, SEND_BUTTON * 2.0 + BUTTON_INSET);
+            }
+        }
+    }
+
+    /// A swap that is asked for is a swap that finishes: one flip, 170 ms, 0 → 1.
+    #[test]
+    fn typing_runs_the_swap_to_the_send_arrow_and_clearing_runs_it_back() {
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let mut swap = SendSwap::settled(false, t0);
+        assert_eq!(swap.level(false, t0, false), (0.0, false), "resting empty");
+
+        // Typing: the first frame already shows the arrow coming.
+        let (start, moving) = swap.level(true, t0, false);
+        assert_eq!(start, 0.0);
+        assert!(moving, "the first frame asks for the next one");
+        let (half, moving) = swap.level(true, ms(85), false);
+        assert!(half > 0.5, "ease-out front-loads the change: {half}");
+        assert!(half < 1.0);
+        assert!(moving);
+        let (end, moving) = swap.level(true, ms(SEND_SWAP_MS as u64), false);
+        assert_eq!(end, 1.0, "lands exactly on the arrow");
+        assert!(!moving, "and stops asking for frames");
+        assert_eq!(swap.level(true, ms(5_000), false), (1.0, false));
+
+        // Clearing the field runs the same swap backwards.
+        let (back, moving) = swap.level(false, ms(5_000), false);
+        assert_eq!(back, 1.0, "it starts from where the arrow was");
+        assert!(moving);
+        let (settled, moving) = swap.level(false, ms(5_000 + SEND_SWAP_MS as u64), false);
+        assert_eq!(settled, 0.0, "back to the mic + phone pair");
+        assert!(!moving);
+    }
+
+    /// Typing fast, deleting fast and clearing the field mid-swap: the level
+    /// stays inside 0..1 the whole way, so the two sets are never both solid
+    /// and the slot is never empty, and a reversal lands exactly, never past.
+    #[test]
+    fn a_flip_mid_swap_reverses_from_where_it_got_to_and_never_overshoots() {
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let mut swap = SendSwap::settled(false, t0);
+        swap.level(true, t0, false);
+        let (caught, _) = swap.level(true, ms(40), false);
+        assert!(caught > 0.0 && caught < 1.0, "caught mid-swap: {caught}");
+
+        // Delete the character while the arrow is still arriving.
+        let (resumed, moving) = swap.level(false, ms(40), false);
+        assert_eq!(resumed, caught, "no jump: it reverses from here");
+        assert!(moving);
+        // What is left takes its share of the 170 ms, not another full one: at
+        // the moment the shortened span runs out the swap is home (the `as u64`
+        // truncation leaves it a fraction of a millisecond short).
+        let left = (SEND_SWAP_MS * caught) as u64;
+        let (home, _) = swap.level(false, ms(40 + left), false);
+        assert!(home < 0.001, "lands on the pair, not past it: {home}");
+        assert!(home >= 0.0, "and never past it: {home}");
+        let (settled, moving) = swap.level(false, ms(40 + left + 1), false);
+        assert_eq!(settled, 0.0);
+        assert!(!moving);
+
+        // Twenty flips, one every 7 ms — faster than anyone types.
+        let mut swap = SendSwap::settled(false, t0);
+        for i in 0..20u64 {
+            let (level, _) = swap.level(i % 2 == 0, ms(i * 7), false);
+            assert!(
+                (0.0..=1.0).contains(&level),
+                "flip {i} left the swap at {level}"
+            );
+        }
+    }
+
+    /// Reduce Motion: the swap lands at once — no scale, no fade — and asks
+    /// for no frames, in both directions and from anywhere mid-swap.
+    #[test]
+    fn reduce_motion_swaps_with_no_fade_at_all() {
+        let t0 = Instant::now();
+        let mut swap = SendSwap::settled(false, t0);
+        assert_eq!(swap.level(true, t0, true), (1.0, false));
+        assert_eq!(swap.level(false, t0, true), (0.0, false));
+        // Turning it on part way through a swap lands the swap immediately.
+        swap.level(true, t0, false);
+        let caught = swap.level(true, t0 + Duration::from_millis(40), false).0;
+        assert!(caught < 1.0, "mid-swap: {caught}");
+        assert_eq!(
+            swap.level(true, t0 + Duration::from_millis(40), true),
+            (1.0, false)
+        );
     }
 
     const SENTENCE: &str = "the quick brown fox";
@@ -6859,5 +7143,110 @@ mod overlay_tests {
         );
         let gap = f32::from(closed.field.top() - picker.bottom());
         assert!((gap - MENTION_MENU_GAP).abs() <= 0.5, "picker gap {gap}");
+    }
+
+    /// The text row inside the pill — the one thing Jacob said must not move.
+    fn field_text(vcx: &mut VisualTestContext) -> Bounds<Pixels> {
+        vcx.debug_bounds("composer-field-text")
+            .expect("the field's text row is drawn")
+    }
+
+    /// The rest of what the swap must leave alone: the mic's slot, the round
+    /// button, the pill and the transcript. None of these sizes depends on how
+    /// far the swap has run, so one assert pins them at any moment.
+    fn trailing_frame(
+        shell: &Entity<Shell>,
+        vcx: &mut VisualTestContext,
+    ) -> (Layout, Bounds<Pixels>, Bounds<Pixels>) {
+        let slot = vcx
+            .debug_bounds("composer-mic-slot")
+            .expect("the mic's slot is drawn");
+        let send = vcx
+            .debug_bounds("composer-send")
+            .expect("the round button is drawn");
+        (layout(shell, vcx), slot, send)
+    }
+
+    /// [feedback composer-send-crossfade-2026-10-30], Jacob's one hard rule:
+    /// typing swaps the grey mic + white phone for the send arrow, and the
+    /// text field must not move or resize while it happens. Before the swap
+    /// was animated the mic was simply unmounted, so the field grew by a
+    /// circle and a gap the moment a character landed. The mic keeps its slot
+    /// now, and these frames are measured with the swap in flight — nothing
+    /// here settles it first.
+    #[gpui::test]
+    fn typing_swaps_the_trailing_controls_and_moves_the_field_by_nothing(cx: &mut TestAppContext) {
+        let Mounted {
+            state,
+            shell,
+            composer,
+            vcx,
+            ..
+        } = mount(cx);
+        let empty_field = field_text(vcx);
+        let rest = trailing_frame(&shell, vcx);
+
+        vcx.simulate_input("hey");
+        settle(&state, &shell, vcx);
+        assert_eq!(
+            field_text(vcx),
+            empty_field,
+            "the text field keeps its place and its width as the arrow arrives"
+        );
+        assert_eq!(
+            trailing_frame(&shell, vcx),
+            rest,
+            "and so do the mic's slot, the round button and the pill"
+        );
+
+        // Cleared while the arrow is still arriving: the swap turns round and
+        // still moves nothing.
+        composer.update(vcx, |c, cx| c.input.update(cx, |i, cx| i.clear(cx)));
+        settle(&state, &shell, vcx);
+        assert_eq!(
+            field_text(vcx),
+            empty_field,
+            "and keeps them as the mic comes back"
+        );
+        assert_eq!(trailing_frame(&shell, vcx), rest);
+    }
+
+    /// Reduce Motion on the Mac is `cx.reduce_motion()`, read from macOS
+    /// Accessibility → Display at launch (`ui::motion::system_reduce_motion`).
+    /// The swap then lands on the frame the character does: no scale, no fade,
+    /// the mic simply not drawn — while its slot still holds the field's width.
+    #[gpui::test]
+    fn reduce_motion_swaps_the_controls_without_a_fade(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let Mounted {
+            state,
+            shell,
+            composer,
+            vcx,
+            ..
+        } = mount(cx);
+        let rest = trailing_frame(&shell, vcx);
+        let mic = vcx
+            .debug_bounds("composer-mic")
+            .expect("an empty field shows the mic");
+        let slot = vcx.debug_bounds("composer-mic-slot").expect("its slot");
+        assert_eq!(mic, slot, "at rest the mic fills its slot, unscaled");
+
+        vcx.simulate_input("hey");
+        settle(&state, &shell, vcx);
+        assert!(
+            vcx.debug_bounds("composer-mic").is_none(),
+            "no half-faded mic is left behind"
+        );
+        assert_eq!(trailing_frame(&shell, vcx), rest, "and nothing moved");
+
+        composer.update(vcx, |c, cx| c.input.update(cx, |i, cx| i.clear(cx)));
+        settle(&state, &shell, vcx);
+        assert_eq!(
+            vcx.debug_bounds("composer-mic"),
+            Some(mic),
+            "and it is back, full size, in one frame"
+        );
+        assert_eq!(trailing_frame(&shell, vcx), rest);
     }
 }

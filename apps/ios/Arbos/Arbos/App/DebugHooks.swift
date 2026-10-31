@@ -30,6 +30,16 @@ enum DebugHooks {
     static var composerDraft: String? { value("ARBOS_COMPOSER_DRAFT").flatMap { $0.isEmpty ? nil : $0 } }
     /// Rig (#1596): print each people-chat send's text and `mentions` ids to the console.
     static var traceSends: Bool { value("ARBOS_TRACE_SENDS") == "1" }
+    /// Rig (#2404): print what moves the transcript around a reveal — the target's place in
+    /// the list, the row window before and after, and every near-top grow step with the
+    /// scroll offset that triggered it. A reveal that lands short does so because something
+    /// moved the content under it, and this says what and when.
+    static var traceReveal: Bool { value("ARBOS_TRACE_REVEAL") == "1" }
+    /// Rig (#2404): reveal a message the way the code did before the fix — stretch the row
+    /// window back to the tail, then one `scrollTo` and no correction — so one build can
+    /// measure the symptom beside the fix. Goes away with the rig; nothing but a measurement
+    /// should ever set it.
+    static var revealPreFix: Bool { value("ARBOS_REVEAL_PRE_FIX") == "1" }
     static var pairCode: String? { value("ARBOS_PAIR_CODE") }
     /// Rig: a test-token sign-in skips the first-login stages (the account exists already).
     static var skipFirstLogin: Bool { value("ARBOS_SKIP_FIRST_LOGIN") == "1" }
@@ -248,6 +258,23 @@ enum DebugHooks {
         return v.isEmpty ? nil : v
         #else
         return nil
+        #endif
+    }
+
+    /// One line at boot naming the `ARBOS_` variables this process actually received.
+    ///
+    /// A rig run whose launch environment does not arrive looks exactly like a rig run whose
+    /// app is broken: no fixture, no landing screen, no trace, and a UI test that waits out
+    /// its timeout on an element that was never going to exist. Four cases and a heavy slot
+    /// went on telling those two apart. The line costs one `print` per launch in Debug and
+    /// settles it in the first second of the log.
+    static func logEnvironment() {
+        #if DEBUG
+        let seen = ProcessInfo.processInfo.environment.keys
+            .filter { $0.hasPrefix("ARBOS_") }
+            .sorted()
+        // Values can carry a relay token; the names are what a rig needs and are safe.
+        print("[arbos rig] launch environment: \(seen.isEmpty ? "no ARBOS_ variables" : seen.joined(separator: " "))")
         #endif
     }
 }
