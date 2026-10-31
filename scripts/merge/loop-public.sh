@@ -34,23 +34,28 @@ for r in $(git for-each-ref --format='%(refname)' refs/remotes/gate/); do
 done
 # In-flight CI, filtered by status on the server so no amount of newer activity can push a gate run out of
 # the read. Each answer carries its own total_count: a failed read, or one that returned fewer runs than the
-# total, is a finding of its own and never reads as "nothing running".
+# total, is a finding of its own and never reads as "nothing running". GitHub counts and lists a run that is
+# changing status in separate steps, so a disagreement is read again (3 tries, 5 s apart) before it counts;
+# a gate run seen in any try counts.
 for st in queued in_progress waiting requested pending; do
-  e=$(mktemp)
-  if ! got=$(gh api --paginate "repos/$R/actions/workflows/ci.yml/runs?status=$st&per_page=100" \
-      --jq '"TOTAL \(.total_count)", (.workflow_runs[] | "RUN \(.id) \(.head_branch)")' 2>"$e"); then
-    unsafe+=("cannot list $st ci.yml runs: $(tr '\n' ' ' <"$e" | cut -c1-160)"); rm -f "$e"; continue
-  fi
-  rm -f "$e"
-  total=$(printf '%s\n' "$got" | awk '$1=="TOTAL"{print $2; exit}')
-  n=$(printf '%s\n' "$got" | grep -c '^RUN ')
-  if [ -z "$total" ] || [ "$n" -lt "$total" ]; then
-    unsafe+=("$st ci.yml runs read incompletely: $n of ${total:-an unknown total}"); continue
-  fi
-  [ -n "$V" ] && echo "  ci.yml $st: $n of $total read"
-  for b in $(printf '%s\n' "$got" | awk '$1=="RUN" && $3 ~ /^gate\// {print $3}' | sort -u); do
-    unsafe+=("CI is $st on $b")
+  why=""; gates=""
+  for try in 1 2 3; do
+    [ "$try" -gt 1 ] && sleep 5
+    e=$(mktemp)
+    if ! got=$(gh api --paginate "repos/$R/actions/workflows/ci.yml/runs?status=$st&per_page=100" \
+        --jq '"TOTAL \(.total_count)", (.workflow_runs[] | "RUN \(.id) \(.head_branch)")' 2>"$e"); then
+      why="cannot list $st ci.yml runs: $(tr '\n' ' ' <"$e" | cut -c1-160)"; rm -f "$e"; continue
+    fi
+    rm -f "$e"
+    gates="$gates $(printf '%s\n' "$got" | awk '$1=="RUN" && $3 ~ /^gate\// {print $3}')"
+    total=$(printf '%s\n' "$got" | awk '$1=="TOTAL"{print $2; exit}')
+    n=$(printf '%s\n' "$got" | grep -c '^RUN ')
+    if [ -z "$total" ] || [ "$n" -lt "$total" ]; then why="$st ci.yml runs read incompletely: $n of ${total:-an unknown total} ($try tries)"; continue; fi
+    why=""; [ -n "$V" ] && echo "  ci.yml $st: $n of $total read (try $try)"
+    break
   done
+  [ -n "$why" ] && unsafe+=("$why")
+  for b in $(printf '%s\n' $gates | sort -u); do unsafe+=("CI is $st on $b"); done
 done
 
 # Release/deploy trigger paths a feedback branch can reach without the Rust/iOS gate.
