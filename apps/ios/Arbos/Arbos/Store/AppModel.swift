@@ -3872,8 +3872,11 @@ final class AppModel: ObservableObject {
         if Self.isDraftDM(chatId) { return }
         let hadRemote = (unreadCounts[chatId] ?? 0) > 0
         let hadLocalFlag = peopleUnread.contains(chatId)
-        peopleUnread.remove(chatId)
-        if unreadCounts[chatId] != nil { unreadCounts[chatId] = 0 }
+        // Both writes are unconditional today, and `@Published` fires on the write, not on a
+        // change — so opening an already-read DM published twice and re-rendered the home
+        // list for nothing. The guarded versions leave exactly the same state behind.
+        if hadLocalFlag { peopleUnread.remove(chatId) }
+        if unreadCounts[chatId] ?? 0 != 0 { unreadCounts[chatId] = 0 }
         PushManager.shared.clearDelivered(chatId: chatId)
         defer { applyBadge() }
         guard let chat = peopleChat(chatId) else { return }
@@ -6574,7 +6577,10 @@ final class AppModel: ObservableObject {
     func markRead(chatId: Id, force: Bool = false) {
         if JobTabs.isJobChat(chatId) { return }
         let hadRemote = (unreadCounts[chatId] ?? 0) > 0
-        if unreadCounts[chatId] != nil { unreadCounts[chatId] = 0 }
+        // Already zero: writing it again publishes the whole model and re-renders the home
+        // list. The old condition only asked whether the key was present, so re-opening a
+        // read chat — the common case — published every time.
+        if unreadCounts[chatId] ?? 0 != 0 { unreadCounts[chatId] = 0 }
         PushManager.shared.clearDelivered(chatId: chatId)
         var hadLocal = false
         for (pid, list) in chats {
