@@ -183,6 +183,31 @@ fn user_json(state: &AppState, user_id: &str) -> Value {
     serde_json::to_value(user_dto(state, user_id)).expect("AccountUserDto")
 }
 
+/// End a device's session everywhere it exists: the relay `devices` row, that device's refresh
+/// tokens, and its Matrix device and access token. Returns whether the relay row was still live.
+///
+/// Both halves are needed. `/_matrix` forwards any valid Matrix access token straight to the
+/// homeserver and never consults the `devices` table, so a path that revokes the relay rows alone
+/// leaves a working Matrix session behind for a device the user believes is signed out. The
+/// refresh-token replay branches below did exactly that: 11 Matrix access tokens across 7 users,
+/// for devices revoked between Oct 22 and Oct 30, were still live with their `matrix_devices` rows
+/// intact. Every caller comes through here so a sign-out path cannot do one half and skip the other.
+///
+/// The Matrix logout runs even when the relay row was already revoked: a `matrix_devices` row left
+/// over from an earlier half-revocation is cleaned up the next time the device is revoked. The
+/// Matrix half is best effort and logs its own failures; the database half is returned, so a
+/// caller that cannot revoke can say so instead of reporting a sign-out that did not happen.
+pub(crate) async fn revoke_device_everywhere(
+    state: &AppState,
+    device_id: &str,
+) -> anyhow::Result<bool> {
+    // Both halves run before anything is reported: a database failure must not stop the Matrix
+    // session from being closed.
+    let relay = state.db.revoke_device_fully(device_id);
+    crate::matrix::servers::revoke_device(state, device_id).await;
+    relay
+}
+
 /// Access + refresh pair for a device. The refresh token is stored hashed, bound to the device.
 pub(crate) fn issue_tokens(
     state: &AppState,
@@ -642,7 +667,9 @@ pub async fn refresh(State(state): State<AppState>, Json(b): Json<RefreshBody>) 
             };
         }
         tracing::warn!(device = %row.device_id, "refresh token replayed; revoking the device");
-        let _ = state.db.revoke_device_fully(&row.device_id);
+        if let Err(e) = revoke_device_everywhere(&state, &row.device_id).await {
+            tracing::error!(device = %row.device_id, error = %e, "replayed refresh token: device not revoked");
+        }
         return api_error(
             StatusCode::UNAUTHORIZED,
             "bad_refresh",
@@ -680,7 +707,9 @@ pub async fn refresh(State(state): State<AppState>, Json(b): Json<RefreshBody>) 
                 };
             }
             tracing::warn!(device = %row.device_id, "refresh token replayed; revoking the device");
-            let _ = state.db.revoke_device_fully(&row.device_id);
+            if let Err(e) = revoke_device_everywhere(&state, &row.device_id).await {
+                tracing::error!(device = %row.device_id, error = %e, "replayed refresh token: device not revoked");
+            }
             return api_error(
                 StatusCode::UNAUTHORIZED,
                 "bad_refresh",
@@ -702,11 +731,8 @@ pub async fn refresh(State(state): State<AppState>, Json(b): Json<RefreshBody>) 
 /// `POST /auth/logout` (Bearer): this device and its refresh tokens are revoked.
 pub async fn logout(State(state): State<AppState>, principal: Principal) -> Response {
     match principal {
-        Principal::Device { id, .. } => match state.db.revoke_device_fully(&id) {
-            Ok(_) => {
-                crate::matrix::servers::revoke_device(&state, &id).await;
-                StatusCode::NO_CONTENT.into_response()
-            }
+        Principal::Device { id, .. } => match revoke_device_everywhere(&state, &id).await {
+            Ok(_) => StatusCode::NO_CONTENT.into_response(),
             Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
         },
         Principal::Box { .. } | Principal::Admin => {
@@ -798,11 +824,8 @@ pub async fn device_revoke(
     if !allowed {
         return api_error(StatusCode::FORBIDDEN, "forbidden", "not your device");
     }
-    match state.db.revoke_device_fully(&target) {
-        Ok(_) => {
-            crate::matrix::servers::revoke_device(&state, &target).await;
-            StatusCode::NO_CONTENT.into_response()
-        }
+    match revoke_device_everywhere(&state, &target).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
     }
 }
@@ -1499,6 +1522,94 @@ mod refresh_tests {
         assert!(
             device_revoked(&state, &device),
             "a token rotated outside the grace window is a replay"
+        );
+    }
+
+    /// The revoke a replayed refresh token triggers must take the device's Matrix session with
+    /// it, not just its relay rows. Skipped unless `ARBOS_MATRIX_TEST_HS` and
+    /// `ARBOS_MATRIX_TEST_AS_TOKEN` point at a throwaway Synapse with an appservice over `@.*`
+    /// (see `matrix::worker::tests`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_replayed_refresh_token_kills_the_matrix_token() {
+        let (Ok(hs_url), Ok(as_token)) = (
+            std::env::var("ARBOS_MATRIX_TEST_HS"),
+            std::env::var("ARBOS_MATRIX_TEST_AS_TOKEN"),
+        ) else {
+            return;
+        };
+        let mut state = test_state(AuthMode::Github);
+        state.matrix = crate::matrix::Matrix::new(crate::matrix::Config {
+            mode: crate::matrix::Mode::Dual,
+            hs_url: hs_url.clone(),
+            server_name: "arbos.life".into(),
+            as_token_users: as_token.clone(),
+            as_token_agents: as_token.clone(),
+            as_token_bridges: as_token,
+            ..crate::matrix::Config::off()
+        });
+        let (user, device) = sign_up(&state, 505);
+
+        // The same identity `GET /me/matrix` mints for a signed-in device.
+        let mxid = state.matrix.cfg.user_mxid(&user);
+        let client =
+            crate::matrix::client::Client::new(state.http.clone(), state.matrix.cfg.clone());
+        client.register(&mxid).await.expect("register");
+        let (mx_token, mx_device) = client
+            .login_appservice(&mxid, &device)
+            .await
+            .expect("login");
+        let enc = state.relay_key.encrypt(&mx_token).expect("encrypt");
+        state
+            .db
+            .matrix_insert_device(&device, &user, &mxid, &mx_device, &enc)
+            .expect("device row");
+
+        let whoami = || {
+            let http = state.http.clone();
+            let url = format!("{hs_url}/_matrix/client/v3/account/whoami");
+            let token = mx_token.clone();
+            async move {
+                http.get(url)
+                    .bearer_auth(token)
+                    .send()
+                    .await
+                    .expect("whoami")
+                    .status()
+            }
+        };
+        assert!(
+            whoami().await.is_success(),
+            "the Matrix token works while the device is signed in"
+        );
+
+        let tokens = issue_tokens(&state, &user, &device).expect("tokens");
+        let past = now_ms() - REFRESH_GRACE_MS - 1_000;
+        state
+            .db
+            .with(|c| {
+                c.execute(
+                    "UPDATE refresh_tokens SET rotated_at = ?2 WHERE token_hash = ?1",
+                    params![hash(&tokens.refresh_token), past],
+                )
+            })
+            .expect("age rotated_at");
+        state.refresh_grace.lock().await.clear();
+
+        let r = do_refresh(&state, &tokens.refresh_token).await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        assert!(device_revoked(&state, &device), "the device is revoked");
+        assert_eq!(
+            whoami().await,
+            StatusCode::UNAUTHORIZED,
+            "a replayed refresh token must end the Matrix session too"
+        );
+        assert!(
+            state
+                .db
+                .matrix_devices_of_user(&user)
+                .expect("devices")
+                .is_empty(),
+            "no matrix_devices row is left behind"
         );
     }
 
