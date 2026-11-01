@@ -1001,7 +1001,7 @@ fn fixture_stop_jobs(shared: &Arc<Shared>, chat_id: &str, only: Option<&str>) {
     }
 }
 
-/// `ARBOS_FIXTURE_TYPING=1|<handle>[,<handle>…]` keeps "<name> is typing…"
+/// `ARBOS_FIXTURE_TYPING=1|<handle>[,<handle>…]` keeps "<name> is typing"
 /// up in every fixture people chat (`1` = the chat's other person, else those
 /// handles) for the screenshot rig ([feedback typing-indicator-left-2026-10-23]);
 /// the app drops a typing mark after 6 s, so it is re-sent every 3 s.
