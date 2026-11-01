@@ -48,6 +48,8 @@ pub mod notify;
 pub mod onboarding;
 pub mod palette;
 pub mod people;
+pub mod photo_edit;
+pub mod photo_editor;
 pub mod picture_fit;
 pub mod presence;
 pub mod profile_target;

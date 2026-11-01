@@ -35,6 +35,7 @@ use crate::ui::feedback;
 use crate::ui::media_viewer;
 use crate::ui::motion::{self, PulseClock};
 use crate::ui::palette as palette_ui;
+use crate::ui::photo_editor;
 use crate::ui::shell::{self, Shell};
 use crate::ui::theme::{
     reapply_window_background, AppearancePref, Surface, Theme, TRAFFIC_LIGHT_POSITION,
@@ -357,6 +358,19 @@ fn bind_keys(cx: &mut App) {
         // Text selected in a chat bubble (drag / double-click) takes focus; ⌘C copies it.
         KeyBinding::new("cmd-c", transcript::Copy, Some("Transcript")),
         KeyBinding::new("ctrl-c", transcript::Copy, Some("Transcript")),
+        // The composer's crop-and-draw sheet. Bound to its own context, so the
+        // chords are live only while it is up: ⌘Z takes the last stroke back,
+        // ⌘⏎ is Done (the sheet's primary button, like every other sheet), and
+        // the arrows nudge the crop rectangle a point at a time — the Mac way
+        // of placing an edge exactly, which a drag cannot do.
+        KeyBinding::new("cmd-z", photo_editor::Undo, Some("PhotoEditor")),
+        KeyBinding::new("ctrl-z", photo_editor::Undo, Some("PhotoEditor")),
+        KeyBinding::new("cmd-enter", photo_editor::Commit, Some("PhotoEditor")),
+        KeyBinding::new("ctrl-enter", photo_editor::Commit, Some("PhotoEditor")),
+        KeyBinding::new("left", photo_editor::NudgeLeft, Some("PhotoEditor")),
+        KeyBinding::new("right", photo_editor::NudgeRight, Some("PhotoEditor")),
+        KeyBinding::new("up", photo_editor::NudgeUp, Some("PhotoEditor")),
+        KeyBinding::new("down", photo_editor::NudgeDown, Some("PhotoEditor")),
         KeyBinding::new("cmd-w", shell::CloseTab, None),
         KeyBinding::new("ctrl-w", shell::CloseTab, None),
         KeyBinding::new("cmd-t", shell::NewTab, None),
