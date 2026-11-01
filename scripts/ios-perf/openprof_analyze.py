@@ -11,7 +11,7 @@ Per group: interval and main-thread CPU per open, self time by binary, time char
 deepest app frame (additive), named categories (inclusive, overlapping), a pruned call tree,
 and, for a pair `X-first` / `X-repeat`, the first-minus-repeat difference by frame.
 """
-import sys, re, collections, statistics
+import os, sys, re, collections, statistics
 import xml.etree.ElementTree as ET
 
 APP_BINARIES = ("Arbos",)
@@ -125,8 +125,9 @@ def parse_groups(spec, n):
 
 
 CATEGORIES = [
-    ("markdown parse (Rust core over FFI: markdownBlocks/markdownSpans, uniffi)",
-     re.compile(r"markdownBlocks|markdownSpans|uniffi|arbos_core|makeRustCall")),
+    ("markdown parse (Rust core over FFI: markdownBlocks/markdownSpans)", re.compile(r"markdownBlocks|markdownSpans")),
+    ("code highlighting (CodeHighlight.tokens, Rust core)", re.compile(r"CodeHighlight\.tokens")),
+    ("accessibility (AX bundles, SwiftUI accessibility nodes)", re.compile(r"[Aa]ccessib|^AX|^_AX|^-\[AX|^\+\[AX")),
     ("Markdown.* Swift side (blocks/nest/inlineText/plain/polish)", re.compile(r"\bMarkdown\.")),
     ("Transcript row build (refreshRows / Transcript.rows / proseBlocks)", re.compile(r"refreshRows|Transcript\.|proseBlocks")),
     ("Text layout and shaping (CoreText / TextKit / UIFoundation)", re.compile(r"^CT|TypeSetter|Typesetter|TextLayout|NSLayoutManager|NSTextStorage|_NSAttributed|TextRendering|CoreText")),
@@ -156,7 +157,11 @@ ONE_TIME = [
     ("Metal device first use (RenderBox RBDevice.sharedDefaultDevice)", re.compile(r"RBDevice sharedDefaultDevice|MTLCreateSystemDefaultDevice|MTLDeviceArrayInitialize")),
     ("AttributedString → NSAttributedString scope reflection (AttributeScope.scopeDescription)", re.compile(r"AttributeScope\.scopeDescription")),
     ("SwiftUI view-type field reflection (DynamicPropertyCache.fields)", re.compile(r"DynamicPropertyCache\.fields")),
-    ("Markdown parse in the Rust core (ArbosFFI)", re.compile(r"bin:ArbosFFI|markdownBlocks|markdownSpans|makeRustCall")),
+    ("Code highlighting in the Rust core (CodeHighlight.tokens)", re.compile(r"CodeHighlight\.tokens")),
+    ("Chart model in the Rust core (ChartModelCache / chartModelJson)", re.compile(r"ChartModelCache|chartModelJson")),
+    ("Markdown parse in the Rust core (markdownBlocks / markdownSpans)", re.compile(r"markdownBlocks|markdownSpans")),
+    ("Other Rust core calls (ArbosFFI)", re.compile(r"bin:ArbosFFI|makeRustCall")),
+    ("Accessibility (AX bundles, SwiftUI accessibility nodes)", re.compile(r"[Aa]ccessib|^AX|^_AX|^-\[AX|^\+\[AX|axbundle")),
 ]
 KINDS = [
     ("Swift runtime type lookup (conformance scan, mangled-name metadata, demangler)",
@@ -374,6 +379,12 @@ def main():
         load_syms(sys.argv[5])
     ivs = intervals_of(sp)
     spans = ivs.get("open-chat", [])
+    # OPEN_WINDOW_MS: a fixed window from each open's start instead of the signpost's end, to catch
+    # work an open causes after its newest row first appears.
+    win = int(os.environ.get("OPEN_WINDOW_MS", "0"))
+    if win:
+        spans = [(a, a + win * 1_000_000, m) for a, _, m in spans]
+        ivs = dict(ivs, **{"open-chat": spans})
     samples = samples_of(tp, spans)
     groups = parse_groups(spec, len(spans))
     stats = report(label, spans, samples, groups)

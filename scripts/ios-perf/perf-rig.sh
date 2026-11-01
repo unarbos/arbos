@@ -3,9 +3,9 @@
 # "Arbos PerfBaseline" simulator. Fixture mode only: the relay is http://fixture.invalid.
 # Start detached:  ( trap "" HUP PIPE; exec ~/arbos-perf-82aa-w/perf-rig.sh run <plan> ) > ~/arbos-perf-82aa-w/run.log 2>&1 < /dev/null &
 export DEVELOPER_DIR=/Applications/Xcode-27.0.0.app/Contents/Developer
-W=~/arbos-perf-82aa-w; SRC=~/arbos-perf-82aa; SLOT=/usr/local/bin/arbos-heavy-slot.sh
+W=${W:-~/arbos-perf-82aa-w}; SRC=${SRC:-~/arbos-perf-82aa}; SLOT=/usr/local/bin/arbos-heavy-slot.sh
 SLOTS=/Users/Shared/arbos-run/heavy-slots
-SIM=717D7018-B970-4621-BC53-61346B36EE94
+SIM=${SIM:-717D7018-B970-4621-BC53-61346B36EE94}
 DD=$W/dd; BUDGET=${BUDGET:-3300}
 mkdir -p $W/logs $W/xcr $W/traces
 say() { echo "[$(date -u +%H:%M:%S)] RIG $*"; }
