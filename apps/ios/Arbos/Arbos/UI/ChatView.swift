@@ -83,16 +83,28 @@ private struct ChatSessionHost: View {
     let chatId: Id
     let projectId: Id
     @State private var tick = 0
+    @State private var shownVersion: Int?
+    @State private var shownCaughtUp = false
 
     var body: some View {
         #if DEBUG
         let _ = SendTrace.recent ? SendTrace.mark("host-body", detail: "tick=\(tick)", once: false) : ()
         #endif
         ChatSession(model: model, chatId: chatId, projectId: projectId, tick: tick)
-            .onReceive(model.$messages) { _ in tick &+= 1 }
-            .onReceive(model.$messagesVersion) { _ in tick &+= 1 }
-            .onReceive(model.$channelRows) { _ in tick &+= 1 }
-            .onReceive(model.$caughtUp) { _ in tick &+= 1 }
+            // This chat's list only: `messagesVersion[chatId]` moves on every replacement of
+            // `messages[chatId]` or `channelRows[chatId]` (`AppModel.bumpVersions`), so a send
+            // still re-runs the session at once (#1720) and another chat's stream does not.
+            // Filtered here, not with a capturing `map`: a new publisher per body would resubscribe.
+            .onReceive(model.$messagesVersion) { versions in
+                guard versions[chatId] != shownVersion else { return }
+                shownVersion = versions[chatId]
+                tick &+= 1
+            }
+            .onReceive(model.$caughtUp) { ready in
+                guard ready.contains(chatId) != shownCaughtUp else { return }
+                shownCaughtUp = ready.contains(chatId)
+                tick &+= 1
+            }
             .onReceive(model.$typing) { _ in tick &+= 1 }
             .onReceive(model.$peopleChats) { _ in tick &+= 1 }
             .onReceive(model.$machine) { _ in tick &+= 1 }
