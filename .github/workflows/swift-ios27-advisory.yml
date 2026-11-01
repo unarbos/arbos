@@ -20,25 +20,18 @@ on:
       - "rust-toolchain.toml"
       - "apps/ios/Arbos/**"
       - ".github/workflows/swift-ios27-advisory.yml"
-  pull_request:
-    paths:
-      - "crates/arbos-core/**"
-      - "crates/arbos-client/**"
-      - "crates/arbos-ffi/**"
-      - "scripts/build-xcframework.sh"
-      - "packages/ArbosFFI/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - "apps/ios/Arbos/**"
-      - ".github/workflows/swift-ios27-advisory.yml"
+  # No pull_request trigger. `xcode-27` draws on the same hosted macOS jobs as the gate's `macos-15`
+  # runs: at 2026-10-31 23:30:41Z five advisory jobs held all that ran here, and twenty gate jobs
+  # waited. A reading of main is the whole purpose; one per pull request doubled the demand.
 
 permissions:
   contents: read
 
 concurrency:
   group: swift-ios27-advisory-${{ github.ref }}
-  cancel-in-progress: true
+  # Let the running job finish: main merges faster than a run lasts, so cancelling would leave no reading.
+  # GitHub keeps one pending run per group, the newest, so this is never more than one job plus one waiting.
+  cancel-in-progress: false
 
 jobs:
   # The job id is `check`, as in swift-core-check.yml, because rust-cache keys on the job id: that is
