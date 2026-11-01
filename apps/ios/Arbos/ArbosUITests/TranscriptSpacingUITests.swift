@@ -78,7 +78,7 @@ final class TranscriptSpacingUITests: XCTestCase {
         }
     }
 
-    /// Where the bubble bodies start, as the names report it.
+    /// Where the bubble bodies start, as the names report it, keyed by the sender named.
     ///
     /// The disc and the bubble are placed by two different expressions — the disc by
     /// `avatarColumn`'s padding, the bubble by the HStack spacing after it — so a disc in the
@@ -86,24 +86,40 @@ final class TranscriptSpacingUITests: XCTestCase {
     /// bubble body: the body carries no accessibility identifier (only my own bubbles do) and
     /// the row's `bubble:` identifier spans the whole row.
     ///
-    /// **No absolute is asserted here, and that is deliberate.** The name's text origin is
-    /// 66 — the bubble body starts at 52 and `Theme.bubbleHPad` is 14 — and 66 is correct and
-    /// observed: in the 2026-11-01 capture at 3.0 px/pt the "Mira Kaplan" glyph ink runs from
-    /// 67.3 pt, which is 66.0 plus about 1.3 pt of side bearing on the "M". But the element
-    /// here is a `Button` wrapping `LiveSenderName`, and its accessibility frame reports
-    /// **58**, because SwiftUI extends a button's hit frame 8 pt to the left of its glyphs.
+    /// **The names do not share one leading edge, and no absolute is asserted.** A name in a
+    /// text bubble sits inside that bubble's `Theme.bubbleHPad`, so it starts at 66: the body
+    /// begins at 52 and the padding is 14. A name above a picture or file card has no bubble
+    /// around it — `RowView.mediaRow` puts the name and the card in a bare VStack — and
+    /// carries its own 6 pt leading padding, so it starts at 58. Both are measured from the
+    /// same lane and both are right. The 66 is confirmed against ink rather than inferred: in
+    /// the 2026-11-01 capture at 3.0 px/pt the "Mira Kaplan" glyphs run from 67.3 pt, which is
+    /// 66.0 plus about 1.3 pt of side bearing on the "M".
     ///
-    /// So 66 is ours and unreachable through this proxy, and 58 is SwiftUI's current leading
-    /// inset for a button's frame rather than anything we designed. Pinning 58 would turn the
-    /// gate red the day that inset changes, for a move no user could see. Neither number is
-    /// asserted. What is asserted is that every name agrees with every other name across both
-    /// keyboard states, which is the invariant this suite exists for: a lane re-derived from
-    /// `composerInset` at the call site moves with the keyboard, and equality catches that
-    /// without pinning anything incidental.
-    private func nameLeadingEdges(_ app: XCUIApplication, _ state: String) -> [CGFloat] {
+    /// So two names are never compared with each other, and neither number is pinned — 66 and
+    /// 58 are both reachable only through this proxy, and an absolute here would redden the
+    /// gate for a row type the suite was not written to police. Each name is compared with
+    /// *itself* across the two keyboard states instead. That is the invariant this suite
+    /// exists for: a lane re-derived from `composerInset` at the call site moves every name by
+    /// the 13 pt the inset changes by, whatever a given row's own padding happens to be.
+    private func nameEdgesByLabel(_ app: XCUIApplication, _ state: String) -> [String: CGFloat] {
         let named = names(app)
         XCTAssertFalse(named.isEmpty, "\(state): at least one bubble names its sender")
-        return named.map(\.frame.minX)
+        var edges: [String: CGFloat] = [:]
+        var seen: Set<String> = []
+        for element in named {
+            let label = element.label
+            guard !label.isEmpty else { continue }
+            // A sender who both writes and sends a picture is named twice in one state, once
+            // at each inset. Neither entry can be matched to its own self in the other state,
+            // so drop the label rather than guess which row survived the scroll.
+            if seen.contains(label) {
+                edges[label] = nil
+                continue
+            }
+            seen.insert(label)
+            edges[label] = element.frame.minX
+        }
+        return edges
     }
 
     /// Keyboard down, then up, in one launch: the lane must not move between them. Asserting
@@ -114,12 +130,12 @@ final class TranscriptSpacingUITests: XCTestCase {
         let app = launch()
         assertLaneIsWhereJacobPutIt(app, "keyboard down")
         let down = discs(app).map(\.frame.minX)
-        let namesDown = nameLeadingEdges(app, "keyboard down")
+        let namesDown = nameEdgesByLabel(app, "keyboard down")
 
         raiseKeyboard(app)
         assertLaneIsWhereJacobPutIt(app, "keyboard up")
         let up = discs(app).map(\.frame.minX)
-        let namesUp = nameLeadingEdges(app, "keyboard up")
+        let namesUp = nameEdgesByLabel(app, "keyboard up")
 
         XCTAssertFalse(up.isEmpty, "pictures are still on screen with the keyboard up")
         for x in down + up {
@@ -127,16 +143,19 @@ final class TranscriptSpacingUITests: XCTestCase {
                            "the column is the same with the keyboard down \(down) and up \(up); "
                            + "a lane that reads the composer inset gives 37 and 24")
         }
-        // Every name against one of them rather than pairwise by index: raising the keyboard
-        // scrolls rows off, so the two lists need not be the same length or the same rows.
-        // They do all have to report one edge, because they are all in one lane.
-        let edges = namesDown + namesUp
-        guard let first = edges.first else { return }
-        for x in edges {
-            XCTAssertEqual(x, first, accuracy: Self.slack,
-                           "the bubbles start at one edge with the keyboard down \(namesDown) "
-                           + "and up \(namesUp); a lane that reads the composer inset moves "
-                           + "them by the 13 pt the composer's inset changes by")
+        // Each name against its own earlier self, matched by the sender it names, and only
+        // for senders named in both states: raising the keyboard scrolls rows off, so a name
+        // present in one list and absent from the other says nothing about the lane.
+        let shared = Set(namesDown.keys).intersection(namesUp.keys).sorted()
+        XCTAssertFalse(shared.isEmpty,
+                       "some sender is named in both keyboard states, so there is a name to "
+                       + "compare — down \(namesDown), up \(namesUp)")
+        for label in shared {
+            guard let wasAt = namesDown[label], let nowAt = namesUp[label] else { continue }
+            XCTAssertEqual(nowAt, wasAt, accuracy: Self.slack,
+                           "\(label)'s name starts where it did before the keyboard came up; "
+                           + "a lane that reads the composer inset moves it by the 13 pt the "
+                           + "inset changes by — down \(namesDown), up \(namesUp)")
         }
     }
 }
