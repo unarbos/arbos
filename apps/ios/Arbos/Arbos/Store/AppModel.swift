@@ -324,6 +324,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var messagesVersion: [Id: Int] = [:]
     /// One pass over a chat's list, kept until that list changes.
     private var activityCache: [Id: ChatActivity] = [:]
+    /// Last bubble double-tap that toggled a ❤️ — collapses a double-fire of the
+    /// same gesture so the second report does not undo the unlike
+    /// ([feedback app-01M6B7GC86T1QYFA3AKMN2PW65]).
+    private var lastDoubleTapHeart: (messageId: Id, at: Date)?
 
     /// A chat's scan results (streaming / open hand-off / awaiting) and the view's
     /// change detection must not cost a pass over the list per screen body: both key
@@ -5078,10 +5082,31 @@ final class AppModel: ObservableObject {
         do {
             try doc.toggleReaction(messageId: messageId, emoji: emoji, sender: me)
             doc.commit()
+            // Mirror into the open transcript at once so a second double-tap can
+            // undo the heart without waiting on onChange
+            // ([feedback app-01M6B7GC86T1QYFA3AKMN2PW65]).
+            if var list = messages[chatId], let i = list.firstIndex(where: { $0.id == messageId }) {
+                list[i].reactions = MessageReaction.toggling(list[i].reactions, emoji: emoji, sender: me)
+                messages[chatId] = list
+            }
             Haptics.pick()
         } catch {
             fail("update the reaction", error)
         }
+    }
+
+    /// Double-tap a bubble: add a ❤️, or remove mine if it is already there.
+    /// A second report of the same double-tap (SwiftUI can fire `TapGesture(count: 2)`
+    /// twice while the chip appears) would otherwise toggle the heart back on
+    /// ([feedback app-01M6B7GC86T1QYFA3AKMN2PW65]).
+    func doubleTapHeart(chatId: Id, messageId: Id) {
+        let now = Date()
+        if let last = lastDoubleTapHeart, last.messageId == messageId,
+           now.timeIntervalSince(last.at) < 0.15 {
+            return
+        }
+        lastDoubleTapHeart = (messageId, now)
+        toggleReaction(chatId: chatId, messageId: messageId, emoji: "❤️")
     }
 
     /// Delete a message for everyone. The relay decides (`DELETE /room/…/messages/{id}`,
