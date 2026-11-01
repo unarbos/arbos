@@ -47,7 +47,7 @@ final class LinkIconTests: XCTestCase {
             XCTAssertEqual(LinkIcons.shared.image(for: "nypost.com").size, LinkIcons.placeholder.size)
         }
         // One ask per host, however many links point at it.
-        try await Task.sleep(for: .milliseconds(100))
+        try await Self.waitUntilAnswered("nypost.com")
         XCTAssertEqual(fetched, ["nypost.com"])
         let icon = LinkIcons.shared.image(for: "nypost.com")
         XCTAssertEqual(icon.size, CGSize(width: LinkIcons.side + LinkIcons.gap, height: LinkIcons.side))
@@ -58,7 +58,7 @@ final class LinkIconTests: XCTestCase {
         var asks = 0
         LinkIcons.shared.fetch = { _ in asks += 1; return nil }
         _ = LinkIcons.shared.image(for: "none.example")
-        try await Task.sleep(for: .milliseconds(50))
+        try await Self.waitUntilAnswered("none.example")
         XCTAssertTrue(LinkIcons.shared.image(for: "none.example") === LinkIcons.placeholder)
         _ = LinkIcons.shared.image(for: "none.example")
         try await Task.sleep(for: .milliseconds(20))
@@ -78,6 +78,18 @@ final class LinkIconTests: XCTestCase {
             XCTAssertNotNil(data.flatMap(LinkIcons.rounded), "fixture icon for \(host) decodes")
         }
         XCTAssertNil(LinkIcons.fixtureIcon(host: "nowhere.example"))
+    }
+
+    /// Waits until `host`'s answer (picture or none) is published, which is when it becomes a key
+    /// of `images`. The fetch, the detached decode and the one-frame publish have no fixed bound
+    /// on a loaded simulator clone, so a fixed sleep is not a wait.
+    static func waitUntilAnswered(_ host: String, timeout: Duration = .seconds(10)) async throws {
+        let clock = ContinuousClock()
+        let end = clock.now + timeout
+        while !LinkIcons.shared.images.keys.contains(host) {
+            guard clock.now < end else { return XCTFail("no answer for \(host) within \(timeout)") }
+            try await Task.sleep(for: .milliseconds(10))
+        }
     }
 
     static func png(side: Int) -> Data {
