@@ -42,7 +42,7 @@ struct QuestionCard: View {
     @State private var offerShow = false
     @State private var offerSeeded = false
     @State private var handoffErrorDetailsOpen = false
-    /// This card's entry in `model.handoff`, kept by `.onReceive` so a save re-runs the card.
+    /// This card's entry in `model.handoff`, kept by the card's `.task` so a save re-runs the card.
     @State private var observedHandoff: AppModel.HandoffState?
     @FocusState private var offerFocus: OfferField?
 
@@ -93,7 +93,7 @@ struct QuestionCard: View {
             .background(RoundedRectangle(cornerRadius: Self.radius, style: .continuous).fill(palette.outer))
             .task(id: handoffId) {
                 guard let id = handoffId else { return }
-                for await state in model.$handoff.map({ $0[id] }).removeDuplicates().dropFirst().values {
+                for await state in model.$handoff.map({ $0[id] }).removeDuplicates().values {
                     observedHandoff = state
                 }
             }
