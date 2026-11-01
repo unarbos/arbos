@@ -225,6 +225,63 @@ final class OneAddRowPerPaneTests: XCTestCase {
         XCTAssertFalse(chat.contains("\"Add agent\""), "no Add agent control in the chat pane")
     }
 
+    /// Jacob 2026-10-31 ([feedback chat-info-pane-icon-defaults-2026-10-31]: "fix the
+    /// settings page icons so that they are all classic defaults"): every row on the chat
+    /// info pane leads with the stock SF Symbol Apple's own apps put on that action, drawn
+    /// at the row label's own point size, weight and colour. The muted tint is what made
+    /// the glyphs read lighter than the text beside them. The Mac twin is
+    /// `profiles::kit::tests::an_action_rows_icon_has_the_menus_room_around_it`.
+    func testChatInfoRowsLeadWithStockSymbolsDrawnLikeTheirLabel() throws {
+        let pages = try source("UI/ProfilePages.swift")
+        let group = body(of: "GroupProfileView", in: pages)
+        for (row, symbol) in [("Add members", "person.badge.plus"), ("Description", "note.text"),
+                              ("Share invite link", "square.and.arrow.up"), ("Activity", "clock.arrow.circlepath")] {
+            XCTAssertTrue(group.contains(".glyph(\"\(symbol)\")"), "\(row) leads with \(symbol)")
+        }
+        // A text-alignment control and a filled list rectangle: neither is the symbol
+        // Apple would put on a description or on a history, and both sat heavier or
+        // lighter than the rest of the set.
+        for gone in ["text.alignleft", "list.bullet.rectangle"] {
+            XCTAssertFalse(group.contains(gone), "\(gone) is gone from the chat info pane")
+        }
+        // The icon is drawn like the label it sits beside, and the box matches the Mac's.
+        XCTAssertEqual(PaneKit.glyphPoint, Theme.body)
+        XCTAssertEqual(PaneKit.glyphWeight, .medium)
+        XCTAssertEqual(PaneKit.glyphRadius, 10)
+        // The rows reach the box through `PaneRow`, so an inline `Image` drawn back into
+        // `leadingView` would put the muted tint back without `PaneGlyphBox` noticing.
+        let row = body(of: "PaneRow", in: pages)
+        XCTAssertTrue(row.contains("PaneGlyphBox(symbol: icon)"), "a .glyph row draws the one box")
+        let box = body(of: "PaneGlyphBox", in: pages)
+        XCTAssertTrue(box.contains("Image(systemName: symbol)"), "the system symbol, not a drawn glyph")
+        XCTAssertTrue(box.contains("foregroundStyle(theme.text)"), "the label's colour")
+        XCTAssertFalse(box.contains("theme.muted"), "never the muted tint")
+        // The box is as wide as a member row's avatar, which is what `separatorInset`
+        // measures: every label in the card starts at one left edge.
+        XCTAssertTrue(box.contains("width: PaneKit.avatar, height: PaneKit.avatar"),
+                      "the icon box is the avatar's box")
+        XCTAssertEqual(PaneKit.separatorInset(.glyph("")), PaneKit.inset + PaneKit.avatar + PaneKit.gap)
+        XCTAssertNotEqual(PaneKit.separatorInset(.glyph("")), PaneKit.separatorInset(.tile("")))
+        // The twin of the Mac's `sf_symbols::symbol` pin. An `.overlay` draws the
+        // symbol at its own size, so Apple's canvas keeps its proportions however
+        // wide it is; `resizable` or a fill content mode would stretch it to the
+        // box and bring the Mac's squash here — a narrowed glyph with thinned
+        // strokes, which is what Scout reported.
+        for stretches in [".resizable()", ".scaledToFill()", "contentMode: .fill"] {
+            XCTAssertFalse(box.contains(stretches), "\(stretches) would distort Apple's canvas")
+        }
+        XCTAssertTrue(box.contains(".overlay("), "the symbol draws at its own size")
+        // The companion rule, and the twin of
+        // `sf_symbols::tests::the_slot_does_not_crop_what_overflows_it`. A symbol that
+        // keeps its proportions has to overflow a box narrower than its canvas, so the
+        // tempting tidy-up is to clip it away. That swaps a squashed symbol for a
+        // cropped one, which looks like a fix and is not one. The rounded rectangle
+        // here is the box's fill, never a mask.
+        for crops in [".clipped()", ".clipShape("] {
+            XCTAssertFalse(box.contains(crops), "\(crops) would crop Apple's canvas instead")
+        }
+    }
+
     func testThePickerHasAnAgentsSectionMineFirstThenTheOthersAlreadyIn() throws {
         XCTAssertEqual(AddMembersAgents.sectionTitle, "Agents")
         XCTAssertEqual(AddMembersAgents.peopleTitle, "People")

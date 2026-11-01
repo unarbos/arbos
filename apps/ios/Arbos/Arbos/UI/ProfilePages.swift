@@ -115,6 +115,16 @@ enum PaneKit {
     static let gap: CGFloat = 10
     static let tile: CGFloat = 30
     static let avatar: CGFloat = 36
+    /// The chat info pane's action-row icon ("Add members", "Description", the
+    /// rest): Apple's system symbol drawn at the row label's own point size,
+    /// weight and colour inside the `avatar`-wide box, so it can never read
+    /// lighter than the label beside it ([feedback
+    /// chat-info-pane-icon-defaults-2026-10-31], Jacob: "all classic
+    /// defaults"). The Mac twin is `profiles::kit::ROW_GLYPH_PT`, which is the
+    /// Mac's own body size — each platform's icon matches its own label.
+    static let glyphPoint: CGFloat = Theme.body
+    static let glyphWeight: Font.Weight = .medium
+    static let glyphRadius: CGFloat = 10
     /// The hero picture (a free constant: a static on the generic PaneHeader cannot be named without its type parameter).
     static let heroAvatar: CGFloat = 112
     static let radius: CGFloat = 16
@@ -290,11 +300,29 @@ struct PaneRow: View {
         case .avatar(let view):
             view.frame(width: PaneKit.avatar, height: PaneKit.avatar)
         case .glyph(let icon):
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(theme.field)
-                .frame(width: PaneKit.avatar, height: PaneKit.avatar)
-                .overlay(Image(systemName: icon).font(theme.font(17, weight: .medium)).foregroundStyle(theme.muted))
+            PaneGlyphBox(symbol: icon)
         }
+    }
+}
+
+/// A row's icon box: the system symbol `symbol` centred in the `avatar`-wide
+/// box that keeps the row's label in line with the member rows under it. The
+/// symbol takes the label's own point size, weight and colour — it used to be
+/// `theme.muted`, which read lighter than the text beside it (Scout, via
+/// Jacob, 2026-10-31: the pane's glyphs "look too thin").
+struct PaneGlyphBox: View {
+    @Environment(\.theme) private var theme
+    let symbol: String
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: PaneKit.glyphRadius, style: .continuous)
+            .fill(theme.field)
+            .frame(width: PaneKit.avatar, height: PaneKit.avatar)
+            .overlay(
+                Image(systemName: symbol)
+                    .font(theme.font(PaneKit.glyphPoint, weight: PaneKit.glyphWeight))
+                    .foregroundStyle(theme.text)
+            )
     }
 }
 
@@ -1554,7 +1582,7 @@ struct GroupProfileView: View {
             if canEditGroupSettings {
                 list.append(AnyView(Button { showEdit = true } label: {
                     PaneRow(
-                        leading: .glyph("text.alignleft"),
+                        leading: .glyph("note.text"),
                         title: "Description",
                         value: desc.isEmpty ? "Add a description" : desc,
                         chevron: true
@@ -1564,7 +1592,7 @@ struct GroupProfileView: View {
                 .accessibilityLabel(desc.isEmpty ? "Add a description" : "Edit description")))
             } else if !desc.isEmpty {
                 list.append(AnyView(
-                    PaneRow(leading: .glyph("text.alignleft"), title: "Description", value: desc)
+                    PaneRow(leading: .glyph("note.text"), title: "Description", value: desc)
                         .accessibilityLabel("Description: \(desc)")
                 ))
             }
@@ -1586,7 +1614,7 @@ struct GroupProfileView: View {
         // People groups only: the activity log is built from this chat's system lines.
         if projectId == nil, people?.isGroup == true, canManageMembers {
             list.append(AnyView(Button { showActivity = true } label: {
-                PaneRow(leading: .glyph("list.bullet.rectangle"), title: "Activity", chevron: true)
+                PaneRow(leading: .glyph("clock.arrow.circlepath"), title: "Activity", chevron: true)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Group activity")))
