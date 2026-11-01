@@ -2763,16 +2763,26 @@ private struct LiveSenderBar: ViewModifier {
 /// Not an `ObservableObject`: one finished download must not invalidate every
 /// avatar on screen (group-chat scroll lag). Each `PersonAvatar` holds its own
 /// `@State` and awaits `load`.
+///
+/// Bounded: each picture is a 384 px bitmap (~590 KB), so the limit holds about 110 —
+/// more than twice what `warm` asks for. An evicted picture reloads from the URL cache.
 @MainActor
 final class AvatarImageCache {
     static let shared = AvatarImageCache()
 
-    private(set) var images: [String: UIImage] = [:]
+    nonisolated static let costLimitBytes = 64 * 1024 * 1024
+
+    private let images: NSCache<NSString, UIImage> = {
+        let c = NSCache<NSString, UIImage>()
+        c.totalCostLimit = AvatarImageCache.costLimitBytes
+        return c
+    }()
+    /// URLs with a download or decode in flight.
     private var requested: Set<String> = []
     private var waiters: [String: [CheckedContinuation<UIImage?, Never>]] = [:]
 
     func image(for url: String?) -> UIImage? {
-        url.flatMap { images[$0] }
+        url.flatMap { images.object(forKey: $0 as NSString) }
     }
 
     /// Pictures are kept at the largest size a row draws (128 pt hero at 3x). The relay's
@@ -2822,7 +2832,7 @@ final class AvatarImageCache {
     /// changed picture is a new URL. Failures retry with backoff before giving up; a 404 ("no
     /// picture") does not retry.
     func load(_ url: String) async -> UIImage? {
-        if let img = images[url] { return img }
+        if let img = image(for: url) { return img }
         if requested.contains(url) {
             return await withCheckedContinuation { cont in
                 waiters[url, default: []].append(cont)
@@ -2833,14 +2843,15 @@ final class AvatarImageCache {
         var img: UIImage?
         var attempt = 0
         while true {
-            let (data, status) = await Task.detached(priority: .userInitiated) { () -> (Data?, Int) in
+            let (decoded, status) = await Task.detached(priority: .userInitiated) { () -> (UIImage?, Int) in
                 var req = URLRequest(url: u)
                 req.cachePolicy = .returnCacheDataElseLoad
                 guard let (data, resp) = try? await URLSession.shared.data(for: req) else { return (nil, 0) }
                 let code = (resp as? HTTPURLResponse)?.statusCode ?? 200
-                return (code / 100 == 2 ? data : nil, code)
+                guard code / 100 == 2 else { return (nil, code) }
+                return (AvatarImageCache.decode(data), code)
             }.value
-            if let data, let decoded = AvatarImageCache.decode(data) {
+            if let decoded {
                 img = decoded
                 break
             }
@@ -2848,10 +2859,9 @@ final class AvatarImageCache {
             try? await Task.sleep(nanoseconds: AvatarImageCache.retrySeconds[attempt] * 1_000_000_000)
             attempt += 1
         }
+        requested.remove(url)
         if let img {
-            images[url] = img
-        } else {
-            requested.remove(url)
+            images.setObject(img, forKey: url as NSString, cost: AvatarImageCache.cost(of: img))
         }
         let pending = waiters.removeValue(forKey: url) ?? []
         for cont in pending { cont.resume(returning: img) }
@@ -2869,6 +2879,11 @@ final class AvatarImageCache {
         ]
         guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
         return UIImage(cgImage: cg)
+    }
+
+    nonisolated static func cost(of image: UIImage) -> Int {
+        guard let cg = image.cgImage else { return 1 }
+        return cg.bytesPerRow * cg.height
     }
 }
 
