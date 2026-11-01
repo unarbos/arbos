@@ -13,7 +13,6 @@ final class ReactionChipAnchorTests: XCTestCase {
     private let chat = "fx-group-arbonites"
     private let me = "user:fx-me"
     private let t0: Int64 = 1_700_000_000_000
-    private let inset: CGFloat = 16
     private let pdf = Attachment(name: "plan.pdf", mime: "application/pdf", blobRef: "blob-pdf", kind: "file")
     private let video = Attachment(name: "clip.mov", mime: "video/quicktime", blobRef: "blob-mov", kind: "video")
     private let picture = Attachment(name: "IMG_1.jpeg", mime: "image/jpeg", blobRef: "blob-jpg", kind: "image")
@@ -48,7 +47,7 @@ final class ReactionChipAnchorTests: XCTestCase {
     }
 
     func testChipsStartOnTheBubblesLeadingEdgeInAPeopleGroup() {
-        let lane = Theme.memberLane(composerInset: inset)
+        let lane = Theme.memberLane
         let ben = "user:fx-ben"
         let messages = [
             person(0, ben, [text(0)]),
@@ -66,7 +65,7 @@ final class ReactionChipAnchorTests: XCTestCase {
         XCTAssertFalse(rows[1].showsAvatar, "Ben's second line continues his run (empty avatar column)")
         for row in rows {
             let mine = row.messageId == "m7" || row.messageId == "m8"
-            XCTAssertEqual(RowView.reactionLeading(for: row.kind, composerInset: inset), mine ? 0 : lane,
+            XCTAssertEqual(RowView.reactionLeading(for: row.kind), mine ? 0 : lane,
                            "\(row.messageId) (\(row.kind)): chips must start where its bubble does")
         }
     }
@@ -74,7 +73,7 @@ final class ReactionChipAnchorTests: XCTestCase {
     func testChipsStartAtTheEdgeInTheAgentChat() {
         let messages = [agent(0, [text(0)]), agent(1, [file(1, pdf)]), person(2, me, [text(2)])]
         for row in chipRows(messages, people: false) {
-            XCTAssertEqual(RowView.reactionLeading(for: row.kind, composerInset: inset), 0,
+            XCTAssertEqual(RowView.reactionLeading(for: row.kind), 0,
                            "\(row.messageId): no avatar lane in a 1:1 agent chat")
         }
     }

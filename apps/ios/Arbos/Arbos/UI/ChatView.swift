@@ -1272,7 +1272,7 @@ struct ChatSession: View {
                             // showReactionSenders: holding the message lists who
                             // used each emoji under the held bubble (chip hold
                             // does the same one-emoji list in the transcript).
-                            RowView(model: model, theme: theme, composerInset: composerSideInset, row: row, chatId: chatId, width: geo.size.width,
+                            RowView(model: model, theme: theme, row: row, chatId: chatId, width: geo.size.width,
                                     people: isPeople || isChannel, timeReveal: 0,
                                     mentions: MentionTable.Cache.shared.table(model: model, theme: theme),
                                     showReactionSenders: !row.reactions.isEmpty)
@@ -4114,7 +4114,6 @@ extension ChatSession {
     @ViewBuilder
     fileprivate func transcriptRows(shown: [Row], mentions: MentionTable, width: CGFloat) -> some View {
         let people = isPeople || isChannel
-        let composerInset = composerSideInset
         let actionsRowId = actionsRow?.id
         let firstId = shown.first?.id
         // Lazy rows: the oldest row of the window sits above the viewport and may never
@@ -4122,7 +4121,7 @@ extension ChatSession {
         let lastId = shown.last?.id
         ForEach(shown) { row in
             let reply = isMessageRow(row)
-            RowView(model: model, theme: theme, composerInset: composerInset, row: row, chatId: chatId, width: width,
+            RowView(model: model, theme: theme, row: row, chatId: chatId, width: width,
                     people: people, timeReveal: timeReveal,
                     onQuoteTap: { quote in revealQuoted(quote, from: row.messageId) },
                     highlighted: highlightedMessage == row.messageId,
