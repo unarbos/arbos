@@ -56,6 +56,10 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// 41346954704 it landed 16 pt off centre with the app reporting
     /// `passes=1 arrived=true moved=0` — while the pre-fix arm of the same run, aimed at the
     /// same row, came to rest thirty-five rows away with the row not realized.
+    ///
+    /// Still one sample per arm. The second attempt on this same tree, run 41352615015, is not
+    /// one: the runner's newest Xcode carried no iPhone 17 simulator, so `xcodebuild` failed on
+    /// the destination specifier and no test ran. A red gate is not always a red suite.
     private static let stuckTarget = "long-304"
     /// How many drags the list may be nudged while looking for a named target before the case
     /// gives up. Twenty-nine hits separate `convergingTarget` from the newest, a drag moves
