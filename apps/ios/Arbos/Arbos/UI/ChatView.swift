@@ -683,6 +683,7 @@ struct ChatSession: View {
         calls.isActive && !calls.isPresented && calls.call?.kind == .voice && calls.call?.chatId == chatId
     }
     @State private var chatNoteDetailsOpen = false
+    @State private var chatNoteDismissed: String?
     private var headerExtra: CGFloat { (hasCallBar ? 52 : 0) + (hasInCallBar ? 56 : 0) + (showSearch ? Controls.height + 8 : 0) }
     /// Member chips under the header — off on iPhone (feedback ABDgl8tFlqeUlwP4DihfYhk).
     private var showsMemberChips: Bool { false }
@@ -2964,12 +2965,20 @@ struct ChatSession: View {
         return nil
     }
 
+    /// The note the reader has closed, keyed by what it said and when the machine last moved,
+    /// so the same sentence after a fresh state change is a new note and shows again.
+    private func chatNoteKey(_ error: UserError) -> String {
+        ErrorNote.dismissKey(stateSince: model.machine.since, raw: error.raw)
+    }
+
     @ViewBuilder private var chatNote: some View {
-        if let error = chatLevelError {
+        if let error = chatLevelError, chatNoteDismissed != chatNoteKey(error) {
             ErrorNote(id: model.pushRefused.contains(chatId) ? "delivery-error" : "machine-error",
                       error: error,
                       detailsOpen: $chatNoteDetailsOpen,
-                      onTryAgain: model.pushRefused.contains(chatId) ? nil : { model.startMachine() })
+                      onTryAgain: model.pushRefused.contains(chatId) ? nil : { model.startMachine() },
+                      onDismiss: { chatNoteDismissed = chatNoteKey(error) },
+                      overTranscript: true)
         }
     }
 

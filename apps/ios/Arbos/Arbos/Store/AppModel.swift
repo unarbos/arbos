@@ -1150,9 +1150,24 @@ final class AppModel: ObservableObject {
 
     func setRelayLink(_ state: LinkState) {
         guard relayLink != state else { return }
+        let wasDown = relayLink != .live
         relayLink = state
         relayLinkSince = Date()
         if state != .live { scheduleLinkPillRepaint() }
+        // `startMachine` / `restartMachine` set `.error` locally when their own call fails, and
+        // nothing polls `/machine`, so the "Can't reach your machine" note outlived the outage
+        // that caused it ([feedback machine-banner-glass-2026-10-30]). The link coming back is
+        // the one moment worth re-asking; a healthy state clears the note on its own.
+        if Self.shouldReAskMachine(wasDown: wasDown, now: state, machineState: machine.state) {
+            Task { await refreshMachine() }
+        }
+    }
+
+    /// Should a link change re-ask `/machine`? Only when the link has just come back and the
+    /// machine is still showing the error nothing else will clear. Pure, so
+    /// `MachineBannerTests` can pin it without a relay.
+    nonisolated static func shouldReAskMachine(wasDown: Bool, now: LinkState, machineState: BoxState) -> Bool {
+        now == .live && wasDown && machineState == .error
     }
 
     func scheduleLinkPillRepaint() {
