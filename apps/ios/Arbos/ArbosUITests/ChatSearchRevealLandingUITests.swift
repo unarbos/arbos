@@ -57,14 +57,26 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// `passes=1 arrived=true moved=0` — while the pre-fix arm of the same run, aimed at the
     /// same row, came to rest thirty-five rows away with the row not realized.
     ///
-    /// Still one sample per arm. The second attempt on this same tree, run 41352615015, is not
-    /// one: the runner's newest Xcode carried no iPhone 17 simulator, so `xcodebuild` failed on
-    /// the destination specifier and no test ran. A red gate is not always a red suite.
+    /// Two attempts since then produced no second sample for this row, and neither is a verdict
+    /// on the fix. Run 41352615015 drew a runner whose newest Xcode carried no iPhone 17
+    /// simulator, so `xcodebuild` failed on the destination specifier and no test ran. Run
+    /// 41353988578 is the reason `reachable` now keeps the keyboard's edge and `nudge` steps
+    /// 120 pt instead of 200: twelve drags left this row at y461…556, the aim at y551 went under
+    /// a keyboard the band had stopped bounding, and the tap was delivered to the right element
+    /// and ignored — the result list came to rest byte-identical to its pre-tap state and the
+    /// bar stayed open, so the reveal was never exercised. In that same run `convergingTarget`
+    /// passed with `passes=1 arrived=true offset=10551 moved=0`, the same numbers as
+    /// 41346954704, and the pre-fix arm reproduced the symptom on *this* row at eleven drags.
+    /// The app and the row were both fine; the aim was the only variable. A red gate is not
+    /// always a red suite.
     private static let stuckTarget = "long-304"
     /// How many drags the list may be nudged while looking for a named target before the case
     /// gives up. Twenty-nine hits separate `convergingTarget` from the newest, a drag moves
-    /// one to three of them, and the measured counts are eleven and fourteen, so forty is
-    /// most of a factor of three in hand.
+    /// one to three of them, and the measured counts were eleven and fourteen at the old 200 pt
+    /// step, so forty had most of a factor of three in hand. `nudge`'s step is now 120 pt,
+    /// which should put the counts near eighteen to twenty-three and still leaves a factor
+    /// close to two. The gate run after this change is what settles that; if a case ever gives
+    /// up here, the drag count in the failure message is the number to read.
     private static let aimSearchDrags = 40
     /// Clear space the aim point must have above it, below the search chrome, before this
     /// will tap there.
@@ -158,6 +170,26 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         rows.map { "\($0.id)@y\(Int($0.frame.minY))…\(Int($0.frame.maxY))" }.joined(separator: ", ")
     }
 
+    /// The keyboard's top edge, kept for the life of the case once it has been seen.
+    ///
+    /// `app.keyboards` is not a reliable read of whether the keyboard is on screen. The
+    /// transcript dismisses it interactively (`.scrollDismissesKeyboard(.interactively)`), so a
+    /// drag can leave it reported as absent while it still covers the lower third, and a band
+    /// that trusts that read runs to the bottom of the screen and lets a row be aimed at a
+    /// point the keyboard owns.
+    ///
+    /// Gate run 41353988578 is that case. The aim at y551 on an 874 pt screen was delivered to
+    /// `bubble:long-304` — XCUITest resolved the element and synthesized the event against it,
+    /// with no interrupting element — and the app did nothing at all: the result list came to
+    /// rest byte-identical to its pre-tap state and the bar stayed open. The same row in the
+    /// same run, aimed at y229, took its tap and revealed. The variable was the aim, not the
+    /// row and not the app.
+    ///
+    /// The keyboard comes up with the bar and this suite never closes it, so the first frame it
+    /// reports holds for the case. `nil` means it was never reported at all, which the aim log
+    /// says out loud rather than silently widening the band.
+    private var keyboardTop: CGFloat?
+
     /// The part of the window a touch actually reaches: below the header and the Search bar,
     /// above the keyboard. Being inside the window is not the same as being reachable.
     private func reachable(_ app: XCUIApplication, screen: CGRect) -> CGRect {
@@ -166,8 +198,11 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
                        app.textFields["chat-search-field"]] where chrome.exists {
             top = max(top, chrome.frame.maxY)
         }
-        var bottom = screen.maxY
-        if app.keyboards.count > 0 { bottom = min(bottom, app.keyboards.firstMatch.frame.minY) }
+        if app.keyboards.count > 0 {
+            let seen = app.keyboards.firstMatch.frame.minY
+            keyboardTop = min(keyboardTop ?? seen, seen)
+        }
+        let bottom = min(screen.maxY, keyboardTop ?? screen.maxY)
         return CGRect(x: screen.minX, y: top, width: screen.width, height: max(0, bottom - top))
     }
 
@@ -176,11 +211,17 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// would leave the list somewhere this cannot name. With a keyword typed a scroll keeps
     /// the bar open (`ChatSearchClose.scrollCloses`), so this moves where the list stands and
     /// changes nothing else about the state under test.
+    ///
+    /// The step has to be smaller than the reachable band, or a row can cross the band between
+    /// two drags and never be aimable in it. On gate run 41353988578 the 200 pt drag moved
+    /// `long-304` from y140…234 to y461…556 — 322 pt — stepping clean over a band that ends at
+    /// the keyboard, which is how the aim came to sit under it. 120 pt moves the list about
+    /// 190 pt, against a band of roughly 350, and costs a handful more drags inside the cap.
     private func nudge(_ app: XCUIApplication, band: CGRect) {
         let origin = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
         origin.withOffset(CGVector(dx: band.midX, dy: band.minY + 30))
             .press(forDuration: 0.1,
-                   thenDragTo: origin.withOffset(CGVector(dx: band.midX, dy: band.minY + 230)))
+                   thenDragTo: origin.withOffset(CGVector(dx: band.midX, dy: band.minY + 150)))
         usleep(900_000)
     }
 
@@ -343,7 +384,8 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         // knowing whether the row being aimed at varied too. The drags are gestures and do
         // not stop in the same place every time, so `aimable` can pick a different hit.
         print("[rig] \(arm) target \(id) at \(point)")
-        print("[rig] \(arm) aimed at \(point); results before the tap: \(describe(bubbles(app)))")
+        let before = describe(bubbles(app))
+        print("[rig] \(arm) aimed at \(point); results before the tap: \(before)")
 
         let liveTarget = row(app, id)
         guard liveTarget.exists else {
@@ -363,8 +405,12 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
             .filter { $0.id != "bubble:\(id)" && $0.frame.minY > live.midY }
             .min { $0.frame.minY < $1.frame.minY }
         let gap = below.map { "\(Int($0.frame.minY - aim.y))pt to \($0.id)" } ?? "no row below"
+        // The band's bottom is logged as well as its top, because the aim that was delivered
+        // and ignored was 13 pt below a bottom the band did not have at the time.
         print("[rig] \(arm) aim \(aim): \(Int(aim.y - band.minY))pt below the band top "
-              + "y\(Int(band.minY)), \(gap)")
+              + "y\(Int(band.minY)), band ends y\(Int(band.maxY)) "
+              + "(keyboard \(app.keyboards.count > 0 ? "up" : "not reported"), bound "
+              + "\(keyboardTop.map { "y\(Int($0))" } ?? "never seen")), \(gap)")
         // dy 1 is the row's bottom edge; the 5 points back up land in `Theme.bubbleVPad`,
         // the same place the coordinate aim used to target. XCUITest resolves the frame
         // itself, at the moment of the touch.
@@ -380,7 +426,16 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         // Frontmost first: a frame means nothing until the chat is what the reader sees.
         let header = app.descendants(matching: .any)["chat-search-button"].firstMatch
         let resting = bubbles(app)
-        let detail = "tapped \(arm) at \(aim); screen \(screen); resting [\(describe(resting))]"
+        // A list that is byte-identical to its pre-tap state is the signature of a touch the
+        // app never acted on, and it reads nothing like a reveal that landed short. Say which
+        // one it is in the failure message, so the next reader does not have to diff two
+        // hundred-character lines by eye.
+        let stillness = describe(resting) == before
+            ? "NOTHING MOVED — the result list is byte-identical to its pre-tap state, so the "
+              + "touch was delivered and the app did not act on it; "
+            : ""
+        let detail = "tapped \(arm) at \(aim); screen \(screen); "
+            + stillness + "resting [\(describe(resting))]"
         print("[rig] \(detail)")
         XCTAssertTrue(header.isHittable, "the chat is frontmost — \(detail)")
         XCTAssertFalse(field.exists, "a result tap closes the bar — \(detail)")
