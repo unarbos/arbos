@@ -106,7 +106,9 @@ struct HomeView: View {
             // 2026-10-28], see-through since [feedback iphone-composer-see-through-2026-10-28]):
             // the fade is one layer at the canvas's bottom (over the rows, under the capsule),
             // not the bar's own background; rows stay readable through and between the pills.
-            .overlay(alignment: .bottom) { BottomBarFadeView(spec: BottomBarFade.home) }
+            .overlay(alignment: .bottom) {
+                BottomBarFadeView { geo, _ in BottomBarFade.home(bottomInset: geo.safeAreaInsets.bottom) }
+            }
             .safeAreaInset(edge: .bottom, spacing: 0) { bottomBar }
             .animation(.easeOut(duration: 0.18), value: searching)
             .task(id: model.link) {

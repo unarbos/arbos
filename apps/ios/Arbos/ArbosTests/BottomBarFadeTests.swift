@@ -58,7 +58,8 @@ final class BottomBarFadeTests: XCTestCase {
                     let bar = chatBar(statusRow: statusRow, errorNote: note, keyboard: keyboard)
                     for below in belowBar {
                         let above = BottomBarFade.aboveComposer(bar: bar, keyboard: keyboard)
-                        let spec = BottomBarFade.chat(bottomInset: bar + below, aboveComposer: above)
+                        let spec = BottomBarFade.chat(bottomInset: bar + below, aboveComposer: above,
+                                                      composerTop: nil, layerTop: 0)
                         XCTAssertEqual(spec.controls, Theme.composerHeight)
                         // The ramp ends on the composer, whatever else the bar carries.
                         XCTAssertEqual(spec.controlsTop + spec.controls,
@@ -78,7 +79,8 @@ final class BottomBarFadeTests: XCTestCase {
             for statusRow in [false, true] {
                 let bar = chatBar(statusRow: statusRow, errorNote: 0, keyboard: keyboard)
                 let above = BottomBarFade.aboveComposer(bar: bar, keyboard: keyboard)
-                let spec = BottomBarFade.chat(bottomInset: bar + 34, aboveComposer: above)
+                let spec = BottomBarFade.chat(bottomInset: bar + 34, aboveComposer: above,
+                                              composerTop: nil, layerTop: 0)
                 let where_ = "status=\(statusRow) kb=\(keyboard)"
                 // The last row's bottom edge at rest: `Theme.transcriptTail` over the bar's top
                 // edge, which is `spec.fade` under the layer's top.
@@ -93,6 +95,125 @@ final class BottomBarFadeTests: XCTestCase {
                 // The status row's bottom edge is its own gap over the composer.
                 XCTAssertEqual(spec.alpha(at: spec.controlsTop - Theme.presenceBottomGap), 0, where_)
             }
+        }
+    }
+
+    /// A device whose bottom inset over-reports by `wrong` pt. The layer's height is that inset,
+    /// and its bottom edge is the screen's, so its top edge sits `wrong` pt higher than the
+    /// arithmetic assumes while the composer stays where it is. What the layer measures is the
+    /// distance between the two, taken with its own top edge as the origin.
+    private func chatOnADeviceReporting(wrong: CGFloat, bar: CGFloat, below: CGFloat, keyboard: Bool)
+        -> (designed: BottomBarFade.Spec, fixed: BottomBarFade.Spec) {
+        let above = BottomBarFade.aboveComposer(bar: bar, keyboard: keyboard)
+        let inset = bar + below + wrong
+        let designed = BottomBarFade.chat(bottomInset: inset, aboveComposer: above,
+                                          composerTop: nil, layerTop: 0)
+        let fixed = BottomBarFade.chat(bottomInset: inset, aboveComposer: above,
+                                       composerTop: designed.controlsTop + wrong, layerTop: 0)
+        return (designed, fixed)
+    }
+
+    /// Jacob's iPhone Air reports its bottom inset 76 pt too large, so the layer's top edge sits
+    /// that far above where the arithmetic puts it and the ramp reached the newest bubble at
+    /// rest — the complaint itself. Neither the iPhone 17 nor the iPhone Air *simulator*
+    /// reproduces it (`internal/bottom-fade-sits-76pt-high-on-the-device-only.md`), so this is
+    /// the only place that device's behaviour is pinned at all.
+    func testAWrongInsetIsCorrectedFromTheMeasuredComposer() {
+        for keyboard in [false, true] {
+            for statusRow in [false, true] {
+                let bar = chatBar(statusRow: statusRow, errorNote: 0, keyboard: keyboard)
+                let below: CGFloat = keyboard ? 336 : 34
+                let wrong: CGFloat = 76
+                let (designed, fixed) = chatOnADeviceReporting(wrong: wrong, bar: bar, below: below,
+                                                               keyboard: keyboard)
+                let where_ = "status=\(statusRow) kb=\(keyboard)"
+                // The ramp moves down by exactly the error, back on to the composer's top edge.
+                XCTAssertEqual(fixed.controlsTop, designed.controlsTop + wrong, accuracy: 0.001, where_)
+                // Which is the point. The newest row's bottom edge at rest is `transcriptTail`
+                // over the bar's top edge, and on this device that is `wrong` pt further down
+                // the layer than the designed geometry believes.
+                let newestRow = designed.fade - Theme.transcriptTail + wrong
+                XCTAssertGreaterThan(designed.alpha(at: newestRow), 0, "\(where_) — the bug")
+                XCTAssertEqual(fixed.alpha(at: newestRow), 0, "\(where_) — the fix")
+                // And it is still the same ramp: clear lead, dim over the composer, readable.
+                check(fixed, bar: bar, below: below + wrong, "air \(where_)")
+            }
+        }
+    }
+
+    /// The no-regression proof, and the reason the simulator before/after pairs for this half of
+    /// the fix show nothing: on a device that reports its bottom inset correctly the measurement
+    /// agrees with the arithmetic to the pixel, for every shape the chat bar takes. The
+    /// correction is dead code there, so what a simulator shows is the first half of the fix,
+    /// untouched.
+    func testACorrectDeviceMeasuresExactlyTheDesignedGeometry() {
+        for keyboard in [false, true] {
+            for statusRow in [false, true] {
+                for note in [CGFloat(0), 44] {
+                    let bar = chatBar(statusRow: statusRow, errorNote: note, keyboard: keyboard)
+                    let under = Theme.composerHeight
+                        + (keyboard ? Theme.composerBottomKeyboard : Theme.composerBottom)
+                    let above = BottomBarFade.aboveComposer(bar: bar, keyboard: keyboard)
+                    for below in belowBar {
+                        // The layer's top edge is `fade + inset` over the screen's edge and the
+                        // composer's top edge is `below + under` over it, so a device whose
+                        // inset is right measures the one from the other as `fade + bar - under`.
+                        let designed = BottomBarFade.chat(bottomInset: bar + below, aboveComposer: above,
+                                                          composerTop: nil, layerTop: 0)
+                        let measured = BottomBarFade.chat(bottomInset: bar + below, aboveComposer: above,
+                                                          composerTop: BottomBarFade.fade + bar - under,
+                                                          layerTop: 0)
+                        XCTAssertEqual(measured, designed,
+                                       "status=\(statusRow) note=\(note) kb=\(keyboard) below=\(below)")
+                    }
+                }
+            }
+        }
+    }
+
+    /// The fallback, which matters because the hardware this corrects for is hardware we cannot
+    /// test. A measurement wrong the other way would drag the ramp up over the rows at rest —
+    /// the bug — or drop it under the composer so rows went beneath it undimmed, which is worse
+    /// than the bug. Neither is obeyed: the designed geometry is the floor, and the layer's own
+    /// bottom edge is the ceiling.
+    func testAnImplausibleMeasurementFallsBackToTheDesignedGeometry() {
+        for keyboard in [false, true] {
+            let bar = chatBar(statusRow: true, errorNote: 0, keyboard: keyboard)
+            let below: CGFloat = keyboard ? 336 : 34
+            let above = BottomBarFade.aboveComposer(bar: bar, keyboard: keyboard)
+            func spec(_ composerTop: CGFloat?, _ layerTop: CGFloat? = 0) -> BottomBarFade.Spec {
+                BottomBarFade.chat(bottomInset: bar + below, aboveComposer: above,
+                                   composerTop: composerTop, layerTop: layerTop)
+            }
+            let designed = spec(nil)
+            let where_ = "kb=\(keyboard)"
+            // The measurement agrees, which is what every simulator we can run reports: the
+            // geometry is the one that shipped in the first half of this fix, to the pixel.
+            XCTAssertEqual(spec(designed.controlsTop), designed, where_)
+            // Sub-pixel noise does not re-make the gradient either.
+            XCTAssertEqual(spec(designed.controlsTop + 0.4), designed, where_)
+            // Wrong upward, and not measured yet on the first layout pass: refused.
+            XCTAssertEqual(spec(designed.controlsTop - 40), designed, where_)
+            XCTAssertEqual(spec(0), designed, where_)
+            XCTAssertEqual(spec(nil), designed, where_)
+            // The layer has not landed yet, so there is nothing to measure against: refused.
+            XCTAssertEqual(spec(designed.controlsTop + 76, nil), designed, where_)
+            // Not a number, from either side: refused.
+            XCTAssertEqual(spec(.nan), designed, where_)
+            XCTAssertEqual(spec(designed.controlsTop + 76, .nan), designed, where_)
+            // Wrong downward: clamped, so the composer's band still ends inside the layer.
+            let absurd = spec(designed.controlsTop + 10_000)
+            XCTAssertGreaterThan(absurd.controlsTop, designed.controlsTop, where_)
+            XCTAssertLessThanOrEqual(absurd.controlsTop + absurd.controls, absurd.height, where_)
+            for k in absurd.knots { XCTAssertLessThan(k.alpha, 1, where_) }
+            for (a, b) in zip(absurd.knots, absurd.knots.dropFirst()) {
+                XCTAssertGreaterThan(b.y, a.y, where_)
+                XCTAssertGreaterThanOrEqual(b.alpha, a.alpha, where_)
+            }
+            // Even clamped to its ceiling it cannot wash the rows at rest, which is the one
+            // property that must hold whatever a device reports.
+            XCTAssertEqual(absurd.alpha(at: absurd.fade - Theme.transcriptTail), 0, where_)
+            XCTAssertEqual(absurd.alpha(at: absurd.height), BottomBarFade.bottomWash, accuracy: 0.001, where_)
         }
     }
 
