@@ -14,6 +14,7 @@ struct ArbosApp: App {
                 .environmentObject(model)
                 // The code-card grammars load off the main thread at launch.
                 .task { CodeHighlight.warm() }
+                .task { await FirstOpenWarmup.run(model: model) }
         }
     }
 }
