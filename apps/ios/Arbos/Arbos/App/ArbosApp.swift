@@ -174,11 +174,24 @@ struct RootView: View {
     private var expectedPeople: [CallPerson] { calls.call.map(model.expectedCallPeople) ?? [] }
 
     /// Shake / screenshot → capture the current screen and open the feedback sheet.
+    ///
+    /// The chat is read from the topmost chat anywhere in the path, not from `path.last`,
+    /// because a profile now pushes over the chat it was opened from: reading only the top
+    /// would have named the screen a chat and carried no chat id at all.
     private func openFeedbackFromGesture() {
         guard model.isPaired else { return }
-        feedback.open(screen: model.path.isEmpty ? "home" : "chat",
-                      chatId: model.path.last.map { if case .chat(let c, _) = $0 { return c } else { return "" } },
-                      projectId: model.path.last.map { if case .chat(_, let p) = $0 { return p } else { return "" } })
+        let screen: String
+        switch model.path.last {
+        case .none: screen = "home"
+        case .profile?: screen = "profile"
+        case .chat?, .server?: screen = "chat"
+        }
+        let chat = model.path.last(where: { (route: AppModel.Route) -> Bool in
+            if case .chat = route { return true } else { return false }
+        })
+        feedback.open(screen: screen,
+                      chatId: chat.map { if case .chat(let c, _) = $0 { return c } else { return "" } },
+                      projectId: chat.map { if case .chat(_, let p) = $0 { return p } else { return "" } })
     }
 
     /// Ask once, a beat after the home screen appears (never in the fixture or a live demo).
@@ -214,32 +227,32 @@ struct MainShellView: View {
 /// The profile sheet: a NavigationStack rooted on the page so a tapped member
 /// (or an agent's owner) is pushed and its back chevron (the page's own
 /// `ProfileTopBar`) pops to the page as it was.
+///
+/// Since 2026-11-01 a profile reached from a chat, the home list or a channel list is a
+/// push onto the root stack instead (Jacob's ruling). This sheet is left for the one case
+/// that cannot push: a profile opened from inside another sheet, which has no route onto
+/// the stack underneath it. Everything in it runs with `profileHost` as `.sheet`, so the
+/// member rows of a page shown here push into this stack rather than the root's.
 private struct ProfileSheet: View {
     @EnvironmentObject private var model: AppModel
     let target: ProfileTarget
 
     var body: some View {
-        if target.pushesPeople {
-            NavigationStack(path: $model.profilePath) {
-                page(target)
-                    .toolbar(.hidden, for: .navigationBar)
-                    .navigationDestination(for: ProfileTarget.self) { pushed in
-                        page(pushed).toolbar(.hidden, for: .navigationBar)
-                    }
-            }
-        } else {
-            page(target)
-        }
+        content.environment(\.profileHost, .sheet)
     }
 
     @ViewBuilder
-    private func page(_ target: ProfileTarget) -> some View {
-        switch target {
-        case .user(let p): UserProfileView(person: p)
-        case .group(let chatId, let projectId): GroupProfileView(chatId: chatId, projectId: projectId)
-        case .agent(let pid): AgentProfileView(projectId: pid, fallback: model.foreignAgent(pid))
-        case .server(let sid): ServerProfileView(serverId: sid)
-        case .channel(let cid): ChannelProfileView(channelId: cid)
+    private var content: some View {
+        if target.pushesPeople {
+            NavigationStack(path: $model.profilePath) {
+                ProfilePage(target: target)
+                    .toolbar(.hidden, for: .navigationBar)
+                    .navigationDestination(for: ProfileTarget.self) { pushed in
+                        ProfilePage(target: pushed).toolbar(.hidden, for: .navigationBar)
+                    }
+            }
+        } else {
+            ProfilePage(target: target)
         }
     }
 }
