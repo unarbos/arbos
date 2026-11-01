@@ -322,6 +322,9 @@ final class AppModel: ObservableObject {
     /// Bumped whenever a chat's list (`messages` or `channelRows`) is replaced; views
     /// watch this instead of comparing the whole message array on every body.
     @Published private(set) var messagesVersion: [Id: Int] = [:]
+    /// The `messagesVersion` made by an edit that replaced only the chat's last message
+    /// (a streaming token). Any other write moves the version past it.
+    private(set) var tailEditVersion: [Id: Int] = [:]
     /// One pass over a chat's list, kept until that list changes.
     private var activityCache: [Id: ChatActivity] = [:]
 
@@ -2699,9 +2702,15 @@ final class AppModel: ObservableObject {
             #endif
             emitSnapshot(chatId)
         } else {
+            let before = messagesVersion[chatId]
+            let oldCount = messages[chatId]?.count
             var next = messages
             next[chatId] = list
             messages = next
+            if let version = messagesVersion[chatId], version != before {
+                let tailOnly = indexes.count == 1 && indexes.first == list.count - 1 && oldCount == list.count
+                tailEditVersion[chatId] = tailOnly ? version : nil
+            }
             #if DEBUG
             if SendTrace.traces(chatId) {
                 SendTrace.markIfPresent("messages-has-row", ids: list.map(\.id), detail: "via=indexes rows=\(list.count)")
