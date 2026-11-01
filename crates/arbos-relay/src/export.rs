@@ -231,11 +231,25 @@ fn lines(state: &AppState, chat_id: &str, rows: &[Value], now: i64) -> Vec<Line>
                         })
                         .filter_map(|p| {
                             let a = &p["attachment"];
-                            let key = a["ref"].as_str()?;
+                            // A picked GIF (ARB-544) has no `ref`: the relay stores no copy,
+                            // so the export carries the provider's own URL, which needs no
+                            // signature and does not expire. Dropping it used to drop the
+                            // whole row when the GIF was the message
+                            // ([feedback gif-send-and-playback-2026-10-30]).
+                            let (url, expires) = match a["ref"].as_str() {
+                                Some(key) => (
+                                    signed_blob_url(state, chat_id, key, now),
+                                    json!(now + BLOB_URL_TTL_MS),
+                                ),
+                                None => (
+                                    a["url"].as_str().filter(|u| !u.is_empty())?.to_owned(),
+                                    Value::Null,
+                                ),
+                            };
                             Some(json!({
                                 "name": a["name"], "mime": a["mime"], "kind": a["kind"],
-                                "url": signed_blob_url(state, chat_id, key, now),
-                                "url_expires_at": now + BLOB_URL_TTL_MS,
+                                "url": url,
+                                "url_expires_at": expires,
                             }))
                         })
                         .collect()

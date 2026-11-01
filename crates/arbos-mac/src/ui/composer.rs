@@ -27,7 +27,7 @@ use gpui::{
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::app::{decode_thumbnail, AppState, ComposerMode};
-use crate::model::{AttachmentKind, CallKind, Message, Part, Role};
+use crate::model::{CallKind, Message, Part, Role};
 use crate::search;
 use crate::ui::callview;
 use crate::ui::error_note;
@@ -4531,13 +4531,13 @@ impl ReplyPreview {
                 Role::User => "you".into(),
                 Role::System | Role::Project => "message".into(),
             });
+        // `preview_key`, not `ref`: a picked GIF has no `ref`, so the bar fell back to its
+        // file name — the provider's numeric id
+        // ([feedback gif-send-and-playback-2026-10-30]).
         let thumb = message.parts.iter().find_map(|p| match p {
-            Part::Attachment { attachment, .. } if attachment.kind() == AttachmentKind::Image => {
-                attachment
-                    .blob_ref
-                    .as_deref()
-                    .and_then(|k| thumbnails.get(k).cloned())
-            }
+            Part::Attachment { attachment, .. } if attachment.is_image() => attachment
+                .preview_key()
+                .and_then(|k| thumbnails.get(&k).cloned()),
             _ => None,
         });
         Self {
@@ -4836,7 +4836,7 @@ mod reply_preview_tests {
     }
 
     #[test]
-    fn a_picture_without_prose_names_its_file() {
+    fn a_picture_without_prose_names_its_kind() {
         let m: Message = serde_json::from_value(serde_json::json!({
             "id": "m2",
             "role": "user",
@@ -4847,8 +4847,38 @@ mod reply_preview_tests {
         .expect("message");
         let preview = ReplyPreview::for_message(&m, &HashMap::new());
         assert_eq!(preview.who, "you");
-        assert_eq!(preview.line, "IMG_0412.jpg");
+        assert_eq!(preview.line, "Image");
         assert!(preview.thumb.is_none(), "no decoded thumbnail yet");
+    }
+
+    /// A picked GIF (ARB-544) has no `ref`, only a provider `url`. The bar used to show its
+    /// file name — the provider's numeric id — and never its picture
+    /// ([feedback gif-send-and-playback-2026-10-30]).
+    #[test]
+    fn a_picked_gif_reads_as_gif_and_finds_its_picture() {
+        let m: Message = serde_json::from_value(serde_json::json!({
+            "id": "m3",
+            "role": "user",
+            "status": "done",
+            "parts": [{ "kind": "attachment", "id": "a1", "attachment": {
+                "name": "6178590884800169.gif",
+                "mime": "image/gif",
+                "kind": "image",
+                "url": "https://static.klipy.com/ii/abc/f3/bd/G88BNBBL.gif",
+            } }],
+        }))
+        .expect("message");
+        assert_eq!(ReplyPreview::for_message(&m, &HashMap::new()).line, "GIF");
+
+        let image = Arc::new(gpui::RenderImage::new(Vec::new()));
+        let thumbs = HashMap::from([(
+            "url:https://static.klipy.com/ii/abc/f3/bd/G88BNBBL.gif".to_owned(),
+            image,
+        )]);
+        assert!(
+            ReplyPreview::for_message(&m, &thumbs).thumb.is_some(),
+            "the GIF's picture is cached under its `url:` key, not under a `ref`"
+        );
     }
 }
 

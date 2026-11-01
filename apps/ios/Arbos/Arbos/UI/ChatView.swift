@@ -3154,8 +3154,8 @@ struct ChatSession: View {
             Image(systemName: "arrowshape.turn.up.left").font(.system(size: 12)).foregroundStyle(theme.muted)
             Text("Replying to \(replyLabel(for: r))").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                 .lineLimit(1).fixedSize()
-            if let ref = quotedImageRef(r) {
-                ReplyThumb(projectId: projectId, blobRef: ref)
+            if let key = quotedImageKey(r) {
+                ReplyThumb(projectId: projectId, previewKey: key)
             }
             Text(Quote.line(of: r, maxChars: Theme.replyPreviewChars))
                 .font(theme.font(Theme.tiny)).foregroundStyle(theme.text)
@@ -3219,10 +3219,12 @@ struct ChatSession: View {
         .accessibilityLabel("Editing message")
     }
 
-    /// The blob of the first picture on the quoted message, for the preview's thumbnail.
-    private func quotedImageRef(_ m: Message) -> String? {
+    /// The first picture on the quoted message, for the preview's thumbnail. By
+    /// `previewKey`, not `ref`: a picked GIF has no `ref`, so the bar showed its file name —
+    /// the provider's numeric id ([feedback gif-send-and-playback-2026-10-30]).
+    private func quotedImageKey(_ m: Message) -> String? {
         for part in m.parts {
-            if case .attachment(_, let a) = part, a.isImage, let ref = a.blobRef { return ref }
+            if case .attachment(_, let a) = part, a.isImage, let key = a.previewKey { return key }
         }
         return nil
     }
