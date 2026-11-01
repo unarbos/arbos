@@ -547,12 +547,14 @@ row sideways. Reserving the bold width costs the Mac row about 5 pt and the
 iPhone row under 8 pt at the default Text Size.
 
 The iPhone has no drag handle, so it has no narrow-column problem to solve — but
-`PaneTabs` is a bare `HStack` with no scroll under it, and the four labels
-outgrow the narrowest phone this build runs on (the 360 pt 13 mini) somewhere
-around the 1.2× Text Size step, where SwiftUI squeezes them. That predates this
-change and is not fixed by it; the test only claims what the change is
-answerable for, which is that the wider row overflows no phone the narrower one
-already fitted.
+`PaneTabs` is a bare `HStack` with no scroll under it, so at a large enough Text
+Size the four labels outgrow the narrowest phone this build runs on (the 360 pt
+13 mini) and SwiftUI squeezes them. That predates this change and is not fixed
+by it. The exact step where it tips is **not** written down here: it depends on
+SF Pro's metrics, the Mac gate is the only machine that can measure them, and
+two attempts to assert a number from off-Mac were wrong. The iPhone test claims
+only what needs no measurement — that reserving the selected weight costs under
+5 % of the row's width at every Text Size.
 
 ### Narrow Mac column: the capsules tighten, they do not scroll away (Scout 2026-10-31)
 
@@ -575,7 +577,7 @@ selecting_a_filter_moves_no_capsule}` (the shipping `filter_row_box` /
 `filter_capsule_box` laid out for real, measured with `debug_bounds`); the
 iPhone row's two halves by
 `HomeListFilterTests::{testSelectingATabDoesNotMoveTheRow,
-testTheWiderRowOverflowsNoPhoneTheOldOneFitted}`.
+testReservingTheSelectedWidthBarelyWidensTheRow}`.
 
 Server rows draw their picture as a rounded square (corner 11/36 of the size,
 `SERVER_PICTURE_CORNER`) so servers read apart from the agent and people discs.
