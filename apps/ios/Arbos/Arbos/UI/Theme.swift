@@ -1122,9 +1122,14 @@ extension HomeChrome {
 /// and the first bottom curve of [feedback iphone-home-bar-fades-2026-10-28]). Grok Bot: rows
 /// scroll under the glass pills and stay readable through and between them; a soft fade dims the
 /// content toward the bottom edge. One layer at the canvas's bottom — over the content, under the
-/// controls — the page colour masked by a ramp: clear `fade` pt above the bar's top edge,
-/// `edgeWash` at that edge, `controlsWash` at the controls' bottom edge, `bottomWash` at the
-/// screen's (or the keyboard's) edge. Never 1: no band, no hard edge. The same ramp on Matte and
+/// controls — the page colour masked by a ramp: clear from the layer's top down to `ramp` pt above
+/// the controls' top edge, `edgeWash` at that edge, `controlsWash` at the controls' bottom edge,
+/// `bottomWash` at the screen's (or the keyboard's) edge. Never 1: no band, no hard edge. The
+/// ramp follows the controls, not the bar's top edge, so a bar that carries more than its
+/// controls (the chat's status row, a send error's note) does not drag the fade up over the
+/// rows at rest ([feedback iphone-bottom-fade-newest-bubble-2026-11-01]). In the chat the ramp is
+/// placed from the composer's *measured* frame rather than from the reported bottom inset, which
+/// on at least one real iPhone is wrong by 76 pt — see `BottomBarFade.canvas`. The same ramp on Matte and
 /// Glass, light and dark (the surface shows in the pills: `ControlSurface` is glass on Glass).
 /// The reader keeps the safe area, so its bottom inset is the bar (+ home indicator / keyboard);
 /// the layer inside ignores that edge and reaches the screen's edge, moving with the keyboard.
@@ -1133,6 +1138,24 @@ enum BottomBarFade {
     /// Clear this far above the bar's top edge; the lists' trailing clearance, so the last row at
     /// rest sits above the fade (`Theme.transcriptTail`, `HomeChrome.listBottom`).
     static let fade: CGFloat = Theme.composerFade
+    /// The chat's ramp, over the composer's top edge. The chat bar is not only the composer —
+    /// the status row rides over it, and a send error's note over that — so a ramp that started
+    /// at the bar's top edge washed the status row, and with a bar that tall it reached the
+    /// newest bubble at rest as well (Jacob, 2026-11-01: "the first chat bubble above the chat
+    /// box is faded … should cut off the fade almost immediately after the box"). The ramp
+    /// follows the composer instead, and is shorter than the status row's own bottom gap
+    /// (`Theme.presenceBottomGap`, 22⅔ pt), so nothing resting over the composer is washed.
+    static let composerRamp: CGFloat = 20
+    /// The chat canvas's coordinate space, which the layer and the chat bar both measure in.
+    ///
+    /// They are two overlays on one container, so neither can see the other's geometry, and the
+    /// layer placed its ramp by arithmetic over `geo.safeAreaInsets.bottom` instead. On Jacob's
+    /// iPhone Air that inset is wrong by 76 pt and the ramp landed that far above the composer
+    /// — washing the newest bubble at rest, which is the whole complaint — while every
+    /// simulator we can run reports it correctly and shows nothing wrong
+    /// (`internal/bottom-fade-sits-76pt-high-on-the-device-only.md`). Arithmetic cannot tell the
+    /// two apart; a measurement taken in a space both overlays share can.
+    static let canvas = "chat-canvas"
     /// The wash at the bar's top edge, at the controls' bottom edge, and at the screen's edge.
     /// Lighter under the pills since [feedback iphone-composer-glass-2026-10-28] (0.3 / 0.5 /
     /// 0.8 before): the pills are clear glass now and the text must read through them, so the
@@ -1144,19 +1167,40 @@ enum BottomBarFade {
     static let readableMax: Double = 0.6
 
     struct Spec: Equatable {
+        /// The layer's clear lead over the bar's top edge, which sets its height.
         let fade: CGFloat
-        /// The bar's top edge → the controls' bottom edge (chat: the 8 pt pad + the composer;
-        /// Home: the capsule).
+        /// The ramp's own height, ending at the controls' top edge.
+        let ramp: CGFloat
+        /// The bar's top edge → the controls' top edge: 0 on Home, where the capsule is the
+        /// bar's first view; on the chat, its top pad plus whatever rides over the composer.
+        let aboveControls: CGFloat
+        /// The controls' height (the composer; Home's capsule).
         let controls: CGFloat
         /// The canvas's bottom inset: the bar + the home indicator, or the bar + the keyboard.
         let inset: CGFloat
         /// The layer's height; its bottom is the screen's (or the keyboard's) edge.
         var height: CGFloat { fade + inset }
+        /// The controls' top edge, from the layer's top. The ramp ends here, so the ramp sits
+        /// where the bar's own controls are however tall the bar has grown.
+        var controlsTop: CGFloat { fade + aboveControls }
         var knots: [ListTopFade.Spec.Knot] {
-            [.init(y: 0, alpha: 0),
-             .init(y: fade, alpha: BottomBarFade.edgeWash),
-             .init(y: min(fade + controls, height), alpha: BottomBarFade.controlsWash),
-             .init(y: height, alpha: BottomBarFade.bottomWash)]
+            let raw: [ListTopFade.Spec.Knot] = [
+                .init(y: 0, alpha: 0),
+                .init(y: max(0, controlsTop - ramp), alpha: 0),
+                .init(y: min(controlsTop, height), alpha: BottomBarFade.edgeWash),
+                .init(y: min(controlsTop + controls, height), alpha: BottomBarFade.controlsWash),
+                .init(y: height, alpha: BottomBarFade.bottomWash),
+            ]
+            var out: [ListTopFade.Spec.Knot] = []
+            for k in raw {
+                // A knot landing on the one before it is a zero-width step, which is not a
+                // gradient stop SwiftUI can read: the ramp starting at the layer's own top
+                // edge, or ending at its bottom edge because `chat` clamped it there. Keep the
+                // lower one, so the screen's edge stays the darkest point.
+                if let last = out.last, k.y <= last.y { out.removeLast() }
+                out.append(k)
+            }
+            return out
         }
         var stops: [Gradient.Stop] {
             guard height > 0 else { return [] }
@@ -1172,29 +1216,78 @@ enum BottomBarFade {
         }
     }
 
-    /// The chat: the bar's top pad and the composer are the controls (the status row, when it
-    /// shows, rides above them in the same ramp).
-    static func chat(bottomInset: CGFloat) -> Spec {
-        Spec(fade: fade, controls: Theme.chatBarTopPad + Theme.composerHeight, inset: bottomInset)
+    /// The chat: the composer is the control the rows scroll under, and `aboveComposer` is
+    /// everything the bar carries over it.
+    ///
+    /// `composerTop` and `layerTop` are the composer's and the layer's own top edges in
+    /// `canvas`, so their difference is where the composer's top edge really falls inside the
+    /// layer however wrong the inset is. `aboveComposer` stays the designed answer *and* the
+    /// floor: the correction only pushes the ramp down, never up, and never so far down that
+    /// the composer's own band would fall past the layer's bottom edge. So a device whose inset
+    /// is right — every simulator — gets exactly the geometry it had without this, and only a
+    /// device whose inset is wrong moves. Both guards matter on hardware we cannot test: a
+    /// measurement wrong upward would wash the rows at rest, which is the bug, and one wrong
+    /// downward would drop the ramp under the composer and clip the rows scrolling beneath it,
+    /// which is worse than the bug.
+    static func chat(bottomInset: CGFloat, aboveComposer: CGFloat,
+                     composerTop: CGFloat?, layerTop: CGFloat?) -> Spec {
+        func spec(_ above: CGFloat) -> Spec {
+            Spec(fade: fade, ramp: composerRamp, aboveControls: above,
+                 controls: Theme.composerHeight, inset: bottomInset)
+        }
+        let designed = spec(aboveComposer)
+        guard let composerTop, let layerTop, composerTop.isFinite, layerTop.isFinite
+        else { return designed }
+        let drift = composerTop - layerTop - designed.controlsTop
+        // The room left under the designed ramp for the composer's own band. A drift asking for
+        // more than this is not describing an inset, so it is refused rather than obeyed.
+        let room = max(0, designed.height - Theme.composerHeight - designed.controlsTop)
+        let corrected = min(max(0, drift), room)
+        // Half a point: sub-pixel noise must not re-make the gradient on every layout pass.
+        return corrected > 0.5 ? spec(aboveComposer + corrected) : designed
     }
 
-    /// Home: the search capsule sits at the bar's top edge.
+    /// What rides over the composer inside the chat bar — the bar's top pad, the status row
+    /// when it shows, a send error's note — read back out of the bar's measured height, so the
+    /// ramp follows the bar whatever it carries. Taken from the same height the layer's inset
+    /// is, so the ramp lands on the composer's top edge even if that height is off.
+    static func aboveComposer(bar: CGFloat, keyboard: Bool) -> CGFloat {
+        let under = Theme.composerHeight + (keyboard ? Theme.composerBottomKeyboard : Theme.composerBottom)
+        return max(Theme.chatBarTopPad, bar - under)
+    }
+
+    /// Home: the search capsule sits at the bar's top edge, so the ramp is the clear lead.
     static func home(bottomInset: CGFloat) -> Spec {
-        Spec(fade: fade, controls: Controls.height, inset: bottomInset)
+        Spec(fade: fade, ramp: fade, aboveControls: 0, controls: Controls.height, inset: bottomInset)
     }
 }
 
 struct BottomBarFadeView: View {
     @Environment(\.theme) private var theme
-    /// `BottomBarFade.chat` or `.home`, given the canvas's bottom inset.
-    let spec: (CGFloat) -> BottomBarFade.Spec
+    /// The drawn layer's own top edge in `BottomBarFade.canvas`, `nil` before its first layout.
+    ///
+    /// Measured on the layer and not on the reader around it: the reader keeps the safe area and
+    /// the layer inside it does not, so the reader's frame says nothing about where the layer
+    /// actually starts without going back through the inset this is here to stop trusting.
+    ///
+    /// Feeding a measurement back into the view that produced it is only safe because the
+    /// layer's own geometry does not depend on it: `Spec.height` comes from the inset alone, and
+    /// the measurement moves the *mask*, which does not lay anything out. So this settles after
+    /// one extra pass instead of oscillating.
+    @State private var layerTop: CGFloat? = nil
+    /// `BottomBarFade.chat` or `.home`, from the reader's insets and that measured top edge.
+    /// Home ignores the top edge — it never declares the chat's space — and so pays only that
+    /// one extra pass when the layer first lands.
+    let spec: (GeometryProxy, CGFloat?) -> BottomBarFade.Spec
 
     var body: some View {
         GeometryReader { geo in
-            let s = spec(geo.safeAreaInsets.bottom)
+            let s = spec(geo, layerTop)
             theme.bg
                 .frame(height: s.height)
                 .mask(LinearGradient(stops: s.stops, startPoint: .top, endPoint: .bottom))
+                .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(BottomBarFade.canvas)).minY }
+                    action: { layerTop = $0 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                 .ignoresSafeArea(edges: .bottom)
         }

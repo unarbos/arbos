@@ -150,6 +150,9 @@ struct ChatSession: View {
     /// The chat bar's height, observed only by the transcript's tail and the layers over the
     /// bar's top edge, so the bar growing or shrinking does not re-render this screen.
     @State private var chatBarHeight = ChatBarHeight()
+    /// The composer's measured top edge, observed only by the fade layer, which places its ramp
+    /// there instead of trusting the bottom inset it is given.
+    @State private var composerEdge = ComposerEdge()
     /// `AppModel.addressesEveryone(text)` for the current draft, updated only when it flips.
     @State private var draftAddressesEveryone = false
     @State private var rows: [Row] = []
@@ -1142,16 +1145,14 @@ struct ChatSession: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         // The fade the chat bar floats on ([feedback iphone-composer-see-through-2026-10-28]):
-        // rows scrolling under the bar dim from `Theme.composerFade` above it toward the
-        // bottom edge and stay readable through and between the glass pills — no band. The
-        // bar's measured height is added to the layer's bottom inset, so it starts at the
-        // bar's top edge, moves with the keyboard, is over the transcript and under the pill
-        // and the chevron below — not in the bar's layer.
-        .overlay(alignment: .bottom) {
-            ChatBarHeightReader(bar: chatBarHeight) { bar in
-                BottomBarFadeView(spec: BottomBarFade.chat).safeAreaPadding(.bottom, bar)
-            }
-        }
+        // rows scrolling under the bar dim toward the bottom edge and stay readable through and
+        // between the glass pills — no band. The bar's measured height is added to the layer's
+        // bottom inset, so it starts at the bar's top edge, moves with the keyboard, is over the
+        // transcript and under the pill and the chevron below — not in the bar's layer. The ramp
+        // itself ends `BottomBarFade.composerRamp` lower, at the composer's top edge, so the
+        // status row and the newest bubble at rest are outside it (Jacob, 2026-11-01) — placed
+        // from the composer's measured frame, since that inset is wrong on some hardware.
+        .overlay(alignment: .bottom) { ChatBarFade(bar: chatBarHeight, composer: composerEdge, keyboard: composerFocused) }
         .overlay(alignment: .bottom) {
             if newBelowCount > 0 {
                 ChatBarHeightReader(bar: chatBarHeight) { bar in
@@ -1222,6 +1223,11 @@ struct ChatSession: View {
                 // Grok: 31 pt side inset with the keyboard down, 19 pt with it up.
                 .padding(.horizontal, composerSideInset)
                 .animation(.easeOut(duration: 0.25), value: composerFocused)
+                // Where the fade's ramp has to end. Measured on this group rather than on the
+                // composer itself, so the read-only, silenced and blocked lines that take the
+                // composer's place are the anchor when they show.
+                .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(BottomBarFade.canvas)).minY }
+                    action: { composerEdge.update($0) }
             }
             .padding(.top, Theme.chatBarTopPad)
             // Grok: 18 pt between the field and the keyboard, 2 pt above the home indicator.
@@ -1232,6 +1238,9 @@ struct ChatSession: View {
             .backSwipeComposerBar()
             .modifier(ChatBarHeightProbe())
         }
+        // Declared after both overlays, so the fade layer and the chat bar are inside it and can
+        // be measured against each other (`BottomBarFade.canvas`).
+        .coordinateSpace(.named(BottomBarFade.canvas))
         .overlayPreferenceValue(RowFrameKey.self) { anchors in
             GeometryReader { geo in
                 if let row = actionsRow, let anchor = anchors[row.id] {
@@ -2274,7 +2283,8 @@ struct ChatSession: View {
                     // (`PresenceRow`), not a transcript row.
                     // Clears the chat bar and the `Theme.composerFade` above it, so the
                     // last row at rest is never under the fade; the status row rises into
-                    // it (`Theme.presenceLift`).
+                    // that clearance (`Theme.presenceLift`) and is clear of the ramp too,
+                    // which now ends at the composer's top edge.
                     TranscriptTail(bar: chatBarHeight).id("bottom")
                 }
                 .padding(.horizontal, 16)
@@ -4265,6 +4275,38 @@ final class ChatBarHeight: ObservableObject {
 
     func update(_ height: CGFloat) {
         if abs(height - value) > 0.5 { value = height }
+    }
+}
+
+/// The composer's own top edge in `BottomBarFade.canvas` — not the bar's, which
+/// `ComposerTopKey` already reports for the back swipe in a different space.
+///
+/// Its own object rather than a second property on `ChatBarHeight`, so the transcript's tail
+/// spacer, which observes that one, is not re-rendered when only the fade's anchor moves.
+@MainActor
+final class ComposerEdge: ObservableObject {
+    /// `nil` until the first layout, which is the fade's cue to use its designed geometry.
+    @Published private(set) var top: CGFloat?
+
+    func update(_ y: CGFloat) {
+        guard y.isFinite else { return }
+        if top.map({ abs(y - $0) > 0.5 }) ?? true { top = y }
+    }
+}
+
+/// The fade the chat bar floats on, with its ramp placed on the composer that was measured.
+private struct ChatBarFade: View {
+    @ObservedObject var bar: ChatBarHeight
+    @ObservedObject var composer: ComposerEdge
+    let keyboard: Bool
+
+    var body: some View {
+        let above = BottomBarFade.aboveComposer(bar: bar.value, keyboard: keyboard)
+        BottomBarFadeView { geo, layerTop in
+            BottomBarFade.chat(bottomInset: geo.safeAreaInsets.bottom, aboveComposer: above,
+                               composerTop: composer.top, layerTop: layerTop)
+        }
+        .safeAreaPadding(.bottom, bar.value)
     }
 }
 
