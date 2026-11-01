@@ -30,8 +30,8 @@ use tokio::sync::mpsc;
 use crate::sync::user_error::UserError;
 
 use crate::model::{
-    AccountView, Call, CallEnded, CallKind, CallMissed, Person, Reachable, Sender, ServerInfo,
-    Voice,
+    AccountView, Call, CallEnded, CallKind, CallMissed, GroupAdd, Person, Reachable, Sender,
+    ServerInfo, Voice,
 };
 use crate::model::{
     Attachment, BoxReport, BoxState, ChannelsView, ChartBody, Chat, ConnectorsView, DeviceView,
@@ -216,6 +216,8 @@ pub enum SyncEvent {
     },
     /// Who is signed in (`/auth/token` or `/me`); `None` after sign-out.
     Account(Option<AccountView>),
+    /// `GET /me` → `privacy.group_add`: who may add me to a people group.
+    GroupAdd(GroupAdd),
     /// Remote feature flags from `GET /me` → `features` (one object, one place on the relay).
     Features {
         /// `features.voice_mode`: spoken replies, voice picker, reply playback. Absent on an
@@ -1112,6 +1114,8 @@ pub enum ClientCommand {
         name: String,
         handle: String,
     },
+    /// Settings → Privacy: `PATCH /me {group_add}`.
+    SetGroupAdd(GroupAdd),
     /// Agent page: `PATCH /projects/{id} {description}` (API §9; `""` clears).
     SetDescription {
         project_id: Id,

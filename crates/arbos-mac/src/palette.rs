@@ -223,13 +223,14 @@ pub struct AgentRow {
 }
 
 /// Which of the Mac's pages a shared index item is; `None` for the items the
-/// Mac does not list (the iPhone's Privacy, Text Size, Credits, Connected apps).
+/// Mac does not list (the iPhone's Text Size, Credits, Connected apps).
 pub fn setting_target(item: SettingsItem) -> Option<SettingTarget> {
     Some(match item {
         SettingsItem::Appearance | SettingsItem::AppearanceOpacity => {
             SettingTarget::Page(SettingsPage::Appearance)
         }
         SettingsItem::Notifications => SettingTarget::Page(SettingsPage::Notifications),
+        SettingsItem::Privacy => SettingTarget::Page(SettingsPage::Privacy),
         SettingsItem::Secrets => SettingTarget::Page(SettingsPage::Secrets),
         SettingsItem::SecretsNew => SettingTarget::SecretsNew,
         SettingsItem::SecretsConnectOnePassword => SettingTarget::SecretsConnect,
@@ -240,10 +241,9 @@ pub fn setting_target(item: SettingsItem) -> Option<SettingTarget> {
         SettingsItem::SendFeedback => SettingTarget::Feedback,
         SettingsItem::About => SettingTarget::Page(SettingsPage::About),
         SettingsItem::Profile => SettingTarget::Profile,
-        SettingsItem::Privacy
-        | SettingsItem::TextSize
-        | SettingsItem::Credits
-        | SettingsItem::ConnectedApps => return None,
+        SettingsItem::TextSize | SettingsItem::Credits | SettingsItem::ConnectedApps => {
+            return None
+        }
         // Per-agent rows are built by `settings_entries` with the agent id.
         SettingsItem::AgentModel | SettingsItem::AgentReasoning | SettingsItem::AgentVoice => {
             return None
@@ -256,6 +256,7 @@ pub fn target_glyph(target: &SettingTarget) -> &'static str {
     match target {
         SettingTarget::Page(SettingsPage::Appearance) => "circle.lefthalf.filled",
         SettingTarget::Page(SettingsPage::Notifications) => "bell",
+        SettingTarget::Page(SettingsPage::Privacy) => "hand.raised",
         SettingTarget::Page(SettingsPage::Secrets)
         | SettingTarget::SecretsNew
         | SettingTarget::SecretsConnect => "key",
@@ -1090,7 +1091,6 @@ mod tests {
             );
         }
         for item in [
-            SettingsItem::Privacy,
             SettingsItem::TextSize,
             SettingsItem::Credits,
             SettingsItem::ConnectedApps,
