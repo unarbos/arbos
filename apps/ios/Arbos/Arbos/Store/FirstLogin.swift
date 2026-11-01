@@ -27,6 +27,11 @@ struct FirstLogin: Equatable {
     static let timeoutSeconds: Double = 180
     static let slowAfterSeconds: Double = 45
     static let agentName = "Home"
+    /// `POST /projects` attempts before the screen gives up and offers Retry.
+    static let createMaxAttempts = 5
+    /// Seconds to wait before attempt 2, 3, 4, 5. Without this the stage
+    /// machine re-enters the create as fast as the relay can answer.
+    static let createRetryDelays: [Double] = [1, 2, 4, 8]
 
     var stage: Stage = .computer
     var startedAt: Date
@@ -43,6 +48,12 @@ struct FirstLogin: Equatable {
     var registrySeen = false
     /// `POST /projects` in flight.
     var creating = false
+    /// Creates started so far that did not leave an agent in the registry.
+    var createAttempts = 0
+    /// Earliest moment the next create may start; nil = now.
+    var nextCreateAt: Date?
+    /// The relay's words about the last refused create, for the S14 block.
+    var createError: String?
     var greetingWritten = false
     /// First moment the machine reported awake (fallback when the box never
     /// reports its workspace state).
@@ -68,6 +79,38 @@ struct FirstLogin: Equatable {
     func finishProgress(at now: Date) -> Double? {
         guard let t0 = finishStartedAt else { return nil }
         return min(1, max(0, now.timeIntervalSince(t0) / FirstLogin.finishSeconds))
+    }
+
+    /// An answer the relay will repeat however many times we ask: it refused
+    /// this request (4xx), rather than being busy (408 / 429), broken for the
+    /// moment (5xx) or unreachable (status 0). 409 stays retryable — it means
+    /// another device of this account created the agent, so the next registry
+    /// read is expected to find it.
+    static func createIsRefused(_ error: Error) -> Bool {
+        guard let status = (error as? RelayError)?.status, (400..<500).contains(status) else { return false }
+        return status != 408 && status != 409 && status != 429
+    }
+
+    /// Book one finished create. Every attempt is counted and spaced, because
+    /// reaching this point at all means the last create left no agent in the
+    /// registry — whether it threw or answered 2xx with nothing usable.
+    mutating func noteCreateAttempt(failure: Error?, at now: Date) {
+        if let relay = failure as? RelayError, !relay.message.isEmpty {
+            createError = relay.message
+        }
+        if let failure, FirstLogin.createIsRefused(failure) {
+            createAttempts = FirstLogin.createMaxAttempts
+            nextCreateAt = nil
+            return
+        }
+        let i = min(max(createAttempts, 1), FirstLogin.createRetryDelays.count) - 1
+        nextCreateAt = now.addingTimeInterval(FirstLogin.createRetryDelays[i])
+    }
+
+    mutating func resetCreateRetries() {
+        createAttempts = 0
+        nextCreateAt = nil
+        createError = nil
     }
 }
 
@@ -175,6 +218,7 @@ extension AppModel {
         fl.error = nil
         fl.detail = nil
         fl.awakeSince = nil
+        fl.resetCreateRetries()
         firstLogin = fl
         Task {
             await startMachineQuietly()
@@ -240,18 +284,30 @@ extension AppModel {
         }
 
         // First project: adopt the account's existing one, else create "Home".
+        // The create must stay bounded and spaced: finishing one runs the
+        // registry refresh that leads straight back into this block, so an
+        // unbounded retry here is a request flood, not a slow loop.
         if fl.projectId == nil, fl.registrySeen, !fl.creating {
             if let own = projects.first(where: { !$0.shared }) {
                 fl.projectId = own.id
                 fl.agentName = own.name
-            } else {
+            } else if fl.createAttempts >= FirstLogin.createMaxAttempts {
+                fl.stage = .failed
+                fl.error = fl.createError ?? "The relay could not create your first agent."
+                fl.stageSince = now
+                firstLogin = fl
+                return
+            } else if now >= (fl.nextCreateAt ?? now) {
                 fl.creating = true
+                fl.createAttempts += 1
                 firstLogin = fl
                 Task { [weak self] in
                     guard let self else { return }
+                    var failure: Error?
                     do {
                         try await self.createFirstProject(name: FirstLogin.agentName)
                     } catch {
+                        failure = error
                         // 409: another device of this account made it first.
                         if (error as? RelayError)?.status != 409 {
                             NSLog("first login: create project failed: \(error.localizedDescription)")
@@ -260,12 +316,15 @@ extension AppModel {
                     await self.refreshRegistry()
                     if var fl = self.firstLogin {
                         fl.creating = false
+                        fl.noteCreateAttempt(failure: failure, at: Date())
                         self.firstLogin = fl
                     }
                     self.firstLoginTick()
                 }
                 return
             }
+            // Otherwise: waiting out the delay. Fall through so the terminal
+            // keeps reporting the machine while nothing is in flight.
         }
 
         let home: Project? = fl.projectId.flatMap { id in self.project(id) }
