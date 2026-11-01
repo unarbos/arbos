@@ -926,7 +926,9 @@ final class AppModel: ObservableObject {
     private(set) var contentOrigin = "relay"
     /// Keys the store loader has handed to `ensureRoom` (or decided to skip).
     private var storeDocsLoaded = false
-    @Published private(set) var storeUsage = DeviceStore.Usage()
+    /// Not published: only Settings reads it, when its body runs. A publish here went out
+    /// after every 1.5 s store flush and re-ran every subscribed view in the app.
+    private(set) var storeUsage = DeviceStore.Usage()
     /// Set when the first home list came from disk and the relay is not live yet.
     var showingSavedCopy: Bool { contentOrigin == "store" && link != .live }
     private static let flushDelayNs: UInt64 = 1_500_000_000
@@ -4432,7 +4434,9 @@ final class AppModel: ObservableObject {
     /// Unsent composer text kept per chat while the ChatView is off-screen (Mac `Composer.drafts`).
     private var composerDrafts: [Id: String] = [:]
     /// Last presence time per user id, from room presence frames this session.
-    @Published private(set) var lastSeen: [String: Int64] = [:]
+    /// Not published: no view draws it, and `CallManager.calleePresence` reads it on demand.
+    /// Every presence frame from every room used to re-run Home and the open chat.
+    private(set) var lastSeen: [String: Int64] = [:]
     /// Who is typing per chat (handle → until ms), from room presence frames
     /// with `typing`; the presence row over the composer reads it
     /// ([feedback typing-indicator-left-2026-10-23], Mac `AppState.typing`).

@@ -112,7 +112,6 @@ private struct ChatSessionHost: View {
             .onReceive(model.$mutedChannelIds) { _ in tick &+= 1 }
             .onReceive(model.$models) { _ in tick &+= 1 }
             .onReceive(model.$notice) { _ in tick &+= 1 }
-            .onReceive(model.$lastSeen) { _ in tick &+= 1 }
             .onReceive(model.$jobs) { _ in tick &+= 1 }
     }
 }
