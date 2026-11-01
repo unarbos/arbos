@@ -83,16 +83,28 @@ private struct ChatSessionHost: View {
     let chatId: Id
     let projectId: Id
     @State private var tick = 0
+    @State private var shownVersion: Int?
+    @State private var shownCaughtUp = false
 
     var body: some View {
         #if DEBUG
         let _ = SendTrace.recent ? SendTrace.mark("host-body", detail: "tick=\(tick)", once: false) : ()
         #endif
         ChatSession(model: model, chatId: chatId, projectId: projectId, tick: tick)
-            .onReceive(model.$messages) { _ in tick &+= 1 }
-            .onReceive(model.$messagesVersion) { _ in tick &+= 1 }
-            .onReceive(model.$channelRows) { _ in tick &+= 1 }
-            .onReceive(model.$caughtUp) { _ in tick &+= 1 }
+            // This chat's list only: `messagesVersion[chatId]` moves on every replacement of
+            // `messages[chatId]` or `channelRows[chatId]` (`AppModel.bumpVersions`), so a send
+            // still re-runs the session at once (#1720) and another chat's stream does not.
+            // Filtered here, not with a capturing `map`: a new publisher per body would resubscribe.
+            .onReceive(model.$messagesVersion) { versions in
+                guard versions[chatId] != shownVersion else { return }
+                shownVersion = versions[chatId]
+                tick &+= 1
+            }
+            .onReceive(model.$caughtUp) { ready in
+                guard ready.contains(chatId) != shownCaughtUp else { return }
+                shownCaughtUp = ready.contains(chatId)
+                tick &+= 1
+            }
             .onReceive(model.$typing) { _ in tick &+= 1 }
             .onReceive(model.$peopleChats) { _ in tick &+= 1 }
             .onReceive(model.$machine) { _ in tick &+= 1 }
@@ -112,7 +124,6 @@ private struct ChatSessionHost: View {
             .onReceive(model.$mutedChannelIds) { _ in tick &+= 1 }
             .onReceive(model.$models) { _ in tick &+= 1 }
             .onReceive(model.$notice) { _ in tick &+= 1 }
-            .onReceive(model.$lastSeen) { _ in tick &+= 1 }
             .onReceive(model.$jobs) { _ in tick &+= 1 }
     }
 }
@@ -150,6 +161,8 @@ struct ChatSession: View {
     /// Message ids that `rows` / `messageById` currently mirror — used to skip a full
     /// `Transcript.rows` rebuild on streaming deltas and single appends.
     @State private var refreshIds: [Id] = []
+    /// `messagesVersion` that `rows`, `messageById` and `refreshIds` were built from.
+    @State private var refreshVersion: (chat: Id, version: Int?)?
     /// id → message for the rows on screen (menus, search, replies); rebuilt with `rows`.
     @State private var messageById: [Id: Message] = [:]
     /// How many of the newest rows are in the view tree. The transcript is a plain
@@ -895,6 +908,12 @@ struct ChatSession: View {
             memberNames[who.id] = name.isEmpty ? "@\(who.login)" : name
         }
         let list = messages
+        let version = model.messagesVersion[chatId]
+        let shown = refreshVersion?.chat == chatId ? refreshVersion?.version : nil
+        defer { refreshVersion = (chatId, version) }
+        let rowsMark = PerfSignpost.rowsBegin()
+        var rowsPath = PerfSignpost.RowsPath.full
+        defer { PerfSignpost.rowsEnd(rowsMark, path: rowsPath, messages: list.count, rows: rows.count, window: windowCount) }
         #if DEBUG
         let refreshStarted = Date()
         defer {
@@ -914,12 +933,19 @@ struct ChatSession: View {
 
         // Incremental: same ids and only the last message's content changed (streaming
         // token) — rebuild only the tail. A middle edit (reaction, etc.) falls through.
+        // A token that lands one version after these rows skips the history compare.
+        let tailEdit = version != nil && version == model.tailEditVersion[chatId]
+            && shown.map { $0 &+ 1 } == version && list.count == refreshIds.count
         if list.count == refreshIds.count, list.count > 0,
-           zip(list, refreshIds).allSatisfy({ $0.id == $1 }) {
+           tailEdit || zip(list, refreshIds).allSatisfy({ $0.id == $1 }) {
             let last = list[list.count - 1]
-            let prefixSame = list.dropLast().allSatisfy { messageById[$0.id] == $0 }
+            let prefixSame = tailEdit || list.dropLast().allSatisfy { messageById[$0.id] == $0 }
             if prefixSame {
-                if messageById[last.id] == last { return }
+                if messageById[last.id] == last {
+                    rowsPath = .unchanged
+                    return
+                }
+                rowsPath = .tail
                 var byId = messageById
                 byId[last.id] = last
                 let cut = rows.firstIndex(where: { $0.messageId == last.id }).map { ix -> Int in
@@ -950,6 +976,7 @@ struct ChatSession: View {
         // Incremental append: one new message at the end.
         if list.count == refreshIds.count + 1, list.count > 0,
            zip(list.dropLast(), refreshIds).allSatisfy({ $0.id == $1 }) {
+            rowsPath = .append
             let last = list[list.count - 1]
             var byId = messageById
             byId[last.id] = last
@@ -1002,6 +1029,7 @@ struct ChatSession: View {
     }
 
     var body: some View {
+        let _ = FrameProbe.count(.chatBody)
         #if DEBUG
         let _ = PerfCounters.bump("chatBody")
         let _ = DebugHooks.perfChanges ? Self._printChanges() : ()
@@ -1251,6 +1279,7 @@ struct ChatSession: View {
                                 .padding(.horizontal, 16)
                         }
                     )
+                    .onAppear { PerfSignpost.endAfterCommit(.messageMenu) }
                 }
             }
             .ignoresSafeArea()
@@ -1569,6 +1598,10 @@ struct ChatSession: View {
     private func handleSessionDisappear() {
         // Keep the typed draft so coming back to this thread restores it.
         model.setComposerDraft(composerDraft.text, for: chatId)
+        // The two callbacks capture this view, whose `@State` owns the draft: left set, the
+        // draft and the closed chat's rows and messages never free. Appear sets them again.
+        composerDraft.onChange = nil
+        composerDraft.onCaretOrMentions = nil
         // Catch notifies that landed after the last onChange mark-read while we were still in the chat
         // (including rows that arrived while the app was inactive on a call — isWatching was false).
         if isPeople { model.markPeopleRead(chatId) }
@@ -2751,6 +2784,7 @@ struct ChatSession: View {
         actionsRestoresKeyboard = composerFocused
         composerFocused = false
         searchFocused = false
+        PerfSignpost.begin(.messageMenu)
         withAnimation(.easeOut(duration: 0.18)) { actionsRow = row }
     }
 
@@ -3770,6 +3804,7 @@ struct ChatSession: View {
         #if DEBUG
         SendTrace.begin(chatId: chatId, rows: rows.count, caughtUp: model.caughtUp.contains(chatId))
         #endif
+        PerfSignpost.sendBegan(chatId: chatId, newestRowId: rows.last?.id)
         Haptics.send()
         // A send means follow the reply: re-pin even if the reader had scrolled up.
         jumpBackTo = nil
@@ -4108,6 +4143,7 @@ extension ChatSession {
                         SendTrace.markIfPresent("row-in-tree", ids: [row.messageId], detail: "row=\(row.id)")
                     }
                     #endif
+                    if row.id == lastId { PerfSignpost.newestRowAppeared(chatId: chatId, rowId: row.id) }
                     // Once per open — not on every row, and not again when the newest row is
                     // realised a second time after a trip into history.
                     if row.id == lastId, !firstRowMarked {
@@ -4342,6 +4378,13 @@ final class ComposerDraft: ObservableObject {
     }
     var onChange: ((String) -> Void)?
     var onCaretOrMentions: (() -> Void)?
+
+    #if DEBUG
+    /// Drafts alive right now, so a test can see a closed chat's draft free.
+    nonisolated(unsafe) static var live = 0
+    init() { Self.live += 1 }
+    deinit { Self.live -= 1 }
+    #endif
 }
 
 /// Which of the composer's trailing controls the field's state calls for. The

@@ -47,7 +47,7 @@ final class LinkIconTests: XCTestCase {
             XCTAssertEqual(LinkIcons.shared.image(for: "nypost.com").size, LinkIcons.placeholder.size)
         }
         // One ask per host, however many links point at it.
-        try await Task.sleep(for: .milliseconds(50))
+        try await Task.sleep(for: .milliseconds(100))
         XCTAssertEqual(fetched, ["nypost.com"])
         let icon = LinkIcons.shared.image(for: "nypost.com")
         XCTAssertEqual(icon.size, CGSize(width: LinkIcons.side + LinkIcons.gap, height: LinkIcons.side))
