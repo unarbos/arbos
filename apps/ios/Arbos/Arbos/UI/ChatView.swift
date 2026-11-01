@@ -191,37 +191,58 @@ struct ChatSession: View {
     @State private var windowSkipEnd = 0
     /// The animated hop a reveal makes to a row the stack has already built.
     static let revealHop: Double = 0.35
-    /// How long `settleOnRevealed` waits between its corrections, and how many it makes.
-    /// Three over 0.45 s: long enough for the lazy rows around the landing to be measured,
-    /// short enough to be over before the reader could have started scrolling themselves.
+    /// How long `settleOnRevealed` waits between its corrections.
     ///
-    /// The count was four and was cut on measurement. Across all twenty-six laddered
-    /// reveals recorded for #2404 — several runtimes, including two ten-iteration
-    /// repetitions that varied nothing but timing — the first correction moved the scroll
-    /// in eighteen, the second in three, and the third in none. The fourth never moved it
-    /// in the ten reveals where it could be measured, which is what it was cut on. Read
-    /// the trace with care when checking this: the `settle` line is printed *before* its
-    /// own `scrollTo`, so the offset logged at `step=N` is what correction N achieved, not
-    /// N+1.
+    /// This used to be paired with a count of three, and the count is what #2560 removes.
+    /// The measurement behind it stands and is worth keeping, because it is also the
+    /// evidence that counting was the wrong idea: across all twenty-six laddered reveals
+    /// recorded for #2404 — several runtimes, including two ten-iteration repetitions that
+    /// varied nothing but timing — the first correction moved the scroll in eighteen, the
+    /// second in three, and **the third in none**.
     ///
-    /// The rule the count follows: **keep the deepest pass ever measured to do work, plus
-    /// one of margin.** The deepest real correction is the second, so the count is three.
-    /// The margin is there because the costs are not symmetrical — a pass that never fires
-    /// costs one no-op `scrollTo` against a layout that already agrees, while one pass too
-    /// few costs exactly the bug this corrects. Every one of the twenty-six was a simulator
-    /// on one Mac; real devices, slower main threads and deeper transcripts are unmeasured.
+    /// A ladder whose last pass never moves the scroll looks like a ladder with margin to
+    /// spare. It is not: it means the corrections had stopped moving the transcript, and a
+    /// landing that is wrong when they stop stays wrong however many more are added. One of
+    /// those stopping points is on the gate now (`long-304`, #2404 again), and no third,
+    /// fourth or tenth pass of the same `scrollTo` can recover it. `revealCorrectFor` and
+    /// the arrival test in `settleOnRevealed` replace the count.
     ///
-    /// The second pass is not a rarity kept out of caution. It did nothing in the first
-    /// sixteen reveals but one, and then moved the landing in two of the ten taken after
-    /// the count was cut — 7131 to 7368 and 7131 to 7591, both onto a correct landing.
-    ///
-    /// Cut this to two when measurements on hardware justify it, rather than re-deriving
-    /// the argument.
+    /// Read the trace with care when checking this: the `settle` line is printed *before*
+    /// its own `scrollTo`, so the offset logged at `pass=N` is what correction N achieved,
+    /// not N+1.
     static let revealSettleGap: Double = 0.15
-    static let revealSettleSteps = 3
+    /// How long the reveal keeps correcting before it gives up. Twelve passes at
+    /// `revealSettleGap`, and this cap is what makes the loop safe rather than a pass count:
+    /// a correction that outlived the jump would fight the reader's own scroll.
+    ///
+    /// Twelve because the loop walks in — each landing measures a viewport of rows and takes
+    /// a bite out of the estimate error — and the worst error on record is eighteen rows. It
+    /// outlasts the 1.6 s highlight fade, which is a deliberate trade: a tint that fades
+    /// while the transcript is still settling is a smaller fault than a transcript that
+    /// stops in the wrong place.
+    static let revealCorrectFor: Double = 1.8
+    /// How far off centre the revealed row may sit and still count as arrived.
+    ///
+    /// The UI test's own bar is the middle half of the screen, so anything inside a quarter
+    /// of the screen height passes; this is tighter than that on purpose, because the point
+    /// of the correction is to centre the row and a slack as wide as the assertion would
+    /// let the loop stop at the edge of passing.
+    static let revealCentreSlack: CGFloat = 48
+    /// What a correction pass aims at when the one before it moved nothing: the same row,
+    /// against an anchor that puts it somewhere else in the viewport. Both of these are most
+    /// of a viewport away from `.center`, which is the point — the transcript has to move for
+    /// the rows around the landing to be laid out and measured.
+    static let unstickAnchors: [UnitPoint] = [.top, .bottom]
+    /// Rig: how long after the correction stops the probe's `moved` count is read. Long
+    /// enough that a transcript still settling shows it, short enough to be published before
+    /// the UI test reads the probe three seconds after the bar closes.
+    static let revealMovedAfter: Double = 0.4
     /// How long after the last correction `traceAtRest` reports where the transcript ended
-    /// up. Three seconds, to land beside the moment the UI test reads the resting frame
-    /// rather than somewhere before it; the test sleeps 3 s after the bar closes.
+    /// up. Three seconds, chosen to land beside the moment the UI test reads the resting
+    /// frame; since #2560 the correction may run for `revealCorrectFor` first, so it now
+    /// lands after that read rather than beside it. Left alone because the line it prints
+    /// goes to the app's stdout, which CI does not capture either way — the probe's `moved`
+    /// is what a gate run actually reads.
     static let revealAtRestAfter: Double = 3.0
     /// How long after a result tap the reveal trace records scroll samples. It has to outlast
     /// `revealAtRestAfter`, or the at-rest line reports a stillness that is only the trace
@@ -267,6 +288,26 @@ struct ChatSession: View {
     /// A reference box and not `@State`: this is written on every scroll sample, and a state
     /// write per sample would invalidate the view on every frame of every scroll.
     @State private var scrollProbe = ScrollProbe()
+    /// Where the row a reveal is correcting onto actually sits, and how big the viewport is.
+    /// A reference box for the same reason `scrollProbe` is one: it is written on every
+    /// layout pass while the correction runs.
+    @State private var revealFrame = RevealFrameProbe()
+    /// The row the reveal correction is working on, or nil when no reveal is in flight.
+    ///
+    /// This is the one piece of reveal state the row builder reads, and it is why the frame
+    /// above costs nothing in steady state: `RowFrameKey` publishes an anchor for this row
+    /// only, only while this is set, which is the second or so the correction runs for. A
+    /// transcript nobody is revealing into reports no anchors at all, exactly as before.
+    ///
+    /// It also replaces `highlightedMessage` as the loop's stand-down signal. The two were
+    /// the same thing while the correction was shorter than the highlight; separating them
+    /// means the highlight's fade timer can be tuned without silently changing how long the
+    /// scroll keeps correcting.
+    @State private var revealingRow: RevealTarget?
+    /// Rig (`ARBOS_TRACE_REVEAL=1`): what the correction did, for `revealedMessageProbe`.
+    /// Written only when the trace flag is set, so a shipping build makes no state write
+    /// here at all.
+    @State private var revealOutcome: String?
     /// Rows that arrived while the reader was away from the end — drives the
     /// "New messages" pill. Cleared when they re-pin or jump to the latest.
     @State private var newBelowCount = 0
@@ -1243,6 +1284,13 @@ struct ChatSession: View {
         .coordinateSpace(.named(BottomBarFade.canvas))
         .overlayPreferenceValue(RowFrameKey.self) { anchors in
             GeometryReader { geo in
+                // The revealed row's frame, resolved in the same space its viewport is
+                // measured in. Nothing is drawn for it; the reveal correction reads it to
+                // decide whether it has arrived (#2560).
+                if let reveal = revealingRow {
+                    revealLandingReporter(frame: anchors[reveal.rowId].map { geo[$0] },
+                                          viewport: geo.size.height)
+                }
                 if let row = actionsRow, let anchor = anchors[row.id] {
                     let frame = geo[anchor]
                     // This reader ignores the safe area, so its own insets read 0; the
@@ -2056,13 +2104,40 @@ struct ChatSession: View {
     ///
     /// So the app names the row it revealed and the test checks that against the row it
     /// meant to tap. A mis-tap then fails as a mis-tap instead of being blamed on the fix.
+    /// The correction's own numbers ride on the same value, because the channel that was
+    /// supposed to carry them does not reach CI. `revealTrace` prints from the **app**, and
+    /// `xcodebuild` captures the test runner's stdout and not the app's: there is not one
+    /// `[arbos reveal]` line in any gate artifact, so every reading of this bug so far has
+    /// been made from the rig's own frames. This value is read through XCUITest and printed
+    /// by the runner, which the gate does keep.
+    ///
+    /// `<message id> passes=<n> arrived=<bool> offset=<y> moved=<n>`, or `none` before the
+    /// first reveal. `passes` is how many corrections ran, `arrived` whether the loop
+    /// stopped because the row was there or because it ran out of time, and `moved` the
+    /// scroll samples taken in the `revealMovedAfter` after it stopped — a zero being the
+    /// load-bearing reading, since it says the residual was already baked in.
     @ViewBuilder private var revealedMessageProbe: some View {
         if DebugHooks.traceReveal {
             Color.clear
                 .frame(width: 0, height: 0)
                 .accessibilityIdentifier("reveal-probe")
-                .accessibilityValue(lastRevealedMessage.map(String.init(describing:)) ?? "none")
+                .accessibilityValue(revealProbeValue)
         }
+    }
+
+    private var revealProbeValue: String {
+        guard let id = lastRevealedMessage else { return "none" }
+        return [String(describing: id), revealOutcome].compactMap { $0 }.joined(separator: " ")
+    }
+
+    /// Hands the revealed row's resolved frame to the correction loop. Draws nothing: it
+    /// exists because resolving an `Anchor` needs a `GeometryProxy`, which only a view has.
+    private func revealLandingReporter(frame: CGRect?, viewport: CGFloat) -> some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .onAppear { revealFrame.report(row: frame, viewport: viewport) }
+            .onChange(of: frame) { revealFrame.report(row: frame, viewport: viewport) }
+            .onChange(of: viewport) { revealFrame.report(row: frame, viewport: viewport) }
     }
 
     private var composerSideInset: CGFloat {
@@ -2707,9 +2782,37 @@ struct ChatSession: View {
     /// than it when the window slid onto it. Same fault, opposite signs — which is why the
     /// shape of the window alone cannot be the whole fix.
     ///
-    /// Each repeat is resolved against a layout that knows more than the last one did, so the
-    /// error shrinks with every pass. The ladder is deliberately short and stands down the
-    /// moment another reveal claims the highlight: a correction that outlived the jump would
+    /// Each repeat is resolved against a layout that knows more than the last one did — but
+    /// only while the repeats keep moving the transcript, because movement is what makes the
+    /// stack realize rows and measure them. A row that stays off screen is never measured and
+    /// its estimate never improves, so the correction has a **fixed point**: once `scrollTo`
+    /// computes "already centred" from the wrong estimates of the rows between the viewport
+    /// and the target, every further pass computes the same destination, nothing moves, and
+    /// the landing stays wrong. That is what #2404's ladder of three hit on `long-304` —
+    /// resting eighteen rows short with the target never realized — and why a count of passes
+    /// cannot be the termination condition.
+    ///
+    /// So this corrects **until the row has arrived**, with two things to break the fixed
+    /// point:
+    ///
+    ///  - *Arrival is read off the row, not off the scroll offset.* While a reveal is in
+    ///    flight the target row publishes its frame through `RowFrameKey`, and the loop stops
+    ///    when the row is realized, wholly inside the viewport and within
+    ///    `revealCentreSlack` of its centre — the same question the reveal is for, and the
+    ///    same one `ChatSearchRevealLandingUITests` asserts. An offset that has stopped
+    ///    moving cannot answer it: a correction stuck in the wrong place has also stopped.
+    ///  - *A pass that moved nothing asks for somewhere else* — see `unstick`. An unanimated
+    ///    `scrollTo` lays out the rows where it lands and none of the rows it skipped over,
+    ///    so the only way to measure the rows whose estimates are wrong is to come to rest
+    ///    among them, and the only way to do that is to ask for a destination the layout does
+    ///    not already believe it is at.
+    ///
+    /// Each landing therefore measures rows that were estimated before, the computed distance
+    /// to the target improves by their error, and the next centre pass moves again on its
+    /// own. The loop walks in rather than jumping.
+    ///
+    /// Bounded by `revealCorrectFor` rather than by a pass count, and it stands down the
+    /// moment another reveal claims `revealingRow`: a correction that outlived the jump would
     /// be fighting the reader's own scroll, and `settleToBottom` corrects the tail the same
     /// way and for the same reason.
     private func settleOnRevealed(_ rowId: String, messageId: Id, animated: Bool) {
@@ -2719,23 +2822,136 @@ struct ChatSession: View {
             withTransaction(Transaction(animation: nil)) { scroller?.scrollTo(rowId, anchor: .center) }
         }
         guard !DebugHooks.revealPreFix else { return }
+        // Nothing has been published for this row yet, and a frame left over from the last
+        // reveal would read as an arrival before the first pass has run.
+        revealFrame.clear()
+        revealingRow = RevealTarget(rowId: rowId, messageId: messageId)
         // An animated hop owns the scroll view until its curve ends; correcting into it would
         // cancel the animation the reader is watching.
         let first = (animated ? Self.revealHop : 0) + Self.revealSettleGap
-        for step in 0..<Self.revealSettleSteps {
-            DispatchQueue.main.asyncAfter(deadline: .now() + first + Double(step) * Self.revealSettleGap) {
-                guard highlightedMessage == messageId else { return }
-                // `stack` again on every correction, not only at the start: the question a
-                // ladder has to answer is whether its later passes are still scrolling the
-                // stack its first pass aimed at, or one that was torn down underneath it.
-                revealTrace("settle", "id=\(messageId) step=\(step) "
-                            + "offset=\(Self.offsetText(scrollProbe.last)) stack=\(stackIdentityForTrace)")
+        let giveUpAt = Date().addingTimeInterval(first + Self.revealCorrectFor)
+        DispatchQueue.main.asyncAfter(deadline: .now() + first) {
+            correctReveal(rowId, messageId: messageId, pass: 0, unstuck: 0,
+                          lastOffset: .infinity, giveUpAt: giveUpAt)
+        }
+    }
+
+    /// One correction pass, which schedules the next one unless the row has arrived or the
+    /// deadline has passed. Split out of `settleOnRevealed` because it recurs; read that
+    /// method's comment for why it is a loop and not a ladder.
+    ///
+    /// `unstuck` counts the passes that had to break a fixed point, and is carried rather
+    /// than stored because it belongs to this reveal and nothing outside the loop reads it.
+    private func correctReveal(_ rowId: String, messageId: Id, pass: Int, unstuck: Int,
+                               lastOffset: CGFloat, giveUpAt: Date) {
+        // A second reveal has taken over, or the reader has been handed the scroll back.
+        guard revealingRow == RevealTarget(rowId: rowId, messageId: messageId) else { return }
+        let offset = scrollProbe.last
+        // The target's own frame, in the same space as the viewport it is measured against.
+        let landing = revealFrame.landing
+        let arrived = landing.map { Self.hasArrived($0) } ?? false
+        // `stack` again on every correction, not only at the start: the question a loop has
+        // to answer is whether its later passes are still scrolling the stack its first pass
+        // aimed at, or one that was torn down underneath it.
+        revealTrace("settle", "id=\(messageId) pass=\(pass) unstuck=\(unstuck) "
+                    + "offset=\(Self.offsetText(offset)) row=\(Self.landingText(landing)) "
+                    + "arrived=\(arrived) stack=\(stackIdentityForTrace)")
+        if arrived || Date() >= giveUpAt {
+            // Out of time and not there. Leave the transcript as close to centred as the
+            // estimates allow rather than wherever the last unstick pass parked it: a reader
+            // whose reveal failed should still be looking at roughly the right place.
+            if !arrived {
                 withTransaction(Transaction(animation: nil)) { scroller?.scrollTo(rowId, anchor: .center) }
-                if step == Self.revealSettleSteps - 1 {
-                    traceAtRest(messageId: messageId, after: scrollProbe.samples)
-                }
+            }
+            finishReveal(messageId: messageId, passes: pass, arrived: arrived, offset: offset)
+            return
+        }
+        // The pass before this one changed nothing — exactly equal offsets, because a
+        // transcript that did not move takes no new scroll sample at all. The layout already
+        // agrees with the destination, so asking for it again is the no-op that makes the
+        // landing permanent; ask for somewhere else instead.
+        let stuck = pass > 0 && offset.isFinite && lastOffset.isFinite && offset == lastOffset
+        if stuck {
+            unstick(rowId, messageId: messageId, pass: pass, tried: unstuck)
+        } else {
+            withTransaction(Transaction(animation: nil)) { scroller?.scrollTo(rowId, anchor: .center) }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.revealSettleGap) {
+            correctReveal(rowId, messageId: messageId, pass: pass + 1,
+                          unstuck: unstuck + (stuck ? 1 : 0),
+                          lastOffset: offset, giveUpAt: giveUpAt)
+        }
+    }
+
+    /// Ask the scroll view for somewhere it does not already think it is, so that the rows
+    /// around the landing get laid out and the next pass has measurements instead of
+    /// estimates.
+    ///
+    /// The first move is the one with an argument behind it: the **last row of the window**,
+    /// at `.bottom`. Asking for the bottom of the last row is asking for an offset at or past
+    /// the end of the content, and the scroll view cannot go past the end, so this lands on
+    /// the end however wrong the estimated heights above it are — the one destination in the
+    /// transcript that does not depend on them. It lays out the rows between the target and
+    /// the end of the window, which are the fifteen `includeInWindow` deliberately keeps
+    /// below the target, and the pass after it re-aims at the target across measured rows
+    /// rather than guessed ones: a short move, and a nearly exact one.
+    ///
+    /// It does not re-pin the reader to the tail, even though it touches the end:
+    /// `AwayFromBottomReporter` only moves `pinned` while the scroll is user-driven, and this
+    /// is not.
+    ///
+    /// Later moves are weaker, and they are here because the first one is an argument and not
+    /// a proof: the same row against `.top` and `.bottom`, which asks for a destination most
+    /// of a viewport away without changing which row is being asked for.
+    private func unstick(_ rowId: String, messageId: Id, pass: Int, tried: Int) {
+        if tried == 0, let tail = windowedRows.last?.id, tail != rowId {
+            revealTrace("settle-unstick", "id=\(messageId) pass=\(pass) windowEnd=\(tail)")
+            withTransaction(Transaction(animation: nil)) { scroller?.scrollTo(tail, anchor: .bottom) }
+            return
+        }
+        let anchor = Self.unstickAnchors[tried % Self.unstickAnchors.count]
+        revealTrace("settle-unstick", "id=\(messageId) pass=\(pass) anchorY=\(anchor.y)")
+        withTransaction(Transaction(animation: nil)) { scroller?.scrollTo(rowId, anchor: anchor) }
+    }
+
+    /// Is the revealed row where the reveal was supposed to put it: realized, wholly inside
+    /// the viewport, and near enough its middle. A row taller than the viewport can never be
+    /// wholly inside one, so it counts as arrived on its centre alone.
+    /// The revealed row's frame for the trace. `offsetText` and not `Int(_:)` for the same
+    /// reason the scroll offset uses it: an infinite or NaN coordinate traps the conversion,
+    /// and formatting one killed the app on every chat open once already.
+    private static func landingText(_ landing: (row: CGRect, viewport: CGFloat)?) -> String {
+        guard let landing else { return "not realized" }
+        return "y\(offsetText(landing.row.minY))…\(offsetText(landing.row.maxY)) "
+            + "of \(offsetText(landing.viewport))"
+    }
+
+    private static func hasArrived(_ landing: (row: CGRect, viewport: CGFloat)) -> Bool {
+        let (row, viewport) = landing
+        guard viewport > 0 else { return false }
+        let centred = abs(row.midY - viewport / 2) <= Self.revealCentreSlack
+        let whole = row.height > viewport || (row.minY >= 0 && row.maxY <= viewport)
+        return centred && whole
+    }
+
+    /// Stop correcting: drop the row's frame reporting and, for the rig, publish what the
+    /// loop did where a UI test can read it.
+    private func finishReveal(messageId: Id, passes: Int, arrived: Bool, offset: CGFloat) {
+        revealingRow = nil
+        let samplesAtStop = scrollProbe.samples
+        if DebugHooks.traceReveal {
+            revealOutcome = "passes=\(passes) arrived=\(arrived) offset=\(Self.offsetText(offset)) moved=?"
+            // `moved` cannot be read at the moment the loop stops — it is the count of scroll
+            // samples *after* it. One short wait, well inside the three seconds the UI test
+            // waits before reading the probe.
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.revealMovedAfter) {
+                guard lastRevealedMessage == messageId else { return }
+                revealOutcome = "passes=\(passes) arrived=\(arrived) "
+                    + "offset=\(Self.offsetText(scrollProbe.last)) "
+                    + "moved=\(scrollProbe.samples - samplesAtStop)"
             }
         }
+        traceAtRest(messageId: messageId, after: samplesAtStop)
     }
 
     /// Where the transcript actually came to rest, logged late enough to be read beside the
@@ -4126,6 +4342,7 @@ extension ChatSession {
         let people = isPeople || isChannel
         let composerInset = composerSideInset
         let actionsRowId = actionsRow?.id
+        let revealingRowId = revealingRow?.rowId
         let firstId = shown.first?.id
         // Lazy rows: the oldest row of the window sits above the viewport and may never
         // appear; the newest one is on screen at open, so it marks the open.
@@ -4167,8 +4384,12 @@ extension ChatSession {
                 }
                 // A message bubble: long-press → reaction capsule + menu; double-tap → ❤️.
                 // Other rows keep the plain Copy menu.
+                // Two rows can ask for a frame and never at the same time in practice: the
+                // pressed row, and — for the second or so a correction runs — the row a
+                // reveal is scrolling onto (#2560). Everything else reports nothing, so a
+                // transcript at rest publishes no anchors at all.
                 .anchorPreference(key: RowFrameKey.self, value: .bounds) { anchor in
-                    actionsRowId == row.id ? [row.id: anchor] : [:]
+                    actionsRowId == row.id || revealingRowId == row.id ? [row.id: anchor] : [:]
                 }
                 .messageRowGestures(isMessage: reply, onLongPress: { openActions(row) },
                                     onDoubleTap: {
@@ -4196,6 +4417,44 @@ private final class ScrollProbe {
     /// Scroll samples seen, so a reveal can say whether the transcript moved after its
     /// correction rather than leaving that to be read out of an absence of trace lines.
     var samples = 0
+}
+
+/// The row a reveal is correcting onto. Its own type rather than a bare row id because both
+/// halves are load-bearing: the id is what `RowFrameKey` and `scrollTo` address, and the
+/// message id is what a late correction pass checks itself against when a second reveal may
+/// have replaced the first.
+private struct RevealTarget: Equatable {
+    let rowId: String
+    let messageId: Id
+}
+
+/// Where the row a reveal is correcting onto came to rest, and the height of the viewport it
+/// is measured in. Written from the overlay's geometry reader on every layout pass while a
+/// reveal is in flight, which is why it is a reference box and not `@State` — see
+/// `ScrollProbe`, which is a box for the same reason.
+private final class RevealFrameProbe {
+    private var row: CGRect?
+    private var viewport: CGFloat = 0
+
+    /// Nil until the row is realized and has published a frame.
+    var landing: (row: CGRect, viewport: CGFloat)? {
+        row.map { ($0, viewport) }
+    }
+
+    /// A nil frame is the row having left the stack, and it must land here as nil rather than
+    /// as the last frame it had: a correction that reads a stale frame reads an arrival that
+    /// is no longer true, which is the failure this whole loop exists to stop.
+    func report(row: CGRect?, viewport: CGFloat) {
+        self.row = row
+        self.viewport = viewport
+    }
+
+    /// Before a reveal starts correcting: a frame left from the last one would read as an
+    /// arrival before the first pass has run.
+    func clear() {
+        row = nil
+        viewport = 0
+    }
 }
 
 /// Fires when the scroll view comes near its top (channel older page / grow window).

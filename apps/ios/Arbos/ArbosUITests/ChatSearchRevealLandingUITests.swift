@@ -7,12 +7,19 @@ import XCTest
 /// the frontmost check: the chat is in front, the bar has gone, nothing covers the message —
 /// the transcript has simply come to rest somewhere else.
 ///
-/// **What the cases vary is whether the tapped result is inside the row window, and whether
-/// the reveal is the one from before the fix.** A hit among the newest is in the window
-/// already and needs nothing. A hit the reader scrolled back to is not, and reaching it means
-/// moving the window and then scrolling into rows the `LazyVStack` has never laid out.
-/// Everything else is identical: same keyword, same tap point in the bubble's bottom padding
-/// clear of every button, same settle.
+/// **What the cases vary is whether the tapped result is inside the row window, which row
+/// outside it they tap, and whether the reveal is the one from before the fix.** A hit among
+/// the newest is in the window already and needs nothing. A hit the reader scrolled back to is
+/// not, and reaching it means moving the window and then scrolling into rows the `LazyVStack`
+/// has never laid out. Everything else is identical: same keyword, same tap point in the
+/// bubble's bottom padding clear of every button, same settle.
+///
+/// **The row is named, not taken from wherever the drags stop.** It was the second thing, and
+/// it was discovered the hard way: the two cases below that look like duplicates were, and
+/// between them they sampled `long-265` — which landed six times out of six — and `long-304`,
+/// which has never landed once. One suite reporting both read as a single fault firing about
+/// half the time, and the queue spent a day on a flake that was a product bug on one row
+/// (#2560). A landing this suite cannot attribute to a row is not a measurement.
 ///
 /// Three earlier explanations were measured and ruled out, which is why none is a case here.
 /// A near-top window grow firing inside the reveal: across four launches the trace recorded
@@ -35,6 +42,21 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     private let settle: TimeInterval = 20
     private static let longRows = 420
     private static let keyword = "embargo"
+    /// The row the old ladder of three corrections happened to converge on: measured landing
+    /// in six gate runs out of six.
+    ///
+    /// Hit 53 of this fixture's 83, so the drags reach it after they reach `stuckTarget`.
+    private static let convergingTarget = "long-265"
+    /// The row it never converged on: two gate failures out of two attempts that aimed here,
+    /// resting eighteen rows short with the message not realized at all, and **no run on
+    /// record has ever landed it** (#2560).
+    ///
+    /// This is the row #2560 is about. Hit 59 of 83.
+    private static let stuckTarget = "long-304"
+    /// How many drags the list may be nudged while looking for a named target before the case
+    /// gives up. Twenty-nine hits separate `convergingTarget` from the newest, and a drag
+    /// moves one to three of them, so forty is roughly half again the worst honest case.
+    private static let aimSearchDrags = 40
     /// Clear space the aim point must have above it, below the search chrome, before this
     /// will tap there.
     ///
@@ -56,7 +78,11 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
             "ARBOS_FIXTURE": "1",
             "ARBOS_OPEN_PEOPLE": "fx-group-launch",
             "ARBOS_FIXTURE_LONG_ROWS": "\(Self.longRows)",
-            // The app prints what moves the transcript; the run's stdout is the evidence.
+            // Turns on the app's reveal rig. Its `[arbos reveal]` lines go to the **app's**
+            // stdout, which `xcodebuild` does not capture: there is not one of them in any
+            // gate artifact, and every reading of #2404 so far was made without them. What
+            // this flag buys a CI run is `reveal-probe`, which the app publishes and the
+            // runner prints — see the probe read in `landing`.
             "ARBOS_TRACE_REVEAL": "1",
         ]
         if preFix { app.launchEnvironment["ARBOS_REVEAL_PRE_FIX"] = "1" }
@@ -159,10 +185,17 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// inside the row's hit area, below the last line of text, and clear of the sender's
     /// avatar and of the name, neither of which must take this touch. This branch is off
     /// `main`, where nothing suppresses those buttons, so the clearance is asserted.
-    private func aimable(_ app: XCUIApplication, screen: CGRect) -> (id: String, point: CGPoint)? {
+    ///
+    /// `wanted` names the one row this case is allowed to tap. Without it the first bubble in
+    /// tree order that clears the margin wins, and which row that is depends on where fourteen
+    /// drag gestures happened to stop — the lottery that made six green runs and two red ones
+    /// look like one intermittent fault instead of two different rows (#2560).
+    private func aimable(_ app: XCUIApplication, screen: CGRect,
+                         wanted: String? = nil) -> (id: String, point: CGPoint)? {
         let band = reachable(app, screen: screen)
         let all = bubbles(app)
         for (id, frame) in all {
+            if let wanted, id != "bubble:\(wanted)" { continue }
             let point = CGPoint(x: frame.midX, y: frame.maxY - 5)
             guard band.contains(point), frame.height > 24 else { continue }
             // Keep clear of the chrome overhead as well as of the neighbouring rows. A point
@@ -197,23 +230,66 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         return nil
     }
 
-    /// Open the bar, drag the result list `scrollUp` times toward older hits, then aim at
-    /// whichever hit is reachable there. Everything here is harness, not finding: kept apart
+    /// Open the bar and drag the result list toward older hits until the row this case is
+    /// about is reachable — or, with no `wanted`, `scrollUp` times and then at whatever is
+    /// reachable there. Everything here is harness, not finding: kept apart
     /// from the landing so the symptom arm's expected-failure wrapper cannot swallow a broken
     /// rig — it did exactly that once, reporting a run whose app died at launch as a
     /// reproduction.
-    private func aimed(scrollUp: Int, preFix: Bool)
+    private func aimed(scrollUp: Int, preFix: Bool, wanted: String? = nil)
         -> (app: XCUIApplication, screen: CGRect, id: String, point: CGPoint)? {
         let app = openSearch(preFix: preFix)
         let screen = app.windows.firstMatch.frame
         for _ in 0..<scrollUp { nudge(app, band: reachable(app, screen: screen)) }
-        for _ in 0..<4 {
-            if let hit = aimable(app, screen: screen) { return (app, screen, hit.id, hit.point) }
+        guard let wanted else {
+            for _ in 0..<4 {
+                if let hit = aimable(app, screen: screen) { return (app, screen, hit.id, hit.point) }
+                nudge(app, band: reachable(app, screen: screen))
+            }
+            XCTFail("no reachable hit after \(scrollUp) drags up the result list "
+                    + "(results: \(describe(bubbles(app))))")
+            return nil
+        }
+        // Older hits come in from the top and leave at the bottom, so a named row is reached
+        // by nudging and can be nudged past. Check after every drag rather than after a fixed
+        // fourteen: `inReach` is one element query, and running the full `aimable` walk forty
+        // times would cost more than the case does.
+        for drag in 0...Self.aimSearchDrags {
+            if inReach(app, screen: screen, wanted: wanted),
+               let hit = aimable(app, screen: screen, wanted: wanted) {
+                print("[rig] \(wanted) came into reach after \(scrollUp + drag) drags")
+                return (app, screen, hit.id, hit.point)
+            }
+            // Past it: no drag goes back the other way, so say so now instead of spending the
+            // rest of the budget looking for a row that has left.
+            if wentPast(app, screen: screen, wanted: wanted) {
+                XCTFail("the result list went past \(wanted) after \(scrollUp + drag) drags — "
+                        + "it is below the reachable band, and nudging only moves older hits "
+                        + "in from the top (results: \(describe(bubbles(app))))")
+                return nil
+            }
             nudge(app, band: reachable(app, screen: screen))
         }
-        XCTFail("no reachable hit after \(scrollUp) drags up the result list "
-                + "(results: \(describe(bubbles(app))))")
+        XCTFail("\(wanted) never came into reach in \(scrollUp + Self.aimSearchDrags) drags up "
+                + "the result list (results: \(describe(bubbles(app))))")
         return nil
+    }
+
+    /// Is the named row's aim point in the reachable band? One element query, so it can be
+    /// asked after every drag; `aimable` does the rest of the checks once this says yes.
+    private func inReach(_ app: XCUIApplication, screen: CGRect, wanted: String) -> Bool {
+        let e = row(app, wanted)
+        guard e.exists else { return false }
+        let band = reachable(app, screen: screen)
+        let point = CGPoint(x: e.frame.midX, y: e.frame.maxY - 5)
+        return band.contains(point) && point.y - band.minY >= Self.aimBandMargin
+    }
+
+    /// Has the named row gone out below the band, where no further drag can bring it back?
+    private func wentPast(_ app: XCUIApplication, screen: CGRect, wanted: String) -> Bool {
+        let e = row(app, wanted)
+        guard e.exists else { return false }
+        return e.frame.minY > reachable(app, screen: screen).maxY
     }
 
     /// Tap the aimed point and say where the transcript came to rest. Identical for every
@@ -304,9 +380,15 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         // asked to reveal, so a tap that landed on a neighbour fails here, as a mis-aimed
         // rig, instead of further down as the fix missing by tens of rows. Both iOS 26
         // failures in this lane were this, and without this line they read as app faults.
+        //
+        // The same value carries what the correction did — `passes`, `arrived`, `offset`,
+        // `moved` — because the app's own trace does not reach CI. This print is the only
+        // place a gate run says how many corrections ran and whether the loop stopped
+        // because the row was there or because it timed out.
         let probe = app.descendants(matching: .any)["reveal-probe"].firstMatch
-        if probe.exists, let revealedId = probe.value as? String, revealedId != "none" {
-            print("[rig] \(arm) app revealed \(revealedId); rig aimed at \(id)")
+        if probe.exists, let value = probe.value as? String, value != "none" {
+            print("[rig] \(arm) app revealed \(value); rig aimed at \(id)")
+            let revealedId = value.split(separator: " ").first.map(String.init) ?? value
             XCTAssertEqual(revealedId, id,
                            "the tap reached the row this case is about — it reached \(revealedId) "
                            + "instead, so this run measures the rig, not the fix — \(detail)")
@@ -343,9 +425,9 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// interpreting coordinates: a run whose baseline **landed** has measured the fix against
     /// no baseline at all, which is what happened once already here and read as four passes.
     /// Launching and aiming stay outside the expectation, so a broken rig still goes red.
-    private func run(scrollUp: Int, preFix: Bool, expectShort: Bool = false) {
-        let arm = "up\(scrollUp)/\(preFix ? "pre-fix" : "fixed")"
-        guard let a = aimed(scrollUp: scrollUp, preFix: preFix) else { return }
+    private func run(scrollUp: Int, preFix: Bool, wanted: String? = nil, expectShort: Bool = false) {
+        let arm = "\(wanted ?? "up\(scrollUp)")/\(preFix ? "pre-fix" : "fixed")"
+        guard let a = aimed(scrollUp: scrollUp, preFix: preFix, wanted: wanted) else { return }
         guard expectShort else { return landing(arm, a) }
         continueAfterFailure = true
         XCTExpectFailure("the reveal as it was before the fix (#2404)", strict: false) { landing(arm, a) }
@@ -378,19 +460,34 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     ///
     /// Measured short six times out of six, resting 18 to 35 rows newer than the message
     /// with the message never realized.
+    ///
+    /// Aimed at `stuckTarget` so that it is the baseline for the arm below that takes the
+    /// same row, and so the before/after pair is one row's behaviour rather than two.
     func testAResultOutsideTheWindowIsTheSymptomBeforeTheFix() {
-        run(scrollUp: 14, preFix: true, expectShort: true)
+        run(scrollUp: 0, preFix: true, wanted: Self.stuckTarget, expectShort: true)
     }
 
     /// The same reveal with the fix: the window slides onto the target rather than stretching
-    /// back to it, and the scroll is corrected as the rows gain real heights.
+    /// back to it, and the scroll is corrected until the row has arrived.
+    ///
+    /// This arm takes `convergingTarget`, the row the old ladder of three already landed. It
+    /// is the regression half of the pair: whatever #2560 changed about the correction, the
+    /// landing that worked before must still work.
     func testAResultOutsideTheWindowLandsAfterTheFix() {
-        run(scrollUp: 14, preFix: false)
+        run(scrollUp: 0, preFix: false, wanted: Self.convergingTarget)
     }
 
-    /// The fix again. One correct landing says nothing about a fault that only shows
-    /// sometimes, and the symptom arm above is the thing that establishes the rate.
+    /// The same reveal aimed at `stuckTarget` — the row no run has ever landed, and the one
+    /// #2560 is about.
+    ///
+    /// **This case used to be a duplicate of the one above and is the reason the bug was
+    /// found at all.** Both ran the same fourteen drags and then tapped whichever hit they
+    /// left reachable, so between them they sampled two different rows and reported the
+    /// difference as one intermittent fault. Naming the row in each is what turned "fails
+    /// about half the time" into "fails on this row every time", and it is why neither arm
+    /// may go back to letting the gestures choose. The name is kept as it was so the gate's
+    /// history for it stays readable.
     func testAResultOutsideTheWindowLandsAfterTheFixAgain() {
-        run(scrollUp: 14, preFix: false)
+        run(scrollUp: 0, preFix: false, wanted: Self.stuckTarget)
     }
 }
