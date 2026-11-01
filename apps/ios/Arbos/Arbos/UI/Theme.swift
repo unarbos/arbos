@@ -1122,9 +1122,12 @@ extension HomeChrome {
 /// and the first bottom curve of [feedback iphone-home-bar-fades-2026-10-28]). Grok Bot: rows
 /// scroll under the glass pills and stay readable through and between them; a soft fade dims the
 /// content toward the bottom edge. One layer at the canvas's bottom — over the content, under the
-/// controls — the page colour masked by a ramp: clear `fade` pt above the bar's top edge,
-/// `edgeWash` at that edge, `controlsWash` at the controls' bottom edge, `bottomWash` at the
-/// screen's (or the keyboard's) edge. Never 1: no band, no hard edge. The same ramp on Matte and
+/// controls — the page colour masked by a ramp: clear from the layer's top down to `ramp` pt above
+/// the controls' top edge, `edgeWash` at that edge, `controlsWash` at the controls' bottom edge,
+/// `bottomWash` at the screen's (or the keyboard's) edge. Never 1: no band, no hard edge. The
+/// ramp follows the controls, not the bar's top edge, so a bar that carries more than its
+/// controls (the chat's status row, a send error's note) does not drag the fade up over the
+/// rows at rest ([feedback iphone-bottom-fade-newest-bubble-2026-11-01]). The same ramp on Matte and
 /// Glass, light and dark (the surface shows in the pills: `ControlSurface` is glass on Glass).
 /// The reader keeps the safe area, so its bottom inset is the bar (+ home indicator / keyboard);
 /// the layer inside ignores that edge and reaches the screen's edge, moving with the keyboard.
@@ -1133,6 +1136,14 @@ enum BottomBarFade {
     /// Clear this far above the bar's top edge; the lists' trailing clearance, so the last row at
     /// rest sits above the fade (`Theme.transcriptTail`, `HomeChrome.listBottom`).
     static let fade: CGFloat = Theme.composerFade
+    /// The chat's ramp, over the composer's top edge. The chat bar is not only the composer —
+    /// the status row rides over it, and a send error's note over that — so a ramp that started
+    /// at the bar's top edge washed the status row, and with a bar that tall it reached the
+    /// newest bubble at rest as well (Jacob, 2026-11-01: "the first chat bubble above the chat
+    /// box is faded … should cut off the fade almost immediately after the box"). The ramp
+    /// follows the composer instead, and is shorter than the status row's own bottom gap
+    /// (`Theme.presenceBottomGap`, 22⅔ pt), so nothing resting over the composer is washed.
+    static let composerRamp: CGFloat = 20
     /// The wash at the bar's top edge, at the controls' bottom edge, and at the screen's edge.
     /// Lighter under the pills since [feedback iphone-composer-glass-2026-10-28] (0.3 / 0.5 /
     /// 0.8 before): the pills are clear glass now and the text must read through them, so the
@@ -1144,19 +1155,30 @@ enum BottomBarFade {
     static let readableMax: Double = 0.6
 
     struct Spec: Equatable {
+        /// The layer's clear lead over the bar's top edge, which sets its height.
         let fade: CGFloat
-        /// The bar's top edge → the controls' bottom edge (chat: the 8 pt pad + the composer;
-        /// Home: the capsule).
+        /// The ramp's own height, ending at the controls' top edge.
+        let ramp: CGFloat
+        /// The bar's top edge → the controls' top edge: 0 on Home, where the capsule is the
+        /// bar's first view; on the chat, its top pad plus whatever rides over the composer.
+        let aboveControls: CGFloat
+        /// The controls' height (the composer; Home's capsule).
         let controls: CGFloat
         /// The canvas's bottom inset: the bar + the home indicator, or the bar + the keyboard.
         let inset: CGFloat
         /// The layer's height; its bottom is the screen's (or the keyboard's) edge.
         var height: CGFloat { fade + inset }
+        /// The controls' top edge, from the layer's top. The ramp ends here, so the ramp sits
+        /// where the bar's own controls are however tall the bar has grown.
+        var controlsTop: CGFloat { fade + aboveControls }
         var knots: [ListTopFade.Spec.Knot] {
-            [.init(y: 0, alpha: 0),
-             .init(y: fade, alpha: BottomBarFade.edgeWash),
-             .init(y: min(fade + controls, height), alpha: BottomBarFade.controlsWash),
-             .init(y: height, alpha: BottomBarFade.bottomWash)]
+            let rampTop = max(0, controlsTop - ramp)
+            var out: [ListTopFade.Spec.Knot] = [.init(y: 0, alpha: 0)]
+            if rampTop > 0 { out.append(.init(y: rampTop, alpha: 0)) }
+            out.append(.init(y: min(controlsTop, height), alpha: BottomBarFade.edgeWash))
+            out.append(.init(y: min(controlsTop + controls, height), alpha: BottomBarFade.controlsWash))
+            out.append(.init(y: height, alpha: BottomBarFade.bottomWash))
+            return out
         }
         var stops: [Gradient.Stop] {
             guard height > 0 else { return [] }
@@ -1172,15 +1194,25 @@ enum BottomBarFade {
         }
     }
 
-    /// The chat: the bar's top pad and the composer are the controls (the status row, when it
-    /// shows, rides above them in the same ramp).
-    static func chat(bottomInset: CGFloat) -> Spec {
-        Spec(fade: fade, controls: Theme.chatBarTopPad + Theme.composerHeight, inset: bottomInset)
+    /// The chat: the composer is the control the rows scroll under, and `aboveComposer` is
+    /// everything the bar carries over it.
+    static func chat(bottomInset: CGFloat, aboveComposer: CGFloat) -> Spec {
+        Spec(fade: fade, ramp: composerRamp, aboveControls: aboveComposer,
+             controls: Theme.composerHeight, inset: bottomInset)
     }
 
-    /// Home: the search capsule sits at the bar's top edge.
+    /// What rides over the composer inside the chat bar — the bar's top pad, the status row
+    /// when it shows, a send error's note — read back out of the bar's measured height, so the
+    /// ramp follows the bar whatever it carries. Taken from the same height the layer's inset
+    /// is, so the ramp lands on the composer's top edge even if that height is off.
+    static func aboveComposer(bar: CGFloat, keyboard: Bool) -> CGFloat {
+        let under = Theme.composerHeight + (keyboard ? Theme.composerBottomKeyboard : Theme.composerBottom)
+        return max(Theme.chatBarTopPad, bar - under)
+    }
+
+    /// Home: the search capsule sits at the bar's top edge, so the ramp is the clear lead.
     static func home(bottomInset: CGFloat) -> Spec {
-        Spec(fade: fade, controls: Controls.height, inset: bottomInset)
+        Spec(fade: fade, ramp: fade, aboveControls: 0, controls: Controls.height, inset: bottomInset)
     }
 }
 

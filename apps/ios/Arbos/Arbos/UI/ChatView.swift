@@ -1142,14 +1142,17 @@ struct ChatSession: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         // The fade the chat bar floats on ([feedback iphone-composer-see-through-2026-10-28]):
-        // rows scrolling under the bar dim from `Theme.composerFade` above it toward the
-        // bottom edge and stay readable through and between the glass pills — no band. The
-        // bar's measured height is added to the layer's bottom inset, so it starts at the
-        // bar's top edge, moves with the keyboard, is over the transcript and under the pill
-        // and the chevron below — not in the bar's layer.
+        // rows scrolling under the bar dim toward the bottom edge and stay readable through and
+        // between the glass pills — no band. The bar's measured height is added to the layer's
+        // bottom inset, so it starts at the bar's top edge, moves with the keyboard, is over the
+        // transcript and under the pill and the chevron below — not in the bar's layer. The ramp
+        // itself ends `BottomBarFade.composerRamp` lower, at the composer's top edge, so the
+        // status row and the newest bubble at rest are outside it (Jacob, 2026-11-01).
         .overlay(alignment: .bottom) {
             ChatBarHeightReader(bar: chatBarHeight) { bar in
-                BottomBarFadeView(spec: BottomBarFade.chat).safeAreaPadding(.bottom, bar)
+                let above = BottomBarFade.aboveComposer(bar: bar, keyboard: composerFocused)
+                BottomBarFadeView(spec: { BottomBarFade.chat(bottomInset: $0, aboveComposer: above) })
+                    .safeAreaPadding(.bottom, bar)
             }
         }
         .overlay(alignment: .bottom) {
@@ -2274,7 +2277,8 @@ struct ChatSession: View {
                     // (`PresenceRow`), not a transcript row.
                     // Clears the chat bar and the `Theme.composerFade` above it, so the
                     // last row at rest is never under the fade; the status row rises into
-                    // it (`Theme.presenceLift`).
+                    // that clearance (`Theme.presenceLift`) and is clear of the ramp too,
+                    // which now ends at the composer's top edge.
                     TranscriptTail(bar: chatBarHeight).id("bottom")
                 }
                 .padding(.horizontal, 16)
