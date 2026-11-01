@@ -138,6 +138,32 @@ final class AvatarBackSwipeUITests: XCTestCase {
         assertHome(app)
     }
 
+    /// The other picture Jacob named: the one in the header pill. It is the pill's leading
+    /// 32 pt, so the drag starts there rather than on the title. This one is outside the
+    /// transcript, so the recognizer under test is the screen's (`FullScreenBackHost`) and not
+    /// the transcript's.
+    func testASwipeRightStartingOnTheHeaderAvatarGoesBack() {
+        let app = openGroup()
+        let pill = app.descendants(matching: .any)["chat-header-pill"].firstMatch
+        XCTAssertTrue(pill.waitForExistence(timeout: settle), "the header pill is on screen")
+        let frame = pill.frame
+        // The avatar is Controls.avatar (32 pt) at the pill's leading end, so half of it in is
+        // on the picture whether the reported frame starts at the capsule or at the picture.
+        let point = CGPoint(x: frame.minX + 16, y: frame.midY)
+        XCTAssertGreaterThan(point.x, 24, "the header avatar at \(frame) is clear of the edge zone")
+        let distance: CGFloat = 180
+        XCTAssertLessThan(point.x + distance, app.windows.firstMatch.frame.maxX - 8,
+                          "the \(Int(distance)) pt drag would be clamped at the screen edge")
+        let start = app.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: point.x, dy: point.y))
+
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: distance, dy: 0)),
+                    withVelocity: .fast, thenHoldForDuration: 0.05)
+
+        assertGone(back(app))
+        assertHome(app)
+    }
+
     // MARK: What the fix must not cost
 
     /// A tap on the avatar still opens the sender's page, and opens it on the touch that made
@@ -156,6 +182,24 @@ final class AvatarBackSwipeUITests: XCTestCase {
                                              object: app.descendants(matching: .any)["chat-search-button"].firstMatch)
         XCTAssertEqual(XCTWaiter().wait(for: [wait], timeout: settle), .completed,
                        "a tap on the avatar at \(avatar) opens the sender's page over the chat")
+    }
+
+    /// And the header avatar still opens the group's page on a tap.
+    func testATapOnTheHeaderAvatarStillOpensTheProfile() {
+        let app = openGroup()
+        let pill = app.descendants(matching: .any)["chat-header-pill"].firstMatch
+        XCTAssertTrue(pill.waitForExistence(timeout: settle), "the header pill is on screen")
+        let frame = pill.frame
+        XCTAssertTrue(chatIsFrontmost(app), "the chat is in front before the tap")
+
+        app.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: frame.minX + 16, dy: frame.midY)).tap()
+
+        let left = NSPredicate(format: "isHittable == false")
+        let wait = XCTNSPredicateExpectation(predicate: left,
+                                             object: app.descendants(matching: .any)["chat-search-button"].firstMatch)
+        XCTAssertEqual(XCTWaiter().wait(for: [wait], timeout: settle), .completed,
+                       "a tap on the header avatar at \(frame) opens the group's page over the chat")
     }
 
     /// A vertical drag that begins on an avatar is still the scroll view's: the transcript
