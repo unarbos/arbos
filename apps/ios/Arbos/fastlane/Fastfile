@@ -69,6 +69,15 @@ def xcodebuild_logged(name, command, on_failure: nil)
   lines = File.exist?(log) ? File.readlines(log) : []
   lines.grep(/error:|\*\* (BUILD|ARCHIVE|EXPORT) (SUCCEEDED|FAILED)/).uniq.each { |line| UI.message(line.chomp) }
   if failed
+    # Diagnostic only. This count must never feed the pass decision. Across the 527 green gate
+    # runs retained on 2026-11-01, 12 carry exactly one `error:` line while 0 have any case
+    # reporting failed, and every one of the 12 is the same recovered transient —
+    # `FBSOpenApplicationServiceErrorDomain Code=1, "Simulator device failed to launch"`. So
+    # wiring this count into the verdict would manufacture twelve false reds out of runs whose
+    # per-case tally was correct. It is safe today only by control flow: the count is taken
+    # inside this `if failed`, so a zero exit never computes it at all. Move it out, or compare
+    # it against anything, and that stops being true
+    # (store note internal/2381-first-live-gate-verdict.md).
     errors = lines.grep(/error:/).uniq
     on_failure&.call(log, errors)
     UI.user_error!("xcodebuild #{name} failed (#{errors.size} error lines, see #{log})")
