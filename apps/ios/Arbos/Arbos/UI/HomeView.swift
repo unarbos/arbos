@@ -135,6 +135,14 @@ struct HomeView: View {
                     // D88: the server's channel list (the slid-in left pane).
                     ServerChannelsView(serverId: serverId)
                         .id(serverId)
+                case .profile(let target):
+                    // Jacob 2026-11-01: a profile comes in from the right like any other
+                    // page. `backSwipeToPop` is what gives it the stack's back swipe —
+                    // the pages draw their own `ProfileTopBar` instead of the system bar,
+                    // so without it they would have no swipe back of any kind.
+                    ProfilePage(target: target)
+                        .id(target.id)
+                        .backSwipeToPop()
                 }
             }
             .navigationDestination(isPresented: $showHidden) {
