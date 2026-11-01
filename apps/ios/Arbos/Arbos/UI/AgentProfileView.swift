@@ -219,6 +219,8 @@ struct AgentProfileView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
+    /// The "Run by …" owner link pushes onto whichever stack this page is on.
+    @Environment(\.profileHost) private var profileHost
     let projectId: Id
     /// For an agent that is not in my project list (someone else's agent in a DM).
     var fallback: Project? = nil
@@ -389,9 +391,10 @@ struct AgentProfileView: View {
         let subtitle = AgentPane.subtitle(description: project.description, mine: isMine, ownerHandle: project.ownerHandle, ownerName: project.ownerName)
         // Someone else's agent: "Run by …" is a link to the owner's page (Jacob 2026-10-25).
         let owner = AgentPane.ownerLink(mine: isMine, ownerHandle: project.ownerHandle, ownerName: project.ownerName)
-        // The owner's page is pushed over this one by the root sheet's NavigationStack
-        // (`ProfileSheet`, `ProfileTarget.pushesPeople`); its top-bar chevron pops back here.
-        let openOwner: (() -> Void)? = owner.map { link in { model.showProfile(.user(ownerPerson(project, handle: link.handle))) } }
+        // The owner's page is pushed over this one — onto the root stack, or onto the
+        // sheet's own stack when this page is inside the sheet (`ProfileSheet`,
+        // `ProfileTarget.pushesPeople`); its top-bar chevron pops back here either way.
+        let openOwner: (() -> Void)? = owner.map { link in { model.showProfile(.user(ownerPerson(project, handle: link.handle)), in: profileHost) } }
         return PaneHero(
             picture: .image(AnyView(heroPicture(project))),
             name: project.name,

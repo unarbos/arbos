@@ -1402,7 +1402,9 @@ struct ProjectMembersSheet: View {
                 Section("Members") {
                     ForEach(members) { m in
                         HStack(spacing: PaneKit.gap) {
-                            Button { model.showProfile(.user(ProfilePerson(m))) } label: { PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 40, name: m.name, id: m.id, colorIndex: m.avatarColorIndex) }.buttonStyle(.plain)
+                            // This list is itself a sheet, so the page opens as one: a push
+                            // onto the stack underneath would land behind this sheet.
+                            Button { model.showProfile(.user(ProfilePerson(m)), in: .sheet) } label: { PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 40, name: m.name, id: m.id, colorIndex: m.avatarColorIndex) }.buttonStyle(.plain)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(m.name?.isEmpty == false ? m.name! : m.handle).foregroundStyle(theme.text)
                                 Text("@\(m.handle) · \(m.role)\(m.status == "invited" ? " · invited" : "")").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
