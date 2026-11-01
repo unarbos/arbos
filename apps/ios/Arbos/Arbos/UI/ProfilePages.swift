@@ -1730,22 +1730,22 @@ struct GroupProfileView: View {
                     }
                     if canRemove(r) {
                         Divider()
-                        Button(role: .destructive) {
+                        MenuAction("Remove", systemImage: "person.badge.minus", role: .destructive) {
                             pendingRemoveId = r.person.id
                             pendingRemoveName = label
-                        } label: { Label("Remove", systemImage: "person.badge.minus") }
+                        }
                         if canMuteBan(r) {
-                            Button(role: .destructive) {
+                            MenuAction("Ban", systemImage: "hand.raised", role: .destructive) {
                                 pendingBanId = r.person.id
                                 pendingBanName = label
-                            } label: { Label("Ban", systemImage: "hand.raised") }
+                            }
                         }
                     }
                 } else if canRemove(r) {
-                    Button(role: .destructive) {
+                    MenuAction("Remove", systemImage: "person.badge.minus", role: .destructive) {
                         pendingRemoveId = r.person.id
                         pendingRemoveName = label
-                    } label: { Label("Remove", systemImage: "person.badge.minus") }
+                    }
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")
@@ -1841,22 +1841,22 @@ struct GroupProfileView: View {
                         }
                     }
                     if canRemove(r) {
-                        Button(role: .destructive) {
+                        MenuAction("Remove from group", systemImage: "person.badge.minus", role: .destructive) {
                             pendingRemoveId = r.person.id
                             pendingRemoveName = label
-                        } label: { Label("Remove from group", systemImage: "person.badge.minus") }
+                        }
                         if canMuteBan(r) {
-                            Button(role: .destructive) {
+                            MenuAction("Ban from group", systemImage: "hand.raised", role: .destructive) {
                                 pendingBanId = r.person.id
                                 pendingBanName = label
-                            } label: { Label("Ban from group", systemImage: "hand.raised") }
+                            }
                         }
                     }
                 } else if canRemove(r) {
-                    Button(role: .destructive) {
+                    MenuAction("Remove from group", systemImage: "xmark", role: .destructive) {
                         pendingRemoveId = r.person.id
                         pendingRemoveName = label
-                    } label: { Label("Remove from group", systemImage: "xmark") }
+                    }
                 }
             }
         }
@@ -2387,7 +2387,7 @@ struct ServerProfileView: View {
                 }
                 if !isGeneral {
                     Divider()
-                    Button(role: .destructive) { deletingChannel = c } label: { Label("Delete channel", systemImage: "trash") }
+                    MenuAction("Delete channel", systemImage: "trash", role: .destructive) { deletingChannel = c }
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")
@@ -2463,8 +2463,8 @@ struct ServerProfileView: View {
                     }
                     Divider()
                 }
-                Button(role: .destructive) { removingMember = m } label: { Label("Remove", systemImage: "person.badge.minus") }
-                Button(role: .destructive) { banningMember = m } label: { Label("Ban", systemImage: "hand.raised") }
+                MenuAction("Remove", systemImage: "person.badge.minus", role: .destructive) { removingMember = m }
+                MenuAction("Ban", systemImage: "hand.raised", role: .destructive) { banningMember = m }
             } label: {
                 Image(systemName: "ellipsis.circle")
                     .font(theme.font(17))

@@ -166,9 +166,7 @@ struct ServerChannelsView: View {
                             } label: { Label("Archive", systemImage: "archivebox") }
                             if server.isAdmin, channel.id != server.general?.id {
                                 Divider()
-                                Button(role: .destructive) { deletingChannel = channel } label: {
-                                    Label("Delete", systemImage: "trash")
-                                }
+                                MenuAction("Delete", systemImage: "trash", role: .destructive) { deletingChannel = channel }
                             }
                         }
                         .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))

@@ -318,9 +318,7 @@ struct HomeView: View {
                 }
                 if !project.shared {
                     Divider()
-                    Button(role: .destructive) { model.deleteProject(project.id) } label: {
-                        Label("Delete", systemImage: "trash")
-                    }
+                    MenuAction("Delete", systemImage: "trash", role: .destructive) { model.deleteProject(project.id) }
                 }
             }
             .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
@@ -417,9 +415,7 @@ struct HomeView: View {
                 } else {
                     Button { model.showProfile(.group(chatId: chat.id, projectId: nil)) } label: { Label("Group info", systemImage: "person.2") }
                 }
-                Button(role: .destructive) { model.deleteOrLeavePeopleChat(chat) } label: {
-                    Label("Delete", systemImage: "trash")
-                }
+                MenuAction("Delete", systemImage: "trash", role: .destructive) { model.deleteOrLeavePeopleChat(chat) }
             }
             .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
             .listRowSeparator(.hidden)
@@ -1171,9 +1167,7 @@ struct HiddenChatsView: View {
                                 Label("Unarchive", systemImage: "tray.and.arrow.up")
                             }
                             if !project.shared {
-                                Button(role: .destructive) { model.deleteProject(project.id) } label: {
-                                    Label("Delete", systemImage: "trash")
-                                }
+                                MenuAction("Delete", systemImage: "trash", role: .destructive) { model.deleteProject(project.id) }
                             }
                         }
                         .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
@@ -1201,9 +1195,7 @@ struct HiddenChatsView: View {
                             Button { withAnimation { model.unarchive(peopleChatId: chat.id) } } label: {
                                 Label("Unarchive", systemImage: "tray.and.arrow.up")
                             }
-                            Button(role: .destructive) { model.deleteOrLeavePeopleChat(chat) } label: {
-                                Label("Delete", systemImage: "trash")
-                            }
+                            MenuAction("Delete", systemImage: "trash", role: .destructive) { model.deleteOrLeavePeopleChat(chat) }
                         }
                         .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
                         .listRowSeparator(.hidden)
