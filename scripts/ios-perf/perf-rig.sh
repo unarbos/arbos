@@ -240,6 +240,23 @@ exportall() {
   done
 }
 
+# warmtree <dir>: the source tree `run warmab` measures, from pushed branches only: this harness
+# branch, merged with the warm-up branch (#2519), plus the measurement-only phase markers that
+# bracket the warm-up for the side-effect counter (warmup-phase-markers.patch, never in #2519).
+# The ArbosFFI products are gitignored: copied from $REPO, else run scripts/build-xcframework.sh.
+# Then: SRC=<dir> perf-rig.sh run warmab
+warmtree() {
+  local dir=$1 repo=${REPO:-$SRC} f
+  git -C "$repo" worktree add --detach "$dir" "${HARNESS_REF:-origin/cursor/ios-perf-baseline-harness-82aa}" || return 1
+  git -C "$dir" -c user.name=perf-rig -c user.email=perf-rig@invalid merge --no-edit -q \
+    "${WARMUP_REF:-origin/cursor/ios-first-open-warmup-82aa}" || return 1
+  git -C "$dir" apply scripts/ios-perf/warmup-phase-markers.patch || return 1
+  for f in packages/ArbosFFI/ArbosFFIRust.xcframework packages/ArbosFFI/Sources/ArbosFFI/ArbosFFI.swift; do
+    [ -e "$repo/$f" ] && { mkdir -p "$dir/$(dirname $f)"; cp -R "$repo/$f" "$dir/$f"; }
+  done
+  say "warmtree $dir: $(git -C "$dir" log -1 --format=%h) + phase markers"
+}
+
 ALL="testLaunchToChatList testOpenLongGroup testOpenSmallDM testSwitchChats testScrollChatList testScrollLongChat testComposerTypeAndSend testSettingsSheet testMessageMenu testStreamingAnswer"
 
 case "${1:-}" in
@@ -325,5 +342,7 @@ case "${1:-}" in
     esac
     kill $WD 2>/dev/null
     release_all ;;
-  *) echo "usage: $0 run pass1|pass23|glass|only <tests>"; exit 1 ;;
+  warmtree)
+    warmtree "${2:?usage: $0 warmtree <dir>}" ;;
+  *) echo "usage: $0 run pass1|pass23|glass|only <tests> | warmtree <dir>"; exit 1 ;;
 esac
