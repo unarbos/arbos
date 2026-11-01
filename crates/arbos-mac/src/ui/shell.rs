@@ -223,8 +223,8 @@ struct CenterGeometry {
     /// slide it appears once the inset puts it at its resting spot (72 + 12
     /// from the window edge), after the sidebar's own disc has left the frame.
     show_sidebar_toggle: bool,
-    /// A slide is running: the transcript keeps `ChatSlide::start_width`
-    /// inside the live slot width (`ui::slide`).
+    /// A slide between capped widths is running: the transcript keeps
+    /// `ChatSlide::start_width`, centred in the live slot width (`ui::slide`).
     chat_slide: Option<(ChatSlide, f32)>,
 }
 
@@ -3530,9 +3530,9 @@ impl Shell {
         if has_pre {
             column = column.child(div().pt(px(header::metrics::HEIGHT)).children(pre));
         }
-        // While a neighbouring pane slides, the transcript keeps the width it
-        // had and is clipped/offset instead of re-measured per frame
-        // (`ui::slide`); the header and composer follow the live width.
+        // The transcript follows the live width while a neighbouring pane
+        // slides, except between capped widths, where it keeps the width it
+        // had and glides centred instead of being re-measured (`ui::slide`).
         let transcript = match chat_slide {
             Some((slide, live_width)) => slide::transcript_clip(slide, live_width, transcript),
             None => transcript,
