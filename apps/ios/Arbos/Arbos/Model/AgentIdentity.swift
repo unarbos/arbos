@@ -185,10 +185,18 @@ extension AppModel {
             p.avatarVersion = facts.version
             p.imageURL = agentPictureURL(id: projectId, imageKey: facts.imageKey, version: facts.version)
         }
-        for i in projects.indices where projects[i].id == projectId { write(&projects[i]) }
+        // Write through `@Published` only on a change: an `inout` pass publishes even when
+        // `write` leaves the copy as it was, and every poll reconciles every agent.
+        for i in projects.indices where projects[i].id == projectId {
+            var p = projects[i]
+            write(&p)
+            if p != projects[i] { projects[i] = p }
+        }
         for c in peopleChats.indices {
             for m in peopleChats[c].members.indices where peopleChats[c].members[m].isAgent && peopleChats[c].members[m].id == projectId {
-                if peopleChats[c].members[m].project != nil { write(&peopleChats[c].members[m].project!) }
+                guard var p = peopleChats[c].members[m].project else { continue }
+                write(&p)
+                if p != peopleChats[c].members[m].project { peopleChats[c].members[m].project = p }
             }
         }
     }
