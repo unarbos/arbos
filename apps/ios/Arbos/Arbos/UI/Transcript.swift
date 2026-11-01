@@ -223,29 +223,108 @@ enum MediaSender: Equatable {
     case agent(id: String?, handle: String, name: String?, avatar: String?)
 }
 
+/// One transcript row. The fields live in one immutable `Box`, so copying a row is one retain,
+/// and SwiftUI's compare of the row arrays (the `ForEach` data and the `rows` state, on every
+/// streamed token) is a pointer check for each row nobody rebuilt.
+///
+/// The box is never mutated: every setter makes a new box with the one field changed, so two
+/// rows can never share storage that one of them edits. Do not add an in-place
+/// (`isKnownUniquelyReferenced`) path; rows are built once and read many times.
 struct Row: Identifiable, Equatable {
-    var id: String
-    var messageId: Id
-    var role: Role
-    var kind: RowKind
+    private struct Fields: Equatable {
+        var id: String
+        var messageId: Id
+        var role: Role
+        var kind: RowKind
+        var reactions: [MessageReaction]
+        var replyCount: Int
+        var createdAt: Int64
+        var gapBefore: CGFloat
+        var runStart: Bool
+        var showsAvatar: Bool
+    }
+
+    private final class Box {
+        let fields: Fields
+        init(_ fields: Fields) { self.fields = fields }
+    }
+
+    private var box: Box
+
+    init(id: String, messageId: Id, role: Role, kind: RowKind, reactions: [MessageReaction] = [],
+         replyCount: Int = 0, createdAt: Int64 = 0, gapBefore: CGFloat = 0, runStart: Bool = true,
+         showsAvatar: Bool = true) {
+        box = Box(Fields(id: id, messageId: messageId, role: role, kind: kind, reactions: reactions,
+                         replyCount: replyCount, createdAt: createdAt, gapBefore: gapBefore,
+                         runStart: runStart, showsAvatar: showsAvatar))
+    }
+
+    private mutating func replace<T>(_ field: WritableKeyPath<Fields, T>, _ value: T) {
+        var fields = box.fields
+        fields[keyPath: field] = value
+        box = Box(fields)
+    }
+
+    /// The same box short-cuts to equal; anything else compares every field.
+    static func == (lhs: Row, rhs: Row) -> Bool {
+        lhs.box === rhs.box || lhs.box.fields == rhs.box.fields
+    }
+
+    /// Whether `==` against `other` takes the pointer short-cut (tests).
+    func sharesStorage(with other: Row) -> Bool { box === other.box }
+
+    var id: String {
+        get { box.fields.id }
+        set { replace(\.id, newValue) }
+    }
+    var messageId: Id {
+        get { box.fields.messageId }
+        set { replace(\.messageId, newValue) }
+    }
+    var role: Role {
+        get { box.fields.role }
+        set { replace(\.role, newValue) }
+    }
+    var kind: RowKind {
+        get { box.fields.kind }
+        set { replace(\.kind, newValue) }
+    }
     /// Emoji reactions shown under this bubble (stamped on the last prose/media row of a message).
-    var reactions: [MessageReaction] = []
+    var reactions: [MessageReaction] {
+        get { box.fields.reactions }
+        set { replace(\.reactions, newValue) }
+    }
     /// How many messages reply to this one via `replyTo` (long-press Reply); shown top-right when > 0.
-    var replyCount: Int = 0
+    var replyCount: Int {
+        get { box.fields.replyCount }
+        set { replace(\.replyCount, newValue) }
+    }
     /// The message's `createdAt` (ms), so the swipe-revealed time needs no lookup.
-    var createdAt: Int64 = 0
+    var createdAt: Int64 {
+        get { box.fields.createdAt }
+        set { replace(\.createdAt, newValue) }
+    }
     /// Space above this row (`Transcript.runGap` inside a sender run, `turnGap` where a
     /// new run starts, `systemGap` around system lines), fixed at build time so a row's
     /// layout does not depend on its position in the visible window.
-    var gapBefore: CGFloat = 0
+    var gapBefore: CGFloat {
+        get { box.fields.gapBefore }
+        set { replace(\.gapBefore, newValue) }
+    }
     /// The row's message starts a sender run (see `Transcript.runWindowMs`): its first
     /// bubble carries the name and the row above it opens the turn gap. A message that
     /// continues the run sits under the first one's text in the in-run gap.
-    var runStart: Bool = true
+    var runStart: Bool {
+        get { box.fields.runStart }
+        set { replace(\.runStart, newValue) }
+    }
     /// Draw the sender's avatar beside this row: once per run, on the last avatar-bearing
     /// row of the run's first message; every other row keeps the avatar column empty
     /// ([feedback grouped-messages-ios-2026-10-28]).
-    var showsAvatar: Bool = true
+    var showsAvatar: Bool {
+        get { box.fields.showsAvatar }
+        set { replace(\.showsAvatar, newValue) }
+    }
 }
 
 enum Transcript {

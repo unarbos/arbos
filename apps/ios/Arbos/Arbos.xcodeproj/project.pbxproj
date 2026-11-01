@@ -137,6 +137,7 @@
 		A1BC00000000000000000016 /* MessageActionsHitAreaTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BC00000000000000000015 /* MessageActionsHitAreaTests.swift */; };
 		A1BC00000000000000000008 /* ReactionCapsuleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BC00000000000000000007 /* ReactionCapsuleTests.swift */; };
 		A1BE00000000000000000002 /* LongTranscriptPerfTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BE00000000000000000001 /* LongTranscriptPerfTests.swift */; };
+		EC6500000000000000000002 /* RowStorageTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC6500000000000000000001 /* RowStorageTests.swift */; };
 		A15E00000000000000000002 /* HomeSearch.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15E00000000000000000001 /* HomeSearch.swift */; };
 		A15E00000000000000000004 /* HomeSearchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15E00000000000000000003 /* HomeSearchTests.swift */; };
 		A1C100000000000000000002 /* SenderNameRowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C100000000000000000001 /* SenderNameRowTests.swift */; };
@@ -384,6 +385,7 @@
 		A1BC00000000000000000015 /* MessageActionsHitAreaTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageActionsHitAreaTests.swift; sourceTree = "<group>"; };
 		A1BC00000000000000000007 /* ReactionCapsuleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReactionCapsuleTests.swift; sourceTree = "<group>"; };
 		A1BE00000000000000000001 /* LongTranscriptPerfTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LongTranscriptPerfTests.swift; sourceTree = "<group>"; };
+		EC6500000000000000000001 /* RowStorageTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RowStorageTests.swift; sourceTree = "<group>"; };
 		A15E00000000000000000001 /* HomeSearch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeSearch.swift; sourceTree = "<group>"; };
 		A15E00000000000000000003 /* HomeSearchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeSearchTests.swift; sourceTree = "<group>"; };
 		A1C100000000000000000001 /* SenderNameRowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SenderNameRowTests.swift; sourceTree = "<group>"; };
@@ -722,6 +724,7 @@
 				A1BC00000000000000000015 /* MessageActionsHitAreaTests.swift */,
 				A1BD00000000000000000001 /* NewMessageSheetTests.swift */,
 				A1BE00000000000000000001 /* LongTranscriptPerfTests.swift */,
+				EC6500000000000000000001 /* RowStorageTests.swift */,
 				A15E00000000000000000003 /* HomeSearchTests.swift */,
 				A1B5EA00000000000000A00B /* SearchIndexTests.swift */,
 				A1B5EA00000000000000A0F1 /* SearchSettingsTests.swift */,
@@ -1107,6 +1110,7 @@
 				A1BC00000000000000000016 /* MessageActionsHitAreaTests.swift in Sources */,
 				A1BD00000000000000000002 /* NewMessageSheetTests.swift in Sources */,
 				A1BE00000000000000000002 /* LongTranscriptPerfTests.swift in Sources */,
+				EC6500000000000000000002 /* RowStorageTests.swift in Sources */,
 				A15E00000000000000000004 /* HomeSearchTests.swift in Sources */,
 				A1B5EA00000000000000A00C /* SearchIndexTests.swift in Sources */,
 				A1B5EA00000000000000A0F2 /* SearchSettingsTests.swift in Sources */,
