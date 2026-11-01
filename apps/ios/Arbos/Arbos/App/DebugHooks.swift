@@ -245,6 +245,17 @@ enum DebugHooks {
     /// pans that moved the finger but never moved the transcript ("dropped") — to the `perf`
     /// log, plus a one-time dump of the gesture-recognizer graph under the first touch.
     static let perfTouch: Bool = value("ARBOS_PERF_TOUCH") == "1"
+    /// Rows a chat opens with before the window grows to `ChatSession.windowInitial`
+    /// (`ChatSession.windowFirstPaint`, default 24). The number trades frozen screen before
+    /// the push animation against how far a flick started during the push can run before the
+    /// window catches up, and both depend on bubble spacing — so the lane that changes the
+    /// spacing can re-measure it without a build.
+    static var perfFirstWindow: Int? { value("ARBOS_PERF_FIRST_WINDOW").flatMap { Int($0) } }
+    /// Milliseconds to hold the grow to `ChatSession.windowInitial` after the chat appears,
+    /// instead of the usual single main-queue hop. A hold longer than the push animation is
+    /// the only way to record a chat whose first-paint window is its ONLY layout before the
+    /// screen moves, which is what says whether a small first layout is worth anything.
+    static var perfFirstWindowHoldMs: Int? { value("ARBOS_PERF_FIRST_WINDOW_HOLD_MS").flatMap { Int($0) } }
     /// Scroll rig A/B: comma-separated gestures left out of the chat screen for this launch —
     /// `time` (transcript swipe-left time peek), `back` (the full-screen swipe-right back; the
     /// system edge pop is never off), `longpress` (bubble long-press menu).
