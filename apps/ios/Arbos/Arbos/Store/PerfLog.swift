@@ -4,6 +4,10 @@
 // frame and the summed time over budget — a main-thread hang shows up as one
 // long frame — and logs them with the footprint every 2 s:
 //
+// The link asks for the screen's top rate, so on a ProMotion phone it budgets against
+// 8.3 ms. These are Debug numbers: frame-rate and hitch figures for a fix come from
+// Instruments (Animation Hitches) on a Release build on a device, not from this log.
+//
 //   log show --predicate 'subsystem == "com.unarbos.arbos.ios" AND category == "perf"'
 
 #if DEBUG
@@ -51,6 +55,11 @@ final class PerfLog {
         guard DebugHooks.perfLog, !started else { return }
         started = true
         let link = CADisplayLink(target: self, selector: #selector(tick(_:)))
+        // Without a range the link is held to 60 Hz on ProMotion phones and a dropped
+        // 120 Hz frame never shows. Asking for 120 keeps the display at that rate while
+        // the rig runs, so frame numbers from this log are not battery-representative.
+        let maxFps = Float(UIScreen.main.maximumFramesPerSecond)
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: min(80, maxFps), maximum: maxFps, preferred: maxFps)
         link.add(to: .main, forMode: .common)
         self.link = link
         Self.log.notice("perf log on t=\(LaunchClock.msSinceLaunch())ms rss=\(Self.footprintMB())MB")
@@ -64,7 +73,9 @@ final class PerfLog {
             return
         }
         let frameMs = (now - lastTimestamp) * 1000
-        let nominalMs = link.duration * 1000
+        // `duration` is the screen's base period; the interval the link is actually
+        // driven at is `targetTimestamp - timestamp` (8.3 ms when ProMotion grants 120 Hz).
+        let nominalMs = (link.targetTimestamp - link.timestamp) * 1000
         frames += 1
         if scrollableArmedAt > 0, !scrollableLogged {
             smoothRun = frameMs < 33 ? smoothRun + 1 : 0
@@ -81,7 +92,7 @@ final class PerfLog {
         worstMs = max(worstMs, frameMs)
         guard now - windowStart >= 2 else { return }
         let counts = PerfCounters.drain()
-        Self.log.notice("frames=\(self.frames) dropped=\(self.dropped) worst=\(Int(self.worstMs))ms over_budget=\(Int(self.overBudgetMs))ms rss=\(Self.footprintMB())MB t=\(LaunchClock.msSinceLaunch())ms \(counts, privacy: .public)")
+        Self.log.notice("frames=\(self.frames) hz=\(Int((1000 / nominalMs).rounded())) dropped=\(self.dropped) worst=\(Int(self.worstMs))ms over_budget=\(Int(self.overBudgetMs))ms rss=\(Self.footprintMB())MB t=\(LaunchClock.msSinceLaunch())ms \(counts, privacy: .public)")
         frames = 0
         dropped = 0
         worstMs = 0
