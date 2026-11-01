@@ -3,7 +3,8 @@
 #   ios-gate.sh <branch> <sha>
 # Fetches the branch into ~/arbos-gate (its own clone, never the audit clone), checks out <sha>
 # detached, and builds the iPhone app twice (Release, then Debug; generic simulator, no signing). Prints the
-# compiler errors; exit 0 = both compile, 1 = one does not, 2 = infrastructure trouble (fetch/checkout).
+# compiler errors; exit 0 = both compile, 1 = one does not, 2 = infrastructure trouble (fetch, checkout, or a
+# rig that cannot run the suite — the poller retries those and records no verdict against the branch).
 set -uo pipefail
 
 # The embedded ArbosFFI framework is current when it carries the metadata symbol of the newest struct
@@ -34,13 +35,96 @@ new_test_errors() {
 # in 4 s, ≈ 1 min wall. A test red on MAIN is not the branch's fault: the failing set of the base main
 # head is cached per head (~/arbos-gate/.test-baseline/<sha>) — computed once on main's own tree when a
 # new head appears — and only failures outside that baseline fail the half (the #1843 / known-red rule).
-TEST_SIM_NAME="${ARBOS_GATE_TEST_SIM:-iPhone 17}"
+#
+# Two operator overrides, both one-line files in ~/arbos-gate, because the poller launches this over
+# ssh and no environment of yours reaches it. Both are named in the failure message, so whoever meets
+# a rig that cannot test at 3am does not have to read this script to find them:
+#   .test-sim        the simulator to run on, when the rig has no device under the default name.
+#                    Stands until removed. ARBOS_GATE_TEST_SIM does the same for a hand-run gate.
+#   .allow-untested  one line of reason. Lets ONE run ship a branch the rig could not test, then is
+#                    consumed, so the next branch is gated normally. The reason is printed into the
+#                    gate output, which the poller posts on the issue.
+SIM_PIN="$HOME/arbos-gate/.test-sim"
+ALLOW_UNTESTED="$HOME/arbos-gate/.allow-untested"
+TEST_SIM_NAME="${ARBOS_GATE_TEST_SIM:-$(head -n 1 "$SIM_PIN" 2>/dev/null)}"
+TEST_SIM_NAME="${TEST_SIM_NAME:-iPhone 17}"
 BASELINE_DIR="$HOME/arbos-gate/.test-baseline"
+# The target run_suite selects. Named once so the xcodebuild flag and the "0 tests" message cannot drift.
+TEST_ONLY=ArbosTests
+
+# xcodebuild reports a test case in one of two shapes and this gate has to read both.
+#   Xcode 27 running a target in parallel clones, which is what ArbosTests is:
+#     Test case 'PinPolicyTests.testAMemberCannotPin()' passed on 'Clone 1 of iPhone 17 - Arbos (41549)' (0.001 seconds)
+#   The older serial reporter, which ArbosUITests still uses:
+#     Test Case '-[ArbosTests.PinPolicyTests testAMemberCannotPin]' passed (0.001 seconds).
+# The wording, the capitalisation and the brackets all differ, so a parser written for one
+# matches nothing in the other. Do NOT key anything on the `Executed N tests` summary: the
+# parallel reporter never prints it. In a 10,713-line hosted log of a run that passed, all
+# 507 ArbosTests cases were the first shape with no summary of their own, and the only eight
+# `Executed N tests` lines in the file belonged to the 33 UI tests. On the gate Mac, where
+# run_suite selects ArbosTests alone, there is no such line at all — asserting on it reported
+# a six-case run that genuinely passed as a run of nothing
+# (store note internal/xcodebuild-test-count-detection.md, 2026-10-30 20:13).
+# test_cases <log> <passed|failed> → one "Class/test" per matching case, sorted, unique.
+# Both shapes normalise to "Class/test", which is what the known-red baseline files hold.
+test_cases() {
+  local log=$1 want=$2
+  {
+    grep -E "^Test case '[A-Za-z0-9_]+\.[A-Za-z0-9_]+\(\)' $want " "$log" 2>/dev/null \
+      | sed -E "s/^Test case '([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)\(\)' $want .*/\1\/\2/"
+    grep -E "^Test Case '-\[([A-Za-z0-9_]+\.)?[A-Za-z0-9_]+ [A-Za-z0-9_]+\]' $want" "$log" 2>/dev/null \
+      | sed -E "s/^Test Case '-\[([A-Za-z0-9_]+\.)?([A-Za-z0-9_]+) ([A-Za-z0-9_]+)\]' $want.*/\2\/\3/"
+  } | sort -u
+}
 
 # failing_tests <xcodebuild log> → "Class/test" per failing test, sorted.
 failing_tests() {
-  grep -E "^Test Case '-\[ArbosTests\.[A-Za-z0-9_]+ [A-Za-z0-9_]+\]' failed" "$1" 2>/dev/null \
-    | sed -E "s/^Test Case '-\[ArbosTests\.([A-Za-z0-9_]+) ([A-Za-z0-9_]+)\]' failed.*/\1\/\2/" | sort -u
+  test_cases "$1" failed
+}
+
+# test_run_state <xcodebuild log> → "<state> <passed> <failed>". The point of the state is to
+# keep "I read this log and it ran nothing" apart from "I could not read this log", because
+# the second is a parser that has fallen behind the toolchain and must not be reported as a
+# suite of zero tests — that mistake looks exactly like a test regression.
+#   ran        case lines are there, so the counts mean what they say
+#   none       the run finished and says in so many words that it selected no test
+#   unreadable the run finished, but carries no case line of either known shape: either it
+#              selected nothing in a way this toolchain does not spell out, or the per-case
+#              wording has changed again and test_cases needs updating. Never silently zero.
+#   incomplete no verdict banner at all — the run did not get that far (no simulator, a
+#              watchdog kill before the end). Infrastructure, handled by the caller as before.
+test_run_state() {
+  local log=$1 passed failed
+  passed=$(test_cases "$log" passed | grep -c .)
+  failed=$(test_cases "$log" failed | grep -c .)
+  if (( passed + failed > 0 )); then
+    echo "ran $passed $failed"
+  elif ! grep -qE '\*\* TEST (SUCCEEDED|FAILED|EXECUTE FAILED) \*\*' "$log" 2>/dev/null; then
+    echo "incomplete 0 0"
+  elif grep -qE "Executed 0 test|Test Suite 'Selected tests'" "$log" 2>/dev/null; then
+    echo "none 0 0"
+  else
+    echo "unreadable 0 0"
+  fi
+}
+
+# run_verdict <xcodebuild log> → passed | failed | none. Both the watchdog below and run_suite's
+# exit code read this one function, so the banners live in one place.
+# `** TEST FAILED **` is the banner a plain test failure prints, and on a unit-only run it is the
+# only verdict there is: the parallel reporter writes no `Test Suite 'All tests'` block at all
+# (in the hosted log that block spans lines 4759-10065 and covers the UI target alone, closing on
+# `Executed 33 tests`, while the 507 unit cases start at line 10066 after a bare `Testing
+# started`). While that literal was missing from the alternation, a failing unit run never
+# registered as finished and burned the whole TEST_RUN_MAX_S before the watchdog killed it —
+# fifteen minutes of a contended Mac, on exactly the runs someone is waiting for.
+run_verdict() {
+  if grep -qE "Test Suite 'All tests' passed|\*\* TEST SUCCEEDED \*\*" "$1" 2>/dev/null; then
+    echo passed
+  elif grep -qE "Test Suite 'All tests' failed|\*\* TEST (FAILED|EXECUTE FAILED) \*\*" "$1" 2>/dev/null; then
+    echo failed
+  else
+    echo none
+  fi
 }
 
 test_sim_udid() {
@@ -52,19 +136,29 @@ run_suite() {
   local dd="$1" log="$2" xctestrun udid
   xctestrun=$(ls -t "$dd"/Build/Products/*.xctestrun 2>/dev/null | head -n 1)
   udid=$(test_sim_udid)
-  [[ -n "$xctestrun" && -n "$udid" ]] || { echo "no xctestrun or no simulator '$TEST_SIM_NAME'" >"$log"; return 2; }
+  # Write what the rig actually offers, not only what is missing: the hosted runner hit the same
+  # fault on 2026-10-30 (runs 41114348485, 41116429834) and its log named the device list, which is
+  # what told us CoreSimulator had no device at all rather than one under a different name.
+  if [[ -z "$xctestrun" || -z "$udid" ]]; then
+    { echo "no xctestrun or no simulator '$TEST_SIM_NAME'"
+      echo "xctestrun: ${xctestrun:-none under $dd/Build/Products}"
+      echo "simulators this rig offers (xcrun simctl list devices available):"
+      xcrun simctl list devices available 2>&1 | head -n 25
+    } >"$log"
+    return 2
+  fi
   xcrun simctl bootstatus "$udid" -b >/dev/null 2>&1
   # xcodebuild sometimes never exits after the suite has finished (06:23 Oct 26: 222 tests done, the
   # process idle on the main thread 8 min later). Run it in the background and stop it once the log
   # carries the suite verdict (plus a 20 s grace for the result bundle), or after TEST_RUN_MAX_S.
   xcodebuild test-without-building -xctestrun "$xctestrun" \
     -destination "platform=iOS Simulator,id=$udid" -parallel-testing-enabled NO \
-    -only-testing:ArbosTests >"$log" 2>&1 &
+    "-only-testing:$TEST_ONLY" >"$log" 2>&1 &
   local pid=$! t0 done_at=0 now
   t0=$(date +%s)
   while kill -0 "$pid" 2>/dev/null; do
     now=$(date +%s)
-    if (( done_at == 0 )) && grep -qE "Test Suite 'All tests' (passed|failed)|\*\* TEST (EXECUTE FAILED|SUCCEEDED) \*\*" "$log" 2>/dev/null; then
+    if (( done_at == 0 )) && [[ "$(run_verdict "$log")" != none ]]; then
       done_at=$now
     fi
     if (( done_at > 0 && now - done_at > 20 )) || (( now - t0 > TEST_RUN_MAX_S )); then
@@ -76,9 +170,11 @@ run_suite() {
   done
   wait "$pid" 2>/dev/null
   # The verdict line, not xcodebuild's exit code, decides: a watchdog kill after a complete run is a pass/fail by the log.
-  grep -qE "Test Suite 'All tests' passed|\*\* TEST SUCCEEDED \*\*" "$log" && return 0
-  grep -qE "Test Suite 'All tests' failed|\*\* TEST EXECUTE FAILED \*\*" "$log" && return 65
-  return 70
+  case "$(run_verdict "$log")" in
+    passed) return 0 ;;
+    failed) return 65 ;;
+    *) return 70 ;;
+  esac
 }
 TEST_RUN_MAX_S="${TEST_RUN_MAX_S:-900}"
 
@@ -110,17 +206,80 @@ baseline_for() {
 }
 
 run_unit_tests() {
-  local log t0 fails base baseline new
+  local log t0 fails state passed base baseline new
   log=$(mktemp -t ios-gate-tests); t0=$(date +%s)
   run_suite "$HOME/arbos-gate-dd-Debug" "$log"
   local trc=$?
   fails=$(failing_tests "$log")
+  read -r state passed _ <<< "$(test_run_state "$log")"
+  # Three of the four states carry no test case at all, and they are decided together: a branch
+  # that no test ran against has not been checked, so none of them may report a pass. Each one
+  # still gets its own words, because they are repaired in three different places.
+  case "$state" in
+    unreadable)
+      # A finished run whose cases this script cannot find is a parser problem, and saying so is the
+      # whole point of the state: the alternative is calling it zero tests, which reads as a suite
+      # that never ran and sends the next person looking at the branch instead of at this file.
+      echo "== tests: FAIL — the run finished but no test case line of a shape this gate knows is in"
+      echo "   its log, so it cannot tell a suite that passed from one that never ran. Either"
+      echo "   -only-testing:$TEST_ONLY selected nothing, or xcodebuild's per-case wording changed"
+      echo "   again and test_cases() needs the new shape (see its comment for the two it reads)."
+      tail -n 8 "$log" | cut -c1-200
+      rm -f "$log"; return 1 ;;
+    none)
+      # xcodebuild exits 0 and prints "** TEST SUCCEEDED **" when -only-testing matches no test in
+      # the .xctestrun, so the verdict line cannot see it (2026-10-30: a rig built the app, ran 0
+      # tests and reported success because a new ArbosUITests file was never added to project.pbxproj,
+      # so it compiled into no bundle).
+      echo "== tests: FAIL — the suite finished but ran no test (rc=$trc); -only-testing:$TEST_ONLY"
+      echo "   matched nothing in the .xctestrun. Check that $TEST_ONLY is a target of the Arbos scheme's"
+      echo "   Test action and that every test file is a member of it in project.pbxproj."
+      tail -n 8 "$log" | cut -c1-200
+      rm -f "$log"; return 1 ;;
+    incomplete)
+      # No verdict banner at all: the suite never started, so nothing was checked. The cause is the
+      # rig (no simulator named TEST_SIM_NAME, no .xctestrun, a kill before the first case), never the
+      # branch — which is why this returns 2 and not 1. Two is the gate's infrastructure code, like a
+      # failed fetch: rust-gate.sh reports `infra`, the poller retries on the next tick, no verdict is
+      # recorded and no issue is told its branch failed. What it must never do again is return 0. It
+      # did until 2026-10-30, printing "could not run — not blamed" on a pass, which let a branch no
+      # test ran against merge as if it had been tested. The hosted runner met the same empty
+      # simulator set three times that day (runs 41081201116, 41114348485, 41116429834) and went red
+      # for it; the gate waved it through.
+      if [[ -f "$ALLOW_UNTESTED" ]]; then
+        local why; why=$(head -n 1 "$ALLOW_UNTESTED"); rm -f "$ALLOW_UNTESTED"
+        echo "== tests: NOT RUN (rc=$trc) and shipped anyway on the operator's one-shot override"
+        echo "   ($ALLOW_UNTESTED, now consumed): ${why:-no reason given}"
+        echo "   This branch merges WITHOUT a test run. The next branch is gated normally."
+        tail -n 12 "$log" | cut -c1-200
+        rm -f "$log"; return 0
+      fi
+      # Every line of the repair starts with "== ", because that is the only shape rust-gate.sh's
+      # `status` forwards to the poller (`grep -E "^== "`). An indented continuation line is dropped
+      # on the way out and the operator would have to be on the Mac to read it — which is exactly
+      # the person we do not have at 3am.
+      echo "== tests: NOT RUN — the suite never reached a verdict (rc=$trc), so this branch was NOT checked."
+      echo "== tests: the rig could not test. That is not the branch's fault and it is not a pass: the gate"
+      echo "== tests: reports infrastructure, the poller retries, and nothing merges untested meanwhile."
+      echo "== rig fix, on the gate Mac (ssh via the relay host, docs/process-rules.md), in this order:"
+      echo "== rig fix: 1. xcrun simctl list devices available | grep -F '$TEST_SIM_NAME'"
+      echo "== rig fix:    it is listed? nothing to repair, the retry will pass. Stop here."
+      echo "== rig fix: 2. no device of any name? CoreSimulator is sick. Restart it:"
+      echo "== rig fix:    sudo killall -9 com.apple.CoreSimulator.CoreSimulatorService"
+      echo "== rig fix: 3. devices under other names? pin one: echo '<device name>' > $SIM_PIN"
+      echo "== rig fix: 4. a hotfix must ship now? allow ONE untested run, consumed by it:"
+      echo "== rig fix:    echo '<your name>: <why>' > $ALLOW_UNTESTED"
+      echo "== rig fix: 5. none of those? escalate: items stay gating and the merge queue stops draining."
+      tail -n 12 "$log" | cut -c1-200 | sed 's/^/== rig: /'
+      rm -f "$log"; return 2 ;;
+  esac
   if [[ "$trc" -eq 0 && -z "$fails" ]]; then
-    echo "== tests: $(grep -oE 'Executed [0-9]+ tests' "$log" | tail -n 1 | tr -d '\n') pass ($(( $(date +%s) - t0 )) s)"
+    echo "== tests: $passed passed ($(( $(date +%s) - t0 )) s)"
     rm -f "$log"; return 0
   fi
   if [[ -z "$fails" ]]; then
-    # xcodebuild failed without a single failing test case: simulator / infrastructure trouble, not the branch.
+    # The suite ran cases and not one of them failed, yet xcodebuild still returned non-zero (a crash
+    # after the last case, a watchdog kill once the verdict was in): infrastructure, not the branch.
     echo "== tests: could not run (rc=$trc, no test case failed) — not blamed; tail:"
     tail -n 8 "$log" | cut -c1-200
     rm -f "$log"; return 0
@@ -140,6 +299,11 @@ run_unit_tests() {
   fi
   echo "== tests: FAIL — failing and NOT red on main (${base:0:8}):"
   printf '%s\n' "$new" | head -20
+  # Supplementary assertion text, never the blame: this shape is printed only by the serial reporter,
+  # which is what run_suite gets because it runs with parallelisation off. A parallel-clone failure
+  # prints no `error:` line at all, so a gate that counted these would report fewer failures than
+  # there are — hosted run 41239073951 announced three of its four that way. The names above come
+  # from the per-case tally, which reads both shapes, and they are what decides.
   grep -E "error: -\[ArbosTests\." "$log" | sed 's#/Users/[^/]*/arbos-gate/##' | head -20 | cut -c1-300
   rm -f "$log"; return 1
 }
@@ -175,7 +339,90 @@ if [[ "${1:-}" == "selftest" ]]; then
   else
     echo "selftest: failing-test parser WRONG — got: $(failing_tests "$tlog")"; rm -f "$tlog"; exit 1
   fi
+  # The run-state reader is what keeps a passing suite from being reported as a suite that never
+  # ran, so it is pinned to lines copied out of real logs: the parallel shape from the gate Mac's
+  # Xcode 27, the serial shape, a run that selected nothing, and a finished run in neither shape.
+  printf '%s\n' "Test case 'PinPolicyTests.testAdminsPolicyRefusesAPlainMember()' passed on 'Clone 1 of iPhone 17 - Arbos (41549)' (0.001 seconds)" \
+                 "Test case 'PinPolicyTests.testAMemberCannotPin()' failed on 'Clone 1 of iPhone 17 - Arbos (41549)' (0.002 seconds)" \
+                 "** TEST FAILED **" > "$tlog"
+  parallel="$(test_run_state "$tlog") $(failing_tests "$tlog")"
+  printf '%s\n' "Test Case '-[ArbosTests.PinPolicyTests testAdminsPolicyRefusesAPlainMember]' passed (0.001 seconds)." \
+                 "Test Case '-[ArbosTests.PinPolicyTests testAMemberCannotPin]' failed (0.002 seconds)." \
+                 "	 Executed 2 tests, with 1 failure (0 unexpected) in 0.003 (0.004) seconds" \
+                 "** TEST FAILED **" > "$tlog"
+  serial="$(test_run_state "$tlog") $(failing_tests "$tlog")"
+  printf '%s\n' "Test Suite 'Selected tests' passed at 2026-10-30 17:24:31.002." \
+                 "	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds" \
+                 "** TEST SUCCEEDED **" > "$tlog"
+  selected_nothing=$(test_run_state "$tlog")
+  printf '%s\n' "Test thing 'PinPolicyTests.whatever' went fine on some future runner" \
+                 "** TEST SUCCEEDED **" > "$tlog"
+  future=$(test_run_state "$tlog")
+  printf '%s\n' "no xctestrun or no simulator 'iPhone 17'" > "$tlog"
+  no_run=$(test_run_state "$tlog")
+  if [[ "$parallel" == "ran 1 1 PinPolicyTests/testAMemberCannotPin" \
+     && "$serial" == "ran 1 1 PinPolicyTests/testAMemberCannotPin" \
+     && "$selected_nothing" == "none 0 0" && "$future" == "unreadable 0 0" && "$no_run" == "incomplete 0 0" ]]; then
+    echo "selftest: run-state reader counts cases in both shapes and separates none / unreadable / incomplete"
+  else
+    echo "selftest: run-state reader WRONG — parallel '$parallel', serial '$serial', selected-nothing"
+    echo "          '$selected_nothing', future '$future', no-run '$no_run'"; rm -f "$tlog"; exit 1
+  fi
+  # run_verdict decides both the watchdog's "is it finished" and run_suite's exit code, so a banner
+  # missing from it costs the whole TEST_RUN_MAX_S. The first case is the one that was missing:
+  # a unit-only run that failed, whose only verdict is "** TEST FAILED **".
+  printf '%s\n' "Test case 'PinPolicyTests.testAMemberCannotPin()' failed on 'Clone 1 of iPhone 17 - Arbos (41549)' (0.002 seconds)" \
+                 "Test suite 'PinPolicyTests' failed on 'Clone 1 of iPhone 17 - Arbos (41549)'" \
+                 "** TEST FAILED **" > "$tlog"
+  unit_failed=$(run_verdict "$tlog")
+  printf '%s\n' "Test case 'PinPolicyTests.testAMemberCannotPin()' passed on 'Clone 1 of iPhone 17 - Arbos (41549)' (0.001 seconds)" \
+                 "** TEST SUCCEEDED **" > "$tlog"
+  unit_passed=$(run_verdict "$tlog")
+  printf '%s\n' "Test Suite 'All tests' failed at 2026-10-30 17:20:06.520." > "$tlog"
+  suite_failed=$(run_verdict "$tlog")
+  printf '%s\n' "** TEST EXECUTE FAILED **" > "$tlog"
+  execute_failed=$(run_verdict "$tlog")
+  printf '%s\n' "Test case 'PinPolicyTests.testAMemberCannotPin()' passed on 'Clone 1 of iPhone 17 - Arbos (41549)' (0.001 seconds)" > "$tlog"
+  unfinished=$(run_verdict "$tlog")
+  if [[ "$unit_failed" == "failed" && "$unit_passed" == "passed" && "$suite_failed" == "failed" \
+     && "$execute_failed" == "failed" && "$unfinished" == "none" ]]; then
+    echo "selftest: run_verdict reads a unit-only run's banner, so the watchdog sees it finish"
+  else
+    echo "selftest: run_verdict WRONG — unit-failed '$unit_failed', unit-passed '$unit_passed', suite-failed"
+    echo "          '$suite_failed', execute-failed '$execute_failed', unfinished '$unfinished'"; rm -f "$tlog"; exit 1
+  fi
   rm -f "$tlog"
+  # The decision itself, not only the reader. Stub the suite with the logs that reach run_unit_tests
+  # without a single case line and check each verdict: the rig that cannot test is infrastructure (2),
+  # a finished run that selected nothing is the branch's (1), and neither is ever a pass. Until
+  # 2026-10-30 the first of the two printed "not blamed" and returned 0 on zero tests.
+  # ALLOW_UNTESTED is pointed at a scratch file here: a selftest must not eat an override an operator
+  # has armed for the next gate run.
+  no_sim() { run_suite() { printf '%s\n' "no xctestrun or no simulator '$TEST_SIM_NAME'" >"$2"; return 2; }; }
+  no_sim_rc=0
+  ( no_sim; ALLOW_UNTESTED=/nonexistent/no-override-armed
+    run_unit_tests >/dev/null 2>&1 ) || no_sim_rc=$?
+  nothing_rc=0
+  ( run_suite() { printf '%s\n' "Test Suite 'Selected tests' passed at 2026-10-30 17:24:31.002." \
+                                "** TEST SUCCEEDED **" >"$2"; return 0; }
+    run_unit_tests >/dev/null 2>&1 ) || nothing_rc=$?
+  if (( no_sim_rc == 2 && nothing_rc == 1 )); then
+    echo "selftest: a run that executed no test never passes — untestable rig 2 (retried), nothing selected 1"
+  else
+    echo "selftest: WRONG — untestable rig returned $no_sim_rc (want 2), selected-nothing returned"
+    echo "          $nothing_rc (want 1); a 0 there is a pass for a branch no test ran against"; exit 1
+  fi
+  # The operator's escape hatch has to work on the night it is needed, and has to be one-shot.
+  allow=$(mktemp -t ios-gate-allow); echo "selftest: pretending to be the operator" >"$allow"
+  armed_rc=0
+  ( no_sim; ALLOW_UNTESTED="$allow"; run_unit_tests >/dev/null 2>&1 ) || armed_rc=$?
+  if (( armed_rc == 0 )) && [[ ! -f "$allow" ]]; then
+    echo "selftest: .allow-untested ships one untested run and is consumed by it"
+  else
+    echo "selftest: WRONG — armed override returned $armed_rc (want 0) and the file is"
+    echo "          $([[ -f "$allow" ]] && echo "still there (want consumed)" || echo "gone")"; rm -f "$allow"; exit 1
+  fi
+  rm -f "$allow"
   [[ -n "$(test_sim_udid)" ]] && echo "selftest: test simulator '$TEST_SIM_NAME' present ($(test_sim_udid))" || { echo "selftest: test simulator '$TEST_SIM_NAME' MISSING"; exit 1; }
   # The scheme must build the unit-test target in its Test action, or build-for-testing checks nothing.
   scheme=$HOME/arbos-gate/apps/ios/Arbos/Arbos.xcodeproj/xcshareddata/xcschemes/Arbos.xcscheme
@@ -350,7 +597,13 @@ if [[ "$rc" -eq 0 ]]; then
   trc=$?
   if [[ "$trc" -eq 0 ]]; then
     echo "== tests: compile"
-    run_unit_tests || rc=1
+    # 2 keeps its meaning all the way out: infrastructure, retried, never a verdict on the branch.
+    run_unit_tests; urc=$?
+    case "$urc" in
+      0) ;;
+      2) rc=2 ;;
+      *) rc=1 ;;
+    esac
   else
     echo "== tests: FAIL to compile (ArbosTests)"
     branch_errs=$(test_error_set "$log")

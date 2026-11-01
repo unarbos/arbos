@@ -58,7 +58,10 @@ end
 # whole output goes to build/xcodebuild-<name>.log; the console gets the
 # `error:` lines and the verdict. `pipefail` keeps xcodebuild's exit status
 # (not tee's), and a failure stops the lane with the error count.
-def xcodebuild_logged(name, command)
+# `on_failure` lets a lane report the failure in its own vocabulary before the generic message is
+# raised. The `test` lane uses it because an error count is the wrong reading for a test run; if the
+# hook declines to raise (no failing case, so the build itself broke) the generic message still runs.
+def xcodebuild_logged(name, command, on_failure: nil)
   log = "#{out_dir}/xcodebuild-#{name}.log"
   UI.message("xcodebuild #{name}: full output in #{log}")
   failed = false
@@ -66,7 +69,17 @@ def xcodebuild_logged(name, command)
   lines = File.exist?(log) ? File.readlines(log) : []
   lines.grep(/error:|\*\* (BUILD|ARCHIVE|EXPORT) (SUCCEEDED|FAILED)/).uniq.each { |line| UI.message(line.chomp) }
   if failed
+    # Diagnostic only. This count must never feed the pass decision. Across the 527 green gate
+    # runs retained on 2026-11-01, 12 carry exactly one `error:` line while 0 have any case
+    # reporting failed, and every one of the 12 is the same recovered transient —
+    # `FBSOpenApplicationServiceErrorDomain Code=1, "Simulator device failed to launch"`. So
+    # wiring this count into the verdict would manufacture twelve false reds out of runs whose
+    # per-case tally was correct. It is safe today only by control flow: the count is taken
+    # inside this `if failed`, so a zero exit never computes it at all. Move it out, or compare
+    # it against anything, and that stops being true
+    # (store note internal/2381-first-live-gate-verdict.md).
     errors = lines.grep(/error:/).uniq
+    on_failure&.call(log, errors)
     UI.user_error!("xcodebuild #{name} failed (#{errors.size} error lines, see #{log})")
   end
   log
@@ -116,6 +129,111 @@ def require_xcframework!
   )
 end
 
+# xcodebuild reports a test case in one of two shapes, and both appear in one `test` log
+# because the two targets run differently:
+#   ArbosTests, in parallel clones on Xcode 27 —
+#     Test case 'PinPolicyTests.testAMemberCannotPin()' passed on 'Clone 1 of iPhone 17 - Arbos (90505)' (0.001 seconds)
+#   ArbosUITests, serial —
+#     Test Case '-[ArbosUITests.BackSwipeUITests testAgentChatEdgeSwipeGoesHome]' passed (42.807 seconds).
+# Count cases, never the `Executed N tests` summary and never the `error:` lines: the parallel
+# reporter prints neither, for a pass or for a failure. A 10,713-line log of a run that passed held
+# 507 parallel cases with no summary of their own and eight `Executed N tests` lines, all of them
+# from the 33 UI tests (store note internal/xcodebuild-test-count-detection.md).
+TEST_CASE_PARALLEL = /^Test case '([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)\(\)' (passed|failed)/
+TEST_CASE_SERIAL = /^Test Case '-\[(?:[A-Za-z0-9_]+\.)?([A-Za-z0-9_]+) ([A-Za-z0-9_]+)\]' (passed|failed)/
+
+# test_cases(body) → { "Suite/test" => "passed" | "failed" }, read from both shapes and normalised
+# to the "Suite/test" form the gate's known-red baseline files already hold. A case seen more than
+# once keeps "failed", so a retry cannot turn a failure into a pass.
+def test_cases(body)
+  found = {}
+  body.each_line do |line|
+    m = TEST_CASE_PARALLEL.match(line) || TEST_CASE_SERIAL.match(line)
+    next if m.nil?
+    name = "#{m[1]}/#{m[2]}"
+    found[name] = m[3] unless found[name] == "failed"
+  end
+  found
+end
+
+# failing_cases(log) → the names of every case that reported failed, in either shape, sorted.
+def failing_cases(log)
+  test_cases(File.exist?(log) ? File.read(log) : "").select { |_, outcome| outcome == "failed" }.keys.sort
+end
+
+# A test run that executed nothing is not a pass. xcodebuild exits 0 and prints no `error:`
+# line when the selected tests do not exist, when a bundle was built without its sources, or
+# when the scheme's Test action has no target, so neither xcodebuild_logged's exit status nor
+# its error count can see it (2026-10-30: a rig reported success on 0 tests because a new file
+# was never added to project.pbxproj, so it compiled into no bundle). `selection` names what
+# to look at first. A finished run with no case line of either shape is reported as what it
+# is — a log this lane cannot read — and not as a run of zero tests: calling a toolchain
+# change "no tests ran" points the next person at the branch instead of at this file.
+def require_tests_ran!(log, selection)
+  body = File.exist?(log) ? File.read(log) : ""
+  return if test_cases(body).any?
+  if body.match?(/Executed 0 test|Test Suite 'Selected tests'/)
+    UI.user_error!(
+      "#{selection} ran no test (see #{log}) — check that the scheme's Test action " \
+      "builds the test target and that every test file is a member of it in project.pbxproj"
+    )
+  else
+    UI.user_error!(
+      "cannot tell whether #{selection} ran any test (see #{log}): the log carries no test " \
+      "case line of a shape this lane knows. Either nothing was selected, or xcodebuild's " \
+      "per-case wording changed and TEST_CASE_PARALLEL / TEST_CASE_SERIAL need the new shape."
+    )
+  end
+end
+
+# The console's `error:` count is not the failure count on this toolchain, and the two readings are
+# not even correlated. Measured on run 41239073951 (head 4c2db3338): `xcodebuild_logged` announced
+# `xcodebuild test failed (3 error lines)` and named three ArbosUITests cases, and there were FOUR
+# failures. The fourth was a unit case, HomeListFilterTests/
+# testTheWiderRowStillFitsEveryPhoneAtTheDefaultTextSize, 11,989 lines into the artifact with
+# nothing pointing at it.
+#
+# The reason is the shape, not a regex that slipped. ArbosUITests runs serially, and a failure
+# there prints a `File.swift:NN: error: …` line and an `Executed N tests, with M failures` summary.
+# ArbosTests runs on parallel clones, and a failure there prints NEITHER. So the `lines.grep(/error:/)`
+# in `xcodebuild_logged` is structurally incapable of counting a unit failure; it is not that it
+# missed one. The `** TEST FAILED **` banner was there, and no failing-test list printed at all.
+#
+# The rule, therefore: the per-case tally is the count that holds, and a disagreement between the
+# two readings is itself reported rather than smoothed over. A gate that quietly prefers the
+# smaller number is how four failures were announced as three.
+def report_failing_cases!(log, error_lines)
+  failed = failing_cases(log)
+  # No case reported failed, so this is not a test failure — the caller reports the build error.
+  return if failed.empty?
+  UI.error("Failing tests: (#{failed.size})")
+  failed.each { |name| UI.error("  #{name}") }
+  disagreement =
+    if error_lines.size == failed.size
+      ""
+    else
+      " The console showed #{error_lines.size} `error:` line(s) for #{failed.size} failing case(s); " \
+        "they disagree because a parallel-clone failure prints no `error:` line, and the tally is " \
+        "the reading that holds."
+    end
+  UI.user_error!(
+    "#{failed.size} test case(s) failed: #{failed.join(', ')}.#{disagreement} See #{log}."
+  )
+end
+
+# The same rule with the signs reversed, and the more dangerous direction. xcodebuild exited 0, so
+# nothing downstream would look again; if a case still reports failed, the tally wins and the lane
+# fails. This is the shape a silent pass would take once the banner and the exit status agree with
+# each other and not with the cases.
+def require_no_failing_case!(log)
+  failed = failing_cases(log)
+  return if failed.empty?
+  UI.user_error!(
+    "xcodebuild exited 0 but #{failed.size} test case(s) report failed: #{failed.join(', ')} " \
+    "(see #{log}). The per-case tally is the reading that holds."
+  )
+end
+
 def report_arbosffi_size(archive_path)
   fw = "#{archive_path}/Products/Applications/Arbos.app/Frameworks/ArbosFFI.framework"
   UI.user_error!("archive embeds no ArbosFFI.framework at #{fw}") unless File.directory?(fw)
@@ -146,10 +264,13 @@ platform :ios do
   desc "Run ArbosTests on the iOS simulator (no signing); requires packages/ArbosFFI"
   lane :test do
     require_xcframework!
-    xcodebuild_logged("test",
+    log = xcodebuild_logged("test",
       "cd .. && xcodebuild test -project #{PROJECT} -scheme #{SCHEME} -configuration Debug " \
       "-destination 'platform=iOS Simulator,name=iPhone 17' -derivedDataPath '#{out_dir}/dd' #{spm_flags}" \
-      "CODE_SIGNING_ALLOWED=NO")
+      "CODE_SIGNING_ALLOWED=NO",
+      on_failure: ->(path, errors) { report_failing_cases!(path, errors) })
+    require_tests_ran!(log, "the Test action of scheme #{SCHEME} (no -only-testing filter)")
+    require_no_failing_case!(log)
   end
 
   desc "Unsigned Release archive (what CI keeps even when no Apple secret is set)"
