@@ -1871,7 +1871,8 @@ final class AppModel: ObservableObject {
         do {
             let result = try await api.registry()
             let items = result.projects
-            registryError = nil
+            // The 15 s poll: a write that changes nothing still publishes to every subscriber.
+            if registryError != nil { registryError = nil }
             let previousProjects = projects
             let previousChatsMap = chats
             var newProjects: [Project] = []
@@ -1917,8 +1918,9 @@ final class AppModel: ObservableObject {
                     newProjects[i].workspace = prev.workspace
                 }
             }
-            projects = newProjects.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-            chats = newChats
+            let sortedProjects = newProjects.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            if sortedProjects != projects { projects = sortedProjects }
+            if newChats != chats { chats = newChats }
             reconcileAgentAvatars()
             reconcileArchivedProjects(newProjects)
             saveRegistryCache()
@@ -3040,14 +3042,14 @@ final class AppModel: ObservableObject {
         do {
             let raw = try await api.peopleChatsJSON()
             let list = raw.compactMap(PeopleChat.parse)
-            peopleChats = list
+            if list != peopleChats { peopleChats = list }
             reconcileAgentAvatars()
             reconcileArchivedPeople(list)
-            for c in list where c.unread { peopleUnread.insert(c.id) }
-            for c in list where !c.unread && visibleChatId != c.id {
+            for c in list where c.unread && !peopleUnread.contains(c.id) { peopleUnread.insert(c.id) }
+            for c in list where !c.unread && visibleChatId != c.id && peopleUnread.contains(c.id) {
                 // Loro can mark unread before the people list's head_seq catches up;
                 // keep the blue circle while the latest row is still incoming.
-                if peopleUnread.contains(c.id), let last = messages[c.id]?.last,
+                if let last = messages[c.id]?.last,
                    !last.pending, last.role != .system,
                    myUserId == nil || last.sender != myUserId {
                     continue
