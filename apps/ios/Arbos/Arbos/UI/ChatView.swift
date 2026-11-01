@@ -152,6 +152,10 @@ struct ChatSession: View {
     @State private var refreshIds: [Id] = []
     /// id → message for the rows on screen (menus, search, replies); rebuilt with `rows`.
     @State private var messageById: [Id: Message] = [:]
+    /// `rows` holds only the newest `openTailMessages` while the whole history builds off the
+    /// main actor (`buildHistoryRows`); `historyBuild` tells a stale result from the live one.
+    @State private var rowsArePartial = false
+    @State private var historyBuild = 0
     /// How many of the newest rows are in the view tree. The transcript is a plain
     /// VStack (see `transcript`), so every row it holds is built and laid out at once;
     /// a long group chat put thousands in it and the open took seconds (long-chat-perf,
@@ -161,6 +165,12 @@ struct ChatSession: View {
     /// Same initial window on iOS 17 — PreferenceKey geometry near the top grows it
     /// (feedback app-01M5NNJ001NHHYBHXTASM5NXBZ). iOS 18+ uses onScrollGeometryChange.
     static let windowInitial: Int = 80
+    /// A chat longer than this opens on the rows of its newest this-many messages; the rest
+    /// join off the main actor. Three windows, so the first 80 rows have context above them.
+    static let openTailMessages = 240
+    /// Where the history build hands over to the open's tail rows: this many messages into
+    /// the tail, so the tail rows at the seam were built with a sender run and a date above them.
+    static let openTailSeam = 8
     /// Rows added per step. Small on purpose: a step builds and lays out this many
     /// bubbles in one frame (≈4 ms each in a Debug simulator build).
     static let windowStep = 30
@@ -980,8 +990,25 @@ struct ChatSession: View {
         }
 
         let byId = Transcript.index(list)
-        let next = Transcript.rows(list, byId: byId, projectId: slot, me: me,
-                                   people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames, hiddenSenders: hiddenSenders)
+        let build: @Sendable ([Message], [Id: Message]) -> [Row] = { msgs, index in
+            Transcript.rows(msgs, byId: index, projectId: slot, me: me,
+                            people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames, hiddenSenders: hiddenSenders)
+        }
+        // A reveal or a search needs the whole history on the first pass.
+        let needsHistory = showSearch || model.pendingSearchChat == chatId || model.pendingReveal?.chatId == chatId
+        if rows.isEmpty, list.count > Self.openTailMessages, !needsHistory {
+            let cut = list.count - Self.openTailMessages
+            messageById = byId
+            rows = build(Array(list[cut...]), byId)
+            refreshIds = list.map(\.id)
+            rowsVersion &+= 1
+            rowsArePartial = true
+            historyBuild &+= 1
+            buildHistoryRows(list, byId: byId, cut: cut, generation: historyBuild, build: build)
+            return
+        }
+        rowsArePartial = false
+        let next = build(list, byId)
         // Rows appended after the last one we had (new messages) join the window, so the
         // oldest row on screen does not fall out of the view tree when a new one lands.
         // History that arrives above it — the first snapshot, a backfill, an older
@@ -999,6 +1026,47 @@ struct ChatSession: View {
         rows = next
         refreshIds = list.map(\.id)
         rowsVersion &+= 1
+    }
+
+    /// Builds every row of `built` off the main actor, then puts the history above the
+    /// open's tail rows. Streaming and appends during the build only touched the tail, so
+    /// the tail keeps its live rows from the seam message on; anything else rebuilds here.
+    private func buildHistoryRows(_ built: [Message], byId: [Id: Message], cut: Int, generation: Int,
+                                  build: @escaping @Sendable ([Message], [Id: Message]) -> [Row]) {
+        Task.detached(priority: .userInitiated) {
+            #if DEBUG
+            let started = Date()
+            #endif
+            let full = build(built, byId)
+            #if DEBUG
+            PerfCounters.time("rows.bg", ms: Date().timeIntervalSince(started) * 1000)
+            #endif
+            await MainActor.run {
+                guard generation == historyBuild, rowsArePartial else { return }
+                rowsArePartial = false
+                rows = spliceHistory(full, built: built, cut: cut) ?? build(messages, messageById)
+                rowsVersion &+= 1
+            }
+        }
+    }
+
+    /// `full` (rows of `built`) up to the seam message, then today's `rows` from it on.
+    /// Nil when the history no longer matches what is on screen.
+    private func spliceHistory(_ full: [Row], built: [Message], cut: Int) -> [Row]? {
+        let now = messages
+        if now == built { return full }
+        let seam = min(cut + Self.openTailSeam, built.count - 1)
+        guard now.count >= seam + 1, Array(now.prefix(seam + 1)) == Array(built.prefix(seam + 1)) else { return nil }
+        let historyIds = Set(built.prefix(seam).map(\.id))
+        let repliesIntoHistory = now.dropFirst(built.count).contains { m in
+            [m.replyTo, m.inReplyTo].contains { id in id.map { historyIds.contains($0) } ?? false }
+        }
+        guard !repliesIntoHistory else { return nil }
+        let seamId = built[seam].id
+        guard let inFull = full.firstIndex(where: { $0.messageId == seamId }),
+              let inRows = rows.firstIndex(where: { $0.messageId == seamId }) else { return nil }
+        let start = { (list: [Row], ix: Int) in ix > 0 && list[ix - 1].id == "\(seamId)#date" ? ix - 1 : ix }
+        return Array(full[..<start(full, inFull)]) + Array(rows[start(rows, inRows)...])
     }
 
     var body: some View {
@@ -2322,7 +2390,7 @@ struct ChatSession: View {
                 lastGrowAt = Date()
                 if windowCount + windowSkipEnd < visibleRows.count {
                     growWindow()
-                } else if isChannel {
+                } else if isChannel, !rowsArePartial {
                     model.loadOlderChannel(chatId)
                 }
             }, onSample: { old, new in
