@@ -5,8 +5,8 @@ import XCTest
 /// Grouped messages ([feedback grouped-messages-ios-2026-10-28], Jacob 2026-10-28, from the
 /// Arbonites' ask): consecutive messages from one sender within `Transcript.runWindowMs`
 /// form a run — the name and the avatar once, on the first message; the later ones under
-/// its text with the avatar column empty and `runGap` between them (half the old 8). The
-/// run breaks on a sender change, on the window passing, at a system line or a date line,
+/// its text with the avatar column empty and `runGap` between them. The run breaks on a
+/// sender change, on the window passing, at a system line or a date line,
 /// and at a reply quote. People and agents group alike, my own messages too.
 final class GroupedMessagesTests: XCTestCase {
     private let chat = "fx-group-launch"
@@ -53,8 +53,8 @@ final class GroupedMessagesTests: XCTestCase {
 
     func testTheWindowIsTwoMinutesAndTheGapsAreTighter() {
         XCTAssertEqual(Transcript.runWindowMs, 120_000, "a couple of minutes = 2 min")
-        XCTAssertEqual(Transcript.runGap, 4, "half of the 8 pt the phone had inside a run")
-        XCTAssertEqual(Transcript.turnGap, 16, "Grok Bot's iPhone turn gap; was 24")
+        XCTAssertEqual(Transcript.runGap, 2, "Jacob's 2026-11-01 reference measures 4–5 px at 2.03 px/pt; was 4")
+        XCTAssertEqual(Transcript.turnGap, 13, "the same reference measures 24–28 px between runs; was 16")
         XCTAssertEqual(Transcript.systemGap, 20)
         XCTAssertLessThan(Transcript.runGap, Transcript.turnGap)
     }
@@ -180,7 +180,7 @@ final class GroupedMessagesTests: XCTestCase {
     /// lane, so `RowView` draws an empty slot of the avatar's width in its place.
     func testTheAvatarSlotIsTheAvatarsWidth() {
         XCTAssertEqual(Theme.memberLane(composerInset: Theme.composerInset),
-                       Theme.avatarColumnInset(composerInset: Theme.composerInset) + Theme.memberAvatar + Theme.memberAvatarGap,
+                       Theme.avatarColumnInset + Theme.memberAvatar + Theme.memberAvatarGap,
                        "the lane is inset + avatar + gap; the empty slot is the avatar's width at the same inset")
     }
 }

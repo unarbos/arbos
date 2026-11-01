@@ -338,12 +338,12 @@ enum Transcript {
     /// Mac's `transcript::RUN_WINDOW_MS` (the row builders live in the two clients, not in
     /// `arbos_core`): keep the two in step.
     static let runWindowMs: Int64 = 2 * 60 * 1000
-    /// Space between two bubbles of one run — half of the 8 pt the phone had.
-    static let runGap: CGFloat = 4
-    /// Space a new run opens (a sender change, the window passed, a quoted reply): Grok
-    /// Bot's iPhone turn gap (≈ 15–16 pt measured on `internal/refs/grokbot-ios/ref-01`,
-    /// 1.17 px/pt); was 24.
-    static let turnGap: CGFloat = 16
+    /// Space between two bubbles of one run: 4–5 px on Jacob's 2026-11-01 reference at
+    /// 2.03 px/pt (was 4, and 8 before that).
+    static let runGap: CGFloat = 2
+    /// Space a new run opens (a sender change, the window passed, a quoted reply):
+    /// 24–28 px on the same reference, mean 26 (was Grok Bot's 16, 24 before that).
+    static let turnGap: CGFloat = 13
     /// Space around a centred system line (dates, hand-offs, membership notices).
     static let systemGap: CGFloat = 20
 
@@ -2059,7 +2059,7 @@ struct RowView: View, Equatable {
         return sender
     }
 
-    /// Match the avatar offset used by people-chat bubbles (26 pt + 8 pt gap).
+    /// Match the avatar offset used by people-chat bubbles (`Theme.memberLane`).
     private var reactionLeading: CGFloat {
         Self.reactionLeading(for: row.kind, composerInset: composerInset)
     }
@@ -2094,11 +2094,11 @@ struct RowView: View, Equatable {
     private func avatarColumn<Avatar: View>(@ViewBuilder avatar: () -> Avatar) -> some View {
         if row.showsAvatar {
             avatar()
-                .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
+                .padding(.leading, Theme.avatarColumnInset)
         } else {
             Color.clear
                 .frame(width: Theme.memberAvatar, height: 1)
-                .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
+                .padding(.leading, Theme.avatarColumnInset)
                 .accessibilityHidden(true)
                 .accessibilityIdentifier("sender-avatar-slot")
         }
