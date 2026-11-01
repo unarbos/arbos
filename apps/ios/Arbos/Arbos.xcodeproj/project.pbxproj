@@ -64,6 +64,7 @@
 		A1BB00000000000000000039 /* ChatSearchRevealLandingUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000038 /* ChatSearchRevealLandingUITests.swift */; };
 		A1BB0000000000000000003B /* ChatSearchResultJumpUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB0000000000000000003A /* ChatSearchResultJumpUITests.swift */; };
 		A1BB4D3E7A0C29F1B6E85039 /* MentionListOverlayUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB4D3E7A0C29F1B6E85038 /* MentionListOverlayUITests.swift */; };
+		A1BB4D3E7A0C29F1B6E85041 /* ChatBarInsetUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB4D3E7A0C29F1B6E85040 /* ChatBarInsetUITests.swift */; };
 		A1CAB7000000000000000002 /* CaptureRigUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CAB7000000000000000001 /* CaptureRigUITests.swift */; };
 		A11B0000000000000000A002 /* LibraryList.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11B0000000000000000A001 /* LibraryList.swift */; };
 		A15EC9000000000000000002 /* AgentPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15EC9000000000000000001 /* AgentPicker.swift */; };
@@ -315,6 +316,7 @@
 		A1BB00000000000000000038 /* ChatSearchRevealLandingUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSearchRevealLandingUITests.swift; sourceTree = "<group>"; };
 		A1BB0000000000000000003A /* ChatSearchResultJumpUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSearchResultJumpUITests.swift; sourceTree = "<group>"; };
 		A1BB4D3E7A0C29F1B6E85038 /* MentionListOverlayUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MentionListOverlayUITests.swift; sourceTree = "<group>"; };
+		A1BB4D3E7A0C29F1B6E85040 /* ChatBarInsetUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatBarInsetUITests.swift; sourceTree = "<group>"; };
 		A1CAB7000000000000000001 /* CaptureRigUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureRigUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000010 /* ArbosUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ArbosUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A11B0000000000000000A001 /* LibraryList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryList.swift; sourceTree = "<group>"; };
@@ -784,6 +786,7 @@
 				A1BB00000000000000000038 /* ChatSearchRevealLandingUITests.swift */,
 				A1BB0000000000000000003A /* ChatSearchResultJumpUITests.swift */,
 				A1BB4D3E7A0C29F1B6E85038 /* MentionListOverlayUITests.swift */,
+				A1BB4D3E7A0C29F1B6E85040 /* ChatBarInsetUITests.swift */,
 				A1CAB7000000000000000001 /* CaptureRigUITests.swift */,
 			);
 			path = ArbosUITests;
@@ -1173,6 +1176,7 @@
 				A1BB00000000000000000039 /* ChatSearchRevealLandingUITests.swift in Sources */,
 				A1BB0000000000000000003B /* ChatSearchResultJumpUITests.swift in Sources */,
 				A1BB4D3E7A0C29F1B6E85039 /* MentionListOverlayUITests.swift in Sources */,
+				A1BB4D3E7A0C29F1B6E85041 /* ChatBarInsetUITests.swift in Sources */,
 				A1CAB7000000000000000002 /* CaptureRigUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
