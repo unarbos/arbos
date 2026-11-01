@@ -3675,6 +3675,71 @@ impl AppState {
             .count()
     }
 
+    /// The chat row of `chat_id` wherever it is listed, for the read state it
+    /// carries.
+    pub fn chat_row(&self, chat_id: &str) -> Option<&Chat> {
+        self.chats
+            .values()
+            .flat_map(|v| v.iter())
+            .find(|c| c.id == chat_id)
+    }
+
+    /// How many unread direct `@mentions` of the viewer the relay counts in
+    /// `chat_id`.
+    pub fn unread_mention_count(&self, chat_id: &str) -> usize {
+        self.chat_row(chat_id)
+            .map_or(0, |c| c.mention_count as usize)
+    }
+
+    /// The unread direct mentions of the viewer in `chat_id`.
+    ///
+    /// The relay sends a count, not a list, and the list is derivable: the
+    /// mention cursor only moves forward (one row per chat, merged with
+    /// `MAX`), so the unread mentions are always the *newest* ones. Taking
+    /// the last `count` direct mentions of the viewer among the loaded
+    /// messages therefore names them exactly, and a stale local answer is
+    /// corrected by the next `GET /me/unread` rather than by a second
+    /// endpoint.
+    ///
+    /// The list runs short when the chat is not scrolled back far enough to
+    /// hold them all. That case is why [`UnreadMentions`] carries the relay's
+    /// count beside the list rather than just the list.
+    pub fn unread_mentions_in(&self, chat_id: &str) -> UnreadMentions {
+        let count = self.unread_mention_count(chat_id);
+        if count == 0 {
+            return UnreadMentions::default();
+        }
+        let me_handle = self.me_handle();
+        let me = format!("user:{}", self.me_id());
+        let mut loaded: Vec<Id> = self
+            .messages_of(chat_id)
+            .iter()
+            .filter(|m| m.sender != me)
+            .filter(|m| crate::sync::mentions_me_directly(&m.plain_text(), &me_handle))
+            .map(|m| m.id.clone())
+            .collect();
+        let drop = loaded.len().saturating_sub(count);
+        loaded.drain(..drop);
+        UnreadMentions { loaded, count }
+    }
+
+    /// A direct `@mention` was actually on screen, so the mark can go. Moves
+    /// the relay's mention cursor to it and nothing else — the chat's unread
+    /// messages are untouched, and no other device is told to clear anything.
+    ///
+    /// The caller must pass the **oldest** unread mention; see
+    /// [`UnreadMentions::oldest_markable`] for why anything else is thrown
+    /// away by the relay without saying so.
+    pub fn mention_seen(&mut self, chat_id: &str, message_id: &str, cx: &mut Context<Self>) {
+        self.command(ClientCommand::MarkMentionsRead {
+            chat_id: chat_id.to_owned(),
+            message_id: message_id.to_owned(),
+        });
+        // The command's own handler lowers the count on the sync side and
+        // re-emits the chats; the badge follows from that.
+        cx.notify();
+    }
+
     /// S8: the last assistant message ended with an `ask_user` question and
     /// nothing has been sent since. A typed widget question is answered from
     /// its card, so it does not switch the composer.
@@ -4321,6 +4386,19 @@ impl AppState {
             chat.unread = false;
             chat.unread_count = 0;
         }
+        // `mention_count` is deliberately NOT cleared here, and this is the
+        // place someone will want to clear it. Opening a chat reads its
+        // messages; it does not mean the user saw the line that named them,
+        // which may be hours above the newest page. The `@` is cleared only by
+        // the mention actually being on screen (`Transcript::clear_seen_mentions`)
+        // and only one mention at a time, oldest first, because the relay's
+        // cursor is a watermark.
+        //
+        // So an open chat showing the `@` with no unread count is the specified
+        // behaviour (Jacob, 2026-10-31), not a bug: its messages are read and
+        // its mention is not. Clearing it here would also put the mark back to
+        // being a second unread indicator, which is the thing it exists not to
+        // be.
         self.sync_badge();
         // Reading it here clears its banners here too (the relay tells the other devices).
         notify::withdraw_chat(&chat_id);
@@ -4383,6 +4461,7 @@ impl AppState {
                 participants: Vec::new(),
                 unread: false,
                 unread_count: 0,
+                mention_count: 0,
                 last_message_at: now_ms(),
                 archived_at: None,
             });
@@ -12995,6 +13074,48 @@ fn preview(m: &Message) -> String {
     }
 }
 
+/// What is still unread of the viewer's direct `@mentions` in one chat: the
+/// relay's count, and the messages holding them that this device has actually
+/// loaded, oldest first. The two can disagree, and the difference decides
+/// whether anything may be marked — see [`UnreadMentions::oldest_markable`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UnreadMentions {
+    /// Oldest first. Shorter than `count` when older mentions sit above the
+    /// loaded window.
+    pub loaded: Vec<Id>,
+    /// The relay's number. This is what the jump capsule shows, because it
+    /// counts the mentions that exist rather than the ones scrolled in.
+    pub count: usize,
+}
+
+impl UnreadMentions {
+    /// Where the `@` capsule sends the user: the oldest mention we hold. When
+    /// older ones are still above the loaded window this is not the oldest
+    /// that exists, which is fine — it moves the user upward, and scrolling
+    /// back loads the rest.
+    pub fn jump_target(&self) -> Option<&Id> {
+        self.loaded.first()
+    }
+
+    /// The mention it is safe to tell the relay about, if any.
+    ///
+    /// `PUT /chats/{id}/mentions/read` accepts **only the oldest** unread
+    /// mention: the cursor is a watermark, so honouring a newer id would
+    /// swallow every older mention under it. Anything else is discarded and
+    /// still answered `204`, which makes a wrong id look like a success and
+    /// present as a badge that will not clear.
+    ///
+    /// So this answers `None` unless we can prove we hold the oldest — which
+    /// is exactly when the loaded list accounts for the relay's whole count.
+    /// A chat scrolled back too little to show its earliest mention simply
+    /// keeps its mark until the user goes up to it.
+    pub fn oldest_markable(&self) -> Option<&Id> {
+        (self.loaded.len() == self.count)
+            .then(|| self.loaded.first())
+            .flatten()
+    }
+}
+
 /// What a message that just landed does to the chat's read state (#1438).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ArrivalRead {
@@ -13082,6 +13203,7 @@ pub(crate) fn forked_chat(source: &Chat, project: &Project, id: Id) -> Option<Ch
         participants: Vec::new(),
         unread: false,
         unread_count: 0,
+        mention_count: 0,
         last_message_at: now_ms(),
         archived_at: None,
     })
@@ -13141,6 +13263,59 @@ pub(crate) fn people_sheet_results(
     filter(pool, &normalize_query(query), |p| {
         Fields::new(p.display_name(), p.handle.clone())
     })
+}
+
+#[cfg(test)]
+mod unread_mention_tests {
+    use super::UnreadMentions;
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// `PUT /chats/{id}/mentions/read` takes the oldest unread mention and
+    /// nothing else, and answers 204 either way. So a client that cannot
+    /// prove it holds the oldest must not send at all: the request would
+    /// look like it worked and the badge would stay.
+    #[test]
+    fn only_a_provably_oldest_mention_may_be_marked() {
+        // All three loaded: the first is the oldest that exists.
+        let whole = UnreadMentions {
+            loaded: ids(&["m1", "m2", "m3"]),
+            count: 3,
+        };
+        assert_eq!(whole.oldest_markable().map(String::as_str), Some("m1"));
+
+        // Scrolled back only far enough for the last two of three. "m2" is
+        // the oldest we can see and NOT the oldest the relay counts, so
+        // sending it would be swallowed under a 204.
+        let partial = UnreadMentions {
+            loaded: ids(&["m2", "m3"]),
+            count: 3,
+        };
+        assert_eq!(partial.oldest_markable(), None);
+        assert_eq!(
+            partial.jump_target().map(String::as_str),
+            Some("m2"),
+            "the jump still goes up to the oldest we hold"
+        );
+
+        // Nothing unread: nothing to mark and no capsule.
+        let none = UnreadMentions::default();
+        assert_eq!(none.count, 0);
+        assert_eq!(none.oldest_markable(), None);
+        assert_eq!(none.jump_target(), None);
+
+        // Counted but none loaded yet: no capsule, because there is nowhere
+        // for it to go. The row's `@` still shows — that is the relay's
+        // count, which does not depend on what this device scrolled in.
+        let unloaded = UnreadMentions {
+            loaded: Vec::new(),
+            count: 2,
+        };
+        assert_eq!(unloaded.oldest_markable(), None);
+        assert_eq!(unloaded.jump_target(), None);
+    }
 }
 
 #[cfg(test)]
@@ -13209,6 +13384,7 @@ mod hidden_chat_open_tests {
             is_system: false,
             unread: false,
             unread_count: 0,
+            mention_count: 0,
             last_message_at: 1_000,
             archived_at: None,
             kind: ChatKind::Chat,
@@ -14113,6 +14289,7 @@ mod fork_tests {
             participants: Vec::new(),
             unread: false,
             unread_count: 0,
+            mention_count: 0,
             last_message_at: 0,
             archived_at: None,
         }
@@ -15089,6 +15266,7 @@ mod coalesced_banner_withdraw_tests {
                     is_system: false,
                     unread: false,
                     unread_count: 0,
+                    mention_count: 0,
                     last_message_at: 1_000,
                     archived_at: None,
                     kind: ChatKind::Chat,

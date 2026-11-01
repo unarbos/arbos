@@ -739,6 +739,11 @@ pub(crate) struct RowView {
     pub(crate) unread: bool,
     /// Missed messages across the space's tabs (≥ 1 whenever `unread`).
     pub(crate) unread_count: usize,
+    /// An unread direct `@mention` of the viewer waits in one of the space's
+    /// tabs. Independent of `unread`: a read chat can still carry one. Read
+    /// by the expanded row only — the collapsed rail has one badge slot and
+    /// no approved design for a second mark in it.
+    pub(crate) mentioned: bool,
     pub(crate) typing: bool,
     pub(crate) preview: String,
     pub(crate) time: String,
@@ -946,6 +951,10 @@ fn unsorted_entries(shell: &Shell, cx: &Context<Shell>) -> Vec<ListEntry> {
                 .iter()
                 .map(|c| c.missed_count())
                 .sum(),
+            mentioned: state
+                .visible_tabs(&p.id)
+                .iter()
+                .any(|c| c.mention_count > 0),
             typing: !state.typing_in(&p.id).is_empty(),
             preview: hit.reason.unwrap_or_else(|| preview(state, p)),
             time: time_label(last_activity(state, p)),
@@ -2250,6 +2259,7 @@ fn render_row(
         streaming,
         unread,
         unread_count,
+        mentioned,
         typing,
         preview,
         time,
@@ -2449,10 +2459,12 @@ fn render_row(
                         // braille spinner while the chat's agent works (one shared
                         // ticker); the unread count pill; nothing for a person typing
                         // (the preview says "typing…") or a quiet read chat. Never a
-                        // coloured dot.
+                        // coloured dot. An unread direct `@mention` adds its mark in
+                        // front of whatever the cell shows (Jacob, 2026-10-31).
                         .children(row_status_cell(
                             RowStatus::of(streaming, typing, unread),
                             unread_count,
+                            mentioned,
                             &id,
                             theme,
                             cx,
@@ -2463,11 +2475,22 @@ fn render_row(
 
 /// What the status cell under a row's time shows (Jacob, 2026-10-27,
 /// [feedback working-braille-spinner-mac-2026-10-27] + [feedback
-/// neon-dots-mac-2026-10-27]). One cell, one mark, never a coloured dot: a
-/// person typing shows nothing in the cell (the spinner is the *agent's*
-/// working sign, never a human's; the preview reads "typing…"); the spinner
-/// while the chat's agent works; the unread **count pill** otherwise; a quiet
-/// read chat shows nothing.
+/// neon-dots-mac-2026-10-27]): a person typing shows nothing in the cell (the
+/// spinner is the *agent's* working sign, never a human's; the preview reads
+/// "typing…"); the spinner while the chat's agent works; the unread **count
+/// pill** otherwise; a quiet read chat shows nothing. Never a coloured dot —
+/// that part of the rule is untouched.
+///
+/// **The cell may hold two marks.** The old "one cell, one mark" rule was
+/// overruled by Jacob on 2026-10-31: an unread direct `@mention` draws the
+/// `@` pill BESIDE the unread count, 4 pt apart, because a chat you were
+/// named in has to be findable without opening it. Do not "fix" this back to
+/// one mark. The `@` carries no number of its own, so the pair is a mark and
+/// a count rather than two counts to compare; the mention count lives on the
+/// transcript's jump capsule instead. The two are separate state, so the `@`
+/// can stand alone on a chat whose messages are all read — opening a chat
+/// reads its messages, and only scrolling a mention onto the screen clears
+/// the mark.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowStatus {
     /// A person is typing: no mark in the cell (the preview carries it).
@@ -2495,14 +2518,19 @@ impl RowStatus {
     }
 }
 
+/// How far apart the `@` mark and the mark beside it sit — the row's own
+/// inner gap family (2 / 4 / 6 pt).
+const STATUS_MARK_GAP: f32 = 4.0;
+
 fn row_status_cell(
     status: RowStatus,
     unread_count: usize,
+    mentioned: bool,
     id: &Id,
     theme: &Theme,
     cx: &mut App,
 ) -> Option<AnyElement> {
-    match status {
+    let beside: Option<AnyElement> = match status {
         RowStatus::Typing | RowStatus::Quiet => None,
         RowStatus::Working => Some(
             crate::ui::working::glyph(theme, cx)
@@ -2514,7 +2542,20 @@ fn row_status_cell(
                 .debug_selector(|| format!("row-status-unread-{id}"))
                 .into_any_element(),
         ),
+    };
+    if !mentioned {
+        return beside;
     }
+    Some(
+        div()
+            .flex()
+            .items_center()
+            .gap(px(STATUS_MARK_GAP))
+            .debug_selector(|| format!("row-status-mentioned-{id}"))
+            .child(crate::ui::marks::mention_pill(theme))
+            .children(beside)
+            .into_any_element(),
+    )
 }
 
 /// The right-click menu of a sidebar row, anchored at the click. An agent
@@ -3950,7 +3991,7 @@ mod status_cell_tests {
     use gpui::{AppContext as _, Bounds, Entity, Pixels, TestAppContext, VisualTestContext};
     use tokio::sync::mpsc;
 
-    use super::RowStatus;
+    use super::{RowStatus, STATUS_MARK_GAP};
     use crate::app::AppState;
     use crate::model::{Chat, Message, Person, Project, SpaceKind};
     use crate::sync::{ClientCommand, SyncEvent, SyncSource};
@@ -3974,6 +4015,30 @@ mod status_cell_tests {
         ) -> BoxFuture<'static, anyhow::Result<()>> {
             Box::pin(std::future::pending())
         }
+    }
+
+    /// The rule as code for the mark that shares the cell: `RowStatus` is
+    /// unchanged by the `@`, because the two are separate state. The mention
+    /// mark rides alongside whatever the status picked, including `Quiet` —
+    /// that is D4, the chat whose messages are read and whose mention is not.
+    #[test]
+    fn the_mention_mark_is_beside_the_status_not_instead_of_it() {
+        // Jacob, 2026-10-31. The old rule allowed one mark per cell.
+        assert_eq!(
+            RowStatus::of(false, false, true),
+            RowStatus::Unread,
+            "an unread chat still picks the count pill; the @ is added to it"
+        );
+        assert_eq!(
+            RowStatus::of(false, false, false),
+            RowStatus::Quiet,
+            "a read chat still picks nothing; the @ then stands alone"
+        );
+        assert_eq!(
+            RowStatus::of(true, false, true),
+            RowStatus::Working,
+            "the spinner is unaffected; the @ sits in front of it"
+        );
     }
 
     /// The rule as code: the agent's spinner beats unread, unread beats a
@@ -4188,6 +4253,125 @@ mod status_cell_tests {
             vcx.debug_bounds("row-status-unread-dm").is_none(),
             "a person typing shows no mark in the cell (the preview says typing…)"
         );
+    }
+
+    /// The staged pair the shipped shots are taken of, asserted as geometry so
+    /// a frame cannot quietly lose it: a mentioned group carrying 6 unread and
+    /// 2 mentions, beside an unread DM carrying 3 unread and no mention.
+    ///
+    /// The control row is the whole point. With it, the frame proves the `@` is
+    /// about being *mentioned* — the mark is beside one count and absent from
+    /// the other. Without it a reviewer only has our word that the mark is not
+    /// a second unread indicator. The fixture
+    /// (`sync::fixture::seed_people_chats_base`) stages the same two rows for
+    /// the real capture; keep the two in step.
+    #[gpui::test]
+    fn the_mention_mark_is_beside_one_count_and_not_the_other(cx: &mut TestAppContext) {
+        let (_rt, _state, _shell, vcx) = mount_mention_pair(cx);
+
+        let mentioned = vcx
+            .debug_bounds("row-status-mentioned-mentioned")
+            .expect("the mentioned row draws the @ beside its count");
+        let count = vcx
+            .debug_bounds("row-status-unread-mentioned")
+            .expect("…and still draws the count itself");
+        let at = vcx.debug_bounds("mention-pill").expect("the @ pill");
+
+        // Both marks really are in the cell, the `@` first.
+        assert!(
+            f32::from(at.right()) <= f32::from(count.origin.x) + 0.5,
+            "the @ sits in front of the count ({} then {})",
+            f32::from(at.right()),
+            f32::from(count.origin.x)
+        );
+        assert!(
+            close(
+                f32::from(count.origin.x) - f32::from(at.right()),
+                STATUS_MARK_GAP
+            ),
+            "{STATUS_MARK_GAP} pt apart, got {}",
+            f32::from(count.origin.x) - f32::from(at.right())
+        );
+        assert!(
+            close(centre_y(at), centre_y(count)),
+            "the two marks share a centre line"
+        );
+        assert_eq!(
+            f32::from(at.size.height),
+            UNREAD_PILL_H,
+            "the @ is the count pill's capsule, so the pair reads as one cell"
+        );
+        // The wrapper holds both, so the cell grew rather than one mark
+        // replacing the other.
+        assert!(
+            f32::from(mentioned.size.width)
+                >= f32::from(at.size.width) + f32::from(count.size.width),
+            "the cell holds both marks"
+        );
+
+        // The control: unread, named by nobody, so a count and no `@`.
+        assert!(
+            vcx.debug_bounds("row-status-unread-control").is_some(),
+            "the control row draws its unread count"
+        );
+        assert!(
+            vcx.debug_bounds("row-status-mentioned-control").is_none(),
+            "…and no @ — the mark is about being mentioned, not about being unread"
+        );
+    }
+
+    /// Two rows staged exactly as the shipped shots stage them: `mentioned`
+    /// (6 unread, 2 of them naming me) and `control` (3 unread, none).
+    fn mount_mention_pair(
+        cx: &mut TestAppContext,
+    ) -> (
+        tokio::runtime::Runtime,
+        Entity<AppState>,
+        Entity<Shell>,
+        &mut VisualTestContext,
+    ) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| {
+            gpui_tokio::init_from_handle(cx, handle);
+            cx.set_global(Theme::dark(Surface::Matte));
+            if !cx.has_global::<PulseClock>() {
+                PulseClock::init(cx);
+            }
+            WorkingClock::init(cx);
+        });
+        let state = cx.new(|cx| AppState::new(Box::new(Idle), cx));
+        let now = crate::model::now_ms();
+        state.update(cx, |s, cx| {
+            for (pid, name, unread_count, mention_count) in [
+                ("mentioned", "Launch week", 6u32, 2u32),
+                ("control", "Sam Rivera", 3, 0),
+            ] {
+                s.projects.push(Project {
+                    id: pid.into(),
+                    name: name.into(),
+                    kind: SpaceKind::Group,
+                    ..Project::default()
+                });
+                let room = format!("room-{pid}");
+                let at = now - 60_000;
+                let mut row = chat(&room, pid, true, at);
+                row.unread_count = unread_count;
+                row.mention_count = mention_count;
+                s.chats.insert(pid.into(), vec![row]);
+                s.messages.insert(
+                    room.clone(),
+                    vec![message("u", &room, "user", "done", "Morning.", at)],
+                );
+            }
+            cx.notify();
+        });
+        let (shell, vcx) = cx.add_window_view(|window, cx| Shell::new(state.clone(), window, cx));
+        vcx.run_until_parked();
+        (rt, state, shell, vcx)
     }
 
     /// One spinning row (the typing DM pulses, it does not spin), one ticker;

@@ -726,18 +726,26 @@ fn message_grant_from(g: &arbos_core::api::MessageGrantDto) -> MessageGrant {
     }
 }
 
+/// What `GET /me/unread` says about one chat: its unread messages and, apart
+/// from them, its unread direct `@mentions` of the viewer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RelayUnread {
+    pub messages: u32,
+    pub mentions: u32,
+}
+
 /// The relay's verdict for one chat: `GET /me/unread` is the user's read cursor and names
 /// every chat with something unread (with a message count), so when it answered, a chat it
 /// leaves out is read. Only when it did not answer (`None`: older relay) does the chat's own
 /// `unread` flag count — then `known_count` (at least 1) stands in for the missing total.
 pub(crate) fn relay_unread_for(
-    unread_by_chat: Option<&HashMap<Id, u32>>,
+    unread_by_chat: Option<&HashMap<Id, RelayUnread>>,
     chat_id: &str,
     chat_flag: bool,
     known_count: u32,
 ) -> u32 {
     match unread_by_chat {
-        Some(map) => map.get(chat_id).copied().unwrap_or(0),
+        Some(map) => map.get(chat_id).map_or(0, |u| u.messages),
         None => {
             if chat_flag {
                 known_count.max(1)
@@ -745,6 +753,21 @@ pub(crate) fn relay_unread_for(
                 0
             }
         }
+    }
+}
+
+/// The relay's unread-mention count for one chat. A relay that did not answer
+/// (older build, transport error) leaves the mark exactly as it was: there is
+/// no per-chat flag to fall back on, and clearing the `@` on a failed request
+/// would lose the one thing the user has not seen yet.
+pub(crate) fn relay_mentions_for(
+    unread_by_chat: Option<&HashMap<Id, RelayUnread>>,
+    chat_id: &str,
+    known_count: u32,
+) -> u32 {
+    match unread_by_chat {
+        Some(map) => map.get(chat_id).map_or(0, |u| u.mentions),
+        None => known_count,
     }
 }
 
@@ -761,6 +784,26 @@ pub(crate) fn merged_unread(
         return 0;
     }
     relay_unread
+}
+
+/// Merge the relay's unread-mention count with what this device has already
+/// cleared.
+///
+/// Opening a chat does **not** come into it: reading the messages leaves a
+/// mention the user never scrolled to, which is the whole point of the mark.
+/// Only seeing a mention clears one, and then the local count is the lower of
+/// the two until the relay has answered since that clear — our `PUT` may
+/// still have been in flight when this answer was built.
+pub(crate) fn merged_mentions(
+    relay_mentions: u32,
+    local_mentions: u32,
+    local_cleared_at: Option<i64>,
+    last_activity_at: i64,
+) -> u32 {
+    if local_cleared_at.is_some_and(|at| at >= last_activity_at) {
+        return local_mentions.min(relay_mentions);
+    }
+    relay_mentions
 }
 
 /// Merge the relay's chat list with what this Mac already holds.
@@ -836,6 +879,7 @@ pub(crate) fn chat_from_dto(dto: &ChatDto) -> Chat {
         participants: dto.participants.clone(),
         unread: false,
         unread_count: 0,
+        mention_count: 0,
         last_message_at: dto.created_at.max(0) as u64,
         archived_at: dto
             .archived_at
@@ -1047,6 +1091,8 @@ pub(crate) fn people_space_from(
         participants: Vec::new(),
         unread: dto.unread,
         unread_count: u32::from(dto.unread),
+        // Mentions ride on `GET /me/unread`, never on a chat row.
+        mention_count: 0,
         last_message_at: dto.last_activity_at.max(0) as u64,
         archived_at: dto.archived_at.filter(|t| *t > 0).map(|t| t as u64),
     };
@@ -1280,12 +1326,59 @@ mod tests {
     /// counts when the endpoint did not answer.
     #[test]
     fn me_unread_is_authoritative_when_served() {
-        let served: HashMap<Id, u32> = HashMap::from([("dm".to_string(), 2)]);
+        let served: HashMap<Id, RelayUnread> = HashMap::from([(
+            "dm".to_string(),
+            RelayUnread {
+                messages: 2,
+                mentions: 0,
+            },
+        )]);
         assert_eq!(relay_unread_for(Some(&served), "dm", false, 0), 2);
         assert_eq!(relay_unread_for(Some(&served), "group", true, 1), 0);
         assert_eq!(relay_unread_for(None, "group", true, 0), 1);
         assert_eq!(relay_unread_for(None, "group", true, 4), 4);
         assert_eq!(relay_unread_for(None, "group", false, 0), 0);
+    }
+
+    /// The mention mark is its own state: a chat the served list leaves out
+    /// has none, and a relay that did not answer at all leaves the mark
+    /// alone rather than clearing it.
+    #[test]
+    fn mentions_come_off_the_same_answer_and_survive_a_silent_relay() {
+        let served: HashMap<Id, RelayUnread> = HashMap::from([(
+            "group".to_string(),
+            RelayUnread {
+                messages: 0,
+                mentions: 2,
+            },
+        )]);
+        assert_eq!(relay_mentions_for(Some(&served), "group", 0), 2);
+        assert_eq!(relay_mentions_for(Some(&served), "dm", 3), 0);
+        assert_eq!(relay_mentions_for(None, "group", 3), 3);
+    }
+
+    /// Reading a chat never clears its `@` (D4), and a clear this device made
+    /// after the chat's last activity wins over a relay answer built before
+    /// our `PUT` landed.
+    #[test]
+    fn merged_mentions_keeps_the_mark_through_a_read_and_a_stale_answer() {
+        // No local clear: the relay is the truth, whatever the read mark says.
+        assert_eq!(merged_mentions(2, 2, None, 1_700_000_000_000), 2);
+        // Cleared one here since the last activity: our lower count holds.
+        assert_eq!(
+            merged_mentions(2, 1, Some(1_700_000_000_100), 1_700_000_000_000),
+            1
+        );
+        // The PUT has landed and the relay now agrees — or knows better.
+        assert_eq!(
+            merged_mentions(0, 1, Some(1_700_000_000_100), 1_700_000_000_000),
+            0
+        );
+        // A newer message arrived after our clear: the relay wins again.
+        assert_eq!(
+            merged_mentions(3, 1, Some(1_699_999_999_000), 1_700_000_000_000),
+            3
+        );
     }
 
     fn sample_chat(id: &str, project_id: &str, title: &str, archived_at: Option<u64>) -> Chat {
@@ -1299,6 +1392,7 @@ mod tests {
             participants: Vec::new(),
             unread: false,
             unread_count: 0,
+            mention_count: 0,
             last_message_at: 1_000,
             archived_at,
         }
@@ -1369,6 +1463,7 @@ mod tests {
             chat_id: "chat_fixture".into(),
             project_id: "proj_fixture".into(),
             unread: 3,
+            mentions: 0,
         });
         let by_id: HashMap<&str, u32> = unread
             .chats
