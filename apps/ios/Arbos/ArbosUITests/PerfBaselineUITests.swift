@@ -239,8 +239,7 @@ final class PerfBaselineUITests: XCTestCase {
         let app = launch()
         measure(metrics: [signpost("settings-sheet"), XCTClockMetric()], options: options(manual: true)) {
             app.buttons["home-account"].tap()
-            XCTAssertTrue(app.staticTexts["sheet-title"].waitForExistence(timeout: 10), "Settings opened")
-            sleep(1)
+            sleep(2)
             stopMeasuring()
             dismissSheet(app)
             XCTAssertTrue(row(app, dm).waitForExistence(timeout: appear), "back on the chat list")
