@@ -25,6 +25,9 @@ final class LinkIcons: ObservableObject {
     /// draw ([feedback link-icons-ios-tile-2026-10-27]); `nil` when the site has none.
     private(set) var pictures: [String: (image: UIImage, tone: LinkIconTone)?] = [:]
     private var inFlight: Set<String> = []
+    /// Decoded answers waiting for the next publish (`flush`).
+    private var landed: [String: Decoded] = [:]
+    private var flushQueued = false
     /// Fetches the PNG for a host: the relay in the app, the bundled icons in the fixture. Set by
     /// `AppModel`; `nil` means never ask (the placeholder stays).
     var fetch: ((String) async -> Data?)?
@@ -60,12 +63,33 @@ final class LinkIcons: ObservableObject {
             let decoded = await Task.detached(priority: .utility) { () -> Decoded in
                 LinkIcons.decode(data, scale: scale)
             }.value
-            guard let self else { return }
-            self.inFlight.remove(host)
-            self.objectWillChange.send()
-            self.pictures[host] = decoded.picture
-            self.images[host] = decoded.icon
+            self?.land(host, decoded)
         }
+    }
+
+    /// Every visible paragraph observes this store, so answers that land within one frame share
+    /// one publish: one redraw of the transcript however many hosts arrived. A host stays in
+    /// `inFlight` until its answer is published, so it is never asked for twice.
+    private func land(_ host: String, _ decoded: Decoded) {
+        landed[host] = decoded
+        guard !flushQueued else { return }
+        flushQueued = true
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(16))
+            self?.flush()
+        }
+    }
+
+    private func flush() {
+        flushQueued = false
+        guard !landed.isEmpty else { return }
+        objectWillChange.send()
+        for (host, decoded) in landed {
+            pictures[host] = decoded.picture
+            images[host] = decoded.icon
+            inFlight.remove(host)
+        }
+        landed = [:]
     }
 
     /// A fetched host's tile picture with its tone, and its inline icon. A struct, not a tuple:
@@ -93,6 +117,7 @@ final class LinkIcons: ObservableObject {
         images = [:]
         pictures = [:]
         inFlight = []
+        landed = [:]
     }
 
     /// The host an icon is fetched for, or `nil` when the link is not an http(s) URL to a named host
