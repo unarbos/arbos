@@ -64,26 +64,36 @@ final class AvatarBackSwipeUITests: XCTestCase {
         }
     }
 
-    /// A sender's avatar the finger can reach: on screen, clear of the header and of the
-    /// composer bar (a drag that starts in the bar is the composer's, by design), and clear of
-    /// the 24 pt edge zone that belongs to the system pop. Returns its frame, so each case can
-    /// aim where it needs to and say what it aimed at when it fails.
-    private func reachableAvatar(_ app: XCUIApplication,
-                                 file: StaticString = #filePath, line: UInt = #line) -> CGRect {
+    /// The sender avatars the finger can reach, top to bottom: on screen, clear of the header
+    /// and of the composer bar (a drag that starts in the bar is the composer's, by design),
+    /// and clear of the 24 pt edge zone that belongs to the system pop. Frames, not elements,
+    /// so a case can say what it aimed at when it fails.
+    private func reachableAvatars(_ app: XCUIApplication,
+                                  file: StaticString = #filePath, line: UInt = #line) -> [CGRect] {
         let avatars = app.descendants(matching: .any).matching(identifier: "sender-avatar")
         XCTAssertTrue(avatars.firstMatch.waitForExistence(timeout: settle),
                       "the group transcript draws sender avatars", file: file, line: line)
         let window = app.windows.firstMatch.frame
-        let usable = avatars.allElementsBoundByIndex.filter {
-            $0.isHittable && $0.frame.minY > window.minY + 120 && $0.frame.maxY < window.maxY - 160
-        }
+        let usable = avatars.allElementsBoundByIndex
+            .filter { $0.isHittable && $0.frame.minY > window.minY + 120 && $0.frame.maxY < window.maxY - 160 }
+            .map(\.frame)
+            .sorted { $0.minY < $1.minY }
         XCTAssertFalse(usable.isEmpty, "an avatar is on screen between the header and the composer",
                        file: file, line: line)
-        let frame = usable.last!.frame
-        XCTAssertGreaterThan(frame.minX, 24,
-                             "the avatar is clear of the edge zone, so this is the full-screen "
-                             + "swipe and not the system pop", file: file, line: line)
-        return frame
+        for frame in usable {
+            XCTAssertGreaterThan(frame.minX, 24,
+                                 "the avatar at \(frame) is clear of the edge zone, so this is the "
+                                 + "full-screen swipe and not the system pop", file: file, line: line)
+        }
+        return usable
+    }
+
+    /// The bubbles the reader can see, top to bottom.
+    private func visibleBubbles(_ app: XCUIApplication) -> [XCUIElement] {
+        let window = app.windows.firstMatch.frame
+        return app.descendants(matching: .any).matching(bubbleQuery).allElementsBoundByIndex
+            .filter { $0.frame.minY > window.minY + 120 && $0.frame.maxY < window.maxY - 120 }
+            .sorted { $0.frame.minY < $1.frame.minY }
     }
 
     /// Whether the chat is the frontmost screen. Taken from `ChatSearchResultJumpUITests`: a
@@ -113,7 +123,7 @@ final class AvatarBackSwipeUITests: XCTestCase {
     /// zone — so this is the transcript's swipe-right, not the system pop.
     func testASwipeRightStartingOnASenderAvatarGoesBack() {
         let app = openGroup()
-        let avatar = reachableAvatar(app)
+        let avatar = reachableAvatars(app).last!
         let distance: CGFloat = 180
         XCTAssertLessThan(avatar.midX + distance, app.windows.firstMatch.frame.maxX - 8,
                           "the \(Int(distance)) pt drag would be clamped at the screen edge and "
@@ -135,7 +145,7 @@ final class AvatarBackSwipeUITests: XCTestCase {
     /// frontmost": an agent's page carries none of the `profile-*` markers a person's does.
     func testATapOnASenderAvatarStillOpensTheProfile() {
         let app = openGroup()
-        let avatar = reachableAvatar(app)
+        let avatar = reachableAvatars(app).last!
         XCTAssertTrue(chatIsFrontmost(app), "the chat is in front before the tap")
 
         app.coordinate(withNormalizedOffset: .zero)
@@ -151,22 +161,36 @@ final class AvatarBackSwipeUITests: XCTestCase {
     /// A vertical drag that begins on an avatar is still the scroll view's: the transcript
     /// moves and the chat stays. The scroll's pan is a `UIPanGestureRecognizer`, which is
     /// exactly what `BackSwipe.sharesTouch` still refuses to share with.
+    ///
+    /// The drag goes **down**, toward the older messages. A chat opens at its newest message,
+    /// so a drag up asks a scroll view that is already at its end to go further and it
+    /// rubber-bands back to where it was — which reads as "nothing scrolled" however well the
+    /// gesture worked.
     func testAVerticalDragStartingOnASenderAvatarStillScrolls() {
         let app = openGroup()
-        let avatar = reachableAvatar(app)
         let window = app.windows.firstMatch.frame
-        XCTAssertGreaterThan(avatar.midY - 200, window.minY + 8, "the 200 pt drag up stays on screen")
-        let bubbles = app.descendants(matching: .any).matching(bubbleQuery)
-        let before = bubbles.firstMatch.frame
+        let distance: CGFloat = 200
+        guard let avatar = reachableAvatars(app).first(where: { $0.midY + distance < window.maxY - 160 }) else {
+            return XCTFail("no avatar has room for a \(Int(distance)) pt drag down above the composer")
+        }
+        guard let anchor = visibleBubbles(app).first else {
+            return XCTFail("a bubble is visible to measure the scroll by")
+        }
+        let anchorId = anchor.identifier
+        let before = anchor.frame
         let start = app.coordinate(withNormalizedOffset: .zero)
             .withOffset(CGVector(dx: avatar.midX, dy: avatar.midY))
 
-        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 6, dy: -200)),
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 6, dy: distance)),
                     withVelocity: .slow, thenHoldForDuration: 0.1)
         sleep(1)
 
         XCTAssertTrue(back(app).exists, "the chat did not go back")
         XCTAssertTrue(chatIsFrontmost(app), "no profile page opened either")
-        XCTAssertNotEqual(bubbles.firstMatch.frame, before, "the transcript scrolled")
+        let after = app.descendants(matching: .any)[anchorId].firstMatch
+        XCTAssertTrue(after.exists, "\(anchorId) is still in the transcript after the scroll")
+        XCTAssertGreaterThan(after.frame.minY, before.minY + 50,
+                             "the transcript scrolled toward the older messages: \(anchorId) was at "
+                             + "\(before.minY) and is at \(after.frame.minY)")
     }
 }
