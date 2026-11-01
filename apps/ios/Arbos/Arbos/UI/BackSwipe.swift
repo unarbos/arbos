@@ -20,6 +20,11 @@
 //
 // There is no swipe-to-reply. Reply stays on long-press and in the actions menu.
 //
+// A drag that starts on something tappable — a sender's avatar above all — is the swipe, not
+// the tap: both back recognizers declare themselves simultaneous with the presses and taps
+// and exclusive with the pans (`BackSwipe.sharesTouch`, Jacob 2026-11-01). Only a touch that
+// does not become a drag opens the profile.
+//
 // History: #1554 gated the back gestures on the composer's focus (#1831). #1985 made the edge
 // pop a SwiftUI drag that called `dismiss()` after 40 pt and added the per-bubble reply drag;
 // #2122 turned both into exclusive UIKit recognizers — the root one claimed an edge drag at
@@ -73,6 +78,42 @@ enum BackSwipe {
     /// Named coordinate space of a screen that uses `backSwipeToPop`; the composer bar
     /// measures its top edge in it.
     static let space = "arbosBackSwipeRoot"
+
+    /// May a back gesture run alongside `other`? Asked by the delegate of both
+    /// `DirectionalSwipeRecognizer`s, and the reason a drag that starts on a sender's
+    /// avatar is read as "back" at all (Jacob, 2026-11-01: "the slide to go back doesn't
+    /// register when you are over top a user pfp which is common but this should still
+    /// register as the slide and only a direct click should go to the user profile screen").
+    ///
+    /// Every avatar beside a bubble is a SwiftUI `Button` (`sender-avatar` → `toggleProfile`),
+    /// and a `Button` tracks its press with a recognizer that enters `.began` on touch-down —
+    /// that is how the pressed state draws. UIKit then lets that already-begun recognizer
+    /// prevent every later one that does not share the touch with it, so the swipe was
+    /// prevented at `lockDistance`, before it had decided anything: the finger was on a
+    /// picture, so the screen did not move.
+    ///
+    /// The delegate's simultaneity call is UIKit's own answer to this and it is one-sided by
+    /// design — returning true is *guaranteed* to allow simultaneous recognition, whatever
+    /// the other delegate says, while returning false only declines. So "back" says yes to
+    /// the presses and taps (the avatar's and the name's `Button`, the bubble's long-press)
+    /// and keeps saying no to every pan: the scroll view's, the time peek's and the system
+    /// pop's arbitration is exactly what it was.
+    ///
+    /// Nothing is made to wait. `require(toFail:)` would be the other way to give the swipe
+    /// priority, and it is the wrong one: the avatar's tap would then be held until the
+    /// swipe had failed, and a profile that opens after a pause is its own regression. A
+    /// touch that does not move still opens the page on the frame it always did; a touch
+    /// that becomes a swipe leaves the avatar, and a button that the finger leaves cancels
+    /// itself, as every button does.
+    ///
+    /// The two back recognizers are excluded from each other by name, not by being pans —
+    /// `DirectionalSwipeRecognizer` is a plain `UIGestureRecognizer`. One swipe right inside
+    /// the transcript is claimed by both the transcript's recognizer and the screen's, and
+    /// they have always been exclusive, so the first to begin pops and the other is
+    /// prevented. Letting them share would pop two levels at once.
+    static func sharesTouch(with other: UIGestureRecognizer) -> Bool {
+        !(other is UIPanGestureRecognizer) && !(other is DirectionalSwipeRecognizer)
+    }
 }
 
 /// Which optional chat-screen gestures are installed. All of them in Release; the Debug
@@ -362,10 +403,11 @@ struct TranscriptSwipeHost: UIViewRepresentable {
             }
         }
 
-        /// Exclusive with every other recognizer (the scroll pan above all); SwiftUI's own
-        /// recognizer still asks for itself and keeps taps / long-press alive until we begin.
+        /// Exclusive with every pan (the scroll's above all), shared with the presses and
+        /// taps inside the transcript — a sender's avatar is a `Button`, and its press
+        /// recognizer would otherwise prevent this one (`BackSwipe.sharesTouch`).
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
-            false
+            BackSwipe.sharesTouch(with: other)
         }
     }
 }
@@ -572,11 +614,13 @@ private struct FullScreenBackHost: UIViewRepresentable {
             }
         }
 
-        /// Exclusive with every other recognizer: the scroll pan, the time peek and the
-        /// system pop (which never shares a touch with this one anyway — edge starts fail
-        /// here on touch-down).
+        /// Exclusive with every pan: the scroll pan, the time peek and the system pop
+        /// (which never shares a touch with this one anyway — edge starts fail here on
+        /// touch-down). Shared with the presses and taps on the screen, so the header
+        /// pill's avatar and the `Button`s drawn over the transcript cannot prevent it
+        /// (`BackSwipe.sharesTouch`).
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
-            false
+            BackSwipe.sharesTouch(with: other)
         }
     }
 }
