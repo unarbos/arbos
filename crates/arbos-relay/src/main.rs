@@ -1,4 +1,5 @@
 mod admin;
+mod admin_audit;
 mod agent_messages;
 mod api;
 mod api_error_layer;
@@ -434,7 +435,21 @@ async fn main() -> anyhow::Result<()> {
     matrix::shadow::spawn_nightly(state.clone());
     boxes::spawn_project_purge(state.clone()).await;
 
-    let app = Router::new()
+    let app = build_app(state.clone());
+    let state_for_restart = state;
+
+    let listener = tokio::net::TcpListener::bind(&args.listen).await?;
+    tracing::info!(listen = %args.listen, data = %args.data.display(), "arbos-relay listening");
+    restart::install_sigterm_handler(state_for_restart);
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+/// Every route the relay serves, and the layers over all of them. Separate from `main` so a test
+/// can hold the real router: `admin_audit`'s coverage test reads the `.route(…)` paths out of this
+/// file and drives each one through the router this builds.
+fn build_app(state: AppState) -> Router {
+    Router::new()
         .route("/healthz", get(api::healthz))
         .route("/pair/new", post(api::pair_new))
         .route("/pair", post(api::pair))
@@ -1083,14 +1098,13 @@ async fn main() -> anyhow::Result<()> {
             state.clone(),
             api_error_layer::rewrite_plain_api_errors,
         ))
-        .with_state(state.clone());
-    let state_for_restart = state;
-
-    let listener = tokio::net::TcpListener::bind(&args.listen).await?;
-    tracing::info!(listen = %args.listen, data = %args.data.display(), "arbos-relay listening");
-    restart::install_sigterm_handler(state_for_restart);
-    axum::serve(listener, app).await?;
-    Ok(())
+        // Outermost, and over the whole router rather than any subset: a route added below is
+        // audited the moment it is added, and no handler can leave the line out by forgetting it.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            admin_audit::log_admin_requests,
+        ))
+        .with_state(state)
 }
 
 fn env_nonempty(name: &str) -> Option<String> {
