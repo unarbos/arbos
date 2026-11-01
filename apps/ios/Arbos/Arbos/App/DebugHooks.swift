@@ -204,6 +204,8 @@ enum DebugHooks {
     static var fixtureHomeRows: Int { value("ARBOS_FIXTURE_HOME_ROWS").flatMap { Int($0) } ?? 0 }
     /// Perf baseline: this chat gets an agent answer streamed word by word, over and over.
     static var fixtureStreamChat: String? { value("ARBOS_FIXTURE_STREAM") }
+    /// Perf baseline: `<chat>[,<chat>…]:<n>` — n timed opens from the chat list, in turn.
+    static var perfOpens: String? { value("ARBOS_PERF_OPENS") }
     /// Log frame pacing (dropped frames, worst frame, time over budget) and memory every
     /// 2 s to `com.unarbos.arbos.ios` / `perf` for the duration of the launch.
     static let perfLog: Bool = value("ARBOS_PERF_LOG") == "1"

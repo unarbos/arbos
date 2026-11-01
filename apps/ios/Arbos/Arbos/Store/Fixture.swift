@@ -339,6 +339,9 @@ extension AppModel {
         if let chatId = DebugHooks.fixtureStreamChat {
             Task { await fixtureStream(chatId: chatId) }
         }
+        if let spec = DebugHooks.perfOpens {
+            Task { await fixtureOpens(spec) }
+        }
         // `ARBOS_FIXTURE_DOC=<path>`: the fixture group becomes a real chat doc (a Loro
         // snapshot exported from the relay), so the transcript has the true shape —
         // members, avatars, mentions, replies, media, system rows (long-chat perf rig).
@@ -1006,6 +1009,26 @@ extension AppModel {
             }
             try? await Task.sleep(nanoseconds: 2_000_000_000)
         }
+    }
+
+    /// `ARBOS_PERF_OPENS=<chat>[,<chat>…]:<n>` (perf baseline): from 6 s after launch, n chat
+    /// opens through `open(peopleChat:)`, the chats in turn — 1.5 s on the chat list, then
+    /// 3.5 s in the chat. No XCUITest in the loop, so a profile of an open holds only the
+    /// app's own work. Each open is a `PerfSignpost` `open-chat` interval.
+    private func fixtureOpens(_ spec: String) async {
+        let parts = spec.split(separator: ":")
+        let chats = parts.first.map { $0.split(separator: ",").map(String.init) } ?? []
+        let count = parts.count > 1 ? Int(parts[1]) ?? 10 : 10
+        guard !chats.isEmpty else { return }
+        try? await Task.sleep(nanoseconds: 6_000_000_000)
+        for i in 0..<count {
+            path = []
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard let chat = peopleChats.first(where: { $0.id == chats[i % chats.count] }) else { return }
+            open(peopleChat: chat)
+            try? await Task.sleep(nanoseconds: 3_500_000_000)
+        }
+        path = []
     }
 
     /// A several-paragraph agent answer with a list and a code span — the shape
