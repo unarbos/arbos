@@ -631,6 +631,17 @@ final class MentionUITextView: UITextView {
     /// Paste of an image / GIF / WebP from the pasteboard.
     var onPasteImage: ((Data, String, String) -> Void)?
 
+    override func becomeFirstResponder() -> Bool {
+        if !isFirstResponder { PerfSignpost.composerAskedForFocus() }
+        return super.becomeFirstResponder()
+    }
+
+    override func insertText(_ text: String) {
+        PerfSignpost.begin(.keystroke)
+        super.insertText(text)
+        PerfSignpost.endAfterCommit(.keystroke)
+    }
+
     override func deleteBackward() {
         if text.isEmpty, let onDeleteBackwardEmpty {
             onDeleteBackwardEmpty()

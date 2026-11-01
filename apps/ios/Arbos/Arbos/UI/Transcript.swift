@@ -1481,6 +1481,7 @@ struct RowView: View, Equatable {
     }
 
     var body: some View {
+        let _ = FrameProbe.count(.rowBody)
         #if DEBUG
         let _ = PerfCounters.bump("rowBody")
         let _ = DebugHooks.perfChanges ? Self._printChanges() : ()
@@ -2226,6 +2227,7 @@ struct BlockView: View {
     private var muted: Color { ink == nil ? theme.muted : color.opacity(0.72) }
 
     var body: some View {
+        let _ = FrameProbe.count(.blockBody)
         #if DEBUG
         let _ = PerfCounters.bump("blockBody")
         #endif

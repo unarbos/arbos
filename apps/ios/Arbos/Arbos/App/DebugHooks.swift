@@ -200,6 +200,10 @@ enum DebugHooks {
     /// "Launch week" with this many synthetic rows — mixed people / agent prose with
     /// markdown, relay system lines, replies, attachments.
     static var fixtureLongRows: Int? { value("ARBOS_FIXTURE_LONG_ROWS").flatMap { Int($0) } }
+    /// Perf baseline: pad the fixture chat list with this many DMs so it scrolls.
+    static var fixtureHomeRows: Int { value("ARBOS_FIXTURE_HOME_ROWS").flatMap { Int($0) } ?? 0 }
+    /// Perf baseline: this chat gets an agent answer streamed word by word, over and over.
+    static var fixtureStreamChat: String? { value("ARBOS_FIXTURE_STREAM") }
     /// Log frame pacing (dropped frames, worst frame, time over budget) and memory every
     /// 2 s to `com.unarbos.arbos.ios` / `perf` for the duration of the launch.
     static let perfLog: Bool = value("ARBOS_PERF_LOG") == "1"
@@ -255,10 +259,19 @@ enum DebugHooks {
         #if DEBUG
         let v = ProcessInfo.processInfo.environment[key] ?? ""
         return v.isEmpty ? nil : v
+        #elseif ARBOS_FIXTURE
+        let v = launchEnvironment[key] ?? ""
+        return v.isEmpty ? nil : v
         #else
         return nil
         #endif
     }
+
+    #if ARBOS_FIXTURE
+    /// Read once: a Release build measured for performance must not pay Debug's per-call
+    /// copy of the environment inside row bodies.
+    private static let launchEnvironment = ProcessInfo.processInfo.environment
+    #endif
 
     /// One line at boot naming the `ARBOS_` variables this process actually received.
     ///

@@ -4,7 +4,7 @@
 
 import Foundation
 
-#if DEBUG
+#if DEBUG || ARBOS_FIXTURE
 extension AppModel {
     func loadFixture() {
         isFixture = true
@@ -310,6 +310,28 @@ extension AppModel {
             messages["fx-group-launch"] = Self.longGroupTranscript(rows: rows, before: now - 4 * 3_600_000, rich: DebugHooks.fixtureLongRich)
                 + (messages["fx-group-launch"] ?? [])
         }
+        // `ARBOS_FIXTURE_HOME_ROWS=<n>` (perf baseline): n more DMs under the two above, so the
+        // chat list is long enough to scroll. Initials only, so no picture comes off the network.
+        for i in 0..<DebugHooks.fixtureHomeRows {
+            let id = "fx-pad-\(i)"
+            let person = ChatMember(id: "fx-pad-u\(i)", kind: .user, member: "user:fx-pad-u\(i)", role: "member", handle: "person\(i)",
+                                    avatarUrl: nil, name: "Person \(i)", status: "member", joinedAt: now - 86_400_000, project: nil,
+                                    ownerId: nil, ownerHandle: nil, replyPolicy: nil)
+            let at = now - Int64(i + 2) * 600_000
+            peopleChats.append(PeopleChat(id: id, kind: "dm", createdBy: person.id, createdAt: at, title: "@person\(i)", pending: false,
+                                          members: [person, meMember], headSeq: 3, readSeq: i % 4 == 0 ? 2 : 3, unread: i % 4 == 0,
+                                          lockState: "people_only", lastActivityAt: at, myRole: "member", muted: false, silenced: false))
+            messages[id] = (0..<3).map { k in
+                Message(id: "\(id)-\(k)", chatId: id, role: .user, sender: k == 1 ? "user:fx-me" : person.member, status: .done, turn: nil,
+                        decision: nil, subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil,
+                        createdAt: at - Int64(3 - k) * 60_000, completedAt: nil, pending: false,
+                        parts: [.text(id: "\(id)-\(k)t", text: "Line \(k + 1) of a padded chat, long enough to fill the preview row in the list.")],
+                        hiddenCount: 0, senderHandle: k == 1 ? "jacob" : person.handle, senderName: k == 1 ? "Jacob Steeves" : person.name)
+            }
+        }
+        if let chatId = DebugHooks.fixtureStreamChat {
+            Task { await fixtureStream(chatId: chatId) }
+        }
         // `ARBOS_FIXTURE_DOC=<path>`: the fixture group becomes a real chat doc (a Loro
         // snapshot exported from the relay), so the transcript has the true shape —
         // members, avatars, mentions, replies, media, system rows (long-chat perf rig).
@@ -341,10 +363,12 @@ extension AppModel {
                 messages["fx-group-launch"] = list
             }
         }
+        #if DEBUG
         if let replay = DebugHooks.perfReplay {
             perfReplay(checkpointPath: replay.checkpoint, rowsPath: replay.rows, rooms: DebugHooks.perfReplayRooms,
                        gapMs: DebugHooks.perfReplayGapMs, afterMs: DebugHooks.perfReplayAfterMs)
         }
+        #endif
         // `ARBOS_FIXTURE_WORKING=<n>`: the first n agents of the group (and the opened
         // agent chat's one agent) stream a row with no words yet — "<name> is working".
         if DebugHooks.fixtureWorking > 0 {
@@ -940,6 +964,40 @@ extension AppModel {
             ? "Got `subtensor/` on main. What do you want to do with it?"
             : "Done. Short replies from now on, and I'll keep anything that goes out on Discord to one or two casual lines in your voice."
         append(bubble(resultText))
+    }
+
+    /// `ARBOS_FIXTURE_STREAM=<chat>` (perf baseline): from 8 s after launch, an agent answer
+    /// grows in that chat one word every 40 ms — the cadence of a relay text delta — then
+    /// finishes, and 2 s later the next one starts, until the app quits. Each word is one
+    /// `messages` write, the same publish a live token causes.
+    private func fixtureStream(chatId: Id) async {
+        let words = (AppModel.longReview + "\n\n" + AppModel.bubbleSortReply + "\n\n" + AppModel.longReply)
+            .split(separator: " ", omittingEmptySubsequences: false)
+        try? await Task.sleep(nanoseconds: 8_000_000_000)
+        while !Task.isCancelled {
+            let id = newId()
+            var m = assistant(id, chatId, "", at: nowMs())
+            m.status = .streaming
+            m.completedAt = nil
+            if peopleChats.contains(where: { $0.id == chatId }) {
+                m.sender = "agent:fx-foreign-testagent"
+                m.senderHandle = "testagent"
+                m.senderName = "TestAgent"
+            }
+            messages[chatId, default: []].append(m)
+            for n in 1...words.count {
+                try? await Task.sleep(nanoseconds: 40_000_000)
+                m.parts = [.text(id: "\(id)-t", text: words.prefix(n).joined(separator: " "))]
+                if n == words.count {
+                    m.status = .done
+                    m.completedAt = nowMs()
+                }
+                guard let i = messages[chatId]?.lastIndex(where: { $0.id == id }) else { return }
+                messages[chatId]?[i] = m
+                FrameProbe.count(.streamToken)
+            }
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+        }
     }
 
     /// A several-paragraph agent answer with a list and a code span — the shape

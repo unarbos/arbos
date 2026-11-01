@@ -186,7 +186,7 @@ final class AppModel: ObservableObject {
     /// mirrors its access token so every existing call path keeps working.
     @Published private(set) var tokens: AuthTokens?
     @Published private(set) var user: AuthUser?
-    #if DEBUG
+    #if DEBUG || ARBOS_FIXTURE
     /// Fixture only: the signed-in user (D79 initials, `myUserId` for reactions).
     func setFixtureUser(_ who: AuthUser) { user = who }
     #endif
@@ -412,6 +412,7 @@ final class AppModel: ObservableObject {
     /// Navigation: home → chat. Shared so menus anywhere can open a chat.
     @Published var path: [Route] = [] {
         didSet {
+            PerfSignpost.pathChanged(from: oldValue, to: path)
             dropDraftDMIfLeft()
             // The open chat is loaded first next launch and evicted last.
             if case .chat(let chatId, let pid)? = path.last, pid != channelSlot, let store {
@@ -986,8 +987,8 @@ final class AppModel: ObservableObject {
             creds = DeviceCredentials(relayUrl: RelayEndpoint(saved).httpUrl, deviceId: env["ARBOS_DEVICE_ID"] ?? "ios:env", deviceToken: tok)
         }
         #endif
-        #if DEBUG
-        if env["ARBOS_FIXTURE"] == "1" {
+        #if DEBUG || ARBOS_FIXTURE
+        if ProcessInfo.processInfo.environment["ARBOS_FIXTURE"] == "1" {
             api = RelayAPI(endpoint: RelayEndpoint("http://fixture.invalid")) { "" }
             credentials = DeviceCredentials(relayUrl: "http://fixture.invalid", deviceId: "ios:fixture", deviceToken: "fixture")
             LinkIcons.shared.fetch = { host in LinkIcons.fixtureIcon(host: host) }
@@ -1226,7 +1227,7 @@ final class AppModel: ObservableObject {
 
     /// A system row in a chat doc (call start/end lines). Fixture: local append.
     func writeSystemLine(chatId: Id, projectId: Id, text: String, callId: String) {
-        #if DEBUG
+        #if DEBUG || ARBOS_FIXTURE
         if isFixture {
             let m = Message(id: newId(), chatId: chatId, role: .system, sender: "system", status: .done, turn: nil, decision: nil,
                             subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: nowMs(),
@@ -2280,7 +2281,9 @@ final class AppModel: ObservableObject {
             PerfLog.mark("phase replay end", ms: Date().timeIntervalSince(started) * 1000)
         }
     }
+    #endif
 
+    #if DEBUG || ARBOS_FIXTURE
     /// Test seam (iphone-group-send-instant): a fixture people chat gets a real chat doc
     /// seeded with its fixture lines and a room that is stopped at once, so `sendPeople`
     /// writes the way a live chat does — doc, push queue, change events — with no relay.
@@ -3262,7 +3265,7 @@ final class AppModel: ObservableObject {
     /// `GET /projects/{id}/routines` when an owned agent's pane opens.
     func refreshRoutines(_ projectId: Id) async {
         if isFixture {
-            #if DEBUG
+            #if DEBUG || ARBOS_FIXTURE
             routines[projectId] = fixtureRoutines(projectId)
             #endif
             return
@@ -3294,7 +3297,7 @@ final class AppModel: ObservableObject {
     /// "The machine did not answer" with the reason.
     func refreshBoxReport() async {
         if isFixture {
-            #if DEBUG
+            #if DEBUG || ARBOS_FIXTURE
             boxReport = fixtureBoxReport()
             #endif
             return
@@ -3367,7 +3370,7 @@ final class AppModel: ObservableObject {
     /// `POST /chats/dm`: the relay makes the DM (or answers the one it has) and tells the
     /// other person. Only the first send of a draft calls it.
     private func createDM(handle: String) async -> PeopleChat? {
-        #if DEBUG
+        #if DEBUG || ARBOS_FIXTURE
         if isFixture {
             let dm = fixtureOpenDM(handle: handle, navigate: false)
             if let dm { fixtureAttachDoc(chatId: dm.id) }
@@ -5065,7 +5068,7 @@ final class AppModel: ObservableObject {
     /// can be active on the same message; tapping the same emoji again clears it.
     func toggleReaction(chatId: Id, messageId: Id, emoji: String) {
         guard let me = myUserId, !emoji.isEmpty else { return }
-        #if DEBUG
+        #if DEBUG || ARBOS_FIXTURE
         if isFixture {
             guard var list = messages[chatId], let i = list.firstIndex(where: { $0.id == messageId }) else { return }
             list[i].reactions = MessageReaction.toggling(list[i].reactions, emoji: emoji, sender: me)
@@ -5091,7 +5094,7 @@ final class AppModel: ObservableObject {
     func deleteMessage(chatId: Id, messageId: Id, projectId: Id? = nil) {
         guard !messageId.isEmpty else { return }
         let audit = groupDeletionAuditLine(chatId: chatId)
-        #if DEBUG
+        #if DEBUG || ARBOS_FIXTURE
         if isFixture {
             guard var list = messages[chatId] else { return }
             list.removeAll { $0.id == messageId }
@@ -5145,7 +5148,7 @@ final class AppModel: ObservableObject {
             list[i].preview = "off"
             messages[chatId] = list
         }
-        #if DEBUG
+        #if DEBUG || ARBOS_FIXTURE
         if isFixture { Haptics.pick(); return }
         #endif
         let room: String
@@ -5174,7 +5177,7 @@ final class AppModel: ObservableObject {
     func editMessage(chatId: Id, messageId: Id, text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !messageId.isEmpty, !trimmed.isEmpty else { return }
-        #if DEBUG
+        #if DEBUG || ARBOS_FIXTURE
         if isFixture {
             guard var list = messages[chatId],
                   let idx = list.firstIndex(where: { $0.id == messageId })
@@ -5699,7 +5702,7 @@ final class AppModel: ObservableObject {
                        extra: [String: Any] = [:], messageId presetId: Id? = nil, replyTo: Id? = nil,
                        forwardedFrom: String? = nil, extraParts: [[String: Any]] = []) {
         guard let chat = chat(chatId) else {
-            #if DEBUG
+            #if DEBUG || ARBOS_FIXTURE
             if isFixture { fixtureAppend(chatId: chatId, text: text, attachments: attachments, replyTo: replyTo) }
             #endif
             return
