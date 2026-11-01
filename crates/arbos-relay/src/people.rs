@@ -307,12 +307,9 @@ pub(crate) fn member_dto(state: &AppState, m: &Membership) -> ChatMemberDto {
         dto.last_seen_at = Some(seen.map(|t| t - t % 60_000));
         dto.online = Some(seen.is_some_and(|t| now_ms() - t < ONLINE_MS));
         dto.avatar_color_index_effective = Some(i64::from(crate::avatar::color_index(uid)));
-        dto.read_receipts = Some(
-            m.settings
-                .get("read_receipts")
-                .and_then(Value::as_bool)
-                .unwrap_or(true),
-        );
+        // The effective value (#1484): this chat's override, else the account default. The
+        // stored override alone was not the truth once an account default existed.
+        dto.read_receipts = Some(crate::read_receipts::enabled_for(state, uid, &m.chat_id));
         let silenced = membership_is_silenced(m);
         dto.silenced = Some(silenced);
         if silenced {
@@ -599,15 +596,7 @@ pub fn people_chat_dto(
                 .filter(|m| membership_is_silenced(m))
                 .and_then(|m| m.silenced_until),
             archived_at,
-            read_receipts: Some(
-                mine.map(|m| {
-                    m.settings
-                        .get("read_receipts")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(true)
-                })
-                .unwrap_or(true),
-            ),
+            read_receipts: Some(crate::read_receipts::enabled_for(state, me, &cm.chat.id)),
         },
     }
 }
@@ -2766,9 +2755,10 @@ pub async fn project_member_remove(
 
 #[derive(Deserialize)]
 pub struct ChatSettingsBody {
-    /// Share "Seen by @me" with the other people in this chat (default true).
+    /// Share "Seen by @me" with the other people in this chat: `true`, `false`, or `"inherit"`
+    /// to follow the account default (`PUT /me/read-receipts`). Absent leaves it alone.
     #[serde(default)]
-    pub read_receipts: Option<bool>,
+    pub read_receipts: Option<crate::read_receipts::ChatSettingBody>,
     #[serde(default)]
     pub muted: Option<bool>,
     /// Archive (hide) this chat for me on every device; `false` brings it back (D78).
@@ -2865,6 +2855,21 @@ pub async fn chat_settings(
         Ok(v) => v,
         Err(r) => return *r,
     };
+    // Read the whole body before applying any of it, so a word we do not know leaves the
+    // other settings in the request untouched.
+    let receipts = match &b.read_receipts {
+        Some(r) => match r.parse() {
+            Some(setting) => Some(setting),
+            None => {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "bad_request",
+                    "read_receipts must be true, false or \"inherit\"",
+                )
+            }
+        },
+        None => None,
+    };
     if let Some(a) = b.archived {
         if let Err(r) = apply_archive(&state, &principal, &me, &id, PEOPLE_PROJECT, a) {
             return *r;
@@ -2878,8 +2883,8 @@ pub async fn chat_settings(
         .map(|m| m.settings.clone())
         .filter(Value::is_object)
         .unwrap_or_else(|| json!({}));
-    if let Some(r) = b.read_receipts {
-        settings["read_receipts"] = json!(r);
+    if let Some(setting) = receipts {
+        crate::read_receipts::set_chat_override(&mut settings, setting);
     }
     if let Err(e) = state.db.set_member_settings(&id, &member, &settings) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
