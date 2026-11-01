@@ -37,12 +37,18 @@ static _Atomic uint64_t tid1, tid3;
 static __thread int busy;
 static os_log_t L;
 
-// connect() can run inside another image's initializer, before this library's constructor.
-static os_log_t log_handle(void) {
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ L = os_log_create("com.unarbos.arbos.perfprobe", "probe"); });
-    return L;
-}
+// connect() runs inside another image's initializer, before this library's constructor and
+// possibly before libc and os_log are set up. So a connect() hit only copies the raw address and
+// walks frame pointers by hand; dump() formats and logs it later.
+#define NET_MAX 8
+#define NET_PCS 16
+static struct {
+    struct sockaddr_storage sa;
+    int fd, phase, npcs;
+    uint64_t lr, pcs[NET_PCS];
+} net_rec[NET_MAX];
+static _Atomic int net_n;
+static int net_logged;
 
 static uint64_t tid(void) {
     uint64_t t;
@@ -50,7 +56,41 @@ static uint64_t tid(void) {
     return t;
 }
 
+static const char *image_of(uint64_t pc, uint64_t *off);
+
+static void log_connects(void) {
+    int n = net_n < NET_MAX ? net_n : NET_MAX;
+    for (; net_logged < n; net_logged++) {
+        const struct sockaddr *sa = (const struct sockaddr *)&net_rec[net_logged].sa;
+        char addr[128] = "?";
+        int port = -1;
+        if (sa->sa_family == AF_INET) {
+            inet_ntop(AF_INET, &((const struct sockaddr_in *)sa)->sin_addr, addr, sizeof addr);
+            port = ntohs(((const struct sockaddr_in *)sa)->sin_port);
+        } else if (sa->sa_family == AF_INET6) {
+            inet_ntop(AF_INET6, &((const struct sockaddr_in6 *)sa)->sin6_addr, addr, sizeof addr);
+            port = ntohs(((const struct sockaddr_in6 *)sa)->sin6_port);
+        } else if (sa->sa_family == AF_UNIX) {
+            snprintf(addr, sizeof addr, "unix:%s", ((const struct sockaddr_un *)sa)->sun_path);
+        }
+        char callers[1200] = "";
+        size_t len = 0;
+        for (int k = 0; k < net_rec[net_logged].npcs && len < sizeof callers - 64; k++) {
+            uint64_t off = 0;
+            const char *img = image_of(net_rec[net_logged].pcs[k], &off);
+            len += snprintf(callers + len, sizeof callers - len, " %s+0x%llx", img, (unsigned long long)off);
+        }
+        uint64_t off = 0;
+        const char *img = image_of(net_rec[net_logged].lr, &off);
+        os_log(L, "probe NET phase=%d main=? name=connect fd=%d family=%d addr=%{public}s port=%d caller=%{public}s+0x%llx stack=%{public}s",
+               net_rec[net_logged].phase, net_rec[net_logged].fd, sa->sa_family, addr, port, img,
+               (unsigned long long)off, callers);
+    }
+    if (net_n > NET_MAX) os_log(L, "probe NET dropped=%d connect records", net_n - NET_MAX);
+}
+
 static void dump(const char *when) {
+    log_connects();
     long own = 0, other = 0;
     for (int i = 0; i < HK_N; i++) {
         if (!hk_name[i]) continue;
@@ -85,24 +125,36 @@ static const char *utf8(id str) {
 
 // Network hits say where they go: the socket address of a connect(), the URL, method and
 // header names of a URLSession request, and the frames that started it.
+static void record_connect(uint64_t *regs, uint64_t lr) {
+    int k = atomic_fetch_add(&net_n, 1);
+    if (k >= NET_MAX) return;
+    const unsigned char *src = (const unsigned char *)regs[1];
+    unsigned char *dst = (unsigned char *)&net_rec[k].sa;
+    unsigned long n = (unsigned)regs[2] < sizeof net_rec[k].sa ? (unsigned)regs[2] : sizeof net_rec[k].sa;
+    for (unsigned long b = 0; src && b < n; b++) dst[b] = src[b];
+    net_rec[k].fd = (int)regs[0];
+    net_rec[k].phase = phase;
+    net_rec[k].lr = lr;
+    uint64_t *fp = (uint64_t *)__builtin_frame_address(0);
+    int depth = 0;
+    while (fp && depth < NET_PCS && ((uint64_t)fp & 0xf) == 0) {
+        uint64_t *next = (uint64_t *)fp[0];
+        if (fp[1]) net_rec[k].pcs[depth++] = fp[1];
+        if (next <= fp || (uint64_t)(next - fp) > (1u << 17)) break;
+        fp = next;
+    }
+    net_rec[k].npcs = depth;
+}
+
 static void describe_network(long i, uint64_t *regs, uint64_t lr) {
     char what[640] = "";
     const char *name = hk_name[i] ? hk_name[i] : i < HK_NC ? hk_name_c[i] : "?";
     if (!strcmp(name, "connect")) {
-        const struct sockaddr *sa = (const struct sockaddr *)regs[1];
-        char addr[128] = "?";
-        int port = -1;
-        if (sa && sa->sa_family == AF_INET) {
-            inet_ntop(AF_INET, &((const struct sockaddr_in *)sa)->sin_addr, addr, sizeof addr);
-            port = ntohs(((const struct sockaddr_in *)sa)->sin_port);
-        } else if (sa && sa->sa_family == AF_INET6) {
-            inet_ntop(AF_INET6, &((const struct sockaddr_in6 *)sa)->sin6_addr, addr, sizeof addr);
-            port = ntohs(((const struct sockaddr_in6 *)sa)->sin6_port);
-        } else if (sa && sa->sa_family == AF_UNIX) {
-            snprintf(addr, sizeof addr, "unix:%s", ((const struct sockaddr_un *)sa)->sun_path);
-        }
-        snprintf(what, sizeof what, "fd=%d family=%d addr=%s port=%d", (int)regs[0], sa ? sa->sa_family : -1, addr, port);
-    } else if (name[0] == '-') {
+        record_connect(regs, lr);
+        return;
+    }
+    if (!L) return;
+    if (name[0] == '-') {
         id req = NULL;
         if (strstr(name, " resume]")) req = msg((id)regs[0], "currentRequest");
         else if (strstr(name, "WithRequest:")) req = (id)regs[2];
@@ -125,7 +177,7 @@ static void describe_network(long i, uint64_t *regs, uint64_t lr) {
     }
     uint64_t off = 0;
     const char *img = image_of(lr, &off);
-    os_log(log_handle(), "probe NET phase=%d main=%d name=%{public}s %{public}s caller=%{public}s+0x%llx stack=%{public}s",
+    os_log(L, "probe NET phase=%d main=%d name=%{public}s %{public}s caller=%{public}s+0x%llx stack=%{public}s",
            (int)phase, pthread_main_np(), name, what, img, (unsigned long long)off, callers);
 }
 
@@ -227,7 +279,7 @@ static void hook_objc(void) {
 }
 
 __attribute__((constructor)) static void init(void) {
-    log_handle();
+    L = os_log_create("com.unarbos.arbos.perfprobe", "probe");
     for (int i = 0; i < HK_NC; i++) {
         if (!hk_orig[i]) continue;
         hk_name[i] = hk_name_c[i];

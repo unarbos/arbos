@@ -302,8 +302,9 @@ case "${1:-}" in
       netprobe)
         SIMCTL_CHILD_ARBOS_FIXTURE=1 xcrun simctl launch "$SIM" com.unarbos.arbos.ios >/dev/null 2>&1; sleep 8
         xcrun simctl terminate "$SIM" com.unarbos.arbos.ios 2>/dev/null
-        proberun net-1
-        proberun net-2 ARBOS_NO_WARMUP=1
+        set -- ${NET_TAGS:-net-1 net-2}
+        proberun $1
+        proberun $2 ARBOS_NO_WARMUP=1
         [ "${NET_THEN_COLD:-}" = 1 ] && {
           coldlaunch ${CL_N:-8}
           [ -n "${WU_EXTRA:-}" ] && openprof $WU_EXTRA 48 ARBOS_FIXTURE_LONG_ROWS=2200 ARBOS_FIXTURE_LONG_RICH=1 ARBOS_PERF_OPENS=fx-dm-unconst,fx-group-launch:6
