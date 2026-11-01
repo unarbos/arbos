@@ -193,7 +193,7 @@ struct ChatSession: View {
     static let revealHop: Double = 0.35
     /// How long `settleOnRevealed` waits between its corrections.
     ///
-    /// This used to be paired with a count of three, and the count is what #2560 removes.
+    /// This used to be paired with a count of three, and the count is what #2535 removes.
     /// The measurement behind it stands and is worth keeping, because it is also the
     /// evidence that counting was the wrong idea: across all twenty-six laddered reveals
     /// recorded for #2404 — several runtimes, including two ten-iteration repetitions that
@@ -239,7 +239,7 @@ struct ChatSession: View {
     static let revealMovedAfter: Double = 0.4
     /// How long after the last correction `traceAtRest` reports where the transcript ended
     /// up. Three seconds, chosen to land beside the moment the UI test reads the resting
-    /// frame; since #2560 the correction may run for `revealCorrectFor` first, so it now
+    /// frame; since #2535 the correction may run for `revealCorrectFor` first, so it now
     /// lands after that read rather than beside it. Left alone because the line it prints
     /// goes to the app's stdout, which CI does not capture either way — the probe's `moved`
     /// is what a gate run actually reads.
@@ -1286,7 +1286,7 @@ struct ChatSession: View {
             GeometryReader { geo in
                 // The revealed row's frame, resolved in the same space its viewport is
                 // measured in. Nothing is drawn for it; the reveal correction reads it to
-                // decide whether it has arrived (#2560).
+                // decide whether it has arrived (#2535).
                 if let reveal = revealingRow {
                     revealLandingReporter(frame: anchors[reveal.rowId].map { geo[$0] },
                                           viewport: geo.size.height)
@@ -4386,7 +4386,7 @@ extension ChatSession {
                 // Other rows keep the plain Copy menu.
                 // Two rows can ask for a frame and never at the same time in practice: the
                 // pressed row, and — for the second or so a correction runs — the row a
-                // reveal is scrolling onto (#2560). Everything else reports nothing, so a
+                // reveal is scrolling onto (#2535). Everything else reports nothing, so a
                 // transcript at rest publishes no anchors at all.
                 .anchorPreference(key: RowFrameKey.self, value: .bounds) { anchor in
                     actionsRowId == row.id || revealingRowId == row.id ? [row.id: anchor] : [:]

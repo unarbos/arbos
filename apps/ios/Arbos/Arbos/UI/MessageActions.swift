@@ -54,7 +54,7 @@ struct ReactionPick {
 
 /// Where a row sits, for whoever has to know. Two rows report and neither in steady state:
 /// the pressed one, for the actions overlay, and — only while a reveal is correcting its
-/// scroll — the row that reveal is landing on (#2560).
+/// scroll — the row that reveal is landing on (#2535).
 struct RowFrameKey: PreferenceKey {
     static let defaultValue: [String: Anchor<CGRect>] = [:]
     static func reduce(value: inout [String: Anchor<CGRect>], nextValue: () -> [String: Anchor<CGRect>]) {

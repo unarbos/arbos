@@ -19,7 +19,7 @@ import XCTest
 /// between them they sampled `long-265` — which landed six times out of six — and `long-304`,
 /// which has never landed once. One suite reporting both read as a single fault firing about
 /// half the time, and the queue spent a day on a flake that was a product bug on one row
-/// (#2560). A landing this suite cannot attribute to a row is not a measurement.
+/// (#2535). A landing this suite cannot attribute to a row is not a measurement.
 ///
 /// Three earlier explanations were measured and ruled out, which is why none is a case here.
 /// A near-top window grow firing inside the reveal: across four launches the trace recorded
@@ -49,9 +49,9 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     private static let convergingTarget = "long-265"
     /// The row it never converged on: two gate failures out of two attempts that aimed here,
     /// resting eighteen rows short with the message not realized at all, and **no run on
-    /// record has ever landed it** (#2560).
+    /// record has ever landed it** (#2535).
     ///
-    /// This is the row #2560 is about. Hit 59 of 83.
+    /// This is the row #2535 is about. Hit 59 of 83.
     private static let stuckTarget = "long-304"
     /// How many drags the list may be nudged while looking for a named target before the case
     /// gives up. Twenty-nine hits separate `convergingTarget` from the newest, and a drag
@@ -189,7 +189,7 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// `wanted` names the one row this case is allowed to tap. Without it the first bubble in
     /// tree order that clears the margin wins, and which row that is depends on where fourteen
     /// drag gestures happened to stop — the lottery that made six green runs and two red ones
-    /// look like one intermittent fault instead of two different rows (#2560).
+    /// look like one intermittent fault instead of two different rows (#2535).
     private func aimable(_ app: XCUIApplication, screen: CGRect,
                          wanted: String? = nil) -> (id: String, point: CGPoint)? {
         let band = reachable(app, screen: screen)
@@ -471,14 +471,14 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// back to it, and the scroll is corrected until the row has arrived.
     ///
     /// This arm takes `convergingTarget`, the row the old ladder of three already landed. It
-    /// is the regression half of the pair: whatever #2560 changed about the correction, the
+    /// is the regression half of the pair: whatever #2535 changed about the correction, the
     /// landing that worked before must still work.
     func testAResultOutsideTheWindowLandsAfterTheFix() {
         run(scrollUp: 0, preFix: false, wanted: Self.convergingTarget)
     }
 
     /// The same reveal aimed at `stuckTarget` — the row no run has ever landed, and the one
-    /// #2560 is about.
+    /// #2535 is about.
     ///
     /// **This case used to be a duplicate of the one above and is the reason the bug was
     /// found at all.** Both ran the same fourteen drags and then tapped whichever hit they
