@@ -35,6 +35,16 @@ final class ChatSearchResultJumpUITests: XCTestCase {
     /// which measured it; these are two suites with their own copy of `reachable`, not one
     /// shared helper, so the guard has to be written in both.
     private static let aimBandMargin: CGFloat = 24
+    /// How far above a result row's bottom edge a touch aimed at the row's own padding goes.
+    /// Result rows overlap their neighbours, so an aim too near the edge belongs to the next
+    /// row and the app reveals that one instead — correctly, since it owns the touch. Measured
+    /// off two gate logs on the same fixture: the deepest overlap was 4 pt on main and 6 pt
+    /// once [feedback group-chat-spacing-ios-2026-11-01] tightened `runGap` to 2, so the old
+    /// aim of 5 went from 1 pt clear to 1 pt inside. `Theme.bubbleVPad` is 11, which puts the
+    /// padding band roughly 4–15 pt above the edge; 9 sits in the middle of it, below the last
+    /// line of text and clear of the deepest overlap seen. The guard in `settledResult` is what
+    /// keeps this honest if a later pass deepens the overlap again.
+    private static let bubbleBottomAim: CGFloat = 9
 
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -252,9 +262,11 @@ final class ChatSearchResultJumpUITests: XCTestCase {
         field.typeText(Self.keyword)
         sleep(2)
         var band = reachable(app, screen: screen)
+        var ambiguous: [String] = []
         for attempt in 0..<3 {
             band = reachable(app, screen: screen)
-            for candidate in stillRows(app, screen: screen) {
+            let rows = stillRows(app, screen: screen)
+            for candidate in rows {
                 let inner = inRow(app, candidate.id, child)
                 guard inner.exists else { continue }
                 let point = aim(candidate.frame, inner.frame)
@@ -267,13 +279,37 @@ final class ChatSearchResultJumpUITests: XCTestCase {
                 // worst good tap. Hardening, not a fix for anything currently failing: the two
                 // landing failures on iOS 26.2 aim 97 and 115 pt below the band top.
                 guard point.y - band.minY >= Self.aimBandMargin else { continue }
+                // The point has to belong to this row and to no other. Result rows overlap
+                // their neighbours by a few points, so an aim near an edge can sit inside the
+                // next row's frame; the app then reveals the row that owns the touch while the
+                // assertions read the row this picked, and the failure reads as a landing bug
+                // when the landing was right. Rejecting the candidate removes that whole class,
+                // rather than the one aim that happened to cross the line
+                // ([feedback group-chat-spacing-ios-2026-11-01] took the overlap from 4 pt to 6
+                // and broke a 5 pt aim). `ChatSearchRevealLandingUITests` guards its own picks
+                // the same way.
+                if let other = rows.first(where: { $0.id != candidate.id && $0.frame.contains(point) }) {
+                    ambiguous.append("\(candidate.id) at \(point) is also inside \(other.id) \(other.frame)")
+                    continue
+                }
                 return (id: candidate.id, frame: candidate.frame, point: point)
             }
             if attempt < 2 { nudgeResultsDown(app, band: band) }
         }
-        XCTFail("no result row is still, showing \(child), with somewhere inside it to tap that "
-                + "a touch can reach, after two nudges (reachable \(band); "
-                + "results: \(describe(bubbles(app, screen: screen))))")
+        // Both exits fail. A run where every candidate is ambiguous says something specific —
+        // the rows have closed up far enough that no result can be tapped unambiguously — and
+        // it must never be mistaken for a pass or for the harness simply not finding a row.
+        let why: String
+        if ambiguous.isEmpty {
+            why = "no result row is still, showing \(child), with somewhere inside it to tap "
+                + "that a touch can reach, after two nudges"
+        } else {
+            why = "no unambiguous result row available: every candidate showing \(child) has its "
+                + "aim point inside a neighbouring row too, so a tap would reveal a row this test "
+                + "did not name — the result rows have closed up, check the transcript's gap "
+                + "metrics. Rejected [\(ambiguous.joined(separator: "; "))]"
+        }
+        XCTFail("\(why) (reachable \(band); results: \(describe(bubbles(app, screen: screen))))")
         return nil
     }
 
@@ -296,12 +332,13 @@ final class ChatSearchResultJumpUITests: XCTestCase {
     func testAResultTapClearOfTheAvatarAndNameRevealsTheMessageInTheChat() {
         let app = openLongLaunchWeekSearch()
         let screen = app.windows.firstMatch.frame
-        // `Theme.bubbleVPad` is 11, so the bottom few points of the bubble are its own padding:
-        // inside the row's hit area and below the last line of text. The name column's midX
+        // The bottom of the row is the bubble's own padding (`Self.bubbleBottomAim`): inside
+        // the row's hit area, below the last line of text, and far enough off the edge that
+        // the point belongs to this row and not to the one under it. The name column's midX
         // keeps it inside the bubble horizontally, away from the avatar lane.
         guard let chosen = settledResult(app, screen: screen, showing: "bubble-name",
                                          aim: { bubble, name in
-                                             CGPoint(x: name.midX, y: bubble.maxY - 5)
+                                             CGPoint(x: name.midX, y: bubble.maxY - Self.bubbleBottomAim)
                                          }) else { return }
         XCTAssertEqual(app.keyboards.count, 1, "the keyboard is up, as it is for a reader who just typed")
         let point = chosen.point
