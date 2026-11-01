@@ -63,13 +63,18 @@ final class PerfBaselineUITests: XCTestCase {
     private func row(_ app: XCUIApplication, _ chatId: String) -> XCUIElement { app.buttons["home-row:\(chatId)"] }
     private func back(_ app: XCUIApplication, _ chatId: String) -> XCUIElement { app.buttons["chat-back:\(chatId)"] }
 
+    /// Every element query is an accessibility snapshot that runs on the app's main thread
+    /// (50–90 ms in the long group), so after a tap nothing is queried until the measured
+    /// intervals are over.
     private func open(_ app: XCUIApplication, _ chatId: String) {
         row(app, chatId).tap()
+        sleep(3)
         XCTAssertTrue(back(app, chatId).waitForExistence(timeout: appear), "\(chatId) opened")
     }
 
     private func leave(_ app: XCUIApplication, _ chatId: String) {
         back(app, chatId).tap()
+        sleep(2)
         XCTAssertTrue(row(app, chatId).waitForExistence(timeout: appear), "back on the chat list")
     }
 
@@ -101,10 +106,8 @@ final class PerfBaselineUITests: XCTestCase {
         let app = launch()
         measure(metrics: [signpost("open-chat"), signpost("open-chat-settled"), XCTClockMetric()], options: options(manual: true)) {
             open(app, chatId)
-            sleep(1)
             stopMeasuring()
             leave(app, chatId)
-            sleep(1)
         }
     }
 
@@ -119,12 +122,11 @@ final class PerfBaselineUITests: XCTestCase {
         measure(metrics: [signpost("back-settled"), signpost("open-chat"), signpost("open-chat-settled"), XCTClockMetric()],
                 options: options(manual: true)) {
             back(app, dm).tap()
+            sleep(2)
             open(app, group)
-            sleep(1)
             stopMeasuring()
             leave(app, group)
             open(app, dm)
-            sleep(1)
         }
     }
 
@@ -137,8 +139,8 @@ final class PerfBaselineUITests: XCTestCase {
         let high = CGPoint(x: frame.midX, y: 220)
         measure(metrics: [XCTOSSignpostMetric.scrollDecelerationMetric, XCTOSSignpostMetric.scrollDraggingMetric], options: options(manual: false)) {
             phase("list-flick") {
-                for _ in 0..<4 { flick(app, frame: frame, from: low, dy: -420); usleep(700_000) }
-                for _ in 0..<4 { flick(app, frame: frame, from: high, dy: 420); usleep(700_000) }
+                for _ in 0..<4 { flick(app, frame: frame, from: low, dy: -420) }
+                for _ in 0..<4 { flick(app, frame: frame, from: high, dy: 420) }
             }
         }
     }
@@ -155,10 +157,10 @@ final class PerfBaselineUITests: XCTestCase {
         let high = CGPoint(x: frame.midX, y: 180)
         measure(metrics: [XCTOSSignpostMetric.scrollDecelerationMetric, XCTOSSignpostMetric.scrollDraggingMetric], options: options(manual: false)) {
             phase("chat-history-flick") {
-                for _ in 0..<6 { flick(app, frame: frame, from: high, dy: 300); usleep(600_000) }
+                for _ in 0..<6 { flick(app, frame: frame, from: high, dy: 300) }
             }
             phase("chat-newest-flick") {
-                for _ in 0..<6 { flick(app, frame: frame, from: low, dy: -300); usleep(600_000) }
+                for _ in 0..<6 { flick(app, frame: frame, from: low, dy: -300) }
             }
         }
         phase("chat-slow-drag") {
@@ -181,8 +183,7 @@ final class PerfBaselineUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(row(app, dm).waitForExistence(timeout: appear), "the chat list is up")
         open(app, group)
-        sleep(1)
-        phase("idle-in-chat") { sleep(6) }
+        phase("idle-in-chat") { sleep(5) }
         sleep(10)
         phase("stream-in-open-chat") { sleep(15) }
         leave(app, group)
@@ -191,12 +192,16 @@ final class PerfBaselineUITests: XCTestCase {
         phase("stream-in-other-chat") { sleep(12) }
     }
 
-    /// One coordinate read per test: every `frame` query is an accessibility snapshot of the
-    /// whole screen, which costs the app's main thread far more than the gesture.
+    /// A gesture resolves its element first, and that snapshot runs on the app's main thread.
+    /// So each gesture logs `perfgesture end` once its touches are done, and 2 s of quiet
+    /// follow: the analysis counts late frames in the 1.5 s after each end (the deceleration),
+    /// which no snapshot overlaps.
     private func flick(_ app: XCUIApplication, frame: CGRect, from: CGPoint, dy: CGFloat) {
         let origin = app.windows.firstMatch.coordinate(withNormalizedOffset: .zero)
         let start = origin.withOffset(CGVector(dx: from.x - frame.minX, dy: from.y - frame.minY))
         start.press(forDuration: 0.02, thenDragTo: start.withOffset(CGVector(dx: 0, dy: dy)), withVelocity: .fast, thenHoldForDuration: 0.02)
+        NSLog("perfgesture end")
+        usleep(2_000_000)
     }
 
     /// A held drag that ends with the finger still down, so nothing decelerates.
@@ -204,7 +209,8 @@ final class PerfBaselineUITests: XCTestCase {
         let origin = app.windows.firstMatch.coordinate(withNormalizedOffset: .zero)
         let start = origin.withOffset(CGVector(dx: from.x - frame.minX, dy: from.y - frame.minY))
         start.press(forDuration: 0.05, thenDragTo: start.withOffset(by), withVelocity: velocity, thenHoldForDuration: 0.3)
-        usleep(400_000)
+        NSLog("perfgesture end")
+        usleep(2_000_000)
     }
 
     // MARK: Composer
