@@ -38,14 +38,19 @@ rd() {
   else echo "BLOCKED:$(tr '\n' ' ' <"$e" | cut -c1-200)"; rm -f "$e"; return 1; fi
 }
 
-# GATES: one line per required check — <workflow file>|<human name>. A gate applies to a head only
-# when that head's diff touches the workflow's own path filter, so a Mac-only change is not asked
-# for an iPhone verdict.
+# GATES: one line per required check — <workflow file>|<human name>|<gate job>. A gate applies to a
+# head only when that head's diff touches the workflow's own path filter, so a Mac-only change is
+# not asked for an iPhone verdict.
+#
+# The third field is the job that has to have passed. A run's own conclusion is not enough; see the
+# CONSTRAINT on gate_state. `|` is the delimiter, and a job name may contain spaces but not a pipe —
+# if one ever needs a pipe, change the delimiter here and in both loops that read GATES
+# (require_gates below, and range_gate in merge-window.sh).
 #
 # ci.yml is deliberately absent. Its requiredness turns on `paths-ignore`, which merge-window.sh's
 # verdict() already reads for a different purpose, and asserting it here without that logic would
 # refuse legitimate iOS-only merges. Adding it is a separate change with its own proof.
-GATES='.github/workflows/swift-core-check.yml|Swift core check'
+GATES='.github/workflows/swift-core-check.yml|Swift core check|build-xcframework + fastlane test'
 
 # gate_patterns <workflow> <ref>: every quoted path pattern under that workflow's top level `on:`
 # block, read at <ref>.
@@ -100,46 +105,91 @@ commit_files() {
   rd "repos/$R/commits/$1" --jq '.files[]?.filename'
 }
 
-# gate_state <workflow> <sha>: one line — PASS <detail> | RED <detail> | NOVERDICT <detail> |
-# PENDING <detail> | NONE | BLOCKED <what could not be read>.
+# gate_job_conclusions <run id> <job name>: every conclusion recorded for that job name in that run,
+# one per line; empty when the run has no job by that name. "BLOCKED:<why>" with a non-zero status
+# when the listing cannot be trusted — counted and paginated like the run read, because a short job
+# read would silently turn "skipped" into "absent", and absent is the renamed-job case.
+gate_job_conclusions() {
+  local id=$1 job=$2 total list got
+  total=$(rd "repos/$R/actions/runs/$id/jobs?per_page=1" --jq '.total_count') \
+    || { echo "BLOCKED:counting jobs: ${total#BLOCKED:}"; return 1; }
+  list=$(rd --paginate "repos/$R/actions/runs/$id/jobs?per_page=100" --jq '.jobs[]|"\(.name)\t\(.conclusion)"') \
+    || { echo "BLOCKED:listing jobs: ${list#BLOCKED:}"; return 1; }
+  got=$(printf '%s\n' "$list" | grep -c .)
+  [ "$got" -ge "${total:-0}" ] || { echo "BLOCKED:job list incomplete, read $got of $total"; return 1; }
+  printf '%s\n' "$list" | awk -F'\t' -v j="$job" '$1 == j { print $2 }'
+}
+
+# gate_state <workflow> <sha> <gate job>: one line — PASS <detail> | RED <detail> | NOVERDICT
+# <detail> | PENDING <detail> | NONE | BLOCKED <what could not be read>.
 #
 # Read by head_sha, not from the PR's rollup. Two check runs on one head can share a job name (the
 # push run's and the pull_request run's), and the rollup gives no way to tell which result belongs
 # to which event. The runs API keyed on the sha is exact. Every page is read, and a short read is
 # loud, for the reason #2467 documents.
 #
-# CONSTRAINT — what a run-level conclusion is allowed to mean, and why it is not this file's to
-# guarantee. This reads the RUN's conclusion rather than a named check row, and PASS accepts only
-# `success`.
+# DECISION — PASS requires a run whose GATE JOB passed, not a run whose conclusion is `success`.
 #
-# What `success` is worth. A run concludes `success` only when some job actually succeeded and none
-# failed or was cancelled. Skipped jobs neither produce that conclusion nor prevent it, which takes
-# two measurements to pin down: run 41144617495 has a single skipped job and concludes `skipped`,
-# while run 41244242835 has one skipped job beside three successes and concludes `success`. So a
-# `success` run is always one in which something really ran and passed. The only open question is
-# whether the thing that passed was the check.
+# The reason is not that some added job could fake a pass. It is that a run's conclusion is an
+# aggregate over the run's whole job graph, so it does not answer the question this function asks —
+# did the gate test THIS head. Reading the job answers exactly that, and it stops the kit depending
+# on the gate workflow's job graph at all. That argument holds under the one-job shape on main, under
+# #2448's four-job shape, and under shapes neither exists yet; no claim about particular jobs can say
+# as much.
 #
-# Today it was, because this workflow has exactly one job, `check`. After #2448 it is because the
-# workflow ends in `verdict` ("Swift verdict"), which is `if: always()` and exits non-zero unless a
-# check actually passed on this head: `always()` keeps it out of only a cancelled run, and a
-# cancelled run concludes `cancelled`, so a `success` run is one where `verdict` itself ran and
-# passed.
+# What a run's `success` is worth. A run concludes `success` only when some job actually succeeded
+# and none failed or was cancelled. Skipped jobs neither produce that conclusion nor prevent it, and
+# both halves are measured. All 63 `pull_request` runs of this workflow that concluded `skipped` hold
+# exactly one job — the gate job, skipped — so a lone skipped job does not reach `success`. Run
+# 41244242835 (a run of ci.yml, not of this workflow) holds one skipped job beside three successes
+# and concludes `success`, so a skipped job does not prevent it either. A `success` run is one in
+# which something ran and passed. Not necessarily the gate.
 #
-# Two edits break that, and both live in a YAML file nobody reviewing this one would think to open:
-#   - today, adding ANY job that can succeed while `check` is skipped. Run 41244242835 above is
-#     already that shape, so this is observed behaviour and not a worry about one.
-#   - after #2448, `continue-on-error: true` on `verdict`. A tolerated failure stops failing the
-#     run, so the run concludes `success` on the strength of its other jobs with no check passed.
-# Either one makes this function quietly permissive again with no line here changing. The matching
-# constraint comment is carried on the workflow side by #2448's branch, the change that adds
-# `verdict`; until that lands, main's workflow is the single-job form above and there is no comment
-# there to find.
+# The two already come apart on a real head. On #2448's head 758fe93bb this workflow declares four
+# jobs, and in run 41247933853 `route` concluded SUCCESS while the gate job was SKIPPED. A run
+# holding a green job and no gate verdict is a thing that has happened, and the run's conclusion
+# cannot distinguish it from a run the gate passed in.
 #
-# Reading rows by name instead would only trade this dependency for a worse one:
-# `build-xcframework + fastlane test` is skipped in the mirror run exactly when the push twin
-# passed, so requiring it by name would refuse when coverage exists.
+# What this does NOT claim, because an earlier version of this comment claimed it and was wrong. It
+# warned that the run-level read goes permissive if the workflow gains any other always-green job.
+# Under #2448 that is false. GitHub fails a run when any job fails, and the `verdict` job is
+# `if: always()` and exits non-zero unless the check passed in that run or the push twin passed, so a
+# skipped check takes the run red however many other jobs succeed. Measured over all eight runs of
+# that four-job shape: `route` — which carries no `if:` and no fork guard — concluded success in
+# every one, and `verdict` concluded failure in every one. Seven of those runs concluded `failure`
+# and the eighth concluded `cancelled`, its check having been cancelled. None concluded `success`.
+# The old clause was true only of the one-job shape, where a skipped check leaves nothing but
+# success-or-skipped jobs. It is dropped, not softened.
+#
+# The limit on that evidence, named rather than left to be found. No run observed so far has
+# `verdict` as its ONLY red job: each of the eight had a second job red or cancelled beside it. So
+# "a red `verdict` alone takes the run red" rests on GitHub's documented aggregation rule, not on a
+# log read here.
+#
+# What survives as a real hazard is narrower, and every item is one edit to the YAML:
+#   1. `continue-on-error: true` on `verdict`.
+#   2. any `if:` on `verdict` other than `always()`, or deleting the job — a skipped check then
+#      leaves only success-or-skipped jobs and the run concludes `success`.
+#   3. an `exit 0` path in `verdict` that requires neither a passing check nor a passing push run.
+# Reading the gate job's conclusion depends on none of the three, which is the point.
+#
+# So the job conclusion is read, one more hop on the same runs-API-by-sha call. The workflow may grow
+# whatever jobs it likes.
+#
+# EXISTS, never FOR ALL. The condition is that SOME run at this head has the gate job green. It must
+# not be that every run does: the mirror run's gate job is skipped precisely when the push twin
+# passed, so a FOR ALL test would refuse exactly when coverage exists. That is the same trap this
+# function already avoids for check rows, entered from the job side instead, and getting it backwards
+# turns a silent-green bug into a cannot-ever-merge bug.
+#
+# Three readings are therefore distinct and none of them is a pass: a run that is red, a run that is
+# skipped, and a run that concluded `success` without the gate job running. The last is named in the
+# output rather than folded into the others, because it is the case this exists to catch.
 gate_state() {
-  local wf=$1 sha=$2 base total list got
+  local wf=$1 sha=$2 job=$3 base total list got
+  # A GATES line missing its third field would otherwise match no job, call every success run
+  # "no job named ''", and refuse with a reason that describes the table rather than the head.
+  [ -n "$job" ] || { echo "BLOCKED GATES names no gate job for ${wf##*/}, so no run of it can be judged"; return; }
   base="repos/$R/actions/workflows/${wf##*/}/runs?head_sha=$sha"
   total=$(rd "$base&per_page=1" --jq '.total_count') || { echo "BLOCKED counting ${wf##*/} runs for ${sha:0:8}: ${total#BLOCKED:}"; return; }
   [ "${total:-0}" -eq 0 ] && { echo "NONE"; return; }
@@ -150,25 +200,38 @@ gate_state() {
 
   # Every run is named in the detail, whatever the label. The bug this replaces was a result that
   # never appeared in any output, so a result that is not a pass is listed rather than summarised.
-  local pass all red pend
-  pass=$(printf '%s\n' "$list" | awk '$4=="success"{print $1" ("$2")"}' | head -1)
-  [ -n "$pass" ] && { echo "PASS run $pass"; return; }
+  local all red pend cand id ev jc green=''
+  # EXISTS: the first run at this head whose gate job is green decides it. A run that concluded
+  # `success` without that job going green is recorded in $green and reported below, never passed.
+  cand=$(printf '%s\n' "$list" | awk '$4=="success"{print $1" "$2}')
+  while read -r id ev; do
+    [ -n "$id" ] || continue
+    jc=$(gate_job_conclusions "$id" "$job") \
+      || { echo "BLOCKED reading jobs of run $id for ${sha:0:8}: ${jc#BLOCKED:}"; return; }
+    printf '%s\n' "$jc" | grep -qx success && { echo "PASS run $id ($ev), job '$job' success"; return; }
+    if [ -z "$jc" ]; then green="$green, run $id ($ev) concluded success with no job named '$job'"
+    else green="$green, run $id ($ev) concluded success but '$job' was $(printf '%s' "$jc" | paste -sd'/' -)"; fi
+  done <<< "$cand"
+
   all=$(printf '%s\n' "$list" | awk '{print $1" ("$2", "($3 == "completed" ? $4 : $3)")"}' | paste -sd', ' -)
+  [ -n "$green" ] && all="$all${green}"
   pend=$(printf '%s\n' "$list" | awk '$3!="completed"')
-  [ -n "$pend" ] && { echo "PENDING $got run(s) on this head, none successful yet: $all"; return; }
+  [ -n "$pend" ] && { echo "PENDING $got run(s) on this head, none with '$job' green yet: $all"; return; }
+  # A run that concluded success while the gate job did not is the silent-green case. It is not red
+  # and not skipped, so it would otherwise fall through to the canary below and be described as
+  # "every one skipped or neutral", which it is not. Named here instead.
+  [ -n "$green" ] && { echo "NOVERDICT $got run(s) on this head, none ran '$job' to a pass: $all"; return; }
   # skipped and neutral are not failures, and that is the whole trap: they are not verdicts either.
   # A job skipped by an `if:` condition did no work, so it proves nothing about this commit.
   red=$(printf '%s\n' "$list" | awk '$4!="success" && $4!="skipped" && $4!="neutral"')
-  [ -n "$red" ] && { echo "RED $got run(s) on this head, none successful: $all"; return; }
-  # A canary, not a live path — and kept deliberately. Under #2448 every run reaches the always()
-  # verdict job, so a wholly skipped or neutral run should be unreachable for a fresh head. It stays
-  # because it is still live for historical heads, whose all-skipped runs sit on main's history
-  # permanently and are read by the audit paths, and because the red= filter above deliberately
-  # excludes skipped and neutral, so this case arrives here by falling through everything else.
-  # Delete the branch and the case has to be reclassified; the convenient reclassification is "pass",
-  # which restores the original bug inside the one function written to prevent it. If this line ever
-  # fires for a fresh head, the verdict job's fail-closed guarantee has been broken — read it as that
-  # alarm, not as a routine skip.
+  [ -n "$red" ] && { echo "RED $got run(s) on this head, none with '$job' green: $all"; return; }
+  # Every run at this head was skipped or neutral, so nothing even attempted the gate job. This is a
+  # live state, not a historical one: a same-repo branch whose push run never arrived is left with
+  # only its skipped pull_request mirror, which is #2468 exactly. It is kept as its own branch
+  # because the red= filter above deliberately excludes skipped and neutral, so the case arrives
+  # here by falling through everything else — delete it and the case has to be reclassified, and the
+  # convenient reclassification is "pass", which restores the original bug inside the one function
+  # written to prevent it.
   echo "NOVERDICT $got run(s) on this head, every one skipped or neutral, so none of them tested it: $all"
 }
 
@@ -203,7 +266,7 @@ gate_applies() {
 #
 # <files> is the newline-separated diff for this head, from pr_files or commit_files.
 require_gates() {
-  local sha=$1 files=$2 wf name phead pbase pats state rc=0
+  local sha=$1 files=$2 wf name job phead pbase pats state rc=0
   # GitHub's head_sha run filter matches the full 40-character sha only. An abbreviated one is not
   # an error: it returns total_count 0, which gate_state would report as "no run exists for this
   # sha at all". That is this file's own bug one level down — "nothing is there" standing in for
@@ -219,14 +282,14 @@ require_gates() {
     return 2
   fi
   sha=$norm
-  while IFS='|' read -r wf name; do
+  while IFS='|' read -r wf name job; do
     [ -n "$wf" ] || continue
     state=$(gate_applies "$wf" "$sha" "$files")
     case $? in
       1) echo "    required check '$name' on ${sha:0:9}: $state"; continue ;;
       2) echo "    required check '$name' on ${sha:0:9}: $state"; rc=2; continue ;;
     esac
-    state=$(gate_state "$wf" "$sha")
+    state=$(gate_state "$wf" "$sha" "$job")
     case "$state" in
       PASS*)    echo "    required check '$name' on ${sha:0:9}: $state" ;;
       BLOCKED*) echo "    required check '$name' on ${sha:0:9}: $state"; rc=2 ;;

@@ -135,9 +135,9 @@ verdict() {
 #
 # Returns 0 satisfied (or no gate applies since <from>), 1 refused, 2 blocked, 3 wait.
 range_gate() {
-  local ch wf name rc=0 g sha subj files why state decided
+  local ch wf name job rc=0 g sha subj files why state decided
   ch=$(changes_since "$1")
-  while IFS='|' read -r wf name; do
+  while IFS='|' read -r wf name job; do
     [ -n "$wf" ] || continue
     g=0; decided=""
     while read -r sha subj; do
@@ -153,7 +153,7 @@ range_gate() {
         else echo "    '$name' on ${sha:0:9} (older, a finding, not a refusal): $why"; fi
         continue
       fi
-      state=$(gate_state "$wf" "$sha")
+      state=$(gate_state "$wf" "$sha" "$job")
       if [ -z "$decided" ]; then
         decided=$sha
         case "$state" in
