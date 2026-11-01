@@ -157,6 +157,74 @@ openprof() {
   xcrun simctl terminate "$SIM" com.unarbos.arbos.ios 2>/dev/null
 }
 
+# coldlaunch <n>: launches by simctl, alternating warm-up on / off (the order flips each round),
+# then the app's launch milestones; the pid → arm map goes to cl-pids.txt. CL_ROWS: home rows
+# (`first-content` marks a sentinel after the last row, so it only fires when they all fit).
+coldlaunch() {
+  local T0 i arm pid; T0=$(date "+%Y-%m-%d %H:%M:%S")
+  : > $W/logs/cl-pids.txt
+  say "coldlaunch load=[$(sysctl -n vm.loadavg)]"
+  for i in $(seq 1 ${1:-6}); do
+    for arm in $([ $((i % 2)) = 1 ] && echo "on off" || echo "off on"); do
+      pid=$(env SIMCTL_CHILD_ARBOS_FIXTURE=1 SIMCTL_CHILD_ARBOS_PERF_FRAMES=1 SIMCTL_CHILD_ARBOS_FIXTURE_HOME_ROWS=${CL_ROWS:-60} \
+        $([ $arm = off ] && echo SIMCTL_CHILD_ARBOS_NO_WARMUP=1) \
+        xcrun simctl launch --terminate-running-process "$SIM" com.unarbos.arbos.ios 2>/dev/null | awk -F': ' '{print $2}')
+      echo "$arm $i $pid" >> $W/logs/cl-pids.txt
+      sleep 7
+    done
+  done
+  xcrun simctl terminate "$SIM" com.unarbos.arbos.ios 2>/dev/null; sleep 2
+  xcrun simctl spawn "$SIM" log show --style compact --start "$T0" --predicate \
+    'subsystem == "com.unarbos.arbos.ios" AND (category == "perf-frames" OR category == "launch")' > $W/logs/cl-launch.app.log 2>&1
+  say "coldlaunch lines=$(grep -c app-init $W/logs/cl-launch.app.log)"
+}
+
+# probebuild: the side-effect counter for the app just built, hooking every uniffi_ function
+# and the system calls it imports (scripts/ios-perf/probe).
+probebuild() {
+  local app="$DD/Build/Products/Release-iphonesimulator/Arbos.app/Arbos"
+  mkdir -p $W/probe && cp $SRC/scripts/ios-perf/probe/{gen.py,probe.c} $W/probe/ || return 1
+  xcrun nm -u "$app" | grep -E '^_uniffi_' > $W/probe/imports.txt
+  ( cd $W/probe && python3 gen.py imports.txt . && xcrun clang -dynamiclib -target arm64-apple-ios17.0-simulator \
+      -isysroot "$(xcrun --sdk iphonesimulator --show-sdk-path)" -O1 probe.c hooks.s -o probe.dylib \
+      -undefined dynamic_lookup -framework Foundation -lobjc 2>&1 | grep -v dynamic_lookup )
+  say "probebuild $(ls -la $W/probe/probe.dylib 2>&1 | awk '{print $5}') bytes"
+}
+
+# proberun <tag> [KEY=VAL...]: one launch with the side-effect counter injected (probe/probe.dylib),
+# its log, and the mtimes of every file the app's containers and the simulator keychain hold.
+proberun() {
+  local tag=$1 T0 kv envs=() pid d; shift
+  T0=$(date "+%Y-%m-%d %H:%M:%S")
+  for kv in ARBOS_FIXTURE=1 ARBOS_FIXTURE_HOME_ROWS=60 "DYLD_INSERT_LIBRARIES=$W/probe/probe.dylib" "$@"; do envs+=("SIMCTL_CHILD_$kv"); done
+  pid=$(env "${envs[@]}" xcrun simctl launch --terminate-running-process "$SIM" com.unarbos.arbos.ios 2>/dev/null | awk -F': ' '{print $2}')
+  say "proberun $tag pid=${pid:-none} $*"
+  sleep 20
+  xcrun simctl terminate "$SIM" com.unarbos.arbos.ios 2>/dev/null; sleep 2
+  xcrun simctl spawn "$SIM" log show --style compact --start "$T0" --predicate \
+    'subsystem == "com.unarbos.arbos.perfprobe" OR (subsystem == "com.unarbos.arbos.ios" AND category == "launch")' > $W/logs/$tag.probe.log 2>&1
+  { for d in "$(xcrun simctl get_app_container "$SIM" com.unarbos.arbos.ios data 2>/dev/null)" \
+        $(xcrun simctl get_app_container "$SIM" com.unarbos.arbos.ios groups 2>/dev/null | awk '{print $2}') \
+        ~/Library/Developer/CoreSimulator/Devices/$SIM/data/Library/Keychains; do
+      [ -d "$d" ] && find "$d" -type f -exec stat -f "%Fm %z %N" {} + 2>/dev/null
+    done; } > $W/logs/$tag.files.txt
+  say "proberun $tag $(grep -c 'probe count' $W/logs/$tag.probe.log) count lines; $(grep 'probe summary' $W/logs/$tag.probe.log | tail -1 | sed 's/.*probe summary//')"
+}
+
+# exportall: time-profile and os-signpost tables of every trace not yet exported (gzipped XML;
+# symbolise with sim_symbol_addrs.py + sim-symbolicate.sh).
+exportall() {
+  local t n
+  for t in $W/traces/*.trace; do
+    n=${t%.trace}
+    [ -f $n.tp.xml.gz ] && continue
+    nice -n 12 xcrun xctrace export --input "$t" --xpath '/trace-toc/run[@number="1"]/data/table[@schema="time-profile"]' > $n.tp.xml 2>/dev/null
+    nice -n 12 xcrun xctrace export --input "$t" --xpath '/trace-toc/run[@number="1"]/data/table[@schema="os-signpost"]' > $n.sp.xml 2>/dev/null
+    gzip -f $n.tp.xml $n.sp.xml
+    say "exported $(basename $n) $(du -h $n.tp.xml.gz | cut -f1)"
+  done
+}
+
 ALL="testLaunchToChatList testOpenLongGroup testOpenSmallDM testSwitchChats testScrollChatList testScrollLongChat testComposerTypeAndSend testSettingsSheet testMessageMenu testStreamingAnswer"
 
 case "${1:-}" in
@@ -193,6 +261,29 @@ case "${1:-}" in
         openprof open-mix 85 ARBOS_FIXTURE_LONG_ROWS=2200 ARBOS_FIXTURE_LONG_RICH=1 ARBOS_PERF_OPENS=fx-dm-unconst,fx-group-launch:14
         # The same group opens driven by XCUITest (accessibility on in the app), profiled.
         ITER=5 XINST="--instrument os_signpost" trace "Time Profiler" testOpenLongGroup 70 axg ;;
+      # First-open warm-up A/B in one binary (ARBOS_NO_WARMUP=1 turns it off): cold launches
+      # alternating on / off, the side-effect counter over the warm-up window, then profiled
+      # opens, DM first then the long group, three launches per arm.
+      warmab)
+        build || { kill $WD 2>/dev/null; release_all; exit 3; }
+        xcrun simctl install "$SIM" "$DD/Build/Products/Release-iphonesimulator/Arbos.app"
+        # The first launch after a boot dies before xctrace can attach; spend it here.
+        SIMCTL_CHILD_ARBOS_FIXTURE=1 xcrun simctl launch "$SIM" com.unarbos.arbos.ios >/dev/null 2>&1; sleep 10
+        xcrun simctl terminate "$SIM" com.unarbos.arbos.ios 2>/dev/null
+        coldlaunch 6
+        probebuild && { proberun probe-on-1; proberun probe-off-1 ARBOS_NO_WARMUP=1; proberun probe-on-2; }
+        for i in 1 2 3; do
+          openprof wu-on-$i 48 ARBOS_FIXTURE_LONG_ROWS=2200 ARBOS_FIXTURE_LONG_RICH=1 ARBOS_PERF_OPENS=fx-dm-unconst,fx-group-launch:6
+          openprof wu-off-$i 48 ARBOS_FIXTURE_LONG_ROWS=2200 ARBOS_FIXTURE_LONG_RICH=1 ARBOS_PERF_OPENS=fx-dm-unconst,fx-group-launch:6 ARBOS_NO_WARMUP=1
+        done ;;
+      # No build: cold launches only, on the app the last plan installed.
+      coldab)
+        SIMCTL_CHILD_ARBOS_FIXTURE=1 xcrun simctl launch "$SIM" com.unarbos.arbos.ios >/dev/null 2>&1; sleep 8
+        xcrun simctl terminate "$SIM" com.unarbos.arbos.ios 2>/dev/null
+        coldlaunch ${3:-8}
+        [ -n "${WU_EXTRA:-}" ] && openprof $WU_EXTRA 48 ARBOS_FIXTURE_LONG_ROWS=2200 ARBOS_FIXTURE_LONG_RICH=1 ARBOS_PERF_OPENS=fx-dm-unconst,fx-group-launch:6
+        xcrun simctl shutdown "$SIM" 2>/dev/null
+        exportall ;;
       only)
         tag=$3; shift 3; for t in "$@"; do runtest $t $tag; done ;;
       *) echo "plan?"; ;;
