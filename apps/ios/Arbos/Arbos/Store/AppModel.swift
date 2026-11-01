@@ -922,6 +922,9 @@ final class AppModel: ObservableObject {
     /// Rooms whose doc or cursor changed since the last save.
     private var dirtyDocs: Set<Id> = []
     private var flushTask: Task<Void, Never>?
+    private var lastDirtyAt = Date.distantPast
+    /// The oldest change not saved yet (nil when everything is saved).
+    private var dirtySince: Date?
     /// Where the first populated home list came from: "store" or "relay" (launch log).
     private(set) var contentOrigin = "relay"
     /// Keys the store loader has handed to `ensureRoom` (or decided to skip).
@@ -932,6 +935,8 @@ final class AppModel: ObservableObject {
     /// Set when the first home list came from disk and the relay is not live yet.
     var showingSavedCopy: Bool { contentOrigin == "store" && link != .live }
     private static let flushDelayNs: UInt64 = 1_500_000_000
+    /// Seconds an unsaved change may wait while its rooms keep changing (`markDirty`).
+    private static let flushMaxDelay: TimeInterval = 10
     /// At most one PUT /chats/{id}/read per chat inside this window (latest value at the end).
     static let readPutThrottleSeconds: TimeInterval = 2
     /// Last seq/headSeq successfully handed to the relay for mark-read, per chat.
@@ -1791,6 +1796,7 @@ final class AppModel: ObservableObject {
         directory = []
         directoryLoadedAt = 0
         dirtyDocs = []
+        dirtySince = nil
         flushTask?.cancel()
         flushTask = nil
         storeDocsLoaded = false
@@ -2110,16 +2116,44 @@ final class AppModel: ObservableObject {
         store.put(StoreKey.unread, data)
     }
 
-    /// A room's doc or cursor moved: save soon (coalesced per 1.5 s).
+    /// A room's doc or cursor moved: save once the rooms have been quiet for 1.5 s, or
+    /// `flushMaxDelay` after the first unsaved change while they keep changing. The export
+    /// serialises the whole doc on the main actor, so a stream must not pay it every 1.5 s.
     private func markDirty(_ key: Id) {
         guard store != nil else { return }
         dirtyDocs.insert(key)
+        lastDirtyAt = Date()
+        if dirtySince == nil { dirtySince = lastDirtyAt }
         guard flushTask == nil else { return }
+        armFlush(afterNs: AppModel.flushDelayNs)
+    }
+
+    private func armFlush(afterNs delay: UInt64) {
         flushTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: AppModel.flushDelayNs)
+            try? await Task.sleep(nanoseconds: delay)
             guard let self, !Task.isCancelled else { return }
             self.flushTask = nil
+            let quiet = Date().timeIntervalSince(self.lastDirtyAt)
+            let waited = Date().timeIntervalSince(self.dirtySince ?? self.lastDirtyAt)
+            let quietNeeded = Double(AppModel.flushDelayNs) / 1e9
+            if quiet < quietNeeded, waited < AppModel.flushMaxDelay {
+                let rest = min(quietNeeded - quiet, AppModel.flushMaxDelay - waited)
+                self.armFlush(afterNs: UInt64(max(rest, 0.05) * 1e9))
+                return
+            }
             self.flushStore(all: false)
+        }
+    }
+
+    /// Store usage on a background thread: `usage()` waits on the store queue, behind the
+    /// snapshot writes a flush just queued.
+    private func refreshStoreUsage(_ store: DeviceStore) {
+        Task.detached(priority: .utility) { [weak self] in
+            let usage = store.usage()
+            await MainActor.run {
+                guard let self, self.store === store else { return }
+                self.storeUsage = usage
+            }
         }
     }
 
@@ -2129,6 +2163,7 @@ final class AppModel: ObservableObject {
         guard let store else { return }
         flushTask?.cancel()
         flushTask = nil
+        dirtySince = nil
         let keys = all ? Set(docs.keys) : dirtyDocs
         dirtyDocs = []
         for key in keys {
@@ -2139,7 +2174,7 @@ final class AppModel: ObservableObject {
         }
         store.enforceCaps()
         if all { store.flush() }
-        if !keys.isEmpty { storeUsage = store.usage() }
+        if !keys.isEmpty { refreshStoreUsage(store) }
     }
 
     private func forgetDoc(_ key: Id) {
