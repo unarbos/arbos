@@ -10,6 +10,7 @@ import QuickLook
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
+import os
 
 /// Long-press → Forward payload for the chat picker sheet: the message (its text, its
 /// pictures / files / videos and its charts all travel) and who wrote it
@@ -179,9 +180,14 @@ struct ChatSession: View {
     /// every row sized in that first layout is time the screen does not move. Measured on
     /// the landed build, the push is asked for at +28–41 ms and does not animate until
     /// +87–296 ms, and sizing the 80-row window is 13–45 ms of that
-    /// (internal/perf/ios-push-waits-for-destination-layout.md). The rows this leaves out
-    /// join one main-queue hop later, behind a transition the render server is already
-    /// driving, where their layout is invisible.
+    /// (internal/perf/ios-push-waits-for-destination-layout.md).
+    ///
+    /// MEASURED AS A REGRESSION, and not shippable in this form. A main-queue hop does not
+    /// escape the layout the push is waiting on — that layout spans several run-loop turns —
+    /// so the stack is sized twice before the animation starts and the saving is never
+    /// banked. Push-animates went 102.4 → 113.5 ms warm and 304.6 → 358.5 ms on a group's
+    /// first open. The remaining open question is whether ONE small first layout beats ONE
+    /// large one; `ARBOS_PERF_FIRST_WINDOW_HOLD_MS` exists to measure exactly that.
     ///
     /// 24, not a screenful. A screenful of the shortest bubbles the rig has ever rendered
     /// (64 pt tall, 4 pt apart) is 10 rows in the 682 pt between the header and the
@@ -440,13 +446,36 @@ struct ChatSession: View {
         }
     }
 
-    /// Open the first-paint window out to the reading window, once the push owns the screen.
+    /// Queue `growToReadingWindow`.
     ///
-    /// Called from `handleSessionAppear` through one main-queue hop. The hop is the whole
-    /// point: `onAppear` runs inside the layout the navigation controller is waiting on, and
-    /// the Core Animation transaction that commits the push closes at the end of that
-    /// run-loop turn. A block queued there runs after the commit, so the rows added here are
-    /// laid out while the render server is already sliding the screen in.
+    /// `ARBOS_PERF_FIRST_WINDOW_HOLD_MS` is a measurement hook: it holds the grow for a fixed
+    /// wall-clock interval instead of one main-queue hop, so a run can be recorded in which
+    /// the first-paint window is the ONLY layout before the push animates. That isolates
+    /// what a small first layout is worth, which the hop cannot (it pays for both passes).
+    ///
+    /// The log line is in the held branch on purpose: that branch cannot run unless the
+    /// variable is set, so the shipping app never reaches it. It is what lets the
+    /// no-movement check line a grow up against the frames of a screen recording.
+    private func scheduleReadingWindowGrow() {
+        guard let hold = DebugHooks.perfFirstWindowHoldMs, hold > 0 else {
+            DispatchQueue.main.async { growToReadingWindow() }
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(hold)) {
+            Logger(subsystem: "com.unarbos.arbos.ios", category: "launch")
+                .notice("first-paint-grow held=\(hold) t=\(LaunchClock.msSinceLaunch()) ms")
+            growToReadingWindow()
+        }
+    }
+
+    /// Open the first-paint window out to the reading window.
+    ///
+    /// Scheduled by `scheduleReadingWindowGrow`. The intent is for these rows to be laid out
+    /// behind a transition the render server is already driving, where their cost is
+    /// invisible — but a main-queue hop does NOT get there. `onAppear` runs inside the
+    /// layout the navigation controller is waiting on, and that layout spans several
+    /// run-loop turns, so a block queued from it still runs before the push animates. See
+    /// `ChatSession.windowFirstPaint` for the numbers.
     ///
     /// Nothing on screen moves. The window is a SUFFIX of `visibleRows`, so this only adds
     /// rows ABOVE the viewport, and the scroll view is bottom-anchored (`defaultScrollAnchor`
@@ -1567,8 +1596,7 @@ struct ChatSession: View {
     /// Chat appear: mark-read, restore draft, open channel / refresh call, rig hooks.
     private func handleSessionAppear() {
         appearedAt = Date()
-        // After the push animation has been committed, not before it: see `growToReadingWindow`.
-        DispatchQueue.main.async { growToReadingWindow() }
+        scheduleReadingWindowGrow()
         LaunchClock.mark("chat-appear", detail: "messages=\(messages.count)")
         #if DEBUG
         PerfLog.mark("chat-open appear \(chatId) messages=\(messages.count)", ms: 0)
