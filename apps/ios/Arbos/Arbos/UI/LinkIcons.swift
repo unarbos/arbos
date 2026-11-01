@@ -11,16 +11,19 @@ final class LinkIcons: ObservableObject {
     static let shared = LinkIcons()
 
     /// Side of the icon in points (Grok's is 16 at its 15 pt body; ours sits in 17 pt text).
-    static let side: CGFloat = 14
+    nonisolated static let side: CGFloat = 14
     /// The gap between the icon and the link text.
-    static let gap: CGFloat = 4
+    nonisolated static let gap: CGFloat = 4
 
     /// host → the rounded icon, or `nil` when the site has none. A host that is not a key yet is
     /// still loading (or never asked for).
-    @Published private(set) var images: [String: UIImage?] = [:]
+    ///
+    /// Not `@Published`: every visible paragraph observes this store, so a fetched host writes
+    /// `images` and `pictures` under one `objectWillChange` — one redraw, not two.
+    private(set) var images: [String: UIImage?] = [:]
     /// host → the relay's picture as decoded, full size, with its tone — what the link tiles
     /// draw ([feedback link-icons-ios-tile-2026-10-27]); `nil` when the site has none.
-    @Published private(set) var pictures: [String: (image: UIImage, tone: LinkIconTone)?] = [:]
+    private(set) var pictures: [String: (image: UIImage, tone: LinkIconTone)?] = [:]
     private var inFlight: Set<String> = []
     /// Fetches the PNG for a host: the relay in the app, the bundled icons in the fixture. Set by
     /// `AppModel`; `nil` means never ask (the placeholder stays).
@@ -53,12 +56,29 @@ final class LinkIcons: ObservableObject {
         inFlight.insert(host)
         Task { @MainActor [weak self] in
             let data = await fetch(host)
+            let scale = UIScreen.main.scale
+            let decoded = await Task.detached(priority: .utility) { () -> Decoded in
+                LinkIcons.decode(data, scale: scale)
+            }.value
             guard let self else { return }
             self.inFlight.remove(host)
-            let decoded = data.flatMap(UIImage.init(data:))
-            self.pictures[host] = decoded.map { (image: $0, tone: LinkIconTone.of($0)) }
-            self.images[host] = decoded.flatMap(Self.roundedIcon)
+            self.objectWillChange.send()
+            self.pictures[host] = decoded.picture
+            self.images[host] = decoded.icon
         }
+    }
+
+    /// A fetched host's tile picture with its tone, and its inline icon. A struct, not a tuple:
+    /// `Task.detached` cannot resolve its overload for a closure returning a labeled tuple.
+    struct Decoded: Sendable {
+        let picture: (image: UIImage, tone: LinkIconTone)?
+        let icon: UIImage?
+    }
+
+    /// The tile picture with its tone, and the inline icon, from the relay's bytes.
+    nonisolated static func decode(_ data: Data?, scale: CGFloat) -> Decoded {
+        guard let image = data.flatMap(UIImage.init(data:)) else { return Decoded(picture: nil, icon: nil) }
+        return Decoded(picture: (image: image, tone: LinkIconTone.of(image)), icon: roundedIcon(image, scale: scale))
     }
 
     /// The fixture's fetcher: the real icons of the fixture replies' sites ship in the asset
@@ -69,6 +89,7 @@ final class LinkIcons: ObservableObject {
 
     /// Forget everything (tests).
     func reset() {
+        objectWillChange.send()
         images = [:]
         pictures = [:]
         inFlight = []
@@ -156,13 +177,17 @@ final class LinkIcons: ObservableObject {
 
     /// The relay's PNG as the icon: scaled to `side` points (sharp at 3×), corners rounded at a
     /// quarter, with the gap on its right so the text never touches it. `nil` when it does not decode.
-    static func rounded(_ data: Data) -> UIImage? {
-        UIImage(data: data).flatMap(roundedIcon)
+    nonisolated static func rounded(_ data: Data) -> UIImage? {
+        UIImage(data: data).flatMap { roundedIcon($0) }
     }
 
     /// The decoded picture as the inline icon (see `rounded(_ data:)`).
-    static func roundedIcon(_ src: UIImage) -> UIImage? {
-        let r = UIGraphicsImageRenderer(size: CGSize(width: side + gap, height: side))
+    /// `scale` is the screen's, passed in when this runs off the main thread (where the
+    /// renderer's default format cannot be trusted to match the screen).
+    nonisolated static func roundedIcon(_ src: UIImage, scale: CGFloat? = nil) -> UIImage? {
+        let format = UIGraphicsImageRendererFormat.default()
+        if let scale { format.scale = scale }
+        let r = UIGraphicsImageRenderer(size: CGSize(width: side + gap, height: side), format: format)
         return r.image { _ in
             let rect = CGRect(x: 0, y: 0, width: side, height: side)
             UIBezierPath(roundedRect: rect, cornerRadius: side / 4).addClip()
