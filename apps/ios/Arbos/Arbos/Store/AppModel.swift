@@ -2683,12 +2683,19 @@ final class AppModel: ObservableObject {
         unacked[chatId] = set.isEmpty ? nil : set
     }
 
+    /// Streaming calls this per token. A write that keeps the order and the minute the
+    /// lists draw (`HomeView.timeLabel`) is skipped: it re-sorted and published `chats` /
+    /// `peopleChats` to every subscriber for nothing. The token's own `messages` publish
+    /// still re-runs the open chat (`ChatSessionHost`, #1720).
     private func markActivity(chatId: Id) {
+        let now = nowMs()
         for (pid, list) in chats {
             if let i = list.firstIndex(where: { $0.id == chatId }) {
                 var updated = list
-                updated[i].lastMessageAt = nowMs()
-                chats[pid] = AppModel.sorted(updated)
+                updated[i].lastMessageAt = now
+                let sorted = AppModel.sorted(updated)
+                if Self.sameMinute(list[i].lastMessageAt, now), sorted.map(\.id) == list.map(\.id) { return }
+                chats[pid] = sorted
                 return
             }
         }
@@ -2698,11 +2705,14 @@ final class AppModel: ObservableObject {
         // no-ops while watching). Same bump local sends already do in commitPeople.
         if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
             var next = peopleChats
-            next[i].lastActivityAt = nowMs()
+            next[i].lastActivityAt = now
             next.sort { $0.lastActivityAt > $1.lastActivityAt }
+            if Self.sameMinute(peopleChats[i].lastActivityAt, now), next.map(\.id) == peopleChats.map(\.id) { return }
             peopleChats = next
         }
     }
+
+    private static func sameMinute(_ a: Int64, _ b: Int64) -> Bool { a / 60_000 == b / 60_000 }
 
     /// A live Loro row from someone else landed. Chat on screen in the foreground: the
     /// user has seen it, so the per-user read cursor on the relay advances (#1438) and
