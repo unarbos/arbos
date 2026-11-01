@@ -150,6 +150,8 @@ struct ChatSession: View {
     /// Message ids that `rows` / `messageById` currently mirror — used to skip a full
     /// `Transcript.rows` rebuild on streaming deltas and single appends.
     @State private var refreshIds: [Id] = []
+    /// `messagesVersion` that `rows`, `messageById` and `refreshIds` were built from.
+    @State private var refreshVersion: (chat: Id, version: Int?)?
     /// id → message for the rows on screen (menus, search, replies); rebuilt with `rows`.
     @State private var messageById: [Id: Message] = [:]
     /// How many of the newest rows are in the view tree. The transcript is a plain
@@ -895,6 +897,9 @@ struct ChatSession: View {
             memberNames[who.id] = name.isEmpty ? "@\(who.login)" : name
         }
         let list = messages
+        let version = model.messagesVersion[chatId]
+        let shown = refreshVersion?.chat == chatId ? refreshVersion?.version : nil
+        defer { refreshVersion = (chatId, version) }
         #if DEBUG
         let refreshStarted = Date()
         defer {
@@ -914,10 +919,13 @@ struct ChatSession: View {
 
         // Incremental: same ids and only the last message's content changed (streaming
         // token) — rebuild only the tail. A middle edit (reaction, etc.) falls through.
+        // A token that lands one version after these rows skips the history compare.
+        let tailEdit = version != nil && version == model.tailEditVersion[chatId]
+            && shown.map { $0 &+ 1 } == version && list.count == refreshIds.count
         if list.count == refreshIds.count, list.count > 0,
-           zip(list, refreshIds).allSatisfy({ $0.id == $1 }) {
+           tailEdit || zip(list, refreshIds).allSatisfy({ $0.id == $1 }) {
             let last = list[list.count - 1]
-            let prefixSame = list.dropLast().allSatisfy { messageById[$0.id] == $0 }
+            let prefixSame = tailEdit || list.dropLast().allSatisfy { messageById[$0.id] == $0 }
             if prefixSame {
                 if messageById[last.id] == last { return }
                 var byId = messageById
