@@ -554,6 +554,12 @@ preference" and was reverted by Jacob ([feedback header-pill-restore-2026-10-24]
 Code: `header::bar_frame` (equal side slots, `justify_center`) and
 `header::metrics`; pinned by `header_tests::the_pill_is_centred_not_parked_at_the_left_edge`.
 
+The pill and the folded-sidebar disc keep their hover to themselves
+([feedback mac-header-pill-hover-2026-10-30], Scout on Arbonites): they float
+over the transcript, so both block hover for what lies behind them
+(`block_mouse_except_scroll`) — pointing at the pill never raises a message
+row's time or hover rail — while the wheel still scrolls the list under them.
+
 ### Connection capsule under the pill — shown for every chat kind, whole (Jacob 2026-10-22 [feedback connection-pill]; 2026-10-27 [feedback offline-chip-group-header-2026-10-27])
 
 The small dark capsule under the pill — a 6 pt dot and two words, "Offline" ·
