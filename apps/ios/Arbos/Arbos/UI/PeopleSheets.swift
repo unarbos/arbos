@@ -748,6 +748,7 @@ struct CreateEntityView: View {
                     .frame(width: 84, height: 44).background(Capsule().fill(cancelBg))
             }
             .buttonStyle(.plain)
+            .accessibilityIdentifier("create-entity-cancel")
             Button(action: go) {
                 Text(creating ? "Creating…" : kind.action).font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(canGo ? theme.onPrimary : createText)
@@ -755,6 +756,9 @@ struct CreateEntityView: View {
             }
             .buttonStyle(.plain)
             .disabled(!canGo)
+            // The sheet's title also contains "Create", so a rig cannot reach this button by
+            // its label (`CaptureRigUITests`' `taplabel` takes the first match).
+            .accessibilityIdentifier("create-entity-go")
         }
         .padding(.trailing, 16)
         .padding(.top, 25)

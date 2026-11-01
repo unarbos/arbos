@@ -985,18 +985,49 @@ impl Shell {
                 project_input.update(cx, |input, cx| input.set_text(name, cx));
             }
         }
-        // Rig: `ARBOS_CREATE_PICTURE=upload|generate[:<prompt>]` opens the Create sheet on that
-        // option (and types the prompt into the Generate field).
+        // Rig: `ARBOS_CREATE_PICTURE=upload[:<path>]|generate[:<prompt>]` opens the Create sheet
+        // on that option — with `<path>` as the Upload tab's pick (the file panel is native, so
+        // a rig cannot reach it), or the prompt typed into the Generate field.
         let mut create_picker = avatar_picker::Picker::new(avatar_picker::Target::Draft);
         if let Ok(spec) = std::env::var("ARBOS_CREATE_PICTURE") {
-            let (option, prompt) = spec.split_once(':').unwrap_or((spec.as_str(), ""));
+            let (option, arg) = spec.split_once(':').unwrap_or((spec.as_str(), ""));
             if option == "generate" {
                 create_picker.tab = avatar_picker::Tab::Generate;
-                if !prompt.is_empty() {
-                    avatar_prompt_input
-                        .update(cx, |input, cx| input.set_text(prompt.to_owned(), cx));
+                if !arg.is_empty() {
+                    avatar_prompt_input.update(cx, |input, cx| input.set_text(arg.to_owned(), cx));
                 }
+            } else if option == "upload" && !arg.is_empty() {
+                let path = std::path::PathBuf::from(arg);
+                // The preview reads the file through the avatar loader, like the panel's pick.
+                let url = avatar_picker::file_url(&path);
+                state.update(cx, |s, _| s.want_avatar(url));
+                create_picker.upload = Some(path);
+                create_picker.reset = false;
             }
+        }
+        // Rig: `ARBOS_RIG_CREATE_MS=<ms>` presses the open Create sheet's action that long after
+        // launch — the click an Xvfb or VNC display will not deliver (same reason as
+        // `ARBOS_RIG_TOGGLE_RAIL_MS`), so a rig can walk create-with-a-picture end to end.
+        if let Some(ms) = std::env::var("ARBOS_RIG_CREATE_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+        {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(ms))
+                    .await;
+                let _ = this.update_in(cx, |this, window, cx| {
+                    let kind = if this.create_group_open {
+                        CreateKind::Group
+                    } else if this.state.read(cx).connect_open {
+                        CreateKind::Connect
+                    } else {
+                        CreateKind::Agent
+                    };
+                    this.submit_create(kind, window, cx);
+                });
+            })
+            .detach();
         }
         // Rig: `ARBOS_OPEN_CREATE=group|server` opens the D93 Create screen for that entity
         // (group = step 1; `ARBOS_OPEN_NEW_GROUP=1` is step 2); `ARBOS_NEW_AGENT_NAME` prefills.

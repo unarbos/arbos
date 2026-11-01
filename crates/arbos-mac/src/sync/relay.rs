@@ -1917,6 +1917,7 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                                 picture,
                             )
                             .await
+                            .is_some()
                             {
                                 if let Ok(fresh) = shared
                                     .get_json(&format!("/servers/{id}"))
@@ -4249,31 +4250,39 @@ async fn my_avatar_saved(shared: &Arc<Shared>, put: Result<reqwest::Response, re
     }
 }
 
+/// The new agent's id in the `POST /projects` answer ([`arbos_core::api::CreateProjectResponseDto`]):
+/// the project record is nested under `project`, so there is no top-level `id` to read.
+fn created_project_id(v: &Value) -> Option<&str> {
+    v.pointer("/project/id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+}
+
 /// The Create sheet's pending picture, once the entity exists: the file (or the bytes of the
 /// picture generated into my own slot) goes into the new entity's slot as a picture master, then
-/// `PATCH <patch_path> {image_key}`. `prefix` names the key (`avatar-` / `server-`). Errors are
-/// a notice — the entity itself is already created and shows its neutral initial.
+/// `PATCH <patch_path> {image_key}`. `prefix` names the key (`avatar-` / `server-`). The key and
+/// the patch answer come back so the caller can land the picture through its own resolver.
+/// Errors are a notice — the entity itself is already created and shows its neutral initial.
 async fn adopt_draft_picture(
     shared: &Arc<Shared>,
     slot: &str,
     patch_path: &str,
     prefix: &str,
     picture: DraftPicture,
-) -> bool {
+) -> Option<(String, Value)> {
     let master = match picture {
         DraftPicture::File(path) => {
             match tokio::task::spawn_blocking(move || picture_master(&path)).await {
                 Ok(Ok(m)) => m,
                 Ok(Err(err)) => {
                     shared.fail("upload the picture", &err);
-                    return false;
+                    return None;
                 }
-                Err(_) => return false,
+                Err(_) => return None,
             }
         }
         DraftPicture::Generated { key } => {
-            let from = picture_url(shared, &PictureTarget::Draft, Some(&key));
-            let Some(from) = from else { return false };
+            let from = picture_url(shared, &PictureTarget::Draft, Some(&key))?;
             match shared.http.get(from).send().await {
                 Ok(r) if r.status().is_success() => match r.bytes().await {
                     // The relay's copy is already a master; its type travels with the bytes.
@@ -4283,16 +4292,16 @@ async fn adopt_draft_picture(
                     },
                     Err(err) => {
                         shared.fail("keep the generated picture", &err);
-                        return false;
+                        return None;
                     }
                 },
                 Ok(r) => {
                     shared.fail("keep the generated picture", r.status());
-                    return false;
+                    return None;
                 }
                 Err(err) => {
                     shared.fail("keep the generated picture", &err);
-                    return false;
+                    return None;
                 }
             }
         }
@@ -4310,21 +4319,21 @@ async fn adopt_draft_picture(
         Ok(r) if r.status().is_success() => {}
         Ok(r) => {
             shared.fail("upload the picture", r.status());
-            return false;
+            return None;
         }
         Err(err) => {
             shared.fail("upload the picture", &err);
-            return false;
+            return None;
         }
     }
     match shared
         .patch_json(patch_path, json!({ "image_key": key }))
         .await
     {
-        Ok(_) => true,
+        Ok(reply) => Some((key, reply)),
         Err(err) => {
             shared.fail("save the picture", &err);
-            false
+            None
         }
     }
 }
@@ -7614,10 +7623,11 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
                 match shared.post_json("/projects", body).await {
                     Ok(v) => {
-                        // The Create sheet's picture goes into the new agent's own slot first,
-                        // so the list refresh already shows it.
-                        if let Some(picture) = picture {
-                            if let Some(id) = v.get("id").and_then(Value::as_str) {
+                        // The Create sheet's picture goes into the new agent's own slot, keyed
+                        // by the id the answer nests under `project`.
+                        let id = created_project_id(&v).map(str::to_owned);
+                        let adopted = match (picture, id.as_deref()) {
+                            (Some(picture), Some(id)) => {
                                 adopt_draft_picture(
                                     &shared,
                                     id,
@@ -7625,11 +7635,36 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                                     "avatar-",
                                     picture,
                                 )
-                                .await;
+                                .await
                             }
-                        }
+                            _ => None,
+                        };
                         if let Err(err) = refresh_registry(&shared).await {
                             shared.diagnostic("refresh", format!("{err:#}"));
+                        }
+                        // The refresh may have read the agent before the patch landed, so the
+                        // picture goes through the resolver afterwards with the relay's stamp
+                        // (ARB-394): a newer known version never loses to the registry's copy.
+                        if let (Some(id), Some((key, reply))) = (id, adopted) {
+                            let mut projects = shared.projects.lock().unwrap();
+                            let base =
+                                super::agent_avatar::newest(&projects, &id).unwrap_or_default();
+                            let stamp = super::agent_avatar::stamp_of(&reply).max(base.version + 1);
+                            let url = project_image_url(&shared.http_url, &id, Some(&key), stamp);
+                            super::agent_avatar::apply(
+                                &mut projects,
+                                &id,
+                                &super::agent_avatar::Facts {
+                                    image_url: url,
+                                    leaf: base.leaf,
+                                    leaf_color: base.leaf_color,
+                                    version: stamp,
+                                },
+                                true,
+                            );
+                            let snapshot = projects.clone();
+                            drop(projects);
+                            let _ = shared.events.send(SyncEvent::Projects(snapshot));
                         }
                     }
                     Err(err) => shared.fail("create the agent", &err),
@@ -9474,6 +9509,68 @@ fn hostname() -> String {
 impl Drop for Room {
     fn drop(&mut self) {
         self.task.abort();
+    }
+}
+
+#[cfg(test)]
+mod created_project_tests {
+    //! The Create sheet's picture is adopted onto the id `POST /projects` answers with. That
+    //! answer is a `CreateProjectResponseDto`, which nests the agent under `project`: reading a
+    //! top-level `id` found nothing, so every new agent kept the neutral initial and the owner
+    //! had to set the picture again from the agent's pane.
+    use arbos_core::api::CreateProjectResponseDto;
+    use serde_json::{json, Value};
+
+    use super::created_project_id;
+
+    /// The answer as the relay sends it: the two records it nests come from their committed wire
+    /// captures, and the whole thing is then decoded into `CreateProjectResponseDto`. The decode
+    /// is the anchor — a change to the answer's shape fails here instead of losing the picture.
+    fn create_project_answer() -> Value {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../arbos-relay/tests/fixtures/api");
+        let capture = |name: &str| -> Value {
+            let path = dir.join(name);
+            let raw = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            serde_json::from_str(&raw).expect("captured json")
+        };
+        let project = capture("project_json.json");
+        let chat = capture("chat_json.json");
+        let id = project["id"]
+            .as_str()
+            .expect("the capture has an id")
+            .to_owned();
+        let answer: CreateProjectResponseDto = serde_json::from_value(json!({
+            "project": project,
+            "pinned_chat": chat,
+            "sandbox": { "provider": "process", "sandbox_id": null, "device_id": null, "box_url": null },
+            "rooms": { "project": format!("/room/{id}/_project"), "pinned_chat": format!("/room/{id}/c1") },
+        }))
+        .expect("the create answer decodes as CreateProjectResponseDto");
+        serde_json::to_value(&answer).expect("serialize")
+    }
+
+    #[test]
+    fn the_new_agents_id_comes_from_the_nested_project() {
+        let answer = create_project_answer();
+        assert!(
+            answer.get("id").is_none(),
+            "the create answer carries no top-level id"
+        );
+        let nested = answer["project"]["id"].as_str().expect("project.id");
+        assert_eq!(created_project_id(&answer), Some(nested));
+    }
+
+    #[test]
+    fn an_answer_without_a_project_adopts_nothing() {
+        assert_eq!(created_project_id(&json!({})), None);
+        assert_eq!(
+            created_project_id(&json!({ "project": { "id": "" } })),
+            None
+        );
+        // The shape both clients used to read: an id at the top level is not an agent id.
+        assert_eq!(created_project_id(&json!({ "id": "p-pepper" })), None);
     }
 }
 
