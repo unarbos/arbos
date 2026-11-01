@@ -6,12 +6,15 @@ import SwiftUI
 /// open repeats, whichever chat it was: Swift conformance scans and type-metadata lookups for
 /// the chat screen's view types, SwiftUI reflecting `ChatSession`'s fields, the first
 /// `AttributedString` → `NSAttributedString` conversion, and the first Metal device
-/// (ios-perf-open-breakdown-and-baseline). Every one of those is a process-wide cache in the
-/// Swift runtime, Foundation or Metal, so filling them on a background thread after the first
-/// frame takes them out of the first tap without drawing anything.
+/// (ios-perf-open-breakdown-and-baseline). The type lookups, the attribute-scope reflection and
+/// the Metal device are process-wide caches in the Swift runtime, Foundation or Metal, so
+/// filling them on a background thread after the first frame takes them out of the first tap
+/// without drawing anything.
 ///
 /// Nothing here builds a view graph: rendering the chat off screen would run its appear hooks
-/// (mark-read, `visibleChatId`, the jobs poll) against the real model.
+/// (mark-read, `visibleChatId`, the jobs poll) against the real model. So SwiftUI's own
+/// per-view field cache (`DynamicPropertyCache`), which it fills only while building a graph,
+/// stays on the first open.
 /// `ARBOS_NO_WARMUP=1` turns it off, for measuring the difference.
 enum FirstOpenWarmup {
     private static let signposter = OSSignposter(subsystem: "com.unarbos.arbos.ios", category: "launch")
@@ -21,7 +24,7 @@ enum FirstOpenWarmup {
         guard ProcessInfo.processInfo.environment["ARBOS_NO_WARMUP"] != "1" else { return }
         // Well after the chat list's first frame (committed in the turn the root appears).
         try? await Task.sleep(for: .milliseconds(500))
-        // The value only carries `ChatSession`'s stored-property types to the reflection
+        // The value only carries `ChatSession`'s stored-property types to the metadata walk
         // below; it never enters a view graph, so none of its hooks run.
         let session = TypeBox(ChatSession(model: model, chatId: "", projectId: "", tick: 0))
         await Task.detached(priority: .utility) {
