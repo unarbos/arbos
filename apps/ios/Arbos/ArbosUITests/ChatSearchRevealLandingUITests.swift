@@ -88,6 +88,25 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// worst and 122 at best. That is the whole of the evidence for this number, and 24 is
     /// chosen to sit above the worst good tap rather than just above the bad one.
     private static let aimBandMargin: CGFloat = 24
+    /// How far above a row's bottom edge to aim, inside the bubble's own vertical padding.
+    ///
+    /// This suite was written against `Transcript.runGap` 4 and `turnGap` 16 and aimed 5 pt up,
+    /// which is inside the padding but close to its edge. #2527 took those gaps to 2 and 13, and
+    /// `73e2c8800` measured what that does to a tap: the overlap between adjacent result rows
+    /// went from 4 pt to 6 pt, so a 5 pt aim stopped being 1 pt inside the row it named and
+    /// became 1 pt inside the row below. `ChatSearchResultJumpUITests` was moved to 9 pt for
+    /// that reason and this suite follows it, for the same reason and to the same number.
+    ///
+    /// 9 is the middle of the band rather than a margin over the failure: `Theme.bubbleVPad`
+    /// is 11, so the padding runs roughly 4–15 pt above the edge. 5 sat at its lower edge,
+    /// where 2–3 pt of tightening is enough to leave it.
+    ///
+    /// This suite's own rows are not the ones that were measured — `73e2c8800` read the newest
+    /// unfiltered rows and these cases work the filtered window, where the last log showed 12 pt
+    /// of clearance from the aim to the next row's top. So this is not a fix for an observed
+    /// failure here. It is the same displacement arriving on the same gaps, taken on the branch
+    /// because a red on main's post-merge gate blocks every merge behind it.
+    private static let bubbleBottomAim: CGFloat = 9
 
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -246,7 +265,7 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         let all = bubbles(app)
         for (id, frame) in all {
             if let wanted, id != "bubble:\(wanted)" { continue }
-            let point = CGPoint(x: frame.midX, y: frame.maxY - 5)
+            let point = CGPoint(x: frame.midX, y: frame.maxY - Self.bubbleBottomAim)
             guard band.contains(point), frame.height > 24 else { continue }
             // Keep clear of the chrome overhead as well as of the neighbouring rows. A point
             // can sit inside the band and still be close enough to its top edge that what
@@ -331,7 +350,7 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         let e = row(app, wanted)
         guard e.exists else { return false }
         let band = reachable(app, screen: screen)
-        let point = CGPoint(x: e.frame.midX, y: e.frame.maxY - 5)
+        let point = CGPoint(x: e.frame.midX, y: e.frame.maxY - Self.bubbleBottomAim)
         return band.contains(point) && point.y - band.minY >= Self.aimBandMargin
     }
 
@@ -395,7 +414,7 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         // below does not use it: it is reported so that a mis-tap can be told apart from a
         // list that slid, which is the distinction the frames of the last one could not make.
         let live = liveTarget.frame
-        let aim = CGPoint(x: live.midX, y: live.maxY - 5)
+        let aim = CGPoint(x: live.midX, y: live.maxY - Self.bubbleBottomAim)
         if abs(aim.y - point.y) > 1 {
             print("[rig] \(arm) re-aimed: the list moved \(Int(aim.y - point.y))pt between "
                   + "choosing \(point) and tapping \(aim)")
@@ -411,11 +430,11 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
               + "y\(Int(band.minY)), band ends y\(Int(band.maxY)) "
               + "(keyboard \(app.keyboards.count > 0 ? "up" : "not reported"), bound "
               + "\(keyboardTop.map { "y\(Int($0))" } ?? "never seen")), \(gap)")
-        // dy 1 is the row's bottom edge; the 5 points back up land in `Theme.bubbleVPad`,
+        // dy 1 is the row's bottom edge; `bubbleBottomAim` back up lands in `Theme.bubbleVPad`,
         // the same place the coordinate aim used to target. XCUITest resolves the frame
         // itself, at the moment of the touch.
         liveTarget.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 1))
-            .withOffset(CGVector(dx: 0, dy: -5))
+            .withOffset(CGVector(dx: 0, dy: -Self.bubbleBottomAim))
             .tap()
         let field = app.textFields["chat-search-field"]
         let deadline = Date().addingTimeInterval(settle)
