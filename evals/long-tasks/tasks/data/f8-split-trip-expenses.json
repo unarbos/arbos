@@ -1,0 +1,21 @@
+{
+ "id": "f8-split-trip-expenses",
+ "lane": "d",
+ "category": "data",
+ "title": "Settle shared trip expenses with the fewest payments (uneven splits, fractional cents)",
+ "turns": [
+  {
+   "prompt": "We split costs on our surf trip: {D}/expenses.csv lists who paid what and who shared each cost (split equally among split_between). Work out who owes whom using as few payments as possible, write {D}/settle.csv with header from,to,amount (amounts to the cent), and tell me the result as a short list.",
+   "seed": "mkdir -p {D} && cat > {D}/expenses.csv <<'EOF'\ndate,paid_by,amount,split_between,description\n2026-10-10,Ana,120.00,Ana;Ben;Caro;Dev,Groceries\n2026-10-10,Ben,64.00,Ana;Ben,Fuel\n2026-10-11,Caro,210.00,Ana;Ben;Caro;Dev,Surf lessons\n2026-10-11,Dev,45.00,Caro;Dev,Taxi\n2026-10-12,Ana,88.50,Ana;Ben;Caro;Dev,Dinner\n2026-10-12,Ben,30.00,Ben;Caro;Dev,Boat tickets\nEOF",
+   "verify": "f={D}/settle.csv; test -f $f || { echo FAIL: no settle.csv; exit 0; }\nsed 's/^/SHOW /' $f | head -10\npython3 - {D}/expenses.csv \"$f\" <<'EOF'\nimport csv, sys\nnet = {}\nfor r in csv.DictReader(open(sys.argv[1])):\n    people = r[\"split_between\"].split(\";\")\n    amt = float(r[\"amount\"])\n    net[r[\"paid_by\"]] = net.get(r[\"paid_by\"], 0) + amt\n    for p in people:\n        net[p] = net.get(p, 0) - amt / len(people)\nrows = list(csv.DictReader(open(sys.argv[2])))\nhdr = rows and set(k.strip().lower() for k in rows[0].keys()) >= {\"from\", \"to\", \"amount\"}\nif not hdr:\n    print(\"FAIL: header is not from,to,amount\"); sys.exit()\nfor r in rows:\n    r = {k.strip().lower(): (v or \"\").strip() for k, v in r.items()}\n    a = float(r[\"amount\"].lstrip(\"$\"))\n    if a <= 0:\n        print(f\"FAIL: non-positive amount {a}\"); sys.exit()\n    net[r[\"from\"]] = net.get(r[\"from\"], 0) + a\n    net[r[\"to\"]] = net.get(r[\"to\"], 0) - a\nleft = {k: round(v, 3) for k, v in net.items() if abs(v) > 0.02}\nprint(f\"SHOW payments={len(rows)} unsettled={left}\")\nprint(\"PASS\" if not left and len(rows) <= 3 else f\"FAIL: payments={len(rows)} unsettled={left}\")\nEOF",
+   "reply_regex": "(?i)dev[\\s\\S]*(ana|caro)|(ana|caro)[\\s\\S]*dev",
+   "forbid_question": true,
+   "timeout_s": 300,
+   "rubric": {
+    "criteria": "Pass if settle.csv settles everyone to within a cent or two in at most three payments (nets: Ana +71.88, Caro +72.88, Ben -52.63, Dev -92.13) and the reply lists the same payments. Fail if balances do not settle, the reply's numbers differ from the file, or the split ignores split_between.",
+    "min": 3
+   }
+  }
+ ],
+ "notes": "Added for run 15 (2026-10-30): a realistic ask a user gives an Arbos agent, graded by a programmatic check plus the rubric. Uneven split groups and 22.125 shares make naive equal-split and rounding errors visible."
+}

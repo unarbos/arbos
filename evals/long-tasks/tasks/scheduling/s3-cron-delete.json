@@ -15,5 +15,5 @@
  ],
  "same_chat_as": "s1-cron-create-fires",
  "cleanup_routines": true,
- "regression": "#1713 over-application (asks before deleting a routine it created; note on the issue)"
+ "regression": "#1713 over-application (asks before deleting a routine it created; note on the issue); run 15: part 1 asked before deleting its own routine (#1713 class); part 2 passed"
 }

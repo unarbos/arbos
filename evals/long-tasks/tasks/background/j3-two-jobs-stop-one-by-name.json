@@ -3,7 +3,7 @@
  "lane": "c",
  "category": "background",
  "title": "Two named jobs run; 'stop the slow one' stops only that job (stop_job by name); the other finishes and reports",
- "regression": "job tools: list_jobs/stop_job target the right job by its name; the surviving job still completes and its result is posted; run 13: not measured — the harness held t1 for 646 s so the stop arrived after the slow job ended; passed in run 12",
+ "regression": "job tools: list_jobs/stop_job target the right job by its name; the surviving job still completes and its result is posted; run 13: not measured — the harness held t1 for 646 s so the stop arrived after the slow job ended; passed in run 12; run 15 (both parts): the job worker's detached writer raised an approval (the driver rejects every approval), t1 or t2 claimed it running, and t2 posted the same correction twice",
  "turns": [
   {
    "prompt": "Start two jobs, as jobs: 'fast-count' writes 1 to 5 to {D}/fast.txt one number per second; 'slow-count' writes 1 to 60 to {D}/slow.txt one number per 3 seconds. Tell me when both have started.",

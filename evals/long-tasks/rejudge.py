@@ -2,7 +2,7 @@
 """Re-run the LLM rubric for turns of a scoreboard whose rubric was skipped (judge error), from the
 stored reply and verify output; recompute pass/fail and the aggregates.
 
-  rejudge.py --run <run-id>
+  rejudge.py --run <run-id> [--tasks a,b]
 """
 
 import argparse
@@ -20,9 +20,11 @@ SB = Path(__file__).resolve().parent / "scoreboard"
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", required=True)
+    ap.add_argument("--tasks", default="", help="also re-judge these tasks' scored rubric turns (comma list); the first verdict is kept as `first_rubric`")
     args = ap.parse_args()
     board = json.loads((SB / f"{args.run}.json").read_text())
     tasks = {t["id"]: t for t in load_tasks()}
+    again = set(filter(None, args.tasks.split(",")))
     judged = 0
     for r in board["results"]:
         task = tasks.get(r["task"])
@@ -31,9 +33,12 @@ def main():
         for t in r.get("turns") or []:
             spec = task["turns"][t["turn"] - 1] if t["turn"] - 1 < len(task["turns"]) else {}
             rub = spec.get("rubric")
-            if not rub or (t.get("rubric") and t["rubric"].get("score") is not None):
+            scored = t.get("rubric") and t["rubric"].get("score") is not None
+            if not rub or (scored and r["task"] not in again):
                 continue
-            produced = "\n".join(l[5:] for l in (t.get("verify_out") or "").splitlines() if l.startswith("SHOW "))
+            if scored:
+                t["first_rubric"] = t["rubric"]
+            produced = t.get("produced") or "\n".join(l[5:] for l in (t.get("verify_out") or "").splitlines() if l.startswith("SHOW "))
             res = gr.judge(t["prompt"], rub["criteria"], t.get("reply") or "", produced, t.get("verify_out") or "")
             t["rubric"] = res
             judged += 1
