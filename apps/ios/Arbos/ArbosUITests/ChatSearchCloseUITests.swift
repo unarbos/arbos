@@ -175,16 +175,51 @@ final class ChatSearchCloseUITests: XCTestCase {
             .matching(NSPredicate(format: "label CONTAINS %@", "embargo note"))
             .firstMatch
         XCTAssertTrue(newestHit.waitForExistence(timeout: settle), "the filtered transcript holds its hits")
-        XCTAssertTrue(newestHit.isHittable, "…and the newest hit is on screen")
         // The chat bar's own top edge (`ChatBarHeightProbe`, DEBUG): where the rows must end.
         let composer = app.descendants(matching: .any)["chat-bar-height"].firstMatch
         XCTAssertTrue(composer.waitForExistence(timeout: settle), "the chat bar probe is up")
-        // Let the stack settle: the pin runs again 0.25 s after the rebuild.
-        sleep(2)
+        let hitFrame = restingFrame(newestHit)
         shot(app, "10-filtered-list-pinned-to-the-composer")
-        let slack = composer.frame.minY - newestHit.frame.maxY
+        let slack = composer.frame.minY - hitFrame.maxY
+        print("[pin] hit \(hitFrame) composer \(composer.frame) screen \(app.frame) slack \(slack)")
+        XCTAssertTrue(newestHit.isHittable, "…and the newest hit is on screen")
         XCTAssertLessThan(slack, 60,
                           "the filtered list ends at the composer (slack \(slack) pt; healthy is 24–25, the iOS 27 re-key regression was 161)")
+    }
+
+    /// The hit's frame once the transcript has stopped moving, for the pinned-list measurement.
+    ///
+    /// The stack is still in motion when the hit first exists: every keystroke re-keys it, so
+    /// `pinFilteredStackToEnd` runs its last rung 0.25 s after the final one, and the lazy stack
+    /// goes on swapping estimated child heights for measured ones after that. The case used to
+    /// read `isHittable` on the first snapshot after existence and only then sleep 2 s before
+    /// measuring the slack — the assertion that is actually its subject. That ordering is what
+    /// reddened it about one run in ten on the 26.2 gate: on a loaded hosted runner the first
+    /// snapshot arrives mid-settle with the hit below the fold, and the precondition fails before
+    /// the measurement is ever taken. Gate runs 41308036692 attempt 1 (`a9a87ad7d`) and
+    /// 41346954704 (`758001b67`) both failed there and neither reached the slack line; the pass on
+    /// the byte-identical tree took its snapshot 1.6 s after typing, the two failures took theirs
+    /// at 2.4 s or later on runners that were slower throughout.
+    ///
+    /// Waiting for rest softens nothing. The regression this case guards leaves the hit perfectly
+    /// hittable — 161 pt clear of the composer is on screen — so hittability never detected it,
+    /// and the strict `slack < 60` is unchanged and is still taken at the deadline if the stack
+    /// never comes to rest. The budget is the same `settle` the one-shot read already had.
+    private func restingFrame(_ element: XCUIElement,
+                              file: StaticString = #filePath, line: UInt = #line) -> CGRect {
+        let deadline = Date().addingTimeInterval(settle)
+        var last = CGRect.null
+        var still = 0
+        while Date() < deadline, still < 2 {
+            usleep(300_000)
+            let now = element.exists ? element.frame : CGRect.null
+            // Sub-pixel jitter is rest; a row swapping an estimate for a measurement moves points.
+            still = (abs(now.minY - last.minY) < 0.5 && abs(now.maxY - last.maxY) < 0.5) ? still + 1 : 0
+            last = now
+        }
+        if still < 2 { print("[pin] never came to rest inside \(settle)s; measuring \(last)") }
+        XCTAssertFalse(last.isNull, "the newest hit still has a frame", file: file, line: line)
+        return last
     }
 
     /// A keyword with no hit is never a blank transcript.
