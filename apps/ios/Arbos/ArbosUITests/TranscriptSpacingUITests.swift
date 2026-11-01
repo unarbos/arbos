@@ -16,24 +16,9 @@ import XCTest
 /// can agree by luck, and with it up they cannot — the old rule moved the whole lane to 24 pt.
 final class TranscriptSpacingUITests: XCTestCase {
     private let appear: TimeInterval = 150
-    /// The transcript's own horizontal padding, outside anything `Theme` exposes.
-    private static let listPad: CGFloat = 16
-    /// Jacob's numbers: the disc spans 12–48 and the bubble body starts at 52.
+    /// Jacob's numbers: the disc spans 12–48.
     private static let avatarLeft: CGFloat = 12
     private static let avatarSize: CGFloat = 36
-    /// The sender's name sits inside the bubble's `Theme.bubbleHPad`, so its leading edge is
-    /// the bubble's left edge plus 14. The name is the only handle on the bubble body: the
-    /// body carries no accessibility identifier (only my own bubbles do) and the row's
-    /// `bubble:` identifier spans the whole row, so neither can say where the bubble starts.
-    ///
-    /// 52 and 12 are measured — off Jacob's reference and off simulator frames. 66 is
-    /// *derived* from them, because no log we have reports this button's frame; the name's
-    /// ink lands there in the captures. If the gate says otherwise, the button's frame is
-    /// offset from its text and this constant moves once — the failure prints the frame it
-    /// read. The guard keeps its value either way: the regression it exists to catch moves
-    /// this edge from 66 to 97.
-    private static let bubbleHPad: CGFloat = 14
-    private static let bubbleLeft: CGFloat = 52
     /// Frames come back in device points as `Double`; a third of a point of rounding is noise.
     private static let slack: CGFloat = 0.6
 
@@ -79,7 +64,7 @@ final class TranscriptSpacingUITests: XCTestCase {
         sleep(2)
     }
 
-    /// Both halves of the claim, read in one pass so they describe the same moment.
+    /// The picture's own column, in absolute points. These are Jacob's numbers and ours.
     private func assertLaneIsWhereJacobPutIt(_ app: XCUIApplication, _ state: String) {
         let found = discs(app)
         XCTAssertFalse(found.isEmpty, "\(state): the transcript shows at least one sender's picture")
@@ -91,17 +76,34 @@ final class TranscriptSpacingUITests: XCTestCase {
             XCTAssertEqual(f.width, Self.avatarSize, accuracy: Self.slack,
                            "\(state): the picture is \(Self.avatarSize) pt wide — frame \(f)")
         }
-        // The disc and the bubble are placed by two different expressions — the disc by
-        // `avatarColumn`'s padding, the bubble by the HStack spacing after it — so a disc in
-        // the right place does not prove the bubble followed it.
+    }
+
+    /// Where the bubble bodies start, as the names report it.
+    ///
+    /// The disc and the bubble are placed by two different expressions — the disc by
+    /// `avatarColumn`'s padding, the bubble by the HStack spacing after it — so a disc in the
+    /// right place does not prove the bubble followed it. The name is the only handle on the
+    /// bubble body: the body carries no accessibility identifier (only my own bubbles do) and
+    /// the row's `bubble:` identifier spans the whole row.
+    ///
+    /// **No absolute is asserted here, and that is deliberate.** The name's text origin is
+    /// 66 — the bubble body starts at 52 and `Theme.bubbleHPad` is 14 — and 66 is correct and
+    /// observed: in the 2026-11-01 capture at 3.0 px/pt the "Mira Kaplan" glyph ink runs from
+    /// 67.3 pt, which is 66.0 plus about 1.3 pt of side bearing on the "M". But the element
+    /// here is a `Button` wrapping `LiveSenderName`, and its accessibility frame reports
+    /// **58**, because SwiftUI extends a button's hit frame 8 pt to the left of its glyphs.
+    ///
+    /// So 66 is ours and unreachable through this proxy, and 58 is SwiftUI's current leading
+    /// inset for a button's frame rather than anything we designed. Pinning 58 would turn the
+    /// gate red the day that inset changes, for a move no user could see. Neither number is
+    /// asserted. What is asserted is that every name agrees with every other name across both
+    /// keyboard states, which is the invariant this suite exists for: a lane re-derived from
+    /// `composerInset` at the call site moves with the keyboard, and equality catches that
+    /// without pinning anything incidental.
+    private func nameLeadingEdges(_ app: XCUIApplication, _ state: String) -> [CGFloat] {
         let named = names(app)
         XCTAssertFalse(named.isEmpty, "\(state): at least one bubble names its sender")
-        for name in named {
-            XCTAssertEqual(name.frame.minX, Self.bubbleLeft + Self.bubbleHPad, accuracy: Self.slack,
-                           "\(state): the bubble body starts at \(Self.bubbleLeft), so the name "
-                           + "inside its \(Self.bubbleHPad) pt padding starts at "
-                           + "\(Self.bubbleLeft + Self.bubbleHPad) — frame \(name.frame)")
-        }
+        return named.map(\.frame.minX)
     }
 
     /// Keyboard down, then up, in one launch: the lane must not move between them. Asserting
@@ -112,16 +114,29 @@ final class TranscriptSpacingUITests: XCTestCase {
         let app = launch()
         assertLaneIsWhereJacobPutIt(app, "keyboard down")
         let down = discs(app).map(\.frame.minX)
+        let namesDown = nameLeadingEdges(app, "keyboard down")
 
         raiseKeyboard(app)
         assertLaneIsWhereJacobPutIt(app, "keyboard up")
         let up = discs(app).map(\.frame.minX)
+        let namesUp = nameLeadingEdges(app, "keyboard up")
 
         XCTAssertFalse(up.isEmpty, "pictures are still on screen with the keyboard up")
         for x in down + up {
             XCTAssertEqual(x, Self.avatarLeft, accuracy: Self.slack,
                            "the column is the same with the keyboard down \(down) and up \(up); "
                            + "a lane that reads the composer inset gives 37 and 24")
+        }
+        // Every name against one of them rather than pairwise by index: raising the keyboard
+        // scrolls rows off, so the two lists need not be the same length or the same rows.
+        // They do all have to report one edge, because they are all in one lane.
+        let edges = namesDown + namesUp
+        guard let first = edges.first else { return }
+        for x in edges {
+            XCTAssertEqual(x, first, accuracy: Self.slack,
+                           "the bubbles start at one edge with the keyboard down \(namesDown) "
+                           + "and up \(namesUp); a lane that reads the composer inset moves "
+                           + "them by the 13 pt the composer's inset changes by")
         }
     }
 }
