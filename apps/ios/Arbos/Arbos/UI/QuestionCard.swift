@@ -14,7 +14,9 @@
 import SwiftUI
 
 struct QuestionCard: View {
-    @EnvironmentObject private var model: AppModel
+    /// Not observed: a row-level view must not re-run on every model publish (see `RowView.model`).
+    /// The card's own save state is observed alone (`observedHandoff`).
+    let model: AppModel
     @Environment(\.theme) private var theme
 
     let rowId: String
@@ -40,6 +42,8 @@ struct QuestionCard: View {
     @State private var offerShow = false
     @State private var offerSeeded = false
     @State private var handoffErrorDetailsOpen = false
+    /// This card's entry in `model.handoff`, kept by the card's `.task` so a save re-runs the card.
+    @State private var observedHandoff: AppModel.HandoffState?
     @FocusState private var offerFocus: OfferField?
 
     private enum OfferField { case name, value }
@@ -87,15 +91,25 @@ struct QuestionCard: View {
             .padding(.horizontal, Self.pad)
             .padding(.bottom, Self.pad + 1)
             .background(RoundedRectangle(cornerRadius: Self.radius, style: .continuous).fill(palette.outer))
+            .task(id: handoffId) {
+                guard let id = handoffId else { return }
+                for await state in model.$handoff.map({ $0[id] }).removeDuplicates().values {
+                    observedHandoff = state
+                }
+            }
         }
     }
 
     // MARK: Secret hand-off request card
 
     /// The device's own view of this card's save (saving / saved / failed), keyed by approval id.
+    private var handoffId: String? {
+        questionId?.stripping(prefix: "approval:")
+    }
+
     private var handoff: AppModel.HandoffState? {
-        guard let questionId, let id = questionId.stripping(prefix: "approval:") else { return nil }
-        return model.handoff[id]
+        guard let id = handoffId else { return nil }
+        return observedHandoff ?? model.handoff[id]
     }
 
     private var offerTitle: String {

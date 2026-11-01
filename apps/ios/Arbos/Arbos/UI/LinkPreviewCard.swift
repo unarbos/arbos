@@ -13,7 +13,6 @@ import SwiftUI
 struct LinkPreviewCard: View {
     @Environment(\.theme) private var theme
     @Environment(\.openURL) private var openURL
-    @EnvironmentObject private var model: AppModel
     /// Host icons for the tile: the card redraws when one arrives.
     @ObservedObject private var linkIcons = LinkIcons.shared
     let preview: LinkPreview
@@ -234,6 +233,9 @@ struct LinkPreviewCard: View {
     /// The preview picture is a blob in the chat's slot, loaded with the device bearer like
     /// an attachment (`MediaFetch`); nothing is fetched from the site itself.
     private func load() async {
+        // Resolved here rather than observed: the card sits in rows and paragraphs, and an
+        // observed model would re-run it on every publish.
+        guard let model = AppModel.current else { return }
         if let icon = preview.siteIcon, !icon.ref.isEmpty, !preview.slot.isEmpty, LinkBrand.of(host: host) == nil {
             let item = MediaItem(id: "\(messageId)#li", name: icon.ref, mime: icon.mime, kind: .image,
                                  blobRef: icon.ref, slot: preview.slot, by: "", at: 0)
