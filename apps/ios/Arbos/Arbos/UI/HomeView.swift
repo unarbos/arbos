@@ -65,20 +65,11 @@ struct HomeView: View {
     /// own agents only (no people chats / other users); People is DMs and groups.
     @State private var listFilter: HomeListFilter = .all
 
-    private var hiddenProjects: [Project] {
-        model.projects.filter { model.isArchived($0.id) }.sorted { lastActivity($0) > lastActivity($1) }
+    private var hiddenCount: Int {
+        model.projects.filter { model.isArchived($0.id) }.count
+            + model.peopleChats.filter { model.isArchived(peopleChatId: $0.id) }.count
+            + model.servers.filter { model.isArchived(serverId: $0.id) }.count
     }
-
-    private var hiddenPeople: [PeopleChat] {
-        model.peopleChats.filter { model.isArchived(peopleChatId: $0.id) }
-            .sorted { peopleActivity($0) > peopleActivity($1) }
-    }
-
-    private var hiddenServers: [Server] {
-        model.servers.filter { model.isArchived(serverId: $0.id) }
-    }
-
-    private var hiddenCount: Int { hiddenProjects.count + hiddenPeople.count + hiddenServers.count }
     @FocusState private var searchFocused: Bool
 
     /// Folded query (case + diacritics, leading `@` stripped) so "@robert" and "Zoe" find their rows.
@@ -267,8 +258,8 @@ struct HomeView: View {
             // borderless (not .plain): .plain steals the list swipe /
             // long-press on recent iOS, so archive and the menu fail.
             Button { openSearchHit(project, hit: entry.hit) } label: {
-                AgentRow(project: project, preview: entry.hit.reason ?? preview(project),
-                         previewIcon: entry.hit.reason == nil ? previewIcon(project) : nil, time: timeLabel(project),
+                AgentRow(project: project, preview: entry.hit.reason ?? preview(project, latest: entry.latest),
+                         previewIcon: entry.hit.reason == nil ? previewIcon(latest: entry.latest) : nil, time: timeLabel(ms: entry.activity),
                          streaming: model.isStreaming(project: project.id),
                          unread: model.chats(of: project.id).contains { model.chatHasUnread($0) },
                          unreadCount: model.unreadCount(project: project.id),
@@ -352,11 +343,13 @@ struct HomeView: View {
         case .people(let chat):
             let pinned = model.isHomePinned(peopleChatId: chat.id)
             Button { model.open(peopleChat: chat) } label: {
-                PeopleRow(chat: chat, preview: entry.hit.reason ?? peoplePreview(chat), time: timeLabel(ms: peopleActivity(chat)),
+                PeopleRow(model: model, chat: chat, agent: PeopleRow.agent(of: chat, in: model),
+                          preview: entry.hit.reason ?? peoplePreview(chat), time: timeLabel(ms: entry.activity),
                           unread: model.peopleUnread.contains(chat.id) || model.unreadCount(for: chat) > 0,
                           streaming: model.isStreaming(chat.id),
                           count: model.unreadCount(for: chat), me: model.user?.id,
                           pinned: pinned)
+                    .equatable()
             }
             .buttonStyle(.borderless)
             .accessibilityIdentifier("home-row:\(chat.id)")
@@ -454,7 +447,7 @@ struct HomeView: View {
             let pinned = model.isHomePinned(serverId: server.id)
             Button { model.open(server: server) } label: {
                 ServerRow(server: server, preview: entry.hit.reason ?? model.serverPreview(server),
-                          time: timeLabel(ms: model.serverActivity(server)),
+                          time: timeLabel(ms: entry.activity),
                           unread: model.serverUnread(server),
                           unreadCount: model.serverUnreadCount(server),
                           pinned: pinned)
@@ -540,6 +533,8 @@ struct HomeView: View {
 
     private var homeList: some View {
             ScrollViewReader { proxy in
+                let sections = homeSections
+                let hidden = hiddenCount
                 List {
                     Color.clear.frame(height: showsFilterBar ? HomeChrome.listTop : HomeChrome.barOnlyListTop)
                         .listRowInsets(EdgeInsets())
@@ -551,7 +546,7 @@ struct HomeView: View {
                             .listRowInsets(EdgeInsets())
                             .listRowSeparator(.hidden)
                             .listRowBackground(Color.clear)
-                    } else if homeRows.isEmpty {
+                    } else if sections.isEmpty {
                         Text(listFilter.emptyCopy)
                             .font(theme.font(Theme.small))
                             .foregroundStyle(theme.muted)
@@ -577,26 +572,26 @@ struct HomeView: View {
                         if !plannedTasks.isEmpty {
                             plannedTasksSection
                         }
-                        if !pinnedRows.isEmpty {
+                        if !sections.pinned.isEmpty {
                             pinnedHeader
                                 .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
                                 .listRowSeparator(.hidden)
                                 .listRowBackground(theme.bg)
                         }
-                        ForEach(pinnedRows) { entry in
+                        ForEach(sections.pinned) { entry in
                             homeRow(entry)
                         }
-                        if !pinnedRows.isEmpty {
+                        if !sections.pinned.isEmpty {
                             pinnedDivider
                                 .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
                                 .listRowSeparator(.hidden)
                                 .listRowBackground(theme.bg)
                         }
-                        ForEach(restRows) { entry in
+                        ForEach(sections.rest) { entry in
                             homeRow(entry)
                         }
-                        if hiddenCount > 0 {
-                            hiddenFooter
+                        if hidden > 0 {
+                            hiddenFooter(count: hidden)
                                 .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
                                 .listRowSeparator(.hidden)
                                 .listRowBackground(theme.bg)
@@ -607,7 +602,7 @@ struct HomeView: View {
                             .listRowSeparator(.hidden)
                             .listRowBackground(Color.clear)
                             .accessibilityHidden(true)
-                            .onAppear { LaunchClock.mark("first-content", detail: "source=\(model.contentOrigin) rows=\(homeRows.count)") }
+                            .onAppear { LaunchClock.mark("first-content", detail: "source=\(model.contentOrigin) rows=\(sections.all.count)") }
                     }
                     // The last row at rest sits above the bottom fade (`BottomBarFadeView`).
                     Color.clear.frame(height: HomeChrome.listBottom)
@@ -624,7 +619,7 @@ struct HomeView: View {
                 // app-01M5MY2Y9HTFR019WAEPPDCNYS).
                 .scrollIndicators(.visible)
                 .refreshable { await model.refreshRegistry() }
-                .rigListScroll(proxy, ids: homeRows.map(\.id))
+                .rigListScroll(proxy, ids: sections.all.map(\.id))
             }
     }
 
@@ -722,13 +717,13 @@ struct HomeView: View {
 
     /// Grok's "Hidden chats  N  ›" line under the list (measured: 15 pt muted,
     /// the count a shade dimmer, a small chevron, 27 pt above the bottom).
-    private var hiddenFooter: some View {
+    private func hiddenFooter(count: Int) -> some View {
         Button { showHidden = true } label: {
             HStack(spacing: 8) {
                 Text("Hidden chats")
                     .font(theme.font(Theme.small))
                     .foregroundStyle(theme.muted)
-                Text("\(hiddenCount)")
+                Text("\(count)")
                     .font(theme.font(Theme.small))
                     .foregroundStyle(theme.placeholder)
                 Image(systemName: "chevron.right")
@@ -741,7 +736,7 @@ struct HomeView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Hidden chats, \(hiddenCount)")
+        .accessibilityLabel("Hidden chats, \(count)")
     }
 
     /// The filter tabs are fixed chrome under the bar (not a list row) whenever there is
@@ -878,29 +873,31 @@ struct HomeView: View {
     struct HomeEntry: Identifiable {
         var row: HomeRow
         var hit: HomeSearch.Hit
+        /// The row's time and sort key.
+        var activity: Int64 = 0
+        /// An agent row's newest message with prose (`latest`): its preview, glyph and time.
+        var latest: Message? = nil
         var id: String { row.id }
+    }
+
+    /// The two sections of the list, ranked in one pass per body.
+    struct HomeSections {
+        /// The pins the filter admits, in the user's order (never re-sorted by activity);
+        /// empty → no header, no hairline.
+        var pinned: [HomeEntry]
+        /// Everything else, newest activity first.
+        var rest: [HomeEntry]
+        var isEmpty: Bool { pinned.isEmpty && rest.isEmpty }
+        var all: [HomeEntry] { pinned + rest }
     }
 
     /// Projects, DMs and servers in one list: pinned first (in the user's pin
     /// order), then newest activity. `listFilter` scopes the rows: Agents hides
     /// people and servers, People hides agents and servers, Servers shows only
     /// servers (`HomeListFilter`). Archived rows stay out (Hidden chats).
-    private var homeRows: [HomeEntry] { pinnedRows + restRows }
-
-    /// The Pinned section: the pins the filter admits, in the user's order (never re-sorted
-    /// by activity); empty → no header, no hairline.
-    private var pinnedRows: [HomeEntry] {
-        rankedRows.filter { $0.0 != Int.max }.sorted { $0.0 < $1.0 }.map(\.2)
-    }
-
-    /// Everything else, newest activity first.
-    private var restRows: [HomeEntry] {
-        rankedRows.filter { $0.0 == Int.max }.sorted { $0.1 > $1.1 }.map(\.2)
-    }
-
-    private var rankedRows: [(Int, Int64, HomeEntry)] {
+    private var homeSections: HomeSections {
         // pinRank: strip index when pinned (0 = top), Int.max when not.
-        var rows: [(Int, Int64, HomeEntry)] = []
+        var rows: [(pinRank: Int, entry: HomeEntry)] = []
         let hit = HomeSearch.Hit(kind: .title)
         if listFilter.showsProjects {
             for p in model.projects {
@@ -908,13 +905,14 @@ struct HomeView: View {
                 if !listFilter.admitsProject(shared: p.shared) { continue }
                 if model.isArchived(p.id) { continue }
                 let pinRank = model.homePinIndex(projectId: p.id) ?? Int.max
-                rows.append((pinRank, lastActivity(p), HomeEntry(row: .project(p), hit: hit)))
+                let last = latest(p)
+                rows.append((pinRank, HomeEntry(row: .project(p), hit: hit, activity: lastActivity(p, latest: last), latest: last)))
             }
         }
         if listFilter.showsPeople {
             for c in model.peopleChats where !model.isArchived(peopleChatId: c.id) {
                 let pinRank = model.homePinIndex(peopleChatId: c.id) ?? Int.max
-                rows.append((pinRank, peopleActivity(c), HomeEntry(row: .people(c), hit: hit)))
+                rows.append((pinRank, HomeEntry(row: .people(c), hit: hit, activity: peopleActivity(c))))
             }
         }
         if listFilter.showsServers {
@@ -922,10 +920,12 @@ struct HomeView: View {
             // Servers segment shows them alone (Mac parity, 2026-10-24).
             for s in model.servers where !model.isArchived(serverId: s.id) {
                 let pinRank = model.homePinIndex(serverId: s.id) ?? Int.max
-                rows.append((pinRank, model.serverActivity(s), HomeEntry(row: .server(s), hit: hit)))
+                rows.append((pinRank, HomeEntry(row: .server(s), hit: hit, activity: model.serverActivity(s))))
             }
         }
-        return rows
+        return HomeSections(
+            pinned: rows.filter { $0.pinRank != Int.max }.sorted { $0.pinRank < $1.pinRank }.map(\.entry),
+            rest: rows.filter { $0.pinRank == Int.max }.sorted { $0.entry.activity > $1.entry.activity }.map(\.entry))
     }
 
     /// All | Agents | People | Servers — same capsule pill as profile panes (`PaneTabs`).
@@ -993,20 +993,20 @@ struct HomeView: View {
 
     /// Grok puts a small glyph before some previews: a checklist when the bot is
     /// waiting on a question, a paper plane when it messaged another bot.
-    private func previewIcon(_ p: Project) -> String? {
-        guard let m = latest(p) else { return nil }
+    private func previewIcon(latest m: Message?) -> String? {
+        guard let m else { return nil }
         if m.openQuestion != nil { return "checklist" }
         if m.role != .user, m.turn == .new, m.subagentName != nil { return "paperplane" }
         return nil
     }
 
-    private func lastActivity(_ p: Project) -> Int64 {
-        if let m = latest(p), m.createdAt > 0 { return m.createdAt }
+    private func lastActivity(_ p: Project, latest m: Message?) -> Int64 {
+        if let m, m.createdAt > 0 { return m.createdAt }
         return model.chats(of: p.id).map(\.lastMessageAt).max() ?? 0
     }
 
-    private func preview(_ p: Project) -> String {
-        guard let m = latest(p) else {
+    private func preview(_ p: Project, latest m: Message?) -> String {
+        guard let m else {
             return model.isStreaming(project: p.id) ? "\(p.name) is working" : "No messages yet"
         }
         if let q = m.openQuestion { return HomeView.plain(q.question) }
@@ -1023,8 +1023,6 @@ struct HomeView: View {
         for mark in ["**", "__", "`", "*", "_", "#"] { t = t.replacingOccurrences(of: mark, with: "") }
         return t.trimmingCharacters(in: .whitespaces)
     }
-
-    private func timeLabel(_ p: Project) -> String { timeLabel(ms: lastActivity(p)) }
 
     private func timeLabel(ms: Int64) -> String { HomeView.timeLabel(ms: ms) }
 
@@ -1195,8 +1193,10 @@ struct HiddenChatsView: View {
                         }
                     case .people(let chat):
                         Button { model.open(peopleChat: chat) } label: {
-                            PeopleRow(chat: chat, preview: HiddenChatsView.peoplePreview(chat, in: model), time: "",
+                            PeopleRow(model: model, chat: chat, agent: PeopleRow.agent(of: chat, in: model),
+                                      preview: HiddenChatsView.peoplePreview(chat, in: model), time: "",
                                       unread: false, count: 0, me: model.user?.id)
+                                .equatable()
                         }
                         .buttonStyle(.borderless)
                         .contextMenu {
@@ -1396,10 +1396,14 @@ enum RowStatus: Equatable {
 
 /// A people chat in the home list: DMs show the other person; groups show the
 /// chat title (custom name, or member handles from the relay) and a member count.
-struct PeopleRow: View {
-    @EnvironmentObject private var model: AppModel
+struct PeopleRow: View, Equatable {
     @Environment(\.theme) private var theme
+    /// For `GroupAvatar` only. Not observed: the row redraws when its values change, not on
+    /// every publish of the model (`==` leaves it out).
+    let model: AppModel
     let chat: PeopleChat
+    /// The first agent in the chat, drawn small on the avatar (`AppModel.agent(member:chatId:)`).
+    let agent: Project?
     let preview: String
     let time: String
     let unread: Bool
@@ -1410,6 +1414,16 @@ struct PeopleRow: View {
     var count: Int = 0
     let me: String?
     var pinned: Bool = false
+
+    static func agent(of chat: PeopleChat, in model: AppModel) -> Project? {
+        chat.agents.first.map { model.agent(member: $0, chatId: chat.id) }
+    }
+
+    static func == (a: PeopleRow, b: PeopleRow) -> Bool {
+        a.chat == b.chat && a.agent == b.agent && a.preview == b.preview && a.time == b.time
+            && a.unread == b.unread && a.streaming == b.streaming && a.count == b.count
+            && a.me == b.me && a.pinned == b.pinned
+    }
 
     private var other: ChatMember? { chat.counterpart(me: me) }
 
@@ -1438,8 +1452,8 @@ struct PeopleRow: View {
                 } else {
                     PersonAvatar(url: other?.avatarUrl, handle: other?.handle ?? "?", size: Theme.rowAvatar, name: other?.name, id: other?.id, colorIndex: other?.avatarColorIndex)
                 }
-                if let a = chat.agents.first {
-                    AgentAvatar(project: model.agent(member: a, chatId: chat.id), theme: theme, size: 18, still: true)
+                if let agent {
+                    AgentAvatar(project: agent, theme: theme, size: 18, still: true)
                         .overlay(Circle().strokeBorder(theme.bg, lineWidth: 2))
                         .offset(x: 3, y: 3)
                 }
