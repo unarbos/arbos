@@ -1259,9 +1259,13 @@ final class AppModel: ObservableObject {
     /// D82 first login: the live doc of a chat (nil until its room exists).
     func liveDoc(_ chatId: Id) -> CoreChatDoc? { docs[chatId] }
 
-    /// D82 first login: `POST /projects` for the account's first agent.
+    /// D82 first login: `POST /projects` for the account's first agent. A 2xx
+    /// the client cannot read an id out of is a failed attempt, not a silent
+    /// success — the caller has to count it or it retries forever.
     func createFirstProject(name: String) async throws {
-        _ = try await api.createProject(name: name)
+        guard try await api.createProject(name: name) != nil else {
+            throw RelayError(status: 0, message: "The relay answered without an agent.")
+        }
     }
 
     /// D82 first login: `POST /machine/start` from the Retry block.
