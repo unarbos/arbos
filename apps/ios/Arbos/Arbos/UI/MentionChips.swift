@@ -146,8 +146,45 @@ final class MentionTable {
         static let shared = Cache()
         private var table = MentionTable()
         private var stamp = 0
+        /// The source lists `stamp` last hashed. Holding them keeps their buffers alive, so
+        /// any write to the model's copy has to copy it first: the same buffer means the
+        /// same contents, and the hash is skipped (every open-chat body asked for it).
+        private var sources: Sources?
+
+        @MainActor
+        private struct Sources {
+            var projects: [Project]
+            var peopleChats: [PeopleChat]
+            var directory: [Person]
+            var servers: [Server]
+            var appearance: String
+            var surface: String
+
+            init(_ model: AppModel) {
+                projects = model.projects
+                peopleChats = model.peopleChats
+                directory = model.directory
+                servers = model.servers
+                appearance = model.appearanceSetting
+                surface = model.surfaceSetting
+            }
+
+            func same(as model: AppModel) -> Bool {
+                appearance == model.appearanceSetting && surface == model.surfaceSetting
+                    && Self.sameBuffer(projects, model.projects) && Self.sameBuffer(peopleChats, model.peopleChats)
+                    && Self.sameBuffer(directory, model.directory) && Self.sameBuffer(servers, model.servers)
+            }
+
+            private static func sameBuffer<T>(_ a: [T], _ b: [T]) -> Bool {
+                guard a.count == b.count else { return false }
+                if a.isEmpty { return true }
+                return a.withUnsafeBufferPointer { pa in b.withUnsafeBufferPointer { pb in pa.baseAddress == pb.baseAddress } }
+            }
+        }
 
         func table(model: AppModel, theme: Theme) -> MentionTable {
+            if let sources, sources.same(as: model) { return table }
+            sources = Sources(model)
             let next = Self.stamp(model)
             if next != stamp {
                 stamp = next
