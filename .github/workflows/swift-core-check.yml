@@ -65,9 +65,43 @@ jobs:
       - name: Select Xcode
         run: |
           set -euo pipefail
-          newest="$(find /Applications -maxdepth 1 -name 'Xcode_*.app' | sort -V | tail -1)"
-          if [[ -n "$newest" ]]; then sudo xcode-select -s "$newest"; fi
+          # The newest Xcode that can actually run the gate's destination, not simply the newest.
+          # A macos-15 draw whose newest Xcode carries no iOS simulator runtime used to take the
+          # whole run with it: selecting it blindly left `xcodebuild` with no device matching
+          # `platform=iOS Simulator,name=iPhone 17`, and the run died fifteen minutes in, after
+          # package resolution, with no test executed and nothing in the log naming the cause
+          # (run 41352615015). The device name is fastlane's (`fastlane/Fastfile`); keep them in step.
+          # Testing for the device rather than for any iOS runtime is also what stops this from
+          # quietly moving the gate onto an older runtime: an Xcode from before the 26 line has no
+          # `iPhone 17` to offer, so it is skipped rather than selected.
+          want="iPhone 17"
+          chosen=""
+          # Xcode paths hold no spaces, so the unquoted split is safe and bash 3.2 has no mapfile.
+          for app in $(find /Applications -maxdepth 1 -name 'Xcode_*.app' | sort -Vr); do
+            if DEVELOPER_DIR="$app/Contents/Developer" xcrun simctl list devices available \
+                 | grep -qE "^ +$want \("; then
+              chosen="$app"
+              break
+            fi
+            echo "skipping $app: it has no available \"$want\" simulator"
+          done
+          if [[ -n "$chosen" ]]; then
+            sudo xcode-select -s "$chosen"
+          else
+            # Last resort, and loud: downloading a platform costs gigabytes on a shared runner, so
+            # it is worth a line in the log rather than a quiet several-minute stall.
+            chosen="$(find /Applications -maxdepth 1 -name 'Xcode_*.app' | sort -V | tail -1)"
+            echo "::warning title=No installed Xcode has an available \"$want\" simulator::downloading the iOS platform into ${chosen:-the default Xcode}; this adds several GB to the run"
+            if [[ -n "$chosen" ]]; then sudo xcode-select -s "$chosen"; fi
+            sudo xcodebuild -downloadPlatform iOS
+          fi
           xcodebuild -version
+          avail="$(xcrun simctl list devices available)"
+          echo "$avail" | grep -E "^-- iOS|$want \(" || true
+          echo "$avail" | grep -qE "^ +$want \(" || {
+            echo "::error title=No \"$want\" simulator on this runner::the selected Xcode has no iOS runtime and the platform download did not provide one; the test step cannot resolve its destination"
+            exit 1
+          }
       - name: Rust toolchain
         run: |
           set -euo pipefail
