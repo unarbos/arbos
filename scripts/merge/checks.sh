@@ -109,20 +109,35 @@ commit_files() {
 # loud, for the reason #2467 documents.
 #
 # CONSTRAINT — what a run-level conclusion is allowed to mean, and why it is not this file's to
-# guarantee. This reads the RUN's conclusion rather than a named check row. GitHub concludes a run
-# `success` when every one of its jobs is success-or-skipped, so that equals a real verdict only
-# while no job in the workflow can succeed without testing. Today that holds because the workflow
-# has exactly one job, `check`. Once #2448 lands it holds for a different reason: the workflow ends
-# in a job that fails closed — `verdict` ("Swift verdict") is `if: always()` and exits non-zero
-# unless a check actually passed on this head. Without such a job a run whose check was skipped
-# concludes `success`, which is precisely the bug this file was written to end.
+# guarantee. This reads the RUN's conclusion rather than a named check row, and PASS accepts only
+# `success`.
 #
-# So the dependency lives in a YAML file nobody reviewing this one would think to open. If that job
-# gains `continue-on-error: true`, or the workflow gains any other job that always succeeds, this
-# function goes quietly permissive again without a line here changing. The matching constraint
-# comment is on the workflow side. Reading rows by name instead would only trade this dependency for
-# a worse one: `build-xcframework + fastlane test` is skipped in the mirror run exactly when the
-# push twin passed, so requiring it by name would refuse when coverage exists.
+# What `success` is worth. A run concludes `success` only when some job actually succeeded and none
+# failed or was cancelled. Skipped jobs neither produce that conclusion nor prevent it, which takes
+# two measurements to pin down: run 41144617495 has a single skipped job and concludes `skipped`,
+# while run 41244242835 has one skipped job beside three successes and concludes `success`. So a
+# `success` run is always one in which something really ran and passed. The only open question is
+# whether the thing that passed was the check.
+#
+# Today it was, because this workflow has exactly one job, `check`. After #2448 it is because the
+# workflow ends in `verdict` ("Swift verdict"), which is `if: always()` and exits non-zero unless a
+# check actually passed on this head: `always()` keeps it out of only a cancelled run, and a
+# cancelled run concludes `cancelled`, so a `success` run is one where `verdict` itself ran and
+# passed.
+#
+# Two edits break that, and both live in a YAML file nobody reviewing this one would think to open:
+#   - today, adding ANY job that can succeed while `check` is skipped. Run 41244242835 above is
+#     already that shape, so this is observed behaviour and not a worry about one.
+#   - after #2448, `continue-on-error: true` on `verdict`. A tolerated failure stops failing the
+#     run, so the run concludes `success` on the strength of its other jobs with no check passed.
+# Either one makes this function quietly permissive again with no line here changing. The matching
+# constraint comment is carried on the workflow side by #2448's branch, the change that adds
+# `verdict`; until that lands, main's workflow is the single-job form above and there is no comment
+# there to find.
+#
+# Reading rows by name instead would only trade this dependency for a worse one:
+# `build-xcframework + fastlane test` is skipped in the mirror run exactly when the push twin
+# passed, so requiring it by name would refuse when coverage exists.
 gate_state() {
   local wf=$1 sha=$2 base total list got
   base="repos/$R/actions/workflows/${wf##*/}/runs?head_sha=$sha"
