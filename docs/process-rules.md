@@ -173,6 +173,43 @@ exit code; `axbin/osascript` is a shim on `runner.sh`'s PATH that forwards every
 - After a reboot both runners are gone: start `ax-runner.sh` via `sudo launchctl asuser 502 sudo -u arbosgui …`
   from ssh and `runner.sh` via `open /Users/Shared/arbos-run/start-runner.command` (Terminal identity).
 
+## The merge kit needs the `op` binary, which a worker VM may not have (2026-11-01 16:40 UTC)
+
+A lane reached a clean merge-kit GO and was then refused with:
+
+    NOT MERGED: PAT read failed ... exec: op: not found
+
+The failure names a **missing executable, not a bad credential**. `OP_SERVICE_ACCOUNT_TOKEN` was
+present and valid the whole time, so the token, the kit and the PR all look healthy and the message
+is easy to misread as an auth problem and escalate as one. Installing the official `op` CLI to
+`/usr/local/bin` was the whole fix; the kit then merged normally.
+
+It is **not** a uniform snapshot absence, so check before you download. Of three worker VMs seen on
+2026-11-01, one had no `op` at all, one had 2.30.3 already present with nobody installing it that
+session, and one had it from an earlier lane on the same VM (15:33, found by a later lane at 16:38).
+Any patch version in the 2.30.x line has served.
+
+Rule, before a merge from a worker VM:
+
+- `command -v op` first. If it is there, stop — a previous lane on this VM may already have put it
+  on `PATH`, and a second download buys nothing.
+- If it is missing, install the official `op` CLI to `/usr/local/bin`, then verify with the cheap
+  route only: `op --version` (no API call at all) and **at most one** `op whoami` (expect
+  `User Type: SERVICE_ACCOUNT`). Neither reads a secret item.
+- Cheaper still, and preferred when the kit is already to hand: the kit's own free probe,
+  `oprl` from `scripts/merge/opread.sh`, which runs `op service-account ratelimit` and prints the
+  account's `read_write` used count. Its own comment records that this query is free.
+- **Let the kit's `opread` subshell do the PAT read.** Do not route the PAT through the 1Password MCP
+  tools, nor through an `op read` you compose yourself. `opread` exists precisely so the secret never
+  reaches `argv` or an agent's context: it unsets every variable except `PATH`, `HOME` and the token,
+  disables the session bus so no `dbus-daemon` keeps a copy of the environment, runs `--cache=false`
+  so the read is counted honestly, and sends `op`'s stderr (never a secret) to
+  `$MERGE_KIT/op-last.err` so a refusal can be quoted verbatim.
+- **Do not probe the account repeatedly.** The read budget is shared across every lane
+  (`opread.sh` records it as 1,000/day; roughly 379 remained when measured on 2026-11-01), and
+  `oprl`'s counter is account-wide, so a before/after difference also picks up other lanes. One
+  check, then stop — resist re-running "to be sure".
+
 ## Standing rules that this does not change
 
 - One issue per release; a hotfix marker (`[hotfix]`) is for P0s only.
