@@ -45,17 +45,22 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// The row the old ladder of three corrections happened to converge on: measured landing
     /// in six gate runs out of six.
     ///
-    /// Hit 53 of this fixture's 83, so the drags reach it after they reach `stuckTarget`.
+    /// Hit 53 of this fixture's 83, so the drags reach it after they reach `stuckTarget`:
+    /// fourteen of them on gate run 41346954704, where it landed 22 pt off centre.
     private static let convergingTarget = "long-265"
     /// The row it never converged on: two gate failures out of two attempts that aimed here,
-    /// resting eighteen rows short with the message not realized at all, and **no run on
-    /// record has ever landed it** (#2535).
+    /// resting short with the message not realized at all, and no run before #2535 had ever
+    /// landed it.
     ///
-    /// This is the row #2535 is about. Hit 59 of 83.
+    /// This is the row #2535 is about. Hit 59 of 83, eleven drags back, and on gate run
+    /// 41346954704 it landed 16 pt off centre with the app reporting
+    /// `passes=1 arrived=true moved=0` — while the pre-fix arm of the same run, aimed at the
+    /// same row, came to rest thirty-five rows away with the row not realized.
     private static let stuckTarget = "long-304"
     /// How many drags the list may be nudged while looking for a named target before the case
-    /// gives up. Twenty-nine hits separate `convergingTarget` from the newest, and a drag
-    /// moves one to three of them, so forty is roughly half again the worst honest case.
+    /// gives up. Twenty-nine hits separate `convergingTarget` from the newest, a drag moves
+    /// one to three of them, and the measured counts are eleven and fourteen, so forty is
+    /// most of a factor of three in hand.
     private static let aimSearchDrags = 40
     /// Clear space the aim point must have above it, below the search chrome, before this
     /// will tap there.
