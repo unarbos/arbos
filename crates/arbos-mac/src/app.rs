@@ -71,6 +71,8 @@ pub enum ProfilePage {
     Group { space_id: Id },
     /// An agent (one of my projects or a shared one).
     Agent { project_id: Id },
+    /// A connected agent's full session log, pushed from the Details pane's card (#2224).
+    AgentLog { project_id: Id },
     /// My own profile and every app setting (the Settings window is gone).
     Me,
     /// A server (D88): channels, members, and the admin options for owners/admins.
@@ -860,6 +862,9 @@ pub struct AppState {
     pub connect_reveal: Option<ConnectReveal>,
     /// The Wake URL form of the connected agent whose pane is open.
     pub wake_form: Option<WakeForm>,
+    /// Connected agents' session logs (`GET /outside-agents/{id}/log`), oldest first, for the
+    /// Details pane's Session log card and its View all page (#2224).
+    pub outside_logs: HashMap<Id, Vec<crate::model::OutsideLogEntry>>,
     /// Debug: per-message "Show details" disclosures in the transcript.
     pub show_details: bool,
     /// The user's one machine (projects are workspaces on it).
@@ -1340,6 +1345,7 @@ impl AppState {
             connect_open: false,
             connect_reveal: None,
             wake_form: None,
+            outside_logs: HashMap::new(),
             show_details: false,
             machine: Machine::default(),
             connectors: ConnectorsView::default(),
@@ -1851,6 +1857,13 @@ impl AppState {
                 if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
                     p.outside = Some(info);
                 }
+                cx.notify();
+            }
+            SyncEvent::OutsideAgentLog {
+                project_id,
+                entries,
+            } => {
+                self.outside_logs.insert(project_id, entries);
                 cx.notify();
             }
             SyncEvent::OutsideAgentWakeSaved { project_id, error } => {
@@ -2623,6 +2636,17 @@ impl AppState {
                                     .set_profile_tab(crate::ui::profiles::agent::TAB_LIBRARY, cx),
                                 ":computer" => self
                                     .set_profile_tab(crate::ui::profiles::agent::TAB_COMPUTER, cx),
+                                // `agent:log[:replies|errors|sessions]` follows the Session log
+                                // card's "View all" and picks a filter (#2232).
+                                r if r.starts_with(":log") => {
+                                    self.open_outside_log(project_id.clone(), cx);
+                                    self.profile_tab = match r.trim_start_matches(":log") {
+                                        ":replies" => 1,
+                                        ":errors" => 2,
+                                        ":sessions" => 3,
+                                        _ => 0,
+                                    };
+                                }
                                 _ => {}
                             }
                             // `agent:avatar[:generate|:upload[=<path>]]` opens the avatar picker
@@ -10736,7 +10760,48 @@ impl AppState {
 
     /// Details pane: refresh the connection line when the pane opens on an outside agent.
     pub fn refresh_outside_status(&mut self, project_id: Id) {
-        self.command(ClientCommand::OutsideAgentStatus { project_id });
+        self.command(ClientCommand::OutsideAgentStatus {
+            project_id: project_id.clone(),
+        });
+        self.command(ClientCommand::OutsideAgentLog { project_id });
+    }
+
+    /// Session log card → View all: the full log pushed over the agent's pane (‹ back).
+    pub fn open_outside_log(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        self.command(ClientCommand::OutsideAgentLog {
+            project_id: project_id.clone(),
+        });
+        self.push_profile(ProfilePage::AgentLog { project_id }, cx);
+        self.profile_tab = 0;
+    }
+
+    /// The chat a log line names, as the person knows it: a group's or DM's name, the agent's
+    /// own chat, or "Chat" when it is not in this app's lists any more.
+    pub fn outside_log_chat_title(&self, chat: &str, agent: &str) -> String {
+        if let Some(p) = self.project(chat) {
+            return Self::room_title(p);
+        }
+        for (pid, chats) in &self.chats {
+            if chats.iter().any(|c| c.id == chat) {
+                return if pid == agent {
+                    "Your chat".to_owned()
+                } else {
+                    self.project(pid)
+                        .map(Self::room_title)
+                        .unwrap_or_else(|| "Chat".to_owned())
+                };
+            }
+        }
+        "Chat".to_owned()
+    }
+
+    /// A room as the sidebar names it. A DM's `name` is the other person's handle, but every
+    /// other surface shows their display name, so the log agrees with them rather than the row.
+    fn room_title(space: &Project) -> String {
+        match space.person() {
+            Some(p) if !space.is_people_group() => p.display_name(),
+            _ => space.name.clone(),
+        }
     }
 
     /// The Wake URL form for this agent; a form left over from another agent is replaced.
