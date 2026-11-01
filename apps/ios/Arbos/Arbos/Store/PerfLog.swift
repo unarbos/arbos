@@ -4,11 +4,12 @@
 // frame and the summed time over budget — a main-thread hang shows up as one
 // long frame — and logs them with the footprint every 2 s:
 //
+//   log show --predicate 'subsystem == "com.unarbos.arbos.ios" AND category == "perf"'
+//
 // The link asks for the screen's top rate, so on a ProMotion phone it budgets against
 // 8.3 ms. These are Debug numbers: frame-rate and hitch figures for a fix come from
 // Instruments (Animation Hitches) on a Release build on a device, not from this log.
-//
-//   log show --predicate 'subsystem == "com.unarbos.arbos.ios" AND category == "perf"'
+// The simulator runs at 60 Hz and Instruments cannot record hitches there.
 
 #if DEBUG
 import Combine
@@ -56,7 +57,7 @@ final class PerfLog {
         started = true
         let link = CADisplayLink(target: self, selector: #selector(tick(_:)))
         // Without a range the link is held to 60 Hz on ProMotion phones and a dropped
-        // 120 Hz frame never shows. Asking for 120 keeps the display at that rate while
+        // 120 Hz frame never shows. Asking for the top rate holds the display there while
         // the rig runs, so frame numbers from this log are not battery-representative.
         let maxFps = Float(UIScreen.main.maximumFramesPerSecond)
         link.preferredFrameRateRange = CAFrameRateRange(minimum: min(80, maxFps), maximum: maxFps, preferred: maxFps)
