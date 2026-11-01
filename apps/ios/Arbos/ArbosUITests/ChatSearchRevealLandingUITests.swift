@@ -297,6 +297,23 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         let resting = bubbles(app)
         let detail = "tapped \(arm) at \(aim); screen \(screen); resting [\(describe(resting))]"
         print("[rig] \(detail)")
+
+        // What the app thinks it revealed, read and printed before the assertions below.
+        //
+        // `continueAfterFailure` is off, so an assertion that fails ends the case where it
+        // stands. This read used to sit after the two assertions below, and on gate run
+        // 41327251521 the bar assertion failed, the case tore down, and the probe never ran —
+        // so the log could not say whether the app had acted on the tap at all, which was the
+        // one thing worth knowing. It is printed unconditionally, including "none" and the
+        // absent-probe case, because on a red run the absence of a value is itself the answer.
+        //
+        // Only the read and the print moved. The assertion on this value is unchanged and
+        // still sits below, after the two assertions it already followed, so the order in
+        // which this case fails is exactly what it was.
+        let probe = app.descendants(matching: .any)["reveal-probe"].firstMatch
+        let probeValue = probe.exists ? (probe.value as? String) : nil
+        print("[rig] \(arm) app revealed \(probeValue ?? "no probe"); rig aimed at \(id)")
+
         XCTAssertTrue(header.isHittable, "the chat is frontmost — \(detail)")
         XCTAssertFalse(field.exists, "a result tap closes the bar — \(detail)")
 
@@ -304,9 +321,7 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         // asked to reveal, so a tap that landed on a neighbour fails here, as a mis-aimed
         // rig, instead of further down as the fix missing by tens of rows. Both iOS 26
         // failures in this lane were this, and without this line they read as app faults.
-        let probe = app.descendants(matching: .any)["reveal-probe"].firstMatch
-        if probe.exists, let revealedId = probe.value as? String, revealedId != "none" {
-            print("[rig] \(arm) app revealed \(revealedId); rig aimed at \(id)")
+        if let revealedId = probeValue, revealedId != "none" {
             XCTAssertEqual(revealedId, id,
                            "the tap reached the row this case is about — it reached \(revealedId) "
                            + "instead, so this run measures the rig, not the fix — \(detail)")

@@ -162,11 +162,15 @@ final class ChatSearchCloseUITests: XCTestCase {
     /// The slack figures above, and the claim that this is an iOS-27-only fault that iOS 26.5
     /// passes, come from the rig run this case was written against. **The gate contradicts the
     /// runtime half of that.** The gate runs iOS 26.2 on iPhone 17 under Xcode 26.3, and the
-    /// `isHittable` assertion below fails there intermittently: one failure in eight gate runs
-    /// on `main` as of 2026-11-01, the failure being run 41308036692 attempt 1 on `a9a87ad7d`.
-    /// `b923a77b1` — a byte-identical tree, same `^{tree}` hash — passed in run 41303011668 an
-    /// hour earlier, so the same content both passes and fails. A green run here is a draw, not
-    /// a proof, and no branch's green shows that the branch fixed anything.
+    /// `isHittable` assertion below fails there intermittently: one failure in ten gate
+    /// attempts on `main` as of 2026-11-01, the failure being run 41308036692 attempt 1 on
+    /// `a9a87ad7d`. `b923a77b1` — a byte-identical tree, same `^{tree}` hash — passed in run
+    /// 41303011668 an hour earlier, so the same content both passes and fails. A green run here
+    /// is a draw, not a proof, and no branch's green shows that the branch fixed anything.
+    ///
+    /// Count **attempts, not runs**. A re-run reuses the run object, so a run whose first
+    /// attempt failed still reports `success`: 41308036692 is exactly that, and counting it by
+    /// run conclusion drops the one failure of this case anyone has on record.
     ///
     /// Two things follow for anyone picking this up. Reproduce on **26.2**, not on 27.0 or 26.5,
     /// or a clean pass tells you nothing. And pull the failing attempt's log attempt-scoped
