@@ -1588,6 +1588,10 @@ struct ChatSession: View {
     private func handleSessionDisappear() {
         // Keep the typed draft so coming back to this thread restores it.
         model.setComposerDraft(composerDraft.text, for: chatId)
+        // The two callbacks capture this view, whose `@State` owns the draft: left set, the
+        // draft and the closed chat's rows and messages never free. Appear sets them again.
+        composerDraft.onChange = nil
+        composerDraft.onCaretOrMentions = nil
         // Catch notifies that landed after the last onChange mark-read while we were still in the chat
         // (including rows that arrived while the app was inactive on a call — isWatching was false).
         if isPeople { model.markPeopleRead(chatId) }
@@ -4361,6 +4365,13 @@ final class ComposerDraft: ObservableObject {
     }
     var onChange: ((String) -> Void)?
     var onCaretOrMentions: (() -> Void)?
+
+    #if DEBUG
+    /// Drafts alive right now, so a test can see a closed chat's draft free.
+    nonisolated(unsafe) static var live = 0
+    init() { Self.live += 1 }
+    deinit { Self.live -= 1 }
+    #endif
 }
 
 /// Which of the composer's trailing controls the field's state calls for. The
