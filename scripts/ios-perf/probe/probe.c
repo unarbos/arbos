@@ -3,7 +3,14 @@
 // that `arbos_probe_phase` brackets (1-2: ChatSession construction on the main thread, 3-4: the
 // detached warming task). "own" = on the warm-up's own thread inside its own sub-window, which
 // is exclusively warm-up code: both sub-windows are synchronous, with no suspension point.
+#include <CoreFoundation/CoreFoundation.h>
+#include <arpa/inet.h>
 #include <dispatch/dispatch.h>
+#include <execinfo.h>
+#include <netinet/in.h>
+#include <objc/message.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <objc/runtime.h>
@@ -30,6 +37,13 @@ static _Atomic uint64_t tid1, tid3;
 static __thread int busy;
 static os_log_t L;
 
+// connect() can run inside another image's initializer, before this library's constructor.
+static os_log_t log_handle(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ L = os_log_create("com.unarbos.arbos.perfprobe", "probe"); });
+    return L;
+}
+
 static uint64_t tid(void) {
     uint64_t t;
     pthread_threadid_np(NULL, &t);
@@ -53,6 +67,68 @@ static void dump(const char *when) {
            when, (int)phase, armed, own, other);
 }
 
+static const char *image_of(uint64_t pc, uint64_t *off) {
+    Dl_info info = {0};
+    if (!dladdr((void *)pc, &info) || !info.dli_fname) return "?";
+    *off = pc - (uint64_t)info.dli_fbase;
+    const char *slash = strrchr(info.dli_fname, '/');
+    return slash ? slash + 1 : info.dli_fname;
+}
+
+static id msg(id obj, const char *sel) {
+    return obj ? ((id(*)(id, SEL))objc_msgSend)(obj, sel_registerName(sel)) : NULL;
+}
+
+static const char *utf8(id str) {
+    return str ? ((const char *(*)(id, SEL))objc_msgSend)(str, sel_registerName("UTF8String")) : NULL;
+}
+
+// Network hits say where they go: the socket address of a connect(), the URL, method and
+// header names of a URLSession request, and the frames that started it.
+static void describe_network(long i, uint64_t *regs, uint64_t lr) {
+    char what[640] = "";
+    const char *name = hk_name[i] ? hk_name[i] : i < HK_NC ? hk_name_c[i] : "?";
+    if (!strcmp(name, "connect")) {
+        const struct sockaddr *sa = (const struct sockaddr *)regs[1];
+        char addr[128] = "?";
+        int port = -1;
+        if (sa && sa->sa_family == AF_INET) {
+            inet_ntop(AF_INET, &((const struct sockaddr_in *)sa)->sin_addr, addr, sizeof addr);
+            port = ntohs(((const struct sockaddr_in *)sa)->sin_port);
+        } else if (sa && sa->sa_family == AF_INET6) {
+            inet_ntop(AF_INET6, &((const struct sockaddr_in6 *)sa)->sin6_addr, addr, sizeof addr);
+            port = ntohs(((const struct sockaddr_in6 *)sa)->sin6_port);
+        } else if (sa && sa->sa_family == AF_UNIX) {
+            snprintf(addr, sizeof addr, "unix:%s", ((const struct sockaddr_un *)sa)->sun_path);
+        }
+        snprintf(what, sizeof what, "fd=%d family=%d addr=%s port=%d", (int)regs[0], sa ? sa->sa_family : -1, addr, port);
+    } else if (name[0] == '-') {
+        id req = NULL;
+        if (strstr(name, " resume]")) req = msg((id)regs[0], "currentRequest");
+        else if (strstr(name, "WithRequest:")) req = (id)regs[2];
+        if (req) {
+            id keys = msg(msg(req, "allHTTPHeaderFields"), "allKeys");
+            id joined = keys ? ((id(*)(id, SEL, id))objc_msgSend)(keys, sel_registerName("componentsJoinedByString:"), (id)CFSTR(",")) : NULL;
+            const char *u = utf8(msg(msg(req, "URL"), "absoluteString")), *m = utf8(msg(req, "HTTPMethod")), *h = utf8(joined);
+            snprintf(what, sizeof what, "method=%s url=%s headers=[%s]", m ? m : "?", u ? u : "?", h ? h : "");
+        }
+    }
+    void *bt[24];
+    int n = backtrace(bt, 24);
+    char callers[1200] = "";
+    size_t len = 0;
+    for (int k = 1; k < n && len < sizeof callers - 64; k++) {
+        uint64_t off = 0;
+        const char *img = image_of((uint64_t)bt[k], &off);
+        if (!strcmp(img, "probe.dylib")) continue;
+        len += snprintf(callers + len, sizeof callers - len, " %s+0x%llx", img, (unsigned long long)off);
+    }
+    uint64_t off = 0;
+    const char *img = image_of(lr, &off);
+    os_log(log_handle(), "probe NET phase=%d main=%d name=%{public}s %{public}s caller=%{public}s+0x%llx stack=%{public}s",
+           (int)phase, pthread_main_np(), name, what, img, (unsigned long long)off, callers);
+}
+
 void arbos_hit(long i, uint64_t *regs, uint64_t lr) {
     if (busy || i < 0 || i >= HK_N) return;
     busy = 1;
@@ -65,6 +141,8 @@ void arbos_hit(long i, uint64_t *regs, uint64_t lr) {
         const char *mode = (const char *)regs[1];
         writeish = mode && (strchr(mode, 'w') || strchr(mode, 'a') || strchr(mode, '+'));
     }
+    const char *cat = hk_cat[i] ? hk_cat[i] : i < HK_NC ? hk_cat_c[i] : NULL;
+    if (writeish && cat && !strcmp(cat, "network")) describe_network(i, regs, lr);
     if (writeish) {
         int p = phase;
         uint64_t t = tid();
@@ -149,7 +227,7 @@ static void hook_objc(void) {
 }
 
 __attribute__((constructor)) static void init(void) {
-    L = os_log_create("com.unarbos.arbos.perfprobe", "probe");
+    log_handle();
     for (int i = 0; i < HK_NC; i++) {
         if (!hk_orig[i]) continue;
         hk_name[i] = hk_name_c[i];

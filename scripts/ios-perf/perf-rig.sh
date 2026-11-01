@@ -112,7 +112,7 @@ simlaunch() {
   local T0; T0=$(date "+%Y-%m-%d %H:%M:%S") i
   say "simlaunch load=[$(sysctl -n vm.loadavg)]"
   for i in 1 2 3 4 5 6; do
-    SIMCTL_CHILD_ARBOS_FIXTURE=1 SIMCTL_CHILD_ARBOS_PERF_FRAMES=1 SIMCTL_CHILD_ARBOS_FIXTURE_HOME_ROWS=60 \
+    SIMCTL_CHILD_ARBOS_FIXTURE=1 SIMCTL_CHILD_ARBOS_PERF_FRAMES=1 \
       xcrun simctl launch --terminate-running-process "$SIM" com.unarbos.arbos.ios >/dev/null 2>&1
     sleep 7
   done
@@ -126,7 +126,7 @@ simlaunch() {
 applaunch() {
   local out="$W/traces/tr-app-launch.trace"; rm -rf "$out"
   xcrun xctrace record --device "$SIM" --template "App Launch" --time-limit 20s --output "$out" \
-    --env ARBOS_FIXTURE=1 --env ARBOS_FIXTURE_HOME_ROWS=60 \
+    --env ARBOS_FIXTURE=1 \
     --launch -- "$DD/Build/Products/Release-iphonesimulator/Arbos.app" > $W/logs/tr-app-launch.xctrace.log 2>&1
   say "app-launch trace rc=$? size=$(du -sh "$out" 2>/dev/null | cut -f1) $(tail -1 $W/logs/tr-app-launch.xctrace.log)"
   xcrun simctl terminate "$SIM" com.unarbos.arbos.ios 2>/dev/null
@@ -138,7 +138,7 @@ openprof() {
   local tag=$1 secs=$2; shift 2
   local out="$W/traces/$tag.trace" kv envs=()
   rm -rf "$out"
-  for kv in ARBOS_FIXTURE=1 ARBOS_FIXTURE_HOME_ROWS=60 "$@"; do envs+=("SIMCTL_CHILD_$kv"); done
+  for kv in ARBOS_FIXTURE=1 "$@"; do envs+=("SIMCTL_CHILD_$kv"); done
   xcrun simctl terminate "$SIM" com.unarbos.arbos.ios 2>/dev/null; sleep 2
   say "openprof $tag load=[$(sysctl -n vm.loadavg)] $*"
   local pid try
@@ -158,15 +158,17 @@ openprof() {
 }
 
 # coldlaunch <n>: launches by simctl, alternating warm-up on / off (the order flips each round),
-# then the app's launch milestones; the pid → arm map goes to cl-pids.txt. CL_ROWS: home rows
-# (`first-content` marks a sentinel after the last row, so it only fires when they all fit).
+# then the app's launch milestones; the pid → arm map goes to cl-pids.txt. The fixture home list
+# is taller than the screen, so `first-content` (a sentinel after the last row) never fires; the
+# root view's `probe on` line is the first frame of the populated list (the fixture loads in
+# `AppModel.init`).
 coldlaunch() {
   local T0 i arm pid; T0=$(date "+%Y-%m-%d %H:%M:%S")
   : > $W/logs/cl-pids.txt
   say "coldlaunch load=[$(sysctl -n vm.loadavg)]"
   for i in $(seq 1 ${1:-6}); do
     for arm in $([ $((i % 2)) = 1 ] && echo "on off" || echo "off on"); do
-      pid=$(env SIMCTL_CHILD_ARBOS_FIXTURE=1 SIMCTL_CHILD_ARBOS_PERF_FRAMES=1 SIMCTL_CHILD_ARBOS_FIXTURE_HOME_ROWS=${CL_ROWS:-60} \
+      pid=$(env SIMCTL_CHILD_ARBOS_FIXTURE=1 SIMCTL_CHILD_ARBOS_PERF_FRAMES=1 \
         $([ $arm = off ] && echo SIMCTL_CHILD_ARBOS_NO_WARMUP=1) \
         xcrun simctl launch --terminate-running-process "$SIM" com.unarbos.arbos.ios 2>/dev/null | awk -F': ' '{print $2}')
       echo "$arm $i $pid" >> $W/logs/cl-pids.txt
@@ -196,7 +198,7 @@ probebuild() {
 proberun() {
   local tag=$1 T0 kv envs=() pid d; shift
   T0=$(date "+%Y-%m-%d %H:%M:%S")
-  for kv in ARBOS_FIXTURE=1 ARBOS_FIXTURE_HOME_ROWS=60 "DYLD_INSERT_LIBRARIES=$W/probe/probe.dylib" "$@"; do envs+=("SIMCTL_CHILD_$kv"); done
+  for kv in ARBOS_FIXTURE=1 "DYLD_INSERT_LIBRARIES=$W/probe/probe.dylib" "$@"; do envs+=("SIMCTL_CHILD_$kv"); done
   pid=$(env "${envs[@]}" xcrun simctl launch --terminate-running-process "$SIM" com.unarbos.arbos.ios 2>/dev/null | awk -F': ' '{print $2}')
   say "proberun $tag pid=${pid:-none} $*"
   sleep 20
@@ -209,6 +211,19 @@ proberun() {
       [ -d "$d" ] && find "$d" -type f -exec stat -f "%Fm %z %N" {} + 2>/dev/null
     done; } > $W/logs/$tag.files.txt
   say "proberun $tag $(grep -c 'probe count' $W/logs/$tag.probe.log) count lines; $(grep 'probe summary' $W/logs/$tag.probe.log | tail -1 | sed 's/.*probe summary//')"
+}
+
+# xtwarm: the first xctrace attach after a simulator boot fails ("Cannot find process for
+# provided pid"); spend it on a throwaway launch so the next openprof gets a trace.
+xtwarm() {
+  local pid
+  pid=$(SIMCTL_CHILD_ARBOS_FIXTURE=1 xcrun simctl launch --terminate-running-process "$SIM" com.unarbos.arbos.ios 2>/dev/null | awk -F': ' '{print $2}')
+  sleep 2
+  rm -rf $W/xtwarm.trace
+  xcrun xctrace record --device "$SIM" --template "Time Profiler" --attach "$pid" --time-limit 3s --output $W/xtwarm.trace > $W/logs/xtwarm.xctrace.log 2>&1
+  say "xtwarm pid=${pid:-none} rc=$? $(tail -1 $W/logs/xtwarm.xctrace.log)"
+  rm -rf $W/xtwarm.trace
+  xcrun simctl terminate "$SIM" com.unarbos.arbos.ios 2>/dev/null; sleep 2
 }
 
 # exportall: time-profile and os-signpost tables of every trace not yet exported (gzipped XML;
@@ -267,9 +282,7 @@ case "${1:-}" in
       warmab)
         build || { kill $WD 2>/dev/null; release_all; exit 3; }
         xcrun simctl install "$SIM" "$DD/Build/Products/Release-iphonesimulator/Arbos.app"
-        # The first launch after a boot dies before xctrace can attach; spend it here.
-        SIMCTL_CHILD_ARBOS_FIXTURE=1 xcrun simctl launch "$SIM" com.unarbos.arbos.ios >/dev/null 2>&1; sleep 10
-        xcrun simctl terminate "$SIM" com.unarbos.arbos.ios 2>/dev/null
+        xtwarm
         coldlaunch 6
         probebuild && { proberun probe-on-1; proberun probe-off-1 ARBOS_NO_WARMUP=1; proberun probe-on-2; }
         for i in 1 2 3; do
@@ -282,6 +295,27 @@ case "${1:-}" in
         xcrun simctl terminate "$SIM" com.unarbos.arbos.ios 2>/dev/null
         coldlaunch ${3:-8}
         [ -n "${WU_EXTRA:-}" ] && openprof $WU_EXTRA 48 ARBOS_FIXTURE_LONG_ROWS=2200 ARBOS_FIXTURE_LONG_RICH=1 ARBOS_PERF_OPENS=fx-dm-unconst,fx-group-launch:6
+        xcrun simctl shutdown "$SIM" 2>/dev/null
+        exportall ;;
+      # No build: one launch with the side-effect counter (network detail lines), on the app
+      # the last plan installed.
+      netprobe)
+        SIMCTL_CHILD_ARBOS_FIXTURE=1 xcrun simctl launch "$SIM" com.unarbos.arbos.ios >/dev/null 2>&1; sleep 8
+        xcrun simctl terminate "$SIM" com.unarbos.arbos.ios 2>/dev/null
+        proberun net-1
+        proberun net-2 ARBOS_NO_WARMUP=1
+        [ "${NET_THEN_COLD:-}" = 1 ] && {
+          coldlaunch ${CL_N:-8}
+          [ -n "${WU_EXTRA:-}" ] && openprof $WU_EXTRA 48 ARBOS_FIXTURE_LONG_ROWS=2200 ARBOS_FIXTURE_LONG_RICH=1 ARBOS_PERF_OPENS=fx-dm-unconst,fx-group-launch:6
+          xcrun simctl shutdown "$SIM" 2>/dev/null
+          exportall
+        } ;;
+      # No build: the missing on-arm open profile, then the counter for the launch-time connect().
+      onextra)
+        xtwarm
+        openprof ${WU_EXTRA:-wu-on-4} 48 ARBOS_FIXTURE_LONG_ROWS=2200 ARBOS_FIXTURE_LONG_RICH=1 ARBOS_PERF_OPENS=fx-dm-unconst,fx-group-launch:6
+        proberun net-3
+        proberun net-4 ARBOS_NO_WARMUP=1
         xcrun simctl shutdown "$SIM" 2>/dev/null
         exportall ;;
       only)
