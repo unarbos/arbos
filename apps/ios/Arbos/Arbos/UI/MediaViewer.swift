@@ -1045,7 +1045,7 @@ enum MediaFetch {
             return await data(url, headers: model.authHeaders)
         }
         guard let ref = item.blobRef, !ref.hasPrefix("local:") else { return nil }
-        #if DEBUG
+        #if DEBUG || ARBOS_FIXTURE
         if model.isFixture, ref.hasPrefix("fixture-") {
             // Off the main actor like a network fetch, so the rig's open and scroll numbers
             // carry the decode path's cost, not the fixture painter's.
@@ -1112,7 +1112,7 @@ struct BlobImage: View {
     }
 }
 
-#if DEBUG
+#if DEBUG || ARBOS_FIXTURE
 /// Simulator fixture media: a gradient picture seeded by the blob key (the Mac
 /// fixture's `fixture_png`), or a one-page PDF naming the file.
 enum FixtureMedia {
@@ -1309,7 +1309,7 @@ extension AppModel {
     func forward(_ item: MediaItem, to target: ForwardTarget) {
         guard let ref = item.blobRef else { return }
         let text = MediaAlbum.forwardedPrefix + item.by
-        #if DEBUG
+        #if DEBUG || ARBOS_FIXTURE
         if isFixture {
             // No blob store to copy between: the row lands with the same key.
             let chatId: Id
@@ -1376,7 +1376,7 @@ extension AppModel {
             pendingForwardDraft = (chatId, body, forwardedFrom)
             return
         }
-        #if DEBUG
+        #if DEBUG || ARBOS_FIXTURE
         if isFixture {
             // No blob store to copy between: the rows land with the same keys. A chart
             // travels as its fallback picture here.

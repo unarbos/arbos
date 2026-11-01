@@ -911,6 +911,9 @@ struct ChatSession: View {
         let version = model.messagesVersion[chatId]
         let shown = refreshVersion?.chat == chatId ? refreshVersion?.version : nil
         defer { refreshVersion = (chatId, version) }
+        let rowsMark = PerfSignpost.rowsBegin()
+        var rowsPath = PerfSignpost.RowsPath.full
+        defer { PerfSignpost.rowsEnd(rowsMark, path: rowsPath, messages: list.count, rows: rows.count, window: windowCount) }
         #if DEBUG
         let refreshStarted = Date()
         defer {
@@ -938,7 +941,11 @@ struct ChatSession: View {
             let last = list[list.count - 1]
             let prefixSame = tailEdit || list.dropLast().allSatisfy { messageById[$0.id] == $0 }
             if prefixSame {
-                if messageById[last.id] == last { return }
+                if messageById[last.id] == last {
+                    rowsPath = .unchanged
+                    return
+                }
+                rowsPath = .tail
                 var byId = messageById
                 byId[last.id] = last
                 let cut = rows.firstIndex(where: { $0.messageId == last.id }).map { ix -> Int in
@@ -969,6 +976,7 @@ struct ChatSession: View {
         // Incremental append: one new message at the end.
         if list.count == refreshIds.count + 1, list.count > 0,
            zip(list.dropLast(), refreshIds).allSatisfy({ $0.id == $1 }) {
+            rowsPath = .append
             let last = list[list.count - 1]
             var byId = messageById
             byId[last.id] = last
@@ -1021,6 +1029,7 @@ struct ChatSession: View {
     }
 
     var body: some View {
+        let _ = FrameProbe.count(.chatBody)
         #if DEBUG
         let _ = PerfCounters.bump("chatBody")
         let _ = DebugHooks.perfChanges ? Self._printChanges() : ()
@@ -1270,6 +1279,7 @@ struct ChatSession: View {
                                 .padding(.horizontal, 16)
                         }
                     )
+                    .onAppear { PerfSignpost.endAfterCommit(.messageMenu) }
                 }
             }
             .ignoresSafeArea()
@@ -2774,6 +2784,7 @@ struct ChatSession: View {
         actionsRestoresKeyboard = composerFocused
         composerFocused = false
         searchFocused = false
+        PerfSignpost.begin(.messageMenu)
         withAnimation(.easeOut(duration: 0.18)) { actionsRow = row }
     }
 
@@ -3793,6 +3804,7 @@ struct ChatSession: View {
         #if DEBUG
         SendTrace.begin(chatId: chatId, rows: rows.count, caughtUp: model.caughtUp.contains(chatId))
         #endif
+        PerfSignpost.sendBegan(chatId: chatId, newestRowId: rows.last?.id)
         Haptics.send()
         // A send means follow the reply: re-pin even if the reader had scrolled up.
         jumpBackTo = nil
@@ -4131,6 +4143,7 @@ extension ChatSession {
                         SendTrace.markIfPresent("row-in-tree", ids: [row.messageId], detail: "row=\(row.id)")
                     }
                     #endif
+                    if row.id == lastId { PerfSignpost.newestRowAppeared(chatId: chatId, rowId: row.id) }
                     // Once per open — not on every row, and not again when the newest row is
                     // realised a second time after a trip into history.
                     if row.id == lastId, !firstRowMarked {

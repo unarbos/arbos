@@ -56,6 +56,7 @@ struct RootView: View {
             TouchPerf.installIfRequested()
             #endif
             PerfDiagnostics.shared.start(model: model)
+            FrameProbe.startIfRequested(model: model)
             #if DEBUG
             if DebugHooks.perfChanges { setlinebuf(stdout) }
             #endif
