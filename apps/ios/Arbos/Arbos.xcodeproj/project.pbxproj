@@ -16,6 +16,7 @@
 		A1EE00000000000000000002 /* UserError.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EE00000000000000000001 /* UserError.swift */; };
 		A1BB87570AFC8FD22F77F310 /* ArbosApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EF7B8D4ACE5D286ED5271D /* ArbosApp.swift */; };
 		A1B8CC06713710E1DE0950B9 /* DebugHooks.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B4441E009E79A1090EF589 /* DebugHooks.swift */; };
+		A1F50000000000000000F002 /* FirstOpenWarmup.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F50000000000000000F001 /* FirstOpenWarmup.swift */; };
 		A134D74DFA78D38A472BF229 /* Call.swift in Sources */ = {isa = PBXBuildFile; fileRef = A17AB0DF610F874C5BE921E3 /* Call.swift */; };
 		A1547843CA4E6FD14D625E8D /* Model.swift in Sources */ = {isa = PBXBuildFile; fileRef = A123D7A2CAFBECAE6ECFCF29 /* Model.swift */; };
 		A117280222D51C2ECDBA9FC8 /* People.swift in Sources */ = {isa = PBXBuildFile; fileRef = A19AC72230E7AD9814A783A6 /* People.swift */; };
@@ -263,6 +264,7 @@
 		A1E59E8E49DC7AEE0EE9D0F3 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A1EF7B8D4ACE5D286ED5271D /* ArbosApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArbosApp.swift; sourceTree = "<group>"; };
 		A1B4441E009E79A1090EF589 /* DebugHooks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugHooks.swift; sourceTree = "<group>"; };
+		A1F50000000000000000F001 /* FirstOpenWarmup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FirstOpenWarmup.swift; sourceTree = "<group>"; };
 		A17AB0DF610F874C5BE921E3 /* Call.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Call.swift; sourceTree = "<group>"; };
 		A123D7A2CAFBECAE6ECFCF29 /* Model.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Model.swift; sourceTree = "<group>"; };
 		A19AC72230E7AD9814A783A6 /* People.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = People.swift; sourceTree = "<group>"; };
@@ -537,6 +539,7 @@
 			children = (
 				A1EF7B8D4ACE5D286ED5271D,
 				A1B4441E009E79A1090EF589,
+				A1F50000000000000000F001 /* FirstOpenWarmup.swift */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -958,6 +961,7 @@
 				A1EE00000000000000000002 /* UserError.swift in Sources */,
 				A1BB87570AFC8FD22F77F310 /* ArbosApp.swift in Sources */,
 				A1B8CC06713710E1DE0950B9 /* DebugHooks.swift in Sources */,
+				A1F50000000000000000F002 /* FirstOpenWarmup.swift in Sources */,
 				A134D74DFA78D38A472BF229 /* Call.swift in Sources */,
 				A1547843CA4E6FD14D625E8D /* Model.swift in Sources */,
 				A117280222D51C2ECDBA9FC8 /* People.swift in Sources */,
