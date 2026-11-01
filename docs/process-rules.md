@@ -67,6 +67,33 @@ and a 250 GB volume (five leftover 13 GB test-simulator clones took it from 60 t
 - The clean script's sweep (idle clones > 30 min, idle rig checkouts > 30 min, stale `Deleting-*` dirs) is the
   backstop, not the plan; a run that leaves the box under 20 GB free is a regression to raise on your issue.
 
+## XCUITest shortens a drag to fit the screen instead of failing (2026-10-31 22:30 UTC)
+
+A drag whose destination falls outside the screen is **silently clamped**. The app receives a shorter
+gesture than the test asked for, nothing in the log says so, and the test then fails on whatever the
+app did not do. The accusation lands on the application for a gesture it was never given.
+
+This cost a week. `BackSwipeUITests` asked for a 180 pt rightward drag from the centre of the lowest
+bubble in `fx-comms-main` — the word `"Hey"`, a short own-message bubble trailing-aligned about 45 pt
+from the right edge of a 402 pt screen. The app got roughly 45 pt, never crossed the 70 pt
+`BackSwipe.fullScreenPops` threshold, and the test reported that the chat did not go back. Its
+sibling case failed the same way for the vertical axis: it searched for a bubble lying wholly inside a
+237 pt slot on an 874 pt screen, no row is ever that short, and it failed before swiping at all. Both
+cases failed 18 hosted runs out of 18 while the application was correct, and because every pull
+request head carried them, no branch could obtain a Swift gate verdict until the fix landed (#2326,
+`7cd829ddf`).
+
+So, when a UI test drags or swipes:
+
+- Choose the element by **the room the gesture needs**, not by its position in a list. `lastBubble`
+  is the wrong helper for a gesture with a length; `bubbleWithRoomToSwipeRight` is the shape to copy.
+- **Assert the path stays on screen** before delivering it, so a clamped drag fails naming the
+  clamping rather than blaming the app.
+- Measure frames only after the view has stopped moving (`settleTranscript`). A chat opens by
+  scrolling, and a frame read mid-scroll says where a row was, not where the finger will land.
+- Before a case joins a flaky pool, check that it has **ever** passed. A 0 % pass rate is not flake;
+  it is a broken test wearing flake's clothes.
+
 ## One avatar resolver on both platforms (Jacob, 2026-10-26, ARB-394)
 
 - Every agent avatar on the Mac and the iPhone — typing/status/activity row, chat header, sidebar
