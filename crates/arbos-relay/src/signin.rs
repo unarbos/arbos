@@ -165,6 +165,7 @@ fn user_dto(state: &AppState, user_id: &str) -> AccountUserDto {
             name: Some(u.name),
             created_at: Some(u.created_at),
             last_login_at: Some(u.last_login_at),
+            name_source: Some(u.name_source),
         },
         None => AccountUserDto {
             id: user_id.to_owned(),
@@ -174,6 +175,7 @@ fn user_dto(state: &AppState, user_id: &str) -> AccountUserDto {
             name: None,
             created_at: None,
             last_login_at: None,
+            name_source: None,
         },
     }
 }

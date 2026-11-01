@@ -42,6 +42,8 @@ mod groups;
 mod image_sniff;
 mod images;
 mod inspect;
+#[cfg(test)]
+mod invited_name_tests;
 mod link_icons;
 mod livekit;
 mod local;
