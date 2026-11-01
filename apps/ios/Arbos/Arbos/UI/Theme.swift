@@ -115,13 +115,17 @@ struct Theme: Equatable {
     /// People chats — DM, group, channel — use more of the screen on both
     /// sides (Jacob, 2026-10-26, [feedback chat-density-ios-2026-10-26]: "use
     /// more of the screen both ways, left and right per chat bubble"): the
-    /// 16 pt own margin stays, the far side keeps `bubbleOppositeMargin`
-    /// instead of 60, so on a 402 pt screen my bubble may reach 354 pt
-    /// (left edge ≥ 32) and an incoming one 300 pt after the lane (right
-    /// edge ≤ 370; was 253 → 342). The far-side margin is what keeps a bubble
-    /// reading as mine / theirs. Grok's 76 stays the agent-chat number — Grok
-    /// has no group chats to measure.
-    static let bubbleOppositeMargin: CGFloat = 32
+    /// 16 pt own margin stays and the far side keeps `bubbleOppositeMargin`
+    /// instead of 60. The far-side margin is what keeps a bubble reading as
+    /// mine / theirs. Grok's 76 stays the agent-chat number — Grok has no
+    /// group chats to measure.
+    ///
+    /// 16 since Jacob's 2026-11-01 group-chat reference ("more width and
+    /// tighter"; was 32): on his 420 pt iPhone Air both a truncated incoming
+    /// bubble and a wrapped one of mine run to 404 pt — 16 from the far edge,
+    /// the same margin the near side already had. My bubble may now reach
+    /// 388 pt there (was 372) and an incoming one 352 after the lane (was 305).
+    static let bubbleOppositeMargin: CGFloat = 16
     static let peopleBubbleInset: CGFloat = 16 + bubbleOppositeMargin
     /// The inset a transcript row subtracts from the screen for its bubble cap.
     static func bubbleInset(people: Bool) -> CGFloat {
@@ -205,30 +209,29 @@ struct Theme: Equatable {
     ]
 
     static let avatar: CGFloat = 28
-    /// The avatar column (Mac `SENDER_DISC = PLUS_BUTTON`, Jacob [feedback
-    /// AAvkkHYz3TOlou0Hu7u71Sc]): every round picture beside a people-chat bubble is
-    /// centred on the composer's `+`. The `+` moves with the keyboard (31 → 18 pt
-    /// inset), so the column follows it via `avatarColumnInset(composerInset:)`. The
-    /// bubble body follows after `memberAvatarGap`. Shared with
-    /// feedback/sender-name-in-bubble-2026-10-23. Agent chats keep #1374's no-avatar rule.
+    /// The avatar column beside a people-chat bubble. It was centred on the composer's
+    /// `+` and followed it with the keyboard (Jacob [feedback AAvkkHYz3TOlou0Hu7u71Sc]);
+    /// since his 2026-11-01 group-chat reference it is a fixed column 12 pt from the
+    /// screen, measured off that shot, which also stops the incoming lane — and so every
+    /// incoming bubble's width — moving when the keyboard opens. The bubble body follows
+    /// after `memberAvatarGap`. Shared with feedback/sender-name-in-bubble-2026-10-23.
+    /// Agent chats keep #1374's no-avatar rule.
     ///
     /// Size: Discord standard (Jacob, 2026-10-26, [feedback chat-density-ios-2026-10-26]:
     /// "the pfp chat bubble takes up too much space — go for Discord standard size").
     /// Discord draws its message avatar 40 pt in a 72 pt gutter on desktop (cozy) and
     /// 32 pt on mobile; **36** is the pick between the two — it reads as Discord's size
-    /// beside our 17 pt text, keeps a face readable at 3x, and, centred on the 48 pt `+`,
-    /// its left edge lands 6 pt inside the `+` — the same edge as the status row's
-    /// picture (`presenceAvatarOffset`), so every picture in the chat shares one left
-    /// edge (keyboard up 24–60, down 37–73). Was 42 (the `+` before Grok's 48).
-    /// The gap to the bubble is the control family's `Controls.gap` (was 13), so the
-    /// body starts 54 pt after the transcript edge with the keyboard up (was 60; 70 from
-    /// the screen, was 76) and 67 with it down (was 73; 83 from the screen, was 89).
+    /// beside our 17 pt text and keeps a face readable at 3x. Was 42 (the `+` before
+    /// Grok's 48). On the fixed column it spans 12–48 pt from the screen and the bubble
+    /// body starts at 52 (it was 24–60 / 70 with the keyboard up and 37–73 / 83 down).
     static let memberAvatar: CGFloat = 36
-    static let memberAvatarGap: CGFloat = Controls.gap
-    /// Transcript edge → the avatar's left edge, for the composer's current side inset.
-    static func avatarColumnInset(composerInset: CGFloat) -> CGFloat {
-        composerInset + plusButton / 2 - memberAvatar / 2 - 16
-    }
+    /// Picture → bubble. 4 pt off Jacob's 2026-11-01 reference (was `Controls.gap`, 10):
+    /// his discs end 48 pt from the screen and the bubbles start at 52.
+    static let memberAvatarGap: CGFloat = 4
+    /// Transcript edge → the avatar's left edge. The transcript pads 16 pt and the disc
+    /// starts at 12, so the column reaches 4 pt back into that pad; the row still fits
+    /// its container exactly, because `memberLane` hands the same 4 pt to the bubble cap.
+    static let avatarColumnInset: CGFloat = -4
     /// The status row over the composer (Grok's "Adding glass buttons" row, same shot):
     /// a 76 px picture whose left edge sits 18 px inside the `+` disc's left edge (72 px
     /// from the screen with the keyboard up), 42 px to the words (17 pt body, muted),
@@ -258,9 +261,11 @@ struct Theme: Equatable {
     static func presenceInset(composerInset: CGFloat) -> CGFloat {
         composerInset + presenceAvatarOffset - 16
     }
-    /// Transcript edge → bubble body in a people-chat row, for the composer's current side inset.
-    static func memberLane(composerInset: CGFloat) -> CGFloat {
-        avatarColumnInset(composerInset: composerInset) + memberAvatar + memberAvatarGap
+    /// Transcript edge → bubble body in a people-chat row: 36, so the body starts 52 pt
+    /// from the screen. The rows still pass the composer's inset — it is what moved the
+    /// lane until 2026-11-01 — so that the call shape survives the fixed column.
+    static func memberLane(composerInset _: CGFloat) -> CGFloat {
+        avatarColumnInset + memberAvatar + memberAvatarGap
     }
     /// Picture → name in the chat header pill: Grok Bot's title measures 5 pt ink to ink
     /// (Mac ref 57); the Mac's `identity::HEADER_GAP` + side bearing.
@@ -427,8 +432,9 @@ extension Color {
 }
 
 /// The composer's current side inset (`Theme.composerInset` / `composerInsetKeyboard`),
-/// published by ChatView so the transcript rows and the presence row can keep their
-/// avatar column centred on the `+` as it moves with the keyboard.
+/// published by ChatView so the presence row can keep its picture centred on the `+`
+/// as it moves with the keyboard. Transcript rows read it too, but their avatar column
+/// has been a fixed one since [feedback group-chat-spacing-ios-2026-11-01].
 private struct ComposerInsetKey: EnvironmentKey {
     static let defaultValue: CGFloat = Theme.composerInset
 }
