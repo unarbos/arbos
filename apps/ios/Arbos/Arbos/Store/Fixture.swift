@@ -321,13 +321,20 @@ extension AppModel {
             peopleChats.append(PeopleChat(id: id, kind: "dm", createdBy: person.id, createdAt: at, title: "@person\(i)", pending: false,
                                           members: [person, meMember], headSeq: 3, readSeq: i % 4 == 0 ? 2 : 3, unread: i % 4 == 0,
                                           lockState: "people_only", lastActivityAt: at, myRole: "member", muted: false, silenced: false))
-            messages[id] = (0..<3).map { k in
-                Message(id: "\(id)-\(k)", chatId: id, role: .user, sender: k == 1 ? "user:fx-me" : person.member, status: .done, turn: nil,
-                        decision: nil, subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil,
-                        createdAt: at - Int64(3 - k) * 60_000, completedAt: nil, pending: false,
-                        parts: [.text(id: "\(id)-\(k)t", text: "Line \(k + 1) of a padded chat, long enough to fill the preview row in the list.")],
-                        hiddenCount: 0, senderHandle: k == 1 ? "jacob" : person.handle, senderName: k == 1 ? "Jacob Steeves" : person.name)
+            var lines: [Message] = []
+            for k in 0..<3 {
+                let mine = k == 1
+                let sender: String = mine ? "user:fx-me" : person.member
+                let created: Int64 = at - Int64(3 - k) * 60_000
+                let text = "Line \(k + 1) of a padded chat, long enough to fill the preview row in the list."
+                lines.append(Message(id: "\(id)-\(k)", chatId: id, role: .user, sender: sender, status: .done, turn: nil,
+                                     decision: nil, subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil,
+                                     createdAt: created, completedAt: nil, pending: false,
+                                     parts: [.text(id: "\(id)-\(k)t", text: text)],
+                                     hiddenCount: 0, senderHandle: mine ? "jacob" : person.handle,
+                                     senderName: mine ? "Jacob Steeves" : person.name))
             }
+            messages[id] = lines
         }
         if let chatId = DebugHooks.fixtureStreamChat {
             Task { await fixtureStream(chatId: chatId) }
