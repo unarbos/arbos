@@ -117,8 +117,14 @@ final class ChatSearchCloseUITests: XCTestCase {
     /// the space it reserved for the rows the filter removed and built none of the ones that
     /// stayed.
     ///
-    /// Before the fix this case fails on **iOS 27.0 only**. The same binary passes it on iOS
-    /// 26.5, so an older simulator cannot catch it; the gate Mac's simulator is 27.
+    /// Before the fix this case was reported to fail on **iOS 27.0 only**, the same binary
+    /// passing on iOS 26.5.
+    ///
+    /// That report is kept because it is what the fix was written against, but do not read it
+    /// as a statement about the gate: the gate runs **iOS 26.2 on iPhone 17 under Xcode 26.3**,
+    /// not 27 (`OS:26.2, name:iPhone 17` in every `Swift core check` log). An earlier revision
+    /// of this comment said the gate's simulator was 27, which is wrong and cost a lane a rig
+    /// run on the wrong runtime.
     func testAKeywordWithHitsDrawsThem() {
         let app = openLaunchWeekSearch()
         let field = app.textFields["chat-search-field"]
@@ -151,8 +157,30 @@ final class ChatSearchCloseUITests: XCTestCase {
     ///
     /// Needs the deep fixture: the shipped "Launch week" thread is ~10 rows, which is shorter
     /// than the viewport, so the short-thread `minHeight` frame pins it regardless and this
-    /// case cannot express the failure. Before the fix it fails on **iOS 27.0 only** — the
-    /// same binary passes on iOS 26.5, which re-measures by itself.
+    /// case cannot express the failure.
+    ///
+    /// The slack figures above, and the claim that this is an iOS-27-only fault that iOS 26.5
+    /// passes, come from the rig run this case was written against. **The gate contradicts the
+    /// runtime half of that.** The gate runs iOS 26.2 on iPhone 17 under Xcode 26.3, and the
+    /// `isHittable` assertion below fails there intermittently: one failure in ten gate
+    /// attempts on `main` as of 2026-11-01, the failure being run 41308036692 attempt 1 on
+    /// `a9a87ad7d`. `b923a77b1` — a byte-identical tree, same `^{tree}` hash — passed in run
+    /// 41303011668 an hour earlier, so the same content both passes and fails. A green run here
+    /// is a draw, not a proof, and no branch's green shows that the branch fixed anything.
+    ///
+    /// Count **attempts, not runs**. A re-run reuses the run object, so a run whose first
+    /// attempt failed still reports `success`: 41308036692 is exactly that, and counting it by
+    /// run conclusion drops the one failure of this case anyone has on record.
+    ///
+    /// Two things follow for anyone picking this up. Reproduce on **26.2**, not on 27.0 or 26.5,
+    /// or a clean pass tells you nothing. And pull the failing attempt's log attempt-scoped
+    /// (`gh api repos/<owner>/<repo>/actions/runs/<id>/attempts/<n>/logs`), because `gh run view`
+    /// serves the latest attempt and will answer about a re-run instead.
+    ///
+    /// This case's own wall time on `main`'s gate is also drifting on identical content —
+    /// 18.1, 18.1, 23.4 then 33.3 s — against a fixed `sleep(2)` and several waits below.
+    /// Not acted on, recorded: a case whose runtime nearly doubles over four runs is a
+    /// candidate for the next flake.
     func testAFilteredListStaysPinnedToTheComposer() {
         let app = XCUIApplication()
         app.launchEnvironment = ["ARBOS_FIXTURE": "1", "ARBOS_OPEN_PEOPLE": "fx-group-launch",
