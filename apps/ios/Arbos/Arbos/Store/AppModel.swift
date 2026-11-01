@@ -604,49 +604,50 @@ final class AppModel: ObservableObject {
     }
 
     /// The relay's per-user flags win over the offline copy, except for rows this device
-    /// changed in the last few seconds (`archiveLocalUntil`).
-    private func reconcileArchive(key prefix: String, relay: [(Id, Bool)], into set: inout Set<Id>, defaultsKey: String) {
+    /// changed in the last few seconds (`archiveLocalUntil`). A key path, not `inout`: an
+    /// `inout` pass of a `@Published` set publishes even when nothing changed.
+    private func reconcileArchive(key prefix: String, relay: [(Id, Bool)], into set: ReferenceWritableKeyPath<AppModel, Set<Id>>, defaultsKey: String) {
         let now = Date()
-        var next = set
+        var next = self[keyPath: set]
         for (id, archived) in relay {
             if let until = archiveLocalUntil[prefix + id], until > now { continue }
             if archived { next.insert(id) } else { next.remove(id) }
         }
-        guard next != set else { return }
-        set = next
-        UserDefaults.standard.set(Array(set), forKey: defaultsKey)
+        guard next != self[keyPath: set] else { return }
+        self[keyPath: set] = next
+        UserDefaults.standard.set(Array(next), forKey: defaultsKey)
     }
 
     func reconcileArchivedProjects(_ list: [Project]) {
         guard !isFixture else { return }
-        reconcileArchive(key: "p:", relay: list.map { ($0.id, $0.archivedAt != nil) }, into: &archivedProjectIds, defaultsKey: "archivedProjects")
+        reconcileArchive(key: "p:", relay: list.map { ($0.id, $0.archivedAt != nil) }, into: \.archivedProjectIds, defaultsKey: "archivedProjects")
     }
 
     func reconcileArchivedPeople(_ list: [PeopleChat]) {
         guard !isFixture else { return }
-        reconcileArchive(key: "c:", relay: list.map { ($0.id, $0.archivedAt != nil) }, into: &archivedPeopleChatIds, defaultsKey: "archivedPeopleChats")
+        reconcileArchive(key: "c:", relay: list.map { ($0.id, $0.archivedAt != nil) }, into: \.archivedPeopleChatIds, defaultsKey: "archivedPeopleChats")
     }
 
     func reconcileArchivedServers(_ list: [Server]) {
         guard !isFixture else { return }
-        reconcileArchive(key: "s:", relay: list.map { ($0.id, $0.archivedAt != nil) }, into: &archivedServerIds, defaultsKey: "archivedServers")
+        reconcileArchive(key: "s:", relay: list.map { ($0.id, $0.archivedAt != nil) }, into: \.archivedServerIds, defaultsKey: "archivedServers")
     }
 
     /// Another device of mine flipped a row (`space_archived` / `chat_archived` push).
     func applyRemoteArchive(spaceId: Id, kind: String, archived: Bool) {
         archiveLocalUntil.removeValue(forKey: (kind == "server" ? "s:" : "p:") + spaceId)
         if kind == "server" {
-            reconcileArchive(key: "s:", relay: [(spaceId, archived)], into: &archivedServerIds, defaultsKey: "archivedServers")
+            reconcileArchive(key: "s:", relay: [(spaceId, archived)], into: \.archivedServerIds, defaultsKey: "archivedServers")
             if archived { unpinHome(serverId: spaceId) }
         } else {
-            reconcileArchive(key: "p:", relay: [(spaceId, archived)], into: &archivedProjectIds, defaultsKey: "archivedProjects")
+            reconcileArchive(key: "p:", relay: [(spaceId, archived)], into: \.archivedProjectIds, defaultsKey: "archivedProjects")
             if archived { unpinHome(projectId: spaceId) }
         }
     }
 
     func applyRemoteArchive(peopleChatId: Id, archived: Bool) {
         archiveLocalUntil.removeValue(forKey: "c:" + peopleChatId)
-        reconcileArchive(key: "c:", relay: [(peopleChatId, archived)], into: &archivedPeopleChatIds, defaultsKey: "archivedPeopleChats")
+        reconcileArchive(key: "c:", relay: [(peopleChatId, archived)], into: \.archivedPeopleChatIds, defaultsKey: "archivedPeopleChats")
         if archived { unpinHome(peopleChatId: peopleChatId) }
     }
 
@@ -1308,7 +1309,7 @@ final class AppModel: ObservableObject {
     func refreshUnread() async {
         guard credentials != nil, !isFixture else { applyBadge(); return }
         if let r = (try? await api.unread()) ?? nil {
-            unreadCounts = r.chats
+            if r.chats != unreadCounts { unreadCounts = r.chats }
             saveUnreadCache()
         }
         applyBadge()
@@ -1511,8 +1512,8 @@ final class AppModel: ObservableObject {
         guard credentials != nil, !isFixture else { return }
         if tokens?.isExpiringSoon == true { _ = await refreshTokens() }
         if let (who, cr, summary, features, privacy) = try? await api.me() {
-            user = who
-            credits = cr
+            if who != user { user = who }
+            if cr != credits { credits = cr }
             saveAccountCache()
             // D92 remote flag `features.leaf_avatars` (absent on an older relay = on).
             LeafAvatarsFlag.shared.set(features?.leaf_avatars ?? true)
@@ -1532,7 +1533,7 @@ final class AppModel: ObservableObject {
                 m.alwaysOn = true
                 m.state = m.coerced(m.state)
             }
-            machine = m
+            if m != machine { machine = m }
         }
     }
 
@@ -2799,7 +2800,7 @@ final class AppModel: ObservableObject {
                 m.alwaysOn = true
                 m.state = m.coerced(m.state)
             }
-            machineError = nil
+            if machineError != nil { machineError = nil }
             if m != machine { machine = m }
             for i in projects.indices {
                 if let w = m.workspaces[projects[i].id], projects[i].workspace != w { projects[i].workspace = w }
