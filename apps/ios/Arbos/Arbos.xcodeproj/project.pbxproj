@@ -49,6 +49,7 @@
 		A1D8800000000000000000E6 /* ProfilePictureViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D8800000000000000000E5 /* ProfilePictureViewTests.swift */; };
 		A1D8800000000000000000E8 /* AvatarGenerateErrorStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D8800000000000000000E7 /* AvatarGenerateErrorStateTests.swift */; };
 		A1A9D0000000000000000002 /* AgentIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A9D0000000000000000001 /* AgentIdentity.swift */; };
+		A1CF770000000000000002 /* ConnectPaste.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CF770000000000000001 /* ConnectPaste.swift */; };
 		A1A9E0000000000000000002 /* AgentPane.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A9E0000000000000000001 /* AgentPane.swift */; };
 		A1F7A0000000000000000002 /* ProfileToggle.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F7A0000000000000000001 /* ProfileToggle.swift */; };
 		A1BB00000000000000000002 /* BackSwipe.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000001 /* BackSwipe.swift */; };
@@ -70,6 +71,7 @@
 		A15EC9000000000000000004 /* AgentPickerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15EC9000000000000000003 /* AgentPickerTests.swift */; };
 		A15EC9000000000000000104 /* SecretHandoffTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15EC9000000000000000103 /* SecretHandoffTests.swift */; };
 		A1A9D0000000000000000004 /* AgentIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A9D0000000000000000003 /* AgentIdentityTests.swift */; };
+		A1CF770000000000000004 /* ConnectPasteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CF770000000000000003 /* ConnectPasteTests.swift */; };
 		A1AF11000000000000000002 /* AgentAvatarFlipTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1AF11000000000000000001 /* AgentAvatarFlipTests.swift */; };
 		A10A6AAB1A89692C252B33E4 /* FeedbackSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A19A848187E4B392C3266926 /* FeedbackSheet.swift */; };
 		A19DEA501A654ADE6E17D7D0 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1838A1C2D1E07CD3A2A2B9D /* HomeView.swift */; };
@@ -296,6 +298,7 @@
 		A1D8800000000000000000E5 /* ProfilePictureViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfilePictureViewTests.swift; sourceTree = "<group>"; };
 		A1D8800000000000000000E7 /* AvatarGenerateErrorStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AvatarGenerateErrorStateTests.swift; sourceTree = "<group>"; };
 		A1A9D0000000000000000001 /* AgentIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentIdentity.swift; sourceTree = "<group>"; };
+		A1CF770000000000000001 /* ConnectPaste.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectPaste.swift; sourceTree = "<group>"; };
 		A1A9E0000000000000000001 /* AgentPane.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentPane.swift; sourceTree = "<group>"; };
 		A1F7A0000000000000000001 /* ProfileToggle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileToggle.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000001 /* BackSwipe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackSwipe.swift; sourceTree = "<group>"; };
@@ -318,6 +321,7 @@
 		A15EC9000000000000000003 /* AgentPickerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentPickerTests.swift; sourceTree = "<group>"; };
 		A15EC9000000000000000103 /* SecretHandoffTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecretHandoffTests.swift; sourceTree = "<group>"; };
 		A1A9D0000000000000000003 /* AgentIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentIdentityTests.swift; sourceTree = "<group>"; };
+		A1CF770000000000000003 /* ConnectPasteTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectPasteTests.swift; sourceTree = "<group>"; };
 		A1AF11000000000000000001 /* AgentAvatarFlipTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentAvatarFlipTests.swift; sourceTree = "<group>"; };
 		A19A848187E4B392C3266926 /* FeedbackSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedbackSheet.swift; sourceTree = "<group>"; };
 		A1838A1C2D1E07CD3A2A2B9D /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
@@ -555,6 +559,7 @@
 				A1B5EA00000000000000A003 /* SearchIndex.swift */,
 				A1B5EA00000000000000A001 /* GlobalSearch.swift */,
 				A1A9D0000000000000000001 /* AgentIdentity.swift */,
+				A1CF770000000000000001 /* ConnectPaste.swift */,
 				A1A9E0000000000000000001 /* AgentPane.swift */,
 				A1AC0E00000000000000A001 /* MachineMetrics.swift */,
 				A1F7A0000000000000000001 /* ProfileToggle.swift */,
@@ -752,6 +757,7 @@
 				A1C4A2700000000000000003 /* ChartCardTests.swift */,
 				A1C4A2700000000000000013 /* LinkPreviewCardTests.swift */,
 				A1A9D0000000000000000003 /* AgentIdentityTests.swift */,
+				A1CF770000000000000003 /* ConnectPasteTests.swift */,
 				A1AF11000000000000000001 /* AgentAvatarFlipTests.swift */,
 				A15EC9000000000000000003 /* AgentPickerTests.swift */,
 				A15EC9000000000000000103 /* SecretHandoffTests.swift */,
@@ -966,6 +972,7 @@
 				A1B5EA00000000000000A004 /* SearchIndex.swift in Sources */,
 				A1B5EA00000000000000A002 /* GlobalSearch.swift in Sources */,
 				A1A9D0000000000000000002 /* AgentIdentity.swift in Sources */,
+				A1CF770000000000000002 /* ConnectPaste.swift in Sources */,
 				A1A9E0000000000000000002 /* AgentPane.swift in Sources */,
 				A1F7A0000000000000000002 /* ProfileToggle.swift in Sources */,
 				A1BB00000000000000000002 /* BackSwipe.swift in Sources */,
@@ -1138,6 +1145,7 @@
 				A1C4A2700000000000000004 /* ChartCardTests.swift in Sources */,
 				A1C4A2700000000000000014 /* LinkPreviewCardTests.swift in Sources */,
 				A1A9D0000000000000000004 /* AgentIdentityTests.swift in Sources */,
+				A1CF770000000000000004 /* ConnectPasteTests.swift in Sources */,
 				A1AF11000000000000000002 /* AgentAvatarFlipTests.swift in Sources */,
 				A15EC9000000000000000004 /* AgentPickerTests.swift in Sources */,
 				A15EC9000000000000000104 /* SecretHandoffTests.swift in Sources */,

@@ -1624,7 +1624,7 @@ struct OutsideAgentInfo: Equatable {
         }
     }
 
-    /// "Connected · 12 s ago", "Away · 40 min ago", "Waiting for the first heartbeat", "Disconnected".
+    /// "Connected · 12 s ago", "Away · 40 min ago", "Not connected yet", "Disconnected".
     func statusLine(now: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) -> String {
         func ago(_ t: Int64) -> String {
             let s = max(0, (now - t) / 1000)
@@ -1639,7 +1639,7 @@ struct OutsideAgentInfo: Equatable {
         case ("connected", nil): return "Connected"
         case ("away", let t?): return "Away · \(ago(t))"
         case ("away", nil): return "Away"
-        default: return "Waiting for the first heartbeat"
+        default: return "Not connected yet"
         }
     }
 }

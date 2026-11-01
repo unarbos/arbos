@@ -487,14 +487,15 @@ enum CreateKind {
     var explainer: String? {
         switch self {
         case .server: return "A server has channels and an invite link. You start as its owner, in #general."
-        case .connect: return "An agent you already run joins your chats as a member. You get a key to give it."
+        case .connect: return "An agent you already run joins your chats as a member. You get one thing to paste into it."
         case .agent, .group: return nil
         }
     }
 }
 
 /// Where a connected agent runs — the approved type picker's rows, as capsules under the
-/// explainer. The local Claude Code / Codex bridge is set up from a Mac (`arbos-acp`).
+/// explainer. The pick chooses the transport section of the paste block (`ConnectPaste`,
+/// contract §3.2), which is where the install detail lives now.
 enum ConnectTransport: String, CaseIterable, Identifiable {
     case acp, grok, custom
     var id: String { rawValue }
@@ -504,23 +505,6 @@ enum ConnectTransport: String, CaseIterable, Identifiable {
         case .acp: return "Claude Code / Codex on a Mac"
         case .grok: return "Grok"
         case .custom: return "Custom bot"
-        }
-    }
-
-    /// The one line under the key that says what to do with it.
-    var howTo: String {
-        switch self {
-        case .acp: return "On your Mac, in Terminal: cargo install --git https://github.com/unarbos/arbos arbos-acp, then run arbos-acp with the key — it starts Claude Code or Codex for you."
-        case .grok: return "In Grok, add a routine that calls the link every few minutes with the key. Arbos handles the rest."
-        case .custom: return "Your bot calls the link with the key: read its inbox, post replies. The link opens the short how-to."
-        }
-    }
-
-    var short: String {
-        switch self {
-        case .acp: return "ACP"
-        case .grok: return "Grok"
-        case .custom: return "custom"
         }
     }
 }
@@ -803,70 +787,64 @@ struct CreateEntityView: View {
     }
 }
 
-// MARK: - Connect an agent: the key reveal (#2142)
+// MARK: - Connect an agent: the one paste block (#2142, AF-447)
 
-/// After Connect: the link and the key with Copy (the key is shown once), the one how-to line
-/// for the picked transport, and the live status — the system spinner while waiting, "Connected"
-/// once the agent first checks in (polled every 3 s). Done closes the sheet; the new agent is
-/// in the list like any other. Also the screen Rotate key… pushes from the agent pane.
+/// After Connect: one thing to copy and nothing to wait for. The screen is the hero, the
+/// label "Paste this into your agent", one card holding the paste block with **one** Copy
+/// button, one footnote, and Done. The block is `ConnectPaste` (contract
+/// `internal/connect-paste-block-contract.md`), which carries the key, the relay, the identity
+/// and the install detail, so none of that is on the user's screen any more.
+///
+/// Gone with the old reveal: the Link row, the Key row, their two Copy buttons, the
+/// per-transport how-to line, and the "Waiting for the first heartbeat…" spinner with the
+/// 3-second poll behind it. Connection status lives on the agent's profile (Connection →
+/// Status) and on its row in the lists, where it already did.
+///
+/// The key is **never rendered** — the card draws `ConnectPaste.masked`, Copy writes the real
+/// block — so Done waits for Copy, and a swipe-down cannot discard an uncopied key. Also the
+/// screen Rotate key… pushes from the agent pane.
 struct ConnectRevealView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     let reveal: ConnectReveal
     /// Closes the whole sheet (a pushed view's own dismiss only pops).
     let onDone: () -> Void
-    @State private var info: OutsideAgentInfo?
-    @State private var copied: String?
-
-    private var transport: ConnectTransport { ConnectTransport(rawValue: reveal.transport) ?? .custom }
-    private var connected: Bool { (info ?? reveal.info)?.connected == true }
+    @State private var copied = false
 
     private let sheetBg = AvatarSheetPalette.sheetBg
     private let line = AvatarSheetPalette.line
     private let placeholder = AvatarSheetPalette.placeholder
     private let cardBg = AvatarSheetPalette.pillBg
     private let tileBg = AvatarSheetPalette.ring
+    private let doneBg = AvatarSheetPalette.disabledBg
+    private let doneText = AvatarSheetPalette.disabledText
+
+    private var owner: String? { model.user?.name ?? model.user?.login }
 
     var body: some View {
         VStack(spacing: 0) {
             header
-            ScrollView(showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 0) {
-                    NeutralAvatar(name: reveal.name, size: 92)
-                        .frame(maxWidth: .infinity)
-                        .padding(.top, 18)
-                    Text(reveal.name)
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(Color(white: 0xF5 / 255))
-                        .frame(maxWidth: .infinity)
-                        .padding(.top, 12)
-                    sectionTitle("Give this to your agent")
-                    card {
-                        copyRow(id: "connect-link", glyph: "link", label: "Link", shown: shortLink(reveal.link), full: reveal.link)
-                        Rectangle().fill(line).frame(height: 0.5).padding(.leading, 16)
-                        copyRow(id: "connect-key", glyph: "key", label: "Key", shown: shortKey(reveal.key), full: reveal.key)
-                    }
-                    footnote(reveal.rotated
-                        ? "The old key stopped working. This one is shown once."
-                        : "The key is shown once. If you lose it, rotate it from the agent's profile.")
-                    footnote(transport.howTo)
-                    sectionTitle("Status")
-                    card { statusRow }
-                }
-                .padding(.bottom, 24)
-            }
+            NeutralAvatar(name: reveal.name, size: 92)
+                .frame(maxWidth: .infinity)
+                .padding(.top, 18)
+            Text(reveal.name)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(Color(white: 0xF5 / 255))
+                .frame(maxWidth: .infinity)
+                .padding(.top, 12)
+            sectionTitle("Paste this into your agent")
+            pasteCard
+            footnote(reveal.rotated
+                ? "Copy it now. The old key has stopped working, and this one is not shown again."
+                : "Copy it now. The key is in there, and it is not shown again.")
             footer
         }
         .background(sheetBg.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
-        .task(id: reveal.projectId) {
-            // Poll the relay while the screen is up; stop once connected.
-            while !Task.isCancelled {
-                if let fresh = await model.refreshOutsideInfo(reveal.projectId) { info = fresh }
-                if connected { return }
-                try? await Task.sleep(nanoseconds: 3_000_000_000)
-            }
-        }
+        // The key exists only here and only on the clipboard, so a swipe-down cannot throw it
+        // away by accident; × stays live as the deliberate way out (Rotate key… on the agent's
+        // profile mints a fresh block).
+        .interactiveDismissDisabled(!copied)
     }
 
     private var header: some View {
@@ -911,76 +889,63 @@ struct ConnectRevealView: View {
             .padding(.top, 8)
     }
 
-    private func card<Rows: View>(@ViewBuilder _ rows: () -> Rows) -> some View {
-        VStack(spacing: 0) { rows() }
-            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(cardBg))
-            .padding(.horizontal, 16)
-    }
-
-    private func copyRow(id: String, glyph: String, label: String, shown: String, full: String) -> some View {
-        HStack(spacing: 14) {
-            Image(systemName: glyph)
-                .font(.system(size: 17, weight: .medium))
-                .foregroundStyle(Color(white: 0xF5 / 255))
-                .frame(width: 36, height: 36)
-                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(tileBg))
-            VStack(alignment: .leading, spacing: 2) {
-                Text(label).font(.system(size: 13)).foregroundStyle(placeholder)
-                Text(shown)
-                    .font(.system(size: 15, design: .monospaced))
+    /// The block and its one Copy button. The preview scrolls both ways: the contract hard
+    /// wraps the text at its own width, so soft-wrapping it to the phone would leave every
+    /// line ragged. The card takes whatever height the fixed parts above and below it leave.
+    private var pasteCard: some View {
+        VStack(spacing: 0) {
+            ScrollView([.vertical, .horizontal], showsIndicators: false) {
+                Text(ConnectPaste.masked(for: reveal, owner: owner))
+                    .font(.system(size: 10.5, design: .monospaced))
                     .foregroundStyle(Color(white: 0xF5 / 255))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                    .lineSpacing(2)
+                    .fixedSize()
+                    .padding(14)
+                    .accessibilityIdentifier("connect-paste-block")
             }
-            Spacer(minLength: 8)
-            Button {
-                UIPasteboard.general.string = full
-                copied = id
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: copied == id ? "checkmark" : "doc.on.doc")
-                        .font(.system(size: 13, weight: .medium))
-                    Text(copied == id ? "Copied" : "Copy")
-                        .font(.system(size: 14, weight: .medium))
-                }
-                .foregroundStyle(copied == id ? theme.online : Color(white: 0xF5 / 255))
-                .padding(.horizontal, 12)
-                .frame(height: 32)
-                .background(Capsule().fill(copied == id ? theme.online.opacity(0.18) : tileBg))
-            }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("\(id)-copy")
+            .frame(maxWidth: .infinity, minHeight: 160, maxHeight: .infinity, alignment: .topLeading)
+            Rectangle().fill(line).frame(height: 0.5)
+            copyButton
         }
+        .background(cardBg)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .padding(.horizontal, 16)
-        .frame(minHeight: 60)
     }
 
-    @ViewBuilder
-    private var statusRow: some View {
-        HStack(spacing: 10) {
-            if connected {
-                Image(systemName: "checkmark").font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.online)
-                Text("Connected · \(transport.short) · asp/1").font(.system(size: 16)).foregroundStyle(Color(white: 0xF5 / 255))
-            } else {
-                ProgressView().controlSize(.small).tint(theme.accent)
-                Text("Waiting for the first heartbeat…").font(.system(size: 16)).foregroundStyle(placeholder)
+    private var copyButton: some View {
+        Button {
+            UIPasteboard.general.string = ConnectPaste.clipboard(for: reveal, owner: owner)
+            copied = true
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 14, weight: .medium))
+                Text(copied ? "Copied" : "Copy")
+                    .font(.system(size: 15, weight: .medium))
             }
-            Spacer()
+            .foregroundStyle(copied ? theme.online : Color(white: 0xF5 / 255))
+            .frame(maxWidth: .infinity)
+            .frame(height: 50)
+            .background(copied ? theme.online.opacity(0.18) : tileBg)
+            .contentShape(Rectangle())
         }
-        .padding(.horizontal, 16)
-        .frame(minHeight: 56)
-        .accessibilityIdentifier(connected ? "connect-status-connected" : "connect-status-waiting")
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("connect-paste-copy")
     }
 
+    /// Done waits for Copy (contract §6.4): the key is in the block and nowhere else, so
+    /// closing before copying would leave an agent that cannot be connected without a rotate.
     private var footer: some View {
         HStack(spacing: 10) {
             Spacer()
             Button(action: onDone) {
                 Text("Done").font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(theme.onPrimary)
-                    .frame(width: 92, height: 44).background(Capsule().fill(theme.primary))
+                    .foregroundStyle(copied ? theme.onPrimary : doneText)
+                    .frame(width: 92, height: 44)
+                    .background(Capsule().fill(copied ? theme.primary : doneBg))
             }
             .buttonStyle(.plain)
+            .disabled(!copied)
             .accessibilityIdentifier("connect-reveal-done")
         }
         .padding(.trailing, 16)
@@ -988,21 +953,6 @@ struct ConnectRevealView: View {
         .padding(.bottom, 35)
         .overlay(alignment: .top) { Rectangle().fill(line).frame(height: 1) }
     }
-
-    /// `arbk_14788fc5760db12964ebf67724279435f6054bcd` → `arbk_14788fc5…54bcd`.
-    static func shortKey(_ key: String) -> String {
-        guard key.count > 22 else { return key }
-        return "\(key.prefix(13))…\(key.suffix(5))"
-    }
-
-    static func shortLink(_ link: String) -> String {
-        var s = link
-        for p in ["https://", "http://"] where s.hasPrefix(p) { s.removeFirst(p.count) }
-        return s
-    }
-
-    private func shortKey(_ k: String) -> String { Self.shortKey(k) }
-    private func shortLink(_ l: String) -> String { Self.shortLink(l) }
 }
 
 /// What the Create group screen hands to the member picker (step 2).
