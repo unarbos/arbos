@@ -265,8 +265,8 @@ struct HomeView: View {
             // borderless (not .plain): .plain steals the list swipe /
             // long-press on recent iOS, so archive and the menu fail.
             Button { openSearchHit(project, hit: entry.hit) } label: {
-                AgentRow(project: project, preview: entry.hit.reason ?? preview(project),
-                         previewIcon: entry.hit.reason == nil ? previewIcon(project) : nil, time: timeLabel(project),
+                AgentRow(project: project, preview: entry.hit.reason ?? entry.preview,
+                         previewIcon: entry.hit.reason == nil ? entry.previewIcon : nil, time: entry.time,
                          streaming: model.isStreaming(project: project.id),
                          unread: model.chats(of: project.id).contains { model.chatHasUnread($0) },
                          unreadCount: model.unreadCount(project: project.id),
@@ -350,7 +350,7 @@ struct HomeView: View {
         case .people(let chat):
             let pinned = model.isHomePinned(peopleChatId: chat.id)
             Button { model.open(peopleChat: chat) } label: {
-                PeopleRow(chat: chat, preview: entry.hit.reason ?? peoplePreview(chat), time: timeLabel(ms: peopleActivity(chat)),
+                PeopleRow(chat: chat, preview: entry.hit.reason ?? entry.preview, time: entry.time,
                           unread: model.peopleUnread.contains(chat.id) || model.unreadCount(for: chat) > 0,
                           streaming: model.isStreaming(chat.id),
                           count: model.unreadCount(for: chat), me: model.user?.id,
@@ -451,8 +451,8 @@ struct HomeView: View {
             // channel list; the user then opens a channel.
             let pinned = model.isHomePinned(serverId: server.id)
             Button { model.open(server: server) } label: {
-                ServerRow(server: server, preview: entry.hit.reason ?? model.serverPreview(server),
-                          time: timeLabel(ms: model.serverActivity(server)),
+                ServerRow(server: server, preview: entry.hit.reason ?? entry.preview,
+                          time: entry.time,
                           unread: model.serverUnread(server),
                           unreadCount: model.serverUnreadCount(server),
                           pinned: pinned)
@@ -537,7 +537,13 @@ struct HomeView: View {
     }
 
     private var homeList: some View {
-            ScrollViewReader { proxy in
+            // Ranked once for this render. Pinned rows keep the user's pin order and are
+            // never re-sorted by activity; everything else is newest first.
+            let ranked = rankedRows
+            let pinnedRows = ranked.filter { $0.0 != Int.max }.sorted { $0.0 < $1.0 }.map(\.2)
+            let restRows = ranked.filter { $0.0 == Int.max }.sorted { $0.1 > $1.1 }.map(\.2)
+            let homeRows = pinnedRows + restRows
+            return ScrollViewReader { proxy in
                 List {
                     Color.clear.frame(height: showsFilterBar ? HomeChrome.listTop : HomeChrome.barOnlyListTop)
                         .listRowInsets(EdgeInsets())
@@ -876,26 +882,23 @@ struct HomeView: View {
     struct HomeEntry: Identifiable {
         var row: HomeRow
         var hit: HomeSearch.Hit
+        /// The preview line, its glyph and the time column, derived once in
+        /// `rankedRows`. Deriving them walks the row's messages and formats a date,
+        /// so the row view reads them here rather than working them out again.
+        var preview: String
+        var previewIcon: String?
+        var time: String
         var id: String { row.id }
     }
 
-    /// Projects, DMs and servers in one list: pinned first (in the user's pin
-    /// order), then newest activity. `listFilter` scopes the rows: Agents hides
-    /// people and servers, People hides agents and servers, Servers shows only
-    /// servers (`HomeListFilter`). Archived rows stay out (Hidden chats).
-    private var homeRows: [HomeEntry] { pinnedRows + restRows }
-
-    /// The Pinned section: the pins the filter admits, in the user's order (never re-sorted
-    /// by activity); empty → no header, no hairline.
-    private var pinnedRows: [HomeEntry] {
-        rankedRows.filter { $0.0 != Int.max }.sorted { $0.0 < $1.0 }.map(\.2)
-    }
-
-    /// Everything else, newest activity first.
-    private var restRows: [HomeEntry] {
-        rankedRows.filter { $0.0 == Int.max }.sorted { $0.1 > $1.1 }.map(\.2)
-    }
-
+    /// Projects, DMs and servers in one list, each entry complete: its pin rank, its
+    /// activity stamp and the text the row draws. `listFilter` scopes them: Agents hides
+    /// people and servers, People hides agents and servers, Servers shows only servers
+    /// (`HomeListFilter`). Archived rows stay out (Hidden chats).
+    ///
+    /// Read this once per render and hold the result. `homeList` needs the rows in five
+    /// places and each row draws three derived fields; read fresh every time, the list
+    /// re-walked the whole model about ten times per body pass.
     private var rankedRows: [(Int, Int64, HomeEntry)] {
         // pinRank: strip index when pinned (0 = top), Int.max when not.
         var rows: [(Int, Int64, HomeEntry)] = []
@@ -906,13 +909,25 @@ struct HomeView: View {
                 if !listFilter.admitsProject(shared: p.shared) { continue }
                 if model.isArchived(p.id) { continue }
                 let pinRank = model.homePinIndex(projectId: p.id) ?? Int.max
-                rows.append((pinRank, lastActivity(p), HomeEntry(row: .project(p), hit: hit)))
+                let newest = latest(p)
+                let activity = lastActivity(p, newest: newest)
+                rows.append((pinRank, activity, HomeEntry(
+                    row: .project(p), hit: hit,
+                    preview: preview(p, newest: newest),
+                    previewIcon: previewIcon(newest: newest),
+                    time: HomeView.timeLabel(ms: activity))))
             }
         }
         if listFilter.showsPeople {
             for c in model.peopleChats where !model.isArchived(peopleChatId: c.id) {
                 let pinRank = model.homePinIndex(peopleChatId: c.id) ?? Int.max
-                rows.append((pinRank, peopleActivity(c), HomeEntry(row: .people(c), hit: hit)))
+                let messages = model.messages(of: c.id)
+                let activity = peopleActivity(c, messages: messages)
+                rows.append((pinRank, activity, HomeEntry(
+                    row: .people(c), hit: hit,
+                    preview: peoplePreview(c, messages: messages),
+                    previewIcon: nil,
+                    time: HomeView.timeLabel(ms: activity))))
             }
         }
         if listFilter.showsServers {
@@ -920,7 +935,12 @@ struct HomeView: View {
             // Servers segment shows them alone (Mac parity, 2026-10-24).
             for s in model.servers where !model.isArchived(serverId: s.id) {
                 let pinRank = model.homePinIndex(serverId: s.id) ?? Int.max
-                rows.append((pinRank, model.serverActivity(s), HomeEntry(row: .server(s), hit: hit)))
+                let activity = model.serverActivity(s)
+                rows.append((pinRank, activity, HomeEntry(
+                    row: .server(s), hit: hit,
+                    preview: model.serverPreview(s),
+                    previewIcon: nil,
+                    time: HomeView.timeLabel(ms: activity))))
             }
         }
         return rows
@@ -962,13 +982,17 @@ struct HomeView: View {
     }
 
     private func peopleActivity(_ c: PeopleChat) -> Int64 {
-        max(c.lastActivityAt, model.messages(of: c.id).last?.createdAt ?? 0)
+        peopleActivity(c, messages: model.messages(of: c.id))
     }
 
-    private func peoplePreview(_ c: PeopleChat) -> String {
+    private func peopleActivity(_ c: PeopleChat, messages: [Message]) -> Int64 {
+        max(c.lastActivityAt, messages.last?.createdAt ?? 0)
+    }
+
+    private func peoplePreview(_ c: PeopleChat, messages: [Message]) -> String {
         // Skip group deletion audits (hidden in the chat; Activity only) so the
         // home row matches what you see when you open the conversation.
-        guard let m = model.messages(of: c.id).last(where: {
+        guard let m = messages.last(where: {
             !$0.voice && !$0.plainText.isEmpty && !GroupActivity.isAuditLine($0.plainText)
         }) else {
             return c.pending ? "Invited · opens when they sign in" : "Say hi"
@@ -991,20 +1015,24 @@ struct HomeView: View {
 
     /// Grok puts a small glyph before some previews: a checklist when the bot is
     /// waiting on a question, a paper plane when it messaged another bot.
-    private func previewIcon(_ p: Project) -> String? {
-        guard let m = latest(p) else { return nil }
+    private func previewIcon(newest: Message?) -> String? {
+        guard let m = newest else { return nil }
         if m.openQuestion != nil { return "checklist" }
         if m.role != .user, m.turn == .new, m.subagentName != nil { return "paperplane" }
         return nil
     }
 
     private func lastActivity(_ p: Project) -> Int64 {
-        if let m = latest(p), m.createdAt > 0 { return m.createdAt }
+        lastActivity(p, newest: latest(p))
+    }
+
+    private func lastActivity(_ p: Project, newest: Message?) -> Int64 {
+        if let newest, newest.createdAt > 0 { return newest.createdAt }
         return model.chats(of: p.id).map(\.lastMessageAt).max() ?? 0
     }
 
-    private func preview(_ p: Project) -> String {
-        guard let m = latest(p) else {
+    private func preview(_ p: Project, newest: Message?) -> String {
+        guard let m = newest else {
             return model.isStreaming(project: p.id) ? "\(p.name) is working" : "No messages yet"
         }
         if let q = m.openQuestion { return HomeView.plain(q.question) }
@@ -1021,10 +1049,6 @@ struct HomeView: View {
         for mark in ["**", "__", "`", "*", "_", "#"] { t = t.replacingOccurrences(of: mark, with: "") }
         return t.trimmingCharacters(in: .whitespaces)
     }
-
-    private func timeLabel(_ p: Project) -> String { timeLabel(ms: lastActivity(p)) }
-
-    private func timeLabel(ms: Int64) -> String { HomeView.timeLabel(ms: ms) }
 
     /// The home row's time column; the server channel list uses the same rule.
     static func timeLabel(ms: Int64) -> String {
