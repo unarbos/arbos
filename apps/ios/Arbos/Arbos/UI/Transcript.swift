@@ -1776,7 +1776,7 @@ struct RowView: View, Equatable {
             // lane in a people chat) and the same cap width as an incoming bubble.
             HStack(spacing: 0) {
                 if lane { Color.clear.frame(width: Theme.memberLane(composerInset: composerInset), height: 1) }
-                QuestionCard(rowId: row.id, chatId: chatId, questionId: questionId, title: text, options: options,
+                QuestionCard(model: model, rowId: row.id, chatId: chatId, questionId: questionId, title: text, options: options,
                              multi: multi, picked: picked, open: open, shellCard: shellCard, offer: offer)
                     .frame(maxWidth: lane ? maxBubble - Theme.memberLane(composerInset: composerInset) : maxBubble, alignment: .leading)
                 Spacer(minLength: 0)
@@ -1784,7 +1784,7 @@ struct RowView: View, Equatable {
         case .file(let item, let subtitle, let caption, let forwardedFrom, let sender, let named, let quote):
             if let sender {
                 mediaRow(sender: sender, named: named) {
-                    FileCard(item: item, subtitle: subtitle, chatId: chatId, fromUser: false, caption: caption,
+                    FileCard(model: model, item: item, subtitle: subtitle, chatId: chatId, fromUser: false, caption: caption,
                              forwardedFrom: forwardedFrom, quote: quote, onQuoteTap: onQuoteTap)
                         .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: false) }
                         .frame(maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset), alignment: .leading)
@@ -1792,7 +1792,7 @@ struct RowView: View, Equatable {
             } else {
                 HStack {
                     if row.role == .user { Spacer(minLength: 0) }
-                    FileCard(item: item, subtitle: subtitle, chatId: chatId, fromUser: row.role == .user, caption: caption,
+                    FileCard(model: model, item: item, subtitle: subtitle, chatId: chatId, fromUser: row.role == .user, caption: caption,
                              forwardedFrom: forwardedFrom, quote: quote, onQuoteTap: onQuoteTap)
                         .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: row.role == .user) }
                         .frame(maxWidth: maxBubble, alignment: row.role == .user ? .trailing : .leading)
@@ -1809,7 +1809,7 @@ struct RowView: View, Equatable {
         case .voiceMemo(let name, let projectId, let ref, let fromUser):
             HStack {
                 if fromUser { Spacer(minLength: 0) }
-                VoiceMemoBubble(name: name, projectId: projectId, blobRef: ref, fromUser: fromUser)
+                VoiceMemoBubble(model: model, name: name, projectId: projectId, blobRef: ref, fromUser: fromUser)
                     .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: fromUser) }
                     .frame(maxWidth: maxBubble, alignment: fromUser ? .trailing : .leading)
                 if !fromUser { Spacer(minLength: 0) }
@@ -1819,14 +1819,14 @@ struct RowView: View, Equatable {
             // Telegram / iMessage stickers; same lane rules as a picture.
             if let sender {
                 mediaRow(sender: sender, named: named) {
-                    StickerBubble(item: item, chatId: chatId)
+                    StickerBubble(model: model, item: item, chatId: chatId)
                         .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: false) }
                 }
             } else {
                 HStack(spacing: 0) {
                     if fromUser { Spacer(minLength: 0) }
                     if lane { Color.clear.frame(width: Theme.memberLane(composerInset: composerInset), height: 1) }
-                    StickerBubble(item: item, chatId: chatId)
+                    StickerBubble(model: model, item: item, chatId: chatId)
                         .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: fromUser) }
                     if !fromUser { Spacer(minLength: 0) }
                 }
@@ -1837,7 +1837,7 @@ struct RowView: View, Equatable {
             // the sender's avatar in that lane and the name above the first card.
             if let sender {
                 mediaRow(sender: sender, named: named) {
-                    ImageBubble(item: item, chatId: chatId, fromUser: false,
+                    ImageBubble(model: model, item: item, chatId: chatId, fromUser: false,
                                 maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset),
                                 caption: caption, mentions: mentions, source: source, forwardedFrom: forwardedFrom,
                                 quote: quote, onQuoteTap: onQuoteTap)
@@ -1847,7 +1847,7 @@ struct RowView: View, Equatable {
                 HStack(spacing: 0) {
                     if fromUser { Spacer(minLength: 0) }
                     if lane { Color.clear.frame(width: Theme.memberLane(composerInset: composerInset), height: 1) }
-                    ImageBubble(item: item, chatId: chatId, fromUser: fromUser,
+                    ImageBubble(model: model, item: item, chatId: chatId, fromUser: fromUser,
                                 maxWidth: lane ? maxBubble - Theme.memberLane(composerInset: composerInset) : maxBubble,
                                 caption: caption, mentions: mentions, source: source, forwardedFrom: forwardedFrom,
                                 quote: quote, onQuoteTap: onQuoteTap)
@@ -2137,7 +2137,7 @@ struct RowView: View, Equatable {
     }
 
     private func replyQuoteHeader(_ quote: Quote, color: Color) -> some View {
-        ReplyQuoteHeader(quote: quote, color: color, onTap: onQuoteTap)
+        ReplyQuoteHeader(model: model, quote: quote, color: color, onTap: onQuoteTap)
     }
 
     /// "Messaged \u{FFFC}Affine" / "6 messages with \u{FFFC}A, \u{FFFC}B and \u{FFFC}C":
@@ -2996,7 +2996,8 @@ struct AvatarCluster: View {
 /// bubble, a picture bubble (above the picture) and a file card alike ([feedback
 /// picture-reply-quote-ios-2026-10-28]).
 struct ReplyQuoteHeader: View {
-    @EnvironmentObject private var model: AppModel
+    /// Not observed: a row-level view must not re-run on every model publish (see `RowView.model`).
+    let model: AppModel
     @Environment(\.theme) private var theme
     let quote: Quote
     let color: Color
@@ -3073,7 +3074,8 @@ struct ForwardedHeader: View {
 /// the top with a small inset and its own radius; one that spans the bubble is
 /// flush, exactly as a picture-only bubble.
 struct ImageBubble: View {
-    @EnvironmentObject private var model: AppModel
+    /// Not observed: a row-level view must not re-run on every model publish (see `RowView.model`).
+    let model: AppModel
     @Environment(\.theme) private var theme
     @Environment(\.displayScale) private var displayScale
     let item: MediaItem
@@ -3153,7 +3155,7 @@ struct ImageBubble: View {
                     .padding(.top, Theme.bubbleVPad)
                     .padding(.bottom, 6)
             } else if let quote {
-                ReplyQuoteHeader(quote: quote, color: fromUser ? theme.userText : theme.text, onTap: onQuoteTap)
+                ReplyQuoteHeader(model: model, quote: quote, color: fromUser ? theme.userText : theme.text, onTap: onQuoteTap)
                     .padding(.horizontal, Theme.bubbleHPad)
                     .padding(.top, Theme.bubbleVPad)
                     .padding(.bottom, 6)
@@ -3598,7 +3600,8 @@ enum MediaOpen {
 /// Tap opens the media viewer on it (Open there = Quick Look, plus Download / Forward).
 /// A video's typed description sits as a caption bar under the card.
 struct FileCard: View {
-    @EnvironmentObject private var model: AppModel
+    /// Not observed: a row-level view must not re-run on every model publish (see `RowView.model`).
+    let model: AppModel
     @Environment(\.theme) private var theme
     let item: MediaItem
     let subtitle: String
@@ -3629,7 +3632,7 @@ struct FileCard: View {
                     .padding(.horizontal, Theme.bubbleHPad)
                     .padding(.top, Theme.bubbleVPad)
             } else if let quote {
-                ReplyQuoteHeader(quote: quote, color: fromUser ? theme.userText : theme.text, onTap: onQuoteTap)
+                ReplyQuoteHeader(model: model, quote: quote, color: fromUser ? theme.userText : theme.text, onTap: onQuoteTap)
                     .padding(.horizontal, Theme.bubbleHPad)
                     .padding(.top, Theme.bubbleVPad)
             }
@@ -3697,7 +3700,8 @@ struct FileCard: View {
 /// `AVAudioPlayer` so auth and the post-record `AVAudioSession` work;
 /// streaming the blob through `AVPlayer` left the chip stuck on pause at `0:00`.
 struct VoiceMemoBubble: View {
-    @EnvironmentObject private var model: AppModel
+    /// Not observed: a row-level view must not re-run on every model publish (see `RowView.model`).
+    let model: AppModel
     @Environment(\.theme) private var theme
     let name: String
     let projectId: Id
