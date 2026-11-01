@@ -170,7 +170,27 @@ struct ChatSession: View {
     /// a long group chat put thousands in it and the open took seconds (long-chat-perf,
     /// 2026-10-23). Cap stays modest so finger-scrolling stays smooth; older rows join
     /// as the user nears the top (`growWindow`).
-    @State private var windowCount = ChatSession.windowInitial
+    @State private var windowCount = ChatSession.windowFirstPaint
+    /// Rows in the view tree at the chat's FIRST layout, before the window opens out to
+    /// `windowInitial` (`growToReadingWindow`).
+    ///
+    /// This number is paid in frozen screen, not in CPU. The navigation controller does not
+    /// start the push animation until the incoming hosting controller has laid out once, so
+    /// every row sized in that first layout is time the screen does not move. Measured on
+    /// the landed build, the push is asked for at +28–41 ms and does not animate until
+    /// +87–296 ms, and sizing the 80-row window is 13–45 ms of that
+    /// (internal/perf/ios-push-waits-for-destination-layout.md). The rows this leaves out
+    /// join one main-queue hop later, behind a transition the render server is already
+    /// driving, where their layout is invisible.
+    ///
+    /// 24, not a screenful. A screenful of the shortest bubbles the rig has ever rendered
+    /// (64 pt tall, 4 pt apart) is 10 rows in the 682 pt between the header and the
+    /// composer, so 24 is that twice over plus margin. Two reasons for the margin: a flick
+    /// started during the push travels about another screenful before the window grows, and
+    /// the group-spacing work in flight makes rows shorter, which fits more of them on
+    /// screen. `ARBOS_PERF_FIRST_WINDOW` re-tunes it without a build for the lane that
+    /// changes the spacing.
+    static var windowFirstPaint: Int { DebugHooks.perfFirstWindow ?? 24 }
     /// Same initial window on iOS 17 — PreferenceKey geometry near the top grows it
     /// (feedback app-01M5NNJ001NHHYBHXTASM5NXBZ). iOS 18+ uses onScrollGeometryChange.
     static let windowInitial: Int = 80
@@ -418,6 +438,28 @@ struct ChatSession: View {
             // screen; put the row that was at the top back where it was.
             DispatchQueue.main.async { proxy.scrollTo(firstShown, anchor: .top) }
         }
+    }
+
+    /// Open the first-paint window out to the reading window, once the push owns the screen.
+    ///
+    /// Called from `handleSessionAppear` through one main-queue hop. The hop is the whole
+    /// point: `onAppear` runs inside the layout the navigation controller is waiting on, and
+    /// the Core Animation transaction that commits the push closes at the end of that
+    /// run-loop turn. A block queued there runs after the commit, so the rows added here are
+    /// laid out while the render server is already sliding the screen in.
+    ///
+    /// Nothing on screen moves. The window is a SUFFIX of `visibleRows`, so this only adds
+    /// rows ABOVE the viewport, and the scroll view is bottom-anchored (`defaultScrollAnchor`
+    /// plus the `minHeight` frame for threads shorter than the screen), which is the same
+    /// reason `growWindow` can add a slice under the reader's finger without moving it.
+    private func growToReadingWindow() {
+        guard windowSkipEnd == 0, windowCount < Self.windowInitial else { return }
+        let target = min(Self.windowInitial, visibleRows.count)
+        guard target > windowCount else { return }
+        revealTrace("first-paint-grow", "window=\(windowCount)->\(target) rows=\(visibleRows.count)")
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) { windowCount = target }
     }
 
     /// Back at the tail (a send, the new-messages pill, settle): the window is the
@@ -1525,6 +1567,8 @@ struct ChatSession: View {
     /// Chat appear: mark-read, restore draft, open channel / refresh call, rig hooks.
     private func handleSessionAppear() {
         appearedAt = Date()
+        // After the push animation has been committed, not before it: see `growToReadingWindow`.
+        DispatchQueue.main.async { growToReadingWindow() }
         LaunchClock.mark("chat-appear", detail: "messages=\(messages.count)")
         #if DEBUG
         PerfLog.mark("chat-open appear \(chatId) messages=\(messages.count)", ms: 0)
