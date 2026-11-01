@@ -542,15 +542,17 @@ struct MentionTextView: UIViewRepresentable {
                 // The same disc the bubble chip and the Mac draw: initials of `here` / `agents`.
                 picture = AnyView(InitialsAvatar(name: c.handle, handle: c.handle, id: c.handle, size: MentionTable.picture))
             }
-            let view = HStack(spacing: 4) {
+            // The bubble chip's insets, not the composer's own: the field drew
+            // 4 pt before the picture and 7 pt after the name, so the same chip
+            // looked lopsided while you typed it.
+            let view = HStack(spacing: MentionTable.gap) {
                 picture
                 Text(m.name)
                     .font(.system(size: theme.pt(Theme.body), weight: .medium))
                     .foregroundStyle(theme.accent)
                     .lineLimit(1)
             }
-            .padding(.leading, 4)
-            .padding(.trailing, MentionTable.radius)
+            .padding(.horizontal, MentionTable.padX)
             .frame(height: font.lineHeight + MentionTable.padY * 2)
             .background(RoundedRectangle(cornerRadius: MentionTable.radius, style: .continuous).fill(theme.accent.opacity(0.14)))
             .environment(\.theme, theme)

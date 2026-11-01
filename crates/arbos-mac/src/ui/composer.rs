@@ -317,6 +317,13 @@ fn completes_handle(c: char) -> bool {
     c.is_whitespace() || matches!(c, '.' | ',' | '!' | '?' | ':' | ';')
 }
 
+/// A committed token's text in the field: the picture cell and the name
+/// between the pill's two [`mention::PAD`] cells, as a bubble chip reads it.
+/// The sent row still carries `@handle` ([`MentionToken::plain`]).
+fn chip_text(name: &str) -> String {
+    format!("{}{}{name}{}", mention::PAD, mention::CELL, mention::PAD)
+}
+
 impl ComposerInput {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
@@ -505,7 +512,7 @@ impl ComposerInput {
             None => self.selected_range.clone(),
         };
         self.record_undo();
-        let chip = format!("{}{name}", mention::CELL);
+        let chip = chip_text(name);
         let range = self.splice(range, &format!("{chip} "));
         let token = MentionToken {
             range: range.start..range.start + chip.len(),
@@ -546,7 +553,7 @@ impl ComposerInput {
             let Some(m) = self.mentions.by_handle(&handle).cloned() else {
                 continue;
             };
-            let chip = format!("{}{}", mention::CELL, m.name);
+            let chip = chip_text(&m.name);
             let caret = self.cursor_offset();
             let delta = chip.len() as isize - range.len() as isize;
             let replaced = self.splice(range.clone(), &chip);
@@ -2069,7 +2076,8 @@ impl Element for InputElement {
                     continue;
                 }
                 let local = t.range.start - start..t.range.end.min(para_end) - start;
-                runs = select::chip_runs(runs, local, mention::CELL.len(), mention_accent);
+                let cell = mention::PAD.len() + mention::CELL.len();
+                runs = select::chip_runs(runs, local, cell, mention_accent);
             }
             // Live chat-Markdown styling ([feedback chat-markdown-composer-2026-10-27]):
             // markers faint, the words between them in their style, a `> ` line
@@ -2184,15 +2192,14 @@ impl Element for InputElement {
             };
             let mut rects = Vec::with_capacity(fragments.len());
             for (x0, x1, top) in fragments {
+                // The token's text reserves a `mention::PAD` cell at each end,
+                // so the pill needs no inset of its own across the line.
                 let pill = Bounds::new(
                     point(
-                        bounds.left() + x0 - px(mention::PILL_PAD_X),
+                        bounds.left() + x0,
                         bounds.top() + top - dy - px(mention::PILL_PAD_Y),
                     ),
-                    size(
-                        x1 - x0 + px(mention::PILL_PAD_X * 2.0),
-                        lh + px(mention::PILL_PAD_Y * 2.0),
-                    ),
+                    size(x1 - x0, lh + px(mention::PILL_PAD_Y * 2.0)),
                 );
                 rects.push(pill);
                 pills.push(
@@ -2209,18 +2216,26 @@ impl Element for InputElement {
                 pills: rects,
             });
             let picture = mention.picture.clone();
-            let Some(after_cell) = position_for_index(
-                &lines,
-                t.range.start + mention::CELL.len(),
-                bounds.size.width,
-                text_center,
+            let (Some(cell), Some(after_cell)) = (
+                position_for_index(
+                    &lines,
+                    t.range.start + mention::PAD.len(),
+                    bounds.size.width,
+                    text_center,
+                ),
+                position_for_index(
+                    &lines,
+                    t.range.start + mention::PAD.len() + mention::CELL.len(),
+                    bounds.size.width,
+                    text_center,
+                ),
             ) else {
                 continue;
             };
-            if after_cell.y != a.y {
+            if after_cell.y != cell.y {
                 continue;
             }
-            let cell_w = after_cell.x - a.x;
+            let cell_w = after_cell.x - cell.x;
             let d = px(mention::PICTURE)
                 .min(lh)
                 .min(cell_w - px(mention::PICTURE_GAP));
@@ -2230,8 +2245,8 @@ impl Element for InputElement {
             pictures.push((
                 Bounds::new(
                     point(
-                        bounds.left() + a.x,
-                        bounds.top() + a.y - dy + (lh - d) / 2.0,
+                        bounds.left() + cell.x,
+                        bounds.top() + cell.y - dy + (lh - d) / 2.0,
                     ),
                     size(d, d),
                 ),
@@ -2348,8 +2363,8 @@ impl Element for InputElement {
                 window.paint_quad(bar);
             }
         });
-        // A pill reaches `PILL_PAD_X` / `PILL_PAD_Y` past its text, so a chip
-        // that starts or ends a row would lose its rounded end to the text's
+        // A pill reaches `PILL_PAD_Y` above and below its line box, so a chip
+        // on the first or last row would lose its rounded ends to the text's
         // mask; the pills get the field padding they reach into.
         let pill_mask = pill_mask(bounds);
         window.with_content_mask(Some(gpui::ContentMask { bounds: pill_mask }), |window| {
@@ -2543,15 +2558,14 @@ const QUOTE_BAR_INSET: f32 = 2.0;
 /// The field's padding left of the text; the chip pills and quote bars draw in it.
 const FIELD_TEXT_INSET: f32 = 10.0;
 
-/// The text box grown by the chip pills' reach past their text.
+/// The text box grown by the chip pills' reach past their text. Across the
+/// line they reach nowhere — the token's `mention::PAD` cells hold the pill's
+/// inset — so only the line box's top and bottom grow.
 fn pill_mask(text: Bounds<Pixels>) -> Bounds<Pixels> {
     Bounds::new(
-        point(
-            text.left() - px(mention::PILL_PAD_X),
-            text.top() - px(mention::PILL_PAD_Y),
-        ),
+        point(text.left(), text.top() - px(mention::PILL_PAD_Y)),
         size(
-            text.size.width + px(mention::PILL_PAD_X * 2.0),
+            text.size.width,
             text.size.height + px(mention::PILL_PAD_Y * 2.0),
         ),
     )
@@ -5508,7 +5522,7 @@ mod mention_token_tests {
     }
 
     fn chip(name: &str) -> String {
-        format!("{}{name}", mention::CELL)
+        chip_text(name)
     }
 
     /// Jacob (Oct 24): the composer's chips answer the pointer like bubble
@@ -5624,10 +5638,11 @@ mod mention_token_tests {
         assert!(!cx.update(|_, cx| input.read(cx).selected_range.is_empty()));
     }
 
-    /// Scout (Oct 29): a chip first in the field lost its left end — its pill
-    /// reaches `PILL_PAD_X` past the text and the text's mask cut it square.
-    /// First in the draft, mid-row, at a paragraph's start and at a wrapped
-    /// row's start, every pill is painted whole, inside the field's padding.
+    /// Scout (Oct 29): a chip first in the field lost its left end to the
+    /// text's mask. First in the draft, mid-row, at a paragraph's start and at
+    /// a wrapped row's start, every pill is painted whole. Since the token
+    /// carries its own pad cells the pill starts on the text's own left edge,
+    /// so it has nothing to be cut off by.
     #[gpui::test]
     fn a_chip_at_the_start_of_a_row_keeps_both_rounded_ends(cx: &mut TestAppContext) {
         let (input, cx) = input(cx);
@@ -5646,15 +5661,13 @@ mod mention_token_tests {
                 (l.bounds, l.pill_mask, l.chips.clone())
             })
         };
-        let row_start = |bounds: Bounds<Pixels>, r: &Bounds<Pixels>| {
-            r.left() == bounds.left() - px(mention::PILL_PAD_X)
-        };
+        let row_start = |bounds: Bounds<Pixels>, r: &Bounds<Pixels>| r.left() == bounds.left();
 
         pick(cx);
         let (bounds, _, chips) = layout(cx);
         assert!(
             row_start(bounds, &chips[0].1[0]),
-            "the first chip's pill starts in the field's padding: {:?} vs {bounds:?}",
+            "the first chip's pill starts on the text's left edge: {:?} vs {bounds:?}",
             chips[0].1[0]
         );
         cx.simulate_input("hi ");
