@@ -157,7 +157,7 @@ struct ServerChannelsView: View {
                                        unread: model.channelUnread(channel),
                                        unreadCount: model.channelUnreadCount(channel))
                         }
-                        .buttonStyle(.borderless)
+                        .buttonStyle(HomeRowPress(tint: theme.text))
                         // Long-press (the Mac's right-click): Archive for everyone; Delete for
                         // owners/admins, never on #general; Delete asks first.
                         .contextMenu {

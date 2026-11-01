@@ -264,8 +264,8 @@ struct HomeView: View {
         switch entry.row {
         case .project(let project):
             let pinned = model.isHomePinned(projectId: project.id)
-            // borderless (not .plain): .plain steals the list swipe /
-            // long-press on recent iOS, so archive and the menu fail.
+            // `HomeRowPress` for the press wash, never .plain: .plain steals the list
+            // swipe / long-press on recent iOS, so archive and the menu fail.
             Button { openSearchHit(project, hit: entry.hit) } label: {
                 AgentRow(project: project, preview: entry.hit.reason ?? preview(project),
                          previewIcon: entry.hit.reason == nil ? previewIcon(project) : nil, time: timeLabel(project),
@@ -274,7 +274,7 @@ struct HomeView: View {
                          unreadCount: model.unreadCount(project: project.id),
                          pinned: pinned)
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(HomeRowPress(tint: theme.text))
             .contextMenu {
                 // Long-press: Pin (also on leading swipe), reorder when
                 // pinned, Fork (owned), Archive (also on trailing swipe),
@@ -358,7 +358,7 @@ struct HomeView: View {
                           count: model.unreadCount(for: chat), me: model.user?.id,
                           pinned: pinned)
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(HomeRowPress(tint: theme.text))
             .accessibilityIdentifier("home-row:\(chat.id)")
             .contextMenu {
                 // Long-press: Pin, reorder when pinned, Archive,
@@ -459,7 +459,7 @@ struct HomeView: View {
                           unreadCount: model.serverUnreadCount(server),
                           pinned: pinned)
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(HomeRowPress(tint: theme.text))
             .contextMenu {
                 // Long-press: Pin (servers too since the synced pins, Jacob 2026-10-28),
                 // reorder when pinned, Server info, Archive.
@@ -1167,7 +1167,7 @@ struct HiddenChatsView: View {
                             AgentRow(project: project, preview: HiddenChatsView.preview(project, in: model), time: "",
                                      streaming: model.isStreaming(project: project.id), unread: false)
                         }
-                        .buttonStyle(.borderless)
+                        .buttonStyle(HomeRowPress(tint: theme.text))
                         .contextMenu {
                             Button { withAnimation { model.unarchive(project.id) } } label: {
                                 Label("Unarchive", systemImage: "tray.and.arrow.up")
@@ -1198,7 +1198,7 @@ struct HiddenChatsView: View {
                             PeopleRow(chat: chat, preview: HiddenChatsView.peoplePreview(chat, in: model), time: "",
                                       unread: false, count: 0, me: model.user?.id)
                         }
-                        .buttonStyle(.borderless)
+                        .buttonStyle(HomeRowPress(tint: theme.text))
                         .contextMenu {
                             Button { withAnimation { model.unarchive(peopleChatId: chat.id) } } label: {
                                 Label("Unarchive", systemImage: "tray.and.arrow.up")
@@ -1224,7 +1224,7 @@ struct HiddenChatsView: View {
                         Button { model.open(server: server) } label: {
                             ServerRow(server: server, preview: model.serverPreview(server), time: "", unread: false)
                         }
-                        .buttonStyle(.borderless)
+                        .buttonStyle(HomeRowPress(tint: theme.text))
                         .contextMenu {
                             Button { withAnimation { model.unarchive(serverId: server.id) } } label: {
                                 Label("Unarchive", systemImage: "tray.and.arrow.up")
@@ -1391,6 +1391,43 @@ enum RowStatus: Equatable {
         if streaming { return .working }
         if unread { return .unread }
         return .quiet
+    }
+}
+
+/// The wash under a tapped chat row (Jacob, 2026-11-01: "register the click before going
+/// to the next screen in some subtle way so the user knows they have selected that chat
+/// and this will make the slide in seem more intuitive") — the native cell highlight,
+/// under the finger from the moment it lands.
+///
+/// It replaces `.borderless`, which is not silent on press: it dims the *label*, so the
+/// row's avatar, name and preview fade out together (measured ~10 grey levels down,
+/// against ~14 up for this wash). Feedback that subtracts reads as the row going away,
+/// not as the row you chose, and it is easiest to miss under the glass appearance.
+///
+/// Nothing here may cost the open anything, so the wash is a background on this one row:
+/// no state leaves the style, a press re-evaluates the row's own body and nothing above
+/// it, and nothing runs before the button's action. The press is instant and the release
+/// fades, so the wash is still on screen through the frozen window before the push
+/// animates and out again under the sliding list.
+struct HomeRowPress: ButtonStyle {
+    /// The row's text colour; the style sets the strength. Passed in rather than read from
+    /// the environment — a `ButtonStyle` is not a view and installs no dynamic properties.
+    let tint: Color
+    /// Lighter than the control family's 0.12 pressed fill: a whole 80 pt row at that
+    /// strength reads as a chosen row rather than a press.
+    private static let alpha = 0.07
+    private static let radius: CGFloat = 14
+    private static let fadeSeconds = 0.28
+
+    func makeBody(configuration: Configuration) -> some View {
+        let pressed = configuration.isPressed
+        let fade: Animation? = pressed ? nil : .easeOut(duration: Self.fadeSeconds)
+        return configuration.label
+            .background {
+                RoundedRectangle(cornerRadius: Self.radius, style: .continuous)
+                    .fill(tint.opacity(pressed ? Self.alpha : 0))
+                    .animation(fade, value: pressed)
+            }
     }
 }
 
