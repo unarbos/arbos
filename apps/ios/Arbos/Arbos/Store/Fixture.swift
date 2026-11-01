@@ -966,14 +966,14 @@ extension AppModel {
         append(bubble(resultText))
     }
 
-    /// `ARBOS_FIXTURE_STREAM=<chat>` (perf baseline): from 8 s after launch, an agent answer
+    /// `ARBOS_FIXTURE_STREAM=<chat>` (perf baseline): from 15 s after launch, an agent answer
     /// grows in that chat one word every 40 ms — the cadence of a relay text delta — then
-    /// finishes, and 2 s later the next one starts, until the app quits. Each word is one
-    /// `messages` write, the same publish a live token causes.
+    /// finishes, and 2 s later the next one starts, until the app quits. Each word does what a
+    /// live token does in the doc's `onChange`: one `messages` write, then `markActivity`.
     private func fixtureStream(chatId: Id) async {
         let words = (AppModel.longReview + "\n\n" + AppModel.bubbleSortReply + "\n\n" + AppModel.longReply)
             .split(separator: " ", omittingEmptySubsequences: false)
-        try? await Task.sleep(nanoseconds: 8_000_000_000)
+        try? await Task.sleep(nanoseconds: 15_000_000_000)
         while !Task.isCancelled {
             let id = newId()
             var m = assistant(id, chatId, "", at: nowMs())
@@ -994,6 +994,7 @@ extension AppModel {
                 }
                 guard let i = messages[chatId]?.lastIndex(where: { $0.id == id }) else { return }
                 messages[chatId]?[i] = m
+                markActivity(chatId: chatId)
                 FrameProbe.count(.streamToken)
             }
             try? await Task.sleep(nanoseconds: 2_000_000_000)

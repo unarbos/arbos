@@ -969,7 +969,7 @@ final class AppModel: ObservableObject {
         LaunchClock.mark("app-init")
         // Drop the retired SessionRoom TestFlight switch so it does not linger.
         UserDefaults.standard.removeObject(forKey: "sharedRoomSession")
-        #if DEBUG
+        #if DEBUG || ARBOS_FIXTURE
         if let scale = DebugHooks.textScale, TextScale.steps.contains(where: { abs($0 - CGFloat(scale)) < 0.001 }) {
             textScaleSetting = scale
         }
@@ -2686,7 +2686,7 @@ final class AppModel: ObservableObject {
         unacked[chatId] = set.isEmpty ? nil : set
     }
 
-    private func markActivity(chatId: Id) {
+    func markActivity(chatId: Id) {
         for (pid, list) in chats {
             if let i = list.firstIndex(where: { $0.id == chatId }) {
                 var updated = list

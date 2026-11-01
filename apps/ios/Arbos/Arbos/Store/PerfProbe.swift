@@ -12,6 +12,7 @@
 //
 //   log show --predicate 'subsystem == "com.unarbos.arbos.ios" AND category == "perf-frames"'
 
+import Combine
 import Foundation
 import QuartzCore
 import UIKit
@@ -178,10 +179,11 @@ enum PerfSignpost {
 
 /// What the probe's once-a-second line counts besides frames.
 enum PerfCount: Int, CaseIterable {
-    case homeBody, chatBody, rowBody, blockBody, streamToken
+    case publish, homeBody, chatBody, rowBody, blockBody, streamToken
 
     var label: String {
         switch self {
+        case .publish: return "publishes"
         case .homeBody: return "home_body"
         case .chatBody: return "chat_body"
         case .rowBody: return "row_body"
@@ -191,8 +193,12 @@ enum PerfCount: Int, CaseIterable {
     }
 }
 
-/// `ARBOS_PERF_FRAMES=1`: frame pacing, stalls and memory for the perf baseline. Late is
-/// measured against the screen's maximum rate, so on a 120 Hz screen a 60 Hz frame is late.
+/// `ARBOS_PERF_FRAMES=1`: frame pacing, stalls and memory for the perf baseline. The link
+/// asks for the screen's maximum rate, but a frame is late against the period the system
+/// actually gave it (`targetTimestamp - timestamp`): without `CADisableMinimumFrameDurationOnPhone`
+/// an app's display link runs at 60 Hz on a ProMotion iPhone, and the `hz` field says so.
+/// Hitch numbers for the report come from Instruments; this log is for stalls, intervals,
+/// counts and memory.
 @MainActor
 final class FrameProbe {
     static let enabled = ProcessInfo.processInfo.environment["ARBOS_PERF_FRAMES"] == "1"
@@ -213,6 +219,8 @@ final class FrameProbe {
     private var steady = 0
     private var settling = false
     private var counts = [Int](repeating: 0, count: PerfCount.allCases.count)
+    private var periodMsSum = 0.0
+    private var publishSink: AnyCancellable?
 
     /// `let _ = FrameProbe.count(.homeBody)` in a body: one branch on a constant when off.
     static func count(_ what: PerfCount) {
@@ -220,8 +228,12 @@ final class FrameProbe {
         shared.counts[what.rawValue] &+= 1
     }
 
-    static func startIfRequested() {
+    static func startIfRequested(model: AppModel) {
         guard enabled, shared.link == nil else { return }
+        shared.publishSink = model.objectWillChange.sink { _ in
+            guard Thread.isMainThread else { return }
+            MainActor.assumeIsolated { count(.publish) }
+        }
         shared.start()
     }
 
@@ -258,6 +270,8 @@ final class FrameProbe {
             return
         }
         let ms = (now - last) * 1000
+        nominalMs = max(1, (link.targetTimestamp - now) * 1000)
+        periodMsSum += nominalMs
         frames += 1
         worstMs = max(worstMs, ms)
         let isLate = ms > nominalMs * 1.5
@@ -278,7 +292,9 @@ final class FrameProbe {
         }
         guard now - windowStart >= 1 else { return }
         let counted = PerfCount.allCases.map { "\($0.label)=\(counts[$0.rawValue])" }.joined(separator: " ")
-        Self.log.notice("second frames=\(self.frames) late=\(self.late) dropped=\(self.dropped) over_ms=\(Int(self.overMs)) worst_ms=\(Int(self.worstMs)) rss=\(Self.footprintMB())MB \(counted, privacy: .public)")
+        let hz = periodMsSum > 0 ? Int((1000 * Double(frames) / periodMsSum).rounded()) : 0
+        periodMsSum = 0
+        Self.log.notice("second hz=\(hz) frames=\(self.frames) late=\(self.late) dropped=\(self.dropped) over_ms=\(Int(self.overMs)) worst_ms=\(Int(self.worstMs)) rss=\(Self.footprintMB())MB \(counted, privacy: .public)")
         counts = [Int](repeating: 0, count: PerfCount.allCases.count)
         frames = 0
         late = 0

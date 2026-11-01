@@ -32,6 +32,7 @@ final class PerfBaselineUITests: XCTestCase {
     /// An Arbonites-shaped account: 60 more chats on the list and a 2 200-row rich group.
     private func environment(longGroup: Bool) -> [String: String] {
         var e = ["ARBOS_FIXTURE": "1", "ARBOS_PERF_FRAMES": "1", "ARBOS_FIXTURE_HOME_ROWS": "60"]
+        if let surface = env("ARBOS_PERF_SURFACE") { e["ARBOS_SURFACE"] = surface }
         if longGroup {
             e["ARBOS_FIXTURE_LONG_ROWS"] = longRows
             e["ARBOS_FIXTURE_LONG_RICH"] = "1"
@@ -168,9 +169,10 @@ final class PerfBaselineUITests: XCTestCase {
         }
     }
 
-    /// An agent answer streams into the open group, one word every 40 ms, while the
-    /// transcript sits on its newest row; then the same stream goes on with the chat closed.
-    /// The probe's per-second line counts home, chat and row bodies against tokens.
+    /// Idle in the long group, then (from 15 s after launch) an agent answer streams into it one
+    /// word every 40 ms: with the group open on its newest row, with only the chat list up, and
+    /// with another chat open. The probe's per-second line counts publishes and home, chat, row
+    /// and block bodies against tokens.
     func testStreamingAnswer() {
         let app = XCUIApplication()
         var e = environment(longGroup: true)
@@ -179,10 +181,14 @@ final class PerfBaselineUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(row(app, dm).waitForExistence(timeout: appear), "the chat list is up")
         open(app, group)
-        sleep(8)
-        phase("stream-pinned") { sleep(15) }
+        sleep(1)
+        phase("idle-in-chat") { sleep(6) }
+        sleep(10)
+        phase("stream-in-open-chat") { sleep(15) }
         leave(app, group)
         phase("stream-on-list") { sleep(10) }
+        open(app, dm)
+        phase("stream-in-other-chat") { sleep(12) }
     }
 
     /// One coordinate read per test: every `frame` query is an accessibility snapshot of the
