@@ -91,6 +91,12 @@ pub(crate) fn box_env(
     env.insert("ARBOS_RELAY_URL".into(), relay_url.to_owned());
     env.insert("ARBOS_BOX_TOKEN".into(), box_token.to_owned());
     env.insert("ARBOS_MCP_TOKEN".into(), mcp_token.to_owned());
+    // The public half of the key this relay signs relay addresses with. It is pinned here, in the
+    // environment of a root process started before any workspace user exists, because that is the
+    // one input into the box's choice of relay that no process inside the box can rewrite.
+    if let Some(vk) = crate::box_relay_url::verify_key_b64() {
+        env.insert(arbos_core::relay_url::VERIFY_KEY_ENV.into(), vk);
+    }
     env.insert("PI_TELEMETRY".into(), "0".into());
     env.insert("PI_SKIP_VERSION_CHECK".into(), "1".into());
     env.insert("PRIME_AGENT_TELEMETRY".into(), "0".into());
@@ -279,7 +285,7 @@ async fn create_box_row(
             if write_row {
                 state.db.upsert_box(&sb)?;
             }
-            push_relay_url(state, dt, &created.id).await;
+            push_relay_url(state, dt, &created.id, user_id).await;
             state.db.record_timing(
                 &timing_key(user_id),
                 "daytona_create_to_started_ms",
@@ -454,11 +460,9 @@ async fn start_process(
     sb.last_started_at = Some(now_ms());
     state.db.upsert_box(sb)?;
     // The relay URL file for a local box: same contract as Daytona, written straight to disk.
-    let _ = std::fs::create_dir_all(work.join(".arbos"));
-    let _ = std::fs::write(
-        work.join(".arbos").join("relay-url"),
-        format!("{}\n", state.cfg.public_url.trim_end_matches('/')),
-    );
+    let local_url = state.cfg.public_url.trim_end_matches('/').to_owned();
+    let signed = crate::box_relay_url::sign(&local_url, user_id, now_ms());
+    crate::box_relay_url::write_local(&work.join(".arbos"), &local_url, signed.as_ref());
     state
         .local_children
         .lock()
@@ -637,7 +641,7 @@ pub async fn start_box(state: &AppState, user_id: &str) -> Result<()> {
                 t0.elapsed().as_millis() as i64,
                 None,
             )?;
-            push_relay_url(state, dt, &id).await;
+            push_relay_url(state, dt, &id, user_id).await;
         }
         Provider::Process => {
             let (box_token, mcp_token) = tokens.ok_or_else(|| anyhow!("local tokens missing"))?;
@@ -803,23 +807,34 @@ pub fn load_local_tokens(state: &AppState, user_id: &str) -> Result<Option<(Stri
 /// exists), which agentd prefers over its env at boot. Written with `sudo` through the toolbox
 /// shell: the plain toolbox upload runs as the sandbox user and failed with "permission denied"
 /// both under the root-owned `/work` (D70) and against a root-written file in a sticky directory.
+///
+/// Because that shell is already root, nothing here needs to be writable by anyone else, and it
+/// must not be: a workspace runs as its own Unix user (D70), so a world-writable address — or one
+/// in a world-writable directory — lets any workspace redirect the root agentd that serves them
+/// all. The address is signed as well, so that the file is not the only thing standing between a
+/// local write and the box's choice of relay. [`crate::box_relay_url`] holds both.
 pub const RELAY_URL_FILE: &str = "/home/daytona/.arbos/relay-url";
 
-async fn push_relay_url(state: &AppState, dt: &crate::daytona::Daytona, sandbox_id: &str) {
+async fn push_relay_url(
+    state: &AppState,
+    dt: &crate::daytona::Daytona,
+    sandbox_id: &str,
+    user_id: &str,
+) {
     let url = state.cfg.public_url.trim_end_matches('/').to_owned();
-    // Written through a root shell rather than the toolbox upload: the upload runs as the
-    // sandbox user and cannot replace a file agentd (root) wrote. The file ends up owned by the
-    // sandbox user, world-readable, in a non-sticky directory, so either side can rewrite it.
-    let dir = std::path::Path::new(RELAY_URL_FILE)
-        .parent()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "/home/daytona/.arbos".to_owned());
-    let legacy_dir = "/work/.arbos";
-    let cmd = format!(
-        "sudo -n sh -c 'mkdir -p {dir} && printf \"%s\\n\" \"{url}\" > {file} && chown daytona:daytona {dir} {file} 2>/dev/null; chmod 0777 {dir}; chmod 0666 {file}; \
-         if [ -d {legacy_dir} ]; then printf \"%s\\n\" \"{url}\" > {legacy_dir}/relay-url 2>/dev/null && chmod 0666 {legacy_dir}/relay-url 2>/dev/null; fi; echo ok'",
-        file = RELAY_URL_FILE,
-    );
+    // Bound to the owning user, not to the sandbox: one box per user (D70), the relay puts
+    // `ARBOS_USER_ID` in the create environment, and agentd has it before it picks an address —
+    // whereas a sandbox id does not exist yet when that environment is built.
+    let signed = crate::box_relay_url::sign(&url, user_id, now_ms());
+    if signed.is_none() {
+        tracing::warn!(
+            sandbox_id,
+            %user_id,
+            "no {} set: the box cannot tell this address from any other that answers /healthz",
+            crate::box_relay_url::SIGNING_KEY_ENV
+        );
+    }
+    let cmd = crate::box_relay_url::push_command(RELAY_URL_FILE, "/work/.arbos", signed.as_ref());
     for attempt in 1..=4u32 {
         match dt.toolbox_exec(sandbox_id, &cmd, 30).await {
             Ok(out) if out.get("exitCode").and_then(Value::as_i64).unwrap_or(1) == 0 => {

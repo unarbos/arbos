@@ -9,6 +9,7 @@ mod auth;
 mod avatar;
 mod avatar_image;
 mod blobs;
+mod box_relay_url;
 #[cfg(test)]
 mod box_row_tests;
 mod boxes;
@@ -246,6 +247,10 @@ async fn main() -> anyhow::Result<()> {
     {
         anyhow::bail!("ARBOS_AUTH_MODE=github needs ARBOS_GITHUB_CLIENT_ID and ARBOS_GITHUB_CLIENT_SECRET (or the ARBOS_GITHUB_OAUTH_CLIENT_* names)");
     }
+
+    // A signing key that is set but unusable must not read as "signing is off": absence is a
+    // configuration, a typo is a mistake, and a box cannot tell the two apart from the outside.
+    box_relay_url::check_env_key()?;
 
     let cfg = Config {
         public_url,
