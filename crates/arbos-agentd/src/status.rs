@@ -2310,7 +2310,9 @@ pub(crate) mod tests {
                 },
             )
             .await;
-        agent.hook_turn_without_route(chat, true).await;
+        agent
+            .hook_turn_without_route(chat, true, crate::mcp::SessionRole::Main)
+            .await;
         // Correction: `route reply` streamed as arguments and then run.
         agent
             .test_fold(

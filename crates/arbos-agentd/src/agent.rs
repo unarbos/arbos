@@ -7088,8 +7088,13 @@ impl Agent {
     /// not continue (`corrected=false`), record the turn as `reply` so any prose already
     /// streamed is a normal answer (arbos-pi-ext route guard). An empty miss is retried once
     /// via `empty_turn_retry_reason` after the run returns.
-    pub async fn hook_turn_without_route(&self, session_id: &str, corrected: bool) {
-        tracing::warn!(session = %session_id, corrected, "turn ended without a route call");
+    pub async fn hook_turn_without_route(
+        &self,
+        session_id: &str,
+        corrected: bool,
+        role: crate::mcp::SessionRole,
+    ) {
+        tracing::warn!(session = %session_id, corrected, ?role, "turn ended without a route call");
         let _ = self.store.t3_append(
             session_id,
             None,
@@ -7099,6 +7104,10 @@ impl Agent {
             &format!("turn without route; corrective continuation={corrected}"),
             None,
         );
+        // Every session's turn end is logged above; only the main session's decides the turn.
+        if role != crate::mcp::SessionRole::Main {
+            return;
+        }
         let mut tl = self.turn.lock().await;
         let Some(t) = tl.as_mut() else {
             return;

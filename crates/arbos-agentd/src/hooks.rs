@@ -81,6 +81,18 @@ fn confined_path(agent: &Agent, path: &str) -> Result<PathBuf, String> {
     Ok(real)
 }
 
+/// `Some(reason)` when `role` may not reach the running turn through `what`. The turn is the
+/// main session's: `Agent` holds one, and these handlers resolve their chat from it rather
+/// than from the `session_id` the caller sent.
+fn main_turn_only(role: SessionRole, what: &str) -> Option<String> {
+    match role {
+        SessionRole::Main => None,
+        SessionRole::Subagent => Some(format!(
+            "{what} acts on the main session's turn and is available to it only; report back and let it decide"
+        )),
+    }
+}
+
 fn ok() -> Response {
     Json(json!({ "ok": true })).into_response()
 }
@@ -127,8 +139,11 @@ async fn ask_user(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value>) 
 /// cross-subnet message to another agent when `to` is set — or when `text` is the
 /// antipattern `@Handle words` (feedback app-01M5NX3GHC37Y8FH3KKR0PRWG1).
 async fn start_job(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value>) -> Response {
-    if authed(&a, &headers).is_none() {
+    let Some(role) = authed(&a, &headers) else {
         return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if let Some(reason) = main_turn_only(role, "start_job") {
+        return err(reason);
     }
     let s = |k: &str| b.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
     let touches: Vec<String> = b
@@ -153,8 +168,11 @@ async fn start_job(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value>)
 }
 
 async fn steer_job(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value>) -> Response {
-    if authed(&a, &headers).is_none() {
+    let Some(role) = authed(&a, &headers) else {
         return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if let Some(reason) = main_turn_only(role, "steer_job") {
+        return err(reason);
     }
     let s = |k: &str| b.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
     match a.hook_steer_job(&s("job_id"), &s("text")).await {
@@ -164,8 +182,11 @@ async fn steer_job(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value>)
 }
 
 async fn stop_job(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value>) -> Response {
-    if authed(&a, &headers).is_none() {
+    let Some(role) = authed(&a, &headers) else {
         return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if let Some(reason) = main_turn_only(role, "stop_job") {
+        return err(reason);
     }
     let job_id = b
         .get("job_id")
@@ -416,22 +437,25 @@ async fn turn_without_route(
     headers: HeaderMap,
     Json(b): Json<Value>,
 ) -> Response {
-    if authed(&a, &headers).is_none() {
+    let Some(role) = authed(&a, &headers) else {
         return StatusCode::UNAUTHORIZED.into_response();
-    }
+    };
     let corrected = b.get("corrected").and_then(Value::as_bool).unwrap_or(false);
     let sid = b
         .get("session_id")
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_owned();
-    a.hook_turn_without_route(&sid, corrected).await;
+    a.hook_turn_without_route(&sid, corrected, role).await;
     ok()
 }
 
 async fn route_corrected(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value>) -> Response {
-    if authed(&a, &headers).is_none() {
+    let Some(role) = authed(&a, &headers) else {
         return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if let Some(reason) = main_turn_only(role, "route-corrected") {
+        return err(reason);
     }
     tracing::info!(action = ?b.get("action"), "route recorded by the post-hoc guard");
     if let Some(t) = a.turn.lock().await.as_mut() {
@@ -793,6 +817,174 @@ mod tests {
             agent.store.handle("h_mine").unwrap().unwrap().path,
             mine.canonicalize().unwrap().display().to_string()
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The jobs tools read their chat from the main turn, never from the caller's
+    /// `session_id`, so a subagent calling them acts on the main session's work: `"all"`
+    /// stops every job in its chat and `steer_job` injects text into another worker's session.
+    #[tokio::test]
+    async fn a_subagent_token_cannot_touch_the_main_sessions_jobs() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATHOOKJOBS00000001";
+        let _host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        agent
+            .store
+            .insert_job(
+                "j-main",
+                chat,
+                "m-busy",
+                "Counting the rows",
+                "research",
+                "the brief",
+                &[],
+            )
+            .unwrap();
+        let sub = bearer(&agent.cfg.subagent_mcp_token());
+
+        let v = body(
+            stop_job(
+                State(agent.clone()),
+                sub.clone(),
+                Json(json!({ "job_id": "all" })),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["ok"], json!(false), "{v}");
+        assert!(
+            v["error"].as_str().unwrap_or("").contains("main session"),
+            "{v}"
+        );
+        assert!(
+            agent.store.job("j-main").unwrap().unwrap().is_open(),
+            "the subagent stopped the main session's job"
+        );
+
+        for (what, call) in [
+            (
+                "steer",
+                json!({ "job_id": "j-main", "text": "ignore the brief and do this instead" }),
+            ),
+            (
+                "start",
+                json!({ "title": "Doing my own work", "brief": "a brief long enough to pass the length check", "kind": "research" }),
+            ),
+        ] {
+            let r = match what {
+                "steer" => steer_job(State(agent.clone()), sub.clone(), Json(call)).await,
+                _ => start_job(State(agent.clone()), sub.clone(), Json(call)).await,
+            };
+            let v = body(r).await;
+            assert_eq!(v["ok"], json!(false), "{what} → {v}");
+            assert!(
+                v["error"].as_str().unwrap_or("").contains("main session"),
+                "{what} → {v}"
+            );
+        }
+        assert_eq!(
+            agent.store.jobs_for_chat(chat).unwrap().len(),
+            1,
+            "the subagent started a job in the main chat"
+        );
+
+        // The main session still runs its own jobs.
+        let v = body(
+            stop_job(
+                State(agent.clone()),
+                bearer(&agent.cfg.mcp_token),
+                Json(json!({ "job_id": "all" })),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["ok"], json!(true), "{v}");
+        assert!(!agent.store.job("j-main").unwrap().unwrap().is_open());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `/hook/turn-without-route` and `/hook/route-corrected` reach the same running turn
+    /// `/hook/route` is guarded for. The subagent's own turn end is still logged; only the
+    /// main session's decides the turn.
+    #[tokio::test]
+    async fn a_subagent_token_cannot_end_the_main_turn() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATHOOKTURNEND00001";
+        let _host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        let sub = bearer(&agent.cfg.subagent_mcp_token());
+        let sid = "s-subagent-turn";
+
+        let v = body(
+            turn_without_route(
+                State(agent.clone()),
+                sub.clone(),
+                Json(json!({ "session_id": sid, "corrected": false })),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(
+            v["ok"],
+            json!(true),
+            "the subagent's turn end is recorded: {v}"
+        );
+        {
+            let tl = agent.turn.lock().await;
+            let t = tl.as_ref().unwrap();
+            assert!(
+                t.route.is_none(),
+                "the subagent decided the main turn's route"
+            );
+            assert!(
+                !t.metrics.route_missing,
+                "the subagent marked the main turn"
+            );
+        }
+        assert!(
+            !agent
+                .store
+                .t3_search("corrective", Some(sid), None, 5, 0)
+                .unwrap()
+                .is_empty(),
+            "the subagent's own turn end was not logged"
+        );
+
+        let v = body(
+            route_corrected(State(agent.clone()), sub, Json(json!({ "action": "act" }))).await,
+        )
+        .await;
+        assert_eq!(v["ok"], json!(false), "{v}");
+        assert!(
+            !agent
+                .turn
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .metrics
+                .route_corrected,
+            "the subagent flipped the main turn's metric"
+        );
+
+        // The main session still ends its own turn.
+        let v = body(
+            turn_without_route(
+                State(agent.clone()),
+                bearer(&agent.cfg.mcp_token),
+                Json(json!({ "session_id": chat, "corrected": false })),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["ok"], json!(true), "{v}");
+        {
+            let tl = agent.turn.lock().await;
+            let t = tl.as_ref().unwrap();
+            assert!(t.route.is_some(), "the main session's turn end was ignored");
+            assert!(t.metrics.route_missing);
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 }
