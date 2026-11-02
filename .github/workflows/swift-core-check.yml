@@ -38,36 +38,198 @@ permissions:
   contents: read
 
 concurrency:
-  group: swift-core-check-${{ github.ref }}
+  # Not `swift-core-check-<ref>`: runs made from older copies of this file still wait for macos-15 in that
+  # group, and a pending run behind them is cancelled by the next one, so main's runs here never start.
+  group: swift-core-check-v2-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  # Where the macOS check runs, and whether this run runs it at all.
+  #   mode=check   push runs, and pull requests from forks (they have no push run here).
+  #   mode=mirror  pull requests from this repo's branches: the push run is the same commit, so this run
+  #                reports the push run's verdict and runs the check itself only when that run has none.
+  # runner: the self-hosted EC2 Mac (`arbos-mac`) for main/arbos-v2 and for branches with an open pull
+  # request; GitHub's macos-15 pool for forks, for feedback/** and gate/** (tester-pipeline code reaches
+  # the Mac only through the gate, after its screen; the runner account holds the signing keychains),
+  # and for branches nobody has opened a pull request for. The EC2 Mac is one runner shared with the
+  # TestFlight and Mac release jobs, so it takes only the runs someone reads.
+  route:
+    name: route
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      mode: ${{ steps.route.outputs.mode }}
+      runner: ${{ steps.route.outputs.runner }}
+    steps:
+      - id: route
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BRANCH: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+          mode=check
+          if [[ "$EVENT" == pull_request && "$HEAD_REPO" != "$GITHUB_REPOSITORY" ]]; then
+            runner=macos-15
+          else
+            [[ "$EVENT" == pull_request ]] && mode=mirror
+            case "$BRANCH" in
+              main|arbos-v2) runner=arbos-mac ;;
+              feedback/*|gate/*) runner=macos-15 ;;
+              *)
+                if [[ "$mode" == mirror ]]; then
+                  runner=arbos-mac
+                else
+                  # Agents push, then open the pull request seconds later.
+                  sleep 60
+                  open=$(gh api "repos/$GITHUB_REPOSITORY/pulls?state=open&head=$GITHUB_REPOSITORY_OWNER:$BRANCH" -q length 2>/dev/null || echo 0)
+                  if [[ "${open:-0}" -gt 0 ]]; then runner=arbos-mac; else runner=macos-15; fi
+                fi ;;
+            esac
+          fi
+          echo "mode=$mode runner=$runner ($EVENT, $BRANCH)" | tee -a "$GITHUB_STEP_SUMMARY"
+          { echo "mode=$mode"; echo "runner=$runner"; } >> "$GITHUB_OUTPUT"
+
+  push-run:
+    name: push-run verdict for this head
+    needs: route
+    if: needs.route.outputs.mode == 'mirror'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 345
+    permissions:
+      actions: read
+    outputs:
+      verdict: ${{ steps.wait.outputs.verdict }}
+    steps:
+      - id: wait
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          BRANCH: ${{ github.head_ref }}
+          JOB: build-xcframework + fastlane test
+        # The step runs under `bash -e`, and `read` returns 1 on empty input (no run yet, or a run whose check
+        # job does not exist yet), so every read and lookup carries `|| true`: the loop decides, not -e.
+        run: |
+          set -uo pipefail
+          start=$(date +%s)
+          verdict=late; why="the push run started but had no verdict after 330 min"
+          while (( $(date +%s) - start < 330 * 60 )); do
+            read -r id status created < <(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/swift-core-check.yml/runs?event=push&branch=$BRANCH&head_sha=$SHA&per_page=20" \
+              -q '[.workflow_runs[]] | sort_by(.created_at) | last | "\(.id // "") \(.status // "") \(.created_at // "")"' 2>/dev/null) || true
+            if [[ -z "${id:-}" ]]; then
+              if (( $(date +%s) - start > 10 * 60 )); then verdict=none; why="no push run for $SHA"; break; fi
+              sleep 30; continue
+            fi
+            if [[ "$status" != completed ]]; then
+              # A push run waiting for GitHub's macOS pool counts as no verdict after 15 min: on 2026-10-29/31
+              # only 6% of hosted jobs here started within 15 min and the median wait was 209 min. One queued
+              # for the EC2 Mac is waited for: a second run would queue behind it on the same runner.
+              read -r jstatus jcreated jlabels < <(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs" \
+                -q ".jobs[] | select(.name == \"$JOB\") | \"\(.status) \(.created_at) \(.labels | join(\",\"))\"" 2>/dev/null | head -1) || true
+              if [[ "${jstatus:-}" != in_progress && "${jlabels:-}" != *arbos-mac* ]] &&
+                 (( $(date +%s) - $(date -d "${jcreated:-$created}" +%s) > 15 * 60 )); then
+                verdict=none; why="push run $id has had no runner since ${jcreated:-$created}"; break
+              fi
+              sleep 60; continue
+            fi
+            conclusion=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs" -q ".jobs[] | select(.name == \"$JOB\") | .conclusion" 2>/dev/null | head -1) || true
+            case "$conclusion" in
+              success) verdict=success; why="push run $id passed" ;;
+              failure) verdict=failure; why="push run $id failed" ;;
+              *) verdict=none; why="push run $id ended without a verdict (${conclusion:-no check job})" ;;
+            esac
+            break
+          done
+          echo "$SHA: $why — $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/${id:-}" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
+          case "$verdict" in
+            failure) echo "::error title=Swift core check failed::$why"; exit 1 ;;
+            late) echo "::error title=No Swift verdict yet::$why; re-run this job once it finishes"; exit 1 ;;
+            none) echo "::notice title=No Swift verdict from the push run::$why; this run runs the check itself" ;;
+          esac
+
   check:
     name: build-xcframework + fastlane test
-    # A branch in this repo already gets the push run; its pull_request run is the same commit again on
-    # GitHub's macOS pool, which allows this repo five jobs at once (2026-10-30: 33 queued, ~4 h wait).
-    # Pull requests from forks have no push run here, so they keep theirs.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
-    runs-on: macos-15
+    needs: [route, push-run]
+    if: >-
+      !cancelled() && needs.route.result == 'success' &&
+      (needs.route.outputs.mode == 'check' || needs.push-run.outputs.verdict == 'none')
+    runs-on: ${{ needs.route.outputs.runner }}
     # 46-63 min measured on identical content, the spread being runner draw not diff. The old 60
     # killed runs mid-bundle, which is no verdict rather than a red one; this change took 63.4.
-    timeout-minutes: 90
+    # The EC2 Mac's extra 50 min: the heavy-job slot wait (bounded at 45 min below) comes out of this.
+    timeout-minutes: ${{ needs.route.outputs.runner == 'arbos-mac' && 140 || 90 }}
     env:
       APP_DIR: apps/ios/Arbos
+      TEST_SIM: iPhone 17
     steps:
       - uses: actions/checkout@v4
+      # Heavy-job cap on the shared EC2 Mac (#1839). This job is a "rig" to arbos-heavy-slot.sh: it is
+      # refused (exit 75) while a release holds a slot, so it asks again rather than run uncapped.
+      - name: Heavy-job slot
+        id: slot
+        if: runner.environment == 'self-hosted'
+        timeout-minutes: 45
+        run: |
+          set -uo pipefail
+          xcrun simctl list devices booted 2>/dev/null | grep -oE '[0-9A-F-]{36}' | sort -u > "$RUNNER_TEMP/sims-before.txt" || true
+          heavy=/usr/local/bin/arbos-heavy-slot.sh
+          if [[ ! -x "$heavy" ]]; then echo "slot=none" >> "$GITHUB_OUTPUT"; exit 0; fi
+          # Not an array: the Mac's /bin/bash is 3.2, where an empty "${a[@]}" fails under set -u.
+          acquire() { "$heavy" acquire swift-check --pid "$PPID"; }
+          usage=$("$heavy" 2>&1 || true)
+          case "$usage" in *--wait-max*) acquire() { "$heavy" acquire swift-check --pid "$PPID" --wait-max 600; } ;; esac
+          while :; do
+            rc=0
+            slot=$(acquire) || rc=$?
+            if [[ "$rc" -eq 0 && -n "$slot" ]]; then break; fi
+            if [[ "$rc" -ne 0 && "$rc" -ne 75 ]]; then echo "::error title=Heavy-job slot::acquire exited $rc"; exit 1; fi
+            echo "$(date -u +%H:%M:%SZ) no slot (exit $rc); asking again in 60 s"
+            sleep 60
+          done
+          echo "slot=$slot" | tee -a "$GITHUB_OUTPUT"
       - name: Swift package cache
         uses: actions/cache@v4
         with:
           path: apps/ios/Arbos/build/spm
           key: spm-${{ runner.os }}-${{ hashFiles('apps/ios/Arbos/Arbos.xcodeproj/project.pbxproj', 'apps/ios/Arbos/Arbos.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved', 'packages/ArbosFFI/Package.swift') }}
           restore-keys: spm-${{ runner.os }}-
+      # The EC2 Mac's fastlane is a user gem of the runner account (see ios.yml).
+      - name: fastlane on PATH (self-hosted)
+        if: runner.environment == 'self-hosted'
+        run: |
+          set -euo pipefail
+          for d in /opt/homebrew/opt/ruby/bin "$HOME"/.local/share/gem/ruby/*/bin "$HOME"/.gem/ruby/*/bin; do
+            [[ -d "$d" ]] && echo "$d" >> "$GITHUB_PATH"
+          done
+          gem_bins="$(echo "$HOME"/.local/share/gem/ruby/*/bin "$HOME"/.gem/ruby/*/bin | tr ' ' ':')"
+          export PATH="/opt/homebrew/opt/ruby/bin:$gem_bins:$PATH"
+          command -v fastlane >/dev/null || { echo "::error title=fastlane missing::install it for $(whoami): gem install --user-install fastlane"; exit 1; }
+          { echo "LANG=en_US.UTF-8"; echo "LC_ALL=en_US.UTF-8"; } >> "$GITHUB_ENV"
+          fastlane --version | tail -1
       - name: Select Xcode
         run: |
           set -euo pipefail
           newest="$(find /Applications -maxdepth 1 -name 'Xcode_*.app' | sort -V | tail -1)"
           if [[ -n "$newest" ]]; then sudo xcode-select -s "$newest"; fi
           xcodebuild -version
+      # The Fastfile tests on a simulator named "iPhone 17". Devices belong to one user, and the runner
+      # account may have none: create it on the newest iOS runtime, in this account only.
+      - name: Test simulator (self-hosted)
+        if: runner.environment == 'self-hosted'
+        run: |
+          set -euo pipefail
+          if ! xcrun simctl list devices available | grep -qF "$TEST_SIM ("; then
+            runtime=$(xcrun simctl list runtimes available | grep -oE 'com\.apple\.CoreSimulator\.SimRuntime\.iOS-[0-9-]+' | sort -V | tail -1)
+            [[ -n "$runtime" ]] || { echo "::error title=No iOS runtime::xcrun simctl lists no available iOS runtime"; exit 1; }
+            udid=$(xcrun simctl create "$TEST_SIM" "com.apple.CoreSimulator.SimDeviceType.${TEST_SIM// /-}" "$runtime")
+            echo "created $TEST_SIM $udid on $runtime"
+          fi
+          xcrun simctl list devices available | grep -F "$TEST_SIM (" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Rust toolchain
         run: |
           set -euo pipefail
@@ -79,6 +241,8 @@ jobs:
           rustup show active-toolchain || rustup toolchain install
           rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
       - uses: Swatinem/rust-cache@v2
+        # Saving the cache cost minutes on the self-hosted Mac (#1233).
+        if: runner.environment != 'self-hosted'
         with:
           key: swift-core-check
           cache-on-failure: true
@@ -103,3 +267,34 @@ jobs:
           path: apps/ios/Arbos/build/xcodebuild-*.log
           if-no-files-found: ignore
           retention-days: 14
+      - name: Release the heavy-job slot
+        if: always() && runner.environment == 'self-hosted' && steps.slot.outputs.slot != ''
+        run: |
+          [[ "${{ steps.slot.outputs.slot }}" == none ]] || /usr/local/bin/arbos-heavy-slot.sh release "${{ steps.slot.outputs.slot }}" || true
+          for u in $(xcrun simctl list devices booted 2>/dev/null | grep -oE '[0-9A-F-]{36}' | sort -u); do
+            grep -qx "$u" "$RUNNER_TEMP/sims-before.txt" 2>/dev/null || xcrun simctl shutdown "$u" >/dev/null 2>&1 || true
+          done
+
+  # The one result to read. Skipped and cancelled are not failures to GitHub, so without this a commit
+  # whose check never ran reads green.
+  verdict:
+    name: Swift verdict
+    needs: [route, push-run, check]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - env:
+          MODE: ${{ needs.route.outputs.mode }}
+          TWIN: ${{ needs.push-run.outputs.verdict }}
+          CHECK: ${{ needs.check.result }}
+        run: |
+          if [[ "$CHECK" == success ]]; then echo "the check passed in this run"; exit 0; fi
+          if [[ "$MODE" == mirror && "$TWIN" == success ]]; then echo "the push run for this head passed"; exit 0; fi
+          case "$MODE/$TWIN/$CHECK" in
+            mirror/failure/*) why="the push run for this head failed" ;;
+            mirror/late/*) why="the push run for this head has no verdict yet; re-run this workflow's failed jobs once it finishes" ;;
+            *) why="the check did not pass (result: ${CHECK:-none}, mode: ${MODE:-unrouted})" ;;
+          esac
+          echo "::error title=No passing Swift verdict::$why"
+          exit 1
