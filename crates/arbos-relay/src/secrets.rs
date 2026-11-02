@@ -717,22 +717,201 @@ impl Refusal {
     }
 }
 
-/// May `asked_by` ask for `s` in `chat_id`? The owner always may. Anyone else needs a People
-/// row that is on and whose scope covers the chat. `None` means no other person is asking
-/// (owner 1:1 chat, or asker unknown) — allowed.
+/// What the box offered about who is directing a turn, beyond the account it named.
+///
+/// `asked_by` on its own is a claim and not evidence: the box reads it out of the chat document,
+/// and every member of a chat can write that document. These are what the relay checks it
+/// against.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct TurnAuthor<'a> {
+    /// The row the turn answers. [`Db::message_author`] is keyed on it, so without one the relay
+    /// has nothing to look up — a box too old to send it (see [`directing`]).
+    pub message_id: Option<&'a str>,
+    /// The owner's authority here does not rest on a chat document at all: the box wrote the row
+    /// itself (a routine, a voice line, a bound channel's message), or the owner already answered
+    /// a card for this exact request. A row the box wrote itself is a box assertion, not a
+    /// document claim, and the box is an authenticated principal the relay trusts for everything
+    /// else — so trusting it there is sound precisely where trusting a document field is not.
+    pub not_from_document: bool,
+}
+
+impl<'a> TurnAuthor<'a> {
+    /// What a box offered in its request body.
+    pub(crate) fn offered(message_id: Option<&'a str>, own_work: bool) -> Self {
+        Self {
+            message_id: message_id.map(str::trim).filter(|m| !m.is_empty()),
+            not_from_document: own_work,
+        }
+    }
+
+    /// A use whose authority comes from the owner answering a card for this exact request, so
+    /// there is no document claim left to check.
+    pub(crate) fn card_already_answered() -> Self {
+        Self {
+            message_id: None,
+            not_from_document: true,
+        }
+    }
+}
+
+/// Who the relay can establish is directing a turn, which is not always who the box named.
+enum Directing {
+    /// The owner, whose own secrets are theirs to direct.
+    Owner,
+    /// A named person the author record attests to. They need a People row like anyone else —
+    /// and naming them is stronger than refusing, because the refusal then rests on who they
+    /// are rather than on the relay declining to be fooled.
+    Person(String),
+    /// A claim on the owner's authority that nothing supports, in a room where somebody other
+    /// than the owner could have written the row.
+    Unproven,
+}
+
+/// Resolve who is directing a turn, preferring the attested author record over the box's claim.
+///
+/// The record is written from the authenticated principal that pushed the row
+/// (`push_guard::check_push`), so a guest who writes somebody else's id into `sender` is recorded
+/// under their own name and lands in [`Directing::Person`] as themselves — refused by name on the
+/// People list rather than by absence.
+///
+/// The claim is checked whoever it names, not only when it names the owner. A guest who writes
+/// the id of a person the owner *has* listed would otherwise inherit that person's row, which is
+/// the same defect one step down.
+fn directing(
+    state: &AppState,
+    s: &Secret,
+    project_id: &str,
+    chat_id: Option<&str>,
+    asked_by: Option<&str>,
+    author: TurnAuthor<'_>,
+) -> Directing {
+    if author.not_from_document {
+        return claimed(s, asked_by);
+    }
+    let (Some(chat), Some(message_id)) = (chat_id, author.message_id) else {
+        // A box too old to name the row it is answering. Field presence is a function of box
+        // version, and the attacker writes document rows rather than the box's request body, so
+        // this is not a case they can reach — and refusing it would take owners' own secrets away
+        // from them on a *use* path until every box had rolled forward.
+        //
+        // Temporary, and deliberately observable so we can tell when it is dead: see
+        // `note_unattributable`.
+        note_unattributable(state, s, project_id, "no_message_id", shared(state, project_id));
+        return claimed(s, asked_by);
+    };
+    match state.db.message_author(chat, message_id).ok().flatten() {
+        Some(a) if a == format!("user:{}", s.user_id) => Directing::Owner,
+        // The record carries its prefix attached. `user:<someone else>` is the real asker.
+        Some(a) => match a.strip_prefix("user:") {
+            Some(uid) => Directing::Person(uid.to_owned()),
+            // `agent:<project>`: a row the box wrote under one of its owner's agents. An agent
+            // is not a human directing a turn, so it carries nobody's authority.
+            None => Directing::Unproven,
+        },
+        // `None` means two different things, and only `chat_has_authors` tells them apart: in a
+        // chat the relay has attested something in, the relay never saw *this* message
+        // announced; in a chat it has attested nothing in, the record does not reach the chat at
+        // all and its silence is evidence about nothing.
+        //
+        // Both refuse here, and the reason they land together is particular to this caller: the
+        // row in question is always the row driving the *current* turn, which is new, so an
+        // unreachable record means a client that does not announce rather than genuine history.
+        // Allowing the unreachable branch would also hand the attacker the bypass, since they
+        // pick the chat and any long-idle one has no attestations.
+        None => {
+            let reason = if state.db.chat_has_authors(chat).unwrap_or(false) {
+                "message_not_announced"
+            } else {
+                "record_does_not_reach_chat"
+            };
+            let shared = shared(state, project_id);
+            note_unattributable(state, s, project_id, reason, shared);
+            // Where nobody but the owner could have written the row, the claim still stands.
+            if shared {
+                Directing::Unproven
+            } else {
+                claimed(s, asked_by)
+            }
+        }
+    }
+}
+
+/// The box's claim, taken at face value. Only reached where the relay has established that it
+/// cannot be checked *and* that nobody but the owner could have written the row.
+fn claimed(s: &Secret, asked_by: Option<&str>) -> Directing {
+    match asked_by {
+        None => Directing::Owner,
+        Some(uid) if uid == s.user_id => Directing::Owner,
+        Some(uid) => Directing::Person(uid.to_owned()),
+    }
+}
+
+/// Could anybody other than the owner have written a row in this project's rooms? Ever a guest,
+/// not a guest right now: a departure does not make a room's history the owner's.
+fn shared(state: &AppState, project_id: &str) -> bool {
+    state
+        .db
+        .project_ever_had_member(project_id)
+        .unwrap_or(true)
+}
+
+/// A claim to be directing a turn that the relay could not check, recorded so that neither the
+/// fallback nor the refusals become a permanent silent weakening nobody revisits.
+///
+/// One `tracing::warn!` every time for operations, and an audit row only where the project has
+/// ever had a guest — which is where it matters, and which keeps a box too old to send a message
+/// id from writing a row per use in projects where the question cannot arise.
+fn note_unattributable(
+    state: &AppState,
+    s: &Secret,
+    project_id: &str,
+    reason: &'static str,
+    shared: bool,
+) {
+    tracing::warn!(
+        secret = %s.id,
+        project = %project_id,
+        reason,
+        shared,
+        "secrets: a claim to direct this turn could not be checked against the author record"
+    );
+    if shared {
+        audit(
+            state,
+            &s.user_id,
+            AuditEntry {
+                project_id: Some(project_id.to_owned()),
+                detail: json!({ "reason": reason }),
+                ..entry("claim_unattributable", s, "relay")
+            },
+        );
+    }
+}
+
+/// May the person directing this turn ask for `s` in `chat_id`? The owner always may. Anyone
+/// else needs a People row that is on and whose scope covers the chat.
+///
+/// Who is directing is not taken from `asked_by` alone. The claim is checked against the
+/// attested author record ([`directing`]), because `asked_by` reaches the relay from a chat
+/// document field that any member of the chat can write — so a guest who writes the owner's id
+/// into it would otherwise inherit the owner's authority over every secret the project can
+/// reach, and one who writes a listed person's id would inherit that person's row.
 pub(crate) fn may_direct(
     state: &AppState,
     s: &Secret,
+    project_id: &str,
     asked_by: Option<&str>,
     chat_id: Option<&str>,
+    author: TurnAuthor<'_>,
 ) -> bool {
-    match asked_by.map(str::trim).filter(|u| !u.is_empty()) {
-        None => true,
-        Some(uid) if uid == s.user_id => true,
-        Some(uid) => state
+    let asked_by = asked_by.map(str::trim).filter(|u| !u.is_empty());
+    match directing(state, s, project_id, chat_id, asked_by, author) {
+        Directing::Owner => true,
+        Directing::Person(uid) => state
             .db
-            .is_secret_director(&s.id, uid, chat_id)
+            .is_secret_director(&s.id, &uid, chat_id)
             .unwrap_or(false),
+        Directing::Unproven => false,
     }
 }
 
@@ -755,8 +934,10 @@ pub struct Allowed {
 }
 
 /// Check one use of `s` by `project_id` at `host` in `chat_id`. `use_kind` is `header | env |
-/// browser_fill`. `asked_by` is the human directing this turn (`None` = owner / unknown).
-/// Pure except for the lookups (access, allowed_once, directors).
+/// browser_fill`. `asked_by` is the human directing this turn (`None` = owner / unknown), and
+/// `author` is what the relay can check that claim against ([`TurnAuthor`]).
+/// Pure except for the lookups (access, allowed_once, directors, author record).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn decide_use(
     state: &AppState,
     s: &Secret,
@@ -765,6 +946,7 @@ pub(crate) fn decide_use(
     use_kind: &str,
     chat_id: Option<&str>,
     asked_by: Option<&str>,
+    author: TurnAuthor<'_>,
 ) -> Result<Allowed, Refusal> {
     if s.expires_at.is_some_and(|t| t < now_ms()) {
         return Err(Refusal::Expired);
@@ -786,7 +968,7 @@ pub(crate) fn decide_use(
             pin_host: false,
         });
     }
-    if !may_direct(state, s, asked_by, chat_id) {
+    if !may_direct(state, s, project_id, asked_by, chat_id, author) {
         return Err(not_listed(s));
     }
     let Some(a) = access else {
@@ -2821,6 +3003,14 @@ pub struct BoxRequestBody {
     /// Human directing this turn (`user_id`). Absent = owner / unknown.
     #[serde(default, alias = "askedBy")]
     pub asked_by: Option<String>,
+    /// The chat row `asked_by` was read out of, so the relay can check the claim against the
+    /// attested author of that row instead of believing it ([`TurnAuthor::message_id`]).
+    #[serde(default, alias = "askedByMessageId")]
+    pub asked_by_message_id: Option<String>,
+    /// The box asserting that this turn came from its own work and not from a chat document at
+    /// all ([`TurnAuthor::not_from_document`]).
+    #[serde(default, alias = "askedByOwnWork")]
+    pub asked_by_own_work: bool,
 }
 
 /// `POST /box/secrets/request` → 201 `{ request }` (a card is needed) or 200
@@ -2903,8 +3093,9 @@ pub async fn box_request(
         .as_deref()
         .map(str::trim)
         .filter(|u| !u.is_empty());
+    let author = TurnAuthor::offered(b.asked_by_message_id.as_deref(), b.asked_by_own_work);
     // A person who is not on the People list: refuse flat (default), or card the owner.
-    if !may_direct(&state, &s, asked_by, chat_id) && s.others_ask != "card" {
+    if !may_direct(&state, &s, &project_id, asked_by, chat_id, author) && s.others_ask != "card" {
         let why = Refusal::NotDirector;
         audit_refusal(
             &state,
@@ -2933,6 +3124,7 @@ pub async fn box_request(
             &use_kind,
             chat_id,
             asked_by,
+            author,
         ) {
             if allowed.once.is_none() {
                 if let Some(a) = &allowed.access {
@@ -3141,6 +3333,7 @@ pub async fn box_request_values(
         "browser_fill",
         Some(rq.chat_id.as_str()),
         None,
+        TurnAuthor::card_already_answered(),
     ) {
         Ok(a) => a,
         Err(
@@ -3203,7 +3396,9 @@ pub(crate) struct EgressPlan {
 }
 
 /// Decide every placeholder in `texts` for `project_id` at `host`. Values are decrypted only
-/// for secrets the rule allows. `asked_by` is the human directing this turn.
+/// for secrets the rule allows. `asked_by` is the human directing this turn, and `author` is
+/// what that claim is checked against ([`TurnAuthor`]).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn plan_egress(
     state: &AppState,
     user_id: &str,
@@ -3211,6 +3406,7 @@ pub(crate) fn plan_egress(
     host: &str,
     chat_id: Option<&str>,
     asked_by: Option<&str>,
+    author: TurnAuthor<'_>,
     texts: &[&str],
 ) -> Result<EgressPlan, ApiErr> {
     let mut plan = EgressPlan {
@@ -3247,7 +3443,16 @@ pub(crate) fn plan_egress(
                 );
                 continue;
             };
-            match decide_use(state, &s, project_id, host, "header", chat_id, asked_by) {
+            match decide_use(
+                state,
+                &s,
+                project_id,
+                host,
+                "header",
+                chat_id,
+                asked_by,
+                author,
+            ) {
                 Ok(allowed) => {
                     if dek.is_none() {
                         dek = Some(user_dek(state, user_id).map_err(internal)?);
@@ -4147,6 +4352,15 @@ mod tests {
     }
 
     fn verdict(state: &AppState, s: &Secret, asked_by: Option<&str>) -> Result<(), String> {
+        verdict_with(state, s, asked_by, TurnAuthor::default())
+    }
+
+    fn verdict_with(
+        state: &AppState,
+        s: &Secret,
+        asked_by: Option<&str>,
+        author: TurnAuthor<'_>,
+    ) -> Result<(), String> {
         decide_use(
             state,
             s,
@@ -4155,6 +4369,7 @@ mod tests {
             "header",
             Some("chat_arbonites"),
             asked_by,
+            author,
         )
         .map(|_| ())
         .map_err(|r| r.kind().to_owned())
@@ -4229,6 +4444,7 @@ mod tests {
             "header",
             Some("chat_arbonites"),
             Some(&sam),
+            TurnAuthor::default(),
         )
         .unwrap();
         after_use(
@@ -4417,6 +4633,7 @@ mod tests {
             "header",
             Some("chat_arbonites"),
             Some(&jules),
+            TurnAuthor::default(),
         )
         .unwrap();
         assert!(jules_ok.once.is_some());
@@ -4428,9 +4645,165 @@ mod tests {
             "header",
             Some("chat_arbonites"),
             None,
+            TurnAuthor::default(),
         )
         .unwrap();
         assert!(owner_use.once.is_none());
+    }
+
+    // ---- who is directing the turn: the claim vs the attested author ---------------------------
+
+    const ROOM: &str = "chat_arbonites";
+
+    /// `people_setup`, plus Jules as a guest of the project so that somebody other than the
+    /// owner can write a row in its rooms.
+    fn shared_people_setup() -> (AppState, String, Secret, String, String, String) {
+        let (state, owner, secret, sam, samir, jules) = people_setup();
+        assert!(state
+            .db
+            .add_project_member("proj_people", &jules, &owner)
+            .unwrap());
+        (state, owner, secret, sam, samir, jules)
+    }
+
+    fn wrote(state: &AppState, message_id: &str, author: &str) -> String {
+        state
+            .db
+            .record_message_author(ROOM, message_id, author)
+            .unwrap();
+        message_id.to_owned()
+    }
+
+    fn from_row(message_id: &str) -> TurnAuthor<'_> {
+        TurnAuthor::offered(Some(message_id), false)
+    }
+
+    /// The critical: `asked_by` reaches the relay from a chat document field, and every member of
+    /// the chat can write that document. A guest who writes the owner's id into it used to
+    /// inherit the owner's authority over every secret the project could reach.
+    #[test]
+    fn a_forged_asker_does_not_inherit_the_owners_authority() {
+        let (state, owner, secret, _sam, _samir, jules) = shared_people_setup();
+        let row = wrote(&state, "msg_forged", &format!("user:{jules}"));
+        // Jules has no People row, so his own ask is refused — which is what the forgery was for.
+        assert_eq!(
+            verdict_with(&state, &secret, Some(&jules), from_row(&row)),
+            Err("not_allowed_person".into())
+        );
+        // Claiming to be the owner does not change who the record says wrote the row.
+        assert_eq!(
+            verdict_with(&state, &secret, Some(&owner), from_row(&row)),
+            Err("not_allowed_person".into())
+        );
+        // Nor does claiming to be nobody, which is the owner's own shape.
+        assert_eq!(
+            verdict_with(&state, &secret, None, from_row(&row)),
+            Err("not_allowed_person".into())
+        );
+    }
+
+    /// The same defect one step down: a guest who writes the id of somebody the owner *has*
+    /// listed would otherwise inherit that person's row. So the claim is checked whoever it
+    /// names, not only when it names the owner.
+    #[test]
+    fn a_forged_asker_does_not_inherit_a_listed_persons_row() {
+        let (state, _owner, secret, sam, _samir, jules) = shared_people_setup();
+        let row = wrote(&state, "msg_as_sam", &format!("user:{jules}"));
+        assert!(verdict(&state, &secret, Some(&sam)).is_ok(), "Sam is listed");
+        assert_eq!(
+            verdict_with(&state, &secret, Some(&sam), from_row(&row)),
+            Err("not_allowed_person".into())
+        );
+    }
+
+    /// The record is believed over the claim in the permissive direction too. Naming the real
+    /// asker is stronger than refusing, because the answer then rests on who they are.
+    #[test]
+    fn the_record_names_the_asker_even_when_the_claim_does_not() {
+        let (state, owner, secret, sam, samir, _jules) = shared_people_setup();
+        let sams = wrote(&state, "msg_sam", &format!("user:{sam}"));
+        // Sam's row is on, so Sam passes however the document names her.
+        assert!(verdict_with(&state, &secret, Some(&owner), from_row(&sams)).is_ok());
+        assert!(verdict_with(&state, &secret, None, from_row(&sams)).is_ok());
+        // Samir's row is off, so he is refused however the document names him.
+        let samirs = wrote(&state, "msg_samir", &format!("user:{samir}"));
+        assert_eq!(
+            verdict_with(&state, &secret, Some(&sam), from_row(&samirs)),
+            Err("not_allowed_person".into())
+        );
+        // The owner's own row carries the owner's authority.
+        let owners = wrote(&state, "msg_owner", &format!("user:{owner}"));
+        assert!(verdict_with(&state, &secret, None, from_row(&owners)).is_ok());
+        assert!(verdict_with(&state, &secret, Some(&samir), from_row(&owners)).is_ok());
+    }
+
+    /// `agent:<project>` is a row one of the owner's agents wrote. An agent is not a human
+    /// directing a turn, so it carries nobody's authority — including the owner's.
+    #[test]
+    fn an_agent_row_carries_nobodys_authority() {
+        let (state, owner, secret, _sam, _samir, _jules) = shared_people_setup();
+        let row = wrote(&state, "msg_agent", "agent:proj_people");
+        assert_eq!(
+            verdict_with(&state, &secret, Some(&owner), from_row(&row)),
+            Err("not_allowed_person".into())
+        );
+    }
+
+    /// A row the relay never attested. In a shared project this refuses, because the attacker
+    /// picks the chat and would otherwise pick one with no attestations in it. In a project
+    /// nobody but the owner has ever been in, the claim still stands — the owner does not lose
+    /// their own secrets to a client that does not announce.
+    #[test]
+    fn an_unattested_row_refuses_only_where_somebody_else_could_have_written_it() {
+        let (state, owner, secret, _sam, _samir, _jules) = shared_people_setup();
+        wrote(&state, "msg_other", &format!("user:{owner}"));
+        assert_eq!(
+            verdict_with(&state, &secret, Some(&owner), from_row("msg_unknown")),
+            Err("not_allowed_person".into()),
+            "attested chat, unannounced row"
+        );
+
+        let (private, p_owner, p_secret, _, _, _) = people_setup();
+        assert!(
+            verdict_with(&private, &p_secret, Some(&p_owner), from_row("msg_unknown")).is_ok(),
+            "nobody but the owner has ever been in this project"
+        );
+        // And the same for a box too old to name the row at all.
+        assert!(verdict(&private, &p_secret, Some(&p_owner)).is_ok());
+    }
+
+    /// A departure does not make a room's history the owner's: the rows the guest wrote are
+    /// still there. So "shared" is ever-a-guest, not a-guest-right-now.
+    #[test]
+    fn a_departed_guest_still_leaves_the_rooms_shared() {
+        let (state, owner, secret, _sam, _samir, jules) = shared_people_setup();
+        assert!(state
+            .db
+            .remove_project_member("proj_people", &jules)
+            .unwrap());
+        assert!(!state.db.is_project_member("proj_people", &jules).unwrap());
+        assert!(state.db.project_ever_had_member("proj_people").unwrap());
+        assert_eq!(
+            verdict_with(&state, &secret, Some(&owner), from_row("msg_unknown")),
+            Err("not_allowed_person".into())
+        );
+    }
+
+    /// Work the box did itself — a routine, a voice line, a bound channel — is a box assertion
+    /// rather than a document claim, and the box is already an authenticated principal. The
+    /// owner's authority there does not depend on a chat row at all.
+    #[test]
+    fn own_work_the_box_asserts_is_not_a_document_claim() {
+        let (state, owner, secret, _sam, _samir, jules) = shared_people_setup();
+        let own = TurnAuthor::offered(None, true);
+        assert!(verdict_with(&state, &secret, None, own).is_ok());
+        assert!(verdict_with(&state, &secret, Some(&owner), own).is_ok());
+        // Own work is not a blank cheque: it says where the turn came from, not who may direct
+        // it, so a person still needs a People row.
+        assert_eq!(
+            verdict_with(&state, &secret, Some(&jules), own),
+            Err("not_allowed_person".into())
+        );
     }
 
     // ---- secret hand-off: "save this" (POST /box/secrets/from-message) -------------------------

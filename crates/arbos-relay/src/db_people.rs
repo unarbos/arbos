@@ -1175,6 +1175,20 @@ impl Db {
         })
     }
 
+    /// Has this project ever had a guest? Unlike [`Db::is_project_member`] this ignores
+    /// `left_at`, because a departure does not make a room's history the owner's: rows a guest
+    /// wrote while they were here are still there after they leave, and anything that asks "could
+    /// somebody other than the owner have written this?" has to count them.
+    pub fn project_ever_had_member(&self, project_id: &str) -> Result<bool> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT EXISTS (SELECT 1 FROM project_members WHERE project_id = ?1)",
+                params![project_id],
+                |r| r.get(0),
+            )
+        })
+    }
+
     /// `(user_id, added_by, joined_at)` of the live guests of a project, in a total order (see
     /// `members_of`: two guests invited in the same millisecond must not swap places).
     pub fn project_members(&self, project_id: &str) -> Result<Vec<(String, String, i64)>> {
