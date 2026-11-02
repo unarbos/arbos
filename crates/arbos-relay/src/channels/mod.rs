@@ -516,6 +516,8 @@ pub struct PairNewBody {
 }
 
 /// `POST /channels/pair/new { projectId, chatId? }` → `{ code, expiresAt }` (10 min, one use).
+/// Only for a project the caller may touch: redeeming the code binds an external chat to that
+/// project's chat, so minting one for a foreign project is a write into another user's tenant.
 pub async fn pair_new(
     State(state): State<AppState>,
     principal: Principal,
@@ -529,6 +531,9 @@ pub async fn pair_new(
         .project(&b.project_id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
+    if !state.allows(&principal, &p.id) {
+        return Err((StatusCode::FORBIDDEN, "not your project".into()));
+    }
     let chats = state.db.list_chats(&p.id).map_err(internal)?;
     let chat_id = match b.chat_id {
         Some(c) => {
@@ -1176,5 +1181,40 @@ mod tests {
         let own = unbind(State(state.clone()), alice_dev, Path("bind_1".to_owned())).await;
         assert_eq!(status(own), StatusCode::NO_CONTENT);
         assert!(state.db.channel_binding("bind_1").unwrap().is_none());
+    }
+
+    /// `pair_new` refused boxes and nothing else, so any signed-in device could mint a pairing
+    /// code for a project it does not own and then redeem it from a channel it controls — a
+    /// write into another user's tenant. The check is `state.allows`, as `reply` uses.
+    #[tokio::test]
+    async fn pair_new_refuses_a_project_of_another_user() {
+        let state = crate::state::test_support::test_state(crate::state::AuthMode::Github);
+        let (alice, alice_dev) = crate::people::tests_support::person(&state, 3);
+        let (bob, bob_dev) = crate::people::tests_support::person(&state, 4);
+        let project = crate::people::tests_support::project_of(&state, &alice, "Comms");
+        let body = || {
+            Json(PairNewBody {
+                project_id: project.clone(),
+                chat_id: None,
+            })
+        };
+
+        // The attack: bob mints a code against alice's project.
+        let foreign = pair_new(State(state.clone()), bob_dev.clone(), body()).await;
+        assert_eq!(status(foreign), StatusCode::FORBIDDEN);
+        assert!(
+            state.db.active_channel_pair_code().unwrap().is_none(),
+            "no code was minted for another user's project"
+        );
+
+        // The owner still mints one, and so does a member alice invited.
+        let own = pair_new(State(state.clone()), alice_dev, body()).await;
+        assert_eq!(status(own), StatusCode::OK);
+        let minted = state.db.active_channel_pair_code().unwrap().expect("code");
+        assert_eq!(minted.project_id, project);
+
+        state.db.add_project_member(&project, &bob, &alice).unwrap();
+        let invited = pair_new(State(state.clone()), bob_dev, body()).await;
+        assert_eq!(status(invited), StatusCode::OK);
     }
 }
