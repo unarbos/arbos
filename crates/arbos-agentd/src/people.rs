@@ -329,6 +329,19 @@ pub struct Asker {
     pub message_id: String,
 }
 
+/// Who wrote the human row a turn in one of this Project's own chats answers (D72 step 3).
+enum ProjectChatAuthor {
+    /// The row names the owner's account: this turn carries the owner's authority.
+    Owner,
+    /// The row names another account — a person the owner invited into the project.
+    Guest(Asker),
+    /// The row names no account the box can read; the asker map holds the turn under
+    /// [`UNKNOWN_ASKER`], a guest nobody listed. The box cannot tell the owner's own client
+    /// from a person the owner invited, and in a shared project reading such a row as the
+    /// owner's handed a guest the owner's secrets (#1580).
+    Unresolved,
+}
+
 impl Asker {
     /// How to speak about this person: display name, else bare handle (no `@`).
     pub fn spoken(&self) -> &str {
@@ -1489,7 +1502,9 @@ impl Agent {
 
     /// Projects together (D72 step 3): in this Project's own chats, a message written by a guest
     /// the owner invited is labelled so the agent knows who is talking. `None` for the owner's
-    /// own messages and for people chats (which have their own prelude).
+    /// own messages, for a row that names nobody, and for people chats (which have their own
+    /// prelude) — every one of them still leaves the turn's author in the asker map
+    /// (`note_project_chat_author`), which is what decides the owner's secrets.
     pub async fn shared_project_guest_note(
         &self,
         chat_id: &str,
@@ -1500,32 +1515,123 @@ impl Agent {
             return None;
         }
         let msg = host.lock().await.doc.message(user_msg_id)?;
-        let sender = msg.rest.get("sender").and_then(Value::as_str)?;
-        let user_id = sender.strip_prefix("user:")?;
+        let guest = match self.note_project_chat_author(chat_id, &msg, user_msg_id) {
+            ProjectChatAuthor::Guest(asker) => asker,
+            ProjectChatAuthor::Owner | ProjectChatAuthor::Unresolved => return None,
+        };
+        let spoken = guest.spoken();
+        Some(format!(
+            "[This message is from {spoken}, a person the owner of this Project invited to work in it with you. Address them by their display name ({spoken}), never as an @handle. They may direct ordinary work here; do not use the owner's secrets for them unless the owner put them on that secret's People list (or, when its others_ask is card, the owner answered your secrets_request card), and honour any note on their row (for example a daily credit limit).]\n\n"
+        ))
+    }
+
+    /// Who is directing this turn in one of this Project's own chats, remembered as the chat's
+    /// [`Asker`] before any tool runs — `vault.rs` reads it to decide whether this turn carries
+    /// the owner's authority over their secrets.
+    ///
+    /// A row a client wrote that names no account is [`ProjectChatAuthor::Unresolved`], never
+    /// the owner: it is registered as the unknown asker (#1580) so a guest's unlabelled line
+    /// cannot be answered with the owner's keys. The box has nothing better to go on — only a
+    /// client writes that row, `sender: user:<id>` is the one field on it that names an
+    /// account, and the box holds no roster for a project chat ([`PeopleChatInfo::members`],
+    /// which `user_of_device` reads, is filled from `people_chats` alone; `/box/projects` sends
+    /// a project's owner and not its members), so "is this project shared" is not a question
+    /// the daemon can answer. It therefore answers the one it can: the row names the owner, or
+    /// it does not. A client that writes the owner's own id is still read as the owner — only
+    /// the relay, which sees who pushed the row, can tell a forged label from a true one.
+    fn note_project_chat_author(
+        &self,
+        chat_id: &str,
+        msg: &MessageView,
+        user_msg_id: &str,
+    ) -> ProjectChatAuthor {
+        let named = msg
+            .rest
+            .get("sender")
+            .and_then(Value::as_str)
+            .and_then(|s| s.strip_prefix("user:"))
+            .map(str::trim)
+            .filter(|u| !u.is_empty());
+        // A user row this box wrote itself is its own work for its owner and nobody's ask: a
+        // routine run (`routine:<id>`), a voice line or a Projects-tab hand-off (both plain
+        // `user`), a bound channel's message (`channel:<platform>:<id>`). None of them names an
+        // account, and reading them as unidentified would cost the owner their own secrets in
+        // work they set up themselves.
+        let by_this_box =
+            msg.rest.get("deviceId").and_then(Value::as_str) == Some(self.cfg.device_id.as_str());
         let owner = self.people.project_owner();
-        if owner.is_empty() || user_id == owner {
-            return None;
+        match named {
+            Some(uid) if !owner.is_empty() && uid == owner => self.note_owner_asked(chat_id),
+            None if by_this_box => self.note_owner_asked(chat_id),
+            Some(uid) => {
+                let handle = msg
+                    .rest
+                    .get("senderHandle")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|h| !h.is_empty())
+                    .unwrap_or(uid);
+                ProjectChatAuthor::Guest(self.set_project_chat_asker(
+                    chat_id,
+                    Asker {
+                        user_id: uid.to_owned(),
+                        handle: handle.to_owned(),
+                        name: message_spoken_name(msg, handle),
+                        role: "guest",
+                        message_id: user_msg_id.to_owned(),
+                    },
+                ))
+            }
+            None => self.note_unresolved_project_chat_author(chat_id, msg, user_msg_id),
         }
+    }
+
+    /// The owner is nobody's asker: drop whoever asked in this chat last, so a guest's turn
+    /// cannot leave its asker standing over the owner's next one.
+    fn note_owner_asked(&self, chat_id: &str) -> ProjectChatAuthor {
+        self.people.askers.lock().expect("people").remove(chat_id);
+        self.people.set_current(None);
+        ProjectChatAuthor::Owner
+    }
+
+    /// A client's row that names no account: the turn runs for [`UNKNOWN_ASKER`], which is on no
+    /// secret's People list and is not the owner's id, so the box's own check and the relay's
+    /// both refuse it. The row's handle still says who it claimed to be, for the refusal the
+    /// agent speaks and for the card the owner may see.
+    fn note_unresolved_project_chat_author(
+        &self,
+        chat_id: &str,
+        msg: &MessageView,
+        user_msg_id: &str,
+    ) -> ProjectChatAuthor {
         let handle = msg
             .rest
             .get("senderHandle")
             .and_then(Value::as_str)
-            .unwrap_or(user_id);
-        let spoken = message_spoken_name(&msg, handle);
-        self.people.askers.lock().expect("people").insert(
-            chat_id.to_owned(),
+            .map(str::trim)
+            .filter(|h| !h.is_empty())
+            .unwrap_or(UNKNOWN_SPOKEN);
+        self.set_project_chat_asker(
+            chat_id,
             Asker {
-                user_id: user_id.to_owned(),
+                user_id: UNKNOWN_ASKER.to_owned(),
                 handle: handle.to_owned(),
-                name: spoken.clone(),
+                name: message_spoken_name(msg, handle),
                 role: "guest",
                 message_id: user_msg_id.to_owned(),
             },
         );
+        ProjectChatAuthor::Unresolved
+    }
+
+    fn set_project_chat_asker(&self, chat_id: &str, asker: Asker) -> Asker {
+        self.people
+            .askers
+            .lock()
+            .expect("people")
+            .insert(chat_id.to_owned(), asker.clone());
         self.people.set_current(Some(chat_id));
-        Some(format!(
-            "[This message is from {spoken}, a person the owner of this Project invited to work in it with you. Address them by their display name ({spoken}), never as an @handle. They may direct ordinary work here; do not use the owner's secrets for them unless the owner put them on that secret's People list (or, when its others_ask is card, the owner answered your secrets_request card), and honour any note on their row (for example a daily credit limit).]\n\n"
-        ))
+        asker
     }
 
     /// In this Project's own chats: tell the model the owner's display name so it addresses them

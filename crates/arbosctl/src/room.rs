@@ -305,10 +305,12 @@ async fn run(
     timeout: Duration,
 ) -> Result<()> {
     let mut s = Session::load(cfg, project, chat)?;
-    // People chats: the row names its author like the apps do (`user:<id>`, handle, name) so
-    // the agent knows who asked (D72 attribution; a secret's People list, spec §7.7). In a
-    // project's own chats the plain `user` sender is the owner.
-    let author = if project == "people" && matches!(mode, Mode::Send { .. }) {
+    // Every row names its author like the apps do (`user:<id>`, handle, name) so the agent
+    // knows who asked (D72 attribution; a secret's People list, spec §7.7) — in a project's
+    // own chats too: the box reads a row that names nobody as a guest on no People list, not
+    // as the owner (#1580), and a project's own chats are shared with the people its owner
+    // invited, so "the plain `user` sender is the owner" was never safe to assume.
+    let author = if matches!(mode, Mode::Send { .. }) {
         match crate::client::Relay::new(cfg).get("/me").await {
             Ok(me) => {
                 let u = me.pointer("/user").unwrap_or(&me);

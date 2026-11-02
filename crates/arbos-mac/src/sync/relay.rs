@@ -4928,8 +4928,8 @@ async fn send_message(
         }
     }
     shared.unacked.lock().unwrap().insert(message_id.clone());
-    // People chats, and projects with more than one human, carry who wrote
-    // (API §3/§7); a solo project keeps the plain `user` the box expects.
+    // People chats, and projects with more than one human, carry the mentions and the avatar
+    // of whoever wrote (API §3/§7).
     let in_people = shared.is_people(&chat_id) || {
         let projects = shared.projects.lock().unwrap();
         projects
@@ -4962,11 +4962,16 @@ async fn send_message(
             attachments: user_attachments,
             mentions,
             reply_to,
-            sender: if in_people {
-                Some(format!("user:{}", shared.me_id()))
-            } else {
-                None
-            },
+            // Always name the account that wrote the row, in a project's own chats too: the
+            // box reads a row that names nobody as a guest on no People list, not as the owner
+            // (#1580), so an unlabelled line costs the owner their own secrets. This used to
+            // ride on `in_people`, which is true for a solo project only because the owner is
+            // in its member list — a detail no authority should depend on.
+            sender: me
+                .as_ref()
+                .map(|u| u.id.trim())
+                .filter(|id| !id.is_empty())
+                .map(|id| format!("user:{id}")),
             // Always attach the author's display name so agents address them by name, not @handle.
             sender_handle: me.as_ref().map(|u| u.login.clone()),
             sender_name: me
