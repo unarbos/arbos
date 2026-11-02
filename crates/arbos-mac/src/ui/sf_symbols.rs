@@ -219,6 +219,7 @@ mod mac {
     type RasterKey = (String, u32, Weight, u32, [u8; 4]);
 
     fn sizes() -> &'static Mutex<HashMap<SizeKey, Option<(f32, f32)>>> {
+        #[allow(clippy::type_complexity)]
         static SIZES: OnceLock<Mutex<HashMap<SizeKey, Option<(f32, f32)>>>> = OnceLock::new();
         SIZES.get_or_init(Default::default)
     }
