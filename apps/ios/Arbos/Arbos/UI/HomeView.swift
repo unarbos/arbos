@@ -976,8 +976,21 @@ struct HomeView: View {
             return c.pending ? "Invited · opens when they sign in" : "Say hi"
         }
         let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
-        let who = m.sender == model.myUserId ? "You" : (m.senderHandle.map { "@\($0)" } ?? "")
+        let who = HomeView.previewWho(group: c.isGroup, mine: m.sender == model.myUserId,
+                                      sender: m.sender, handle: m.senderHandle)
         return (who.isEmpty ? "" : who + ": ") + HomeView.plain(line)
+    }
+
+    /// The label before a people chat's preview text: "You" for my own line, `@handle`
+    /// for anyone else — but not for the other person of a 1:1 chat, whose name the row
+    /// already carries in its own header. Naming them there printed the handle twice,
+    /// "@DaWizzaa" over "@DaWizzaa: …" ([feedback doubled-sender-prefix-ios-2026-10-30]).
+    /// A group row is headed by the group, and an agent in a 1:1 chat is not the person
+    /// the row names, so both keep their label.
+    static func previewWho(group: Bool, mine: Bool, sender: String, handle: String?) -> String {
+        if mine { return "You" }
+        if !group, sender.hasPrefix("user:") { return "" }
+        return handle.map { "@\($0)" } ?? ""
     }
 
     /// Newest message with prose (or an open question) across the project's chats.
@@ -1303,7 +1316,8 @@ struct HiddenChatsView: View {
             return c.pending ? "Invited · opens when they sign in" : "Say hi"
         }
         let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
-        let who = m.sender == model.myUserId ? "You" : (m.senderHandle.map { "@\($0)" } ?? "")
+        let who = HomeView.previewWho(group: c.isGroup, mine: m.sender == model.myUserId,
+                                      sender: m.sender, handle: m.senderHandle)
         return (who.isEmpty ? "" : who + ": ") + HomeView.plain(line)
     }
 }
