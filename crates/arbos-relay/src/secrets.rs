@@ -796,7 +796,13 @@ fn directing(
         //
         // Temporary, and deliberately observable so we can tell when it is dead: see
         // `note_unattributable`.
-        note_unattributable(state, s, project_id, "no_message_id", shared(state, project_id));
+        note_unattributable(
+            state,
+            s,
+            project_id,
+            "no_message_id",
+            shared(state, project_id),
+        );
         return claimed(s, asked_by);
     };
     match state.db.message_author(chat, message_id).ok().flatten() {
@@ -849,10 +855,7 @@ fn claimed(s: &Secret, asked_by: Option<&str>) -> Directing {
 /// Could anybody other than the owner have written a row in this project's rooms? Ever a guest,
 /// not a guest right now: a departure does not make a room's history the owner's.
 fn shared(state: &AppState, project_id: &str) -> bool {
-    state
-        .db
-        .project_ever_had_member(project_id)
-        .unwrap_or(true)
+    state.db.project_ever_had_member(project_id).unwrap_or(true)
 }
 
 /// A claim to be directing a turn that the relay could not check, recorded so that neither the
@@ -3444,14 +3447,7 @@ pub(crate) fn plan_egress(
                 continue;
             };
             match decide_use(
-                state,
-                &s,
-                project_id,
-                host,
-                "header",
-                chat_id,
-                asked_by,
-                author,
+                state, &s, project_id, host, "header", chat_id, asked_by, author,
             ) {
                 Ok(allowed) => {
                     if dek.is_none() {
@@ -4709,7 +4705,10 @@ mod tests {
     fn a_forged_asker_does_not_inherit_a_listed_persons_row() {
         let (state, _owner, secret, sam, _samir, jules) = shared_people_setup();
         let row = wrote(&state, "msg_as_sam", &format!("user:{jules}"));
-        assert!(verdict(&state, &secret, Some(&sam)).is_ok(), "Sam is listed");
+        assert!(
+            verdict(&state, &secret, Some(&sam)).is_ok(),
+            "Sam is listed"
+        );
         assert_eq!(
             verdict_with(&state, &secret, Some(&sam), from_row(&row)),
             Err("not_allowed_person".into())
