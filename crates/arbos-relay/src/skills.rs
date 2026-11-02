@@ -194,14 +194,38 @@ pub(crate) fn skill_dto(s: &Skill) -> SkillDto {
     SkillDto::from(s)
 }
 
-fn skill_json(s: &Skill) -> Value {
-    serde_json::to_value(skill_dto(s)).expect("SkillDto")
+/// Where a skill is filed, as far as this caller is told.
+///
+/// `origin_project_id` is attribution for the caller's own libraries and a stranger's project id
+/// otherwise, because a shared skill reaches every box on the relay. A project id is not inert:
+/// `PUT /projects/{id}/message-access` accepts `project:<id>` against any project
+/// ([`crate::agent_messages::normalize_grantee`]), and the grant card it returns resolves that id
+/// to the project's name and agent handle with no permission check — deliberately, on the
+/// grounds that taking an id and refusing a name is not a directory. Shared skills were the one
+/// supply of ids that made it one.
+///
+/// Withholding it costs nothing. No box reads the field: `arbos-agentd` never touches it, and
+/// [`Skill::to_markdown`] does not emit it, so it never reaches a model either. A device does
+/// need it — the Mac names the origin project under each skill — and that is why the test is
+/// reach and not ownership: a skill filed in a project you are a guest of is exactly the one a
+/// device must be able to name, so that it can tell you it is filed somewhere you do not own.
+fn attribution_for(state: &AppState, principal: &Principal, s: &Skill) -> Option<String> {
+    owns_skill(state, principal, s)
+        .then(|| s.origin_project_id.clone())
+        .flatten()
 }
 
-fn index_json(s: &Skill) -> Value {
+fn skill_json(state: &AppState, principal: &Principal, s: &Skill) -> Value {
+    let mut dto = skill_dto(s);
+    dto.origin_project_id = attribution_for(state, principal, s);
+    serde_json::to_value(dto).expect("SkillDto")
+}
+
+fn index_json(state: &AppState, principal: &Principal, s: &Skill) -> Value {
     json!({
         "id": s.id, "slug": s.slug, "name": s.name, "description": s.description, "tags": s.tags,
-        "when_to_use": s.when_to_use, "shared": s.shared, "origin_project_id": s.origin_project_id,
+        "when_to_use": s.when_to_use, "shared": s.shared,
+        "origin_project_id": attribution_for(state, principal, s),
         "version": s.version, "updated_at": s.updated_at,
     })
 }
@@ -232,7 +256,12 @@ pub async fn list(
             .map_err(internal)?,
         None => state.db.list_skills(&scope).map_err(internal)?,
     };
-    Ok(Json(rows.iter().map(skill_json).collect::<Vec<_>>()).into_response())
+    Ok(Json(
+        rows.iter()
+            .map(|s| skill_json(&state, &principal, s))
+            .collect::<Vec<_>>(),
+    )
+    .into_response())
 }
 
 /// `GET /skills/index` (box): the lean view the relevance selector caches, plus a change marker.
@@ -246,7 +275,7 @@ pub async fn index(
     let rev = state.db.skills_rev(&scope).map_err(internal)?;
     Ok(Json(json!({
         "rev": rev,
-        "skills": rows.iter().map(index_json).collect::<Vec<_>>(),
+        "skills": rows.iter().map(|s| index_json(&state, &principal, s)).collect::<Vec<_>>(),
     }))
     .into_response())
 }
@@ -275,7 +304,7 @@ pub async fn get(
     if device_only(&principal) && !owns_skill(&state, &principal, &s) {
         return Err((StatusCode::NOT_FOUND, "no such skill".to_owned()));
     }
-    Ok(Json(skill_json(&s)).into_response())
+    Ok(Json(skill_json(&state, &principal, &s)).into_response())
 }
 
 /// `POST /skills`: create. A box posting an existing slug it owns updates that skill instead
@@ -333,7 +362,7 @@ pub async fn create(
                 .map_err(internal)?
                 .ok_or((StatusCode::NOT_FOUND, "no such skill".to_owned()))?;
             notify_boxes(&state, &row.slug);
-            return Ok(Json(skill_json(&row)).into_response());
+            return Ok(Json(skill_json(&state, &principal, &row)).into_response());
         }
         return Err((
             StatusCode::CONFLICT,
@@ -343,7 +372,11 @@ pub async fn create(
     state.db.insert_skill(&s).map_err(internal)?;
     notify_boxes(&state, &s.slug);
     tracing::info!(slug = %s.slug, by = %principal.device_name(), "skill created");
-    Ok((StatusCode::CREATED, Json(skill_json(&s))).into_response())
+    Ok((
+        StatusCode::CREATED,
+        Json(skill_json(&state, &principal, &s)),
+    )
+        .into_response())
 }
 
 /// `PUT /skills/{id}`: edit fields (partial body is fine); bumps the version.
@@ -393,7 +426,7 @@ pub async fn update(
         .ok_or((StatusCode::NOT_FOUND, "no such skill".to_owned()))?;
     notify_boxes(&state, &row.slug);
     tracing::info!(slug = %row.slug, version = row.version, by = %principal.device_name(), "skill updated");
-    Ok(Json(skill_json(&row)).into_response())
+    Ok(Json(skill_json(&state, &principal, &row)).into_response())
 }
 
 /// `DELETE /skills/{id}` (devices only).
@@ -677,6 +710,98 @@ mod tests {
             status(get(State(state.clone()), bobs_box, headers, Path(private.id)).await),
             StatusCode::FORBIDDEN,
             "and `can_see` still keeps an unshared one away from it"
+        );
+    }
+
+    /// A shared skill reaches every box on the relay, so the box of anyone at all used to be
+    /// handed the project id of whoever wrote it. That id is spendable: `PUT
+    /// /projects/{id}/message-access` takes `project:<id>` for any project on the relay, and the
+    /// grant card it returns names that project and its agent handle without a permission check.
+    /// The card is allowed to do that because it takes an id and refuses a name — which holds
+    /// only for as long as ids are not handed out, and shared skills were handing them out.
+    #[tokio::test]
+    async fn a_box_reading_a_shared_skill_is_not_told_whose_project_it_is() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let hers = project_of(&state, &alice, "Alice work");
+        let his = project_of(&state, &bob, "Bob work");
+        let shared = skill_with(&state, Some(&hers), "shared-one", true, ALICES_BODY);
+
+        let bobs_box = Principal::Box {
+            user_id: bob.clone(),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("x-arbos-project", his.parse().unwrap());
+
+        let one = get(
+            State(state.clone()),
+            bobs_box.clone(),
+            headers.clone(),
+            Path(shared.clone()),
+        )
+        .await;
+        let dto: Value = serde_json::from_str(&body_text(one).await).expect("a skill");
+        assert_eq!(
+            dto["body"], ALICES_BODY,
+            "he still gets the skill, which is the point of sharing it"
+        );
+        assert_eq!(
+            dto["origin_project_id"],
+            Value::Null,
+            "and not the id of the project it came out of"
+        );
+        assert!(
+            !body_text(
+                list(
+                    State(state.clone()),
+                    bobs_box.clone(),
+                    headers.clone(),
+                    Query(Default::default()),
+                )
+                .await
+            )
+            .await
+            .contains(hers.as_str()),
+            "nor anywhere in the listing"
+        );
+        assert!(
+            !body_text(index(State(state.clone()), bobs_box, headers).await)
+                .await
+                .contains(hers.as_str()),
+            "nor in the index the selector caches"
+        );
+    }
+
+    /// The same question answered the other way, and the reason the test is reach rather than
+    /// ownership. A device must be told where a skill is filed even when the project belongs to
+    /// someone else, because a guest's library shows skills of the projects they were invited
+    /// to and the Mac names that project under each one. Scoping this to owners would blank the
+    /// one case a person most needs to see — a skill of theirs sitting in somebody else's
+    /// project — and would do it silently.
+    #[tokio::test]
+    async fn a_guest_is_still_told_which_project_a_skill_is_filed_under() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let hers = project_of(&state, &alice, "Tern");
+        state
+            .db
+            .add_project_member(&hers, &bob, &alice)
+            .expect("Bob is a guest of Alice's Tern");
+        let filed = skill_with(&state, Some(&hers), "ship-the-newsletter", false, "");
+
+        let one = get(
+            State(state.clone()),
+            bob_dev,
+            HeaderMap::new(),
+            Path(filed.clone()),
+        )
+        .await;
+        let dto: Value = serde_json::from_str(&body_text(one).await).expect("a skill");
+        assert_eq!(
+            dto["origin_project_id"], hers,
+            "a project he can reach is named to him"
         );
     }
 
