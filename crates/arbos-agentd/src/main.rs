@@ -8,6 +8,8 @@ mod channels;
 mod chart;
 mod config;
 mod connectors;
+#[cfg(test)]
+mod cross_workspace_auth_tests;
 mod disk;
 mod eval;
 mod feedback;
