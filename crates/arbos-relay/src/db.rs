@@ -3164,16 +3164,32 @@ const REACHABLE_SKILLS: &str = "s.origin_project_id IS NULL OR EXISTS (
              OR EXISTS (SELECT 1 FROM project_members m
                          WHERE m.project_id = p.id AND m.user_id = ?1 AND m.left_at IS NULL)))";
 
+/// What one box may see from the workspace it named: that project's own skills, plus the skills
+/// its owner marked `shared`. `shared` is "Shared with every project" in the Mac's toggle and
+/// "visible to every Project" in the agent's `skills_save` — every Project of that one person.
+/// It is read here as the owner of the box's project, because a box only ever names a project
+/// of its own user (`skills::box_project`), and a skill's owner is the user behind its origin
+/// project. A skill filed under no project has no owner and so reaches no box.
+const BOX_SKILLS: &str = "s.origin_project_id = ?1 OR (s.shared = 1 AND EXISTS (
+     SELECT 1 FROM projects mine, projects theirs
+      WHERE mine.id = ?1 AND theirs.id = s.origin_project_id
+        AND theirs.user_id = mine.user_id AND theirs.deleted_at IS NULL))";
+
 /// Whose skills a query is for. The `skills` table has no owner column, so the only owner a
 /// skill can have is the user behind its origin project.
 #[derive(Debug, Clone)]
 pub enum SkillScope {
     /// The admin token.
     Everything,
-    /// One box, in the workspace it named: the relay's shared skills plus that project's own.
+    /// One box, in the workspace it named: that project's own skills plus its owner's shared ones.
     Project(String),
     /// One person's devices.
     Reachable(String),
+    /// A caller whose library cannot be named — a box that sent no usable project header. It
+    /// gets nothing rather than a default, because `shared` is one person's word and nothing
+    /// here says whose. Its own id, the user behind the box, is not enough: the project is what
+    /// the box asks in, and the relay does not guess it.
+    Nothing,
 }
 
 impl SkillScope {
@@ -3181,14 +3197,15 @@ impl SkillScope {
     fn predicate(&self) -> &'static str {
         match self {
             Self::Everything => "?1 IS NULL",
-            Self::Project(_) => "s.shared = 1 OR s.origin_project_id = ?1",
+            Self::Project(_) => BOX_SKILLS,
             Self::Reachable(_) => REACHABLE_SKILLS,
+            Self::Nothing => "?1 IS NOT NULL",
         }
     }
 
     fn key(&self) -> Option<&str> {
         match self {
-            Self::Everything => None,
+            Self::Everything | Self::Nothing => None,
             Self::Project(id) => Some(id),
             Self::Reachable(user_id) => Some(user_id),
         }
