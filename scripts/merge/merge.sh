@@ -102,16 +102,16 @@ else
   case "$v" in *": GO —"*) ;; *) echo "NOT MERGED: verdict is not GO"; exit 3;; esac
 fi
 # rollup_red: a statusCheckRollup object on stdin, one line out per non-success row:
-#   <the run id of a green twin, or "-"> <this row's run id, or "untraceable"> <check name> <conclusion>
+#   <this row's run id, or "untraceable"> <run ids of the green rows for this same check, or "-"> <check name> <conclusion>
 #
-# The twin field is rule 9's "a run on the identical head sha is green for that same check", read out
-# of the rollup rather than asked for again. Every row in one rollup belongs to one commit — the PR's
-# head, pinned to $SHA above and re-read below — so two rows are on the identical sha by construction,
-# which is the one part of the rule that would otherwise have to be inferred. A twin counts only when
-# it is the same kind of row, from the same workflow, under the same name: GitHub files the push run's
-# copy of a job and the pull_request run's copy under one name, and that pair is the shape rule 9 is
-# about. SKIPPED and NEUTRAL are not twins; a job that did no work proves nothing, which is the point
-# checks.sh is built around.
+# Those green ids are the candidates for rule 9's "a run on the identical head sha is green for that
+# same check". Identical head sha holds by construction and is not inferred: every row in one rollup
+# belongs to one commit, the PR's head, pinned to $SHA above and re-read below. Same check means the
+# same kind of row, from the same workflow, under the same name — GitHub files the push run's copy of
+# a job and the pull_request run's copy under one name, and that pair is the shape rule 9 is about.
+# SKIPPED and NEUTRAL are not green; a job that did no work proves nothing, which is the point
+# checks.sh is built around. A green row with no run behind it is not offered at all, because what it
+# tested cannot be established — see green_twin.
 rollup_red() {
   jq -r '
     def runid: ((.detailsUrl // .targetUrl // "") | [capture("runs/(?<id>[0-9]+)").id] | first);
@@ -120,35 +120,85 @@ rollup_red() {
     | .statusCheckRollup[]
     | select((.conclusion // .state) as $c | ["FAILURE","CANCELLED","TIMED_OUT","ACTION_REQUIRED","STARTUP_FAILURE","ERROR","STALE"] | index($c))
     | . as $row
-    | ([$green[] | select(rowkey == ($row | rowkey)) | (runid // "untraceable")] | first) as $twin
-    | "\($twin // "-") \(($row | runid) // "untraceable") \($row | .name // .context) \($row | .conclusion // .state)"'
+    | ([$green[] | select(rowkey == ($row | rowkey)) | runid | select(. != null)] | join(",")) as $twins
+    | "\(($row | runid) // "untraceable") \(if $twins == "" then "-" else $twins end) \($row | .name // .context) \($row | .conclusion // .state)"'
+}
+# run_event <run id>: the event GitHub recorded for that run, or "unreadable". The rollup does not
+# carry it — a row names its run only through detailsUrl — so it has to be read, and $EVENTS keeps
+# each answer. A rollup names about two distinct runs however many rows it has, and the loop below
+# primes $EVENTS before it starts, so this costs about two reads per merge.
+EVENTS=""
+run_event() {
+  local e
+  case "$1" in ''|*[!0-9]*) printf 'unreadable'; return ;; esac
+  case "$EVENTS " in *" $1="*) e=${EVENTS#*" $1="}; printf '%s' "${e%% *}"; return ;; esac
+  e=$(gh api "repos/$R/actions/runs/$1" --jq '.event' 2>/dev/null) || e=''
+  [ -n "$e" ] || e=unreadable
+  EVENTS="$EVENTS $1=$e"
+  printf '%s' "$e"
+}
+# tested_rank <event>: how much of the merged result a run of that event tested. A push run builds the
+# head alone; a pull_request run builds the head merged into main's tip, so it tests strictly more.
+# 0 is "cannot be told", and nothing is ever ranked against it.
+tested_rank() { case $1 in push) echo 1 ;; pull_request) echo 2 ;; *) echo 0 ;; esac; }
+# green_twin <this row's run id> <candidate green run ids>: "<run id> <event>" for the first candidate
+# that tested at least as much of the merged result as this row's run did, or nothing.
+green_twin() {
+  local mine g ge
+  mine=$(tested_rank "$(run_event "$1")")
+  [ "$mine" -gt 0 ] || return 1
+  for g in $(printf '%s' "$2" | tr ',' ' '); do
+    case $g in ''|*[!0-9]*) continue ;; esac
+    ge=$(run_event "$g")
+    [ "$(tested_rank "$ge")" -ge "$mine" ] && { printf '%s %s' "$g" "$ge"; return 0; }
+  done
+  return 1
 }
 # A second pass, over every other check the rollup reports. The required gates above decide whether the
 # checks that matter ran and passed; this one catches a red result in a check nobody thought to name,
 # and accept-red=<id>[,<id>] can waive it (a run that did not test this PR).
 # It cannot waive a required gate: that refusal already happened, above, and took no arguments.
 #
-# The green-twin half of rule 9 is settled here rather than left to accept-red. gate_state has read a
-# head that way since it was written, and the comment above this file's required-gate refusal leans on
-# it — "a run on the identical head sha is green for that same check" is given there as the reason the
+# Rule 9's green clause is settled here rather than left to accept-red. gate_state has read a head that
+# way since it was written, and the comment above this file's required-gate refusal leans on it — "a
+# run on the identical head sha is green for that same check" is given there as the reason the
 # legitimate flake case needs no override. This pass did not read it, so the kit refused merges its own
 # stated rule allows and an argument was the only way past, which is how two of tonight's hours went.
 # Measured on f4297c758f30acfbce5fbe4f83e3adab3cb106d0: `rust (fmt, clippy, test)` concluded failure in
-# run 41513010699 and success in run 41513719101, both on that sha. This is the opposite of a waiver —
-# it is a fact about the head, it takes no argument, and nobody asserts it.
+# push run 41513010699 and success in pull_request run 41513719101, both on that sha.
 #
-# One thing it inherits from gate_state and deliberately does not narrow: the two runs sharing a head
-# sha are usually the push run, which tests the head exactly, and the pull_request run, which tests the
-# head merged into main's tip. So a push-run green can settle a pull_request-run red that was a genuine
-# conflict with newer main. Rule 9 is written at the level of the sha and gate_state has always applied
-# it at that level; making it asymmetric is a policy change that needs its own proof, not a detail to
-# settle in passing here. The green run's id is printed so the reader can go and see which run it was.
+# The clause runs one way only, and that direction is the rule rather than a trim on it. Nobody asserts
+# anything here, so it has to hold with nobody in the loop. A push run builds the head alone; a
+# pull_request run builds the head merged into main's tip, and is therefore the only automated test
+# this change gets against what has landed since. A push green settling a pull_request red would throw
+# that test away and merge on the strength of a weaker one — which is the failure AF-647 is about, where
+# two changes to one route merge clean with no line in common and only the merged-result run sees it.
+# So a green settles a red only when its run tested at least as much, and a run whose event cannot be
+# established settles nothing: a commit status has no run at all, a run read can fail, and an event that
+# is neither of these two says nothing about what was built. An unanswerable question is a refusal here
+# as everywhere else in this kit.
+#
+# Measured against every PR this repository had red tonight. #2569 above is the safe direction. #2589
+# (2b825a625), #2591 (06308d0b1) and #2592 (aa322cda0) are all the unsafe one — push green, pull_request
+# red — and all three fail the same test, which main itself is red on (AF-646), while none of the three
+# changes any Rust. So the unnarrowed clause would have done the wrong thing harmlessly on every case in
+# front of it, in evidence indistinguishable from the case where it is not harmless.
 rollup=$(gh pr view "$PR" -R $R --json statusCheckRollup) || { echo "NOT MERGED: cannot read the check rollup"; exit 3; }
 red=$(printf '%s' "$rollup" | rollup_red) || { echo "NOT MERGED: cannot read the check rollup: it did not parse"; exit 3; }
 acc=",${FLAKE#accept-red=},"
-while read -r twin id name; do
+# Every run the rollup names, read once, here. It has to be here: the lookups below all happen inside
+# a $( ), and a cache filled in a subshell goes away with it. Anything that is not a run id —
+# "untraceable", "-" — run_event turns away without a call.
+for rid in $(printf '%s\n' "$red" | cut -d' ' -f1,2 | tr ', ' '\n' | sort -u); do
+  run_event "$rid" >/dev/null
+done
+while read -r id twins name; do
   [ -n "$id" ] || continue
-  [ "$twin" = "-" ] || { echo "    red check settled by run $twin, green for this same check on ${SHA:0:9} (rule 9): $id $name"; continue; }
+  if g=$(green_twin "$id" "$twins"); then
+    echo "    red check settled by run ${g% *} (${g#* }), green for this same check on ${SHA:0:9} and at least as merged as this $(run_event "$id") run: $id $name"
+    continue
+  fi
+  [ "$twins" = "-" ] || echo "    a green run of this same check exists on ${SHA:0:9} (run ${twins//,/, }), but it cannot be shown to have tested at least as much of the merged result as run $id did, so it does not settle this row"
   case "$acc" in *",$id,"*) echo "    red check accepted by run id: $id $name" ;;
     *) echo "NOT MERGED: red check not accepted: run $id $name"; exit 3 ;; esac
 done <<< "$red"
