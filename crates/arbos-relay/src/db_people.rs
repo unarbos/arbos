@@ -1204,6 +1204,22 @@ impl Db {
         })
     }
 
+    /// Has this project ever had a guest, including ones who have left? `project_members` answers
+    /// "is anyone else here now", which is the wrong question about a row that already exists: once
+    /// someone else could append to the room, every row in it could be theirs, and their leaving
+    /// does not make the history theirs no longer. A departure only sets `left_at`, so the row
+    /// stays and this sees it (`secrets::box_from_message`).
+    pub fn project_ever_had_member(&self, project_id: &str) -> Result<bool> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM project_members WHERE project_id = ?1",
+                params![project_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n > 0)
+        })
+    }
+
     /// Project ids shared with a user (they are a live guest), in a total order (see
     /// `members_of`).
     pub fn shared_project_ids(&self, user_id: &str) -> Result<Vec<String>> {
