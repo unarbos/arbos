@@ -1,4 +1,5 @@
 import ArbosFFI
+import UIKit
 import XCTest
 @testable import Arbos
 
@@ -141,6 +142,72 @@ final class HomeListFilterTests: XCTestCase {
         XCTAssertFalse(HomeListFilter.servers.showsProjects)
         XCTAssertFalse(HomeListFilter.servers.showsPeople)
         XCTAssertEqual(HomeListFilter.servers.emptyCopy, "No servers yet")
+    }
+
+    // MARK: the row does not move when the selection does
+
+    private let labels = HomeListFilter.allCases.map(\.rawValue)
+
+    private func labelWidth(_ text: String, size: CGFloat, weight: UIFont.Weight) -> CGFloat {
+        (text as NSString).size(withAttributes: [.font: UIFont.systemFont(ofSize: size, weight: weight)]).width
+    }
+
+    /// Home's filter row as `PaneTabs` lays it out: four labels, each in
+    /// `Theme.body` at the Text Size `scale`, `labelPad` on both sides of the
+    /// label and `gap` between two capsules.
+    ///
+    /// `reserveSelectedWidth` is the rule this change introduces — every tab is
+    /// as wide as its label in the selected (semibold) weight. `false` is what
+    /// shipped before it: only the selected label was semibold, so the row's
+    /// width followed the selection.
+    private func rowWidth(selected: String, scale: CGFloat, reserveSelectedWidth: Bool) -> CGFloat {
+        let size = (Theme.body * scale * 2).rounded() / 2
+        let text = labels.reduce(CGFloat(0)) { sum, t in
+            let bold = reserveSelectedWidth || t == selected
+            return sum + labelWidth(t, size: size, weight: bold ? .semibold : .regular)
+        }
+        let n = CGFloat(labels.count)
+        return text + n * 2 * PaneTabsMetrics.labelPad + n * PaneTabsMetrics.gap
+    }
+
+    /// Scout, 2026-10-31: selecting a filter made its label bolder, so the tab
+    /// grew and pushed the others sideways. Reserving the semibold width for
+    /// every tab holds the row still whichever one is on.
+    func testSelectingATabDoesNotMoveTheRow() {
+        for scale in TextScale.steps {
+            let widths = labels.map { rowWidth(selected: $0, scale: scale, reserveSelectedWidth: true) }
+            for (t, w) in zip(labels, widths) {
+                XCTAssertEqual(w, widths[0], accuracy: 0.01,
+                               "\(t) selected at \(scale)×: the row is the width it is with All selected")
+            }
+            let before = labels.map { rowWidth(selected: $0, scale: scale, reserveSelectedWidth: false) }
+            XCTAssertGreaterThan((before.max() ?? 0) - (before.min() ?? 0), 0.5,
+                                 "the old rule did move the row at \(scale)× — this test can tell them apart")
+        }
+    }
+
+    /// What holding the row still costs in width: the row gets wider, and only
+    /// barely. The cost is the three unselected labels' regular → semibold
+    /// delta, so it is bounded here as a *fraction* of the row rather than in
+    /// points, at every Text Size.
+    ///
+    /// Deliberately no absolute width and no screen-width comparison. Two
+    /// earlier versions of this test asserted the row fits a named phone; both
+    /// were guesses at SF Pro's metrics written on a machine with no Mac and no
+    /// Swift toolchain to measure on, and the gate failed both. How many points
+    /// wide the row is, is a measurement, not an invariant. The invariant is
+    /// that reserving the selected weight does not balloon the row, and that
+    /// holds whatever the face. (`PaneTabs` is a bare `HStack` with no scroll,
+    /// so a row wider than the screen is squeezed — that predates this change;
+    /// see § Chat-list filter in docs/mac-design-rules.md.)
+    func testReservingTheSelectedWidthBarelyWidensTheRow() {
+        for scale in TextScale.steps {
+            let after = rowWidth(selected: "All", scale: scale, reserveSelectedWidth: true)
+            let before = rowWidth(selected: "All", scale: scale, reserveSelectedWidth: false)
+            XCTAssertGreaterThanOrEqual(after, before, "at \(scale)× the reserved row is never the narrower one")
+            XCTAssertLessThan(after - before, before / 20,
+                              "at \(scale)× reserving the semibold width costs under 5% of the row")
+        }
     }
 }
 

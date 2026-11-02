@@ -190,7 +190,7 @@ strip's discs no longer fit beside the lights. Rules (`ui/sidebar_fit.rs`):
 | < 204 (`SNAP_WIDTH − SNAP_HYSTERESIS`) | **snaps to the icon rail** (the rail morph, as the toggle) and keeps the width the gesture started from as the column's saved width (`EdgeTarget::Rail { keep }`) |
 | rail → out past 220 | **restores that width** (`NSSplitView` collapse behaviour): the column re-expands at it, the handle holds until the pointer passes it, then follows (`EdgeTarget::Hold` → `Expanded`). The rail's right edge is the same handle (`rail-resize`) |
 | rail → out, short of 220 | **the rail morph follows the pointer** (`EdgeDrag::track` → `slide::Want::sidebar_track`), the mirror of the fold following it down to 220. Crossing 220 settles at the restored width on the open curve from where the hand is; letting go short of it settles back into the rail on the close curve; a width change under a running slide retargets it, never drops it. Drag open and drag close are symmetric with each other and with the toggle (Jacob 2026-10-29, [feedback mac-sidebar-drag-open-2026-10-29]) |
-| Filter capsules | never clipped: the row scrolls horizontally under a 12 pt side fade (`FILTER_FADE_BAND`, `Shell::filter_scroll`) when the four do not fit — Grok Bot's iPhone home filter row — and is centred when they do (first / last capsule carry `auto` side margins); the selected capsule is scrolled into view. No icons, no overflow menu |
+| Filter capsules | never clipped: the four **tighten until they fit** — padding and gap, then the label's type size (`sidebar_fit::FILTER_STEPS` / `filter_fit`, § Chat-list filter) — so each one is whole and clickable at every width in 220–480 and the row never has to scroll. The horizontal scroll under a 12 pt side fade (`FILTER_FADE_BAND`, `Shell::filter_scroll`) stays as the floor for a font wider than the last step; when it does engage the selected capsule is scrolled into view. The set is centred while there is room (first / last capsule carry `auto` side margins). No icons, no overflow menu |
 | Strip | unchanged at every width ≥ 220 |
 
 Breakpoints derive from `ROW_CHROME` 86 (8 + 8 list, 12 + 12 row, 36 picture,
@@ -530,10 +530,54 @@ typed text (search is the palette); the segment alone scopes it.
 |---|---|---|
 | Capsule height / gap | 32 / 4 | 32 / 4 |
 | Label | `TEXT_BODY` 15, semibold when selected | `Theme.body` 17, semibold when selected |
-| Side padding | **10** (`FILTER_PAD_X`; four segments at 16 overflow the 296 pt default sidebar) | 16 |
+| Side padding | **10** (`FILTER_STEPS[0].pad_x`; four segments at 16 overflow the 296 pt default sidebar, and a narrower column steps down the ladder below) | 16 |
 | Selected fill / text | `bubble_assistant` / `text` | `bubbleAssistant` / `text` |
 | Other labels | `text_muted` | `muted` |
 | Scope | All: everything · Agents: my agents (not shared-in) · People: DMs + groups · Servers: servers only | same (`HomeView.homeRows`) |
+
+### Selecting a filter never moves the row (Scout 2026-10-31)
+
+**A capsule is as wide as its label in the *selected* weight, always.** Picking
+a filter changes its fill and its weight and nothing else; the other three stay
+where they are. Both apps draw a transparent semibold copy of the label to set
+the box and lay the real label over it — `sidebar::filter_label` and the hidden
+`Text` + `.overlay` in `PaneTabs` (`ProfilePages.swift`). Before this, only the
+selected label was semibold, so selecting one grew it and shoved the rest of the
+row sideways. Reserving the bold width costs the Mac row about 5 pt and the
+iPhone row under 8 pt at the default Text Size.
+
+The iPhone has no drag handle, so it has no narrow-column problem to solve — but
+`PaneTabs` is a bare `HStack` with no scroll under it, so at a large enough Text
+Size the four labels outgrow the narrowest phone this build runs on (the 360 pt
+13 mini) and SwiftUI squeezes them. That predates this change and is not fixed
+by it. The exact step where it tips is **not** written down here: it depends on
+SF Pro's metrics, the Mac gate is the only machine that can measure them, and
+two attempts to assert a number from off-Mac were wrong. The iPhone test claims
+only what needs no measurement — that reserving the selected weight costs under
+5 % of the row's width at every Text Size.
+
+### Narrow Mac column: the capsules tighten, they do not scroll away (Scout 2026-10-31)
+
+Scout, v0.6.3xx, Glass: dragged narrow, "Servers" was clipped to a bare **S**
+against the column's edge. The row did scroll — the 2026-10-27 answer — but a
+filter you reach only by swiping a row that shows no handle is the same
+complaint one layer down, and raising `SIDEBAR_WIDTH_MIN` would fix it by taking
+away a drag the user meant. So the capsules now **fit**: `sidebar_fit::filter_fit`
+walks `FILTER_STEPS` — (15, pad 10, gap 4) → (14, 8, 4) → (13, 6, 3) → (12, 4, 2)
+— and takes the roomiest step whose row fits the column, the way a row trades its
+`@handle` and then its time away before its name gives (§ Narrow sidebar). The
+label widths are **measured from the live font** each frame rather than written
+down, because the Mac's `.SystemUIFont` and the Linux build's fall-back are not
+the same width and the breakpoint has to be right on both. The default 296 pt
+column is on the first step, so it looks exactly as it did.
+
+Pinned by `sidebar_fit::tests::the_filter_ladder_takes_the_roomiest_step_that_fits`
+(the ladder, pure) and `sidebar::strip_tests::{every_capsule_is_whole_at_every_width_the_handle_allows,
+selecting_a_filter_moves_no_capsule}` (the shipping `filter_row_box` /
+`filter_capsule_box` laid out for real, measured with `debug_bounds`); the
+iPhone row's two halves by
+`HomeListFilterTests::{testSelectingATabDoesNotMoveTheRow,
+testReservingTheSelectedWidthBarelyWidensTheRow}`.
 
 Server rows draw their picture as a rounded square (corner 11/36 of the size,
 `SERVER_PICTURE_CORNER`) so servers read apart from the agent and people discs.

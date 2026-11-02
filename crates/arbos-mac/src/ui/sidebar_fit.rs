@@ -28,18 +28,22 @@
 //!   `@handle` goes; from [`TIME_FULL_MIN`] down the time drops to
 //!   [`TIME_SMALL_SIZE`] pt; from [`TIME_SMALL_MIN`] down the time is hidden
 //!   — all before the name's column goes under [`NAME_MIN`].
-//! * **Filter**: the All · Agents · People · Servers capsules scroll
-//!   horizontally with an edge fade when they do not fit (Grok Bot's iPhone
-//!   home pattern for its filter row), centred when they do; the selected
-//!   capsule is scrolled into view **once** — when the selection or the
-//!   column's width changes ([`FilterPin`]) — and the strip is the user's
-//!   after that, so "All" can always be scrolled back
+//! * **Filter**: the All · Agents · People · Servers capsules **tighten**
+//!   until all four fit — padding and gap first, then the label's type size
+//!   ([`FILTER_STEPS`], [`filter_fit`]), the way a row's time shrinks before
+//!   it goes. Every capsule reserves the width of its label in the
+//!   *selected* weight, so all four are whole and clickable at every width
+//!   in the drag range and selecting one moves nothing. The horizontal
+//!   scroll and its edge fade stay underneath as the floor for a font wider
+//!   than the last step; the selected capsule is scrolled into view **once**
+//!   — when the selection or the column's width changes ([`FilterPin`]) —
+//!   and the strip is the user's after that
 //!   ([feedback server-strip-scroll-2026-10-28]). No icons, no overflow menu
 //!   (`ui::sidebar::render_with`).
 //! * **Strip**: unchanged — it fits at every width ≥ [`SNAP_WIDTH`]
 //!   ([`strip_fits`]).
 
-use crate::ui::theme::{SidebarWidth, SIDEBAR_WIDTH_MIN};
+use crate::ui::theme::{SidebarWidth, SIDEBAR_WIDTH_MIN, TEXT_BODY};
 
 /// The narrowest width the column is drawn at. Below it the slider snaps to
 /// the rail. Equals [`SIDEBAR_WIDTH_MIN`], the drag clamp.
@@ -112,6 +116,83 @@ pub fn strip_fits(width: f32) -> bool {
     let needed =
         TRAFFIC_LIGHTS_INSET + STRIP_INSET + 3.0 * STRIP_BUTTON + 2.0 * STRIP_GAP + STRIP_INSET;
     width + 0.5 >= needed
+}
+
+/// The filter row's own side padding, left and right (the list's inset).
+pub const FILTER_ROW_PAD_X: f32 = 8.0;
+
+/// How the four filter capsules are drawn: the label's type size, a capsule's
+/// side padding, and the space between two capsules.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FilterFit {
+    pub text_size: f32,
+    pub pad_x: f32,
+    pub gap: f32,
+}
+
+/// The ladder the capsule row walks down as the column narrows, roomiest
+/// first; a column narrower than all of them gets the last step.
+///
+/// Scout, 2026-10-31: dragged narrow, "Servers" was clipped to a bare "S" at
+/// the column's edge. The row did scroll — that was the 2026-10-27 answer —
+/// but a filter you must find by swiping a row with no handle on it is the
+/// same complaint one layer down, so the capsules now **fit** instead. The
+/// first step is the default column's look, unchanged; the three under it
+/// give up padding and a point of type at a time, as a row gives up its
+/// `@handle` and then its time before its name (`RowTime`). Type sizes are
+/// `TEXT_BODY` 15 → 14 → 13 → 12; the last is still over the 11.5 the rows'
+/// time reads at, and it leaves room at [`SNAP_WIDTH`] on the widest face the
+/// app has been measured against (the Linux build's fall-back, some 4 % wider
+/// than the Mac's `.SystemUIFont`).
+pub const FILTER_STEPS: [FilterFit; 4] = [
+    FilterFit {
+        text_size: TEXT_BODY,
+        pad_x: 10.0,
+        gap: 4.0,
+    },
+    FilterFit {
+        text_size: 14.0,
+        pad_x: 8.0,
+        gap: 4.0,
+    },
+    FilterFit {
+        text_size: 13.0,
+        pad_x: 6.0,
+        gap: 3.0,
+    },
+    FilterFit {
+        text_size: 12.0,
+        pad_x: 4.0,
+        gap: 2.0,
+    },
+];
+
+impl FilterFit {
+    /// What the whole row needs at this step. `labels` are the capsules'
+    /// label widths **in the selected weight** at [`TEXT_BODY`] — every
+    /// capsule reserves that width whatever its own state, so selecting one
+    /// never moves its neighbours (Scout, 2026-10-31: "switching filters
+    /// moves everything"). Width scales with the type size.
+    pub fn row_width(&self, labels: &[f32]) -> f32 {
+        let n = labels.len() as f32;
+        let text: f32 = labels.iter().sum::<f32>() * self.text_size / TEXT_BODY;
+        2.0 * FILTER_ROW_PAD_X + text + n * 2.0 * self.pad_x + (n - 1.0).max(0.0) * self.gap
+    }
+}
+
+/// The roomiest step of [`FILTER_STEPS`] whose row fits a column `width`
+/// wide; the tightest step when none of them do (there the scroll underneath
+/// still reaches every capsule — see the module docs).
+///
+/// `labels` is measured from the real font at run time rather than written
+/// down here, because the Mac's `.SystemUIFont` and the Linux build's fall-back
+/// are not the same width and the breakpoint must be right on both.
+pub fn filter_fit(labels: &[f32], width: f32) -> FilterFit {
+    let last = FILTER_STEPS[FILTER_STEPS.len() - 1];
+    FILTER_STEPS
+        .into_iter()
+        .find(|step| step.row_width(labels) <= width + 0.5)
+        .unwrap_or(last)
 }
 
 /// When the filter strip scrolls its selected capsule into view.
@@ -388,6 +469,93 @@ mod tests {
         assert_eq!(
             drag.target(900.0, false, 296.0),
             EdgeTarget::Expanded(SIDEBAR_WIDTH_MAX)
+        );
+    }
+
+    /// The ladder: the roomiest step that fits wins, the default column keeps
+    /// the look it has today, and a column narrower than every step still gets
+    /// the tightest one (under it the scroll is the floor).
+    #[test]
+    fn the_filter_ladder_takes_the_roomiest_step_that_fits() {
+        // Four labels of a plausible width at TEXT_BODY semibold.
+        let labels = [24.0, 50.0, 48.0, 55.0];
+        let roomy = FILTER_STEPS[0];
+        let tight = FILTER_STEPS[FILTER_STEPS.len() - 1];
+        assert_eq!(
+            roomy.text_size, TEXT_BODY,
+            "the default column is unchanged"
+        );
+        assert_eq!(roomy.pad_x, 10.0);
+        assert_eq!(roomy.gap, 4.0);
+        // Every step down is narrower than the one above it, and none grows.
+        for pair in FILTER_STEPS.windows(2) {
+            assert!(
+                pair[1].row_width(&labels) < pair[0].row_width(&labels),
+                "{:?} is tighter than {:?}",
+                pair[1],
+                pair[0]
+            );
+            assert!(pair[1].text_size <= pair[0].text_size);
+            assert!(pair[1].pad_x <= pair[0].pad_x);
+            assert!(pair[1].gap <= pair[0].gap);
+        }
+        // The tightest step fits the narrowest column for any four labels up
+        // to 207 pt wide together at TEXT_BODY semibold. The Linux build's
+        // face — the widest the row has been measured on — totals 198, and
+        // the Mac's `.SystemUIFont` is narrower than that, so both have room
+        // to spare before the scroll underneath has anything to do.
+        let widest = [207.0 / 4.0; 4];
+        assert!(
+            tight.row_width(&widest) <= SNAP_WIDTH,
+            "the last step needs {} at the snap width",
+            tight.row_width(&widest)
+        );
+        assert_eq!(
+            filter_fit(&labels, SIDEBAR_WIDTH),
+            roomy,
+            "the default column"
+        );
+        assert_eq!(filter_fit(&labels, SIDEBAR_WIDTH_MAX), roomy);
+        assert_eq!(
+            filter_fit(&labels, roomy.row_width(&labels)),
+            roomy,
+            "exactly its own width still fits"
+        );
+        assert_eq!(
+            filter_fit(&labels, roomy.row_width(&labels) - 1.0),
+            FILTER_STEPS[1],
+            "one point short of the roomiest: the next step down"
+        );
+        assert_eq!(
+            filter_fit(&labels, 10.0),
+            tight,
+            "narrower than every step: the tightest, and the scroll under it"
+        );
+        // The chosen step always fits when any step does.
+        let mut w = SNAP_WIDTH;
+        while w <= SIDEBAR_WIDTH_MAX {
+            let fit = filter_fit(&labels, w);
+            assert!(
+                fit.row_width(&labels) <= w + 0.5 || fit == tight,
+                "{w} pt: {fit:?} needs {}",
+                fit.row_width(&labels)
+            );
+            w += 1.0;
+        }
+        // The row's own padding and the gaps are counted, not forgotten.
+        let bare = FilterFit {
+            text_size: TEXT_BODY,
+            pad_x: 0.0,
+            gap: 0.0,
+        };
+        assert_eq!(
+            bare.row_width(&labels),
+            2.0 * FILTER_ROW_PAD_X + 177.0,
+            "the row's side padding plus the four labels"
+        );
+        assert_eq!(
+            roomy.row_width(&labels),
+            bare.row_width(&labels) + 4.0 * 2.0 * 10.0 + 3.0 * 4.0
         );
     }
 
