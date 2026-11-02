@@ -37,7 +37,9 @@ set -euo pipefail
 
 STATE="${ARBOS_DEPLOY_STATE:-/var/lib/arbos-deploy}"
 QUEUE="${ARBOS_DEPLOY_QUEUE:-/var/lib/arbos-feedback/deploy-requests}"
-PRIORITY_MERGES="$QUEUE/priority-merges"  # written by the feedback poller when a gate-pinned item merges (hotfix fast path)
+# $QUEUE/priority-merges is still written by the feedback poller when a gate-pinned item merges, and is
+# deliberately no longer read here: see relay_hotfix_marker for why a file whose entries are granted from
+# commit-message text cannot authorize a deploy.
 REPO_URL="https://github.com/unarbos/arbos.git"
 GH_REPO="unarbos/arbos"
 API="https://api.github.com/repos/$GH_REPO"
@@ -133,33 +135,31 @@ record_failure() {
 
 # Image-roll hold (2026-10-24 01:1x): three images in a row (0.1.101/102/103) failed the busy-reply canary on
 # the same bad agentd commit; every new merge burned another image. After a canary failure the lane is HELD:
-# no agentd roll starts until an operator lifts it (`arbos-deploy-worker hold-agentd off`) or a commit whose
-# message carries `[canary-fix]` reaches main. The hold file names the failing image and sha.
+# no agentd roll starts until an operator lifts it (`arbos-deploy-worker hold-agentd off`). The hold file
+# names the failing image and sha.
+#
+# A commit message cannot lift it. It used to: any subject in the whole merged range matching
+# `canary-fix]` — the bracket not even required, so a subject merely mentioning the marker in prose
+# qualified — cleared the hold when that commit also touched `crates/arbos-agentd/` or `image/`, which
+# every routine agentd change does. That let a contributor's merge resume a roll an operator had
+# deliberately stopped, including the three-consecutive-box-failure stop whose recorded reason is that
+# the fleet owner recreates the boxes by hand, and including a manual `hold-agentd on` — worst of all for
+# that one, because a manual hold records main's head as its sha, so every commit merged afterwards fell
+# inside the scanned range. A hold a stranger's commit message can lift is not a hold.
 agentd_hold_file() { echo "$STATE/agentd.hold"; }
 agentd_held() { [[ -f "$(agentd_hold_file)" ]]; }
 hold_agentd() {
   # hold_agentd <sha> <version> <reason>
   printf 'sha=%s\nimage=%s\nat=%s\nreason=%s\n' "$1" "$2" "$(date -u +%FT%TZ)" "$3" > "$(agentd_hold_file)"
-  event agentd "$1" roll_held "image $2: $3 — agentd rolls held until a [canary-fix] commit lands or the hold is lifted"
-  log "agentd: HOLD — $3 (image $2); no further images until a [canary-fix] commit lands or 'hold-agentd off'"
+  event agentd "$1" roll_held "image $2: $3 — agentd rolls held until an operator lifts the hold"
+  log "agentd: HOLD — $3 (image $2); no further images until 'arbos-deploy-worker hold-agentd off'"
 }
 agentd_hold_release_if_fixed() {
-  # A commit tagged [canary-fix] on main since the hold lifts it.
+  # Only an operator lifts a hold: `arbos-deploy-worker hold-agentd off`. Kept as a function, and still
+  # called from roll_image, so the held lane says why it is held on every tick instead of going quiet.
   agentd_held || return 0
-  local held_sha c
-  held_sha="$(sed -n 's/^sha=//p' "$(agentd_hold_file)" | head -1)"
-  # Only a commit that (a) carries the tag in its subject and (b) touches agentd code lifts the hold — a
-  # commit that merely mentions the tag in prose (01:30 Oct 24: this very feature's commit, which rolled
-  # 0.1.105 without the fix) must not.
-  while read -r c; do
-    [[ -n "$c" ]] || continue
-    if git -C "$REPO" diff-tree --no-commit-id --name-only -r "$c" 2>/dev/null | grep -qE '^(crates/arbos-agentd/|image/)'; then
-      log "agentd: canary-fix commit ${c:0:9} is on main; lifting the hold"
-      event agentd "$c" roll_hold_lifted "canary-fix commit ${c:0:9} landed"
-      rm -f "$(agentd_hold_file)"
-      return 0
-    fi
-  done < <(git -C "$REPO" log --format='%H %s' "${held_sha:-HEAD~50}..origin/main" 2>/dev/null | grep -i 'canary-fix\]' | cut -d' ' -f1)
+  log "agentd: lane HELD — $(sed -n 's/^reason=//p' "$(agentd_hold_file)" | head -1); an operator lifts it with 'arbos-deploy-worker hold-agentd off'"
+  return 0
 }
 
 # Lane collision (2026-10-29 00:13): the 0.1.180 canary busy-reply smoke ran while the relay lane restarted
@@ -1008,7 +1008,7 @@ roll_image() {
   ensure_repo
   agentd_hold_release_if_fixed
   if agentd_held; then
-    log "agentd: roll of $1 skipped — lane held ($(sed -n 's/^reason=//p' "$(agentd_hold_file)" | head -1)); 'arbos-deploy-worker hold-agentd off' or a [canary-fix] commit lifts it"
+    log "agentd: roll of $1 skipped — lane held ($(sed -n 's/^reason=//p' "$(agentd_hold_file)" | head -1)); 'arbos-deploy-worker hold-agentd off' lifts it"
     exit 0
   fi
   sha="$(resolve "$sha")" || { log "agentd: cannot resolve $1"; exit 1; }
@@ -1219,23 +1219,32 @@ relay_hotfix_marker() {
   [[ -n "$deployed" ]] && git -C "$REPO" cat-file -e "$deployed^{commit}" 2>/dev/null || return 0
   # `|| true`: grep exits 1 when there is no marker - the normal case - and under pipefail that
   # ended every tick with exit 1 (46 failed ticks 17:55-18:40 Oct 23, no deploys at all).
-  # The whole merged range, not first-parent: the loop lands branches through merge commits whose message never
-  # carries the marker — the `[hotfix]` sits on the branch commit (#1966; 17:54–18:09 Oct 27 the P0 authz fix
-  # #2093 was held 20 min to coalesce). Merges of gate-pinned items are named by the loop in $PRIORITY_MERGES
-  # ("<merge-sha> <item> <when>" per line) and count as markers too.
+  #
+  # Nothing a contributor writes may decide this. A marker sends a commit to the relay host, where
+  # the root worker runs that commit's own `deploy-relay.sh` with OP_SERVICE_ACCOUNT_TOKEN in its
+  # environment, without waiting for CI and without the coalescing window — so the signal must come
+  # from somewhere only an operator reaches. `--first-parent` plus `%s` leaves exactly one such
+  # place: the subject of a commit pushed onto main itself, which is the documented operator flow
+  # (an empty `hotfix:` commit on top of the merge it releases, #1323 #1346 #1464).
+  #
+  # Three sources were author-controlled and are deliberately no longer read:
+  #   - the non-first-parent range, i.e. the commits a merge brought in — a PR branch's own
+  #     messages, which is where #1966's marker sat;
+  #   - `%b`, which for a GitHub merge is the default merge body, i.e. the PR TITLE;
+  #   - `$PRIORITY_MERGES`, written by the feedback poller for a gate-pinned item — and a
+  #     non-operator pin stands precisely when a commit message contains `[hotfix]`, so that file
+  #     launders the same text one hop further out rather than replacing it.
+  # The cost is that a branch-borne marker no longer expedites; the operator pushes the empty
+  # `hotfix:` commit, as the flow above already describes.
+  #
+  # The tab comes from a variable rather than ANSI-C quoting the whole pattern: as $'…\b…', bash
+  # expanded `\b` to a backspace byte, so the `revert`/`hotfix` subject alternative could never
+  # match and only the literal `[hotfix]` worked. Inside double quotes `\b` reaches grep intact.
   # No `| head -1` on the producers: with two marker lines the producer gets SIGPIPE (141) and under set -e that
   # killed the whole tick (20:36–20:41 Oct 27, nothing deployed). Collect, then take the first line.
-  local found
-  found="$(git -C "$REPO" log --format='%H%x09%s%x09%b' "$deployed..origin/main" 2>/dev/null | { grep -iE $'\t(revert|hotfix)\b|\[hotfix\]' || true; })"
-  if [[ -z "$found" && -f "$PRIORITY_MERGES" ]]; then
-    local psha _rest
-    while read -r psha _rest; do
-      [[ "$psha" =~ ^[0-9a-f]{7,40}$ ]] || continue
-      if git -C "$REPO" merge-base --is-ancestor "$psha" origin/main 2>/dev/null && ! git -C "$REPO" merge-base --is-ancestor "$psha" "$deployed" 2>/dev/null; then
-        found="$(git -C "$REPO" rev-parse "$psha" 2>/dev/null)"; break
-      fi
-    done < "$PRIORITY_MERGES"
-  fi
+  local found tab=$'\t'
+  found="$(git -C "$REPO" log --first-parent --format="%H${tab}%s" "$deployed..origin/main" 2>/dev/null \
+    | { grep -iE "${tab}(revert|hotfix)\b|\[hotfix\]" || true; })"
   printf '%s\n' "${found%%$'\n'*}" | cut -f1
 }
 
@@ -1509,14 +1518,19 @@ status() {
 # queue, no deploy), exit 0 only if every expected answer comes back. install-deploy-hook.sh runs
 # it before installing, so a worker that cannot complete a tick is never installed again.
 selftest() {
-  local t b m c
+  local t b m c rv mg gt
   t="$(mktemp -d)"; trap 'rm -rf "$t"' RETURN
-  git -C "$t" init -q && git -C "$t" -c user.name=t -c user.email=t@t commit -q --allow-empty -m base
+  gt=(git -C "$t" -c user.name=t -c user.email=t@t)
+  git -C "$t" init -q && "${gt[@]}" commit -q --allow-empty -m base
   b="$(git -C "$t" rev-parse HEAD)"
-  git -C "$t" -c user.name=t -c user.email=t@t commit -q --allow-empty -m "feat: a"
-  git -C "$t" -c user.name=t -c user.email=t@t commit -q --allow-empty -m "hotfix: ship a [hotfix]"
+  "${gt[@]}" commit -q --allow-empty -m "feat: a"
+  # An operator's expedite: pushed onto main itself, and marked in its SUBJECT. Deliberately with no
+  # `[hotfix]` in it, so this case exercises the `hotfix`-prefix alternative on its own. The case it
+  # replaced read "hotfix: ship a [hotfix]", which matched through both alternatives at once and so
+  # kept passing for as long as one of them was dead — see relay_hotfix_marker on the backspace byte.
+  "${gt[@]}" commit -q --allow-empty -m "hotfix: expedite the relay"
   m="$(git -C "$t" rev-parse HEAD)"
-  git -C "$t" -c user.name=t -c user.email=t@t commit -q --allow-empty -m "feat: b"
+  "${gt[@]}" commit -q --allow-empty -m "feat: b"
   c="$(git -C "$t" rev-parse HEAD)"
   git -C "$t" update-ref refs/remotes/origin/main HEAD
   REPO="$t"; STATE="$t"
@@ -1524,6 +1538,36 @@ selftest() {
   SELFTEST_DEPLOYED="$b"; [[ "$(relay_hotfix_marker)" == "$m" ]] || { echo "selftest: marker above base: got '$(relay_hotfix_marker)', want $m" >&2; return 1; }
   SELFTEST_DEPLOYED="$c"; [[ -z "$(relay_hotfix_marker)" ]] || { echo "selftest: marker above head must be empty" >&2; return 1; }
   SELFTEST_DEPLOYED="$m"; [[ -z "$(relay_hotfix_marker)" ]] || { echo "selftest: marker at the marker must be empty" >&2; return 1; }
+  # The `revert` alternative, alone. It matched nothing at all while the pattern was ANSI-C quoted,
+  # because `\b` was a backspace byte; nothing failed, because every other case carried `[hotfix]` too.
+  "${gt[@]}" commit -q --allow-empty -m 'Revert "feat(ios): a thing"'
+  rv="$(git -C "$t" rev-parse HEAD)"
+  git -C "$t" update-ref refs/remotes/origin/main HEAD
+  SELFTEST_DEPLOYED="$c"; [[ "$(relay_hotfix_marker)" == "$rv" ]] || { echo "selftest: a first-parent Revert subject must be a marker: got '$(relay_hotfix_marker)', want $rv" >&2; return 1; }
+  # Nothing a contributor writes may authorize a deploy. One merged pull request carries the marker in
+  # its branch commit's subject AND its body, and the merge carries the PR title as its body, which is
+  # what GitHub writes by default. None of the three may count.
+  "${gt[@]}" checkout -q -b pr "$rv"
+  "${gt[@]}" commit -q --allow-empty -m "fix: tidy a log line [hotfix]" -m "[hotfix] please expedite this"
+  "${gt[@]}" checkout -q master 2>/dev/null || "${gt[@]}" checkout -q main
+  "${gt[@]}" merge -q --no-ff pr -m "Merge pull request #1 from unarbos/cursor/tidy-a-log-line" -m "fix: tidy a log line [hotfix]"
+  mg="$(git -C "$t" rev-parse HEAD)"
+  git -C "$t" update-ref refs/remotes/origin/main HEAD
+  SELFTEST_DEPLOYED="$rv"
+  [[ -z "$(relay_hotfix_marker)" ]] || { echo "selftest: a merged branch's marker (subject, body, or PR title in the merge body) must authorize nothing: got '$(relay_hotfix_marker)'" >&2; return 1; }
+  # And the poller's priority-merges file, whose entries are themselves granted from commit text.
+  mkdir -p "$t/queue" && printf '%s feedback-77 2026-11-02T02:00:00Z\n' "$mg" > "$t/queue/priority-merges"
+  QUEUE="$t/queue"
+  [[ -z "$(relay_hotfix_marker)" ]] || { echo "selftest: priority-merges must authorize nothing: got '$(relay_hotfix_marker)'" >&2; return 1; }
+  # A hold is an operator decision. A merged commit that mentions the old marker and touches agentd code
+  # used to clear it — including a manual hold, which records main's head so every later commit is in range.
+  mkdir -p "$t/crates/arbos-agentd" && echo v2 > "$t/crates/arbos-agentd/main.rs"
+  "${gt[@]}" add -A && "${gt[@]}" commit -q -m "agentd: tolerate a canary-fix] suffix in smoke output"
+  git -C "$t" update-ref refs/remotes/origin/main HEAD
+  printf 'sha=%s\nimage=%s\nat=%s\nreason=%s\n' "$mg" 0.1.200 now "held by the operator" > "$(agentd_hold_file)"
+  agentd_hold_release_if_fixed
+  agentd_held || { echo "selftest: a merged commit must not lift the agentd hold" >&2; return 1; }
+  rm -f "$(agentd_hold_file)"
   [[ "$(auto_enabled relay)" == "$AUTO_DEPLOY_RELAY" ]] || { echo "selftest: auto_enabled" >&2; return 1; }
   # seed_check_parse: .source-sha with and without its trailing newline, and a seed with no file at all.
   local sha40="90e62fb55993ff1b568c36f4bf6b8bc51e11dca5"

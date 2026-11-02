@@ -59,7 +59,14 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get install -y -q shellcheck >/dev/null
-          shellcheck -S warning scripts/*.sh scripts/release/*.sh scripts/runner/*.sh scripts/feedback/*.sh scripts/merge/*.sh image/*.sh
+          # scripts/deploy is included by name: it runs as root on the relay host, and the two
+          # extensionless entry points there are not matched by any *.sh glob.
+          shellcheck -S warning scripts/*.sh scripts/release/*.sh scripts/runner/*.sh scripts/feedback/*.sh scripts/merge/*.sh scripts/deploy/*.sh image/*.sh
+          shellcheck -S warning scripts/deploy/arbos-deploy-worker scripts/deploy/arbos-deploy-hook
+          # The deploy worker's own selftest: pure helpers against a scratch git repo, no root, no
+          # queue, no deploy. install-deploy-hook.sh runs it before installing; running it here means a
+          # pull request that breaks a deploy gate fails review rather than the install.
+          ARBOS_DEPLOY_STATE="$(mktemp -d)" bash scripts/deploy/arbos-deploy-worker selftest
           # One avatar resolver on both platforms (ARB-394): no surface draws an agent picture outside it.
           ./scripts/avatar-lint.sh
           curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash | bash -s -- latest /tmp >/dev/null
