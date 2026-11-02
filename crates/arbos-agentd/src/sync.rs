@@ -1294,10 +1294,10 @@ mod tests {
             .await
             .unwrap();
         }
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while peak.load(Ordering::SeqCst) < ROOMS && std::time::Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        crate::status::tests::wait_until("every room dialled at once", || async {
+            peak.load(Ordering::SeqCst) >= ROOMS
+        })
+        .await;
         assert_eq!(
             peak.load(Ordering::SeqCst),
             ROOMS,

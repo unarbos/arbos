@@ -933,6 +933,29 @@ pub(crate) mod tests {
         axum::http::StatusCode::NO_CONTENT
     }
 
+    /// A bounded wait gives up after this long; it looks this often. The cap is generous on
+    /// purpose: it is the "this will never happen" line, not a claim about how quick the thing is.
+    const WAIT_CAP: Duration = Duration::from_secs(20);
+    const WAIT_EVERY: Duration = Duration::from_millis(20);
+
+    /// Waits until `cond` holds, then returns at once; fails naming `what` if it never does. A
+    /// test waits for its condition, never for a duration — a fixed sleep is too short on a loaded
+    /// runner and too long on every run that is not.
+    pub(crate) async fn wait_until<F, Fut>(what: &str, mut cond: F)
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        let deadline = Instant::now() + WAIT_CAP;
+        while !cond().await {
+            assert!(
+                Instant::now() < deadline,
+                "waited {WAIT_CAP:?} and {what} never happened"
+            );
+            tokio::time::sleep(WAIT_EVERY).await;
+        }
+    }
+
     pub(crate) async fn test_agent() -> (Arc<Agent>, std::path::PathBuf) {
         test_agent_with(axum::Router::new()).await
     }
@@ -1145,12 +1168,10 @@ pub(crate) mod tests {
         let waiting = tokio::spawn(async move { a2.handle_command(&chat2, cmd).await });
         // Give the quick path its grace + model call, then look: the message is queued for the
         // main session (one waiter) and has no assistant row at all.
-        let t0 = Instant::now();
-        while agent.sends_waiting() == 0
-            && t0.elapsed() < Duration::from_secs(FIRST_REPLY_GATE_SECS)
-        {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        wait_until("the ask queued for the main session", || async {
+            agent.sends_waiting() > 0
+        })
+        .await;
         assert_eq!(
             agent.sends_waiting(),
             1,
@@ -1641,8 +1662,9 @@ pub(crate) mod tests {
             t.send_tool = SendTool::On;
             agent.test_open_row(&host, t).await;
         }
+        let ack = "Looking up the top-rated surf schools around Santa Teresa now.";
         agent
-            .hook_route(&json!({ "action": "act", "ack": "Looking up the top-rated surf schools around Santa Teresa now.", "plan": "search, read, compare" }))
+            .hook_route(&json!({ "action": "act", "ack": ack, "plan": "search, read, compare" }))
             .await
             .unwrap();
         assert!(
@@ -1651,14 +1673,14 @@ pub(crate) mod tests {
                 .all(|r| r.text().trim().is_empty()),
             "status first, no bubble yet"
         );
-        tokio::time::sleep(Duration::from_millis(1600)).await;
+        wait_until("the act ack was promoted to a bubble", || async {
+            reply_rows(&host, "m-busy")
+                .iter()
+                .any(|r| r.text().trim() == ack)
+        })
+        .await;
         let rows = reply_rows(&host, "m-busy");
-        let acks: Vec<_> = rows
-            .iter()
-            .filter(|r| {
-                r.text().trim() == "Looking up the top-rated surf schools around Santa Teresa now."
-            })
-            .collect();
+        let acks: Vec<_> = rows.iter().filter(|r| r.text().trim() == ack).collect();
         assert_eq!(
             acks.len(),
             1,
@@ -1865,7 +1887,15 @@ pub(crate) mod tests {
                 },
             )
             .await;
-        tokio::time::sleep(Duration::from_millis(1600)).await;
+        wait_until("the act ack was promoted to a bubble", || async {
+            agent
+                .turn
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|t| t.ack_posted)
+        })
+        .await;
         {
             let mut tl = agent.turn.lock().await;
             let t = tl.as_mut().unwrap();
@@ -2224,12 +2254,10 @@ pub(crate) mod tests {
         let a2 = agent.clone();
         let chat2 = chat.to_owned();
         let waiting = tokio::spawn(async move { a2.handle_command(&chat2, cmd).await });
-        let t0 = Instant::now();
-        while agent.sends_waiting() == 0
-            && t0.elapsed() < Duration::from_secs(FIRST_REPLY_GATE_SECS)
-        {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        wait_until("the ask queued for the main session", || async {
+            agent.sends_waiting() > 0
+        })
+        .await;
         assert_eq!(agent.sends_waiting(), 1, "queued for the main session");
         assert!(
             reply_rows(&host, &msg_id).is_empty(),
@@ -2442,25 +2470,21 @@ pub(crate) mod tests {
             reply_rows(&host, &msg_id).is_empty(),
             "no bubble for a steer"
         );
-        let t0 = Instant::now();
         // The stub relay's log is process-wide: another test's act ack can land in between,
         // so look for this chat's own "Steering: …" line.
-        let seen = loop {
-            if let Some(a) = ACTIVITY_LOG
+        let steering = || {
+            ACTIVITY_LOG
                 .lock()
                 .unwrap()
                 .iter()
                 .find(|a| a.starts_with("Steering:"))
                 .cloned()
-            {
-                break a;
-            }
-            assert!(
-                t0.elapsed() < Duration::from_secs(5),
-                "no steering activity posted"
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
         };
+        wait_until("a steering activity reached the relay", || async {
+            steering().is_some()
+        })
+        .await;
+        let seen = steering().expect("the steering line is still in the log");
         assert!(seen.starts_with("Steering: Change of plan"), "{seen}");
         let _ = std::fs::remove_dir_all(&root);
     }
