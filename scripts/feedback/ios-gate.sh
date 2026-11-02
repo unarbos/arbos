@@ -38,9 +38,29 @@ TEST_SIM_NAME="${ARBOS_GATE_TEST_SIM:-iPhone 17}"
 BASELINE_DIR="$HOME/arbos-gate/.test-baseline"
 
 # failing_tests <xcodebuild log> → "Class/test" per failing test, sorted.
+#
+# xcodebuild prints a failed case in one of two shapes, and which one you get is a property of the
+# run rather than of the test:
+#
+#   serial    Test Case '-[ArbosTests.FooTests testBar]' failed (1.443 seconds).
+#   parallel  Test case 'FooTests.testBar()' failed on 'Clone 1 of iPhone 17 - Arbos (79040)' (0.4 seconds)
+#
+# ArbosTests is parallelizable = "YES" in Arbos.xcscheme, so the parallel shape is its default; the
+# serial shape appears here only because run_suite passes -parallel-testing-enabled NO. Matching one
+# shape made that flag load-bearing from a different function, and failing open in a way that covers
+# its own tracks: this returns empty, run_unit_tests reads empty as "no test case failed" and excuses
+# it as infrastructure trouble, and baseline_for empties main's baseline in the same breath, so
+# neither error can expose the other. Match both shapes and the flag stops carrying correctness.
+#
+# The parallel shape carries no target name — it cannot, each clone runs one target — so that branch
+# is unqualified. It does not need to be: ArbosTests is the only parallelizable test target in the
+# scheme. The serial branch stays qualified, so a UI failure in a combined log is still not counted.
 failing_tests() {
-  grep -E "^Test Case '-\[ArbosTests\.[A-Za-z0-9_]+ [A-Za-z0-9_]+\]' failed" "$1" 2>/dev/null \
-    | sed -E "s/^Test Case '-\[ArbosTests\.([A-Za-z0-9_]+) ([A-Za-z0-9_]+)\]' failed.*/\1\/\2/" | sort -u
+  { grep -E "^Test Case '-\[ArbosTests\.[A-Za-z0-9_]+ [A-Za-z0-9_]+\]' failed" "$1" 2>/dev/null \
+      | sed -E "s/^Test Case '-\[ArbosTests\.([A-Za-z0-9_]+) ([A-Za-z0-9_]+)\]' failed.*/\1\/\2/"
+    grep -E "^Test case '[A-Za-z0-9_]+\.[A-Za-z0-9_]+\(\)' failed on " "$1" 2>/dev/null \
+      | sed -E "s/^Test case '([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)\(\)' failed on .*/\1\/\2/"
+  } | sort -u
 }
 
 test_sim_udid() {
@@ -140,7 +160,11 @@ run_unit_tests() {
   fi
   echo "== tests: FAIL — failing and NOT red on main (${base:0:8}):"
   printf '%s\n' "$new" | head -20
-  grep -E "error: -\[ArbosTests\." "$log" | sed 's#/Users/[^/]*/arbos-gate/##' | head -20 | cut -c1-300
+  # A clone prints no `error:` line for a failure, so the detail would be blank on a parallel run.
+  # Fall back to the case lines themselves rather than naming failures with nothing underneath them.
+  { grep -E "error: -\[ArbosTests\." "$log" 2>/dev/null
+    grep -E "^Test case '[A-Za-z0-9_]+\.[A-Za-z0-9_]+\(\)' failed on " "$log" 2>/dev/null
+  } | sed 's#/Users/[^/]*/arbos-gate/##' | head -20 | cut -c1-300
   rm -f "$log"; return 1
 }
 
@@ -166,14 +190,25 @@ if [[ "${1:-}" == "selftest" ]]; then
   else
     echo "selftest: test-target comparison WRONG — got: $new"; exit 1
   fi
-  # The test-run parser must read xcodebuild's failed test cases as Class/test.
+  # The test-run parser must read xcodebuild's failed test cases as Class/test, in BOTH shapes —
+  # the serial one, and the one the clones print when -parallel-testing-enabled NO is not passed.
   tlog=$(mktemp -t ios-gate-selftest)
   printf '%s\n' "Test Case '-[ArbosTests.HiddenWorkerRowTests testAWorkerSpawnRowDrawsNothingButATeammateSendKeepsItsLine]' failed (1.443 seconds)." \
                  "Test Case '-[ArbosTests.HiddenWorkerRowTests testWorkerFlagParsesAndDefaultsOff]' passed (0.002 seconds)." > "$tlog"
   if [[ "$(failing_tests "$tlog")" == "HiddenWorkerRowTests/testAWorkerSpawnRowDrawsNothingButATeammateSendKeepsItsLine" ]]; then
-    echo "selftest: failing-test parser reads Class/test"
+    echo "selftest: failing-test parser reads Class/test (serial shape)"
   else
-    echo "selftest: failing-test parser WRONG — got: $(failing_tests "$tlog")"; rm -f "$tlog"; exit 1
+    echo "selftest: failing-test parser WRONG on the serial shape — got: $(failing_tests "$tlog")"; rm -f "$tlog"; exit 1
+  fi
+  # The clone shape: no target name, a trailing (), and a device suffix. A passing clone line must
+  # not count, and a serial UI failure in the same log must still not be counted as a unit failure.
+  printf '%s\n' "Test case 'MessagePasteboardTests.testJpegStaysJpegWithAPngTwin()' failed on 'Clone 1 of iPhone 17 - Arbos (79040)' (0.396 seconds)" \
+                 "Test case 'MessagePasteboardTests.testWrittenItemsReadBackByTypeAndTheComposer()' passed on 'Clone 1 of iPhone 17 - Arbos (79040)' (0.004 seconds)" \
+                 "Test Case '-[ArbosUITests.BackSwipeUITests testAgentChatEdgeSwipeGoesHome]' failed (12.003 seconds)." > "$tlog"
+  if [[ "$(failing_tests "$tlog")" == "MessagePasteboardTests/testJpegStaysJpegWithAPngTwin" ]]; then
+    echo "selftest: failing-test parser reads Class/test (parallel shape)"
+  else
+    echo "selftest: failing-test parser WRONG on the parallel shape — got: $(failing_tests "$tlog")"; rm -f "$tlog"; exit 1
   fi
   rm -f "$tlog"
   [[ -n "$(test_sim_udid)" ]] && echo "selftest: test simulator '$TEST_SIM_NAME' present ($(test_sim_udid))" || { echo "selftest: test simulator '$TEST_SIM_NAME' MISSING"; exit 1; }
