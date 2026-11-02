@@ -296,6 +296,13 @@ pub enum SyncEvent {
         sender: Sender,
         text: Option<String>,
     },
+    /// A message's value moved into the vault and the row became the "Secret saved as NAME"
+    /// ghost (`message_redacted` push). The row itself is corrected by room sync, and the
+    /// search index follows the corrected message list; what neither reaches is a banner
+    /// already sitting in Notification Center with the pasted value in it.
+    MessageRedacted {
+        chat_id: Id,
+    },
     /// A call ended (push, or my `leave` answered `ended: true`).
     CallEnded(CallEnded),
     /// A call in one of my chats ended and I never joined (`call_missed` push).

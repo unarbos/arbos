@@ -1993,6 +1993,12 @@ impl AppState {
                     cx.notify();
                 }
             }
+            SyncEvent::MessageRedacted { chat_id } => {
+                // The pasted value is already gone from the row and from the index, which both
+                // follow the room doc. A delivered banner follows nothing: it holds the text it
+                // was posted with until someone dismisses it.
+                notify::withdraw_chat(&chat_id);
+            }
             SyncEvent::CallEnded(ended) => self.on_call_ended(ended, cx),
             SyncEvent::CallMissed(missed) => self.on_call_missed(missed, cx),
             SyncEvent::CallInfo(call) => self.on_call_info(call, cx),
