@@ -380,6 +380,11 @@ pub struct Shell {
     /// Server pane › Settings › New link options (owner): 7-day expiry, single use.
     pub(crate) invite_expires: bool,
     pub(crate) invite_single_use: bool,
+    /// Group pane › Invite links › New link options (any member): 7-day expiry, single use.
+    pub(crate) group_invite_expires: bool,
+    pub(crate) group_invite_single_use: bool,
+    /// A minted link is waiting for the next frame to be copied.
+    invite_copy_queued: bool,
     /// Channel page › Settings: the channel whose topic is being edited in `server_input`.
     pub(crate) channel_topic_edit: Option<crate::model::Id>,
     /// D88: the "Admins only post" toggle of the new-channel sheet.
@@ -1218,6 +1223,9 @@ impl Shell {
             channel_rename: None,
             invite_expires: false,
             invite_single_use: false,
+            group_invite_expires: false,
+            group_invite_single_use: false,
+            invite_copy_queued: false,
             channel_topic_edit: None,
             new_channel_restricted: false,
             server_member_armed: None,
@@ -3185,6 +3193,15 @@ impl Shell {
         cx.notify();
     }
 
+    /// A group invite link to the clipboard, and the notice that says so.
+    pub(crate) fn copy_invite(&mut self, url: &str, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(url.to_owned()));
+        self.state.update(cx, |s, cx| {
+            s.push_notice("Invite link copied");
+            cx.notify();
+        });
+    }
+
     /// Shift-click / right-click on a member row of the group pane: its menu at the click.
     pub(crate) fn open_member_menu(
         &mut self,
@@ -4897,6 +4914,16 @@ impl Render for Shell {
         self.last_viewport_width = width;
         self.fullscreen = window.is_fullscreen() || self.rig_fullscreen;
         crate::ui::picture_fit::note_scale_factor(window.scale_factor());
+        if !self.invite_copy_queued && self.state.read(cx).group_invite_to_copy.is_some() {
+            self.invite_copy_queued = true;
+            cx.defer_in(window, |this, _, cx| {
+                this.invite_copy_queued = false;
+                let url = this.state.update(cx, |s, _| s.group_invite_to_copy.take());
+                if let Some(url) = url {
+                    this.copy_invite(&url, cx);
+                }
+            });
+        }
         let state = self.state.read(cx);
         let narrow = state.window_is_narrow(width);
         // The narrow band hides the sidebar (an overlay brings it back);
