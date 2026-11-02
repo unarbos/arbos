@@ -69,17 +69,28 @@ final class SwipeDirectionsUITests: XCTestCase {
     /// "never came into reach": the loop below asked `isHittable`, never got an answer, and
     /// scrolled past a bubble that was on screen the whole time.
     ///
-    /// Of the matches, take the largest by area: that is the row, and the rest are the pieces
-    /// drawn inside it. Some of those pieces have no size at all, and XCUITest answers a
-    /// hittability question about one of them with "Activation point invalid".
+    /// Ask for the row's container rather than for anything carrying the identifier. The row is
+    /// an accessibility container (`children: .contain`) and the pieces inside an album are
+    /// images, so narrowing to containers picks the row out without walking the children.
+    ///
+    /// Walking them is what broke: reading a frame off each match raises "No matches found for
+    /// Element at index 2" the moment one of those children stops existing between the list
+    /// being taken and the frame being read, and an album's children come and go while its five
+    /// pictures decode. Every album case in this file failed that way and none of the other
+    /// rows did, because no other row has five children to lose.
+    ///
+    /// If the narrowing ever stops resolving to one element, fall back to the largest match by
+    /// area — that is the row, and the rest are the pieces drawn inside it.
     private func bubbleElement(_ app: XCUIApplication, _ id: String) -> XCUIElement {
+        let containers = app.otherElements.matching(identifier: "bubble:\(id)")
+        if containers.count == 1 { return containers.firstMatch }
         let matches = app.descendants(matching: .any).matching(identifier: "bubble:\(id)")
         let all = matches.allElementsBoundByIndex
         guard all.count > 1 else { return matches.firstMatch }
         // Say it out loud, in the log, every time. Picking a winner in silence is how this
         // cost a day: the suite reported "never came into reach" and the gesture took the
         // blame, with nothing anywhere to show that the identifier was the ambiguous part.
-        print("bubble:\(id) matches \(all.count) elements — taking the largest")
+        print("bubble:\(id) matches \(all.count) elements, \(containers.count) of them containers — taking the largest")
         return all.max { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }
             ?? matches.firstMatch
     }
