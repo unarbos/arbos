@@ -207,12 +207,30 @@ async fn a_strangers_device_is_never_handed_another_owners_project_id() {
     );
 }
 
-/// A box is the one caller shown another owner's row on purpose: a shared skill carries the
-/// `origin_project_id` that says whose it is. This pins how far that goes, so the exception
-/// stays an exception — it must not reach an unshared skill, and the card must keep refusing
-/// the box that holds the id.
+/// The chain the invariant above does **not** close, pinned so it cannot quietly widen.
+///
+/// `SkillScope::Project` is `s.shared = 1 OR s.origin_project_id = ?1`, so a box reads every
+/// shared skill on the relay together with the `origin_project_id` saying whose it is. That is
+/// attribution on an explicitly shared row, and defensible by itself. `owner_only` then refuses
+/// the box at the grant card, which is also defensible by itself.
+///
+/// The two together are not. A box reports to its own owner, and that step leaves the relay
+/// without leaving the system: the owner ends up holding a foreign project id, the owner has a
+/// device, and `grant_dto` turns an id into a name and a handle for any device with no
+/// permission check. That is the enumeration path the uniform 404 exists to prevent, assembled
+/// out of two parts that each look fine where they are written.
+///
+/// There is a second reason to pin it here rather than leave it to the reader. `skills.rs`
+/// opens by saying a skill "is never shared across *people*", while the predicate above is
+/// relay-wide for a box. One of those is wrong and the file does not say which — which is the
+/// condition under which someone later edits the code to match the comment, or the comment to
+/// match the code, not knowing a security property hangs on the answer.
+///
+/// Nothing here fixes it — `skills.rs` is held elsewhere. What these assertions buy is that the
+/// chain cannot get *shorter* without a test failing: the origin must not reach an unshared
+/// skill, and the card must keep refusing the box.
 #[tokio::test]
-async fn a_boxs_view_of_a_shared_skill_is_the_one_exception_and_it_is_bounded() {
+async fn a_box_reads_a_foreign_project_id_and_only_the_last_step_is_refused() {
     let s = scene();
     let (mallory, _) = person(&s.state, 9803);
     let mallorys_project = project_of(&s.state, &mallory, "Mallory's other agent");
@@ -232,10 +250,13 @@ async fn a_boxs_view_of_a_shared_skill_is_the_one_exception_and_it_is_bounded() 
         .await,
     )
     .await;
+    // Step one of the chain, asserted so that closing it is a deliberate act and not a
+    // side effect: today a box is told whose shared skill it is.
     assert!(
         !sightings("", &listed, &s.victors_project).is_empty(),
-        "a box is shown whose shared skill it is; if that stops being true, \
-         the stranger test above is the one that matters and this one can go: {listed}"
+        "a box no longer learns whose shared skill it is — if that was on purpose, the chain \
+         in this test's doc comment is closed at its first step and this assertion should go \
+         with it: {listed}"
     );
 
     // Attribution on a shared row only. An unshared skill stays out of the listing entirely,
@@ -255,7 +276,8 @@ async fn a_boxs_view_of_a_shared_skill_is_the_one_exception_and_it_is_bounded() 
         "an unshared skill told a box whose it is: {private}"
     );
 
-    // And the id is not spendable by the caller holding it: the grant card is a device route.
+    // The last step, and the only one the relay refuses: the card is a device route. This is
+    // where the chain stops inside the relay, not where it stops.
     let refused = crate::agent_messages::put_grant(
         State(s.state.clone()),
         agent,
@@ -271,6 +293,6 @@ async fn a_boxs_view_of_a_shared_skill_is_the_one_exception_and_it_is_bounded() 
     assert_eq!(
         refused.0,
         StatusCode::FORBIDDEN,
-        "the chain closes here: a box may read the id but may not turn it into a name"
+        "a box may read the foreign id but may not spend it at the card itself"
     );
 }
