@@ -72,7 +72,10 @@ pub struct Config {
     pub auth_mode: AuthMode,
     pub github_client_id: Option<String>,
     pub github_client_secret: Option<String>,
-    /// Extra allowed `redirect` prefixes for `/auth/github/start` (`ARBOS_AUTH_REDIRECTS`).
+    /// Extra origins `/auth/github/start` may send the browser to (`ARBOS_AUTH_REDIRECTS`,
+    /// comma-separated). Each entry names one origin — `https://arbos.life` — and is compared
+    /// whole: scheme, host and port. A path on an entry is ignored, and no entry is ever
+    /// matched against the start of a redirect (`signin::redirect_allowed`).
     pub auth_redirects: Vec<String>,
     /// Credits a new GitHub account starts with (`ARBOS_DEFAULT_GRANT_USD`).
     pub default_grant_usd: f64,

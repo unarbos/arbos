@@ -1649,15 +1649,45 @@ pub async fn me_matrix(State(state): State<AppState>, principal: Principal) -> R
 
 /// A signed-out Arbos device takes its Matrix device with it (`/logout` with its own token).
 pub async fn revoke_device(state: &AppState, device_id: &str) {
-    let Ok(Some((_, enc))) = state.db.matrix_delete_device(device_id) else {
+    let Ok(Some((_, _, enc))) = state.db.matrix_delete_device(device_id) else {
         return;
     };
-    let Ok(token) = state.relay_key.decrypt(&enc) else {
-        return;
+    let token = match state.relay_key.decrypt(&enc) {
+        Ok(t) => t,
+        // Silence here is how a signed-out device kept a live Matrix token (#2433): the row
+        // went, the token did not.
+        Err(e) => {
+            tracing::warn!(device = %device_id, error = %e, "matrix: device token unreadable; it stays live at the homeserver");
+            return;
+        }
     };
     let client = Client::new(state.http.clone(), state.matrix.cfg.clone());
     if let Err(e) = client.logout_token(&token).await {
         tracing::warn!(device = %device_id, error = %e, "matrix: device logout failed");
+    }
+}
+
+/// A deleted user takes its Matrix identity with it: every device it minted is logged out, the
+/// relay stops being its push gateway, and the relay's own `matrix_users` / `matrix_devices`
+/// rows go. Without this a deleted account keeps live Matrix access tokens, and `/_matrix`
+/// forwards any valid Matrix token to Synapse, so those tokens still work (#2433).
+///
+/// Call it **before** the user's relay rows are deleted: the device list and the encrypted
+/// tokens are what the logout and the pusher removal are made of.
+pub async fn forget_user(state: &AppState, user_id: &str) {
+    if state.matrix.cfg.mode.writes() {
+        let client = Client::new(state.http.clone(), state.matrix.cfg.clone());
+        // Pushers hang off the Matrix account, not off the access token, so a logout does not
+        // take them with it; they have to be removed while the device rows are still there.
+        if let Err(e) = super::reads::set_pushers(state, &client, user_id, false).await {
+            tracing::warn!(user = %user_id, error = %e, "matrix: pushers not removed for a deleted user");
+        }
+    }
+    for device_id in state.db.matrix_devices_of_user(user_id).unwrap_or_default() {
+        revoke_device(state, &device_id).await;
+    }
+    if let Err(e) = state.db.matrix_forget_user(user_id) {
+        tracing::warn!(user = %user_id, error = %e, "matrix: rows of a deleted user not cleared");
     }
 }
 
@@ -1729,6 +1759,116 @@ mod tests {
         );
         assert!(server_name("").is_none());
         assert_eq!(invite_code().len(), 10);
+    }
+
+    /// A deleted user must not keep a working Matrix token. Skipped unless
+    /// `ARBOS_MATRIX_TEST_HS` and `ARBOS_MATRIX_TEST_AS_TOKEN` point at a throwaway Synapse
+    /// with an appservice over `@.*` (see `matrix::worker::tests`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn forgetting_a_user_kills_its_matrix_token() {
+        let (Ok(hs_url), Ok(as_token)) = (
+            std::env::var("ARBOS_MATRIX_TEST_HS"),
+            std::env::var("ARBOS_MATRIX_TEST_AS_TOKEN"),
+        ) else {
+            return;
+        };
+        let mut state = crate::state::test_support::test_state(crate::state::AuthMode::Github);
+        state.matrix = crate::matrix::Matrix::new(crate::matrix::Config {
+            mode: crate::matrix::Mode::Dual,
+            hs_url: hs_url.clone(),
+            server_name: "arbos.life".into(),
+            as_token_users: as_token.clone(),
+            as_token_agents: as_token.clone(),
+            as_token_bridges: as_token,
+            ..crate::matrix::Config::off()
+        });
+        let (user, principal) = crate::people::tests_support::person(&state, 3001);
+        let device_id = match &principal {
+            Principal::Device { id, .. } => id.clone(),
+            _ => unreachable!("person() makes a device"),
+        };
+        // The same identity `GET /me/matrix` mints for a device.
+        let mxid = state.matrix.cfg.user_mxid(&user);
+        let client = Client::new(state.http.clone(), state.matrix.cfg.clone());
+        client.register(&mxid).await.expect("register");
+        let (token, mx_device) = client
+            .login_appservice(&mxid, &device_id)
+            .await
+            .expect("login");
+        let enc = state.relay_key.encrypt(&token).expect("encrypt");
+        state
+            .db
+            .matrix_insert_device(&device_id, &user, &mxid, &mx_device, &enc)
+            .expect("device row");
+        crate::matrix::reads::set_pushers(&state, &client, &user, true)
+            .await
+            .expect("pushers on");
+        state
+            .db
+            .matrix_upsert_user(&format!("user:{user}"), &mxid, Some("tester"))
+            .expect("user row");
+
+        let pushers = || {
+            let http = state.http.clone();
+            let as_token = state.matrix.cfg.as_token_users.clone();
+            let url = format!("{hs_url}/_matrix/client/v3/pushers?user_id={mxid}");
+            async move {
+                let v: Value = http
+                    .get(url)
+                    .bearer_auth(as_token)
+                    .send()
+                    .await
+                    .expect("pushers")
+                    .json()
+                    .await
+                    .expect("pushers json");
+                v["pushers"].as_array().map(Vec::len).unwrap_or(0)
+            }
+        };
+        assert_eq!(pushers().await, 1, "the relay is this user's push gateway");
+
+        let whoami = || {
+            let http = state.http.clone();
+            let url = format!("{hs_url}/_matrix/client/v3/account/whoami");
+            let token = token.clone();
+            async move {
+                http.get(url)
+                    .bearer_auth(token)
+                    .send()
+                    .await
+                    .expect("whoami")
+                    .status()
+            }
+        };
+        assert!(
+            whoami().await.is_success(),
+            "the token works while the user exists"
+        );
+
+        forget_user(&state, &user).await;
+
+        assert_eq!(
+            whoami().await,
+            StatusCode::UNAUTHORIZED,
+            "a deleted user's Matrix token must stop working"
+        );
+        assert_eq!(pushers().await, 0, "no pusher outlives the account");
+        assert!(
+            state
+                .db
+                .matrix_devices_of_user(&user)
+                .expect("devices")
+                .is_empty(),
+            "no matrix_devices row is left behind"
+        );
+        assert!(
+            state
+                .db
+                .matrix_user(&format!("user:{user}"))
+                .expect("user row")
+                .is_none(),
+            "no matrix_users row is left behind"
+        );
     }
 }
 

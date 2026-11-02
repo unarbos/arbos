@@ -423,10 +423,24 @@ impl Db {
         })
     }
 
+    /// Live members of a chat, in a total order: when they joined, then people before agents,
+    /// then by `member`.
+    ///
+    /// The order is a contract, not an implementation detail. Four places turn this roster into
+    /// a string a person reads — the chat title in the API, the push title, the export title and
+    /// the name the voice agent speaks — and three serve it as an array a client renders. A
+    /// group created in one request adds every member in a loop, so all of them carry the same
+    /// `joined_at`; with `joined_at` alone as the sort key SQLite is free to return a tie in
+    /// whatever order the chosen plan produces, and two devices can then disagree about a
+    /// displayed name. `joined_at` stays the first key so a real difference in join time still
+    /// wins. People sort ahead of agents because a group of people reads better led by the
+    /// people, and `agent:` would otherwise sort first. `member` settles the rest: it is stored
+    /// on the row and already covered by the `(chat_id, member)` unique index.
     pub fn members_of(&self, chat_id: &str) -> Result<Vec<Membership>> {
         self.with(|c| {
             let mut st = c.prepare(&format!(
-                "SELECT {MEMBER_COLS} FROM people_members WHERE chat_id = ?1 AND left_at IS NULL ORDER BY joined_at"
+                "SELECT {MEMBER_COLS} FROM people_members WHERE chat_id = ?1 AND left_at IS NULL
+                 ORDER BY joined_at, CASE WHEN member LIKE 'user:%' THEN 0 ELSE 1 END, member"
             ))?;
             let rows = st.query_map(params![chat_id], membership_from_row)?;
             rows.collect()
@@ -1161,22 +1175,24 @@ impl Db {
         })
     }
 
-    /// `(user_id, added_by, joined_at)` of the live guests of a project.
+    /// `(user_id, added_by, joined_at)` of the live guests of a project, in a total order (see
+    /// `members_of`: two guests invited in the same millisecond must not swap places).
     pub fn project_members(&self, project_id: &str) -> Result<Vec<(String, String, i64)>> {
         self.with(|c| {
             let mut st = c.prepare(
-                "SELECT user_id, added_by, joined_at FROM project_members WHERE project_id = ?1 AND left_at IS NULL ORDER BY joined_at",
+                "SELECT user_id, added_by, joined_at FROM project_members WHERE project_id = ?1 AND left_at IS NULL ORDER BY joined_at, user_id",
             )?;
             let rows = st.query_map(params![project_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
             rows.collect()
         })
     }
 
-    /// Project ids shared with a user (they are a live guest).
+    /// Project ids shared with a user (they are a live guest), in a total order (see
+    /// `members_of`).
     pub fn shared_project_ids(&self, user_id: &str) -> Result<Vec<String>> {
         self.with(|c| {
             let mut st = c.prepare(
-                "SELECT project_id FROM project_members WHERE user_id = ?1 AND left_at IS NULL ORDER BY joined_at",
+                "SELECT project_id FROM project_members WHERE user_id = ?1 AND left_at IS NULL ORDER BY joined_at, project_id",
             )?;
             let rows = st.query_map(params![user_id], |r| r.get(0))?;
             rows.collect()
@@ -1404,6 +1420,85 @@ mod tests {
         assert_eq!(card.name.as_deref(), Some("Jacob's Mac"));
         let sender = crate::notify::Sender::user(&state, "u_mac");
         assert_eq!(sender.title(), "@jacobs-mac");
+    }
+
+    /// The roster order is a contract: four strings a person reads and three arrays a client
+    /// renders are built from it. Creating a group adds every member inside one millisecond, so
+    /// they all carry the same `joined_at` and the tiebreak alone decides — people first, then
+    /// by `member`. Without it SQLite may return a tie in whichever order its chosen plan
+    /// produces, and two devices can disagree about a displayed name.
+    #[test]
+    fn members_added_in_one_millisecond_come_back_in_one_order() {
+        let state = test_state(AuthMode::Github);
+        let chat = PeopleChat {
+            id: "chat_roster".into(),
+            kind: "group".into(),
+            created_by: "gh_2".into(),
+            created_at: 1,
+            title: None,
+            image_key: None,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
+            description: None,
+        };
+        state.db.insert_people_chat(&chat).unwrap();
+        for member in [
+            "agent:proj_zed",
+            "user:gh_2",
+            "agent:proj_ada",
+            "user:gh_10",
+            "user:gh_1",
+        ] {
+            state
+                .db
+                .add_member(&chat.id, member, "member", "gh_2", &serde_json::json!({}))
+                .unwrap();
+        }
+        let same_instant = |chat_id: &str| {
+            state
+                .db
+                .with(|c| {
+                    c.execute(
+                        "UPDATE people_members SET joined_at = 7 WHERE chat_id = ?1",
+                        params![chat_id],
+                    )
+                })
+                .unwrap();
+        };
+        same_instant(&chat.id);
+        let roster = |chat_id: &str| -> Vec<String> {
+            state
+                .db
+                .members_of(chat_id)
+                .unwrap()
+                .into_iter()
+                .map(|m| m.member)
+                .collect()
+        };
+        assert_eq!(
+            roster(&chat.id),
+            [
+                "user:gh_1",
+                "user:gh_10",
+                "user:gh_2",
+                "agent:proj_ada",
+                "agent:proj_zed"
+            ]
+        );
+
+        // `joined_at` still comes first, so someone who joins later stays at the end however
+        // their id sorts: a group's roster reads in the order people arrived.
+        state
+            .db
+            .add_member(
+                &chat.id,
+                "user:gh_0",
+                "member",
+                "gh_2",
+                &serde_json::json!({}),
+            )
+            .unwrap();
+        assert_eq!(roster(&chat.id).last().unwrap(), "user:gh_0");
     }
 }
 

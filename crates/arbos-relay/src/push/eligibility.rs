@@ -182,8 +182,15 @@ pub fn decide(r: &Recipient, shape: ChatShape, large_group_min: usize) -> Verdic
 }
 
 /// Does the message mention this person? `mentions` is what the writer declared
-/// (`user:<id>`, `<id>`, `@handle` or `handle`); the text is scanned for `@handle` as a word
-/// and for `@everyone`.
+/// (`user:<id>`, `<id>`, `@handle` or `handle`); the text is scanned for `@handle` as a word,
+/// for `@everyone`, and for `@here`.
+///
+/// The text scan is what answers in practice, because no app fills the declared list in on the
+/// announce: it resolves mentions into the row it writes and posts `…/notify` with the message
+/// id and the text alone. `@here` has to be read out of the prose for the same reason, and it
+/// has to be read here: the apps turn it into member ids on the row, which this path never sees.
+/// `@agents` is deliberately absent — it names the chat's agents, so it mentions no person
+/// (`expand_collectives` in the Mac app adds the people for `@here` and not for `@agents`).
 pub fn mentioned(text: &str, mentions: &[String], user_id: &str, handle: &str) -> bool {
     let handle = handle.trim().trim_start_matches('@');
     let declared = mentions.iter().any(|m| {
@@ -196,7 +203,9 @@ pub fn mentioned(text: &str, mentions: &[String], user_id: &str, handle: &str) -
         return true;
     }
     let lower = text.to_lowercase();
-    if word_at(&lower, "@everyone") {
+    if word_at(&lower, "@everyone")
+        || crate::people::at_token(&lower, crate::people::COLLECTIVE_HERE)
+    {
         return true;
     }
     !handle.is_empty() && word_at(&lower, &format!("@{}", handle.to_lowercase()))
@@ -530,6 +539,20 @@ mod tests {
         assert!(mentioned("", &["@Jacob".into()], "u1", "jacob"));
         assert!(!mentioned("", &["user:u2".into()], "u1", "jacob"));
         assert!(!mentioned("plain", &[], "u1", ""));
+    }
+
+    /// `@here` is everyone in the chat (Jacob, 2026-10-24), and the apps resolve it into member
+    /// ids on the row, not on the announce — so a `mentions`-only recipient hears it only if the
+    /// prose is read for the word. `@agents` names the agents, so it mentions no person.
+    #[test]
+    fn here_mentions_every_person_and_agents_mentions_none() {
+        assert!(mentioned("@here standup in five", &[], "u1", "jacob"));
+        assert!(mentioned("ship it @HERE", &[], "u1", "jacob"));
+        assert!(mentioned("@here", &[], "u1", ""), "no handle of our own");
+        assert!(!mentioned("@agents take this one", &[], "u1", "jacob"));
+        // Not a collective: a longer word, and an address that happens to contain the token.
+        assert!(!mentioned("@heretic takes", &[], "u1", "jacob"));
+        assert!(!mentioned("mail me@here.example", &[], "u1", "jacob"));
     }
 
     #[test]

@@ -8,25 +8,28 @@
 //! already resampled to the display size (Lanczos3 on the CPU, memoised per picture and size), so
 //! the GPU only ever draws at ≈ 1:1.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use gpui::{ImageId, RenderImage};
 
-/// The window's backing scale (`Window::scale_factor`), noted by the shell on every frame so the
-/// element helpers — which have no `Window` — size their pixels right. Retina until told.
-static SCALE_BITS: AtomicU32 = AtomicU32::new(0x4000_0000); // 2.0f32
+thread_local! {
+    /// The window's backing scale (`Window::scale_factor`), noted by the shell on every frame so
+    /// the element helpers — which have no `Window` — size their pixels right. Retina until told.
+    /// Per thread like the memo: it is written and read while rendering, on the UI thread, and a
+    /// test thread's note never leaks into another test.
+    static SCALE: Cell<f32> = const { Cell::new(2.0) };
+}
 
 pub fn note_scale_factor(scale: f32) {
     if scale.is_finite() && scale > 0.0 {
-        SCALE_BITS.store(scale.to_bits(), Ordering::Relaxed);
+        SCALE.with(|s| s.set(scale));
     }
 }
 
 pub fn scale_factor() -> f32 {
-    f32::from_bits(SCALE_BITS.load(Ordering::Relaxed))
+    SCALE.with(Cell::get)
 }
 
 /// Above this many entries the memo is dropped (a few hundred pictures × sizes; the sized
