@@ -1837,3 +1837,90 @@ mod tests {
         assert!(!text.contains("export"));
     }
 }
+
+#[cfg(test)]
+mod chat_scope_tests {
+    use super::*;
+    use crate::status::tests::test_agent_with;
+    use axum::routing::{get, post};
+    use axum::{Json, Router};
+
+    /// A relay stub for one `secrets_request` round trip: it records every request body the box
+    /// sends, answers the poll as if the owner had chosen "Allow for this chat", and keeps the
+    /// two refreshes cheap.
+    fn relay_stub() -> (Router, Arc<Mutex<Vec<Value>>>) {
+        let bodies: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen = bodies.clone();
+        let item = json!({ "env": "ENGY_API_KEY", "kind": "key", "enabled": true, "hosts": [],
+            "placeholders": { "value": "arbos-secret://ENGY_API_KEY/value" }, "note": "",
+            "vault_name": "Arbos" });
+        let router = Router::new()
+            .route(
+                "/box/secrets/request",
+                post(move |Json(b): Json<Value>| {
+                    let seen = seen.clone();
+                    async move {
+                        seen.lock().unwrap().push(b);
+                        (
+                            axum::http::StatusCode::CREATED,
+                            Json(json!({ "request": { "id": "rq_scope" } })),
+                        )
+                    }
+                }),
+            )
+            .route(
+                "/box/secrets/requests/{id}",
+                get(|| async { Json(json!({ "request": { "status": "allowed_chat" } })) }),
+            )
+            .route(
+                "/box/secrets",
+                get(move || {
+                    let item = item.clone();
+                    async move { Json(json!({ "paused": false, "items": [item] })) }
+                }),
+            )
+            .route(
+                "/box/secrets/env",
+                get(|| async { Json(json!({ "paused": false, "items": [] })) }),
+            );
+        (router, bodies)
+    }
+
+    /// "Allow for this chat" has to name the thread that asked. The card is posted in the
+    /// pinned chat on purpose (`approval_chat`, #1440), but the use side sends the turn's own
+    /// chat to `/egress`, and the relay compares that with the access's `scope_chat_id`. If the
+    /// ask reports the card's chat instead, the owner's answer scopes the secret to a thread
+    /// nobody asked from: refused where it was meant, allowed in the pinned chat.
+    #[tokio::test]
+    async fn a_chat_scoped_secret_names_the_thread_that_asked() {
+        let (router, bodies) = relay_stub();
+        let (agent, root) = test_agent_with(router).await;
+        let main = "01TESTCHATSECRETSCOPE00000";
+        let side = "01TESTCHATSECRETSCOPE00001";
+        agent.store.upsert_chat(main, "Main", true, 0).unwrap();
+        agent.store.upsert_chat(side, "Side", false, 1).unwrap();
+        let _host = agent.sync.open_room(main).await.unwrap();
+
+        let _ = secrets_request(
+            &agent,
+            &json!({ "name": "ENGY_API_KEY", "purpose": "the nightly report", "use": "header" }),
+            side,
+        )
+        .await;
+
+        let sent = bodies.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1, "one request reached the relay: {sent:?}");
+        assert_eq!(
+            sent[0]["chat_id"].as_str(),
+            Some(side),
+            "the relay must be told the thread that asked, because that is the chat the use \
+             side presents at `/egress`; it was told the chat the card was posted in"
+        );
+        // The card itself still belongs in the pinned chat, where the owner is looking.
+        assert!(
+            agent.sync.host(side).await.is_none(),
+            "the side thread must not become the card's chat"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
