@@ -232,6 +232,26 @@ fn two_workspaces_of_one_box_get_different_mcp_tokens() {
     );
 }
 
+/// What deriving does *not* fix, recorded so the follow-up has something to turn green. On a
+/// daemon booted with no `ARBOS_MCP_TOKEN` the derivation has no secret to mix in, so the
+/// workspace token is a constant anyone who knows the project id can compute. Being non-empty, it
+/// does stop a request with no header from passing — that is
+/// `an_unset_box_token_does_not_authenticate_a_request_without_one` above — but only the explicit
+/// `configured.is_empty()` guard, the shape #2575 gives the hook API, refuses the computed value.
+#[test]
+fn an_unset_box_token_still_derives_a_token_with_no_secret_in_it() {
+    use sha2::Digest;
+    let root = std::env::temp_dir().join(format!("arbos-xws-pub-{}", ulid()));
+    let mut bx = box_cfg(&root);
+    bx.mcp_token = String::new();
+    let w = bx.workspace(&json!({ "id": PROJECT_A }), 0);
+    let anyone_can_compute = format!(
+        "mcp_{}",
+        hex::encode(&sha2::Sha256::digest(format!("arbos-mcp:v1::{PROJECT_A}").as_bytes())[..16])
+    );
+    assert_eq!(w.mcp_token, anyone_can_compute);
+}
+
 /// The derivation is keyed on the project and not on the workspace index, which comes from a
 /// boot-order counter that compacts across restarts: the same project must keep its token when it
 /// comes back at a different index.
