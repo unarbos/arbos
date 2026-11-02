@@ -3790,14 +3790,15 @@ impl Shell {
         if let Some(chips) = header::chips(self, &space, cx) {
             pre.push(chips);
         }
-        // Calls v1: my call (bar, or the full screen below), or a live call to join.
+        // Calls: my call as the strip at the top of this column (or the slim bar when
+        // collapsed / in another chat), or a live call here to join. The sidebar is never
+        // touched by a call (Jacob, 2026-10-23).
         let my_call = self.state.read(cx).my_call.clone();
         let call_here = self.state.read(cx).calls_in_chat.get(&space.id).cloned();
-        let screen_open = my_call
-            .as_ref()
-            .map(|c| c.expanded && c.call.space_id() == space.id)
-            .unwrap_or(false);
-        if let Some(active) = my_call.as_ref().filter(|_| !screen_open) {
+        let strip_open = callview::strip_layout::shown(my_call.as_ref(), &space.id);
+        if let Some(active) = my_call.as_ref().filter(|_| strip_open) {
+            pre.push(callview::strip(self, active, cx).into_any_element());
+        } else if let Some(active) = my_call.as_ref() {
             pre.push(callview::bar(self, active, cx).into_any_element());
         } else if let Some(call) = call_here.filter(|c| {
             c.is_live()
@@ -3813,13 +3814,6 @@ impl Shell {
         }
         if let Some(note) = self.render_delivery_note(cx) {
             pre.push(note.into_any_element());
-        }
-        if screen_open {
-            if let Some(active) = my_call.as_ref() {
-                return column
-                    .children(pre)
-                    .child(callview::screen(self, active, cx));
-            }
         }
 
         if !dropped {
