@@ -107,7 +107,9 @@ fn owns_skill(state: &AppState, principal: &Principal, s: &Skill) -> bool {
 fn is_own(state: &AppState, scope: Option<&str>, principal: &Principal, s: &Skill) -> bool {
     match principal {
         Principal::Box { .. } => can_edit(scope, principal, s),
-        Principal::Device { .. } => s.origin_project_id.is_some() && owns_skill(state, principal, s),
+        Principal::Device { .. } => {
+            s.origin_project_id.is_some() && owns_skill(state, principal, s)
+        }
         Principal::Admin => false,
     }
 }
@@ -462,9 +464,11 @@ pub async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Db;
     use crate::people::tests_support::{person, project_of};
     use crate::state::test_support::test_state;
     use crate::state::AuthMode;
+    use rusqlite::Connection;
 
     fn status(r: ApiResult) -> StatusCode {
         match r {
@@ -999,7 +1003,13 @@ mod tests {
         let (bob, bob_dev) = person(&state, 2);
         let alices = project_of(&state, &alice, "Alice work");
         let bobs = project_of(&state, &bob, "Bob work");
-        skill_with(&state, Some(&alices), "deploy-the-relay", false, ALICES_BODY);
+        skill_with(
+            &state,
+            Some(&alices),
+            "deploy-the-relay",
+            false,
+            ALICES_BODY,
+        );
 
         let r = create_slug(
             &state,
@@ -1036,7 +1046,13 @@ mod tests {
         let (bob, bob_dev) = person(&state, 2);
         let alices = project_of(&state, &alice, "Alice work");
         let bobs = project_of(&state, &bob, "Bob work");
-        let hers = skill_with(&state, Some(&alices), "deploy-the-relay", false, ALICES_BODY);
+        let hers = skill_with(
+            &state,
+            Some(&alices),
+            "deploy-the-relay",
+            false,
+            ALICES_BODY,
+        );
 
         create_slug(
             &state,
@@ -1150,7 +1166,13 @@ mod tests {
         let (alice, _alice_dev) = person(&state, 1);
         let (_bob, bob_dev) = person(&state, 2);
         let alices = project_of(&state, &alice, "Alice work");
-        let hers = skill_with(&state, Some(&alices), "deploy-the-relay", false, ALICES_BODY);
+        let hers = skill_with(
+            &state,
+            Some(&alices),
+            "deploy-the-relay",
+            false,
+            ALICES_BODY,
+        );
 
         for name in [hers.as_str(), "deploy-the-relay"] {
             let read = get(
@@ -1175,11 +1197,15 @@ mod tests {
             .await;
             assert_eq!(status(edited), StatusCode::NOT_FOUND, "PUT by {name}");
 
-            let dropped = delete(State(state.clone()), bob_dev.clone(), Path(name.to_owned())).await;
+            let dropped =
+                delete(State(state.clone()), bob_dev.clone(), Path(name.to_owned())).await;
             assert_eq!(status(dropped), StatusCode::NOT_FOUND, "DELETE by {name}");
         }
         let row = state.db.skill_by_id(&hers).unwrap().unwrap();
-        assert_eq!((row.name.as_str(), row.body.as_str()), ("deploy-the-relay", ALICES_BODY));
+        assert_eq!(
+            (row.name.as_str(), row.body.as_str()),
+            ("deploy-the-relay", ALICES_BODY)
+        );
     }
 
     /// `arbosctl skills show|delete <slug>` hands a slug to a by-id route, and a slug now names
@@ -1192,7 +1218,13 @@ mod tests {
         let (bob, bob_dev) = person(&state, 2);
         let alices = project_of(&state, &alice, "Alice work");
         let bobs = project_of(&state, &bob, "Bob work");
-        skill_with(&state, Some(&alices), "deploy-the-relay", false, ALICES_BODY);
+        skill_with(
+            &state,
+            Some(&alices),
+            "deploy-the-relay",
+            false,
+            ALICES_BODY,
+        );
         create_slug(
             &state,
             bob_dev.clone(),
@@ -1230,7 +1262,7 @@ mod tests {
     /// Each arm is a 409 before the fix and a 409 after it; the point is that the narrowing
     /// above did not reach them. The ownerless arm is the sharpest: those rows sit in every
     /// device's listing and have no owner to be unique within, so they stay reserved for
-    /// everybody until #2545 gives them one.
+    /// everybody until the table records an author.
     #[tokio::test]
     async fn a_slug_the_caller_can_already_see_is_still_taken() {
         let state = test_state(AuthMode::Github);
@@ -1252,14 +1284,7 @@ mod tests {
             "nobodys-notes",
             "hers-he-is-invited-to",
         ] {
-            let r = create_slug(
-                &state,
-                bob_dev.clone(),
-                HeaderMap::new(),
-                Some(&bobs),
-                slug,
-            )
-            .await;
+            let r = create_slug(&state, bob_dev.clone(), HeaderMap::new(), Some(&bobs), slug).await;
             assert_eq!(status(r), StatusCode::CONFLICT, "{slug} is already in view");
         }
     }
@@ -1296,6 +1321,82 @@ mod tests {
         )
         .await;
         assert_eq!(status(r), StatusCode::CONFLICT);
+    }
+
+    /// The rebuild, run against a database that still carries the relay-wide `UNIQUE`. It is
+    /// why this fix cannot be handler-only: a column-level `UNIQUE` is an implicit index that
+    /// SQLite will not let you drop, so until the table is rebuilt a second owner's row fails
+    /// at the database — as the first assertion here shows. Afterwards every row has survived,
+    /// two owners may hold one slug, and one Project still may not hold it twice.
+    #[test]
+    fn the_rebuild_drops_the_relay_wide_unique_and_keeps_every_row() {
+        const OLD_COLS: &str = "id, slug, name, description, tags, when_to_use, body, origin_project_id, shared, version, created_at, updated_at";
+        let dir = std::env::temp_dir().join(format!("arbos-skills-migration-{}", ulid()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("relay.db");
+        {
+            let c = Connection::open(&path).expect("open");
+            c.execute_batch(&format!(
+                "CREATE TABLE skills (
+                   id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+                   description TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '[]',
+                   when_to_use TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '',
+                   origin_project_id TEXT, shared INTEGER NOT NULL DEFAULT 0,
+                   version INTEGER NOT NULL DEFAULT 1,
+                   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+                 );
+                 INSERT INTO skills({OLD_COLS}) VALUES
+                   ('sk_hers', 'deploy-the-relay', 'Deploy the relay', 'how she does it',
+                    '[\"ops\"]', 'before a release', 'the steps', 'p_alice', 1, 3, 10, 20);"
+            ))
+            .expect("a database on the old schema");
+            assert!(
+                c.execute(
+                    &format!(
+                        "INSERT INTO skills({OLD_COLS}) VALUES
+                           ('sk_his', 'deploy-the-relay', 'Deploy the relay', '', '[]', '', '',
+                            'p_bob', 0, 1, 10, 20)"
+                    ),
+                    [],
+                )
+                .is_err(),
+                "the old database refuses a second owner the name, which is the finding"
+            );
+        }
+
+        let db = Db::open(&path).expect("the migration runs on open");
+        let hers = db.skill_by_id("sk_hers").expect("read").expect("kept");
+        assert_eq!(hers.slug, "deploy-the-relay");
+        assert_eq!(hers.name, "Deploy the relay");
+        assert_eq!(hers.body, "the steps");
+        assert_eq!(hers.tags, vec!["ops".to_owned()]);
+        assert_eq!(hers.when_to_use, "before a release");
+        assert_eq!(hers.origin_project_id.as_deref(), Some("p_alice"));
+        assert!(hers.shared);
+        assert_eq!(
+            (hers.version, hers.created_at, hers.updated_at),
+            (3, 10, 20)
+        );
+
+        let his = Skill {
+            id: "sk_his".into(),
+            slug: "deploy-the-relay".into(),
+            name: "Deploy the relay".into(),
+            origin_project_id: Some("p_bob".into()),
+            version: 1,
+            created_at: 30,
+            updated_at: 30,
+            ..Skill::default()
+        };
+        db.insert_skill(&his).expect("a second owner takes it");
+        assert!(
+            db.insert_skill(&Skill {
+                id: "sk_again".into(),
+                ..his
+            })
+            .is_err(),
+            "and one Project still cannot hold one slug twice"
+        );
     }
 
     /// `skills_save` is an upsert by slug, and the fear with any scoping change is that it

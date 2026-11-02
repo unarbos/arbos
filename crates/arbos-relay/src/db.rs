@@ -3384,7 +3384,7 @@ impl Db {
     /// * a skill the caller can already see, so a refusal never names a row they could not
     ///   list anyway, and no listing of theirs can come to hold one slug twice;
     /// * an ownerless skill, which has no owner to be unique within and sits in every
-    ///   device's listing, so it stays reserved relay-wide until #2545 gives it an owner;
+    ///   device's listing, so it stays reserved relay-wide until the table records an author;
     /// * any other skill of the same owner, which keeps one person's library unambiguous
     ///   even when the caller writing into it is a guest of that Project (D72).
     pub fn skill_holding_slug(
