@@ -362,9 +362,7 @@ async fn turn_author(agent: &Agent) -> (Option<String>, bool) {
         .as_ref()
         .map(|t| t.user_msg_id.clone())
         .filter(|id| !id.is_empty());
-    let own_work = ask_row
-        .as_deref()
-        .is_some_and(|id| agent.wrote_own_row(id));
+    let own_work = ask_row.as_deref().is_some_and(|id| agent.wrote_own_row(id));
     (ask_row, own_work)
 }
 
@@ -1778,10 +1776,7 @@ mod tests {
             agent.note_own_row(&format!("m_{i}"));
         }
         assert!(!agent.wrote_own_row("m_first"), "the oldest went first");
-        assert!(agent.wrote_own_row(&format!(
-            "m_{}",
-            crate::agent::OWN_ROWS_MAX - 1
-        )));
+        assert!(agent.wrote_own_row(&format!("m_{}", crate::agent::OWN_ROWS_MAX - 1)));
         assert!(!agent.wrote_own_row(""), "an absent id is not own work");
     }
 
