@@ -3,6 +3,9 @@ name: CI
 # Linux gate for the workspace (D43). `Release` runs after this succeeds on
 # main (workflow_run), so a red commit never ships. Feature branches get CI
 # on push, without a pull request.
+#
+# The Dockerfile lint has its own workflow (dockerfile-lint.yml): `paths` is a
+# trigger-level filter and this trigger has to stay broad.
 
 on:
   # The feedback loop dispatches CI on a gate/** branch when GitHub ran nothing for
@@ -131,16 +134,3 @@ jobs:
         working-directory: harness
       - run: pnpm -r test
         working-directory: harness
-
-  image:
-    name: image (dockerfile lint)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    needs: [rust, harness]
-    if: github.event_name == 'push'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: hadolint/hadolint-action@v3.1.0
-        with:
-          dockerfile: image/Dockerfile
-          failure-threshold: error
