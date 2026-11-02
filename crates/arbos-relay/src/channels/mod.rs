@@ -643,6 +643,17 @@ pub struct ReplyBody {
 
 /// `POST /projects/{id}/channels/reply { bindingId, text }`: the box's turn finished; send the
 /// prose back to the channel the message came from.
+///
+/// The project's own box and owner, no wider. This route hands text straight to a platform, so
+/// whoever reaches it speaks to the owner's personal contacts as the owner's agent, with no turn
+/// and no agent behind the words — which is a different thing from asking the agent to say
+/// something, and leaves no record that it decided anything. `owns` covers the box, which is who
+/// the route is for: a box arrives as `Principal::Box { user_id }` carrying the owner's user id.
+///
+/// `b25b71647` (feedback `app-01M5KQYAG8S1YDTSR2MY7MGVYT`) widened this to `allows` to fix a
+/// real break: `can_access_project(&p.id)` compared a user id against a *project* id, so the box
+/// always 403'd and no channel reply ever left the relay. Resolving the owner's user id is what
+/// fixed that, and `owns` does it; admitting members was collateral width.
 pub async fn reply(
     State(state): State<AppState>,
     principal: Principal,
@@ -654,7 +665,7 @@ pub async fn reply(
         .project(&id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !state.allows(&principal, &p.id) {
+    if !state.owns(&principal, &p.id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     let binding = state
@@ -1040,11 +1051,13 @@ mod tests {
         assert_eq!(pair_code_in("pairing is fun"), None);
     }
 
-    /// `reply` must use `state.allows` (owner + invited members), not `can_access_project` with a
-    /// project id. The agent box is `Principal::Box { user_id }`; comparing that user id to the
-    /// project id always 403'd and channel replies never reached the platform.
+    /// `reply` must resolve the project's owner, not compare a user id against a *project* id:
+    /// the agent box is `Principal::Box { user_id }`, so `can_access_project(&p.id)` always 403'd
+    /// and channel replies never reached the platform (`b25b71647`). `state.owns` resolves it.
+    /// The member case that fix also admitted is now refused — see
+    /// `only_the_projects_own_box_and_owner_speak_to_its_channels`.
     #[tokio::test]
-    async fn reply_allows_owner_and_invited_member() {
+    async fn reply_answers_to_the_projects_box_and_owner() {
         let state = test_state();
         let project = Project {
             id: "proj_a".into(),
@@ -1154,22 +1167,22 @@ mod tests {
         assert_eq!(err.0, StatusCode::FORBIDDEN);
         assert_eq!(state.db.channel_outbox(10).unwrap().len(), before);
 
+        // Inviting B into the project does not change the answer: driving the agent is not
+        // permission to speak to its channels in your own words.
         state
             .db
             .add_project_member("proj_a", "user_b", "user_a")
             .unwrap();
-        let r = reply(
+        let err = reply(
             State(state.clone()),
             device_b,
             project_path(),
             body("from invited B"),
         )
         .await
-        .expect("invited member");
-        assert_eq!(r.status(), StatusCode::OK);
-        let out = state.db.channel_outbox(10).unwrap();
-        assert_eq!(out.len(), before + 1);
-        assert_eq!(out[0]["text"], "from invited B");
+        .expect_err("invited member");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert_eq!(state.db.channel_outbox(10).unwrap().len(), before);
     }
 
     fn status(r: ApiResult) -> StatusCode {
