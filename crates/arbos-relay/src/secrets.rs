@@ -2063,8 +2063,9 @@ fn free_name(state: &AppState, user_id: &str, wanted: &str) -> Result<(String, S
 /// encrypts it into the owner's vault, grants the asking agent access, and rewrites the row
 /// into the `secret_redacted` ghost ("Secret saved as NAME") — one update every device and the
 /// box import — then replaces the room's stored history with a shallow checkpoint so no row
-/// or checkpoint keeps the old text. Boxes get `secret_scrub` (sessions, memory, logs) and
-/// the owner's devices `message_redacted` (search, notifications, local snapshot).
+/// or checkpoint keeps the old text. Boxes get `secret_scrub` (sessions, memory, logs); every
+/// member of the room gets a background clear for the banners already delivered and
+/// `message_redacted` (search, notifications, local snapshot) for the sessions that are open.
 pub async fn box_from_message(
     State(state): State<AppState>,
     principal: Principal,
@@ -2263,17 +2264,31 @@ pub async fn box_from_message(
             json!({ "secret_id": s.id, "env": s.env, "ref": placeholder(&s.env, "value"), "chat_id": b.chat_id, "message_id": b.message_id }),
         );
     }
-    push_user(
-        &state,
-        &user_id,
-        PushEventDto::MessageRedacted(MessageRedactedPayloadDto {
-            chat_id: b.chat_id.clone(),
-            project_id: room_project.map(str::to_owned),
-            message_id: b.message_id.clone(),
-            secret_id: s.id.clone(),
-            name: s.name.clone(),
-        }),
-    );
+    // Everyone who was in the room, not only the owner. A people chat has other humans in it,
+    // they were alerted about the message, and the two paths heal different device states: the
+    // background clear reaches a phone that is not running, `message_redacted` heals a session
+    // that is open. Neither substitutes for the other, so both go to the whole room.
+    //
+    // Nothing in the payload is new to a member: the ghost row written above carries the same
+    // `secret_id` and `name` into the shared doc, so this says only what the room already says.
+    let chat_ref = match room_project {
+        Some(p) => crate::notify::ChatRef::project(p, &b.chat_id),
+        None => crate::notify::ChatRef::people(&b.chat_id),
+    };
+    crate::notify::clear_after_redaction(&state, &chat_ref, &b.message_id).await;
+    for recipient in crate::notify::recipients(&state, &chat_ref) {
+        push_user(
+            &state,
+            &recipient,
+            PushEventDto::MessageRedacted(MessageRedactedPayloadDto {
+                chat_id: b.chat_id.clone(),
+                project_id: room_project.map(str::to_owned),
+                message_id: b.message_id.clone(),
+                secret_id: s.id.clone(),
+                name: s.name.clone(),
+            }),
+        );
+    }
     let mut body = to_json(secret_envelope(&state, &s));
     body["message_id"] = json!(b.message_id);
     body["redacted"] = json!(true);

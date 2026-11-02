@@ -175,6 +175,41 @@ pub fn find_key_like(text: &str) -> Vec<KeyLike> {
     out
 }
 
+/// Mask every run [`find_key_like`] would offer to put in a vault.
+///
+/// The counterpart of the finder, and deliberately driven by it rather than by
+/// [`redact_patterns`]'s list: the two disagree, and they disagree in the dangerous direction.
+/// `redact_patterns` knows eight shapes, `KEY_PREFIXES` knows eighteen plus the long-opaque
+/// guess, so `sk_live_…`, `github_pat_…`, `AIza…`, a JWT and anything the relay only recognises
+/// as "32 opaque characters" survive `scrub` untouched — and those are exactly the values the
+/// hand-off path exists to take out of a chat. Anywhere a value must not be *shown*, the rule
+/// worth holding is the one the rest of the system already uses to decide a value is a
+/// credential: **if the relay would offer to vault it, the relay does not display it.**
+///
+/// Masking the unconfident guesses too is deliberate. They are the long opaque runs with no
+/// known prefix, which is precisely the case the pattern list cannot catch either; leaving them
+/// would reproduce the gap this closes. The cost is that a sufficiently long id or hash in a
+/// chat message is masked in its *preview* as well, which is cheap next to a credential on a
+/// screen its owner never unlocked.
+pub fn redact_key_like(text: &str) -> String {
+    let found = find_key_like(text);
+    if found.is_empty() {
+        return text.to_owned();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for k in found {
+        if k.start < at {
+            continue;
+        }
+        out.push_str(&text[at..k.start]);
+        out.push_str("[REDACTED:key]");
+        at = k.end;
+    }
+    out.push_str(&text[at..]);
+    out
+}
+
 /// The words a user says to hand a pasted key over: "save this", "save that", "save it",
 /// "store this", "put this in the vault", "add this to the vault".
 pub fn asks_to_save(text: &str) -> bool {
@@ -240,6 +275,22 @@ pub fn scrub_value(v: &mut Value) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn redact_key_like_masks_every_run_the_finder_would_vault() {
+        let two = redact_key_like(
+            "first ghp_abcdefghijklmnopqrstuvwxyz0123456789 then AIzaSyAabcdefghijklmnopqrstuvwxyz0123456 done",
+        );
+        assert_eq!(two, "first [REDACTED:key] then [REDACTED:key] done");
+        // Prose with nothing key-shaped is returned unchanged, allocation aside.
+        assert_eq!(
+            redact_key_like("no keys here at all"),
+            "no keys here at all"
+        );
+        // The unconfident long-opaque guess is masked too; see the doc comment for why.
+        let sha = "deploy 9f2c1ab74d3e5068bb91c4fa27d08e3519ac6b72 now";
+        assert_eq!(redact_key_like(sha), "deploy [REDACTED:key] now");
+    }
 
     #[test]
     fn keys_and_placeholders_go() {

@@ -183,6 +183,11 @@ impl Sender {
 
 /// First `BODY_MAX` characters of the message, one line, no trailing fragments of whitespace.
 pub fn brief(text: &str) -> String {
+    // Redact first, truncate second. A notification is the one copy of a message that lands on
+    // a screen nobody opened and stays there until they do, so a credential must not reach it
+    // — and cutting the text to 140 characters first would leave a prefix that no longer
+    // matches a pattern while still being most of the key.
+    let text = arbos_core::redact::scrub(&arbos_core::redact::redact_key_like(text));
     let one_line: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if one_line.chars().count() <= BODY_MAX {
         return one_line;
@@ -664,6 +669,24 @@ pub async fn clear_on_read(
 
 /// A clear-on-read push stays worth sending about as long as a badge count.
 pub const CLEAR_TTL_MS: i64 = BADGE_TTL_MS;
+
+/// Withdraw a chat's delivered banners from **everyone** it was announced to, after a value
+/// was taken out of the room behind them.
+///
+/// [`clear_on_read`] answers "this person read it elsewhere", so it covers one user's other
+/// devices. A redaction asks a different question — the row changed for the whole room — and
+/// the copy that outlives the row is the banner on a phone that is not running the app, which
+/// only the background push reaches. Sending it per recipient rather than per device keeps the
+/// badge honest: each gets their own unread total, not the acting user's.
+pub async fn clear_after_redaction(state: &AppState, chat: &ChatRef, upto_message_id: &str) {
+    if !state.push.is_on() {
+        return;
+    }
+    for user in recipients(state, chat) {
+        let badge = crate::matrix::reads::unread_total(state, &user).await;
+        silent_clear(state, &user, "", chat, upto_message_id, badge);
+    }
+}
 
 /// The APNs form of [`clear_on_read`]: one background push (`PushKind::Clear`, `type: clear`,
 /// `chat_id`, `badge`) per other device with a token, so a phone that is not running the app
