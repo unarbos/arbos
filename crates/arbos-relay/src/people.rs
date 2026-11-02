@@ -1708,8 +1708,8 @@ pub async fn agent_add(
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
     // Same as adding a person: a DM with an agent is a group (header, members, profile).
-    if cm.chat.kind == "dm" {
-        let _ = state.db.set_people_chat_kind(&id, "group");
+    if let Err(r) = promote_dm_to_group(&state, &cm, &me) {
+        return *r;
     }
     // The notice row goes out first (ARB-393): every device in the room sees "<me> added
     // <agent>" as soon as the membership row exists, before the box wake, the pushes and the
@@ -2227,8 +2227,8 @@ pub async fn member_add(
         subjects.push(notices::subject_agent(&project.id));
         crate::outside::on_membership(&state, &project.id, &id, true);
     }
-    if cm.chat.kind == "dm" {
-        let _ = state.db.set_people_chat_kind(&id, "group");
+    if let Err(r) = promote_dm_to_group(&state, &cm, &me) {
+        return *r;
     }
     // Notice row first (ARB-393), then the slower follow-up work: box wakes, agent pushes
     // and the Matrix mirror.
@@ -2250,6 +2250,46 @@ pub async fn member_add(
         Ok(cm) => Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response(),
         Err(r) => *r,
     }
+}
+
+/// A DM has become a group because a third party joined: flip the kind, and leave it with one
+/// owner.
+///
+/// A DM writes both participants as `owner`, which costs nothing while the chat has exactly two
+/// people in it — neither outranks the other and there is nobody else to rank. Carried into a
+/// group it is not free: almost every role read in this file treats `owner` as authority rather
+/// than as membership, so the other half of the DM would arrive in the new group able to remove
+/// members, set roles, mute, ban, moderate messages and delete the whole chat. Nor is it
+/// recoverable through the API, because `can_moderate_member` and `member_patch` both refuse to
+/// touch a target whose role is `owner`: without this the chat stays two-headed for good.
+///
+/// The chat's creator keeps `owner`. `created_by` is NOT NULL, so it is always someone, but it
+/// can be someone who has since left — and a group with no live owner is a group nobody can
+/// moderate, which is the same bug wearing the other hat. In that case the promoter keeps it;
+/// `member_chat` has already established they are a live member.
+fn promote_dm_to_group(
+    state: &AppState,
+    cm: &ChatWithMembers,
+    promoter: &str,
+) -> Result<(), Box<Response>> {
+    if cm.chat.kind != "dm" {
+        return Ok(());
+    }
+    let creator = cm.chat.created_by.as_str();
+    let creator_is_here = cm.members.iter().any(|m| m.user_id() == Some(creator));
+    let owner = if creator_is_here { creator } else { promoter };
+    if let Err(e) = state
+        .db
+        .set_sole_owner(&cm.chat.id, &format!("user:{owner}"))
+    {
+        return Err(Box::new(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "db",
+            e.to_string(),
+        )));
+    }
+    let _ = state.db.set_people_chat_kind(&cm.chat.id, "group");
+    Ok(())
 }
 
 /// Owner or admin of a people group (not a plain member).
@@ -5341,6 +5381,298 @@ mod agent_tests {
             .membership(&chat, &format!("agent:{alices_project}"))
             .unwrap()
             .is_some());
+    }
+}
+
+#[cfg(test)]
+mod promoted_dm_tests {
+    //! A DM holds both people as `owner`. When a third party turns it into a group, exactly
+    //! one of those rows may survive, because from that point on `owner` is read as authority.
+
+    use std::collections::HashMap;
+
+    use arbos_core::doc::{ChatDoc, UserMessageOpts};
+    use arbos_core::ids::ulid;
+    use arbos_core::wire;
+    use axum::extract::{Path, Query, State};
+    use axum::http::StatusCode;
+    use axum::Json;
+
+    use super::tests_support::{dm, person, project_of};
+    use super::*;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    fn handle(state: &AppState, user: &str) -> String {
+        state.db.user(user).unwrap().unwrap().login.unwrap()
+    }
+
+    fn owners(state: &AppState, chat: &str) -> Vec<String> {
+        state
+            .db
+            .members_of(chat)
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.role == "owner")
+            .map(|m| m.member)
+            .collect()
+    }
+
+    fn kind_of(state: &AppState, chat: &str) -> String {
+        state.db.people_chat(chat).unwrap().unwrap().kind
+    }
+
+    async fn read(r: Response) -> (StatusCode, String) {
+        let status = r.status();
+        let body = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+        (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    async fn chat_id_of(r: Response) -> String {
+        let (status, body) = read(r).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        serde_json::from_str::<Value>(&body).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    /// One message from `sender` in `chat`, so there is something to try to moderate.
+    fn seed(state: &AppState, chat: &str, sender: &str, id: &str) {
+        let doc = crate::matrix::backfill::load_doc(state, chat, None)
+            .unwrap()
+            .unwrap_or_else(|| ChatDoc::new(Some(3), false));
+        let base = doc.oplog_vv();
+        doc.append_user_message(
+            id,
+            "hello",
+            "dev",
+            &UserMessageOpts {
+                sender: Some(sender.to_owned()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let bytes = doc.export_updates_since(&base);
+        state
+            .db
+            .append_row(
+                &wire::room_name(PEOPLE_PROJECT, chat),
+                "dev",
+                &ulid(),
+                &bytes,
+            )
+            .unwrap();
+    }
+
+    /// Everything `who` is told when they reach for the group's moderation surface: set a
+    /// role, remove someone, delete someone else's message, delete the chat.
+    ///
+    /// Bodies as well as statuses. Several of these refusals are 403 whatever your role is,
+    /// and it is the error code inside — `owner_only`, `owner_stays`, `not_yours` — that says
+    /// which rule turned you away. Comparing the whole answer is also what lets this compare
+    /// two chats instead of pinning statuses one by one: a list that matches cannot be made
+    /// to match by changing what a member is told, only by changing who the peer is.
+    async fn moderation_answers(
+        state: &AppState,
+        who: &Principal,
+        chat: &str,
+        victim: &str,
+        message: &str,
+    ) -> Vec<(StatusCode, String)> {
+        let mut out = Vec::new();
+        out.push(
+            read(
+                member_patch(
+                    State(state.clone()),
+                    who.clone(),
+                    Path((chat.to_owned(), victim.to_owned())),
+                    Json(MemberPatchBody {
+                        silenced: None,
+                        silenced_until: None,
+                        role: Some("admin".into()),
+                        can_mute_ban: None,
+                    }),
+                )
+                .await,
+            )
+            .await,
+        );
+        out.push(
+            read(
+                member_remove(
+                    State(state.clone()),
+                    who.clone(),
+                    Path((chat.to_owned(), victim.to_owned())),
+                    Query(HashMap::new()),
+                )
+                .await,
+            )
+            .await,
+        );
+        out.push(
+            read(
+                crate::moderation::delete_message(
+                    State(state.clone()),
+                    who.clone(),
+                    Path((
+                        PEOPLE_PROJECT.to_owned(),
+                        chat.to_owned(),
+                        message.to_owned(),
+                    )),
+                )
+                .await,
+            )
+            .await,
+        );
+        out.push(
+            read(chat_delete(State(state.clone()), who.clone(), Path(chat.to_owned())).await).await,
+        );
+        out
+    }
+
+    #[tokio::test]
+    async fn adding_an_agent_to_a_dm_leaves_one_owner() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _alice_dev) = person(&state, 31);
+        let (bob, bob_dev) = person(&state, 32);
+        let chat = dm(&state, &alice, &bob);
+        let bobs_project = project_of(&state, &bob, "Bob");
+
+        // Bob promotes the chat, but Alice opened it, so the chat stays hers.
+        let r = agent_add(
+            State(state.clone()),
+            bob_dev,
+            Path(chat.clone()),
+            Json(AddAgentBody {
+                project_id: bobs_project,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(kind_of(&state, &chat), "group");
+        assert_eq!(
+            owners(&state, &chat),
+            [format!("user:{alice}")],
+            "the chat's creator keeps owner and the other half of the DM does not"
+        );
+    }
+
+    #[tokio::test]
+    async fn adding_a_person_to_a_dm_leaves_one_owner() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _alice_dev) = person(&state, 33);
+        let (bob, bob_dev) = person(&state, 34);
+        let (carol, _carol_dev) = person(&state, 35);
+        let chat = dm(&state, &alice, &bob);
+
+        let r = member_add(
+            State(state.clone()),
+            bob_dev,
+            Path(chat.clone()),
+            Json(AddMemberBody {
+                handle: Some(handle(&state, &carol)),
+                handles: vec![],
+                agent_ids: vec![],
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(kind_of(&state, &chat), "group");
+        assert_eq!(owners(&state, &chat), [format!("user:{alice}")]);
+    }
+
+    #[tokio::test]
+    async fn the_promoter_keeps_owner_when_the_creator_has_left() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _alice_dev) = person(&state, 36);
+        let (bob, bob_dev) = person(&state, 37);
+        let chat = dm(&state, &alice, &bob);
+        state
+            .db
+            .remove_member(&chat, &format!("user:{alice}"), false)
+            .unwrap();
+        let bobs_project = project_of(&state, &bob, "Bob");
+
+        let r = agent_add(
+            State(state.clone()),
+            bob_dev,
+            Path(chat.clone()),
+            Json(AddAgentBody {
+                project_id: bobs_project,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        // Handing the row to a creator who is gone would leave a group nobody can moderate,
+        // which is the same bug the other way up.
+        assert_eq!(
+            owners(&state, &chat),
+            [format!("user:{bob}")],
+            "a promoted chat always has a live owner"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_promoted_dms_peer_answers_exactly_like_a_plain_member() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 38);
+        let (bob, bob_dev) = person(&state, 39);
+        let (carol, _carol_dev) = person(&state, 40);
+        let bob_handle = handle(&state, &bob);
+        let carol_handle = handle(&state, &carol);
+
+        // Bob reaches the first group as the other half of a DM Alice promoted, and the
+        // second as someone Alice simply added. Same people, same roles on paper.
+        let promoted = dm(&state, &alice, &bob);
+        let r = member_add(
+            State(state.clone()),
+            alice_dev.clone(),
+            Path(promoted.clone()),
+            Json(AddMemberBody {
+                handle: Some(carol_handle.clone()),
+                handles: vec![],
+                agent_ids: vec![],
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+
+        let r = chats_create_group(
+            State(state.clone()),
+            alice_dev,
+            Json(CreateGroupBody {
+                kind: "group".into(),
+                members: vec![bob_handle, carol_handle],
+                agent_ids: vec![],
+                title: Some("Arbonites".into()),
+                avatar_leaf: None,
+                avatar_leaf_color: None,
+                description: None,
+            }),
+        )
+        .await;
+        let plain = chat_id_of(r).await;
+
+        for chat in [&promoted, &plain] {
+            seed(&state, chat, &format!("user:{alice}"), "m_alice");
+        }
+
+        let from_promoted =
+            moderation_answers(&state, &bob_dev, &promoted, &carol, "m_alice").await;
+        let from_plain = moderation_answers(&state, &bob_dev, &plain, &carol, "m_alice").await;
+        assert_eq!(
+            from_promoted, from_plain,
+            "the other half of a promoted DM is a member and must be told what a member is told"
+        );
+        assert!(
+            from_plain.iter().all(|(s, _)| s == &StatusCode::FORBIDDEN),
+            "the baseline is a refusal every time, not a shared yes: {from_plain:?}"
+        );
+        assert!(
+            state.db.people_chat(&promoted).unwrap().is_some(),
+            "and the chat Bob tried to delete is still there"
+        );
     }
 }
 

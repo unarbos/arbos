@@ -415,6 +415,26 @@ impl Db {
         })
     }
 
+    /// Settle a chat on one human owner: `member` holds `owner`, every other live human owner
+    /// becomes a plain `member`. Agent rows are left alone.
+    ///
+    /// Deliberately not `set_member_role`, which refuses to touch an `owner` row. That guard is
+    /// right for the moderation API, where an owner is not someone a request may demote, and
+    /// wrong for promoting a DM, whose whole job is to resolve two co-equal owners down to one.
+    /// One statement, so the invariant holds whatever the chat started from.
+    pub fn set_sole_owner(&self, chat_id: &str, member: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE people_members
+                 SET role = CASE WHEN member = ?2 THEN 'owner' ELSE 'member' END
+                 WHERE chat_id = ?1 AND left_at IS NULL AND member LIKE 'user:%'
+                   AND (member = ?2 OR role = 'owner')",
+                params![chat_id, member],
+            )
+            .map(|_| ())
+        })
+    }
+
     pub fn set_member_settings(
         &self,
         chat_id: &str,
