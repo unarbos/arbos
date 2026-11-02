@@ -84,7 +84,7 @@ run_suite() {
   t0=$(date +%s)
   while kill -0 "$pid" 2>/dev/null; do
     now=$(date +%s)
-    if (( done_at == 0 )) && grep -qE "Test Suite 'All tests' (passed|failed)|\*\* TEST (EXECUTE FAILED|SUCCEEDED) \*\*" "$log" 2>/dev/null; then
+    if (( done_at == 0 )) && grep -qE "Test Suite 'All tests' (passed|failed)|\*\* TEST ((EXECUTE )?FAILED|SUCCEEDED) \*\*" "$log" 2>/dev/null; then
       done_at=$now
     fi
     if (( done_at > 0 && now - done_at > 20 )) || (( now - t0 > TEST_RUN_MAX_S )); then
@@ -96,8 +96,13 @@ run_suite() {
   done
   wait "$pid" 2>/dev/null
   # The verdict line, not xcodebuild's exit code, decides: a watchdog kill after a complete run is a pass/fail by the log.
+  # `** TEST FAILED **` is the banner a run prints when tests fail; `** TEST EXECUTE FAILED **` is the
+  # one it prints when they could not be run at all. Only the second was matched, so a plain test
+  # failure fell through to 70 — the same value as "the watchdog killed it with no verdict". That
+  # conflation matters most under the clone shape, where a parallel target prints no `Test Suite`
+  # block either, so neither `All tests` pattern can fire and the banner is the only verdict there is.
   grep -qE "Test Suite 'All tests' passed|\*\* TEST SUCCEEDED \*\*" "$log" && return 0
-  grep -qE "Test Suite 'All tests' failed|\*\* TEST EXECUTE FAILED \*\*" "$log" && return 65
+  grep -qE "Test Suite 'All tests' failed|\*\* TEST (EXECUTE )?FAILED \*\*" "$log" && return 65
   return 70
 }
 TEST_RUN_MAX_S="${TEST_RUN_MAX_S:-900}"
