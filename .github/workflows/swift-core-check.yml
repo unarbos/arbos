@@ -82,12 +82,33 @@ jobs:
         with:
           key: swift-core-check
           cache-on-failure: true
+      - name: uniffi-bindgen version
+        id: uniffi
+        run: |
+          set -euo pipefail
+          version="$(sed -nE 's/^uniffi[[:space:]]*=[[:space:]]*"=?([^"]+)".*/\1/p' Cargo.toml | head -1)"
+          echo "version=${version:-unknown}" >> "$GITHUB_OUTPUT"
+      # rust-cache prunes target/, where the script would install uniffi-bindgen, so the binary
+      # lives in its own cache and is not rebuilt (about 1.5 min) on every run.
+      - name: uniffi-bindgen cache
+        id: uniffi-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/uniffi-tools
+          key: uniffi-tools-${{ runner.os }}-${{ runner.arch }}-${{ steps.uniffi.outputs.version }}
       - name: Build ArbosFFI xcframework
         run: |
           set -euo pipefail
-          ./scripts/build-xcframework.sh
+          UNIFFI_TOOLS_ROOT="$HOME/uniffi-tools" ./scripts/build-xcframework.sh
           test -d packages/ArbosFFI/ArbosFFIRust.xcframework
           test -f packages/ArbosFFI/Sources/ArbosFFI/ArbosFFI.swift
+      # Saved right after the build, not at job end: a red test step would otherwise skip the save.
+      - name: Save uniffi-bindgen cache
+        if: steps.uniffi-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/uniffi-tools
+          key: ${{ steps.uniffi-cache.outputs.cache-primary-key }}
       - name: fastlane test
         env:
           ARBOS_SPM_DIR: ${{ github.workspace }}/apps/ios/Arbos/build/spm
