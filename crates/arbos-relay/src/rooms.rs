@@ -2335,3 +2335,136 @@ mod covered_push_tests {
         assert_eq!(vv_cached, encode_vv(&doc.oplog_vv()));
     }
 }
+
+#[cfg(test)]
+mod client_system_row_tests {
+    //! Ground truth for #1520: a push carries opaque Loro bytes and the people gates
+    //! (`on_room_push`) never see them — they take a chat id, not a payload. So a `role:
+    //! system` row a *client* wrote is stored and broadcast exactly like a person's message.
+    //! The iPhone's Activity audit line rides in on this path, which is why every other
+    //! member's app is the only thing standing between it and their transcript.
+
+    use axum::routing::get;
+    use axum::Router;
+    use futures::{SinkExt, StreamExt};
+    use serde_json::json;
+    use std::net::SocketAddr;
+    use std::time::Duration;
+    use tokio_tungstenite::tungstenite::Message as TMsg;
+
+    use arbos_core::doc::ChatDoc;
+    use arbos_core::ids::ulid;
+    use arbos_core::wire::{Frame, FrameType};
+
+    use crate::matrix::backfill::load_doc;
+    use crate::people::tests_support::{dm, person};
+    use crate::state::test_support::test_state;
+    use crate::state::{AppState, AuthMode};
+
+    async fn serve(state: AppState) -> SocketAddr {
+        let app = Router::new()
+            .route("/room/{project}/{chat}", get(super::ws_room))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        addr
+    }
+
+    fn device_token(state: &AppState, user: &str) -> String {
+        let token = format!("adv_{}", ulid().to_ascii_lowercase());
+        state
+            .db
+            .insert_device(
+                &ulid(),
+                "t",
+                &arbos_core::auth::hash(&token),
+                user,
+                "paircode",
+            )
+            .unwrap();
+        token
+    }
+
+    fn decode(m: TMsg) -> Option<Frame> {
+        match m {
+            TMsg::Binary(b) => Frame::decode(b).ok().flatten(),
+            _ => None,
+        }
+    }
+
+    /// Does the relay keep a system row a client wrote? Push one and look.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_client_written_system_row_is_stored_and_broadcast() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        let room = format!("people/{chat}");
+        let token = device_token(&state, &alice);
+
+        // Exactly what the iPhone writes on Delete in a people group: a hidden audit line
+        // (marker U+2063) as `role: system`, from the deleting device, not from the relay.
+        let text = "\u{2063}Jacob deleted a message";
+        let doc = ChatDoc::new(Some(9), false);
+        let before = doc.oplog_vv();
+        doc.append_system_line("m-audit", text, "dev:alice", None)
+            .unwrap();
+        let bytes = doc.export_updates_since(&before);
+        let batch_id = ulid();
+
+        let addr = serve(state.clone()).await;
+        let url = format!("ws://{addr}/room/{room}?token={token}");
+        let (ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+        let (mut sink, mut stream) = ws.split();
+        sink.send(TMsg::Binary(
+            Frame::new(
+                FrameType::Hello,
+                json!({
+                    "cursor": 0,
+                    "device": "dev:alice",
+                    "room": room,
+                    "proto": arbos_core::PROTO_VERSION
+                }),
+                bytes::Bytes::new(),
+            )
+            .encode(),
+        ))
+        .await
+        .unwrap();
+        sink.send(TMsg::Binary(
+            Frame::new(
+                FrameType::Push,
+                json!({ "batchId": batch_id }),
+                bytes::Bytes::from(bytes),
+            )
+            .encode(),
+        ))
+        .await
+        .unwrap();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let ack = loop {
+            let m = tokio::time::timeout_at(deadline, stream.next())
+                .await
+                .expect("relay answers")
+                .unwrap()
+                .unwrap();
+            let Some(f) = decode(m) else { continue };
+            if matches!(f.ty, FrameType::Ack | FrameType::Error) {
+                break f;
+            }
+        };
+        assert_eq!(
+            ack.ty,
+            FrameType::Ack,
+            "the relay took the row: {:?}",
+            ack.header
+        );
+
+        let doc = load_doc(&state, &chat, None).unwrap().expect("room doc");
+        let stored = doc.message("m-audit").expect("the system row is kept");
+        assert_eq!(stored.role, "system");
+        assert_eq!(stored.text(), text, "stored verbatim, marker and all");
+    }
+}

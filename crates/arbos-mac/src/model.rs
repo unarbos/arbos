@@ -2340,6 +2340,13 @@ pub struct NoticeSubject {
     pub id: String,
 }
 
+/// U+2063 INVISIBLE SEPARATOR, the prefix the iPhone puts on a people group's deletion audit
+/// line (`GroupActivity.auditPrefix`, #1520) so the line can ride in the chat document while
+/// staying out of the conversation. Note it is a *format* character (Unicode category `Cf`),
+/// not whitespace, so `str::trim` leaves it in place: a reader that only tests for an empty
+/// line sees ordinary prose and draws it.
+pub const HIDDEN_AUDIT_MARKER: &str = "\u{2063}";
+
 /// The facts behind a membership system line (relay `notices::Notice`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MembershipNotice {
@@ -2848,6 +2855,13 @@ impl Message {
             }
         }
         out
+    }
+
+    /// A people group's deletion audit, written into the chat by the deleting iPhone for its
+    /// admin Activity screen (#1520) and marked with [`HIDDEN_AUDIT_MARKER`]. It is an
+    /// internal record, not a message: it draws no transcript row and never previews.
+    pub fn is_hidden_audit(&self) -> bool {
+        self.role == Role::System && self.plain_text().starts_with(HIDDEN_AUDIT_MARKER)
     }
 
     /// A finished row with no words, nothing to look at and no named sender (`user:`,
