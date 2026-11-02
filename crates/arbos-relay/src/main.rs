@@ -63,6 +63,7 @@ mod pins;
 mod preview_token_tests;
 mod proxy;
 mod push;
+mod push_guard;
 mod releases;
 mod restart;
 mod room_health;
