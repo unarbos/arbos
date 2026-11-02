@@ -260,6 +260,10 @@ pub struct Shell {
     /// query once the first chat with rows is on screen (synthetic key events
     /// do not reach the GPUI field on the shared display). Consumed on use.
     chat_search_rig: Option<String>,
+    /// Rig: `ARBOS_AVATAR_PICKER=bot|generate|upload` opens my own profile picture's avatar
+    /// picker on that tab once the account is there — the sheet the reports photograph.
+    /// Consumed on use.
+    avatar_picker_rig: Option<String>,
     /// The palette: open/closed, highlighted row, rows drawn last frame.
     pub(crate) palette: palette::PaletteState,
     /// Where the palette's panel was painted last frame; a mouse-down outside
@@ -1121,6 +1125,9 @@ impl Shell {
             chat_search_rig: std::env::var("ARBOS_CHAT_SEARCH")
                 .ok()
                 .filter(|q| !q.trim().is_empty()),
+            avatar_picker_rig: std::env::var("ARBOS_AVATAR_PICKER")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
             palette,
             palette_bounds: Rc::new(Cell::new(None)),
             chat_search_bounds: Rc::new(Cell::new(None)),
@@ -5475,6 +5482,20 @@ impl Render for Shell {
                     self.open_chat_search(window, cx);
                     self.chat_search_input
                         .update(cx, |i, cx| i.set_text(query, cx));
+                }
+            }
+        }
+        // Rig: my own picture's avatar picker on the named tab, once the account is there.
+        if self.avatar_picker_rig.is_some() && self.avatar_picker.is_none() {
+            if let Some(me) = self.state.read(cx).account.as_ref().map(|a| a.id.clone()) {
+                let spec = self.avatar_picker_rig.take().unwrap_or_default();
+                self.open_avatar_picker(avatar_picker::Target::Me(me), cx);
+                if let Some(pk) = self.avatar_picker.as_mut() {
+                    pk.tab = match spec.as_str() {
+                        "bot" => avatar_picker::Tab::Bot,
+                        "upload" => avatar_picker::Tab::Upload,
+                        _ => avatar_picker::Tab::Generate,
+                    };
                 }
             }
         }

@@ -1653,6 +1653,38 @@ nothing picked → no picture sent), `avatar_picker::tests::the_draft_offers_upl
 Rig: `ARBOS_OPEN_NEW_AGENT=1` / `ARBOS_OPEN_CREATE=group|server` with
 `ARBOS_NEW_AGENT_NAME=…` and `ARBOS_CREATE_PICTURE=upload|generate[:<prompt>]`.
 
+## The avatar sheets' hint line takes space (Affinity 2026-10-31, [feedback avatar-upload-hint-divider-mac-2026-10-31])
+
+**In the avatar picker and the Create sheets, the one line whose height is its
+text's — the Upload tab's hint, the Generate tab's status — sits in the card's
+flow between the body's box and the footer, never in an absolute slot inside
+that box.** Affinity's shot: "PNG, JPEG, HEIC, GIF or WebP; kept at up to 1024
+px." wrapped at the picker's 306 pt width and its second row, "1024 px.", was
+drawn on the footer's hairline. The cause was structural, not the string — the
+body is a fixed box (`BODY_H`, from Grok's measured 397 pt sheet) and the line
+was pinned 30 pt from its bottom, room for exactly one 16 pt row, while the
+footer is laid out after the box and so cannot move. This is the sheet rule the
+error note already follows ("takes space, never absolute over controls"): a
+shorter string or a hard-coded taller box would come back with the next format
+or translation.
+
+| Item | Rule |
+|---|---|
+| The element | `avatar_picker::hint_line(id, text, slot, p)` — 12 / 16 `placeholder`, centred, inset `FIELD_INSET` 16.5, with the text in its own `{id}-line` box; the words are `upload_hint` / `generate_status`. It wraps: no `whitespace_nowrap`, no ellipsis, no line cap |
+| The band | `HintSlot { reserved, gap, anchor }` — `reserved` is a **floor**, not a height, so a line the band holds leaves the sheet measuring exactly as before. The picker keeps **two** rows and the gap (`HINT_RESERVED` = 2 × 16 + `HINT_GAP` 14 = 46), because the reported string takes two at 306 pt and so does "A few words about the picture you want."; a floor of two is what keeps the card at Grok's 397 on every tab and the footer still on a tab switch. The Create sheets keep `FOOTER_TOP − line top`, the taller Generate body's room on both options, for the same reason. `gap` is the least space under the line's last row |
+| The anchor | `anchor` is the end of the band the line sits at — each sheet's existing one, so no line moves: `Footer` in the picker, where `BODY_H − 30` hung it off the hairline, and `Body` in the Create sheets, where it is 12 under the "Choose a photo…" pill with the spare room below. The band is a `flex().flex_col()` and the anchor is `justify_end` / `justify_start`: a plain `div()` is a **block**, which silently drops both the alignment and the axis, and the line then drifts to the band's top |
+| Growing | a row the slot cannot hold grows the slot, the card grows with it and the footer moves down — the card is a flex column (bar / header · note · the body's box · the line's slot · footer) and the box is shortened by the slot it no longer holds (`TAB_BODY_H`; the Bot tab has no line and keeps the whole `BODY_H`) |
+| Never | the line in the body's absolute slots, a height picked to fit today's string, a shortened string, or a cap that truncates the words to one row |
+| iPhone | already correct for the same reason and unchanged: `AvatarPickerSheet` is a `VStack` of bar · `ScrollView(body)` · footer, so the body flows and the footer's `Rectangle` overlay cannot be reached. Its Generate status keeps `lineLimit(1)` |
+
+Pinned by `avatar_picker::me_picker_tests::a_wrapped_hint_grows_the_sheet_instead_of_crossing_the_footer`
+(headless render: both tabs' lines fit the band, so the sheet stays at `HEIGHT`
+with the gap clear, and a chosen file name too long for the band grows the card
+by those rows only) and
+`create_entity::render_tests` (the footer where the constants say).
+Rig: `ARBOS_AVATAR_PICKER=bot|generate|upload` opens my own picture's sheet on
+that tab; `ARBOS_CREATE_PICTURE=upload|generate[:<prompt>]` the Create sheets'.
+
 ## Error messages: one element, one place per surface (Jacob 2026-10-26, [feedback error-messages-mac-2026-10-26]; iPhone [feedback error-messages-ios-2026-10-26])
 
 **Every failure the user sees is one shared element — `ui::error_note` on the Mac, `ErrorNote`
