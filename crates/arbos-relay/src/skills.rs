@@ -389,6 +389,189 @@ pub async fn update(
     Ok(Json(skill_json(&row)).into_response())
 }
 
+/// `POST /skills/{id}/refile` body: the project to file the skill under, by id or by the
+/// caller's own name for it.
+#[derive(Deserialize)]
+pub struct RefileBody {
+    #[serde(default)]
+    pub project_id: String,
+}
+
+/// One row in the `audit` table per re-file attempt, under the project it left and the project
+/// it arrived at, so a move is answerable afterwards from the data rather than from a log.
+fn audit_refile(
+    state: &AppState,
+    principal: &Principal,
+    s: &Skill,
+    to: Option<&str>,
+    allowed: bool,
+    reason: &str,
+) {
+    let (who, device) = match principal {
+        Principal::Device { id, user_id, .. } => (format!("user:{user_id}"), Some(id.clone())),
+        Principal::Box { user_id } => (format!("box:{user_id}"), None),
+        Principal::Admin => ("admin".to_owned(), None),
+    };
+    let entry = json!({
+        "ts": now_ms(), "target": "skill", "id": s.id, "slug": s.slug,
+        "principal": who, "device_id": device,
+        "from": s.origin_project_id, "to": to, "allowed": allowed, "reason": reason,
+    });
+    for project in [s.origin_project_id.as_deref(), to].into_iter().flatten() {
+        if let Err(e) = state.db.record_audit(project, "skills", &entry) {
+            tracing::warn!(project, error = %e, "skill refile audit row not written");
+        }
+    }
+}
+
+/// The first slug in `slug`, `slug-2`, `slug-3`, … that no skill holds. Skill slugs are unique
+/// across the whole relay today, so a claimed copy cannot keep the slug of the row it was copied
+/// from; #2568 scopes the namespace per owner, and the day it lands the first candidate is free
+/// and a claim keeps the author's own slug with no change here.
+fn free_slug(state: &AppState, slug: &str) -> Result<String, (StatusCode, String)> {
+    for n in 1..=50 {
+        let candidate = if n == 1 {
+            slug.to_owned()
+        } else {
+            format!("{slug}-{n}")
+        };
+        if state.db.skill(&candidate).map_err(internal)?.is_none() {
+            return Ok(candidate);
+        }
+    }
+    Err((
+        StatusCode::CONFLICT,
+        format!("too many skills are called {slug}"),
+    ))
+}
+
+/// `POST /skills/{id}/refile` (devices only): put a skill into one of the caller's own Projects.
+///
+/// This exists because a skill could be filed under a stranger's Project of the same name, and
+/// the row cannot say whether that was the lookup's mistake or its author's choice — a guest may
+/// legitimately file a skill into a Project they were invited to. Nothing can tell those apart,
+/// so nothing automated moves them. The author does it, because the author is the only one who
+/// knows which it was.
+///
+/// What the route does depends on whether the relay knows who wrote the row, and the difference
+/// is the whole design rather than an implementation detail:
+///
+/// - **Creator recorded, and it is the caller: the row moves.** Authorship is proven, so there
+///   is nothing to be careful about.
+/// - **Creator recorded, and it is somebody else: refused.** A guest of a Project cannot take
+///   its owner's skill, which is what makes the creator column worth having.
+/// - **No creator — every row written before the column: the caller gets a copy, and the
+///   original is left exactly where it is.** A move here would be a cross-tenant capability
+///   handed out by a repair route: on an unprovable claim, one member of a Project could take a
+///   skill out from under its owner, whose agents would lose it before anyone read an audit row.
+///   A copy gives a genuine author their work back in their own library — their agents see it
+///   again — while the Project it was filed under keeps what it has. Nobody has to prove
+///   authorship because nothing is taken from anybody, and the cost is one duplicate row, which
+///   whoever does not want it can delete.
+///
+/// Two rules hold in every case. The caller must be able to act on the skill at all
+/// ([`owns_skill`], the same question `GET`, `PUT` and `DELETE` ask by id; anything else answers
+/// 404). And the destination must be a Project the caller **owns**, resolved against their own
+/// Projects and never by a relay-wide name lookup — filing into a Project you do not own is how a
+/// skill got misfiled in the first place, so a repair route that allowed it would hand out the
+/// same defect under a friendlier name.
+///
+/// A move answers `200`, a claim answers `201` with the new row, so a client can tell which
+/// happened without comparing ids.
+pub async fn refile(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Json(b): Json<RefileBody>,
+) -> ApiResult {
+    let Principal::Device { user_id, .. } = &principal else {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "a signed-in device is required".into(),
+        ));
+    };
+    let existing = state
+        .db
+        .skill(&id)
+        .map_err(internal)?
+        .ok_or((StatusCode::NOT_FOUND, "no such skill".to_owned()))?;
+    if !owns_skill(&state, &principal, &existing) {
+        // Another user's skill looks like no skill at all, as `delete` and `get` answer (#1953).
+        return Err((StatusCode::NOT_FOUND, "no such skill".to_owned()));
+    }
+    let creator = state.db.skill_creator(&existing.id).map_err(internal)?;
+    if creator.as_deref().is_some_and(|c| c != user_id) {
+        audit_refile(&state, &principal, &existing, None, false, "not_the_author");
+        return Err((
+            StatusCode::FORBIDDEN,
+            "only the author of a skill re-files it".into(),
+        ));
+    }
+    let wanted = b.project_id.trim();
+    let destination = state
+        .db
+        .projects_of_user(user_id)
+        .map_err(internal)?
+        .into_iter()
+        .find(|p| p.id == wanted || p.name == wanted)
+        .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
+    if existing.origin_project_id.as_deref() == Some(destination.id.as_str()) {
+        return Ok(Json(skill_json(&existing)).into_response());
+    }
+
+    if creator.is_none() {
+        let now = now_ms();
+        let claim = Skill {
+            id: ulid(),
+            slug: free_slug(&state, &existing.slug)?,
+            origin_project_id: Some(destination.id.clone()),
+            version: 1,
+            created_at: now,
+            updated_at: now,
+            ..existing.clone()
+        };
+        state
+            .db
+            .insert_skill(&claim, Some(user_id))
+            .map_err(internal)?;
+        audit_refile(
+            &state,
+            &principal,
+            &existing,
+            Some(&destination.id),
+            true,
+            "claimed",
+        );
+        notify_boxes(&state, &claim.slug);
+        tracing::info!(
+            slug = %claim.slug, from = %existing.slug, to = %destination.id,
+            by = %principal.device_name(), "skill claimed"
+        );
+        return Ok((StatusCode::CREATED, Json(skill_json(&claim))).into_response());
+    }
+
+    let row = state
+        .db
+        .refile_skill(&existing.id, &destination.id)
+        .map_err(internal)?
+        .ok_or((StatusCode::NOT_FOUND, "no such skill".to_owned()))?;
+    audit_refile(
+        &state,
+        &principal,
+        &existing,
+        Some(&destination.id),
+        true,
+        "refiled",
+    );
+    // Both libraries change: the skill leaves one Project's set and joins another.
+    notify_boxes(&state, &row.slug);
+    tracing::info!(
+        slug = %row.slug, to = %destination.id, by = %principal.device_name(),
+        "skill refiled"
+    );
+    Ok(Json(skill_json(&row)).into_response())
+}
+
 /// `DELETE /skills/{id}` (devices only).
 pub async fn delete(
     State(state): State<AppState>,
@@ -1092,6 +1275,245 @@ mod tests {
             state.db.skill_creator("shared-runbook").unwrap(),
             Some(alice),
             "the creator is the author, not the editor"
+        );
+    }
+
+    async fn refile_to(
+        state: &AppState,
+        principal: Principal,
+        skill: &str,
+        project: &str,
+    ) -> ApiResult {
+        refile(
+            State(state.clone()),
+            principal,
+            Path(skill.to_owned()),
+            Json(RefileBody {
+                project_id: project.to_owned(),
+            }),
+        )
+        .await
+    }
+
+    fn origin_of(state: &AppState, skill: &str) -> Option<String> {
+        state.db.skill(skill).unwrap().unwrap().origin_project_id
+    }
+
+    /// AF-589, the repair itself. Alice named "Tern" when she filed a skill, the relay resolved
+    /// that to Bob's "Tern" because she is a guest of it, and from then on her own agents never
+    /// saw the skill while Bob's did. Nothing in the row says so, and a guest's deliberate
+    /// filing looks exactly the same, so the relay does not take the row off Bob on Alice's say
+    /// so: she claims a copy into her own Tern, and his library is left alone. Her agents read
+    /// the skill again; nobody loses anything; nobody had to prove authorship.
+    #[tokio::test]
+    async fn a_misfiled_skill_is_claimed_as_a_copy_and_the_original_stays_put() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, _bob_dev) = person(&state, 2);
+        let hers = project_of(&state, &alice, "Tern");
+        let his = project_of(&state, &bob, "Tern");
+        state
+            .db
+            .add_project_member(&his, &alice, &bob)
+            .expect("Alice is a guest of Bob's Tern");
+        let misfiled = skill_with(
+            &state,
+            Some(&his),
+            "ship-the-newsletter",
+            false,
+            ALICES_BODY,
+        );
+
+        let r = refile_to(&state, alice_dev, &misfiled, &hers).await;
+        assert_eq!(status(r), StatusCode::CREATED, "a claim, not a move");
+        assert_eq!(
+            origin_of(&state, &misfiled).as_deref(),
+            Some(his.as_str()),
+            "Bob's row is exactly where it was"
+        );
+
+        let claimed = state
+            .db
+            .list_skills(&SkillScope::Project(hers.clone()))
+            .unwrap();
+        assert_eq!(claimed.len(), 1, "and Alice has one of her own");
+        assert_eq!(claimed[0].body, ALICES_BODY, "with the text she wrote");
+        assert_ne!(claimed[0].id, misfiled, "as a new row");
+        assert_eq!(
+            claimed[0].slug, "ship-the-newsletter-2",
+            "under a free slug, because slugs are relay-wide until #2568"
+        );
+        assert_eq!(
+            state.db.skill_creator(&claimed[0].id).unwrap(),
+            Some(alice.clone()),
+            "recorded as hers, so from here on only she can move it"
+        );
+
+        let arrived = state.db.audit(&hers, 10).unwrap();
+        let left = state.db.audit(&his, 10).unwrap();
+        assert_eq!(arrived.len(), 1, "written down where it arrived");
+        assert_eq!(left.len(), 1, "and under the project it was copied from");
+        assert_eq!(arrived[0]["reason"], "claimed");
+        assert_eq!(arrived[0]["from"], his);
+        assert_eq!(arrived[0]["to"], hers);
+        assert_eq!(arrived[0]["principal"], format!("user:{alice}"));
+    }
+
+    /// The destination has to be the caller's own Project. Filing into a Project you do not own
+    /// is how a skill got misfiled in the first place, so the repair refuses to do it again —
+    /// even though `create` would have allowed it and even though the caller is a guest there.
+    #[tokio::test]
+    async fn a_refile_refuses_a_project_the_caller_only_guests_in() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, _bob_dev) = person(&state, 2);
+        let hers = project_of(&state, &alice, "Alice work");
+        let his = project_of(&state, &bob, "Bob work");
+        state.db.add_project_member(&his, &alice, &bob).expect("ok");
+        let mine = skill_of(&state, Some(&hers), "my-own-runbook");
+
+        let r = refile_to(&state, alice_dev.clone(), &mine, &his).await;
+        assert_eq!(status(r), StatusCode::NOT_FOUND);
+        assert_eq!(
+            origin_of(&state, &mine).as_deref(),
+            Some(hers.as_str()),
+            "nothing moved"
+        );
+
+        // And a Project that belongs to nobody she can reach answers the same way: no 403, so
+        // the route is not a test for whether a project id exists.
+        let (carol, _carol_dev) = person(&state, 3);
+        let carols = project_of(&state, &carol, "Carol work");
+        assert_eq!(
+            status(refile_to(&state, alice_dev, &mine, &carols).await),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    /// Rule 2, and the reason the creator column landed before this route: once the relay knows
+    /// who wrote a skill, nobody else moves it. Without this, a guest of a Project could file
+    /// its owner's own skill into their own library and the owner's agents would simply lose it.
+    #[tokio::test]
+    async fn only_the_recorded_author_may_refile() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let hers = project_of(&state, &alice, "Alice work");
+        let his = project_of(&state, &bob, "Bob work");
+        state
+            .db
+            .add_project_member(&hers, &bob, &alice)
+            .expect("Bob is a guest of Alice's project");
+
+        // Alice writes it, so the relay records her.
+        let creator = create_and_read_creator(
+            &state,
+            alice_dev,
+            HeaderMap::new(),
+            "Alice runbook",
+            Some(&hers),
+        )
+        .await;
+        assert_eq!(creator, Some(alice));
+
+        let r = refile_to(&state, bob_dev, "alice-runbook", &his).await;
+        assert_eq!(status(r), StatusCode::FORBIDDEN);
+        assert_eq!(
+            origin_of(&state, "alice-runbook").as_deref(),
+            Some(hers.as_str()),
+            "the guest cannot take it"
+        );
+        let refused = state.db.audit(&hers, 10).unwrap();
+        assert_eq!(refused.len(), 1, "the attempt is written down");
+        assert_eq!(refused[0]["allowed"], false);
+        assert_eq!(refused[0]["reason"], "not_the_author");
+    }
+
+    /// A skill nobody can reach does not become reachable through this route, and it answers
+    /// like a skill that is not there rather than confirming one exists.
+    #[tokio::test]
+    async fn a_refile_cannot_pull_a_strangers_skill_across() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let hers = project_of(&state, &alice, "Alice work");
+        let his = project_of(&state, &bob, "Bob work");
+        let not_his = skill_of(&state, Some(&hers), "alices-notes");
+
+        let r = refile_to(&state, bob_dev, &not_his, &his).await;
+        assert_eq!(status(r), StatusCode::NOT_FOUND);
+        assert_eq!(origin_of(&state, &not_his).as_deref(), Some(hers.as_str()));
+        assert!(
+            state.db.audit(&hers, 10).unwrap().is_empty(),
+            "and a stranger cannot write rows into another tenant's audit log by trying"
+        );
+    }
+
+    /// A box must not re-file: an agent runs inside one Project and the whole point of the route
+    /// is a person deciding where their skill belongs.
+    #[tokio::test]
+    async fn a_box_cannot_refile() {
+        let state = test_state(AuthMode::Github);
+        let (bob, _bob_dev) = person(&state, 2);
+        let his = project_of(&state, &bob, "Bob work");
+        let other = project_of(&state, &bob, "Bob side project");
+        let skill = skill_of(&state, Some(&his), "bobs-notes");
+
+        let r = refile_to(
+            &state,
+            Principal::Box {
+                user_id: bob.clone(),
+            },
+            &skill,
+            &other,
+        )
+        .await;
+        assert_eq!(status(r), StatusCode::FORBIDDEN);
+        assert_eq!(origin_of(&state, &skill).as_deref(), Some(his.as_str()));
+    }
+
+    /// A row the relay watched the caller write moves, because authorship is not in question,
+    /// and moving it changes where it is filed and nothing else: same row, same slug, same text,
+    /// same version. A reader who took this for an edit would expect the version bump `PUT`
+    /// makes, and there is none.
+    #[tokio::test]
+    async fn the_author_of_a_recorded_skill_moves_it_rather_than_copying_it() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let one = project_of(&state, &alice, "One");
+        let two = project_of(&state, &alice, "Two");
+        assert_eq!(
+            create_and_read_creator(
+                &state,
+                alice_dev.clone(),
+                HeaderMap::new(),
+                "Runbook",
+                Some(&one)
+            )
+            .await,
+            Some(alice)
+        );
+        let before = state.db.skill("runbook").unwrap().unwrap();
+
+        assert_eq!(
+            status(refile_to(&state, alice_dev, "runbook", "Two").await),
+            StatusCode::OK,
+            "a caller may name their own project rather than paste an id"
+        );
+        let after = state.db.skill("runbook").unwrap().unwrap();
+        assert_eq!(after.origin_project_id.as_deref(), Some(two.as_str()));
+        assert_eq!(after.id, before.id, "the same row, not a copy of it");
+        assert_eq!(
+            (after.slug, after.name, after.body, after.version),
+            (before.slug, before.name, before.body, before.version),
+        );
+        assert!(
+            state
+                .db
+                .list_skills(&SkillScope::Project(one))
+                .unwrap()
+                .is_empty(),
+            "and it has left the project it was in"
         );
     }
 }

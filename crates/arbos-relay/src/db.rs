@@ -3274,10 +3274,8 @@ impl Db {
     /// token wrote. `update_skill` never touches it, so this stays the first writer for the life
     /// of the row — an editor does not become its creator.
     ///
-    /// Only the tests read it so far. The route that lets an author re-file their own skill
-    /// (AF-589) is what reads it in anger, and it arrives with that route rather than ahead of
-    /// it, so nothing reads the column before there is a reason to.
-    #[cfg(test)]
+    /// Read by the re-file route, which refuses to move a row whose recorded creator is
+    /// somebody other than the caller (AF-589).
     pub fn skill_creator(&self, id_or_slug: &str) -> Result<Option<String>> {
         self.with(|c| {
             c.query_row(
@@ -3312,6 +3310,29 @@ impl Db {
             )?;
             Self::reindex_skill(c, &row)?;
             Ok(Some(row))
+        })
+    }
+
+    /// Move a skill to another project (`POST /skills/{id}/refile`). Only this and `insert_skill`
+    /// ever write `origin_project_id`: `update_skill` leaves it alone, so an edit cannot move a
+    /// skill between projects, and the authorisation around this call is the only thing that
+    /// decides whether a row changes hands. The text, the slug and the version are untouched —
+    /// nothing about the skill changes except where it is filed.
+    pub fn refile_skill(&self, id: &str, project_id: &str) -> Result<Option<Skill>> {
+        self.with(|c| {
+            let n = c.execute(
+                "UPDATE skills SET origin_project_id = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, project_id, now_ms()],
+            )?;
+            if n == 0 {
+                return Ok(None);
+            }
+            c.query_row(
+                &format!("SELECT {} FROM skills WHERE id = ?1", Self::SKILL_COLS),
+                params![id],
+                Self::row_to_skill,
+            )
+            .map(Some)
         })
     }
 

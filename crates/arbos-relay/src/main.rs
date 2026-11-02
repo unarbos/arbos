@@ -868,6 +868,7 @@ async fn main() -> anyhow::Result<()> {
             "/skills/{id}",
             get(skills::get).put(skills::update).delete(skills::delete),
         )
+        .route("/skills/{id}/refile", post(skills::refile))
         .route(
             "/projects/{id}/audit",
             post(api::record_audit).get(api::list_audit),
