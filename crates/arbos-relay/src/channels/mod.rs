@@ -455,8 +455,8 @@ fn pair_json(c: &ChannelPairCode) -> Value {
 
 /// The bindings this caller may see. `channel_bindings` has no user column, so ownership is
 /// reachable only through the binding's project, which is what `allows` resolves: the owner, the
-/// user's other devices, an invited project member and the admin. `DELETE /channels/bindings/{id}`
-/// has gated on this since #1952; the read routes did not.
+/// user's other devices, an invited project member and the admin. Seeing which channels reach an
+/// agent is part of driving it; changing them is not, so `unbind` asks `owns` instead.
 fn visible_bindings(
     state: &AppState,
     principal: &Principal,
@@ -506,14 +506,16 @@ pub async fn overview(State(state): State<AppState>, principal: Principal) -> Ap
         .iter()
         .map(binding_dto)
         .collect();
-    // Newest live code the caller is allowed on, not the relay's newest: a code another user
-    // minted a moment ago must not hide this caller's own.
+    // The caller's own newest live code, not the relay's: a code another user minted a moment
+    // ago must not hide this caller's own. `owns`, not `allows`, because a code is a bearer
+    // credential — whoever redeems it first gets the binding, so reading one is as good as
+    // minting one, and `pair_new` is the owner's.
     let pairing = state
         .db
         .live_channel_pair_codes()
         .map_err(internal)?
         .iter()
-        .find(|c| state.allows(&principal, &c.project_id))
+        .find(|c| state.owns(&principal, &c.project_id))
         .map(pair_dto);
     Ok(Json(ChannelsOverviewDto {
         mock: mock_on(&state),
@@ -534,6 +536,12 @@ pub struct PairNewBody {
 }
 
 /// `POST /channels/pair/new { projectId, chatId? }` → `{ code, expiresAt }` (10 min, one use).
+///
+/// The owner's, not every member's. A redeemed code binds an outside account to the project:
+/// messages from it wake the box and spend the owner's budget, the agent's prose goes back out
+/// to it, and the binding records no Arbos user, so nothing ends it when a member leaves. A
+/// project outside the caller's answers 404 like `unbind` does, so this is no enumeration
+/// oracle either.
 pub async fn pair_new(
     State(state): State<AppState>,
     principal: Principal,
@@ -542,11 +550,15 @@ pub async fn pair_new(
     if principal.is_box() {
         return Err((StatusCode::FORBIDDEN, "device only".into()));
     }
+    let missing = || (StatusCode::NOT_FOUND, "no such project".to_owned());
     let p = state
         .db
         .project(&b.project_id)
         .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
+        .ok_or_else(missing)?;
+    if !state.owns(&principal, &p.id) {
+        return Err(missing());
+    }
     let chats = state.db.list_chats(&p.id).map_err(internal)?;
     let chat_id = match b.chat_id {
         Some(c) => {
@@ -588,6 +600,11 @@ pub async fn list_bindings(State(state): State<AppState>, principal: Principal) 
 /// `DELETE /channels/bindings/{id}`: unbind one of the caller's own channel bindings. A binding
 /// of another user's project answers 404, as `api::revoke_device` does for a foreign device, so
 /// the route is not an enumeration oracle either (#1952).
+///
+/// The owner's, matching `pair_new`: which outside accounts reach the agent is an integration,
+/// not project work. A member has nothing of their own to tidy here — `channel_bindings` records
+/// no Arbos user, so no binding is theirs; nothing deletes bindings when a member leaves; and a
+/// member who has left fails `allows` and is refused anyway.
 pub async fn unbind(
     State(state): State<AppState>,
     principal: Principal,
@@ -602,7 +619,7 @@ pub async fn unbind(
         .channel_binding(&id)
         .map_err(internal)?
         .ok_or_else(missing)?;
-    if !state.allows(&principal, &binding.project_id) {
+    if !state.owns(&principal, &binding.project_id) {
         return Err(missing());
     }
     let ok = state.db.delete_channel_binding(&id).map_err(internal)?;
@@ -1280,5 +1297,142 @@ mod tests {
             .unwrap();
         let invited = body_of(list_bindings(State(state.clone()), bob_dev).await).await;
         assert_eq!(invited["items"][0]["id"], "bind_alice");
+    }
+
+    struct Scene {
+        project: String,
+        owner: Principal,
+        /// Invited into the project, so `state.allows` holds for them.
+        member: Principal,
+        /// No ownership and no membership.
+        stranger: Principal,
+    }
+
+    /// Alice's project with one Telegram binding, Bob invited into it, Carol outside it.
+    fn alice_bound(state: &AppState) -> Scene {
+        let (alice, owner) = crate::people::tests_support::person(state, 21);
+        let (bob, member) = crate::people::tests_support::person(state, 22);
+        let (_carol, stranger) = crate::people::tests_support::person(state, 23);
+        let project = crate::people::tests_support::project_of(state, &alice, "Comms");
+        state
+            .db
+            .upsert_channel_binding(&ChannelBinding {
+                id: "bind_alice".into(),
+                platform: "telegram".into(),
+                external_chat_id: "tg-chat".into(),
+                external_user_id: "tg-user".into(),
+                project_id: project.clone(),
+                chat_id: "c1".into(),
+                label: "Telegram · Alice".into(),
+                bound_at: 0,
+            })
+            .unwrap();
+        state.db.add_project_member(&project, &bob, &alice).unwrap();
+        assert!(state.allows(&member, &project), "Bob is a project member");
+        assert!(!state.owns(&member, &project), "but not its owner");
+        assert!(!state.allows(&stranger, &project), "Carol is neither");
+        Scene {
+            project,
+            owner,
+            member,
+            stranger,
+        }
+    }
+
+    async fn mint(state: &AppState, who: &Principal, project: &str) -> ApiResult {
+        pair_new(
+            State(state.clone()),
+            who.clone(),
+            Json(PairNewBody {
+                project_id: project.to_owned(),
+                chat_id: None,
+            }),
+        )
+        .await
+    }
+
+    /// `pair_new` refused boxes and nothing else, taking `projectId` from the body: anyone
+    /// signed in could mint a code for anyone's project. Redeeming it binds the minter's own
+    /// Telegram or Slack account to that project, and every adapter but Beeper marks its senders
+    /// trusted, so from then on their messages wake the owner's box and the agent answers them.
+    #[tokio::test]
+    async fn only_the_owner_mints_a_pairing_code_for_their_project() {
+        let state = crate::state::test_support::test_state(crate::state::AuthMode::Github);
+        let s = alice_bound(&state);
+
+        for (who, label) in [
+            (&s.member, "an invited member"),
+            (&s.stranger, "a stranger"),
+        ] {
+            assert_eq!(
+                status(mint(&state, who, &s.project).await),
+                StatusCode::NOT_FOUND,
+                "{label} must not mint a code for Alice's project"
+            );
+        }
+        assert!(
+            state.db.live_channel_pair_codes().unwrap().is_empty(),
+            "no code exists to be redeemed"
+        );
+
+        assert_eq!(
+            status(mint(&state, &s.owner, &s.project).await),
+            StatusCode::OK
+        );
+        assert_eq!(state.db.live_channel_pair_codes().unwrap().len(), 1);
+    }
+
+    /// A pairing code is a bearer credential: whoever sends `/pair` with it first gets the
+    /// binding. Scoping the read by membership would hand a guest the same binding an
+    /// owner-only `pair_new` denies them, so the read is owner-only too.
+    #[tokio::test]
+    async fn only_the_owner_reads_the_live_pairing_code() {
+        let state = crate::state::test_support::test_state(crate::state::AuthMode::Github);
+        let s = alice_bound(&state);
+        assert_eq!(
+            status(mint(&state, &s.owner, &s.project).await),
+            StatusCode::OK
+        );
+        let code = state.db.live_channel_pair_codes().unwrap()[0].code.clone();
+
+        for (who, label) in [
+            (&s.member, "an invited member"),
+            (&s.stranger, "a stranger"),
+        ] {
+            let seen = body_of(overview(State(state.clone()), who.clone()).await).await;
+            assert!(
+                seen["pairing"].is_null(),
+                "{label} reads Alice's live code and can pair their own account: {seen}"
+            );
+        }
+
+        let mine = body_of(overview(State(state.clone()), s.owner).await).await;
+        assert_eq!(mine["pairing"]["code"], code, "the owner still sees it");
+    }
+
+    /// #1952 gave `unbind` a stranger test; the member beside it was never covered. Which
+    /// outside accounts reach the agent is an integration the owner holds: `channel_bindings`
+    /// records no Arbos user, nothing clears a binding when a member leaves, and a departed
+    /// member is refused anyway — so there is no member binding for a member to tidy.
+    #[tokio::test]
+    async fn only_the_owner_unbinds_the_projects_channel() {
+        let state = crate::state::test_support::test_state(crate::state::AuthMode::Github);
+        let s = alice_bound(&state);
+
+        let theirs = unbind(
+            State(state.clone()),
+            s.member,
+            Path("bind_alice".to_owned()),
+        )
+        .await;
+        assert_eq!(status(theirs), StatusCode::NOT_FOUND);
+        assert!(
+            state.db.channel_binding("bind_alice").unwrap().is_some(),
+            "a member does not unbind the owner's channel"
+        );
+
+        let own = unbind(State(state.clone()), s.owner, Path("bind_alice".to_owned())).await;
+        assert_eq!(status(own), StatusCode::NO_CONTENT);
+        assert!(state.db.channel_binding("bind_alice").unwrap().is_none());
     }
 }
