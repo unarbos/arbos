@@ -1435,4 +1435,60 @@ mod tests {
         assert_eq!(status(own), StatusCode::NO_CONTENT);
         assert!(state.db.channel_binding("bind_alice").unwrap().is_none());
     }
+
+    /// `reply` posts text straight to a bound channel, so a member reaching it speaks to the
+    /// owner's personal contacts as the owner's agent, with no turn behind the words. The box
+    /// is what the route is for and it arrives as `Principal::Box`, which `owns` already
+    /// admits, so nothing the route was built for needs a member to pass.
+    #[tokio::test]
+    async fn only_the_projects_own_box_and_owner_speak_to_its_channels() {
+        let state = crate::state::test_support::test_state(crate::state::AuthMode::Github);
+        let s = alice_bound(&state);
+        let said = |text: &str| {
+            Json(ReplyBody {
+                binding_id: "bind_alice".into(),
+                text: text.into(),
+                request_id: None,
+            })
+        };
+
+        let err = reply(
+            State(state.clone()),
+            s.member,
+            Path(s.project.clone()),
+            said("a member speaking as the agent"),
+        )
+        .await
+        .expect_err("a member does not speak to the owner's contacts");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert!(state.db.channel_outbox(10).unwrap().is_empty());
+
+        // The route's own purpose: the project's box delivering a finished turn.
+        let owner_box = Principal::Box {
+            user_id: state.db.project(&s.project).unwrap().unwrap().user_id,
+        };
+        let r = reply(
+            State(state.clone()),
+            owner_box,
+            Path(s.project.clone()),
+            said("from the box"),
+        )
+        .await
+        .expect("the project's box");
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(
+            state.db.channel_outbox(10).unwrap()[0]["text"],
+            "from the box"
+        );
+
+        let r = reply(
+            State(state.clone()),
+            s.owner,
+            Path(s.project),
+            said("from the owner"),
+        )
+        .await
+        .expect("the owner's own device");
+        assert_eq!(r.status(), StatusCode::OK);
+    }
 }
