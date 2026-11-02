@@ -7,12 +7,19 @@ import XCTest
 /// the frontmost check: the chat is in front, the bar has gone, nothing covers the message —
 /// the transcript has simply come to rest somewhere else.
 ///
-/// **What the cases vary is whether the tapped result is inside the row window, and whether
-/// the reveal is the one from before the fix.** A hit among the newest is in the window
-/// already and needs nothing. A hit the reader scrolled back to is not, and reaching it means
-/// moving the window and then scrolling into rows the `LazyVStack` has never laid out.
-/// Everything else is identical: same keyword, same tap point in the bubble's bottom padding
-/// clear of every button, same settle.
+/// **What the cases vary is whether the tapped result is inside the row window, which row
+/// outside it they tap, and whether the reveal is the one from before the fix.** A hit among
+/// the newest is in the window already and needs nothing. A hit the reader scrolled back to is
+/// not, and reaching it means moving the window and then scrolling into rows the `LazyVStack`
+/// has never laid out. Everything else is identical: same keyword, same tap point in the
+/// bubble's bottom padding clear of every button, same settle.
+///
+/// **The row is named, not taken from wherever the drags stop.** It was the second thing, and
+/// it was discovered the hard way: the two cases below that look like duplicates were, and
+/// between them they sampled `long-265` — which landed six times out of six — and `long-304`,
+/// which has never landed once. One suite reporting both read as a single fault firing about
+/// half the time, and the queue spent a day on a flake that was a product bug on one row
+/// (#2535). A landing this suite cannot attribute to a row is not a measurement.
 ///
 /// Three earlier explanations were measured and ruled out, which is why none is a case here.
 /// A near-top window grow firing inside the reveal: across four launches the trace recorded
@@ -35,6 +42,42 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     private let settle: TimeInterval = 20
     private static let longRows = 420
     private static let keyword = "embargo"
+    /// The row the old ladder of three corrections happened to converge on: measured landing
+    /// in six gate runs out of six.
+    ///
+    /// Hit 53 of this fixture's 83, so the drags reach it after they reach `stuckTarget`:
+    /// fourteen of them on gate run 41346954704, where it landed 22 pt off centre.
+    private static let convergingTarget = "long-265"
+    /// The row it never converged on: two gate failures out of two attempts that aimed here,
+    /// resting short with the message not realized at all, and no run before #2535 had ever
+    /// landed it.
+    ///
+    /// This is the row #2535 is about. Hit 59 of 83, eleven drags back, and on gate run
+    /// 41346954704 it landed 16 pt off centre with the app reporting
+    /// `passes=1 arrived=true moved=0` — while the pre-fix arm of the same run, aimed at the
+    /// same row, came to rest thirty-five rows away with the row not realized.
+    ///
+    /// Two attempts since then produced no second sample for this row, and neither is a verdict
+    /// on the fix. Run 41352615015 drew a runner whose newest Xcode carried no iPhone 17
+    /// simulator, so `xcodebuild` failed on the destination specifier and no test ran. Run
+    /// 41353988578 is the reason `reachable` now keeps the keyboard's edge and `nudge` steps
+    /// 120 pt instead of 200: twelve drags left this row at y461…556, the aim at y551 went under
+    /// a keyboard the band had stopped bounding, and the tap was delivered to the right element
+    /// and ignored — the result list came to rest byte-identical to its pre-tap state and the
+    /// bar stayed open, so the reveal was never exercised. In that same run `convergingTarget`
+    /// passed with `passes=1 arrived=true offset=10551 moved=0`, the same numbers as
+    /// 41346954704, and the pre-fix arm reproduced the symptom on *this* row at eleven drags.
+    /// The app and the row were both fine; the aim was the only variable. A red gate is not
+    /// always a red suite.
+    private static let stuckTarget = "long-304"
+    /// How many drags the list may be nudged while looking for a named target before the case
+    /// gives up. Twenty-nine hits separate `convergingTarget` from the newest, a drag moves
+    /// one to three of them, and the measured counts were eleven and fourteen at the old 200 pt
+    /// step, so forty had most of a factor of three in hand. `nudge`'s step is now 120 pt,
+    /// which should put the counts near eighteen to twenty-three and still leaves a factor
+    /// close to two. The gate run after this change is what settles that; if a case ever gives
+    /// up here, the drag count in the failure message is the number to read.
+    private static let aimSearchDrags = 40
     /// Clear space the aim point must have above it, below the search chrome, before this
     /// will tap there.
     ///
@@ -45,6 +88,25 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// worst and 122 at best. That is the whole of the evidence for this number, and 24 is
     /// chosen to sit above the worst good tap rather than just above the bad one.
     private static let aimBandMargin: CGFloat = 24
+    /// How far above a row's bottom edge to aim, inside the bubble's own vertical padding.
+    ///
+    /// This suite was written against `Transcript.runGap` 4 and `turnGap` 16 and aimed 5 pt up,
+    /// which is inside the padding but close to its edge. #2527 took those gaps to 2 and 13, and
+    /// `73e2c8800` measured what that does to a tap: the overlap between adjacent result rows
+    /// went from 4 pt to 6 pt, so a 5 pt aim stopped being 1 pt inside the row it named and
+    /// became 1 pt inside the row below. `ChatSearchResultJumpUITests` was moved to 9 pt for
+    /// that reason and this suite follows it, for the same reason and to the same number.
+    ///
+    /// 9 is the middle of the band rather than a margin over the failure: `Theme.bubbleVPad`
+    /// is 11, so the padding runs roughly 4–15 pt above the edge. 5 sat at its lower edge,
+    /// where 2–3 pt of tightening is enough to leave it.
+    ///
+    /// This suite's own rows are not the ones that were measured — `73e2c8800` read the newest
+    /// unfiltered rows and these cases work the filtered window, where the last log showed 12 pt
+    /// of clearance from the aim to the next row's top. So this is not a fix for an observed
+    /// failure here. It is the same displacement arriving on the same gaps, taken on the branch
+    /// because a red on main's post-merge gate blocks every merge behind it.
+    private static let bubbleBottomAim: CGFloat = 9
 
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -56,7 +118,11 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
             "ARBOS_FIXTURE": "1",
             "ARBOS_OPEN_PEOPLE": "fx-group-launch",
             "ARBOS_FIXTURE_LONG_ROWS": "\(Self.longRows)",
-            // The app prints what moves the transcript; the run's stdout is the evidence.
+            // Turns on the app's reveal rig. Its `[arbos reveal]` lines go to the **app's**
+            // stdout, which `xcodebuild` does not capture: there is not one of them in any
+            // gate artifact, and every reading of #2404 so far was made without them. What
+            // this flag buys a CI run is `reveal-probe`, which the app publishes and the
+            // runner prints — see the probe read in `landing`.
             "ARBOS_TRACE_REVEAL": "1",
         ]
         if preFix { app.launchEnvironment["ARBOS_REVEAL_PRE_FIX"] = "1" }
@@ -123,6 +189,26 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         rows.map { "\($0.id)@y\(Int($0.frame.minY))…\(Int($0.frame.maxY))" }.joined(separator: ", ")
     }
 
+    /// The keyboard's top edge, kept for the life of the case once it has been seen.
+    ///
+    /// `app.keyboards` is not a reliable read of whether the keyboard is on screen. The
+    /// transcript dismisses it interactively (`.scrollDismissesKeyboard(.interactively)`), so a
+    /// drag can leave it reported as absent while it still covers the lower third, and a band
+    /// that trusts that read runs to the bottom of the screen and lets a row be aimed at a
+    /// point the keyboard owns.
+    ///
+    /// Gate run 41353988578 is that case. The aim at y551 on an 874 pt screen was delivered to
+    /// `bubble:long-304` — XCUITest resolved the element and synthesized the event against it,
+    /// with no interrupting element — and the app did nothing at all: the result list came to
+    /// rest byte-identical to its pre-tap state and the bar stayed open. The same row in the
+    /// same run, aimed at y229, took its tap and revealed. The variable was the aim, not the
+    /// row and not the app.
+    ///
+    /// The keyboard comes up with the bar and this suite never closes it, so the first frame it
+    /// reports holds for the case. `nil` means it was never reported at all, which the aim log
+    /// says out loud rather than silently widening the band.
+    private var keyboardTop: CGFloat?
+
     /// The part of the window a touch actually reaches: below the header and the Search bar,
     /// above the keyboard. Being inside the window is not the same as being reachable.
     private func reachable(_ app: XCUIApplication, screen: CGRect) -> CGRect {
@@ -131,8 +217,11 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
                        app.textFields["chat-search-field"]] where chrome.exists {
             top = max(top, chrome.frame.maxY)
         }
-        var bottom = screen.maxY
-        if app.keyboards.count > 0 { bottom = min(bottom, app.keyboards.firstMatch.frame.minY) }
+        if app.keyboards.count > 0 {
+            let seen = app.keyboards.firstMatch.frame.minY
+            keyboardTop = min(keyboardTop ?? seen, seen)
+        }
+        let bottom = min(screen.maxY, keyboardTop ?? screen.maxY)
         return CGRect(x: screen.minX, y: top, width: screen.width, height: max(0, bottom - top))
     }
 
@@ -141,11 +230,17 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// would leave the list somewhere this cannot name. With a keyword typed a scroll keeps
     /// the bar open (`ChatSearchClose.scrollCloses`), so this moves where the list stands and
     /// changes nothing else about the state under test.
+    ///
+    /// The step has to be smaller than the reachable band, or a row can cross the band between
+    /// two drags and never be aimable in it. On gate run 41353988578 the 200 pt drag moved
+    /// `long-304` from y140…234 to y461…556 — 322 pt — stepping clean over a band that ends at
+    /// the keyboard, which is how the aim came to sit under it. 120 pt moves the list about
+    /// 190 pt, against a band of roughly 350, and costs a handful more drags inside the cap.
     private func nudge(_ app: XCUIApplication, band: CGRect) {
         let origin = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
         origin.withOffset(CGVector(dx: band.midX, dy: band.minY + 30))
             .press(forDuration: 0.1,
-                   thenDragTo: origin.withOffset(CGVector(dx: band.midX, dy: band.minY + 230)))
+                   thenDragTo: origin.withOffset(CGVector(dx: band.midX, dy: band.minY + 150)))
         usleep(900_000)
     }
 
@@ -159,11 +254,18 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// inside the row's hit area, below the last line of text, and clear of the sender's
     /// avatar and of the name, neither of which must take this touch. This branch is off
     /// `main`, where nothing suppresses those buttons, so the clearance is asserted.
-    private func aimable(_ app: XCUIApplication, screen: CGRect) -> (id: String, point: CGPoint)? {
+    ///
+    /// `wanted` names the one row this case is allowed to tap. Without it the first bubble in
+    /// tree order that clears the margin wins, and which row that is depends on where fourteen
+    /// drag gestures happened to stop — the lottery that made six green runs and two red ones
+    /// look like one intermittent fault instead of two different rows (#2535).
+    private func aimable(_ app: XCUIApplication, screen: CGRect,
+                         wanted: String? = nil) -> (id: String, point: CGPoint)? {
         let band = reachable(app, screen: screen)
         let all = bubbles(app)
         for (id, frame) in all {
-            let point = CGPoint(x: frame.midX, y: frame.maxY - 5)
+            if let wanted, id != "bubble:\(wanted)" { continue }
+            let point = CGPoint(x: frame.midX, y: frame.maxY - Self.bubbleBottomAim)
             guard band.contains(point), frame.height > 24 else { continue }
             // Keep clear of the chrome overhead as well as of the neighbouring rows. A point
             // can sit inside the band and still be close enough to its top edge that what
@@ -197,23 +299,66 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         return nil
     }
 
-    /// Open the bar, drag the result list `scrollUp` times toward older hits, then aim at
-    /// whichever hit is reachable there. Everything here is harness, not finding: kept apart
+    /// Open the bar and drag the result list toward older hits until the row this case is
+    /// about is reachable — or, with no `wanted`, `scrollUp` times and then at whatever is
+    /// reachable there. Everything here is harness, not finding: kept apart
     /// from the landing so the symptom arm's expected-failure wrapper cannot swallow a broken
     /// rig — it did exactly that once, reporting a run whose app died at launch as a
     /// reproduction.
-    private func aimed(scrollUp: Int, preFix: Bool)
+    private func aimed(scrollUp: Int, preFix: Bool, wanted: String? = nil)
         -> (app: XCUIApplication, screen: CGRect, id: String, point: CGPoint)? {
         let app = openSearch(preFix: preFix)
         let screen = app.windows.firstMatch.frame
         for _ in 0..<scrollUp { nudge(app, band: reachable(app, screen: screen)) }
-        for _ in 0..<4 {
-            if let hit = aimable(app, screen: screen) { return (app, screen, hit.id, hit.point) }
+        guard let wanted else {
+            for _ in 0..<4 {
+                if let hit = aimable(app, screen: screen) { return (app, screen, hit.id, hit.point) }
+                nudge(app, band: reachable(app, screen: screen))
+            }
+            XCTFail("no reachable hit after \(scrollUp) drags up the result list "
+                    + "(results: \(describe(bubbles(app))))")
+            return nil
+        }
+        // Older hits come in from the top and leave at the bottom, so a named row is reached
+        // by nudging and can be nudged past. Check after every drag rather than after a fixed
+        // fourteen: `inReach` is one element query, and running the full `aimable` walk forty
+        // times would cost more than the case does.
+        for drag in 0...Self.aimSearchDrags {
+            if inReach(app, screen: screen, wanted: wanted),
+               let hit = aimable(app, screen: screen, wanted: wanted) {
+                print("[rig] \(wanted) came into reach after \(scrollUp + drag) drags")
+                return (app, screen, hit.id, hit.point)
+            }
+            // Past it: no drag goes back the other way, so say so now instead of spending the
+            // rest of the budget looking for a row that has left.
+            if wentPast(app, screen: screen, wanted: wanted) {
+                XCTFail("the result list went past \(wanted) after \(scrollUp + drag) drags — "
+                        + "it is below the reachable band, and nudging only moves older hits "
+                        + "in from the top (results: \(describe(bubbles(app))))")
+                return nil
+            }
             nudge(app, band: reachable(app, screen: screen))
         }
-        XCTFail("no reachable hit after \(scrollUp) drags up the result list "
-                + "(results: \(describe(bubbles(app))))")
+        XCTFail("\(wanted) never came into reach in \(scrollUp + Self.aimSearchDrags) drags up "
+                + "the result list (results: \(describe(bubbles(app))))")
         return nil
+    }
+
+    /// Is the named row's aim point in the reachable band? One element query, so it can be
+    /// asked after every drag; `aimable` does the rest of the checks once this says yes.
+    private func inReach(_ app: XCUIApplication, screen: CGRect, wanted: String) -> Bool {
+        let e = row(app, wanted)
+        guard e.exists else { return false }
+        let band = reachable(app, screen: screen)
+        let point = CGPoint(x: e.frame.midX, y: e.frame.maxY - Self.bubbleBottomAim)
+        return band.contains(point) && point.y - band.minY >= Self.aimBandMargin
+    }
+
+    /// Has the named row gone out below the band, where no further drag can bring it back?
+    private func wentPast(_ app: XCUIApplication, screen: CGRect, wanted: String) -> Bool {
+        let e = row(app, wanted)
+        guard e.exists else { return false }
+        return e.frame.minY > reachable(app, screen: screen).maxY
     }
 
     /// Tap the aimed point and say where the transcript came to rest. Identical for every
@@ -258,7 +403,8 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         // knowing whether the row being aimed at varied too. The drags are gestures and do
         // not stop in the same place every time, so `aimable` can pick a different hit.
         print("[rig] \(arm) target \(id) at \(point)")
-        print("[rig] \(arm) aimed at \(point); results before the tap: \(describe(bubbles(app)))")
+        let before = describe(bubbles(app))
+        print("[rig] \(arm) aimed at \(point); results before the tap: \(before)")
 
         let liveTarget = row(app, id)
         guard liveTarget.exists else {
@@ -268,7 +414,7 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         // below does not use it: it is reported so that a mis-tap can be told apart from a
         // list that slid, which is the distinction the frames of the last one could not make.
         let live = liveTarget.frame
-        let aim = CGPoint(x: live.midX, y: live.maxY - 5)
+        let aim = CGPoint(x: live.midX, y: live.maxY - Self.bubbleBottomAim)
         if abs(aim.y - point.y) > 1 {
             print("[rig] \(arm) re-aimed: the list moved \(Int(aim.y - point.y))pt between "
                   + "choosing \(point) and tapping \(aim)")
@@ -278,13 +424,17 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
             .filter { $0.id != "bubble:\(id)" && $0.frame.minY > live.midY }
             .min { $0.frame.minY < $1.frame.minY }
         let gap = below.map { "\(Int($0.frame.minY - aim.y))pt to \($0.id)" } ?? "no row below"
+        // The band's bottom is logged as well as its top, because the aim that was delivered
+        // and ignored was 13 pt below a bottom the band did not have at the time.
         print("[rig] \(arm) aim \(aim): \(Int(aim.y - band.minY))pt below the band top "
-              + "y\(Int(band.minY)), \(gap)")
-        // dy 1 is the row's bottom edge; the 5 points back up land in `Theme.bubbleVPad`,
+              + "y\(Int(band.minY)), band ends y\(Int(band.maxY)) "
+              + "(keyboard \(app.keyboards.count > 0 ? "up" : "not reported"), bound "
+              + "\(keyboardTop.map { "y\(Int($0))" } ?? "never seen")), \(gap)")
+        // dy 1 is the row's bottom edge; `bubbleBottomAim` back up lands in `Theme.bubbleVPad`,
         // the same place the coordinate aim used to target. XCUITest resolves the frame
         // itself, at the moment of the touch.
         liveTarget.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 1))
-            .withOffset(CGVector(dx: 0, dy: -5))
+            .withOffset(CGVector(dx: 0, dy: -Self.bubbleBottomAim))
             .tap()
         let field = app.textFields["chat-search-field"]
         let deadline = Date().addingTimeInterval(settle)
@@ -295,7 +445,16 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         // Frontmost first: a frame means nothing until the chat is what the reader sees.
         let header = app.descendants(matching: .any)["chat-search-button"].firstMatch
         let resting = bubbles(app)
-        let detail = "tapped \(arm) at \(aim); screen \(screen); resting [\(describe(resting))]"
+        // A list that is byte-identical to its pre-tap state is the signature of a touch the
+        // app never acted on, and it reads nothing like a reveal that landed short. Say which
+        // one it is in the failure message, so the next reader does not have to diff two
+        // hundred-character lines by eye.
+        let stillness = describe(resting) == before
+            ? "NOTHING MOVED — the result list is byte-identical to its pre-tap state, so the "
+              + "touch was delivered and the app did not act on it; "
+            : ""
+        let detail = "tapped \(arm) at \(aim); screen \(screen); "
+            + stillness + "resting [\(describe(resting))]"
         print("[rig] \(detail)")
         XCTAssertTrue(header.isHittable, "the chat is frontmost — \(detail)")
         XCTAssertFalse(field.exists, "a result tap closes the bar — \(detail)")
@@ -304,9 +463,15 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         // asked to reveal, so a tap that landed on a neighbour fails here, as a mis-aimed
         // rig, instead of further down as the fix missing by tens of rows. Both iOS 26
         // failures in this lane were this, and without this line they read as app faults.
+        //
+        // The same value carries what the correction did — `passes`, `arrived`, `offset`,
+        // `moved` — because the app's own trace does not reach CI. This print is the only
+        // place a gate run says how many corrections ran and whether the loop stopped
+        // because the row was there or because it timed out.
         let probe = app.descendants(matching: .any)["reveal-probe"].firstMatch
-        if probe.exists, let revealedId = probe.value as? String, revealedId != "none" {
-            print("[rig] \(arm) app revealed \(revealedId); rig aimed at \(id)")
+        if probe.exists, let value = probe.value as? String, value != "none" {
+            print("[rig] \(arm) app revealed \(value); rig aimed at \(id)")
+            let revealedId = value.split(separator: " ").first.map(String.init) ?? value
             XCTAssertEqual(revealedId, id,
                            "the tap reached the row this case is about — it reached \(revealedId) "
                            + "instead, so this run measures the rig, not the fix — \(detail)")
@@ -343,9 +508,9 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// interpreting coordinates: a run whose baseline **landed** has measured the fix against
     /// no baseline at all, which is what happened once already here and read as four passes.
     /// Launching and aiming stay outside the expectation, so a broken rig still goes red.
-    private func run(scrollUp: Int, preFix: Bool, expectShort: Bool = false) {
-        let arm = "up\(scrollUp)/\(preFix ? "pre-fix" : "fixed")"
-        guard let a = aimed(scrollUp: scrollUp, preFix: preFix) else { return }
+    private func run(scrollUp: Int, preFix: Bool, wanted: String? = nil, expectShort: Bool = false) {
+        let arm = "\(wanted ?? "up\(scrollUp)")/\(preFix ? "pre-fix" : "fixed")"
+        guard let a = aimed(scrollUp: scrollUp, preFix: preFix, wanted: wanted) else { return }
         guard expectShort else { return landing(arm, a) }
         continueAfterFailure = true
         XCTExpectFailure("the reveal as it was before the fix (#2404)", strict: false) { landing(arm, a) }
@@ -378,19 +543,34 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     ///
     /// Measured short six times out of six, resting 18 to 35 rows newer than the message
     /// with the message never realized.
+    ///
+    /// Aimed at `stuckTarget` so that it is the baseline for the arm below that takes the
+    /// same row, and so the before/after pair is one row's behaviour rather than two.
     func testAResultOutsideTheWindowIsTheSymptomBeforeTheFix() {
-        run(scrollUp: 14, preFix: true, expectShort: true)
+        run(scrollUp: 0, preFix: true, wanted: Self.stuckTarget, expectShort: true)
     }
 
     /// The same reveal with the fix: the window slides onto the target rather than stretching
-    /// back to it, and the scroll is corrected as the rows gain real heights.
+    /// back to it, and the scroll is corrected until the row has arrived.
+    ///
+    /// This arm takes `convergingTarget`, the row the old ladder of three already landed. It
+    /// is the regression half of the pair: whatever #2535 changed about the correction, the
+    /// landing that worked before must still work.
     func testAResultOutsideTheWindowLandsAfterTheFix() {
-        run(scrollUp: 14, preFix: false)
+        run(scrollUp: 0, preFix: false, wanted: Self.convergingTarget)
     }
 
-    /// The fix again. One correct landing says nothing about a fault that only shows
-    /// sometimes, and the symptom arm above is the thing that establishes the rate.
+    /// The same reveal aimed at `stuckTarget` — the row no run has ever landed, and the one
+    /// #2535 is about.
+    ///
+    /// **This case used to be a duplicate of the one above and is the reason the bug was
+    /// found at all.** Both ran the same fourteen drags and then tapped whichever hit they
+    /// left reachable, so between them they sampled two different rows and reported the
+    /// difference as one intermittent fault. Naming the row in each is what turned "fails
+    /// about half the time" into "fails on this row every time", and it is why neither arm
+    /// may go back to letting the gestures choose. The name is kept as it was so the gate's
+    /// history for it stays readable.
     func testAResultOutsideTheWindowLandsAfterTheFixAgain() {
-        run(scrollUp: 14, preFix: false)
+        run(scrollUp: 0, preFix: false, wanted: Self.stuckTarget)
     }
 }
