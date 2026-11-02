@@ -2866,6 +2866,13 @@ final class AvatarImageCache {
         url.flatMap { images.object(forKey: $0 as NSString) }
     }
 
+    /// A picture its owner already holds (the fixture paints its own): in the cache under the
+    /// URL the rows carry, so they paint it on the first frame and `load` never asks for it.
+    func seed(_ data: Data, for url: String) {
+        guard let img = AvatarImageCache.decode(data) else { return }
+        images.setObject(img, forKey: url as NSString, cost: AvatarImageCache.cost(of: img))
+    }
+
     /// Pictures are kept at the largest size a row draws (128 pt hero at 3x). The relay's
     /// picture routes are asked for exactly this width (`?w=`), so the download is the 384 px
     /// Lanczos copy of the 1024 px master, not the master itself.

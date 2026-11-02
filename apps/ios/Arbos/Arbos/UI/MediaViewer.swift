@@ -1140,11 +1140,13 @@ enum FixtureMedia {
         }
     }
 
-    /// A person's picture as a file in the media temp folder, for the URL the fixture hands to
-    /// the avatar cache and to the sample notification: painted here, never fetched, so a rig
+    /// A person's picture, painted here and written to the media temp folder: the bytes go
+    /// into the avatar cache and the file is what a picture fetched by URL reads, so a rig
     /// launch asks the internet for nothing.
-    static func avatarFile(seed: String) -> URL? {
-        avatarPNG(seed: seed).flatMap { MediaFetch.tempFile($0, name: "fixture-avatar-\(seed).png") }
+    static func avatar(seed: String) -> (url: String, png: Data)? {
+        guard let png = avatarPNG(seed: seed),
+              let file = MediaFetch.tempFile(png, name: "fixture-avatar-\(seed).png") else { return nil }
+        return (file.absoluteString, png)
     }
 
     /// A 192 px two-tone disc seeded by the handle (the Mac fixture's `avatar_png`).
