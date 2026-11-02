@@ -79,18 +79,36 @@ final class SwipeDirectionsUITests: XCTestCase {
     /// pictures decode. Every album case in this file failed that way and none of the other
     /// rows did, because no other row has five children to lose.
     ///
-    /// If the narrowing ever stops resolving to one element, fall back to the largest match by
-    /// area — that is the row, and the rest are the pieces drawn inside it.
+    /// Where there is more than one container, take the largest of those — never of the whole
+    /// match list. `g2b` matches three elements, two of them containers, and it is the third
+    /// that disappears mid-read; measuring only the containers keeps the volatile one out of
+    /// the comparison entirely.
     private func bubbleElement(_ app: XCUIApplication, _ id: String) -> XCUIElement {
         let containers = app.otherElements.matching(identifier: "bubble:\(id)")
-        if containers.count == 1 { return containers.firstMatch }
+        // Let the count stop changing first. An album publishes and withdraws elements while
+        // its five pictures decode, and a list taken mid-decode is a list that will not still
+        // be true when its frames are read.
+        var count = containers.count
+        for _ in 0..<20 {
+            Thread.sleep(forTimeInterval: 0.1)
+            let now = containers.count
+            if now == count { break }
+            count = now
+        }
+        if count == 1 { return containers.firstMatch }
+        if count > 1 {
+            print("bubble:\(id) resolves to \(count) containers — taking the largest")
+            let all = containers.allElementsBoundByIndex
+            return all.max { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }
+                ?? containers.firstMatch
+        }
         let matches = app.descendants(matching: .any).matching(identifier: "bubble:\(id)")
         let all = matches.allElementsBoundByIndex
         guard all.count > 1 else { return matches.firstMatch }
         // Say it out loud, in the log, every time. Picking a winner in silence is how this
         // cost a day: the suite reported "never came into reach" and the gesture took the
         // blame, with nothing anywhere to show that the identifier was the ambiguous part.
-        print("bubble:\(id) matches \(all.count) elements, \(containers.count) of them containers — taking the largest")
+        print("bubble:\(id) matches \(all.count) elements and no container — taking the largest")
         return all.max { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }
             ?? matches.firstMatch
     }
