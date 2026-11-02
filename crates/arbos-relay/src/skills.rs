@@ -329,7 +329,14 @@ pub async fn create(
             format!("a skill with slug {} exists", s.slug),
         ));
     }
-    state.db.insert_skill(&s).map_err(internal)?;
+    // The creator is read from the authenticated principal, never from the body: a device and a
+    // box both act for exactly one user, and the admin token acts for the operator, who is not a
+    // tenant and so leaves the row unattributed. Until now the only record of who wrote a skill
+    // was the log line below, which no query can reach (AF-588).
+    state
+        .db
+        .insert_skill(&s, principal.user_id())
+        .map_err(internal)?;
     notify_boxes(&state, &s.slug);
     tracing::info!(slug = %s.slug, by = %principal.device_name(), "skill created");
     Ok((StatusCode::CREATED, Json(skill_json(&s))).into_response())
@@ -447,7 +454,9 @@ mod tests {
             updated_at: now,
             ..Skill::default()
         };
-        state.db.insert_skill(&s).expect("skill");
+        // No creator: these stand for rows that existed before the relay stamped one, which is
+        // every row on the relay today.
+        state.db.insert_skill(&s, None).expect("skill");
         s.id
     }
 
@@ -616,7 +625,7 @@ mod tests {
             updated_at: now,
             ..Skill::default()
         };
-        state.db.insert_skill(&shared).expect("skill");
+        state.db.insert_skill(&shared, None).expect("skill");
 
         let bobs_box = Principal::Box {
             user_id: bob.clone(),
@@ -655,7 +664,7 @@ mod tests {
             updated_at: now,
             ..Skill::default()
         };
-        state.db.insert_skill(&private).expect("skill");
+        state.db.insert_skill(&private, None).expect("skill");
         assert_eq!(
             status(get(State(state.clone()), bobs_box, headers, Path(private.id)).await),
             StatusCode::FORBIDDEN,
@@ -894,6 +903,195 @@ mod tests {
         assert!(
             !text.contains("alices-notes"),
             "the index names only the skills this device can open"
+        );
+    }
+
+    /// `POST /skills` as this caller, then the creator the relay stamped on the row.
+    async fn create_and_read_creator(
+        state: &AppState,
+        principal: Principal,
+        headers: HeaderMap,
+        name: &str,
+        origin: Option<&str>,
+    ) -> Option<String> {
+        let r = create(
+            State(state.clone()),
+            principal,
+            headers,
+            Json(SkillBody {
+                name: Some(name.to_owned()),
+                origin_project_id: origin.map(str::to_owned),
+                ..SkillBody::default()
+            }),
+        )
+        .await;
+        assert_eq!(status(r), StatusCode::CREATED, "{name} was created");
+        state
+            .db
+            .skill_creator(&slugify(name))
+            .expect("creator read")
+    }
+
+    /// AF-588. Until this column the only record of who wrote a skill was the `skill created`
+    /// log line, which carries `by = dev:<device_id>` and which no query can reach: every
+    /// question of the form "whose row is this?" had to be answered from `origin_project_id`,
+    /// and that field is empty on the rows the question is actually asked about.
+    #[tokio::test]
+    async fn a_new_skill_records_the_user_whose_device_created_it() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let alices = project_of(&state, &alice, "Alice work");
+        let bobs = project_of(&state, &bob, "Bob work");
+
+        assert_eq!(
+            create_and_read_creator(
+                &state,
+                alice_dev,
+                HeaderMap::new(),
+                "Alice runbook",
+                Some(&alices)
+            )
+            .await,
+            Some(alice.clone())
+        );
+        assert_eq!(
+            create_and_read_creator(
+                &state,
+                bob_dev,
+                HeaderMap::new(),
+                "Bob runbook",
+                Some(&bobs)
+            )
+            .await,
+            Some(bob),
+            "and the next writer is recorded as themselves, not as whoever wrote first"
+        );
+    }
+
+    /// A skill an agent saves (`skills_save` → `POST /skills` with a box token) is attributable
+    /// too: one box serves exactly one user (D70), so the box token names a person as precisely
+    /// as a device token does.
+    #[tokio::test]
+    async fn a_skill_an_agent_saves_records_the_user_behind_its_box() {
+        let state = test_state(AuthMode::Github);
+        let (bob, _bob_dev) = person(&state, 2);
+        let bobs = project_of(&state, &bob, "Bob work");
+        let mut headers = HeaderMap::new();
+        headers.insert("x-arbos-project", bobs.parse().unwrap());
+
+        assert_eq!(
+            create_and_read_creator(
+                &state,
+                Principal::Box {
+                    user_id: bob.clone(),
+                },
+                headers,
+                "Learned how to cut a release",
+                None,
+            )
+            .await,
+            Some(bob)
+        );
+    }
+
+    /// The admin token acts for the operator, who is not a tenant, so a skill it creates is
+    /// recorded as belonging to nobody rather than to a guessed user. This is exactly the row
+    /// shape the ownerless-skill question (AF-587) is about, and the column says so honestly
+    /// instead of inventing an owner for it.
+    #[tokio::test]
+    async fn the_admin_token_leaves_a_new_skill_unattributed() {
+        let state = test_state(AuthMode::Github);
+
+        assert_eq!(
+            create_and_read_creator(
+                &state,
+                Principal::Admin,
+                HeaderMap::new(),
+                "Relay library note",
+                None,
+            )
+            .await,
+            None,
+            "no creator, and no project either: the operator is not a tenant"
+        );
+    }
+
+    /// The column is write provenance, so an edit must not fill it in. A row that predates the
+    /// column has no creator, and the first person to edit it afterwards is not its author —
+    /// attributing those rows is a decision about data, taken once, with counts in front of it,
+    /// not something the write path does quietly on the next `PUT`.
+    #[tokio::test]
+    async fn an_edit_never_invents_a_creator() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let alices = project_of(&state, &alice, "Alice work");
+        let id = skill_of(&state, Some(&alices), "older-than-the-column");
+
+        let r = update(
+            State(state.clone()),
+            alice_dev,
+            HeaderMap::new(),
+            Path(id.clone()),
+            Json(SkillBody {
+                name: Some("Edited by Alice".into()),
+                ..SkillBody::default()
+            }),
+        )
+        .await;
+        assert_eq!(status(r), StatusCode::OK);
+        assert_eq!(
+            state.db.skill(&id).unwrap().unwrap().version,
+            2,
+            "the edit landed"
+        );
+        assert_eq!(
+            state.db.skill_creator(&id).unwrap(),
+            None,
+            "and the row is still unattributed"
+        );
+    }
+
+    /// The same rule across two people, which is the case that matters: a guest of a project
+    /// may edit its skills (D72, through `allows`), and editing one does not make them its
+    /// creator. Whoever later reads this column to decide whose row it is gets the author, not
+    /// the last person to touch it.
+    #[tokio::test]
+    async fn a_guest_editing_a_skill_does_not_become_its_creator() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let alices = project_of(&state, &alice, "Alice work");
+        let creator = create_and_read_creator(
+            &state,
+            alice_dev,
+            HeaderMap::new(),
+            "Shared runbook",
+            Some(&alices),
+        )
+        .await;
+        assert_eq!(creator, Some(alice.clone()));
+        state
+            .db
+            .add_project_member(&alices, &bob, &alice)
+            .expect("invite");
+
+        let r = update(
+            State(state.clone()),
+            bob_dev,
+            HeaderMap::new(),
+            Path("shared-runbook".to_owned()),
+            Json(SkillBody {
+                body: Some("Bob's correction".into()),
+                ..SkillBody::default()
+            }),
+        )
+        .await;
+        assert_eq!(status(r), StatusCode::OK, "a guest may edit it");
+        assert_eq!(
+            state.db.skill_creator("shared-runbook").unwrap(),
+            Some(alice),
+            "the creator is the author, not the editor"
         );
     }
 }

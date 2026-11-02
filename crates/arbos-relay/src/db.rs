@@ -145,11 +145,16 @@ CREATE TABLE IF NOT EXISTS routine_runs (
   status TEXT NOT NULL, message_id TEXT, note TEXT
 );
 CREATE INDEX IF NOT EXISTS routine_runs_routine ON routine_runs(routine_id, started_at);
+-- `creator` is the user whose device or box wrote the row, stamped by the relay at create time
+-- and never again: an edit does not change it, and no request body can set it. NULL means the
+-- relay does not know — rows written before the column existed, and rows the admin token wrote,
+-- which belong to the operator rather than to any tenant. It is write provenance, not an access
+-- rule: the question "whose skill is this?" is still answered from `origin_project_id`.
 CREATE TABLE IF NOT EXISTS skills (
   id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
   tags TEXT NOT NULL DEFAULT '[]', when_to_use TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '',
   origin_project_id TEXT, shared INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 1,
-  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, creator TEXT
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS skills_fts USING fts5(text, id UNINDEXED, tokenize = 'porter unicode61');
 CREATE TABLE IF NOT EXISTS channel_bindings (
@@ -635,6 +640,11 @@ impl Db {
             [],
         );
         let _ = c.execute("ALTER TABLE chats ADD COLUMN forked_from TEXT", []);
+        // Write provenance for skills (AF-588): who the relay stamped on a row at create time.
+        // Metadata only — a nullable column rewrites no row — and it attributes nothing that
+        // already exists: every row made before this is NULL and stays NULL until a decision is
+        // taken about those rows.
+        let _ = c.execute("ALTER TABLE skills ADD COLUMN creator TEXT", []);
         c.execute_batch(
             "CREATE TABLE IF NOT EXISTS group_traffic (
                id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL, chat_id TEXT NOT NULL,
@@ -3226,12 +3236,17 @@ impl Db {
         Ok(())
     }
 
-    /// Insert a skill (fails on a duplicate slug).
-    pub fn insert_skill(&self, s: &Skill) -> Result<()> {
+    /// Insert a skill (fails on a duplicate slug). `creator` is the user the relay saw writing
+    /// the row, and it is an argument rather than a field of [`Skill`] for two reasons: the
+    /// clients deserialize `Skill` from a request body, so a field there would be a creator the
+    /// caller could choose; and the column is provenance the relay stamps, not part of the
+    /// document a skill is. `None` records that nobody is attributable — the admin token, which
+    /// acts for the operator and not for a tenant.
+    pub fn insert_skill(&self, s: &Skill, creator: Option<&str>) -> Result<()> {
         self.with(|c| {
             c.execute(
                 &format!(
-                    "INSERT INTO skills({}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                    "INSERT INTO skills({}, creator) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
                     Self::SKILL_COLS
                 ),
                 params![
@@ -3246,10 +3261,32 @@ impl Db {
                     s.shared as i64,
                     s.version,
                     s.created_at,
-                    s.updated_at
+                    s.updated_at,
+                    creator
                 ],
             )?;
             Self::reindex_skill(c, s)
+        })
+    }
+
+    /// Who the relay stamped on a skill when it was created, by skill id or slug. `None` for a
+    /// row it does not know the writer of: one made before the column existed, or one the admin
+    /// token wrote. `update_skill` never touches it, so this stays the first writer for the life
+    /// of the row — an editor does not become its creator.
+    ///
+    /// Only the tests read it so far. The route that lets an author re-file their own skill
+    /// (AF-589) is what reads it in anger, and it arrives with that route rather than ahead of
+    /// it, so nothing reads the column before there is a reason to.
+    #[cfg(test)]
+    pub fn skill_creator(&self, id_or_slug: &str) -> Result<Option<String>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT creator FROM skills WHERE id = ?1 OR slug = ?1",
+                params![id_or_slug],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(Option::flatten)
         })
     }
 
@@ -3769,6 +3806,101 @@ mod vault_scope_tests {
         drop(db);
         let db = Db::open(&path).expect("reopen");
         assert_eq!(db.list_vault_items("bob").unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod skill_creator_tests {
+    use super::*;
+
+    /// The `skills` table as it stood before the creator column, so the test starts from the
+    /// shape every deployed relay actually has on disk.
+    const SKILLS_BEFORE_CREATOR: &str = "CREATE TABLE skills (
+      id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+      tags TEXT NOT NULL DEFAULT '[]', when_to_use TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '',
+      origin_project_id TEXT, shared INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    )";
+
+    fn skill(slug: &str) -> Skill {
+        Skill {
+            id: format!("sk_{slug}"),
+            slug: slug.into(),
+            name: slug.into(),
+            description: "d".into(),
+            tags: vec!["t".into()],
+            when_to_use: "w".into(),
+            body: "b".into(),
+            origin_project_id: None,
+            shared: true,
+            version: 3,
+            created_at: 11,
+            updated_at: 22,
+        }
+    }
+
+    /// AF-588: the column arrives by `ALTER TABLE ... ADD COLUMN`, which is metadata only — an
+    /// existing row keeps every field it had and reads as unattributed, because nothing on the
+    /// relay knows who wrote it. Attributing those rows is a separate, gated decision (AF-587);
+    /// starting the relay must not make it by itself.
+    #[test]
+    fn the_creator_column_arrives_without_touching_the_rows_that_exist() {
+        let dir = std::env::temp_dir().join(format!(
+            "arbos-skill-creator-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("relay.db");
+        let before = skill("written-before-the-column");
+        {
+            let c = Connection::open(&path).expect("raw db");
+            c.execute_batch(SKILLS_BEFORE_CREATOR).expect("old table");
+            c.execute(
+                "INSERT INTO skills(id, slug, name, description, tags, when_to_use, body, origin_project_id, shared, version, created_at, updated_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                params![
+                    before.id, before.slug, before.name, before.description,
+                    serde_json::to_string(&before.tags).unwrap(), before.when_to_use, before.body,
+                    before.origin_project_id, before.shared as i64, before.version,
+                    before.created_at, before.updated_at
+                ],
+            )
+            .expect("legacy row");
+        }
+
+        let db = Db::open(&path).expect("open adds the column");
+        assert_eq!(
+            db.skill(&before.slug).unwrap().as_ref(),
+            Some(&before),
+            "the row that was there is byte-for-byte the row that is there"
+        );
+        assert_eq!(
+            db.skill_creator(&before.slug).unwrap(),
+            None,
+            "and it is unattributed, not attributed to a guess"
+        );
+
+        // From here on the relay stamps what it saw.
+        db.insert_skill(&skill("written-after"), Some("u_alice"))
+            .expect("insert");
+        assert_eq!(
+            db.skill_creator("written-after").unwrap().as_deref(),
+            Some("u_alice")
+        );
+
+        // A second start is a no-op: the column is already there and no row changes.
+        drop(db);
+        let db = Db::open(&path).expect("reopen");
+        assert_eq!(db.skill(&before.slug).unwrap().as_ref(), Some(&before));
+        assert_eq!(db.skill_creator(&before.slug).unwrap(), None);
+        assert_eq!(
+            db.skill_creator("written-after").unwrap().as_deref(),
+            Some("u_alice")
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }
