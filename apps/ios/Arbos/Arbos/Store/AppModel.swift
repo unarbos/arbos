@@ -186,7 +186,7 @@ final class AppModel: ObservableObject {
     /// mirrors its access token so every existing call path keeps working.
     @Published private(set) var tokens: AuthTokens?
     @Published private(set) var user: AuthUser?
-    #if DEBUG
+    #if DEBUG || ARBOS_FIXTURE
     /// Fixture only: the signed-in user (D79 initials, `myUserId` for reactions).
     func setFixtureUser(_ who: AuthUser) { user = who }
     #endif
@@ -322,6 +322,9 @@ final class AppModel: ObservableObject {
     /// Bumped whenever a chat's list (`messages` or `channelRows`) is replaced; views
     /// watch this instead of comparing the whole message array on every body.
     @Published private(set) var messagesVersion: [Id: Int] = [:]
+    /// The `messagesVersion` made by an edit that replaced only the chat's last message
+    /// (a streaming token). Any other write moves the version past it.
+    private(set) var tailEditVersion: [Id: Int] = [:]
     /// One pass over a chat's list, kept until that list changes.
     private var activityCache: [Id: ChatActivity] = [:]
 
@@ -412,6 +415,7 @@ final class AppModel: ObservableObject {
     /// Navigation: home → chat. Shared so menus anywhere can open a chat.
     @Published var path: [Route] = [] {
         didSet {
+            PerfSignpost.pathChanged(from: oldValue, to: path)
             dropDraftDMIfLeft()
             // The open chat is loaded first next launch and evicted last.
             if case .chat(let chatId, let pid)? = path.last, pid != channelSlot, let store {
@@ -604,49 +608,50 @@ final class AppModel: ObservableObject {
     }
 
     /// The relay's per-user flags win over the offline copy, except for rows this device
-    /// changed in the last few seconds (`archiveLocalUntil`).
-    private func reconcileArchive(key prefix: String, relay: [(Id, Bool)], into set: inout Set<Id>, defaultsKey: String) {
+    /// changed in the last few seconds (`archiveLocalUntil`). A key path, not `inout`: an
+    /// `inout` pass of a `@Published` set publishes even when nothing changed.
+    private func reconcileArchive(key prefix: String, relay: [(Id, Bool)], into set: ReferenceWritableKeyPath<AppModel, Set<Id>>, defaultsKey: String) {
         let now = Date()
-        var next = set
+        var next = self[keyPath: set]
         for (id, archived) in relay {
             if let until = archiveLocalUntil[prefix + id], until > now { continue }
             if archived { next.insert(id) } else { next.remove(id) }
         }
-        guard next != set else { return }
-        set = next
-        UserDefaults.standard.set(Array(set), forKey: defaultsKey)
+        guard next != self[keyPath: set] else { return }
+        self[keyPath: set] = next
+        UserDefaults.standard.set(Array(next), forKey: defaultsKey)
     }
 
     func reconcileArchivedProjects(_ list: [Project]) {
         guard !isFixture else { return }
-        reconcileArchive(key: "p:", relay: list.map { ($0.id, $0.archivedAt != nil) }, into: &archivedProjectIds, defaultsKey: "archivedProjects")
+        reconcileArchive(key: "p:", relay: list.map { ($0.id, $0.archivedAt != nil) }, into: \.archivedProjectIds, defaultsKey: "archivedProjects")
     }
 
     func reconcileArchivedPeople(_ list: [PeopleChat]) {
         guard !isFixture else { return }
-        reconcileArchive(key: "c:", relay: list.map { ($0.id, $0.archivedAt != nil) }, into: &archivedPeopleChatIds, defaultsKey: "archivedPeopleChats")
+        reconcileArchive(key: "c:", relay: list.map { ($0.id, $0.archivedAt != nil) }, into: \.archivedPeopleChatIds, defaultsKey: "archivedPeopleChats")
     }
 
     func reconcileArchivedServers(_ list: [Server]) {
         guard !isFixture else { return }
-        reconcileArchive(key: "s:", relay: list.map { ($0.id, $0.archivedAt != nil) }, into: &archivedServerIds, defaultsKey: "archivedServers")
+        reconcileArchive(key: "s:", relay: list.map { ($0.id, $0.archivedAt != nil) }, into: \.archivedServerIds, defaultsKey: "archivedServers")
     }
 
     /// Another device of mine flipped a row (`space_archived` / `chat_archived` push).
     func applyRemoteArchive(spaceId: Id, kind: String, archived: Bool) {
         archiveLocalUntil.removeValue(forKey: (kind == "server" ? "s:" : "p:") + spaceId)
         if kind == "server" {
-            reconcileArchive(key: "s:", relay: [(spaceId, archived)], into: &archivedServerIds, defaultsKey: "archivedServers")
+            reconcileArchive(key: "s:", relay: [(spaceId, archived)], into: \.archivedServerIds, defaultsKey: "archivedServers")
             if archived { unpinHome(serverId: spaceId) }
         } else {
-            reconcileArchive(key: "p:", relay: [(spaceId, archived)], into: &archivedProjectIds, defaultsKey: "archivedProjects")
+            reconcileArchive(key: "p:", relay: [(spaceId, archived)], into: \.archivedProjectIds, defaultsKey: "archivedProjects")
             if archived { unpinHome(projectId: spaceId) }
         }
     }
 
     func applyRemoteArchive(peopleChatId: Id, archived: Bool) {
         archiveLocalUntil.removeValue(forKey: "c:" + peopleChatId)
-        reconcileArchive(key: "c:", relay: [(peopleChatId, archived)], into: &archivedPeopleChatIds, defaultsKey: "archivedPeopleChats")
+        reconcileArchive(key: "c:", relay: [(peopleChatId, archived)], into: \.archivedPeopleChatIds, defaultsKey: "archivedPeopleChats")
         if archived { unpinHome(peopleChatId: peopleChatId) }
     }
 
@@ -922,14 +927,21 @@ final class AppModel: ObservableObject {
     /// Rooms whose doc or cursor changed since the last save.
     private var dirtyDocs: Set<Id> = []
     private var flushTask: Task<Void, Never>?
+    private var lastDirtyAt = Date.distantPast
+    /// The oldest change not saved yet (nil when everything is saved).
+    private var dirtySince: Date?
     /// Where the first populated home list came from: "store" or "relay" (launch log).
     private(set) var contentOrigin = "relay"
     /// Keys the store loader has handed to `ensureRoom` (or decided to skip).
     private var storeDocsLoaded = false
-    @Published private(set) var storeUsage = DeviceStore.Usage()
+    /// Not published: only Settings reads it, when its body runs. A publish here went out
+    /// after every 1.5 s store flush and re-ran every subscribed view in the app.
+    private(set) var storeUsage = DeviceStore.Usage()
     /// Set when the first home list came from disk and the relay is not live yet.
     var showingSavedCopy: Bool { contentOrigin == "store" && link != .live }
     private static let flushDelayNs: UInt64 = 1_500_000_000
+    /// Seconds an unsaved change may wait while its rooms keep changing (`markDirty`).
+    private static let flushMaxDelay: TimeInterval = 10
     /// At most one PUT /chats/{id}/read per chat inside this window (latest value at the end).
     static let readPutThrottleSeconds: TimeInterval = 2
     /// Last seq/headSeq successfully handed to the relay for mark-read, per chat.
@@ -968,7 +980,7 @@ final class AppModel: ObservableObject {
         LaunchClock.mark("app-init")
         // Drop the retired SessionRoom TestFlight switch so it does not linger.
         UserDefaults.standard.removeObject(forKey: "sharedRoomSession")
-        #if DEBUG
+        #if DEBUG || ARBOS_FIXTURE
         if let scale = DebugHooks.textScale, TextScale.steps.contains(where: { abs($0 - CGFloat(scale)) < 0.001 }) {
             textScaleSetting = scale
         }
@@ -986,8 +998,8 @@ final class AppModel: ObservableObject {
             creds = DeviceCredentials(relayUrl: RelayEndpoint(saved).httpUrl, deviceId: env["ARBOS_DEVICE_ID"] ?? "ios:env", deviceToken: tok)
         }
         #endif
-        #if DEBUG
-        if env["ARBOS_FIXTURE"] == "1" {
+        #if DEBUG || ARBOS_FIXTURE
+        if ProcessInfo.processInfo.environment["ARBOS_FIXTURE"] == "1" {
             api = RelayAPI(endpoint: RelayEndpoint("http://fixture.invalid")) { "" }
             credentials = DeviceCredentials(relayUrl: "http://fixture.invalid", deviceId: "ios:fixture", deviceToken: "fixture")
             LinkIcons.shared.fetch = { host in LinkIcons.fixtureIcon(host: host) }
@@ -1226,7 +1238,7 @@ final class AppModel: ObservableObject {
 
     /// A system row in a chat doc (call start/end lines). Fixture: local append.
     func writeSystemLine(chatId: Id, projectId: Id, text: String, callId: String) {
-        #if DEBUG
+        #if DEBUG || ARBOS_FIXTURE
         if isFixture {
             let m = Message(id: newId(), chatId: chatId, role: .system, sender: "system", status: .done, turn: nil, decision: nil,
                             subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: nowMs(),
@@ -1308,7 +1320,7 @@ final class AppModel: ObservableObject {
     func refreshUnread() async {
         guard credentials != nil, !isFixture else { applyBadge(); return }
         if let r = (try? await api.unread()) ?? nil {
-            unreadCounts = r.chats
+            if r.chats != unreadCounts { unreadCounts = r.chats }
             saveUnreadCache()
         }
         applyBadge()
@@ -1511,8 +1523,8 @@ final class AppModel: ObservableObject {
         guard credentials != nil, !isFixture else { return }
         if tokens?.isExpiringSoon == true { _ = await refreshTokens() }
         if let (who, cr, summary, features, privacy) = try? await api.me() {
-            user = who
-            credits = cr
+            if who != user { user = who }
+            if cr != credits { credits = cr }
             saveAccountCache()
             // D92 remote flag `features.leaf_avatars` (absent on an older relay = on).
             LeafAvatarsFlag.shared.set(features?.leaf_avatars ?? true)
@@ -1532,7 +1544,7 @@ final class AppModel: ObservableObject {
                 m.alwaysOn = true
                 m.state = m.coerced(m.state)
             }
-            machine = m
+            if m != machine { machine = m }
         }
     }
 
@@ -1789,6 +1801,7 @@ final class AppModel: ObservableObject {
         directory = []
         directoryLoadedAt = 0
         dirtyDocs = []
+        dirtySince = nil
         flushTask?.cancel()
         flushTask = nil
         storeDocsLoaded = false
@@ -1871,7 +1884,8 @@ final class AppModel: ObservableObject {
         do {
             let result = try await api.registry()
             let items = result.projects
-            registryError = nil
+            // The 15 s poll: a write that changes nothing still publishes to every subscriber.
+            if registryError != nil { registryError = nil }
             let previousProjects = projects
             let previousChatsMap = chats
             var newProjects: [Project] = []
@@ -1917,8 +1931,9 @@ final class AppModel: ObservableObject {
                     newProjects[i].workspace = prev.workspace
                 }
             }
-            projects = newProjects.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-            chats = newChats
+            let sortedProjects = newProjects.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            if sortedProjects != projects { projects = sortedProjects }
+            if newChats != chats { chats = newChats }
             reconcileAgentAvatars()
             reconcileArchivedProjects(newProjects)
             saveRegistryCache()
@@ -2108,16 +2123,44 @@ final class AppModel: ObservableObject {
         store.put(StoreKey.unread, data)
     }
 
-    /// A room's doc or cursor moved: save soon (coalesced per 1.5 s).
+    /// A room's doc or cursor moved: save once the rooms have been quiet for 1.5 s, or
+    /// `flushMaxDelay` after the first unsaved change while they keep changing. The export
+    /// serialises the whole doc on the main actor, so a stream must not pay it every 1.5 s.
     private func markDirty(_ key: Id) {
         guard store != nil else { return }
         dirtyDocs.insert(key)
+        lastDirtyAt = Date()
+        if dirtySince == nil { dirtySince = lastDirtyAt }
         guard flushTask == nil else { return }
+        armFlush(afterNs: AppModel.flushDelayNs)
+    }
+
+    private func armFlush(afterNs delay: UInt64) {
         flushTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: AppModel.flushDelayNs)
+            try? await Task.sleep(nanoseconds: delay)
             guard let self, !Task.isCancelled else { return }
             self.flushTask = nil
+            let quiet = Date().timeIntervalSince(self.lastDirtyAt)
+            let waited = Date().timeIntervalSince(self.dirtySince ?? self.lastDirtyAt)
+            let quietNeeded = Double(AppModel.flushDelayNs) / 1e9
+            if quiet < quietNeeded, waited < AppModel.flushMaxDelay {
+                let rest = min(quietNeeded - quiet, AppModel.flushMaxDelay - waited)
+                self.armFlush(afterNs: UInt64(max(rest, 0.05) * 1e9))
+                return
+            }
             self.flushStore(all: false)
+        }
+    }
+
+    /// Store usage on a background thread: `usage()` waits on the store queue, behind the
+    /// snapshot writes a flush just queued.
+    private func refreshStoreUsage(_ store: DeviceStore) {
+        Task.detached(priority: .utility) { [weak self] in
+            let usage = store.usage()
+            await MainActor.run {
+                guard let self, self.store === store else { return }
+                self.storeUsage = usage
+            }
         }
     }
 
@@ -2127,6 +2170,7 @@ final class AppModel: ObservableObject {
         guard let store else { return }
         flushTask?.cancel()
         flushTask = nil
+        dirtySince = nil
         let keys = all ? Set(docs.keys) : dirtyDocs
         dirtyDocs = []
         for key in keys {
@@ -2137,7 +2181,7 @@ final class AppModel: ObservableObject {
         }
         store.enforceCaps()
         if all { store.flush() }
-        if !keys.isEmpty { storeUsage = store.usage() }
+        if !keys.isEmpty { refreshStoreUsage(store) }
     }
 
     private func forgetDoc(_ key: Id) {
@@ -2280,7 +2324,9 @@ final class AppModel: ObservableObject {
             PerfLog.mark("phase replay end", ms: Date().timeIntervalSince(started) * 1000)
         }
     }
+    #endif
 
+    #if DEBUG || ARBOS_FIXTURE
     /// Test seam (iphone-group-send-instant): a fixture people chat gets a real chat doc
     /// seeded with its fixture lines and a room that is stopped at once, so `sendPeople`
     /// writes the way a live chat does — doc, push queue, change events — with no relay.
@@ -2662,9 +2708,15 @@ final class AppModel: ObservableObject {
             #endif
             emitSnapshot(chatId)
         } else {
+            let before = messagesVersion[chatId]
+            let oldCount = messages[chatId]?.count
             var next = messages
             next[chatId] = list
             messages = next
+            if let version = messagesVersion[chatId], version != before {
+                let tailOnly = indexes.count == 1 && indexes.first == list.count - 1 && oldCount == list.count
+                tailEditVersion[chatId] = tailOnly ? version : nil
+            }
             #if DEBUG
             if SendTrace.traces(chatId) {
                 SendTrace.markIfPresent("messages-has-row", ids: list.map(\.id), detail: "via=indexes rows=\(list.count)")
@@ -2683,12 +2735,19 @@ final class AppModel: ObservableObject {
         unacked[chatId] = set.isEmpty ? nil : set
     }
 
-    private func markActivity(chatId: Id) {
+    /// Streaming calls this per token. A write that keeps the order and the minute the
+    /// lists draw (`HomeView.timeLabel`) is skipped: it re-sorted and published `chats` /
+    /// `peopleChats` to every subscriber for nothing. The token's own `messages` publish
+    /// still re-runs the open chat (`ChatSessionHost`, #1720).
+    func markActivity(chatId: Id) {
+        let now = nowMs()
         for (pid, list) in chats {
             if let i = list.firstIndex(where: { $0.id == chatId }) {
                 var updated = list
-                updated[i].lastMessageAt = nowMs()
-                chats[pid] = AppModel.sorted(updated)
+                updated[i].lastMessageAt = now
+                let sorted = AppModel.sorted(updated)
+                if Self.sameMinute(list[i].lastMessageAt, now), sorted.map(\.id) == list.map(\.id) { return }
+                chats[pid] = sorted
                 return
             }
         }
@@ -2698,11 +2757,14 @@ final class AppModel: ObservableObject {
         // no-ops while watching). Same bump local sends already do in commitPeople.
         if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
             var next = peopleChats
-            next[i].lastActivityAt = nowMs()
+            next[i].lastActivityAt = now
             next.sort { $0.lastActivityAt > $1.lastActivityAt }
+            if Self.sameMinute(peopleChats[i].lastActivityAt, now), next.map(\.id) == peopleChats.map(\.id) { return }
             peopleChats = next
         }
     }
+
+    private static func sameMinute(_ a: Int64, _ b: Int64) -> Bool { a / 60_000 == b / 60_000 }
 
     /// A live Loro row from someone else landed. Chat on screen in the foreground: the
     /// user has seen it, so the per-user read cursor on the relay advances (#1438) and
@@ -2797,7 +2859,7 @@ final class AppModel: ObservableObject {
                 m.alwaysOn = true
                 m.state = m.coerced(m.state)
             }
-            machineError = nil
+            if machineError != nil { machineError = nil }
             if m != machine { machine = m }
             for i in projects.indices {
                 if let w = m.workspaces[projects[i].id], projects[i].workspace != w { projects[i].workspace = w }
@@ -3040,14 +3102,14 @@ final class AppModel: ObservableObject {
         do {
             let raw = try await api.peopleChatsJSON()
             let list = raw.compactMap(PeopleChat.parse)
-            peopleChats = list
+            if list != peopleChats { peopleChats = list }
             reconcileAgentAvatars()
             reconcileArchivedPeople(list)
-            for c in list where c.unread { peopleUnread.insert(c.id) }
-            for c in list where !c.unread && visibleChatId != c.id {
+            for c in list where c.unread && !peopleUnread.contains(c.id) { peopleUnread.insert(c.id) }
+            for c in list where !c.unread && visibleChatId != c.id && peopleUnread.contains(c.id) {
                 // Loro can mark unread before the people list's head_seq catches up;
                 // keep the blue circle while the latest row is still incoming.
-                if peopleUnread.contains(c.id), let last = messages[c.id]?.last,
+                if let last = messages[c.id]?.last,
                    !last.pending, last.role != .system,
                    myUserId == nil || last.sender != myUserId {
                     continue
@@ -3262,7 +3324,7 @@ final class AppModel: ObservableObject {
     /// `GET /projects/{id}/routines` when an owned agent's pane opens.
     func refreshRoutines(_ projectId: Id) async {
         if isFixture {
-            #if DEBUG
+            #if DEBUG || ARBOS_FIXTURE
             routines[projectId] = fixtureRoutines(projectId)
             #endif
             return
@@ -3294,7 +3356,7 @@ final class AppModel: ObservableObject {
     /// "The machine did not answer" with the reason.
     func refreshBoxReport() async {
         if isFixture {
-            #if DEBUG
+            #if DEBUG || ARBOS_FIXTURE
             boxReport = fixtureBoxReport()
             #endif
             return
@@ -3367,7 +3429,7 @@ final class AppModel: ObservableObject {
     /// `POST /chats/dm`: the relay makes the DM (or answers the one it has) and tells the
     /// other person. Only the first send of a draft calls it.
     private func createDM(handle: String) async -> PeopleChat? {
-        #if DEBUG
+        #if DEBUG || ARBOS_FIXTURE
         if isFixture {
             let dm = fixtureOpenDM(handle: handle, navigate: false)
             if let dm { fixtureAttachDoc(chatId: dm.id) }
@@ -4432,7 +4494,9 @@ final class AppModel: ObservableObject {
     /// Unsent composer text kept per chat while the ChatView is off-screen (Mac `Composer.drafts`).
     private var composerDrafts: [Id: String] = [:]
     /// Last presence time per user id, from room presence frames this session.
-    @Published private(set) var lastSeen: [String: Int64] = [:]
+    /// Not published: no view draws it, and `CallManager.calleePresence` reads it on demand.
+    /// Every presence frame from every room used to re-run Home and the open chat.
+    private(set) var lastSeen: [String: Int64] = [:]
     /// Who is typing per chat (handle → until ms), from room presence frames
     /// with `typing`; the presence row over the composer reads it
     /// ([feedback typing-indicator-left-2026-10-23], Mac `AppState.typing`).
@@ -5065,7 +5129,7 @@ final class AppModel: ObservableObject {
     /// can be active on the same message; tapping the same emoji again clears it.
     func toggleReaction(chatId: Id, messageId: Id, emoji: String) {
         guard let me = myUserId, !emoji.isEmpty else { return }
-        #if DEBUG
+        #if DEBUG || ARBOS_FIXTURE
         if isFixture {
             guard var list = messages[chatId], let i = list.firstIndex(where: { $0.id == messageId }) else { return }
             list[i].reactions = MessageReaction.toggling(list[i].reactions, emoji: emoji, sender: me)
@@ -5091,7 +5155,7 @@ final class AppModel: ObservableObject {
     func deleteMessage(chatId: Id, messageId: Id, projectId: Id? = nil) {
         guard !messageId.isEmpty else { return }
         let audit = groupDeletionAuditLine(chatId: chatId)
-        #if DEBUG
+        #if DEBUG || ARBOS_FIXTURE
         if isFixture {
             guard var list = messages[chatId] else { return }
             list.removeAll { $0.id == messageId }
@@ -5145,7 +5209,7 @@ final class AppModel: ObservableObject {
             list[i].preview = "off"
             messages[chatId] = list
         }
-        #if DEBUG
+        #if DEBUG || ARBOS_FIXTURE
         if isFixture { Haptics.pick(); return }
         #endif
         let room: String
@@ -5174,7 +5238,7 @@ final class AppModel: ObservableObject {
     func editMessage(chatId: Id, messageId: Id, text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !messageId.isEmpty, !trimmed.isEmpty else { return }
-        #if DEBUG
+        #if DEBUG || ARBOS_FIXTURE
         if isFixture {
             guard var list = messages[chatId],
                   let idx = list.firstIndex(where: { $0.id == messageId })
@@ -5699,7 +5763,7 @@ final class AppModel: ObservableObject {
                        extra: [String: Any] = [:], messageId presetId: Id? = nil, replyTo: Id? = nil,
                        forwardedFrom: String? = nil, extraParts: [[String: Any]] = []) {
         guard let chat = chat(chatId) else {
-            #if DEBUG
+            #if DEBUG || ARBOS_FIXTURE
             if isFixture { fixtureAppend(chatId: chatId, text: text, attachments: attachments, replyTo: replyTo) }
             #endif
             return

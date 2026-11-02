@@ -341,6 +341,9 @@ pub async fn delete_test_user(
             "stop and delete the user's box first",
         );
     }
+    // Before the rows go: the device list and its encrypted Matrix tokens are what the logout
+    // is made of, and a Matrix account left with live tokens outlives the account it belonged to.
+    crate::matrix::servers::forget_user(&state, &id).await;
     match state.db.delete_test_user(&id) {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => api_error(

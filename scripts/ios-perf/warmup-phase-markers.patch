@@ -1,0 +1,31 @@
+diff --git a/apps/ios/Arbos/Arbos/App/FirstOpenWarmup.swift b/apps/ios/Arbos/Arbos/App/FirstOpenWarmup.swift
+index 15158c64a..e6f2cfb5b 100644
+--- a/apps/ios/Arbos/Arbos/App/FirstOpenWarmup.swift
++++ b/apps/ios/Arbos/Arbos/App/FirstOpenWarmup.swift
+@@ -26,8 +26,12 @@ enum FirstOpenWarmup {
+         try? await Task.sleep(for: .milliseconds(500))
+         // The value only carries `ChatSession`'s stored-property types to the metadata walk
+         // below; it never enters a view graph, so none of its hooks run.
++        warmupProbe(1)
+         let session = TypeBox(ChatSession(model: model, chatId: "", projectId: "", tick: 0))
++        warmupProbe(2)
+         await Task.detached(priority: .utility) {
++            warmupProbe(3)
++            defer { warmupProbe(4) }
+             let state = signposter.beginInterval("first-open-warmup")
+             _ = MTLCreateSystemDefaultDevice()
+             _ = try? NSAttributedString(AttributedString("warm"), including: AttributeScopes.SwiftUIAttributes.self)
+@@ -41,6 +45,13 @@ enum FirstOpenWarmup {
+     private static let roots: [Any.Type] = [ChatView.self, ChatSession.self, RowView.self]
+ }
+ 
++// MEASUREMENT ONLY (perf rig, never in the PR): brackets the warm-up window for the injected
++// side-effect counter (scripts/ios-perf/probe), a no-op when it is not loaded.
++private typealias WarmupProbeFn = @convention(c) (Int32) -> Void
++private let warmupProbeFn: WarmupProbeFn? = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "arbos_probe_phase")
++    .map { unsafeBitCast($0, to: WarmupProbeFn.self) }
++private func warmupProbe(_ phase: Int32) { warmupProbeFn?(phase) }
++
+ private struct TypeBox: @unchecked Sendable {
+     let value: Any
+     init(_ value: Any) { self.value = value }

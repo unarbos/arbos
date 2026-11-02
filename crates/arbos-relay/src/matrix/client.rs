@@ -374,6 +374,19 @@ impl Client {
         }
     }
 
+    /// Every current state event of a room (`type`, `state_key`, `sender`, `content`), as seen by
+    /// `as_user`. Unlike [`Self::state`] this keeps the events' senders, which room v12 needs: the
+    /// create event's sender *is* the creator there (MSC4291 dropped `content.creator`).
+    pub async fn room_state(&self, room_id: &str, as_user: &str) -> MxResult<Vec<Value>> {
+        let path = format!("/_matrix/client/v3/rooms/{}/state", enc(room_id));
+        let v = self
+            .call(Method::GET, &path, Some(as_user), None, None)
+            .await?;
+        v.as_array()
+            .cloned()
+            .ok_or_else(|| MatrixError::Shape("room state is not an array".into()))
+    }
+
     /// Joined members of a room, as seen by `as_user` (who must be in it).
     pub async fn joined_members(&self, room_id: &str, as_user: &str) -> MxResult<Vec<String>> {
         let path = format!("/_matrix/client/v3/rooms/{}/joined_members", enc(room_id));

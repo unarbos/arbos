@@ -570,6 +570,9 @@ pub async fn list_bindings(State(state): State<AppState>, principal: Principal) 
     Ok(Json(json!({ "items": items })).into_response())
 }
 
+/// `DELETE /channels/bindings/{id}`: unbind one of the caller's own channel bindings. A binding
+/// of another user's project answers 404, as `api::revoke_device` does for a foreign device, so
+/// the route is not an enumeration oracle either (#1952).
 pub async fn unbind(
     State(state): State<AppState>,
     principal: Principal,
@@ -577,6 +580,15 @@ pub async fn unbind(
 ) -> ApiResult {
     if principal.is_box() {
         return Err((StatusCode::FORBIDDEN, "device only".into()));
+    }
+    let missing = || (StatusCode::NOT_FOUND, "no such binding".to_owned());
+    let binding = state
+        .db
+        .channel_binding(&id)
+        .map_err(internal)?
+        .ok_or_else(missing)?;
+    if !state.allows(&principal, &binding.project_id) {
+        return Err(missing());
     }
     let ok = state.db.delete_channel_binding(&id).map_err(internal)?;
     Ok(if ok {
@@ -1115,5 +1127,54 @@ mod tests {
         let out = state.db.channel_outbox(10).unwrap();
         assert_eq!(out.len(), before + 1);
         assert_eq!(out[0]["text"], "from invited B");
+    }
+
+    fn status(r: ApiResult) -> StatusCode {
+        match r {
+            Ok(resp) => resp.status(),
+            Err((s, _)) => s,
+        }
+    }
+
+    /// #1952: `unbind` refused boxes and nothing else, so any signed-in device could unbind
+    /// another user's channel. A binding outside the caller's projects answers 404, like
+    /// `api::revoke_device` does for a foreign device.
+    #[tokio::test]
+    async fn unbind_refuses_a_binding_of_another_users_project() {
+        let state = crate::state::test_support::test_state(crate::state::AuthMode::Github);
+        let (alice, alice_dev) = crate::people::tests_support::person(&state, 1);
+        let (_bob, bob_dev) = crate::people::tests_support::person(&state, 2);
+        let project = crate::people::tests_support::project_of(&state, &alice, "Comms");
+        let binding = ChannelBinding {
+            id: "bind_1".into(),
+            platform: "telegram".into(),
+            external_chat_id: "tg-chat".into(),
+            external_user_id: "tg-user".into(),
+            project_id: project,
+            chat_id: "c1".into(),
+            label: "Telegram · test".into(),
+            bound_at: 0,
+        };
+        state.db.upsert_channel_binding(&binding).unwrap();
+
+        let foreign = unbind(State(state.clone()), bob_dev, Path("bind_1".to_owned())).await;
+        assert_eq!(status(foreign), StatusCode::NOT_FOUND);
+        assert!(
+            state.db.channel_binding("bind_1").unwrap().is_some(),
+            "another user's binding survives"
+        );
+
+        // An id that exists and one that does not answer alike: no enumeration oracle.
+        let unknown = unbind(
+            State(state.clone()),
+            alice_dev.clone(),
+            Path("no_such_binding".to_owned()),
+        )
+        .await;
+        assert_eq!(status(unknown), StatusCode::NOT_FOUND);
+
+        let own = unbind(State(state.clone()), alice_dev, Path("bind_1".to_owned())).await;
+        assert_eq!(status(own), StatusCode::NO_CONTENT);
+        assert!(state.db.channel_binding("bind_1").unwrap().is_none());
     }
 }
