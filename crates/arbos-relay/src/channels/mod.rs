@@ -435,8 +435,84 @@ pub(crate) fn binding_dto(b: &ChannelBinding) -> ChannelBindingDto {
     }
 }
 
-fn binding_json(b: &ChannelBinding) -> Value {
-    serde_json::to_value(binding_dto(b)).expect("ChannelBindingDto")
+/// The label without the display name every adapter appends: `"Telegram · direct · Ada
+/// Lovelace"` becomes `"Telegram · direct"`. The name is always the last segment
+/// (`telegram.rs`, `slack.rs`, `whatsapp.rs`, `beeper.rs`), and the leading segments are
+/// platform metadata, so keep at most two of those and never the last. A label with no
+/// separator is a bare sender name — `handle_inbound` falls back to one when the adapter gives
+/// no label — and only the platform survives it.
+///
+/// A kept segment is dropped if it quotes the chat id, which Slack's does: its `kind` is
+/// `format!("#{channel}")` for anything but a DM (`slack.rs:141`), so `"Slack · #C024BE91L ·
+/// Ada"` would otherwise hand back the identifier the row redacts.
+///
+/// The result is never empty. A blank label makes Settings → Channels draw
+/// `"{platform} · {external_chat_id}"` instead (`arbos-mac` `ui/channels.rs:302`) — for the
+/// owner a second identifier, for a member a dangling separator, and for either the loss of the
+/// only thing telling one row from the next.
+fn label_without_the_name(b: &ChannelBinding) -> String {
+    let platform = || {
+        Platform::parse(&b.platform).map_or_else(|| b.platform.clone(), |p| p.label().to_owned())
+    };
+    let parts: Vec<&str> = b.label.split(" · ").collect();
+    let keep = parts.len().saturating_sub(1).min(2);
+    let kept: Vec<&str> = parts[..keep]
+        .iter()
+        .copied()
+        .filter(|seg| b.external_chat_id.is_empty() || !seg.contains(&b.external_chat_id))
+        .collect();
+    if kept.is_empty() {
+        platform()
+    } else {
+        kept.join(" · ")
+    }
+}
+
+/// The binding as this caller may see it. A member keeps what answers "is this project
+/// connected, and where" — the platform, the kind of conversation, the project and the chat —
+/// and loses the three fields that say *who the owner is* on that platform: `external_user_id`,
+/// `external_chat_id`, and the display name the adapters bake into `label`.
+///
+/// Redacting only the account id would be the worse half of the job twice over. The name
+/// sitting beside it is bound to a platform the owner actually uses, and across several
+/// bindings that composes into a map of where they can be reached, which is the thing being
+/// hidden. And the chat id is not a row key: WhatsApp uses the counterpart's phone number for
+/// both ids (`whatsapp.rs:126`) and a Telegram private chat is identified by the user's own id,
+/// so on two of the four platforms it is a verbatim copy of the field above it. Slack and
+/// Beeper address a conversation rather than a person, but the relay cannot read a platform's
+/// id scheme off the row, and a per-platform carve-out would be wrong the first time a platform
+/// changed one. Nothing renders it for a member, so the uniform rule costs nothing.
+///
+/// **The fields are redacted differently, on purpose, and the client is what decides which.**
+/// `external_user_id` and `external_chat_id` are blanked: no view reads either, so an empty
+/// string is invisible. `label` is truncated instead, because it is the only thing
+/// distinguishing one row from another in the interface, and because a blank one makes the Mac
+/// fall back to drawing the chat id. Do not flatten these into one rule — ask what the client
+/// does with the field.
+///
+/// Blanked rather than absent, also deliberately. Both clients decode
+/// `arbos_core::api::ChannelBindingDto` — `arbos-mac` directly (`sync/relay.rs`), iOS through
+/// the typeshare-generated Swift mirror — and every field of it is required, so a missing or
+/// null key fails the decode. `Option<String>` is the honest wire shape and waits for the next
+/// client build. Until then the empty string is the redaction, not a bug: do not "fix" it by
+/// restoring the value.
+fn binding_dto_for(
+    state: &AppState,
+    principal: &Principal,
+    b: &ChannelBinding,
+) -> ChannelBindingDto {
+    let mut dto = binding_dto(b);
+    if !state.owns(principal, &b.project_id) {
+        dto.external_user_id = String::new();
+        // Read off `b`, not `dto`: spotting a quoted chat id needs the real one.
+        dto.label = label_without_the_name(b);
+        dto.external_chat_id = String::new();
+    }
+    dto
+}
+
+fn binding_json_for(state: &AppState, principal: &Principal, b: &ChannelBinding) -> Value {
+    serde_json::to_value(binding_dto_for(state, principal, b)).expect("ChannelBindingDto")
 }
 
 pub(crate) fn pair_dto(c: &ChannelPairCode) -> ChannelPairingDto {
@@ -504,7 +580,7 @@ pub async fn overview(State(state): State<AppState>, principal: Principal) -> Ap
         .collect();
     let bindings: Vec<ChannelBindingDto> = visible_bindings(&state, &principal)?
         .iter()
-        .map(binding_dto)
+        .map(|b| binding_dto_for(&state, &principal, b))
         .collect();
     // The caller's own newest live code, not the relay's: a code another user minted a moment
     // ago must not hide this caller's own. `owns`, not `allows`, because a code is a bearer
@@ -592,7 +668,7 @@ pub async fn list_bindings(State(state): State<AppState>, principal: Principal) 
     }
     let items: Vec<Value> = visible_bindings(&state, &principal)?
         .iter()
-        .map(binding_json)
+        .map(|b| binding_json_for(&state, &principal, b))
         .collect();
     Ok(Json(json!({ "items": items })).into_response())
 }
@@ -1336,7 +1412,8 @@ mod tests {
                 external_user_id: "tg-user".into(),
                 project_id: project.clone(),
                 chat_id: "c1".into(),
-                label: "Telegram · Alice".into(),
+                // The shape every adapter builds: platform, kind, then the person's name.
+                label: "Telegram · direct · Ada Lovelace".into(),
                 bound_at: 0,
             })
             .unwrap();
@@ -1447,6 +1524,205 @@ mod tests {
         let own = unbind(State(state.clone()), s.owner, Path("bind_alice".to_owned())).await;
         assert_eq!(status(own), StatusCode::NO_CONTENT);
         assert!(state.db.channel_binding("bind_alice").unwrap().is_none());
+    }
+
+    /// A member sees that the project is connected and where, but not the owner's own handle on
+    /// the platform. Both directions are asserted against each other in one test: a redaction
+    /// that silently inverts is worse than none, and this one turns on a single predicate.
+    #[tokio::test]
+    async fn a_member_sees_the_binding_without_the_owners_platform_handle() {
+        let state = crate::state::test_support::test_state(crate::state::AuthMode::Github);
+        let s = alice_bound(&state);
+
+        let theirs = body_of(list_bindings(State(state.clone()), s.member.clone()).await).await;
+        let theirs = &theirs["items"][0];
+        let mine = body_of(list_bindings(State(state.clone()), s.owner.clone()).await).await;
+        let mine = &mine["items"][0];
+
+        for (field, owners) in [("externalUserId", "tg-user"), ("externalChatId", "tg-chat")] {
+            assert_eq!(mine[field], owners, "{field}: the owner is told");
+            assert_eq!(theirs[field], "", "{field}: the member is not");
+            assert_ne!(
+                mine[field], theirs[field],
+                "{field}: the redaction must not be reading its predicate backwards"
+            );
+
+            // Empty, not absent: both clients decode these as non-optional Strings.
+            assert!(
+                theirs.get(field).is_some_and(Value::is_string),
+                "{field}: the key stays, or the whole GET /channels decode fails: {theirs}"
+            );
+        }
+
+        // The label carries the owner's display name on the platform, so a member gets it
+        // truncated to the platform metadata rather than blanked — see below for why not blank.
+        assert_eq!(mine["label"], "Telegram · direct · Ada Lovelace");
+        assert_eq!(theirs["label"], "Telegram · direct");
+
+        // What the member is still told, so they can see the project is connected.
+        for field in ["id", "platform", "projectId", "chatId"] {
+            assert_eq!(theirs[field], mine[field], "{field} is not secret");
+        }
+
+        // `GET /channels` answers alike, since both routes read the same helper.
+        let seen = body_of(overview(State(state.clone()), s.member).await).await;
+        assert_eq!(seen["bindings"][0]["externalUserId"], "");
+        assert_eq!(seen["bindings"][0]["externalChatId"], "");
+        assert_eq!(seen["bindings"][0]["label"], "Telegram · direct");
+        let seen = body_of(overview(State(state.clone()), s.owner).await).await;
+        assert_eq!(seen["bindings"][0]["externalUserId"], "tg-user");
+        assert_eq!(seen["bindings"][0]["externalChatId"], "tg-chat");
+        assert_eq!(
+            seen["bindings"][0]["label"],
+            "Telegram · direct · Ada Lovelace"
+        );
+    }
+
+    /// Blanking `externalUserId` hides nothing if another field of the same row repeats it, and
+    /// on two of the four platforms it does. WhatsApp uses the counterpart's phone number as
+    /// both the chat id and the user id (`whatsapp.rs:126`), and a Telegram private chat is
+    /// identified by the user's own id — the Mac demo fixture pairs `"8812"` with `"8812"`
+    /// (`arbos-mac/src/sync/fixture.rs:2785`). Slack repeats its channel id inside the label,
+    /// because `kind` is `format!("#{channel}")` for anything that is not a DM (`slack.rs:141`).
+    ///
+    /// So the attack is not to read `externalUserId`. It is to read every *other* field of the
+    /// member's row and look for the identifier back.
+    #[tokio::test]
+    async fn no_field_of_a_members_row_repeats_an_identifier_the_row_redacts() {
+        let state = crate::state::test_support::test_state(crate::state::AuthMode::Github);
+        let s = alice_bound(&state);
+
+        // Id, platform, chat id, user id, label, and the one string that must not reach a member.
+        let rows = [
+            (
+                "wa",
+                "whatsapp",
+                "15555550123",
+                "15555550123",
+                "WhatsApp · Jacob",
+                "15555550123",
+            ),
+            (
+                "tg",
+                "telegram",
+                "8812",
+                "8812",
+                "Telegram · DM · Jacob",
+                "8812",
+            ),
+            (
+                "sl",
+                "slack",
+                "C024BE91L",
+                "U024BE7LH",
+                "Slack · #C024BE91L · Jacob",
+                "C024BE91L",
+            ),
+            // Beeper's chat id is a room, not a person, and its user id is the only copy — so
+            // this row is expected to hold already. The contrast is the finding.
+            (
+                "bp",
+                "beeper",
+                "!room:beeper.local",
+                "@signal_15555550123:beeper.local",
+                "Beeper · Signal · Jacob",
+                "@signal_15555550123:beeper.local",
+            ),
+        ];
+        for (id, platform, chat, user, label, _) in rows {
+            state
+                .db
+                .upsert_channel_binding(&ChannelBinding {
+                    id: id.into(),
+                    platform: platform.into(),
+                    external_chat_id: chat.into(),
+                    external_user_id: user.into(),
+                    project_id: s.project.clone(),
+                    chat_id: "c1".into(),
+                    label: label.into(),
+                    bound_at: 0,
+                })
+                .unwrap();
+        }
+
+        let theirs = body_of(list_bindings(State(state.clone()), s.member.clone()).await).await;
+        let theirs = theirs["items"].as_array().unwrap().clone();
+        for (id, platform, _, _, _, secret) in rows {
+            let row = theirs
+                .iter()
+                .find(|r| r["id"] == id)
+                .unwrap_or_else(|| panic!("{platform} row"));
+            for (field, value) in row.as_object().unwrap() {
+                let Some(text) = value.as_str() else { continue };
+                assert!(
+                    !text.contains(secret),
+                    "{platform}: `{field}` still hands a member `{secret}`: {row}"
+                );
+            }
+            assert_eq!(row["platform"], platform, "the platform is still answered");
+        }
+
+        // The owner is still told all of it, or the row is useless to the person it belongs to.
+        let mine = body_of(list_bindings(State(state.clone()), s.owner).await).await;
+        let mine = mine["items"].as_array().unwrap();
+        for (id, platform, chat, user, label, _) in rows {
+            let row = mine.iter().find(|r| r["id"] == id).unwrap();
+            assert_eq!(row["externalChatId"], chat, "{platform}");
+            assert_eq!(row["externalUserId"], user, "{platform}");
+            assert_eq!(row["label"], label, "{platform}");
+        }
+    }
+
+    /// The real shapes, from each adapter, plus what a truncation must never do. The name is
+    /// always the last segment; the leading segments are platform metadata.
+    #[test]
+    fn a_truncated_label_keeps_the_platform_and_drops_the_person() {
+        let labelled = |platform: &str, chat: &str, label: &str| ChannelBinding {
+            id: "b".into(),
+            platform: platform.into(),
+            external_chat_id: chat.into(),
+            external_user_id: "user".into(),
+            project_id: "p".into(),
+            chat_id: "c".into(),
+            label: label.into(),
+            bound_at: 0,
+        };
+        for (platform, chat, built, expected) in [
+            // telegram.rs:91, slack.rs:159, whatsapp.rs:135, beeper.rs:103.
+            (
+                "telegram",
+                "8812",
+                "Telegram · direct · Ada",
+                "Telegram · direct",
+            ),
+            ("slack", "D024BE91L", "Slack · DM · Ada", "Slack · DM"),
+            ("whatsapp", "15555550123", "WhatsApp · Ada", "WhatsApp"),
+            (
+                "beeper",
+                "!room:beeper.local",
+                "Beeper · signal · Ada",
+                "Beeper · signal",
+            ),
+            // Slack writes the channel id into the label for anything but a DM, so the segment
+            // that would hand back the redacted id goes with the name.
+            ("slack", "C024BE91L", "Slack · #C024BE91L · Ada", "Slack"),
+            // A name with the separator inside it must not survive on the strength of it.
+            (
+                "telegram",
+                "8812",
+                "Telegram · direct · Ada · Lovelace",
+                "Telegram · direct",
+            ),
+            // `handle_inbound` falls back to a bare sender name when the adapter gives none.
+            ("telegram", "8812", "Ada Lovelace", "Telegram"),
+            ("nonsense", "x", "Ada Lovelace", "nonsense"),
+        ] {
+            let got = label_without_the_name(&labelled(platform, chat, built));
+            assert_eq!(got, expected, "{built}");
+            assert!(!got.is_empty(), "never empty, or the row loses its name");
+            assert!(!got.contains("Ada"), "the person does not survive: {got}");
+            assert!(!got.contains(chat), "nor the chat id: {got}");
+        }
     }
 
     /// `reply` posts text straight to a bound channel, so a member reaching it speaks to the
