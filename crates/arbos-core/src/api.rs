@@ -681,6 +681,13 @@ pub struct UnreadChatDto {
     pub project_id: String,
     #[typeshare(serialized_as = "I54")]
     pub unread: i64,
+    /// Unread mentions of the viewer that name them (`@here` is not one of those). Separate
+    /// from `unread`: reading a chat's messages does not mean its mentions were seen, so a
+    /// chat can be listed with `unread: 0` and a mention count above zero. Defaulted, so a
+    /// client built against an older relay decodes a payload without it.
+    #[serde(default)]
+    #[typeshare(serialized_as = "I54")]
+    pub mentions: i64,
 }
 
 /// `GET /me/unread`.

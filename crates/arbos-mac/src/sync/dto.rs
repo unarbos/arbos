@@ -1369,6 +1369,7 @@ mod tests {
             chat_id: "chat_fixture".into(),
             project_id: "proj_fixture".into(),
             unread: 3,
+            mentions: 0,
         });
         let by_id: HashMap<&str, u32> = unread
             .chats

@@ -662,6 +662,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/g/{code}", get(people::group_invite_landing))
         .route("/chats/{id}/read", axum::routing::put(people::chat_read))
         .route(
+            "/chats/{id}/mentions/read",
+            axum::routing::put(people::chat_mentions_read),
+        )
+        .route(
             "/chats/{id}/settings",
             axum::routing::put(people::chat_settings),
         )
