@@ -6260,7 +6260,7 @@ fn sideways_scroll(frame: Stateful<Div>) -> Stateful<Div> {
     // squeezed below its content — so the frame has something to scroll.
     let mut frame = frame.flex().overflow_x_scroll();
     frame.style().restrict_scroll_to_axis = Some(true);
-    frame
+    crate::ui::back_swipe::mark_sideways_scroller(frame)
 }
 
 /// The narrowest a table column is laid out at, in points.

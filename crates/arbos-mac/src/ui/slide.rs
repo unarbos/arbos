@@ -21,11 +21,12 @@
 //! move with the sidebar instead of waiting and jumping ([feedback
 //! mac-sidebar-slide-jank-2026-10-29]).
 //!
-//! An edge drag from the rail is the one case the width follows the hand
+//! An edge drag from the rail is one case the width follows the hand
 //! instead of the clock: the rail morph is drawn at the pointer's x
 //! ([`Want::sidebar_track`]) and settles from there on these same curves —
 //! the drag unfolds exactly as it folds ([feedback
-//! mac-sidebar-drag-open-2026-10-29]).
+//! mac-sidebar-drag-open-2026-10-29]). The other is a two-finger back swipe
+//! closing the right pane ([`Want::pane_track`], `ui::back_swipe`).
 //!
 //! Reduce Motion (`cx.reduce_motion()`): no slide is started; everything
 //! snaps as before.
@@ -245,6 +246,8 @@ pub struct PaneSlides {
     /// The pointer-tracked width last drawn (`Want::sidebar_track`).
     last_sidebar_track: Option<f32>,
     last_pane: Option<(bool, f32)>,
+    /// The swipe-tracked pane width last drawn (`Want::pane_track`).
+    last_pane_track: Option<f32>,
     chat: Option<ChatSlide>,
 }
 
@@ -271,6 +274,11 @@ pub struct Want {
     /// slide runs, and when it goes (the snap width crossed, or the hand let
     /// go) the sidebar settles from there on the toggle's slide.
     pub sidebar_track: Option<f32>,
+    /// A back swipe closing the right pane (`ui::back_swipe`) asks for this
+    /// visible width: the pane follows the fingers, the transcript is held
+    /// as during a slide, and a track that ends away from the pane's target
+    /// settles from there.
+    pub pane_track: Option<f32>,
 }
 
 impl PaneSlides {
@@ -305,16 +313,18 @@ impl PaneSlides {
             }
             (None, None, None) => sidebar_target,
         };
-        let pane_before = match (self.pane, self.last_pane) {
-            (Some(s), _) => s.value(now),
-            (None, Some((shown, w))) => {
+        let pane_track = want.pane_track.filter(|_| want.pane_shown);
+        let pane_before = match (self.last_pane_track, self.pane, self.last_pane) {
+            (Some(tracked), _, _) => tracked,
+            (None, Some(s), _) => s.value(now),
+            (None, None, Some((shown, w))) => {
                 if shown {
                     w
                 } else {
                     0.0
                 }
             }
-            (None, None) => pane_target,
+            (None, None, None) => pane_target,
         };
         let snap = want.reduce_motion;
 
@@ -355,7 +365,20 @@ impl PaneSlides {
         let pane_changed = self
             .last_pane
             .is_some_and(|(shown, _)| shown != want.pane_shown);
-        if pane_changed && !snap {
+        let pane_track_ended = self
+            .last_pane_track
+            .is_some_and(|tracked| pane_track.is_none() && (tracked - pane_target).abs() > 0.5);
+        if pane_track.is_some() {
+            self.pane = None;
+            if self.chat.is_none() {
+                let start_width = want.viewport_width - sidebar_before - pane_before;
+                let end_width = want.viewport_width - sidebar_before;
+                self.chat = Some(ChatSlide {
+                    start_width,
+                    anchor: anchor_for(Side::Right, start_width, end_width),
+                });
+            }
+        } else if (pane_changed || pane_track_ended) && !snap {
             self.start(
                 Side::Right,
                 pane_target,
@@ -372,6 +395,7 @@ impl PaneSlides {
         self.last_sidebar_rail = want.sidebar_rail;
         self.last_sidebar_track = track;
         self.last_pane = Some((want.pane_shown, pane_full));
+        self.last_pane_track = pane_track;
 
         // Finished slides come to rest at their target.
         if self.sidebar.is_some_and(|s| s.done(now)) {
@@ -394,9 +418,11 @@ impl PaneSlides {
         }
         let sidebar_visible =
             track.unwrap_or_else(|| self.sidebar.map_or(sidebar_target, |s| s.value(now)));
-        let pane_visible = self.pane.map_or(pane_target, |s| s.value(now));
+        let pane_visible =
+            pane_track.unwrap_or_else(|| self.pane.map_or(pane_target, |s| s.value(now)));
         let sidebar_moving = self.sidebar.is_some() || track.is_some();
-        if !sidebar_moving && self.pane.is_none() {
+        let pane_moving = self.pane.is_some() || pane_track.is_some();
+        if !sidebar_moving && !pane_moving {
             self.chat = None;
         }
         // The sidebar moving: the held transcript only glides (centred) while
@@ -429,7 +455,7 @@ impl PaneSlides {
             sidebar_visible,
             sidebar_sliding: sidebar_moving,
             pane_visible,
-            pane_sliding: self.pane.is_some(),
+            pane_sliding: pane_moving,
             chat: self.chat,
         }
     }
@@ -544,6 +570,7 @@ mod tests {
             pane_width: PANE,
             reduce_motion: false,
             sidebar_track: None,
+            pane_track: None,
         }
     }
 
@@ -1279,6 +1306,7 @@ mod layout_tests {
                 pane_width: PANE,
                 reduce_motion: false,
                 sidebar_track: track,
+                pane_track: None,
             };
             let t0 = Instant::now();
             let mut script: Vec<(u64, Want)> = vec![(0, want(true, false, None))];
