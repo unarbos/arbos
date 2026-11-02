@@ -281,8 +281,13 @@ pub async fn get(
         .skill(&id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such skill".to_owned()))?;
+    // A skill this box may not see reads exactly like one that is not there. The two answers
+    // used to differ, which told a box whether an id or slug it guessed belongs to somebody —
+    // and scoping `shared` moved every other person's shared skill into that branch, so the
+    // fix would have widened the oracle it inherited. The device arm below already answers
+    // this way (#1953), and agentd treats every non-success as `continue`.
     if !can_see(&state, scope.as_deref(), &principal, &s) {
-        return Err((StatusCode::FORBIDDEN, "not visible to this box".into()));
+        return Err((StatusCode::NOT_FOUND, "no such skill".to_owned()));
     }
     // Only the device arm needs this. `can_see` above is already right for a box — its own
     // user's shared skills plus the named project's — and a box does fetch a skill of another
@@ -383,8 +388,10 @@ pub async fn update(
         .skill(&id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such skill".to_owned()))?;
+    // The same silence as `get`, on the route beside it: closing the oracle on the read and
+    // leaving it on the write would only move the question one request across.
     if !can_edit(scope.as_deref(), &principal, &existing) {
-        return Err((StatusCode::FORBIDDEN, "not this box's skill".into()));
+        return Err((StatusCode::NOT_FOUND, "no such skill".to_owned()));
     }
     // `can_edit` already confines a box to its own project's skills; it is the device arm that is
     // open, returning `true` for every device. This closes that arm, the same way `delete` does
@@ -813,7 +820,7 @@ mod tests {
                 )
                 .await
             ),
-            StatusCode::FORBIDDEN,
+            StatusCode::NOT_FOUND,
             "and `can_see` still keeps an unshared one of another Project away from it"
         );
 
@@ -826,7 +833,74 @@ mod tests {
         );
         assert_eq!(
             status(get(State(state.clone()), bobs_box, headers, Path(hers)).await),
-            StatusCode::FORBIDDEN
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    /// The same silence `module_lookup_tests` asks of the project routes, asked of the two
+    /// skill routes a box can reach by id: a skill somebody else holds must read exactly like
+    /// one nobody holds. They did not — `can_see` and `can_edit` answered 403 where an unknown
+    /// id answers 404 — and scoping `shared` to its owner moved every other person's shared
+    /// skill into that branch, so this fix would otherwise have widened the oracle it found.
+    ///
+    /// A box is the caller that matters here: `arbos-agentd` is the only thing holding a box
+    /// token, and it treats every non-success alike (`continue`), so the two answers cost it
+    /// nothing. The device arm already answers 404 both ways (#1953).
+    #[tokio::test]
+    async fn a_box_cannot_tell_a_strangers_skill_from_one_that_does_not_exist() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let alices = project_of(&state, &alice, "Alice work");
+        let bobs = project_of(&state, &bob, "Bob work");
+        let (bobs_box, headers) = boxed(&bob, &bobs);
+
+        let hers_shared = skill_with(&state, Some(&alices), "alices-shared", true, ALICES_BODY);
+        let hers_private = skill_of(&state, Some(&alices), "alices-notes");
+
+        // By id, by slug, and for a name nobody has taken: one answer.
+        for guess in [
+            hers_shared.as_str(),
+            hers_private.as_str(),
+            "alices-shared",
+            "alices-notes",
+            "nothing-of-the-sort",
+        ] {
+            assert_eq!(
+                status(
+                    get(
+                        State(state.clone()),
+                        bobs_box.clone(),
+                        headers.clone(),
+                        Path(guess.to_owned())
+                    )
+                    .await
+                ),
+                StatusCode::NOT_FOUND,
+                "reading {guess} tells this box whether the name is taken"
+            );
+            assert_eq!(
+                status(
+                    update(
+                        State(state.clone()),
+                        bobs_box.clone(),
+                        headers.clone(),
+                        Path(guess.to_owned()),
+                        Json(SkillBody {
+                            name: Some("renamed by a stranger's agent".into()),
+                            ..SkillBody::default()
+                        }),
+                    )
+                    .await
+                ),
+                StatusCode::NOT_FOUND,
+                "writing {guess} tells this box whether the name is taken"
+            );
+        }
+        assert_eq!(
+            state.db.skill(&hers_shared).unwrap().unwrap().name,
+            "alices-shared",
+            "and nothing of Alice's moved"
         );
     }
 
