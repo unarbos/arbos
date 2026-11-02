@@ -1423,6 +1423,12 @@ mod tests {
     /// Spec §13.2: the first wake creates a session, the next resumes it with the same id; a
     /// resume the agent cannot find falls back to a new session once (status line "starting a
     /// fresh session", handoff prompt), generation climbs, and every step is in the log.
+    ///
+    /// The fake agent runs through `/bin/sh` rather than being exec'd. `execve` is refused with
+    /// `ETXTBSY` while any process holds the file open for writing, and a sibling test thread
+    /// that forks between this write and the spawn leaves its child holding a duplicate of the
+    /// write descriptor until that child execs (seen in CI run 41321573597). Reading the script
+    /// takes no write lock, so there is nothing left to race.
     #[tokio::test]
     async fn sessions_resume_and_fall_back_once() {
         let (dir, m) = temp_mirror();
@@ -1442,16 +1448,16 @@ mod tests {
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
         let t = crate::session::Templates {
             new: vec![
+                "/bin/sh".into(),
                 script.display().to_string(),
                 "new".into(),
                 "{session}".into(),
                 "{prompt}".into(),
             ],
             resume: vec![
+                "/bin/sh".into(),
                 script.display().to_string(),
                 "resume".into(),
                 "{session}".into(),
