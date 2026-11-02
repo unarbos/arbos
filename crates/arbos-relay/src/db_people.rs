@@ -447,6 +447,17 @@ impl Db {
         })
     }
 
+    /// Every member string this chat has ever held, the ones that have left included. The
+    /// Matrix mirror needs the departed: a backfill still names a past author, and the
+    /// creator's on-behalf carry is what delivers them.
+    pub fn members_ever(&self, chat_id: &str) -> Result<Vec<String>> {
+        self.with(|c| {
+            let mut st = c.prepare("SELECT member FROM people_members WHERE chat_id = ?1")?;
+            let rows = st.query_map(params![chat_id], |r| r.get(0))?;
+            rows.collect()
+        })
+    }
+
     pub fn membership(&self, chat_id: &str, member: &str) -> Result<Option<Membership>> {
         self.with(|c| {
             c.query_row(
@@ -1183,6 +1194,16 @@ impl Db {
                 "SELECT user_id, added_by, joined_at FROM project_members WHERE project_id = ?1 AND left_at IS NULL ORDER BY joined_at, user_id",
             )?;
             let rows = st.query_map(params![project_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            rows.collect()
+        })
+    }
+
+    /// Every user this project has ever been shared with, the ones that have left included
+    /// (see [`Self::members_ever`] for why the mirror asks for those).
+    pub fn project_members_ever(&self, project_id: &str) -> Result<Vec<String>> {
+        self.with(|c| {
+            let mut st = c.prepare("SELECT user_id FROM project_members WHERE project_id = ?1")?;
+            let rows = st.query_map(params![project_id], |r| r.get(0))?;
             rows.collect()
         })
     }

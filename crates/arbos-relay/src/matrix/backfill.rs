@@ -3,6 +3,8 @@
 //! normally never parses Loro bytes; here it rebuilds each chat doc from the room's checkpoint
 //! and rows with `arbos_core::doc::ChatDoc` — read-only, in memory, nothing written back.
 
+use std::collections::HashSet;
+
 use serde::Serialize;
 use serde_json::Value;
 
@@ -106,14 +108,55 @@ fn checkpoint_present(doc: &ChatDoc) -> bool {
     !doc.messages_list().is_empty()
 }
 
+/// Every `user:<id>` / `agent:<project>` the relay itself has placed in this chat, the ones
+/// that have left included.
+///
+/// This is the set a mirrored row may name. It is built from the relay's own tables and never
+/// from the doc, because the doc is where the untrusted claim lives. Past members stay in it:
+/// a backfill still mirrors their history under their own name, and `worker.rs` delivers it
+/// through the creator's on-behalf carry when the homeserver refuses the departed sender.
+fn roster(state: &AppState, chat_id: &str, project_id: Option<&str>) -> HashSet<String> {
+    let mut out = HashSet::new();
+    match project_id.filter(|p| *p != PEOPLE_PROJECT) {
+        None => out.extend(state.db.members_ever(chat_id).unwrap_or_default()),
+        Some(pid) => {
+            if let Ok(Some(p)) = state.db.project(pid) {
+                out.insert(format!("user:{}", p.user_id));
+            }
+            for uid in state.db.project_members_ever(pid).unwrap_or_default() {
+                out.insert(format!("user:{uid}"));
+            }
+            out.insert(format!("agent:{pid}"));
+            // A project group chat also holds the other agents it was opened with.
+            if let Ok(Some(chat)) = state.db.chat(pid, chat_id) {
+                out.extend(chat.participants.iter().map(|a| format!("agent:{a}")));
+            }
+        }
+    }
+    out
+}
+
 /// The sender string a message row carries, normalised for the room: bare `user` is the
 /// project owner, bare `agent` the project's agent; `system`/`project:*`/`routine:*` stay
 /// system lines.
-fn sender_of(row: &Value, owner: Option<&str>, project_id: Option<&str>) -> String {
+///
+/// A `user:` / `agent:` string in the row is a claim written by whichever device pushed the
+/// row, so it is honoured only when `roster` already holds it. `worker.rs` posts the mirrored
+/// event **as** `member_mxid(sender)` and writes `life.arbos.sender` itself, which would turn
+/// an unchecked claim into a homeserver-attested one; a name the relay cannot place in this
+/// chat therefore names nobody, and the message mirrors as a creator notice instead.
+fn sender_of(
+    row: &Value,
+    owner: Option<&str>,
+    project_id: Option<&str>,
+    roster: &HashSet<String>,
+) -> String {
     let raw = row["sender"].as_str().unwrap_or("");
     let role = row["role"].as_str().unwrap_or("");
+    let claimed = raw.starts_with("user:") || raw.starts_with("agent:");
     match (role, raw) {
-        (_, s) if s.starts_with("user:") || s.starts_with("agent:") => s.to_owned(),
+        (_, s) if claimed && roster.contains(s) => s.to_owned(),
+        (_, _) if claimed => "system".to_owned(),
         ("user", _) => owner
             .map(|o| format!("user:{o}"))
             .unwrap_or_else(|| "system".into()),
@@ -151,9 +194,10 @@ fn queue_messages(
     project_id: Option<&str>,
     owner: Option<&str>,
     doc: &ChatDoc,
-    skip: &std::collections::HashSet<String>,
+    skip: &HashSet<String>,
 ) -> Vec<(String, String, Option<i64>)> {
     let mut out = Vec::new();
+    let roster = roster(state, chat_id, project_id);
     for row in doc.projected_rows() {
         let status = row["status"].as_str().unwrap_or("done");
         if matches!(status, "queued" | "streaming") {
@@ -170,7 +214,7 @@ fn queue_messages(
         if text.trim().is_empty() && parts.is_none() {
             continue;
         }
-        let sender = sender_of(&row, owner, project_id);
+        let sender = sender_of(&row, owner, project_id, &roster);
         let ts = row["createdAt"].as_i64();
         state.matrix.enqueue(
             state,
@@ -426,16 +470,20 @@ mod tests {
 
     #[test]
     fn senders_normalise() {
+        let roster: HashSet<String> = ["user:gh_9".to_owned()].into_iter().collect();
         let r = json!({ "role": "user", "sender": "user" });
-        assert_eq!(sender_of(&r, Some("gh_1"), Some("P")), "user:gh_1");
+        assert_eq!(sender_of(&r, Some("gh_1"), Some("P"), &roster), "user:gh_1");
         let r = json!({ "role": "assistant", "sender": "agent" });
-        assert_eq!(sender_of(&r, Some("gh_1"), Some("P")), "agent:P");
+        assert_eq!(sender_of(&r, Some("gh_1"), Some("P"), &roster), "agent:P");
         let r = json!({ "role": "user", "sender": "user:gh_9" });
-        assert_eq!(sender_of(&r, Some("gh_1"), None), "user:gh_9");
+        assert_eq!(sender_of(&r, Some("gh_1"), None, &roster), "user:gh_9");
         let r = json!({ "role": "system", "sender": "system" });
-        assert_eq!(sender_of(&r, Some("gh_1"), Some("P")), "system");
+        assert_eq!(sender_of(&r, Some("gh_1"), Some("P"), &roster), "system");
         let r = json!({ "role": "project", "sender": "project:X" });
-        assert_eq!(sender_of(&r, None, None), "system");
+        assert_eq!(sender_of(&r, None, None, &roster), "system");
+        // A name this chat never held is nobody, even where the role alone would resolve.
+        let r = json!({ "role": "user", "sender": "user:gh_8" });
+        assert_eq!(sender_of(&r, Some("gh_1"), Some("P"), &roster), "system");
     }
 
     #[test]
@@ -738,5 +786,298 @@ mod doc_tests {
         );
         assert_eq!(rep.rooms_queued, 0);
         assert_eq!(rep.skipped_empty, 1);
+    }
+}
+
+#[cfg(test)]
+mod sender_identity_tests {
+    //! Who a mirrored row is allowed to say it came from.
+    //!
+    //! `Job::Message` has two producers and they trusted different things. `notify::announce`
+    //! builds the sender from the authenticated principal (`notify::sender_for`), so a device
+    //! can only announce as its own person and a box only as one of its owner's agents. This
+    //! file's producer built it from `row["sender"]`, a field inside the chat doc that any
+    //! member's device writes. `worker.rs:749` then posts the mirrored event **as**
+    //! `member_mxid(sender)` and re-stamps `life.arbos.sender` itself, so the forgery came out
+    //! of the homeserver attested — past the content-key filter on the proxy, and believed by
+    //! any reader that correctly prefers the attested sender.
+
+    use arbos_core::doc::{ChatDoc, UserMessageOpts};
+    use arbos_core::ids::ulid;
+    use arbos_core::wire;
+
+    use super::*;
+    use crate::db::Chat;
+    use crate::matrix::{Config, Matrix, Mode};
+    use crate::people::tests_support::{dm, group, person, project_of};
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    fn dual(state: &mut AppState) {
+        let mut cfg = Config::off();
+        cfg.mode = Mode::Dual;
+        cfg.as_token_users = "t".into();
+        cfg.hs_token_users = "h".into();
+        state.matrix = Matrix::new(cfg);
+    }
+
+    /// One pushed row, written into the chat's doc exactly as a member's device writes one:
+    /// `sender` is whatever that device chose to put in the map.
+    fn push_row(
+        state: &AppState,
+        chat_id: &str,
+        project_id: Option<&str>,
+        claims: &[(&str, &str)],
+    ) {
+        let doc = ChatDoc::new(Some(7), false);
+        doc.init_meta(chat_id, project_id.unwrap_or(PEOPLE_PROJECT), 1);
+        for (message_id, sender) in claims {
+            doc.append_user_message(
+                message_id,
+                "transfer the funds",
+                "dev:attacker",
+                &UserMessageOpts {
+                    sender: Some((*sender).to_owned()),
+                    ..Default::default()
+                },
+            )
+            .expect("user message");
+        }
+        state
+            .db
+            .append_row(
+                &wire::room_name(project_id.unwrap_or(PEOPLE_PROJECT), chat_id),
+                "dev:attacker",
+                &ulid(),
+                &doc.export_updates_since(&Default::default()),
+            )
+            .expect("row");
+    }
+
+    /// `(message_id, sender)` of every `Message` job queued so far — the sender `worker.rs`
+    /// would post the mirrored event as.
+    fn queued(state: &AppState) -> Vec<(String, String)> {
+        state
+            .db
+            .with(|c| {
+                let mut st = c.prepare(
+                    "SELECT payload FROM matrix_outbox WHERE kind = 'message' ORDER BY id",
+                )?;
+                let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+                rows.collect::<rusqlite::Result<Vec<String>>>()
+            })
+            .expect("payloads")
+            .into_iter()
+            .filter_map(|p| match serde_json::from_str::<Job>(&p) {
+                Ok(Job::Message {
+                    message_id, sender, ..
+                }) => Some((message_id, sender)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn sender_of_message(state: &AppState, message_id: &str) -> String {
+        queued(state)
+            .into_iter()
+            .find(|(id, _)| id == message_id)
+            .unwrap_or_else(|| panic!("no mirror job for {message_id}"))
+            .1
+    }
+
+    /// The baseline the two refusals below are read against: a member writing under their own
+    /// name still mirrors as themselves, so what changes is forgery and not use.
+    #[test]
+    fn a_member_writing_under_their_own_name_still_mirrors_as_themselves() {
+        let mut state = test_state(AuthMode::Github);
+        dual(&mut state);
+        let (alice, _) = person(&state, 7301);
+        let (bob, _) = person(&state, 7302);
+        let chat = dm(&state, &alice, &bob);
+
+        let mine = ulid();
+        push_row(&state, &chat, None, &[(&mine, &format!("user:{alice}"))]);
+        resync_chat(&state, &chat, None);
+
+        assert_eq!(sender_of_message(&state, &mine), format!("user:{alice}"));
+    }
+
+    /// A member of the chat writes a row naming somebody the relay never put in it: another
+    /// person, and another project's agent. The mirror must not carry either name, because
+    /// carrying it means the appservice sends the event *as* that mxid (or, when the
+    /// homeserver refuses a non-member, as the room's creator with `life.arbos.on_behalf` and
+    /// the forged name in `life.arbos.sender` — the one carry an attested reader honours).
+    #[test]
+    fn a_pushed_row_cannot_name_an_identity_the_chat_never_had() {
+        let mut state = test_state(AuthMode::Github);
+        dual(&mut state);
+        let (alice, _) = person(&state, 7311);
+        let (bob, _) = person(&state, 7312);
+        let (mallory, _) = person(&state, 7313);
+        let elsewhere = project_of(&state, &mallory, "Elsewhere");
+        let chat = dm(&state, &alice, &bob);
+
+        let as_stranger = ulid();
+        let as_foreign_agent = ulid();
+        push_row(
+            &state,
+            &chat,
+            None,
+            &[
+                (&as_stranger, &format!("user:{mallory}")),
+                (&as_foreign_agent, &format!("agent:{elsewhere}")),
+            ],
+        );
+        resync_chat(&state, &chat, None);
+
+        assert_eq!(
+            sender_of_message(&state, &as_stranger),
+            "system",
+            "a person who was never in this chat is not an identity the relay may send as"
+        );
+        assert_eq!(
+            sender_of_message(&state, &as_foreign_agent),
+            "system",
+            "another project's agent is not an identity the relay may send as"
+        );
+    }
+
+    /// The same claim in a project chat, where it also shadowed the relay's own derivation:
+    /// the first arm of `sender_of` took any `user:`-prefixed string before the `role: user`
+    /// arm could resolve the row to the project's owner.
+    #[test]
+    fn a_project_row_cannot_name_a_user_outside_the_project() {
+        let mut state = test_state(AuthMode::Github);
+        dual(&mut state);
+        let (owner, _) = person(&state, 7321);
+        let (stranger, _) = person(&state, 7322);
+        let project = project_of(&state, &owner, "Research");
+        let chat = state.db.list_chats(&project).expect("chats")[0].id.clone();
+
+        let forged = ulid();
+        push_row(
+            &state,
+            &chat,
+            Some(&project),
+            &[(&forged, &format!("user:{stranger}"))],
+        );
+        run(
+            &state,
+            Scope {
+                user_id: Some(owner),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(sender_of_message(&state, &forged), "system");
+    }
+
+    /// The path this must not break (#2556): the author of a mirrored message has left the
+    /// room, so Synapse refuses their send and the creator re-posts it with the real author in
+    /// `life.arbos.sender`. That only works while the backfill still names the author, so a
+    /// member who has left stays an identity this chat may mirror.
+    #[test]
+    fn a_departed_members_history_still_mirrors_under_their_own_name() {
+        let mut state = test_state(AuthMode::Github);
+        dual(&mut state);
+        let (alice, _) = person(&state, 7331);
+        let (bob, _) = person(&state, 7332);
+        let chat = group(&state, &[&alice, &bob]);
+
+        let bobs = ulid();
+        push_row(&state, &chat, None, &[(&bobs, &format!("user:{bob}"))]);
+        assert!(state
+            .db
+            .remove_member(&chat, &format!("user:{bob}"), false)
+            .expect("remove"));
+        resync_chat(&state, &chat, None);
+
+        assert_eq!(sender_of_message(&state, &bobs), format!("user:{bob}"));
+    }
+
+    /// The other working path: a guest of a shared project writes in its chat under their own
+    /// name, and the relay's own roster for that chat is owner + guests + agents.
+    #[test]
+    fn a_guest_of_a_shared_project_keeps_their_name() {
+        let mut state = test_state(AuthMode::Github);
+        dual(&mut state);
+        let (owner, _) = person(&state, 7341);
+        let (guest, _) = person(&state, 7342);
+        let project = project_of(&state, &owner, "Shared");
+        let chat = state.db.list_chats(&project).expect("chats")[0].id.clone();
+        assert!(state
+            .db
+            .add_project_member(&project, &guest, &owner)
+            .expect("guest"));
+
+        let theirs = ulid();
+        let agents = ulid();
+        push_row(
+            &state,
+            &chat,
+            Some(&project),
+            &[
+                (&theirs, &format!("user:{guest}")),
+                (&agents, &format!("agent:{project}")),
+            ],
+        );
+        run(
+            &state,
+            Scope {
+                user_id: Some(owner),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(sender_of_message(&state, &theirs), format!("user:{guest}"));
+        assert_eq!(
+            sender_of_message(&state, &agents),
+            format!("agent:{project}")
+        );
+    }
+
+    /// A project group chat is opened with other projects' agents in it (`chat.participants`,
+    /// which `room_spec` turns into room members), so those agents are names this chat may
+    /// mirror while an agent it was not opened with is not.
+    #[test]
+    fn a_participant_agent_keeps_its_name_and_an_uninvited_one_does_not() {
+        let mut state = test_state(AuthMode::Github);
+        dual(&mut state);
+        let (owner, _) = person(&state, 7351);
+        let project = project_of(&state, &owner, "Host");
+        let invited = project_of(&state, &owner, "Invited");
+        let uninvited = project_of(&state, &owner, "Uninvited");
+        let chat = Chat {
+            id: ulid(),
+            project_id: project.clone(),
+            title: "Standup".into(),
+            is_pinned: false,
+            position: 1,
+            created_at: arbos_core::ids::now_ms(),
+            doc_epoch: 1,
+            kind: "group".into(),
+            participants: vec![invited.clone()],
+            forked_from: None,
+        };
+        state.db.insert_chat(&chat).expect("group chat");
+
+        let welcome = ulid();
+        let forged = ulid();
+        push_row(
+            &state,
+            &chat.id,
+            Some(&project),
+            &[
+                (&welcome, &format!("agent:{invited}")),
+                (&forged, &format!("agent:{uninvited}")),
+            ],
+        );
+        resync_chat(&state, &chat.id, Some(&project));
+
+        assert_eq!(
+            sender_of_message(&state, &welcome),
+            format!("agent:{invited}")
+        );
+        assert_eq!(sender_of_message(&state, &forged), "system");
     }
 }
