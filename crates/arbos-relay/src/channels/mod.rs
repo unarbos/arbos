@@ -442,33 +442,53 @@ pub(crate) fn binding_dto(b: &ChannelBinding) -> ChannelBindingDto {
 /// separator is a bare sender name — `handle_inbound` falls back to one when the adapter gives
 /// no label — and only the platform survives it.
 ///
-/// The result is never empty, which matters: Settings → Channels renders
-/// `"{platform} · {external_chat_id}"` in place of a blank label (`arbos-mac`
-/// `ui/channels.rs:302`), so emptying this field would put a *different* identifier on screen.
+/// A kept segment is dropped if it quotes the chat id, which Slack's does: its `kind` is
+/// `format!("#{channel}")` for anything but a DM (`slack.rs:141`), so `"Slack · #C024BE91L ·
+/// Ada"` would otherwise hand back the identifier the row redacts.
+///
+/// The result is never empty. A blank label makes Settings → Channels draw
+/// `"{platform} · {external_chat_id}"` instead (`arbos-mac` `ui/channels.rs:302`) — for the
+/// owner a second identifier, for a member a dangling separator, and for either the loss of the
+/// only thing telling one row from the next.
 fn label_without_the_name(b: &ChannelBinding) -> String {
+    let platform = || {
+        Platform::parse(&b.platform).map_or_else(|| b.platform.clone(), |p| p.label().to_owned())
+    };
     let parts: Vec<&str> = b.label.split(" · ").collect();
-    match parts.len().saturating_sub(1).min(2) {
-        0 => Platform::parse(&b.platform)
-            .map_or_else(|| b.platform.clone(), |p| p.label().to_owned()),
-        keep => parts[..keep].join(" · "),
+    let keep = parts.len().saturating_sub(1).min(2);
+    let kept: Vec<&str> = parts[..keep]
+        .iter()
+        .copied()
+        .filter(|seg| b.external_chat_id.is_empty() || !seg.contains(&b.external_chat_id))
+        .collect();
+    if kept.is_empty() {
+        platform()
+    } else {
+        kept.join(" · ")
     }
 }
 
 /// The binding as this caller may see it. A member keeps what answers "is this project
-/// connected, and where" — platform, kind of conversation, chat and project — and loses the two
-/// fields that say *who the owner is* on that platform: `external_user_id`, their account, and
-/// the display name the adapters bake into `label`.
+/// connected, and where" — the platform, the kind of conversation, the project and the chat —
+/// and loses the three fields that say *who the owner is* on that platform: `external_user_id`,
+/// `external_chat_id`, and the display name the adapters bake into `label`.
 ///
-/// Redacting only the account id would be the worse half of the job: the name sitting beside it
-/// is bound to a platform the owner actually uses, and across several bindings that composes
-/// into a map of where they can be reached, which is the thing being hidden.
+/// Redacting only the account id would be the worse half of the job twice over. The name
+/// sitting beside it is bound to a platform the owner actually uses, and across several
+/// bindings that composes into a map of where they can be reached, which is the thing being
+/// hidden. And the chat id is not a row key: WhatsApp uses the counterpart's phone number for
+/// both ids (`whatsapp.rs:126`) and a Telegram private chat is identified by the user's own id,
+/// so on two of the four platforms it is a verbatim copy of the field above it. Slack and
+/// Beeper address a conversation rather than a person, but the relay cannot read a platform's
+/// id scheme off the row, and a per-platform carve-out would be wrong the first time a platform
+/// changed one. Nothing renders it for a member, so the uniform rule costs nothing.
 ///
-/// **The two fields are redacted differently, on purpose, and the client is what decides which.**
-/// `external_user_id` is blanked: nothing renders it, so an empty string is invisible.
-/// `label` is truncated instead, because it is the only thing distinguishing one row from
-/// another in the interface, and because a blank one makes the Mac fall back to drawing the
-/// external chat id. Do not flatten these into one rule — ask what the client does with the
-/// field.
+/// **The fields are redacted differently, on purpose, and the client is what decides which.**
+/// `external_user_id` and `external_chat_id` are blanked: no view reads either, so an empty
+/// string is invisible. `label` is truncated instead, because it is the only thing
+/// distinguishing one row from another in the interface, and because a blank one makes the Mac
+/// fall back to drawing the chat id. Do not flatten these into one rule — ask what the client
+/// does with the field.
 ///
 /// Blanked rather than absent, also deliberately. Both clients decode
 /// `arbos_core::api::ChannelBindingDto` — `arbos-mac` directly (`sync/relay.rs`), iOS through
@@ -484,7 +504,9 @@ fn binding_dto_for(
     let mut dto = binding_dto(b);
     if !state.owns(principal, &b.project_id) {
         dto.external_user_id = String::new();
+        // Read off `b`, not `dto`: spotting a quoted chat id needs the real one.
         dto.label = label_without_the_name(b);
+        dto.external_chat_id = String::new();
     }
     dto
 }
@@ -1517,18 +1539,20 @@ mod tests {
         let mine = body_of(list_bindings(State(state.clone()), s.owner.clone()).await).await;
         let mine = &mine["items"][0];
 
-        assert_eq!(mine["externalUserId"], "tg-user", "the owner is told");
-        assert_eq!(theirs["externalUserId"], "", "the member is not");
-        assert_ne!(
-            mine["externalUserId"], theirs["externalUserId"],
-            "the redaction must not be reading its predicate backwards"
-        );
+        for (field, owners) in [("externalUserId", "tg-user"), ("externalChatId", "tg-chat")] {
+            assert_eq!(mine[field], owners, "{field}: the owner is told");
+            assert_eq!(theirs[field], "", "{field}: the member is not");
+            assert_ne!(
+                mine[field], theirs[field],
+                "{field}: the redaction must not be reading its predicate backwards"
+            );
 
-        // Empty, not absent: both clients decode `externalUserId` as a non-optional String.
-        assert!(
-            theirs.get("externalUserId").is_some_and(Value::is_string),
-            "the key stays, or the whole GET /channels decode fails: {theirs}"
-        );
+            // Empty, not absent: both clients decode these as non-optional Strings.
+            assert!(
+                theirs.get(field).is_some_and(Value::is_string),
+                "{field}: the key stays, or the whole GET /channels decode fails: {theirs}"
+            );
+        }
 
         // The label carries the owner's display name on the platform, so a member gets it
         // truncated to the platform metadata rather than blanked — see below for why not blank.
@@ -1543,9 +1567,11 @@ mod tests {
         // `GET /channels` answers alike, since both routes read the same helper.
         let seen = body_of(overview(State(state.clone()), s.member).await).await;
         assert_eq!(seen["bindings"][0]["externalUserId"], "");
+        assert_eq!(seen["bindings"][0]["externalChatId"], "");
         assert_eq!(seen["bindings"][0]["label"], "Telegram · direct");
         let seen = body_of(overview(State(state.clone()), s.owner).await).await;
         assert_eq!(seen["bindings"][0]["externalUserId"], "tg-user");
+        assert_eq!(seen["bindings"][0]["externalChatId"], "tg-chat");
         assert_eq!(
             seen["bindings"][0]["label"],
             "Telegram · direct · Ada Lovelace"
@@ -1651,36 +1677,51 @@ mod tests {
     /// always the last segment; the leading segments are platform metadata.
     #[test]
     fn a_truncated_label_keeps_the_platform_and_drops_the_person() {
-        let labelled = |platform: &str, label: &str| ChannelBinding {
+        let labelled = |platform: &str, chat: &str, label: &str| ChannelBinding {
             id: "b".into(),
             platform: platform.into(),
-            external_chat_id: "chat".into(),
+            external_chat_id: chat.into(),
             external_user_id: "user".into(),
             project_id: "p".into(),
             chat_id: "c".into(),
             label: label.into(),
             bound_at: 0,
         };
-        for (platform, built, expected) in [
+        for (platform, chat, built, expected) in [
             // telegram.rs:91, slack.rs:159, whatsapp.rs:135, beeper.rs:103.
-            ("telegram", "Telegram · direct · Ada", "Telegram · direct"),
-            ("slack", "Slack · channel · Ada", "Slack · channel"),
-            ("whatsapp", "WhatsApp · Ada", "WhatsApp"),
-            ("beeper", "Beeper · signal · Ada", "Beeper · signal"),
+            (
+                "telegram",
+                "8812",
+                "Telegram · direct · Ada",
+                "Telegram · direct",
+            ),
+            ("slack", "D024BE91L", "Slack · DM · Ada", "Slack · DM"),
+            ("whatsapp", "15555550123", "WhatsApp · Ada", "WhatsApp"),
+            (
+                "beeper",
+                "!room:beeper.local",
+                "Beeper · signal · Ada",
+                "Beeper · signal",
+            ),
+            // Slack writes the channel id into the label for anything but a DM, so the segment
+            // that would hand back the redacted id goes with the name.
+            ("slack", "C024BE91L", "Slack · #C024BE91L · Ada", "Slack"),
             // A name with the separator inside it must not survive on the strength of it.
             (
                 "telegram",
+                "8812",
                 "Telegram · direct · Ada · Lovelace",
                 "Telegram · direct",
             ),
             // `handle_inbound` falls back to a bare sender name when the adapter gives none.
-            ("telegram", "Ada Lovelace", "Telegram"),
-            ("nonsense", "Ada Lovelace", "nonsense"),
+            ("telegram", "8812", "Ada Lovelace", "Telegram"),
+            ("nonsense", "x", "Ada Lovelace", "nonsense"),
         ] {
-            let got = label_without_the_name(&labelled(platform, built));
+            let got = label_without_the_name(&labelled(platform, chat, built));
             assert_eq!(got, expected, "{built}");
-            assert!(!got.is_empty(), "never empty, or the Mac draws the chat id");
+            assert!(!got.is_empty(), "never empty, or the row loses its name");
             assert!(!got.contains("Ada"), "the person does not survive: {got}");
+            assert!(!got.contains(chat), "nor the chat id: {got}");
         }
     }
 
