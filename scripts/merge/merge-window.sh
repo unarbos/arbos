@@ -39,6 +39,19 @@ changes_since() { git log --format='%H %s' --first-parent "$1..${MW_TEST_HEAD:-o
 # "nogate" leaves the Swift gate out, for a caller that judges the gate itself (go, through range_gate).
 verdict() {
   local sha=$1 s8=${1:0:8} since ci tag
+  # Three reads below reach into this checkout's object store — `git tag --contains`, the NOPATH
+  # branch's ci.yml and diff, and the commit date that lower-bounds the Release-run window — and every
+  # one of them answers empty for a commit the checkout does not have. The date is the one that
+  # reaches a verdict: an empty $since makes the window `created=>=`, which GitHub accepts and matches
+  # nothing, so the short-read floor is satisfied at 0 of 0 and the tail of this function prints a
+  # WAIT naming zero Release runs. Measured on ebd909abd in a shallow clone that lacks it: `fatal: bad
+  # object`, then `date: invalid date '@'`, then "read all 0 Release runs created since " — a stalled
+  # release lane and a checkout that never looked are the same sentence, and the merge driver reads
+  # that sentence as the lane. This kit's rule is the one checks.sh states: an unanswerable question
+  # is BLOCKED, never an answer. Deliberately not fetched — this path is read only, and the fetch that
+  # would fix it moves the very refs the rest of the kit judges main by.
+  git cat-file -e "$sha^{commit}" 2>/dev/null \
+    || { echo "BLOCKED $s8 is not a commit in this checkout, so nothing local can be read about it. Fetch it, then re-run: git fetch origin main"; return; }
   # MW_TEST_HISTORY=1 / MW_TEST_UNTIL=<iso>: test-only, to replay an old commit's verdict.
   if [ -z "${MW_TEST_HISTORY:-}" ]; then
     for t in $(git tag --contains "$sha" 2>/dev/null | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | head -1); do echo "TAG $t"; return; done
@@ -83,7 +96,14 @@ verdict() {
     ""|null*) echo "WAIT no CI run yet"; return ;;
     *) echo "WAIT CI $ci"; return ;;
   esac
-  since=$(date -u -d "@$(git show -s --format=%ct "$sha")" +%Y-%m-%dT%H:%M:%SZ)
+  # The floor the guard at the top of this function protects, asserted where the harm lands rather
+  # than only where today's cause is: whatever empties $since — a missing object, a `date` without
+  # GNU's -d @<epoch> — the window becomes one GitHub answers with zero runs instead of rejecting.
+  since=$(date -u -d "@$(git show -s --format=%ct "$sha" 2>/dev/null)" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
+  case "$since" in
+    ????-??-??T??:??:??Z) ;;
+    *) echo "BLOCKED cannot read $s8's commit date locally, so the Release-run window has no lower bound and every run would fall outside it: got '$since'"; return ;;
+  esac
   local window=">=$since"; [ -n "${MW_TEST_UNTIL:-}" ] && window="$since..$MW_TEST_UNTIL"
   # Every page: the list grows all day (one scheduled run per 15 min), so page 1 alone loses the run that
   # judged an older commit. The total is read first, so a run created mid-read cannot fake a shortfall.
