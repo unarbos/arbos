@@ -99,6 +99,42 @@ Working path for iPhone shots and flows:
 
 Do not install Simulator.app or any other system-wide tool on the shared Mac without the coordinator's go-ahead.
 
+## The gate usually runs on one simulator clone, and its `error:` grep is not a verdict (2026-11-02)
+
+Two facts about `Swift core check` that are easy to assume wrongly. Measured over 32 archived
+`xcodebuild-test.log` artifacts.
+
+**Do not design around parallelism the gate mostly does not get.** The `test` lane
+(`apps/ios/Arbos/fastlane/Fastfile:146-153`) passes neither `-parallel-testing-enabled` nor a worker count, so
+xcodebuild decides per run whether to clone a second simulator for the unit bundle. In practice it usually
+does not:
+
+| what the run actually did | runs |
+|---|---|
+| everything on one clone | 25 of 32 |
+| a second clone that really ran cases (6 to 169 of them) | 7 of 32 |
+| of those 25, forced to one clone by a launch denial | 4 |
+
+So single-clone is the normal state, not a degradation of a parallel norm. A schedule, a timing budget or a
+suite-splitting plan that assumes the unit and UI bundles overlap will be wrong about three runs in four. The
+UI bundle (`ArbosUITests`) is serial regardless, so a suite inside it costs its full wall time on the critical
+path under either topology.
+
+Read the topology from the clone *name counts*, not from the error text: a clone that worked appears on
+hundreds of case lines (`Test suite 'RowStorageTests' started on 'Clone 2 of iPhone 17 - Arbos (30206)'`),
+while a clone that was booted and retired appears exactly once in the whole log.
+
+**The trap, for whoever next makes the gate stricter.** When the second clone's SpringBoard refuses the test
+host's launch (`FBSOpenApplicationServiceErrorDomain Code=1 … RequestDenied`), xcodebuild retires that clone
+silently, runs everything on Clone 1, loses no case and reports `** TEST SUCCEEDED **`. The only reason the
+denial reaches the console at all is that `xcodebuild_logged`'s `/error:/` grep incidentally matches the
+string `SimCallingSelector=launchApplicationWithID:options:pid:error:`.
+
+**So the console `error:` count must not be wired into a pass/fail verdict.** Doing so converts these
+transients into false reds on runs where every single case passed — and they are not rare: 4 of these 32
+runs, and 12 of the 527-green-run census. A completeness check belongs on cases and bundles actually run
+(what `require_tests_ran!` does), never on a grep of the log.
+
 ## Rigs take a heavy slot on the shared EC2 Mac (2026-10-26 20:30 UTC)
 
 The Mac's heavy-job cap (`/usr/local/bin/arbos-heavy-slot.sh`, versioned at `scripts/runner/arbos-heavy-slot.sh`;
