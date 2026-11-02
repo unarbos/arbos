@@ -74,7 +74,7 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     ///
     /// Everything above happened on `long-304`, and it is the row #2535 is about. It is also a
     /// 72 pt row, which after #2538 narrowed the band to the chat bar leaves it a 289 pt aim
-    /// window against a rig whose shortest possible travel is about 320 pt. By `aimWindow`'s
+    /// window against a rig whose shortest possible travel is 302 to 357 pt. By `aimWindow`'s
     /// inequality **that row cannot be landed on by any gesture this rig can make**, which is
     /// why the two arms aiming at it reddened `main` on `a6770934f` and were quarantined. It
     /// was never a flake waiting on a better step.
@@ -84,7 +84,7 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// the long drag back through the results is unchanged — the reader's motion #2404
     /// describes is still what the arms perform. It is the same markdown body as
     /// `convergingTarget`, so its height is already measured at 231 pt and its window is
-    /// 448 pt, clearing the 320 pt floor by 128.
+    /// 448 pt, clearing the worst measured floor travel of 357 pt by 91.
     ///
     /// What the substitution gives up is that the pair no longer pins the exact row whose
     /// six-of-six failure motivated #2535. **The suite checks that for itself**: the pre-fix
@@ -108,7 +108,7 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// How many times a row may be carried past its window and dragged back before the case
     /// gives up.
     ///
-    /// A reverse exists because the carry is 200 pt the gesture does not control, so an
+    /// A reverse exists because the carry is 148 to 237 pt the gesture does not control, so an
     /// overshoot is possible however carefully the ask is sized. It is capped low on purpose:
     /// a rig that may ping-pong indefinitely is a rig that hides a fault by eventually getting
     /// lucky, which is the failure mode this whole suite was written to stop. Three says the
@@ -432,8 +432,9 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// reverse, so a row carried past the last position it could be aimed from was lost and
     /// the case failed — which is what reddened main on `a6770934f`. A reverse was argued
     /// against for as long as the forward step was believed to be deliverable; once
-    /// `dragCarry` measured 200 pt of travel the gesture does not control, a single overshoot
-    /// became terminal with no constant able to prevent it, so the rig needs a way back.
+    /// `dragCarry` measured 148 to 237 pt of travel the gesture does not control, a single
+    /// overshoot became terminal with no constant able to prevent it, so the rig needs a way
+    /// back.
     ///
     /// It is deliberately crude and deliberately bounded. It takes the longest gesture the
     /// band will hold, which is more than a window's width, so one of them puts the row back
@@ -473,15 +474,16 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     ///
     /// Each drag moves the row by one travel, so the resting positions are a lattice of that
     /// spacing, and a lattice only lands inside a window when its spacing fits in the window.
-    /// The shortest travel available is `minNudge + dragCarry`, about 320 pt on the gate, so
-    /// the rig can be relied on only where
+    /// The shortest travel available is `minNudge + dragCarry`, measured at 302 to 357 pt
+    /// across the four arms of run 41422187815, so the rig can be relied on only where
     ///
     ///     band.height + frame.height - 97  >=  minNudge + carry
     ///
-    /// which on the gate means a row of **about 103 pt or taller**. A 72 pt row gives 289 pt
-    /// against a 320 pt floor and **cannot be landed on by choosing a different step** — the
-    /// sizing below is what makes the rig honest and readable, not what makes that row
-    /// reachable. That is why `stuckTarget` moved to a 231 pt row at the same depth rather
+    /// which on the gate's 314 pt band means a row of **about 140 pt or taller**. A 72 pt row
+    /// gives 289 pt against a 357 pt floor and **cannot be landed on by choosing a different
+    /// step** — the sizing below is what makes the rig honest and readable, not what makes
+    /// that row reachable. That is why `stuckTarget` moved to a 231 pt row at the same depth
+    /// rather
     /// than staying where it was and waiting for a better gesture.
     private func aimWindow(for frame: CGRect, band: CGRect) -> (highest: CGFloat, lowest: CGFloat) {
         (highest: band.minY + Self.aimBandMargin - frame.height + Self.bubbleBottomAim,
@@ -499,16 +501,29 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// green was where the dice fell.
     ///
     /// **What the carry is remains unknown, and that is the reason this is measured rather
-    /// than predicted.** Holding the finger still removed the variable part — five of those
-    /// six are inside a 4 pt spread, where the flick they replaced ranged over 188 pt — so it
-    /// is not the deceleration it was taken for. The standing guess is the `LazyVStack`
-    /// correcting estimated row heights above the target as they realize, which would move the
-    /// row's frame further than the scroll moves it. A number nobody can derive is a number
-    /// the rig has to read off its own gestures, which is all this is.
+    /// than predicted.** Holding the finger still removed the variable part of a *single*
+    /// repeated gesture — six identical 133 pt asks landed inside a 19 pt spread, where the
+    /// flick they replaced ranged over 188 pt — so it is not the deceleration it was taken
+    /// for. The standing guess is the `LazyVStack` correcting estimated row heights above the
+    /// target as they realize, which would move the row's frame further than the scroll moves
+    /// it. A number nobody can derive is a number the rig has to read off its own gestures,
+    /// which is all this is.
     ///
-    /// The most recent measurement is kept rather than an average: the spread within a run is
-    /// a few points, so recency costs nothing and tracks a carry that drifts with how much of
-    /// the list has been realized.
+    /// ## The carry is not nearly as steady as this comment used to claim
+    ///
+    /// It said "the spread within a run is a few points". Run 41422187815 measured seven
+    /// carries across the four arms — 148, 182, 182, 195, 200, 211 and 237 pt — so the spread
+    /// **inside one run is 89 pt**, and the two laws fitted before it (`ask + 200` and
+    /// `105 + 1.17 × ask`) each describe one run rather than the gesture. The steadiness was
+    /// read off six asks of the same length in one arm and does not survive four arms.
+    ///
+    /// The most recent measurement is still what is kept, and the reason is now different.
+    /// Averaging an 89 pt spread would not predict the next drag any better; what makes the
+    /// sizing work is not precision but the window absorbing the error. On that run the worst
+    /// miss was 47 pt against a 231 pt row's half-window of 224 pt. **The design does not
+    /// depend on the carry being stable — only on it being smaller than the window.** That is
+    /// the inequality in `aimWindow`, and it is the whole reason the target had to change
+    /// height rather than the gesture change length.
     private var dragCarry: CGFloat?
 
     /// The gesture length to ask for next, so that what the list does lands the row in the
@@ -526,11 +541,11 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     ///   less the carry, bounded by `minNudge` and by what the band can hold.
     ///
     /// The bound at `minNudge` is the one worth checking, because it is where the sizing gives
-    /// up precision. The shortest travel the rig can deliver is `minNudge + carry`, about
-    /// 320 pt on the gate, and the worst place to be when that is more than is wanted is just
-    /// above the window. For the 231 pt rows these arms now take, that is y-31 + 320 = y289,
-    /// comfortably inside a window that ends at y417 — so **the floor cannot overshoot while
-    /// `minNudge + carry` stays under the window's width**, which is the inequality in
+    /// up precision. The shortest travel the rig can deliver is `minNudge + carry`, measured
+    /// at 302 to 357 pt on run 41422187815, and the worst place to be when that is more than
+    /// is wanted is just above the window. For the 231 pt rows these arms now take, that is
+    /// y-31 + 357 = y326, inside a window that ends at y417 — so **the floor cannot overshoot
+    /// while `minNudge + carry` stays under the window's width**, which is the inequality in
     /// `aimWindow` and the reason the targets are the height they are. Beyond it the sizing
     /// can overshoot, and `unnudge` is the bounded way back.
     private func nudgeLength(for frame: CGRect?, band: CGRect) -> CGFloat {
@@ -562,9 +577,9 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// 41405456143 is the only kind worth having.
     ///
     /// It is a hard floor, not a preference: there is no shorter gesture available, so
-    /// `minNudge + dragCarry` — about 320 pt on the gate — is the shortest travel this rig can
-    /// deliver at all. That number is what decides which rows it can land on; see
-    /// `aimWindow`.
+    /// `minNudge + dragCarry` — measured at 302 to 357 pt on run 41422187815 — is the shortest
+    /// travel this rig can deliver at all. That range is what decides which rows it can land
+    /// on; see `aimWindow`.
     private static let minNudge: CGFloat = 120
 
     /// The longest gesture the band can hold, keeping 30 pt clear at each end so neither the
