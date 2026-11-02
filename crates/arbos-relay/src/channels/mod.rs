@@ -743,17 +743,13 @@ fn outcome_json(o: &Outcome) -> Value {
 }
 
 /// `GET /channels/mock/outbox`: what was (or would have been) sent to the caller's own channels,
-/// newest first. Mock mode only, like `mock_inbound` — the rows are real outbound message text,
-/// so a route named "mock" must not serve them on a production relay.
+/// newest first. Reachable on a production relay on purpose — the rows are the only record of
+/// what the relay tried to send, which is what makes it worth reading when a channel is
+/// misbehaving. The scoping is what keeps it safe to leave up: it answers for the caller's own
+/// bindings and nobody else's.
 pub async fn mock_outbox(State(state): State<AppState>, principal: Principal) -> ApiResult {
     if principal.is_box() {
         return Err((StatusCode::FORBIDDEN, "device only".into()));
-    }
-    if !mock_on(&state) {
-        return Err((
-            StatusCode::CONFLICT,
-            "set ARBOS_CHANNELS_MOCK=1 on the relay to use the mock outbox".into(),
-        ));
     }
     let ids: Vec<String> = visible_bindings(&state, &principal)?
         .into_iter()
