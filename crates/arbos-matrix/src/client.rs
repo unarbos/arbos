@@ -66,6 +66,20 @@ const HISTORY_PAGE: u32 = 50;
 const ROOM_RANGE_END: u32 = 1999;
 const POLL_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// The mxids entitled to name a sender other than themselves in a row's content, for
+/// [`message_row`]: the room's creators. The relay creates every room and Space as the
+/// owner (`matrix/spaces.rs::server_spec`, `matrix/worker.rs::create_room`) and carries
+/// system notices and departed members' messages as that same mxid, so the create event
+/// is the authority. Empty when the create event is not in the store yet, which attributes
+/// such a row to the mxid that sent it until it is — the safe direction.
+fn creators_of(room: &Room) -> Vec<String> {
+    room.creators()
+        .unwrap_or_default()
+        .iter()
+        .map(|u| u.to_string())
+        .collect()
+}
+
 pub struct MatrixClient {
     client: Client,
     me: OwnedUserId,
@@ -147,7 +161,10 @@ impl MatrixClient {
                     }
                     v["room_id"] = json!(room.room_id().as_str());
                     let names = this.names_for(&room, std::slice::from_ref(&v)).await;
-                    if let Some(row) = message_row(&v, &|m| names.get(m).cloned()) {
+                    let creators = creators_of(&room);
+                    if let Some(row) = message_row(&v, &|m| names.get(m).cloned(), &|m| {
+                        creators.iter().any(|c| c == m)
+                    }) {
                         this.push_rows(room.room_id(), vec![row], true);
                     }
                 }
@@ -450,9 +467,14 @@ impl MatrixClient {
             .filter_map(|e| serde_json::from_str::<Value>(e.raw().json().get()).ok())
             .collect();
         let names = self.names_for(room, &events).await;
+        let creators = creators_of(room);
         let rows: Vec<MessageRow> = events
             .iter()
-            .filter_map(|v| message_row(v, &|m| names.get(m).cloned()))
+            .filter_map(|v| {
+                message_row(v, &|m| names.get(m).cloned(), &|m| {
+                    creators.iter().any(|c| c == m)
+                })
+            })
             .collect();
         Ok((rows, page.end))
     }

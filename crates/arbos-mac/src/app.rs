@@ -13803,7 +13803,8 @@ mod channel_sender_tests {
             "origin_server_ts": at,
             "content": { "msgtype": "m.text", "body": text, "life.arbos.id": id },
         });
-        arbos_matrix::rows::message_row(&ev, &|_| Some(handle.to_owned())).expect("row")
+        // No declared sender in this fixture, so nothing may be declared either.
+        arbos_matrix::rows::message_row(&ev, &|_| Some(handle.to_owned()), &|_| false).expect("row")
     }
 
     fn scout() -> Person {
