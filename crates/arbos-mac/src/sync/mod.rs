@@ -1395,6 +1395,13 @@ pub enum ClientCommand {
     SkillDelete {
         id: Id,
     },
+    /// F5: re-file a skill into one of my own projects. The relay moves the row when it recorded
+    /// me as the writer and claims a copy when it recorded nobody, so this cannot be applied
+    /// optimistically: the `SyncEvent::Skills` that follows carries whichever it did.
+    SkillRefile {
+        id: Id,
+        project_id: Id,
+    },
     /// Settings → Channels opened or asked for a refresh.
     RefreshChannels,
     /// Mint a pairing code for a project (its pinned chat unless `chat_id`).

@@ -1099,6 +1099,13 @@ impl Shell {
         )
         .detach();
         let skills = cx.new(|cx| SkillsPanel::new(state.clone(), cx));
+        // Rig: `ARBOS_OPEN_SKILLS=1` opens the library as its bottom-left popover, and
+        // `ARBOS_OPEN_SKILLS=<slug>` also selects that skill. It is the only way in at the
+        // moment — Settings hides Skills (it is not in `SettingsPage::LISTED` and nothing calls
+        // `open_settings_page` with it), so without this the panel cannot be shot or driven.
+        if std::env::var("ARBOS_OPEN_SKILLS").is_ok_and(|v| !v.is_empty()) {
+            skills.update(cx, |p, cx| p.open(window, cx));
+        }
         cx.observe(&skills, |_, _, cx| cx.notify()).detach();
         let feedback = cx.new(|cx| FeedbackSheet::new(state.clone(), cx));
         cx.observe(&feedback, |_, _, cx| cx.notify()).detach();

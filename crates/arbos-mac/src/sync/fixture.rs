@@ -2751,6 +2751,31 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             shared.skills.lock().unwrap().retain(|s| s.id != id);
             emit_skills(shared);
         }
+        ClientCommand::SkillRefile { id, project_id } => {
+            {
+                let mut skills = shared.skills.lock().unwrap();
+                // Always the claim, never the move: the relay only moves a row it recorded this
+                // user as writing, and no row here has a writer — the column arrived after they
+                // were all made, which is the state of every skill on the relay today.
+                if let Some(origin) = skills.iter().find(|s| s.id == id).cloned() {
+                    let now = now_ms() as i64;
+                    let slug = (2..50)
+                        .map(|n| format!("{}-{n}", origin.slug))
+                        .find(|candidate| !skills.iter().any(|s| &s.slug == candidate))
+                        .unwrap_or_else(|| origin.slug.clone());
+                    skills.push(Skill {
+                        id: new_id(),
+                        slug,
+                        origin_project_id: Some(project_id),
+                        version: 1,
+                        created_at: now,
+                        updated_at: now,
+                        ..origin
+                    });
+                }
+            }
+            emit_skills(shared);
+        }
         ClientCommand::RefreshChannels => emit_channels(shared),
         ClientCommand::ChannelPairNew {
             project_id,
@@ -5483,6 +5508,19 @@ fn seed_skills() -> Vec<Skill> {
             Some(PROJECT_COMMS),
             false,
             52,
+        ),
+        // Filed in Sam's "Studio", which this account is only a guest of (D72), so the library
+        // has one row in the state the re-file action exists for.
+        skill(
+            "studio-render-queue",
+            "Studio render queue",
+            "How the Studio box batches renders overnight and where the output lands.",
+            &["studio", "process"],
+            "Any question about queueing, retrying or collecting an overnight render.",
+            "## Queue\n\n1. Drop the scene into `queue/` with a `.job` beside it.\n2. The box picks it up on the hour and writes to `out/<date>/`.\n\n## Pitfalls\n\n- A job without a `.job` file is skipped in silence; check `queue/rejected.log`.\n",
+            Some(SHARED_STUDIO),
+            false,
+            18,
         ),
         skill(
             "release-checklist",

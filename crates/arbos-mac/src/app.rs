@@ -11777,6 +11777,14 @@ impl AppState {
         cx.notify();
     }
 
+    /// Move a skill into a project of mine, or claim a copy of it. Which one happens is the
+    /// relay's decision and not knowable here, so nothing is changed locally until its `Skills`
+    /// event arrives — an optimistic move would show the wrong thing for the claim.
+    pub fn refile_skill(&mut self, id: Id, project_id: Id, cx: &mut Context<Self>) {
+        self.command(ClientCommand::SkillRefile { id, project_id });
+        cx.notify();
+    }
+
     // ----- channels (F7) ---------------------------------------------------
 
     pub fn refresh_channels(&mut self, cx: &mut Context<Self>) {

@@ -8876,6 +8876,29 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 refresh_skills(&shared).await;
             });
         }
+        ClientCommand::SkillRefile { id, project_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let body = json!({ "project_id": project_id });
+                match shared
+                    .post_json_status(&format!("/skills/{id}/refile"), body, &[])
+                    .await
+                {
+                    // 201 is the claim: the relay recorded no writer for the row, so it copied it
+                    // rather than moving somebody else's. The copy carries a new id and slug.
+                    Ok((status, v)) => {
+                        let slug = v.get("slug").and_then(Value::as_str).unwrap_or_default();
+                        shared.notice(if status.as_u16() == 201 {
+                            format!("Claimed a copy of \"{slug}\"; the original is untouched")
+                        } else {
+                            format!("Skill \"{slug}\" re-filed")
+                        });
+                    }
+                    Err(err) => shared.fail("re-file the skill", &err),
+                }
+                refresh_skills(&shared).await;
+            });
+        }
         ClientCommand::RefreshChannels => {
             let shared = shared.clone();
             tokio::spawn(async move {
