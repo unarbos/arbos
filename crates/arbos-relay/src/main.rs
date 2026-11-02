@@ -881,6 +881,10 @@ async fn main() -> anyhow::Result<()> {
             "/room/{project}/{chat}/checkpoint",
             get(rooms::get_checkpoint).post(rooms::post_checkpoint),
         )
+        .route(
+            "/room/{project}/{chat}/repair",
+            post(rooms::post_room_repair),
+        )
         .route("/room/{project}/{chat}/stats", get(rooms::room_stats))
         .route(
             "/room/{project}/{chat}/messages/{message_id}",

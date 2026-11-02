@@ -86,6 +86,26 @@ CREATE TABLE IF NOT EXISTS rows (
   PRIMARY KEY (room, seq)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS rows_batch ON rows(room, batch_id);
+-- Rows the relay could not decode as a Loro update, moved out of `rows` so that compaction can
+-- proceed. The bytes are kept, never served: `rooms::quarantine_undecodable_rows` moves a row here
+-- and the relay then checkpoints over its seq, which is the only way to reopen a room whose
+-- compaction has wedged.
+--
+-- This table is deliberately OUTSIDE every read path over `rows`, and that is what it is FOR, not an
+-- oversight to tidy up. In particular `rooms::checkpoint_covers_store` must never union it. The
+-- wedge this table exists to fix is caused by a row that cannot be imported into any snapshot being
+-- counted as missing from it, forever; a validation walk that reads quarantine re-imports exactly
+-- those bytes, fails again, and restores the original bug in full. "While we are here, we should
+-- validate against everything we have stored" is the one change that must not be made.
+--
+-- `batch_id` is carried, and uniquely indexed, for a reason that outlives this table's own purpose:
+-- see `Db::row_seq_for_batch`.
+CREATE TABLE IF NOT EXISTS quarantine (
+  room TEXT NOT NULL, seq INTEGER NOT NULL, device TEXT NOT NULL, batch_id TEXT NOT NULL,
+  bytes BLOB NOT NULL, created_at INTEGER NOT NULL, quarantined_at INTEGER NOT NULL,
+  PRIMARY KEY (room, seq)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS quarantine_batch ON quarantine(room, batch_id);
 CREATE TABLE IF NOT EXISTS checkpoints (
   room TEXT PRIMARY KEY, seq INTEGER NOT NULL, frontier BLOB NOT NULL, bytes BLOB NOT NULL,
   size INTEGER NOT NULL, created_at INTEGER NOT NULL
@@ -1768,12 +1788,28 @@ impl Db {
         })
     }
 
-    /// Seq of a stored batch id, if any — used to ACK a resent push as `dup` before the people
-    /// gates (so a reconnect storm does not burn the message rate limit).
+    /// Seq of a batch id this room has already taken, if any — used to ACK a resent push as `dup`
+    /// before the people gates (so a reconnect storm does not burn the message rate limit).
+    ///
+    /// Reads `rows` **and** `quarantine`, and that second read is load-bearing rather than
+    /// bookkeeping. Before quarantine existed, the deepest layer of this defence was not this query
+    /// at all: it was the `rows_batch` UNIQUE index, so even with every lookup wrong SQLite itself
+    /// refused the duplicate insert. A row moved to `quarantine` leaves that index, and since SQLite
+    /// cannot express a unique index spanning two tables, the database-level guarantee silently stops
+    /// covering those bytes — no error and no diagnostic. This lookup is therefore the *only*
+    /// remaining defence for a quarantined batch, where for a stored one it is the outer of two.
+    ///
+    /// What it protects is not only unbounded storage. A re-pushed batch that is not recognised is
+    /// appended at a **new seq** and broadcast to every socket in the room, and the box's sync
+    /// bookkeeping is keyed on seq, so it cannot recognise bytes arriving at a seq it has never
+    /// seen. Relaxing this check corrupts another component's state machine.
     pub fn row_seq_for_batch(&self, room: &str, batch_id: &str) -> Result<Option<i64>> {
         self.with(|c| {
             c.query_row(
-                "SELECT seq FROM rows WHERE room = ?1 AND batch_id = ?2",
+                "SELECT seq FROM rows WHERE room = ?1 AND batch_id = ?2
+                 UNION ALL
+                 SELECT seq FROM quarantine WHERE room = ?1 AND batch_id = ?2
+                 LIMIT 1",
                 params![room, batch_id],
                 |r| r.get(0),
             )
@@ -1791,8 +1827,18 @@ impl Db {
     ) -> Result<(i64, bool)> {
         let now = now_ms();
         self.with(|c| {
+            // Both tables, for the reason given on `row_seq_for_batch`: a quarantined row is no
+            // longer covered by the `rows_batch` unique index, so this query is all that stands
+            // between a replayed batch and a second seq for bytes the room already took.
             let existing: Option<i64> = c
-                .query_row("SELECT seq FROM rows WHERE room = ?1 AND batch_id = ?2", params![room, batch_id], |r| r.get(0))
+                .query_row(
+                    "SELECT seq FROM rows WHERE room = ?1 AND batch_id = ?2
+                     UNION ALL
+                     SELECT seq FROM quarantine WHERE room = ?1 AND batch_id = ?2
+                     LIMIT 1",
+                    params![room, batch_id],
+                    |r| r.get(0),
+                )
                 .optional()?;
             if let Some(seq) = existing {
                 return Ok((seq, true));
@@ -1836,6 +1882,55 @@ impl Db {
             )?;
             let rows = st.query_map(params![room, after, upto, limit], |r| {
                 Ok(Row { seq: r.get(0)?, device: r.get(1)?, batch_id: r.get(2)?, bytes: r.get(3)? })
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// Move one row out of `rows` and into `quarantine`, keeping its seq and bytes. Returns false
+    /// when that seq is not in `rows` (already moved, or already covered by a checkpoint).
+    ///
+    /// A move, not a flag: every read path over `rows` — the catch-up walk, `room_health`,
+    /// `load_doc`, the row count and bytes in `room_state`, and the checkpoint validation walk — is
+    /// correct for the same single reason, that `put_checkpoint` has deleted everything at or below
+    /// the last checkpoint. Marking a row in place would break that one precondition for all of them
+    /// at once and leave six readers to patch; taking the row out of the table keeps every one of
+    /// them correct untouched.
+    pub fn quarantine_row(&self, room: &str, seq: i64) -> Result<bool> {
+        let now = now_ms();
+        self.with(|c| {
+            let tx = c.unchecked_transaction()?;
+            let moved = tx.execute(
+                "INSERT INTO quarantine(room, seq, device, batch_id, bytes, created_at, quarantined_at)
+                 SELECT room, seq, device, batch_id, bytes, created_at, ?3 FROM rows
+                 WHERE room = ?1 AND seq = ?2",
+                params![room, seq, now],
+            )?;
+            if moved == 0 {
+                tx.rollback()?;
+                return Ok(false);
+            }
+            tx.execute("DELETE FROM rows WHERE room = ?1 AND seq = ?2", params![room, seq])?;
+            tx.commit()?;
+            Ok(true)
+        })
+    }
+
+    /// Quarantined rows for a room, oldest first. For operator inspection and recovery: the bytes
+    /// are retained precisely because the relay's inability to decode them is not proof they are
+    /// garbage — a replica on a newer encode version may read what this binary cannot.
+    pub fn quarantined_rows(&self, room: &str) -> Result<Vec<Row>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT seq, device, batch_id, bytes FROM quarantine WHERE room = ?1 ORDER BY seq",
+            )?;
+            let rows = st.query_map(params![room], |r| {
+                Ok(Row {
+                    seq: r.get(0)?,
+                    device: r.get(1)?,
+                    batch_id: r.get(2)?,
+                    bytes: r.get(3)?,
+                })
             })?;
             rows.collect()
         })
