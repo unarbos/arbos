@@ -1429,6 +1429,98 @@ mod tests {
         assert_eq!(refused[0]["reason"], "not_the_author");
     }
 
+    /// The two arms answer the same caller differently, and the only thing that chooses between
+    /// them is whether `creator` holds a value — so the refusal above is worth exactly as much
+    /// as the relay's refusal to clear that column. A guest who could empty it would turn their
+    /// own 403 into a 201 and walk away with a copy of a skill they were just told was not
+    /// theirs, which is the one direction in this route where missing data pays.
+    ///
+    /// Nothing can empty it: `creator` is written once, by the `INSERT` in `insert_skill`, and
+    /// no `UPDATE` in the relay names the column. This drives the widest writes a guest has
+    /// against the row — a whole-document markdown replacement, and a body that names a slug
+    /// and an origin project of its own — and then asks the route again.
+    #[tokio::test]
+    async fn no_edit_a_guest_can_make_turns_their_refusal_into_a_claim() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let hers = project_of(&state, &alice, "Alice work");
+        let his = project_of(&state, &bob, "Bob work");
+        state
+            .db
+            .add_project_member(&hers, &bob, &alice)
+            .expect("Bob is a guest of Alice's project");
+        assert_eq!(
+            create_and_read_creator(
+                &state,
+                alice_dev,
+                HeaderMap::new(),
+                "Alice runbook",
+                Some(&hers)
+            )
+            .await,
+            Some(alice.clone())
+        );
+        let id = state.db.skill("alice-runbook").unwrap().unwrap().id;
+
+        assert_eq!(
+            status(refile_to(&state, bob_dev.clone(), &id, &his).await),
+            StatusCode::FORBIDDEN,
+            "the author is recorded, so the guest is refused"
+        );
+
+        // Every write the guest can reach, by id so that renaming the row does not hide it.
+        for attempt in [
+            SkillBody {
+                markdown: Some("---\nname: Bobs runbook\n---\n\nBob's text".into()),
+                ..SkillBody::default()
+            },
+            SkillBody {
+                slug: Some("bobs-runbook".into()),
+                origin_project_id: Some(his.clone()),
+                shared: Some(true),
+                ..SkillBody::default()
+            },
+        ] {
+            let r = update(
+                State(state.clone()),
+                bob_dev.clone(),
+                HeaderMap::new(),
+                Path(id.clone()),
+                Json(attempt),
+            )
+            .await;
+            assert_eq!(status(r), StatusCode::OK, "a guest may edit it (D72)");
+            assert_eq!(
+                state.db.skill_creator(&id).unwrap(),
+                Some(alice.clone()),
+                "and the edit leaves the author exactly as they were"
+            );
+        }
+        assert_eq!(
+            state.db.skill(&id).unwrap().unwrap().origin_project_id,
+            Some(hers.clone()),
+            "an edit does not move the row either: only this route does that"
+        );
+
+        assert_eq!(
+            status(refile_to(&state, bob_dev, &id, &his).await),
+            StatusCode::FORBIDDEN,
+            "so the second ask is refused for the same reason as the first"
+        );
+        let all = state.db.list_skills(&SkillScope::Everything).unwrap();
+        assert_eq!(
+            all.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            vec![id.as_str()],
+            "and no claimed copy was written: Alice's row is still the only one"
+        );
+        let refused = state.db.audit(&hers, 10).unwrap();
+        assert_eq!(refused.len(), 2, "both attempts are written down");
+        assert!(refused
+            .iter()
+            .all(|r| r["allowed"] == false && r["reason"] == "not_the_author"),);
+    }
+
     /// A skill nobody can reach does not become reachable through this route, and it answers
     /// like a skill that is not there rather than confirming one exists.
     #[tokio::test]
