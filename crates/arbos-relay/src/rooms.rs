@@ -28,6 +28,21 @@ const CATCHUP_HOLD: Duration = Duration::from_secs(10);
 /// A device may push back history the relay lacks once per connection (`PushHeader.heal`).
 const HEALS_PER_CONNECTION: u32 = 1;
 
+/// How often an open socket revalidates the ACL it was admitted on.
+///
+/// `ws_room` authorises once, before the upgrade. On its own that made a removal or a ban a
+/// request to disconnect rather than a revocation: a member who simply held the connection kept
+/// reading every row and kept writing rows the remaining members saw, with no heartbeat and no
+/// timeout to end the session. Access is now re-read on every inbound frame — so a read or a
+/// write is refused the moment it is attempted — and on this tick, which bounds how long a
+/// silent listener keeps receiving live rows after their access ends.
+const ACCESS_RECHECK: Duration = if cfg!(test) {
+    // Short enough that the idle-socket test does not sleep for ten seconds.
+    Duration::from_millis(100)
+} else {
+    Duration::from_secs(10)
+};
+
 /// Full rebuild of the room's stored doc (checkpoint ∪ every row). Runs off the socket task via
 /// `spawn_blocking` on a cold cache.
 fn build_room_doc(state: &AppState, room_name: &str) -> anyhow::Result<crate::state::RoomDocCache> {
@@ -225,8 +240,9 @@ pub async fn ws_room(
         }
     }
     let room_name = wire::room_name(&project_id, &chat_id);
+    let acl = acl_key(&project_id, &chat_id);
     ws.max_message_size(wire::ROW_MAX + 8192)
-        .on_upgrade(move |socket| run(socket, state, principal, project_id, room_name))
+        .on_upgrade(move |socket| run(socket, state, principal, project_id, room_name, acl))
 }
 
 /// What `AppState::allows` checks for a room: the project id, or `people:<chat>` for a people chat.
@@ -313,12 +329,23 @@ impl Drop for LastSocketDocCacheClear {
     }
 }
 
+/// The close a socket gets when the access it was admitted on has ended. 1008 Policy Violation,
+/// not the restart code: the client must not treat this as "redial now" — a redial lands on the
+/// same refusal `ws_room` gives any non-member.
+fn revoked_close() -> Message {
+    Message::Close(Some(axum::extract::ws::CloseFrame {
+        code: axum::extract::ws::close_code::POLICY,
+        reason: "no longer a member".into(),
+    }))
+}
+
 async fn run(
     socket: WebSocket,
     state: AppState,
     principal: Principal,
     project_id: String,
     room_name: String,
+    acl: String,
 ) {
     let conn_id = state.conn_seq.fetch_add(1, Ordering::Relaxed) + 1;
     let room = state.room(&room_name).await;
@@ -364,6 +391,8 @@ async fn run(
     let mut delivery = Delivery::default();
     let hold_deadline = tokio::time::sleep(CATCHUP_HOLD);
     tokio::pin!(hold_deadline);
+    let mut recheck = tokio::time::interval(ACCESS_RECHECK);
+    recheck.tick().await; // the first tick is immediate; `ws_room` just checked
 
     loop {
         tokio::select! {
@@ -374,6 +403,15 @@ async fn run(
                     Message::Close(_) => break,
                     _ => continue,
                 };
+                // Every frame reads or writes the room, so every frame is re-authorised. This
+                // is the only gate a project room has for a push; a people push is gated again
+                // by `people::on_room_push`.
+                if !state.allows(&principal, &acl) {
+                    tracing::info!(%room_name, %device, conn_id, "room access revoked mid-session");
+                    let _ = sink.send(error_frame("not_member", "you are no longer in this chat")).await;
+                    let _ = sink.send(revoked_close()).await;
+                    break;
+                }
                 let f = match Frame::decode(data) {
                     Ok(Some(f)) => f,
                     Ok(None) => continue,
@@ -439,6 +477,15 @@ async fn run(
             changed = closing.changed() => {
                 if changed.is_err() || *closing.borrow_and_update() {
                     let _ = sink.send(restart_close()).await;
+                    break;
+                }
+            }
+            _ = recheck.tick() => {
+                // A socket that only listens sends no frame to be gated, so the session itself
+                // has to end. Without this, saying nothing was enough to keep the room.
+                if !state.allows(&principal, &acl) {
+                    tracing::info!(%room_name, %device, conn_id, "room access revoked; closing idle socket");
+                    let _ = sink.send(revoked_close()).await;
                     break;
                 }
             }
@@ -2333,5 +2380,352 @@ mod covered_push_tests {
         assert_ne!(vv1, vv_cached);
         // And it equals encoding the writer's own vv once the room holds the same ops.
         assert_eq!(vv_cached, encode_vv(&doc.oplog_vv()));
+    }
+}
+
+#[cfg(test)]
+mod revocation_tests {
+    //! `ws_room` authorises once, before the upgrade, and the session loop never looked again:
+    //! no re-check, no heartbeat, no timeout. A removed or banned member who simply did not
+    //! disconnect kept reading the room and kept writing rows the remaining members saw, so a
+    //! ban was a request to hang up rather than a revocation. Project rooms were worse: their
+    //! pushes had no per-frame gate of any kind, the people path having been the only one.
+
+    use axum::routing::get;
+    use axum::Router;
+    use futures::{SinkExt, StreamExt};
+    use serde_json::json;
+    use std::net::SocketAddr;
+    use std::time::Duration;
+    use tokio_tungstenite::tungstenite::Message as TMsg;
+
+    use arbos_core::ids::{now_ms, ulid};
+    use arbos_core::wire::{Frame, FrameType};
+
+    use crate::db::Chat;
+    use crate::people::tests_support::{group, person, project_of};
+    use crate::state::test_support::test_state;
+    use crate::state::{AppState, AuthMode};
+
+    /// Long enough for a couple of `ACCESS_RECHECK` ticks, short enough to fail fast.
+    const SETTLE: Duration = Duration::from_secs(2);
+
+    async fn serve(state: AppState) -> SocketAddr {
+        let app = Router::new()
+            .route("/room/{project}/{chat}", get(super::ws_room))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        addr
+    }
+
+    fn device_token(state: &AppState, user: &str) -> String {
+        let token = format!("adv_{}", ulid().to_ascii_lowercase());
+        state
+            .db
+            .insert_device(
+                &ulid(),
+                "t",
+                &arbos_core::auth::hash(&token),
+                user,
+                "paircode",
+            )
+            .unwrap();
+        token
+    }
+
+    fn hello(room: &str) -> TMsg {
+        TMsg::Binary(
+            Frame::new(
+                FrameType::Hello,
+                json!({
+                    "cursor": 0,
+                    "device": "dev:t",
+                    "room": room,
+                    "proto": arbos_core::PROTO_VERSION,
+                }),
+                bytes::Bytes::new(),
+            )
+            .encode(),
+        )
+    }
+
+    fn rows_req() -> TMsg {
+        TMsg::Binary(
+            Frame::new(
+                FrameType::RowsReq,
+                json!({ "after": 0, "excludeOwn": false }),
+                bytes::Bytes::new(),
+            )
+            .encode(),
+        )
+    }
+
+    /// A push carrying a byte of opaque payload — the relay never parses it.
+    fn push(batch: &str) -> TMsg {
+        TMsg::Binary(
+            Frame::new(
+                FrameType::Push,
+                json!({ "batchId": batch, "heal": false }),
+                bytes::Bytes::from_static(b"\x00"),
+            )
+            .encode(),
+        )
+    }
+
+    /// Read frames until one of `want` arrives, or the socket closes, or `SETTLE` runs out.
+    /// Returns the frame type seen and, for an error frame, its `code`.
+    async fn until<S>(stream: &mut S, want: &[FrameType]) -> (Option<FrameType>, Option<String>)
+    where
+        S: StreamExt<Item = Result<TMsg, tokio_tungstenite::tungstenite::Error>> + Unpin,
+    {
+        let deadline = tokio::time::Instant::now() + SETTLE;
+        loop {
+            let next = tokio::time::timeout_at(deadline, stream.next()).await;
+            let Ok(item) = next else {
+                return (None, Some("timed out".into()));
+            };
+            match item {
+                Some(Ok(TMsg::Binary(b))) => {
+                    let Ok(Some(f)) = Frame::decode(b) else {
+                        continue;
+                    };
+                    if want.contains(&f.ty) {
+                        let code = f.header["code"].as_str().map(str::to_owned);
+                        return (Some(f.ty), code);
+                    }
+                }
+                Some(Ok(TMsg::Close(_))) | None => return (None, None),
+                Some(Err(_)) => return (None, None),
+                _ => continue,
+            }
+        }
+    }
+
+    /// Wait for the socket to be closed by the relay.
+    async fn closed<S>(stream: &mut S) -> bool
+    where
+        S: StreamExt<Item = Result<TMsg, tokio_tungstenite::tungstenite::Error>> + Unpin,
+    {
+        let deadline = tokio::time::Instant::now() + SETTLE;
+        loop {
+            match tokio::time::timeout_at(deadline, stream.next()).await {
+                Err(_) => return false,
+                Ok(None) | Ok(Some(Err(_))) | Ok(Some(Ok(TMsg::Close(_)))) => return true,
+                Ok(Some(Ok(_))) => continue,
+            }
+        }
+    }
+
+    /// A people room: the member reads and writes, is banned mid-session, and the socket they
+    /// never dropped stops serving them — no rows out, no row in, connection ended.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_ban_ends_an_open_people_socket() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 6101);
+        let (bob, _) = person(&state, 6102);
+        let chat = group(&state, &[&alice, &bob]);
+        let token = device_token(&state, &bob);
+        let addr = serve(state.clone()).await;
+        let room = format!("people/{chat}");
+
+        let (ws, _) = tokio_tungstenite::connect_async(format!(
+            "ws://{addr}/room/people/{chat}?token={token}"
+        ))
+        .await
+        .expect("a live member connects");
+        let (mut sink, mut stream) = ws.split();
+        sink.send(hello(&room)).await.unwrap();
+
+        // Reading and writing both work while Bob is a member.
+        sink.send(rows_req()).await.unwrap();
+        let (ty, _) = until(&mut stream, &[FrameType::RowsDone]).await;
+        assert_eq!(ty, Some(FrameType::RowsDone), "a member reads the log");
+        sink.send(push("batch-before")).await.unwrap();
+        let (ty, _) = until(&mut stream, &[FrameType::Ack, FrameType::Error]).await;
+        assert_eq!(ty, Some(FrameType::Ack), "a member writes rows");
+        let rows_before = state.db.rows_after(&room, 0, None, 100).unwrap().len();
+        assert_eq!(rows_before, 1);
+
+        // Banned, on the connection Bob is still holding.
+        state
+            .db
+            .remove_member(&chat, &format!("user:{bob}"), true)
+            .expect("ban");
+
+        sink.send(push("batch-after")).await.unwrap();
+        let (ty, code) = until(&mut stream, &[FrameType::Ack, FrameType::Error]).await;
+        assert_ne!(
+            ty,
+            Some(FrameType::Ack),
+            "a banned member must not write a row the others would see"
+        );
+        assert_eq!(code.as_deref(), Some("not_member"), "{ty:?}");
+        assert!(
+            closed(&mut stream).await,
+            "and the session itself ends rather than staying open"
+        );
+        assert_eq!(
+            state.db.rows_after(&room, 0, None, 100).unwrap().len(),
+            rows_before,
+            "the refused push stored nothing"
+        );
+    }
+
+    /// The read half, on its own: a banned member's request for the row log is refused on the
+    /// socket they already had.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_ban_stops_reads_on_an_open_people_socket() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 6201);
+        let (bob, _) = person(&state, 6202);
+        let chat = group(&state, &[&alice, &bob]);
+        let token = device_token(&state, &bob);
+        let addr = serve(state.clone()).await;
+        let room = format!("people/{chat}");
+
+        let (ws, _) = tokio_tungstenite::connect_async(format!(
+            "ws://{addr}/room/people/{chat}?token={token}"
+        ))
+        .await
+        .expect("connect");
+        let (mut sink, mut stream) = ws.split();
+        sink.send(hello(&room)).await.unwrap();
+        sink.send(rows_req()).await.unwrap();
+        let (ty, _) = until(&mut stream, &[FrameType::RowsDone]).await;
+        assert_eq!(ty, Some(FrameType::RowsDone));
+
+        state
+            .db
+            .remove_member(&chat, &format!("user:{bob}"), true)
+            .expect("ban");
+
+        sink.send(rows_req()).await.unwrap();
+        let (ty, code) = until(&mut stream, &[FrameType::RowsDone, FrameType::Error]).await;
+        assert_ne!(
+            ty,
+            Some(FrameType::RowsDone),
+            "a banned member must not be served the row log"
+        );
+        assert_eq!(code.as_deref(), Some("not_member"), "{ty:?}");
+        assert!(closed(&mut stream).await);
+    }
+
+    /// Saying nothing was enough to keep the room: an idle socket sends no frame to be gated,
+    /// so the session has to end on its own.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_ban_drops_an_idle_people_socket() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 6301);
+        let (bob, _) = person(&state, 6302);
+        let chat = group(&state, &[&alice, &bob]);
+        let token = device_token(&state, &bob);
+        let addr = serve(state.clone()).await;
+
+        let (ws, _) = tokio_tungstenite::connect_async(format!(
+            "ws://{addr}/room/people/{chat}?token={token}"
+        ))
+        .await
+        .expect("connect");
+        let (mut sink, mut stream) = ws.split();
+        sink.send(hello(&format!("people/{chat}"))).await.unwrap();
+
+        state
+            .db
+            .remove_member(&chat, &format!("user:{bob}"), true)
+            .expect("ban");
+
+        assert!(
+            closed(&mut stream).await,
+            "a listener who never speaks is still dropped when their access ends"
+        );
+    }
+
+    /// Project rooms had no per-frame gate at all, so a guest whose share was revoked kept
+    /// writing into the project's chat. The same re-check covers them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn revoking_a_project_guest_ends_their_open_socket() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 6401);
+        let (bob, _) = person(&state, 6402);
+        let project = project_of(&state, &alice, "Shared");
+        let chat = ulid();
+        state
+            .db
+            .insert_chat(&Chat {
+                id: chat.clone(),
+                project_id: project.clone(),
+                title: "t".into(),
+                is_pinned: false,
+                position: 0,
+                created_at: now_ms(),
+                doc_epoch: 1,
+                kind: "chat".into(),
+                participants: Vec::new(),
+                forked_from: None,
+            })
+            .unwrap();
+        state
+            .db
+            .add_project_member(&project, &bob, &alice)
+            .expect("bob is a guest on the project");
+        let token = device_token(&state, &bob);
+        let addr = serve(state.clone()).await;
+        let room = format!("{project}/{chat}");
+
+        let (ws, _) = tokio_tungstenite::connect_async(format!(
+            "ws://{addr}/room/{project}/{chat}?token={token}"
+        ))
+        .await
+        .expect("a guest connects");
+        let (mut sink, mut stream) = ws.split();
+        sink.send(hello(&room)).await.unwrap();
+        sink.send(push("guest-before")).await.unwrap();
+        let (ty, _) = until(&mut stream, &[FrameType::Ack, FrameType::Error]).await;
+        assert_eq!(ty, Some(FrameType::Ack), "a guest writes while shared");
+        let rows_before = state.db.rows_after(&room, 0, None, 100).unwrap().len();
+
+        state
+            .db
+            .remove_project_member(&project, &bob)
+            .expect("share revoked");
+
+        sink.send(push("guest-after")).await.unwrap();
+        let (ty, code) = until(&mut stream, &[FrameType::Ack, FrameType::Error]).await;
+        assert_ne!(ty, Some(FrameType::Ack), "the share is over");
+        assert_eq!(code.as_deref(), Some("not_member"), "{ty:?}");
+        assert!(closed(&mut stream).await);
+        assert_eq!(
+            state.db.rows_after(&room, 0, None, 100).unwrap().len(),
+            rows_before
+        );
+    }
+
+    /// A member who is still a member keeps their socket across re-checks: the gate must not
+    /// drop the people it is not aimed at.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_member_who_stays_keeps_their_socket() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 6501);
+        let (bob, _) = person(&state, 6502);
+        let chat = group(&state, &[&alice, &bob]);
+        let token = device_token(&state, &bob);
+        let addr = serve(state.clone()).await;
+
+        let (ws, _) = tokio_tungstenite::connect_async(format!(
+            "ws://{addr}/room/people/{chat}?token={token}"
+        ))
+        .await
+        .expect("connect");
+        let (mut sink, mut stream) = ws.split();
+        sink.send(hello(&format!("people/{chat}"))).await.unwrap();
+
+        // Several re-check ticks pass with nothing revoked.
+        tokio::time::sleep(SETTLE / 2).await;
+
+        sink.send(push("still-here")).await.unwrap();
+        let (ty, code) = until(&mut stream, &[FrameType::Ack, FrameType::Error]).await;
+        assert_eq!(ty, Some(FrameType::Ack), "code {code:?}");
     }
 }

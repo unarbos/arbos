@@ -3829,6 +3829,14 @@ fn sender_allowed(
     user_id: &str,
     cm: &ChatWithMembers,
 ) -> Result<(), PushRefused> {
+    // Against the roster as it stands now, not as it stood when the socket was authorised.
+    // The room ACL is read before the upgrade, so without this a member removed or banned
+    // mid-session went on writing rows the rest of the chat saw, for as long as they kept the
+    // connection open. The socket is re-checked too (`rooms::run`); this is the write path
+    // refusing on its own account rather than trusting the session it arrived on.
+    if !cm.members.iter().any(|m| m.user_id() == Some(user_id)) {
+        return Err(PushRefused::NotAvailable);
+    }
     if let Some(r) = block_in_the_way(state, user_id, cm) {
         return Err(r);
     }
