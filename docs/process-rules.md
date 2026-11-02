@@ -165,6 +165,25 @@ capacity problem that caused it.
 name lookup cannot match, so your run and the gate cannot collide over one device. **Pin it by UDID, not by
 name** (`-destination "id=<udid>"`): a name lookup is exactly the call that fails under load.
 
+## A new Swift test file cannot be added from a Linux box (2026-11-02)
+
+Separate from the simulator, and a harder limit: **`Arbos.xcodeproj` does not use file-system-synchronised
+groups.** A file that exists on disk is not in the build until `project.pbxproj` says so, which for one new
+test helper means **four hand-written entries** — the file reference, the build file, the group membership
+and the target's sources phase.
+
+Nothing on a Linux box can verify those four. There is no `xcodebuild` to resolve the project, so a wrong or
+missing entry is not a compile error you see; it is a file that silently is not in any target, which is the
+same shape as the zero-test-run hazard the gate already guards against.
+
+So: **adding or moving a Swift test file is Mac work, not "edit the pbxproj carefully" work.** A Linux lane
+may write the test's contents and hand them over, but it must not claim the change is complete, and it must
+say in its PR that the project file edit is unverified. Renaming and deleting Swift test files carry the same
+limit for the same reason.
+
+This is why work that is otherwise small — consolidating two private `waitUntil` helpers into one shared
+file, for instance — is not small from here.
+
 ## ssh to the gate Mac goes through the relay host (2026-10-26 23:40 UTC)
 
 Port 22 on the EC2 Mac (13.217.52.163) is not open to the internet: its security group (`arbos-mobile`) allows ssh
