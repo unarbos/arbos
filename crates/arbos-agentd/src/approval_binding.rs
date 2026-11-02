@@ -29,6 +29,8 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
+use arbos_core::doc::ChatDoc;
+
 use crate::agent::Agent;
 use crate::approval::canonical;
 use crate::store::ApprovalRow;
@@ -122,11 +124,37 @@ impl Agent {
         )
     }
 
+    /// The room snapshot this box last persisted for a chat, whichever project it belongs to.
+    ///
+    /// Both room names are tried rather than asking `people.is_people_chat`, because the path
+    /// that gets here — `people_agent_removed` — drops the roster entry before it closes the
+    /// room, so by now the chat answers "not a people chat" either way.
+    fn persisted_room(&self, chat_id: &str) -> Option<Vec<u8>> {
+        [self.cfg.project_id.as_str(), crate::people::PEOPLE_PROJECT]
+            .into_iter()
+            .find_map(|project| {
+                let room = arbos_core::wire::room_name(project, chat_id);
+                self.store
+                    .room_doc(&room)
+                    .ok()
+                    .flatten()
+                    .and_then(|(_, snap, _)| snap)
+                    .filter(|s| !s.is_empty())
+            })
+    }
+
     /// Does the card still say what the box wrote? Called before a decision is applied.
     ///
-    /// A card raised before the box recorded fingerprints has none, and a card whose chat
-    /// document cannot be opened cannot be compared; both pass, because neither is something an
-    /// attacker can arrange — the alternative is cards that cannot be answered after an upgrade.
+    /// A card raised before the box recorded fingerprints has none to compare, and passes: that
+    /// population is closed and draining, and the alternative is cards nobody can answer after
+    /// an upgrade.
+    ///
+    /// A chat whose room is closed is still compared, against the snapshot the box persisted —
+    /// a member who can have the agent removed from a people chat (`people_agent_removed`) could
+    /// otherwise retire the comparison by closing the room, and the snapshot holds the changed
+    /// card just the same. Only a chat with no snapshot at all passes. The refusal is quieter
+    /// there: with no room there is no document to write the error part into, so it is the log
+    /// and the audit line alone.
     pub(crate) async fn check_card_unchanged(self: &Arc<Self>, row: &ApprovalRow) -> Result<()> {
         let Some(expected) = row.fingerprint.as_deref() else {
             tracing::debug!(
@@ -135,23 +163,33 @@ impl Agent {
             );
             return Ok(());
         };
-        let Some(host) = self.sync.host(&row.chat_id).await else {
-            tracing::debug!(
-                approval_id = row.id,
-                chat_id = row.chat_id,
-                "no document for this chat; nothing to compare the card against"
-            );
-            return Ok(());
-        };
-        // `None` here is a card whose part is gone from the message, which is a change like any
-        // other: a decision about something nobody in the chat can read.
-        let found = {
-            let h = host.lock().await;
-            h.doc
-                .message(&row.message_id)
-                .as_ref()
-                .and_then(|m| part_of(&m.parts, &row.id))
-                .map(fingerprint)
+        // `None` from either source is a card whose part is not in the document the box has,
+        // which is a change like any other: a decision about something it cannot account for.
+        let found = match self.sync.host(&row.chat_id).await {
+            Some(host) => {
+                let h = host.lock().await;
+                h.doc
+                    .message(&row.message_id)
+                    .as_ref()
+                    .and_then(|m| part_of(&m.parts, &row.id))
+                    .map(fingerprint)
+            }
+            None => {
+                let Some(snapshot) = self.persisted_room(&row.chat_id) else {
+                    tracing::debug!(
+                        approval_id = row.id,
+                        chat_id = row.chat_id,
+                        "no open room and no snapshot for this chat; nothing to compare against"
+                    );
+                    return Ok(());
+                };
+                ChatDoc::from_snapshot(None, false, &snapshot)
+                    .ok()
+                    .and_then(|doc| doc.message(&row.message_id))
+                    .as_ref()
+                    .and_then(|m| part_of(&m.parts, &row.id))
+                    .map(fingerprint)
+            }
         };
         if found.as_deref() == Some(expected) {
             return Ok(());
@@ -170,7 +208,6 @@ mod tests {
     use crate::approval::WaitMode;
     use crate::status::tests::test_agent;
     use arbos_core::approval::{ApprovalOutcome, ApprovalRequest, Risk};
-    use arbos_core::doc::ChatDoc;
     use arbos_core::ids::ulid;
 
     /// A destructive card like the one `gate_tool` raises for `rm -rf`.
@@ -389,6 +426,69 @@ mod tests {
             .decide_approval(&id, ApprovalOutcome::Approved, "dev:owner-phone")
             .await
             .expect("no fingerprint, nothing to check");
+    }
+
+    /// A member who can have the agent removed from a people chat closes the room, and with it
+    /// the live document. The comparison does not go away with it: the snapshot the box persisted
+    /// holds the same changed card.
+    #[tokio::test]
+    async fn a_changed_card_is_refused_after_the_room_closes() {
+        let (agent, _root) = test_agent().await;
+        let (chat_id, id) = raise(&agent, card()).await;
+        tamper(&agent, &chat_id, &[("summary", json!("rm -rf /work/tmp"))]).await;
+
+        let host = agent.sync.host(&chat_id).await.expect("doc");
+        agent.sync.persist(&host).await.expect("snapshot");
+        agent.sync.close_room(&chat_id).await;
+        assert!(agent.sync.host(&chat_id).await.is_none(), "room is closed");
+
+        let err = agent
+            .decide_approval(&id, ApprovalOutcome::Approved, "dev:owner-phone")
+            .await
+            .expect_err("a changed card is refused from the snapshot too");
+        assert!(err.to_string().contains("changed after it was raised"));
+        assert_eq!(agent.store.approval(&id).unwrap().unwrap().state, "pending");
+    }
+
+    /// An untouched card still decides once its room is closed — the snapshot agrees with what
+    /// the box wrote, and a closed room is not by itself a reason to refuse an owner.
+    #[tokio::test]
+    async fn an_unchanged_card_decides_after_the_room_closes() {
+        let (agent, _root) = test_agent().await;
+        let (chat_id, id) = raise(&agent, card()).await;
+        let host = agent.sync.host(&chat_id).await.expect("doc");
+        agent.sync.persist(&host).await.expect("snapshot");
+        agent.sync.close_room(&chat_id).await;
+
+        agent
+            .decide_approval(&id, ApprovalOutcome::Approved, "dev:owner-phone")
+            .await
+            .expect("the untouched card decides");
+        assert_eq!(
+            agent.store.approval(&id).unwrap().unwrap().state,
+            "approved"
+        );
+    }
+
+    /// The residual, stated as a test rather than as prose: a chat with no snapshot at all has
+    /// nothing to compare, and passes. Reaching it means the room closed before the box ever
+    /// persisted the card, which is not something a member can time.
+    #[tokio::test]
+    async fn a_chat_with_no_snapshot_has_nothing_to_compare() {
+        let (agent, _root) = test_agent().await;
+        let (chat_id, id) = raise(&agent, card()).await;
+        tamper(&agent, &chat_id, &[("summary", json!("rm -rf /work/tmp"))]).await;
+        agent.sync.close_room(&chat_id).await;
+        let room = arbos_core::wire::room_name(&agent.cfg.project_id, &chat_id);
+        assert!(
+            agent.store.room_doc(&room).unwrap().is_none(),
+            "nothing was ever persisted for this chat"
+        );
+
+        agent
+            .decide_approval(&id, ApprovalOutcome::Approved, "dev:owner-phone")
+            .await
+            .expect("nothing to compare against");
     }
 
     /// Expiry is the box's own clock, not an answer, and it has to be able to close a card the
