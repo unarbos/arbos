@@ -4532,6 +4532,10 @@ class Loop:
 
     DEPLOY_RESTART_BEFORE_S = 240  # a relay comes up ~10 s before its "deployed" event; the build+swap window before it
     DEPLOY_RESTART_AFTER_S = 60
+    # relay-server.sh writes relay.deployed-sha, then renders the env file and runs the planned-restart handshake
+    # before `systemctl restart`: the marker lands this long before the restart it belongs to. A deploy that waits
+    # longer than this (box work in flight) has its own restart counted as a crash, the direction we want to fail in.
+    DEPLOY_MARKER_BEFORE_S = 900
 
     def relay_deploy_near(self, started_iso: str) -> str | None:
         """The sha of a CD relay deploy whose `deployed` event (deploy-events.jsonl, written by the deploy worker)
@@ -4562,6 +4566,30 @@ class Loop:
                 return str(ev.get("sha") or "deploy")
         return None
 
+    def relay_deploy_marker_near(self, started_iso: str, used: str | None) -> tuple[str, str] | None:
+        """`(sha, marker stamp)` of a relay deploy whose `/etc/arbos/relay.deployed-sha` write sits just before a
+        relay start time; None = that marker does not explain the restart. Every deploy writes the marker, the
+        worker's and a direct `scripts/feedback/deploy-relay.sh` run alike, while only the worker writes
+        deploy-events.jsonl (#2497: two deploys run by hand were counted as crashes). The marker keeps no history,
+        so one write excuses one restart — a deploy restarts the relay exactly once, and a second restart on the
+        same marker is a crash. A marker that cannot be read, is empty or is not a sha is no evidence at all and
+        the restart counts."""
+        path = Path(RELAY_DEPLOYED_SHA_FILE)
+        try:
+            sha = path.read_text().strip()
+            at = dt.datetime.fromtimestamp(path.stat().st_mtime, dt.timezone.utc)
+        except OSError:
+            return None
+        if not re.fullmatch(r"[0-9a-f]{40}", sha):
+            return None
+        stamp = iso(at)
+        if stamp == used:
+            return None
+        delta = (at - parse_iso(started_iso)).total_seconds()
+        if not -self.DEPLOY_MARKER_BEFORE_S <= delta <= self.DEPLOY_RESTART_AFTER_S:
+            return None
+        return sha, stamp
+
     def watch_relay_restarts(self) -> None:
         """Every relay restart drops every client's websocket; a burst of them leaves the apps on
         "Reconnecting…" for minutes (2026-10-22 18:5x: four restarts in 95 min — three CD relay deploys and an
@@ -4585,13 +4613,18 @@ class Loop:
         if last is not None and uptime < last:
             started = (now - dt.timedelta(seconds=int(uptime))).strftime("%Y-%m-%dT%H:%M:%SZ")
             deploy = self.relay_deploy_near(started)
+            if not deploy:
+                marker = self.relay_deploy_marker_near(started, watch.get("deploy_marker_used"))
+                if marker:
+                    deploy, watch["deploy_marker_used"] = marker
             if deploy:
-                # A CD relay deploy restarts the relay on purpose (one per coalescing window, hotfixes aside);
-                # it is in the deploy log, so it is not a crash and does not count (#1964: three deploys in an
-                # hour — 19:57, 20:33, 20:40 Oct 26, two of them P0 hotfixes — filed as "relay restarted 3×").
+                # A relay deploy restarts the relay on purpose (one per coalescing window, hotfixes aside); the
+                # deploy log or the deployed-sha marker says so, so it is not a crash and does not count (#1964:
+                # three deploys in an hour — 19:57, 20:33, 20:40 Oct 26, two of them P0 hotfixes — filed as
+                # "relay restarted 3×").
                 watch.setdefault("deploy_restarts", []).append(started)
                 watch["deploy_restarts"] = watch["deploy_restarts"][-20:]
-                log(f"relay-restarts: the relay restarted at {started} for the CD deploy of {deploy[:8]} (not counted)")
+                log(f"relay-restarts: the relay restarted at {started} for the deploy of {deploy[:8]} (not counted)")
             else:
                 watch["restarts"].append(started)
                 log(f"relay-restarts: the relay restarted at {started} (uptime {uptime}s) — no deploy near it: counted as a crash")
@@ -4603,7 +4636,7 @@ class Loop:
             self.gh.ensure_label("relay-restarts", "D93F0B", "The relay restarted repeatedly; every restart drops every client's websocket")
             body = ("The relay restarted **" + str(len(recent)) + " times in the last hour** (healthz `uptime_s` resets): " + ", ".join(recent) +
                     ".\n\nEvery restart closes every client's websocket; the apps show \"Reconnecting…\" and their backoff grows with each "
-                    "drop. Restarts that match a CD relay deploy in `deploy-events.jsonl` are not counted — these are crashes or restarts nothing in the deploy log explains. "
+                    "drop. Restarts that match a relay deploy — a `deployed` event in `deploy-events.jsonl`, or a write of `/etc/arbos/relay.deployed-sha` just before the restart — are not counted; these are crashes or restarts nothing in the deploy record explains. "
                     "This issue closes itself after a quiet hour. Runbook: docs/feedback-loop.md → relay restarts.")
             issue = self.gh.create_issue(f"relay restarted {len(recent)}× in the last hour — clients reconnecting", body, ["relay-restarts"])
             watch["issue"] = issue["number"]
