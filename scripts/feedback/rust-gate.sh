@@ -35,13 +35,17 @@ disk_floor_check() {
   # next tick) and the loop journal gets an ALERT line.
   local free swept
   free=$(df -g /System/Volumes/Data 2>/dev/null | awk 'NR==2 {print $4}')
-  # An unreadable df is not "enough disk". Keep starting the build — refusing every run because a
-  # future macOS renamed the volume would stall the merge queue — but never do it silently: the line
-  # goes into the run log and `status` greps it out, so "the floor check is dead" is visible as itself
-  # rather than as the ENOSPC half-way through the build it is there to prevent.
+  # An unreadable df is not "enough disk", and it has to refuse rather than carry on loudly. Carrying
+  # on was tried and measured: this line reaches `status`, and the poller stores it in the cursor as
+  # mac_tail — but both renderers of mac_tail are guarded on `mac == "fail"`, and this case only
+  # happens on a run that then goes green, so on the one path it occurs on it reaches no human at all.
+  # Refusing puts it where someone sees it: rc 2 is `infra`, which the poller logs with the body
+  # (feedback_poller.py:3199) and retries next tick. A floor that cannot be read stalling the queue
+  # visibly beats it being skipped invisibly — the ENOSPC it exists to prevent (#1466, 2026-10-23)
+  # costs more than a tick, and a renamed volume is then a loud one-line fix rather than a silence.
   case "$free" in
-    *[!0-9]*|"") echo "== disk: cannot read free space on /System/Volumes/Data (df gave '${free}'); the ${MIN_FREE_GB:-6} GiB floor was NOT checked"
-                 return 0 ;;
+    *[!0-9]*|"") echo "== disk: cannot read free space on /System/Volumes/Data (df gave '${free}'); the ${MIN_FREE_GB:-6} GiB floor could NOT be checked, so this run is refused rather than started blind"
+                 return 1 ;;
   esac
   if [ "$free" -lt "${PRUNE_FREE_GB:-40}" ]; then
     echo "== disk: ${free} GiB free on the Mac (< ${PRUNE_FREE_GB:-40}); running arbos-mac-clean.sh --if-low first"
