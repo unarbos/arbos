@@ -65,9 +65,15 @@ final class AvatarBackSwipeUITests: XCTestCase {
     }
 
     /// The sender avatars the finger can reach, top to bottom: on screen, clear of the header
-    /// and of the composer bar (a drag that starts in the bar is the composer's, by design),
-    /// and clear of the 24 pt edge zone that belongs to the system pop. Frames, not elements,
-    /// so a case can say what it aimed at when it fails.
+    /// and of the composer bar (a drag that starts in the bar is the composer's, by design).
+    /// Frames, not elements, so a case can say what it aimed at when it fails.
+    ///
+    /// The edge-zone guard is on the point the cases aim at — the avatar's centre — and not on
+    /// the avatar's left edge, because since #2527 the disc spans 12–48 pt from the screen
+    /// (`Theme.memberAvatar`) and its leftmost 12 pt lie inside the 24 pt zone that belongs to
+    /// the system pop. The centre at 30 pt is outside it, so these cases exercise the swipe
+    /// this file is about. What happens to a drag that starts on the strip left of 24 pt is a
+    /// different gesture and is not measured here.
     private func reachableAvatars(_ app: XCUIApplication,
                                   file: StaticString = #filePath, line: UInt = #line) -> [CGRect] {
         let avatars = app.descendants(matching: .any).matching(identifier: "sender-avatar")
@@ -81,9 +87,10 @@ final class AvatarBackSwipeUITests: XCTestCase {
         XCTAssertFalse(usable.isEmpty, "an avatar is on screen between the header and the composer",
                        file: file, line: line)
         for frame in usable {
-            XCTAssertGreaterThan(frame.minX, 24,
-                                 "the avatar at \(frame) is clear of the edge zone, so this is the "
-                                 + "full-screen swipe and not the system pop", file: file, line: line)
+            XCTAssertGreaterThan(frame.midX, 24,
+                                 "the centre of the avatar at \(frame) is clear of the edge zone, so "
+                                 + "this is the full-screen swipe and not the system pop",
+                                 file: file, line: line)
         }
         return usable
     }
@@ -119,8 +126,9 @@ final class AvatarBackSwipeUITests: XCTestCase {
     // MARK: The bug
 
     /// The case Jacob reported: the drag begins on a picture and is a back swipe like any
-    /// other. It starts at the avatar's centre, which is about 55 pt in — well past the edge
-    /// zone — so this is the transcript's swipe-right, not the system pop.
+    /// other. It starts at the avatar's centre, about 30 pt in since #2527 fixed the column,
+    /// which is past the 24 pt edge zone — so this is the transcript's swipe-right, not the
+    /// system pop.
     func testASwipeRightStartingOnASenderAvatarGoesBack() {
         let app = openGroup()
         let avatar = reachableAvatars(app).last!
