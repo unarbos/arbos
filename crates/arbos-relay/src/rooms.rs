@@ -705,8 +705,13 @@ async fn handle_frame(
             // `focused_chat` (crdt-sync §7.5): the chat on this device's screen; its message
             // notifications are suppressed while the presence stays fresh.
             if let Principal::Device { id, .. } = principal {
-                let focused = f.header.get("focused_chat").and_then(|v| v.as_str());
-                crate::notify::set_focus(state, id, focused).await;
+                match f.header.get("focused_chat").and_then(|v| v.as_str()) {
+                    Some(focused) => crate::notify::set_focus(state, id, focused).await,
+                    None => {
+                        let chat_id = room_name.rsplit_once('/').map_or(room_name, |(_, c)| c);
+                        crate::notify::clear_focus(state, id, chat_id).await;
+                    }
+                }
                 // Presence counts as "seen" (last_seen_at / online), at most one write a minute.
                 let now = arbos_core::ids::now_ms();
                 let mut seen = state.presence_seen.lock().await;

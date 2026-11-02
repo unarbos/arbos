@@ -242,20 +242,16 @@ async fn user_focused_on_chat(state: &AppState, user_id: &str, chat_id: &str) ->
     false
 }
 
-/// Presence from a room socket: remember (or forget) what the device looks at.
-pub async fn set_focus(state: &AppState, device_id: &str, focused_chat: Option<&str>) {
+/// Presence from a room socket: remember what the device looks at.
+pub async fn set_focus(state: &AppState, device_id: &str, focused_chat: &str) {
     let mut focus = state.focus.lock().await;
-    match focused_chat {
-        Some(c) => {
-            focus.insert(device_id.to_owned(), (c.to_owned(), now_ms()));
-        }
-        None => {
-            focus.remove(device_id);
-        }
-    }
+    focus.insert(device_id.to_owned(), (focused_chat.to_owned(), now_ms()));
 }
 
-/// The socket to `chat_id` closed: that device is no longer looking at it.
+/// That device is no longer looking at `chat_id`: its socket closed, or a presence frame from
+/// that room named no focused chat. Scoped to the one chat because a device holds a socket per
+/// chat (the iPhone dials every chat in the list) and only the focused room's frames carry
+/// `focused_chat` — a frame from any other room says nothing about where the device is looking.
 pub async fn clear_focus(state: &AppState, device_id: &str, chat_id: &str) {
     let mut focus = state.focus.lock().await;
     if focus.get(device_id).is_some_and(|(c, _)| c == chat_id) {
@@ -1252,7 +1248,7 @@ mod tests {
 
         // Bob's phone is looking at the chat: only his other device hears the next one,
         // and the event is marked read (he is seeing it) so the badge does not stick.
-        set_focus(&state, &device_id(&bob_dev), Some(&chat)).await;
+        set_focus(&state, &device_id(&bob_dev), &chat).await;
         announce(
             &state,
             &ChatRef::people(&chat),
@@ -1268,7 +1264,7 @@ mod tests {
         assert_eq!(state.db.unread_total(&bob).expect("bob unread"), 0);
 
         // Focus on a different chat does not suppress.
-        set_focus(&state, &device_id(&bob_dev), Some("other-chat")).await;
+        set_focus(&state, &device_id(&bob_dev), "other-chat").await;
         announce(&state, &ChatRef::people(&chat), &sender, "m3", "?").await;
         assert_eq!(pushed(&state).await.len(), 5);
     }

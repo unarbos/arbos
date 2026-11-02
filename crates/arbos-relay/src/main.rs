@@ -34,6 +34,8 @@ mod export;
 mod features;
 mod feedback;
 mod fleet;
+#[cfg(test)]
+mod focus_presence_tests;
 mod gifs;
 mod goals;
 #[cfg(test)]

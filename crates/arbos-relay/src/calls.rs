@@ -1934,7 +1934,7 @@ mod tests {
         };
         // Bob's app is open: fresh presence, focused on this very chat, device just seen.
         state.db.touch_device(bob_device).unwrap();
-        notify::set_focus(&state, bob_device, Some(&chat)).await;
+        notify::set_focus(&state, bob_device, &chat).await;
         let card = crate::people::with_presence(
             &state,
             arbos_core::api::UserCardDto {
