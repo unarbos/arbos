@@ -70,7 +70,7 @@ pub struct Approvals {
     pending: Mutex<HashMap<String, PendingApproval>>,
     grants: Mutex<Vec<Grant>>,
     /// Standing shell grants from the relay (#1544), refreshed on `shell_grants_changed`.
-    shell_grants: Mutex<Vec<ShellGrant>>,
+    pub(crate) shell_grants: Mutex<Vec<ShellGrant>>,
 }
 
 /// `approve` payload field a card option B/C sets: the path class to allow from now on.
@@ -101,7 +101,7 @@ fn args_hash(tool: &str, args: &Value) -> String {
 }
 
 /// Stable text for hashing: serde_json keeps map order as inserted, so sort keys first.
-fn canonical(v: &Value) -> String {
+pub(crate) fn canonical(v: &Value) -> String {
     match v {
         Value::Object(m) => {
             let mut keys: Vec<&String> = m.keys().collect();
@@ -232,7 +232,7 @@ impl Agent {
                 .filter(|t| t.chat_id == chat_id)
                 .map(|t| (t.assistant_msg_id.clone(), t.user_msg_id.clone()))
         };
-        let (msg_id, in_reply_to) = {
+        let (msg_id, in_reply_to, fingerprint) = {
             let h = host.lock().await;
             let (msg_id, in_reply_to, own) = match turn_msg {
                 Some((m, u)) => (m, u, false),
@@ -269,15 +269,26 @@ impl Agent {
             if own {
                 h.doc.finish_message(&msg_id, MessageStatus::Done);
             }
-            (msg_id, in_reply_to)
+            // The card as the document now shows it: what the box answers against later, so a
+            // member cannot rewrite the question between here and the owner's answer
+            // (`approval_binding.rs`). Read back under the same lock that wrote it.
+            let fingerprint = h
+                .doc
+                .message(&msg_id)
+                .as_ref()
+                .and_then(|m| crate::approval_binding::part_of(&m.parts, &approval_id))
+                .map(crate::approval_binding::fingerprint);
+            (msg_id, in_reply_to, fingerprint)
         };
         let _ = self.store.insert_approval(
             &approval_id,
             chat_id,
             &msg_id,
             &req.title,
+            &req.summary,
             req.risk.as_str(),
             &req.payload,
+            fingerprint.as_deref(),
             expires_at,
         );
         let _ = self.store.t3_append(
@@ -382,6 +393,12 @@ impl Agent {
         decided_by: &str,
         payload: &Value,
     ) -> Result<()> {
+        // Before anything: an answer answers the card the box raised, and the standing grant
+        // below is recorded ahead of the decision, so the check cannot wait for
+        // `decide_approval` (`approval_binding.rs`).
+        if let Some(row) = self.store.approval(approval_id).ok().flatten() {
+            self.check_card_unchanged(&row).await?;
+        }
         // Secret hand-off: the request card's answer names the saved secret (ids and names,
         // never a value) for the tool waiting on it; the offer card's Save runs the save.
         crate::handoff::note_card_answer(approval_id, payload);
@@ -456,6 +473,11 @@ impl Agent {
             .store
             .approval(approval_id)?
             .ok_or_else(|| anyhow!("unknown approval {approval_id}"))?;
+        // An answer is an answer to the card the box raised. Expiry is the box's own clock
+        // rather than anybody's answer, and has to be able to close a card either way.
+        if state != ApprovalState::Expired {
+            self.check_card_unchanged(&row).await?;
+        }
         if !self.store.decide_approval(
             approval_id,
             state.as_str(),
@@ -530,7 +552,7 @@ impl Agent {
             .map(|p| p.request.clone())
             .unwrap_or(ApprovalRequest {
                 title: row.title.clone(),
-                summary: String::new(),
+                summary: row.summary.clone(),
                 risk: Risk::parse(&row.risk),
                 payload: row.payload.clone(),
             });

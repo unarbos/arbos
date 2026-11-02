@@ -88,10 +88,12 @@ CREATE TABLE IF NOT EXISTS asks (
 
 -- Approval cards (feature approve): the doc part is the source of truth for clients; this row
 -- survives a restart so a late decision still dispatches.
+-- `summary` and `fingerprint` are what the box wrote onto the card, kept so a decision can be
+-- checked against it (`approval_binding.rs`); the document's copy is member-writable.
 CREATE TABLE IF NOT EXISTS approvals (
   id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, message_id TEXT NOT NULL, title TEXT NOT NULL, risk TEXT NOT NULL,
   payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
-  decided_at INTEGER, decided_by TEXT, reason TEXT
+  decided_at INTEGER, decided_by TEXT, reason TEXT, summary TEXT NOT NULL DEFAULT '', fingerprint TEXT
 );
 
 -- Approved drafts with no connector to deliver them (feature approve, until connectors land).
@@ -284,6 +286,19 @@ impl Store {
             .any(|n| n == "widget");
         if !has_widget {
             c.execute_batch("ALTER TABLE asks ADD COLUMN widget TEXT")?;
+        }
+        // Additive migration: a card's authored summary and fingerprint. A card raised before
+        // this migration has neither, which `approval_binding.rs` reads as "nothing to check".
+        let approval_cols: Vec<String> = c
+            .prepare("PRAGMA table_info(approvals)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .filter_map(Result::ok)
+            .collect();
+        if !approval_cols.iter().any(|n| n == "summary") {
+            c.execute_batch("ALTER TABLE approvals ADD COLUMN summary TEXT NOT NULL DEFAULT ''")?;
+        }
+        if !approval_cols.iter().any(|n| n == "fingerprint") {
+            c.execute_batch("ALTER TABLE approvals ADD COLUMN fingerprint TEXT")?;
         }
         Ok(Self(Arc::new(Mutex::new(c))))
     }
@@ -1445,20 +1460,25 @@ impl Store {
     // ---- approvals (feature approve) ------------------------------------------------------------
 
     #[allow(clippy::too_many_arguments)]
+    /// `fingerprint` is the card as the box wrote it (`approval_binding::fingerprint`); `None`
+    /// only where the card could not be read back after it was written.
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_approval(
         &self,
         id: &str,
         chat_id: &str,
         message_id: &str,
         title: &str,
+        summary: &str,
         risk: &str,
         payload: &Value,
+        fingerprint: Option<&str>,
         expires_at: i64,
     ) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO approvals(id, chat_id, message_id, title, risk, payload, created_at, expires_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-                params![id, chat_id, message_id, title, risk, payload.to_string(), now_ms(), expires_at],
+                "INSERT INTO approvals(id, chat_id, message_id, title, summary, risk, payload, fingerprint, created_at, expires_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                params![id, chat_id, message_id, title, summary, risk, payload.to_string(), fingerprint, now_ms(), expires_at],
             )
             .map(|_| ())
         })
@@ -1467,7 +1487,7 @@ impl Store {
     pub fn approval(&self, id: &str) -> Result<Option<ApprovalRow>> {
         self.with(|c| {
             c.query_row(
-                "SELECT id, chat_id, message_id, title, risk, payload, state, created_at, expires_at, decided_at, decided_by, reason FROM approvals WHERE id = ?1",
+                &format!("SELECT {APPROVAL_COLS} FROM approvals WHERE id = ?1"),
                 params![id],
                 approval_row,
             )
@@ -1477,7 +1497,9 @@ impl Store {
 
     pub fn pending_approvals(&self) -> Result<Vec<ApprovalRow>> {
         self.with(|c| {
-            let mut st = c.prepare("SELECT id, chat_id, message_id, title, risk, payload, state, created_at, expires_at, decided_at, decided_by, reason FROM approvals WHERE state = 'pending' ORDER BY created_at")?;
+            let mut st = c.prepare(&format!(
+                "SELECT {APPROVAL_COLS} FROM approvals WHERE state = 'pending' ORDER BY created_at"
+            ))?;
             let rows = st.query_map([], approval_row)?;
             rows.collect()
         })
@@ -1526,6 +1548,7 @@ pub struct ApprovalRow {
     pub chat_id: String,
     pub message_id: String,
     pub title: String,
+    pub summary: String,
     pub risk: String,
     pub payload: Value,
     pub state: String,
@@ -1534,7 +1557,12 @@ pub struct ApprovalRow {
     pub decided_at: Option<i64>,
     pub decided_by: Option<String>,
     pub reason: Option<String>,
+    /// The card as the box wrote it (`approval_binding::fingerprint`). `None` for a card raised
+    /// by a daemon that predates the column.
+    pub fingerprint: Option<String>,
 }
+
+const APPROVAL_COLS: &str = "id, chat_id, message_id, title, summary, risk, payload, state, created_at, expires_at, decided_at, decided_by, reason, fingerprint";
 
 fn approval_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ApprovalRow> {
     Ok(ApprovalRow {
@@ -1542,14 +1570,16 @@ fn approval_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ApprovalRow> {
         chat_id: r.get(1)?,
         message_id: r.get(2)?,
         title: r.get(3)?,
-        risk: r.get(4)?,
-        payload: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or(Value::Null),
-        state: r.get(6)?,
-        created_at: r.get(7)?,
-        expires_at: r.get(8)?,
-        decided_at: r.get(9)?,
-        decided_by: r.get(10)?,
-        reason: r.get(11)?,
+        summary: r.get(4)?,
+        risk: r.get(5)?,
+        payload: serde_json::from_str(&r.get::<_, String>(6)?).unwrap_or(Value::Null),
+        state: r.get(7)?,
+        created_at: r.get(8)?,
+        expires_at: r.get(9)?,
+        decided_at: r.get(10)?,
+        decided_by: r.get(11)?,
+        reason: r.get(12)?,
+        fingerprint: r.get(13)?,
     })
 }
 
