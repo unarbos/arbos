@@ -2,8 +2,10 @@
 # Mac half of the Rust pre-merge gate, run on the EC2 Mac by the feedback poller over ssh. Asynchronous,
 # because a release build of arbos-mac outlives a 2-minute tick:
 #   rust-gate.sh start-batch <run-id> <tree-sha> <release-mac: 0|1> [full]
-#   rust-gate.sh status <run-id>   -> first line running|ok|fail|infra, then "== …" summary and diagnostics
+#   rust-gate.sh status <run-id>   -> first line running|ok|fail|infra, then the "== …" summary lines with
+#                                     the diagnostics of each, in log order
 #   rust-gate.sh abort  <run-id>
+#   rust-gate.sh selftest          -> checks that report against fixtures; needs nothing from the Mac
 # The poller builds the integration tree (current main + every ready branch) as the branch `gate/<run-id>` on
 # GitHub; CI there is the Linux half (fmt --check, clippy -D warnings, test). This script fetches that tree
 # into ~/arbos-rust-gate (its own clone; ~/arbos-gate belongs to the iOS gate) and runs the one thing a Linux
@@ -25,6 +27,25 @@ runs=$HOME/arbos-rust-gate-runs
 repo=$HOME/arbos-rust-gate
 mkdir -p "$runs"
 cmd=${1:-}; shift || true
+
+# `status`'s report: the "== " summary lines and the diagnostics the log carries under each of them, in LOG
+# ORDER, paths relative to the repo. One pass, because two greps (every heading, then every diagnostic) put
+# every error after `== done rc=1` in one undifferentiated block: a tree whose Release and Debug halves both
+# fail said nothing about which configuration produced which error — the distinction the gate builds Release
+# before Debug for (a `#if DEBUG` type used unconditionally compiles in Debug and dies in the TestFlight
+# archive). The poller's slices made it worse: ios_tail is body[-5000:] and the agent follow-up quotes the
+# last 25 lines, both cutting from the front, so a long enough block reached the agent with no heading left.
+# Caps: 60 headings, 150 diagnostic lines in all and 40 under any one heading — per heading too, so a noisy
+# half cannot spend the whole budget before the half that actually failed gets to say anything.
+status_report() {
+  awk '
+    /^== / { if (++heads <= 60) print; kept = 0; next }
+    total >= 150 || kept >= 40 { next }
+    /^(error|warning)(\[|:)|^[[:space:]]+--> |^Diff in |^test .* FAILED|^failures:|panicked at|: error: |\*\* BUILD FAILED/ {
+      kept++; total++; print
+    }
+  ' "$1" | sed "s#$repo/##g;s#$HOME/arbos-gate/##g"
+}
 
 disk_floor_check() {
   # A release build of arbos-mac needs several GiB of scratch; below ~2 GiB free it fails half-way and
@@ -116,12 +137,61 @@ case "$cmd" in
     if [ ! -f "$log" ]; then echo infra; echo "no run $id"; exit 0; fi
     if [ ! -f "$rc" ]; then echo running; tail -n 3 "$log"; exit 0; fi
     case "$(cat "$rc")" in 0) echo ok;; 1) echo fail;; *) echo infra;; esac
-    # Summary lines, then compiler/fmt/test diagnostics only; paths relative to the repo.
-    grep -E "^== " "$log" | head -n 60
-    grep -E "^(error|warning)(\[|:)|^\s+--> |^Diff in |^test .* FAILED|^failures:|panicked at|: error: |\*\* BUILD FAILED" "$log" \
-      | sed "s#$repo/##g;s#$HOME/arbos-gate/##g" | head -n 150
-    # A clean log has no diagnostics: grep exits 1 and, as the last command, made `status` exit 1 - the
-    # poller took that for "Mac unreachable" and the iOS half never settled (19:15-19:30 Oct 23).
+    status_report "$log"
+    # A clean log has no diagnostics: the grep that read it exited 1 and, as the last command, made `status`
+    # exit 1 - the poller took that for "Mac unreachable" and the iOS half never settled (19:15-19:30 Oct 23).
+    exit 0
+    ;;
+  selftest)
+    # `rust-gate.sh selftest`: the report must hand each "== " heading the diagnostics the log carries
+    # under it, and no heading may be silenced by a noisy one before it. Needs nothing from the Mac.
+    # Not `mktemp -t <prefix>`: that is a BSD spelling GNU mktemp refuses, and the selftest is meant to run
+    # off the Mac too (a Linux box reviewing a change to this report).
+    t=$(mktemp "${TMPDIR:-/tmp}/rust-gate-selftest.XXXXXX")
+    # The iOS half with both configurations red, as ios-gate.sh prints it; the error lines are the ones
+    # archived gate artifact 13096501165 carries and the `silenced:` argument 4b193bfc dropped.
+    scroll="apps/ios/Arbos/ArbosUITests/ScrollPerfUITests.swift:153: error: -[ArbosUITests.ScrollPerfUITests testGroupScrollMetrics] : Received unexpected number of metrics: 0 in iteration with index 4. Got 2 in iteration with index 0"
+    silenced="apps/ios/Arbos/ArbosTests/AgentIdentityTests.swift:72:28: error: missing argument for parameter 'silenced' in call"
+    printf '%s\n' "== ios-gate feedback/af252 915fd99f" "== xcframework: ok" "== Release: FAILS" \
+                  "$scroll" "** BUILD FAILED **" "-- Release log tail --" "    Compiling arbos-ffi v0.1.0" \
+                  "== Debug: FAILS" "$silenced" "** BUILD FAILED **" "== done rc=1" > "$t"
+    want=$(printf '%s\n' "== ios-gate feedback/af252 915fd99f" "== xcframework: ok" "== Release: FAILS" \
+                         "$scroll" "** BUILD FAILED **" "== Debug: FAILS" "$silenced" "** BUILD FAILED **" "== done rc=1")
+    got=$(status_report "$t")
+    if [ "$got" = "$want" ]; then
+      echo "selftest: the iOS half's report keeps each configuration's own errors"
+    else
+      echo "selftest: the iOS half's report is NOT in log order — got:"; printf '%s\n' "$got"; rm -f "$t"; exit 1
+    fi
+    # The Mac half in `full` mode: fmt, clippy and test each have their own section, and the repo prefix goes.
+    printf '%s\n' "== tree 915fd99f" "== cargo fmt --all --check" "Diff in $repo/crates/arbos-core/src/lib.rs:12:" \
+                  "== fmt: FAILS" "== cargo clippy --workspace --all-targets --locked -- -D warnings" \
+                  "error[E0599]: no method named \`silenced\` found for struct \`AgentIdentity\`" \
+                  "   --> crates/arbos-core/src/agent.rs:88:19" "== clippy: FAILS" "== done rc=1" > "$t"
+    want=$(printf '%s\n' "== tree 915fd99f" "== cargo fmt --all --check" "Diff in crates/arbos-core/src/lib.rs:12:" \
+                         "== fmt: FAILS" "== cargo clippy --workspace --all-targets --locked -- -D warnings" \
+                         "error[E0599]: no method named \`silenced\` found for struct \`AgentIdentity\`" \
+                         "   --> crates/arbos-core/src/agent.rs:88:19" "== clippy: FAILS" "== done rc=1")
+    got=$(status_report "$t")
+    if [ "$got" = "$want" ]; then
+      echo "selftest: the Mac half's report keeps fmt's diff apart from clippy's errors"
+    else
+      echo "selftest: the Mac half's report is NOT in log order — got:"; printf '%s\n' "$got"; rm -f "$t"; exit 1
+    fi
+    # A clippy section with more errors than the whole budget must still leave the release build room to speak.
+    { echo "== cargo clippy --workspace --all-targets --locked -- -D warnings"
+      for i in $(seq 1 200); do echo "error[E0599]: noise $i"; done
+      echo "== cargo build --release --locked -p arbos-mac"
+      echo "error[E0432]: unresolved import \`arbos_core::AgentIdentity\`"
+      echo "== done rc=1"; } > "$t"
+    got=$(status_report "$t")
+    rm -f "$t"
+    if printf '%s\n' "$got" | grep -qF "error[E0432]: unresolved import" \
+       && [ "$(printf '%s\n' "$got" | grep -cF "error[E0599]: noise")" -le 40 ]; then
+      echo "selftest: a noisy section cannot silence the next heading's errors"
+    else
+      echo "selftest: the per-heading cap does not hold — got:"; printf '%s\n' "$got" | head -5; exit 1
+    fi
     exit 0
     ;;
   abort)
@@ -193,7 +263,7 @@ case "$cmd" in
     finish "$status"
     ;;
   *)
-    echo "usage: rust-gate.sh start-batch <id> <tree-sha> <0|1> [full] | status <id> | abort <id>" >&2
+    echo "usage: rust-gate.sh start-batch <id> <tree-sha> <0|1> [full] | status <id> | abort <id> | selftest" >&2
     exit 2
     ;;
 esac
