@@ -3238,25 +3238,6 @@ impl Agent {
         if let Some(note) = self.take_side_notes(chat_id) {
             prompt_text = format!("{note}\n\n{prompt_text}");
         }
-        // Replies from other agents that arrived before this turn (#1780): told here, once; the
-        // notice turn waiting behind this send sees them marked and skips.
-        {
-            let h = host.lock().await;
-            let pending = crate::agent_messages::pending_agent_replies(&h.doc.messages());
-            if !pending.is_empty() {
-                for (id, ..) in &pending {
-                    crate::agent_messages::mark_agent_reply_relayed(&h.doc, id);
-                }
-                let note = crate::agent_messages::pending_replies_note(&pending);
-                prompt_text = format!("{note}{prompt_text}");
-                tracing::info!(
-                    chat_id,
-                    n = pending.len(),
-                    "arrived agent replies folded into the user turn"
-                );
-            }
-        }
-
         // Hang-up / typed preempt during setup: drop the claim and leave without opening a row.
         if self.turn.lock().await.as_ref().is_some_and(|t| t.stopped) {
             let _ = self.turn.lock().await.take();
@@ -4220,6 +4201,19 @@ impl Agent {
             streaming_behavior: StreamingBehavior::FollowUp,
         });
         self.turn_running.store(true, Ordering::SeqCst);
+        // Results that landed before this prompt (#1780, #2303): read after `turn_running` is
+        // set, so one arriving from here on is steered into the run instead.
+        let folded;
+        let prompt_text = match &kind {
+            TurnKind::User => match self.fold_arrived_results(chat_id, host).await {
+                Some(note) => {
+                    folded = format!("{note}{prompt_text}");
+                    folded.as_str()
+                }
+                None => prompt_text,
+            },
+            _ => prompt_text,
+        };
         let keepalive = self.spawn_keepalive();
         // A relay turn is stamped so the extension lets a `send_message` that comes before
         // `route` stand as the `reply` route instead of blocking it (the result turn then wrote
@@ -4723,6 +4717,22 @@ impl Agent {
     ) -> Result<()> {
         self.let_user_sends_go_first().await;
         let _guard = self.turn_lock.lock().await;
+        if let Some(j) = job {
+            if self
+                .store
+                .job(&j.id)
+                .ok()
+                .flatten()
+                .is_some_and(|row| row.delivered_key.is_some())
+            {
+                tracing::info!(
+                    chat_id,
+                    job = %j.id,
+                    "job result already told by a user turn; result turn skipped"
+                );
+                return Ok(());
+            }
+        }
         let ask = {
             let h = host.lock().await;
             h.doc
@@ -4807,6 +4817,12 @@ impl Agent {
                 PendingMemory::none(),
             )
             .await?;
+        // Marked while the lock is still ours: a user turn waiting for it must not tell it again.
+        if let (Some(j), Ok(())) = (job, &outcome.result) {
+            let _ = self
+                .store
+                .set_job_delivered(&j.id, &format!("job:{}:result", j.id));
+        }
         // A result turn relays; it does not start further work. Any other route is logged only.
         if !matches!(outcome.turn.route, Some(ValidRoute::Reply { .. }) | None) {
             tracing::warn!(
@@ -4821,6 +4837,68 @@ impl Agent {
             &outcome.turn.streamed_text,
         );
         outcome.result
+    }
+
+    /// Jobs of `chat_id` that finished `done` within `JOB_RESULT_FRESH_MS`, newest first, each with
+    /// its worker's output from the hidden `subagent_result` part on `rows`. `untold_only` keeps
+    /// the ones no turn has given the user yet (no `delivered_key`).
+    pub(crate) fn finished_job_results(
+        &self,
+        chat_id: &str,
+        rows: &[MessageView],
+        untold_only: bool,
+    ) -> Vec<(crate::store::JobRow, String)> {
+        let since = now_ms() - JOB_RESULT_FRESH_MS;
+        self.store
+            .jobs_for_chat(chat_id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|j| j.state == "done" && j.ended_at.is_some_and(|t| t >= since))
+            .filter(|j| !untold_only || j.delivered_key.is_none())
+            .map(|j| {
+                let out = job_worker_output(rows, &j.id).unwrap_or_default();
+                (j, out)
+            })
+            .collect()
+    }
+
+    /// The note a user turn carries for results that landed in the chat before it ran (agent
+    /// replies #1780, finished jobs #2303), marked told so the notice / result turn waiting
+    /// behind this one skips. `None` when nothing is waiting.
+    pub(crate) async fn fold_arrived_results(
+        &self,
+        chat_id: &str,
+        host: &SharedHost,
+    ) -> Option<String> {
+        let h = host.lock().await;
+        let rows = h.doc.messages();
+        let mut note = String::new();
+        let replies = crate::agent_messages::pending_agent_replies(&rows);
+        if !replies.is_empty() {
+            for (id, ..) in &replies {
+                crate::agent_messages::mark_agent_reply_relayed(&h.doc, id);
+            }
+            note.push_str(&crate::agent_messages::pending_replies_note(&replies));
+        }
+        let jobs = self.finished_job_results(chat_id, &rows, true);
+        if !jobs.is_empty() {
+            for (j, _) in &jobs {
+                let _ = self
+                    .store
+                    .set_job_delivered(&j.id, &format!("job:{}:told", j.id));
+            }
+            note.push_str(&finished_jobs_note(&jobs));
+        }
+        if note.is_empty() {
+            return None;
+        }
+        tracing::info!(
+            chat_id,
+            replies = replies.len(),
+            jobs = jobs.len(),
+            "arrived results folded into the user turn"
+        );
+        Some(note)
     }
 
     /// A job ran out of workers (`JOB_WORKER_RETRIES` fresh starts all failed): the main agent
@@ -8297,28 +8375,19 @@ impl Agent {
                 .run_job_fallback_turn(chat_id, host, in_reply_to, j, &e, &text)
                 .await;
         }
-        let r = self
-            .run_result_turn(
-                chat_id,
-                host,
-                in_reply_to,
-                &subagent_id,
-                &sub_name,
-                &status,
-                total_ms,
-                &result_text,
-                done_err.as_deref(),
-                job.as_ref(),
-            )
-            .await;
-        if let Some(j) = &job {
-            if r.is_ok() {
-                let _ = self
-                    .store
-                    .set_job_delivered(&j.id, &format!("job:{}:result", j.id));
-            }
-        }
-        r
+        self.run_result_turn(
+            chat_id,
+            host,
+            in_reply_to,
+            &subagent_id,
+            &sub_name,
+            &status,
+            total_ms,
+            &result_text,
+            done_err.as_deref(),
+            job.as_ref(),
+        )
+        .await
     }
 
     /// The status line after a job ended: the newest step of another job still running in this
@@ -9262,6 +9331,56 @@ fn is_job_name(name: &str) -> bool {
     name.starts_with("ask-")
 }
 
+/// How long a finished job counts as news for a turn that did not see its result (#2303).
+pub(crate) const JOB_RESULT_FRESH_MS: i64 = 60 * 60 * 1000;
+
+/// The raw output of job `job_id`'s last worker (its hidden `subagent_result` part).
+pub(crate) fn job_worker_output(rows: &[MessageView], job_id: &str) -> Option<String> {
+    rows.iter()
+        .rev()
+        .filter(|m| {
+            m.rest
+                .get("job")
+                .and_then(|j| j.get("id"))
+                .and_then(Value::as_str)
+                == Some(job_id)
+        })
+        .find_map(|m| {
+            m.parts
+                .iter()
+                .find(|p| p.get("kind").and_then(Value::as_str) == Some("subagent_result"))
+                .and_then(|p| p.get("text").and_then(Value::as_str))
+                .map(str::to_owned)
+        })
+}
+
+/// The note a user turn carries for jobs that finished before it ran (#2303): the result is
+/// told here, once, instead of "still running" followed by the result.
+pub(crate) fn finished_jobs_note(jobs: &[(crate::store::JobRow, String)]) -> String {
+    if jobs.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from(
+        "[Jobs of this chat that already finished — the user has not been told the results yet. Tell each result in this turn, once: as the answer when the user asks about that job, else alongside your answer to what they asked. Never say the job is still running:]\n",
+    );
+    for (j, out) in jobs {
+        let out = crate::truncate::clip_marked(out.trim(), 1500, "", None);
+        s.push_str(&format!(
+            "- \"{}\" (job {}, asked in message {}) finished: {}\n",
+            j.title,
+            j.id,
+            j.ask_message_id,
+            if out.trim().is_empty() {
+                "(no output was written)"
+            } else {
+                out.trim()
+            }
+        ));
+    }
+    s.push_str("[End of finished jobs]\n\n");
+    s
+}
+
 /// Concurrent asks per workspace (design note `agent-async-jobs.md`: 3; `ARBOS_JOB_MAX_PER_WORKSPACE`).
 /// The box-wide subagent gate (`workspace::BOX_MAX_SUBAGENTS`) bounds the box.
 pub(crate) fn job_max_per_workspace() -> usize {
@@ -9678,6 +9797,52 @@ impl Agent {
             .push("→ bash {\"command\":\"sleep 100 && echo finished\"}".into());
         *self.turn.lock().await = Some(t);
         g
+    }
+
+    /// Test seam: a job of `chat_id` asked in `ask_id` whose worker finished `done` with `output`
+    /// on its hidden worker row, as `run_subagent` leaves it before the result turn runs.
+    pub(crate) async fn test_finished_job(
+        &self,
+        host: &SharedHost,
+        chat_id: &str,
+        job_id: &str,
+        ask_id: &str,
+        output: &str,
+    ) {
+        self.store
+            .insert_job(
+                job_id,
+                chat_id,
+                ask_id,
+                "Counting SHA-256 zeros",
+                "code",
+                "count the digests that start with 00",
+                &[],
+            )
+            .unwrap();
+        self.store.set_job_state(job_id, "running", None).unwrap();
+        let h = host.lock().await;
+        let row = ulid();
+        h.doc.start_assistant_message(&row, ask_id, "box:test");
+        h.doc.set_message_fields(
+            &row,
+            &[
+                (
+                    "job",
+                    json!({ "id": job_id, "title": "Counting SHA-256 zeros" }),
+                ),
+                ("worker", json!(true)),
+                ("hidden", json!(true)),
+            ],
+        );
+        h.doc.add_hidden_part(
+            &row,
+            "subagent_result",
+            output,
+            &json!({ "status": "done" }),
+        );
+        h.doc.finish_message(&row, MessageStatus::Done);
+        self.store.set_job_state(job_id, "done", None).unwrap();
     }
 
     /// Test seam: give the held turn a live assistant row to write into.
@@ -11114,6 +11279,200 @@ mod tests {
             "{msg}"
         );
         pi.shutdown().await;
+    }
+
+    fn user_msg(host: &SharedHost, id: &str, text: &str) {
+        host.try_lock()
+            .expect("host free")
+            .doc
+            .append_user_message(id, text, "dev-mac", &Default::default())
+            .unwrap();
+    }
+
+    fn handoff_row(host: &SharedHost, id: &str, in_reply_to: &str) {
+        let h = host.try_lock().expect("host free");
+        h.doc.start_assistant_message(id, in_reply_to, "box:test");
+        h.doc.set_message_fields(
+            id,
+            &[
+                ("subagentName", json!("lane-b")),
+                ("handoffMessages", json!(1)),
+            ],
+        );
+        h.doc.finish_message(id, MessageStatus::Done);
+    }
+
+    /// #2303 (eval b2, 0.1.185): the job's result was in the chat 10 s before "Is it still
+    /// running?", but the job had left the working set and its result turn waited behind the
+    /// send, so the user turn answered "still running" and the result followed. The next user
+    /// turn carries a finished, untold job result — once — and marks it told.
+    #[tokio::test]
+    async fn a_finished_job_result_reaches_the_next_user_turn_once() {
+        let (agent, root) = crate::status::tests::test_agent().await;
+        let chat = "01TESTCHATJOBRESULTFOLD001";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        user_msg(&host, "m-ask", "Start a background job: count the digests.");
+        agent
+            .test_finished_job(&host, chat, "job-z", "m-ask", "The count written is 11797.")
+            .await;
+        agent
+            .store
+            .insert_job(
+                "job-r",
+                chat,
+                "m-ask",
+                "Still counting",
+                "code",
+                "brief",
+                &[],
+            )
+            .unwrap();
+        agent.store.set_job_state("job-r", "running", None).unwrap();
+        user_msg(&host, "m-status", "How is the background job going?");
+        let note = agent
+            .fold_arrived_results(chat, &host)
+            .await
+            .expect("the finished job is folded in");
+        assert!(
+            note.contains("\"Counting SHA-256 zeros\" (job job-z, asked in message m-ask) finished: The count written is 11797."),
+            "{note}"
+        );
+        assert!(
+            note.contains("Never say the job is still running"),
+            "{note}"
+        );
+        assert!(
+            !note.contains("job-r"),
+            "a running job is not a result: {note}"
+        );
+        assert_eq!(
+            agent
+                .store
+                .job("job-z")
+                .unwrap()
+                .unwrap()
+                .delivered_key
+                .as_deref(),
+            Some("job:job-z:told")
+        );
+        assert!(
+            agent.fold_arrived_results(chat, &host).await.is_none(),
+            "told once"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #2303: the result turn queued behind that user turn posted the count a second time. A job
+    /// result a user turn already told is not delivered again.
+    #[tokio::test]
+    async fn result_turn_skips_a_job_result_a_user_turn_already_told() {
+        let (agent, root) = crate::status::tests::test_agent().await;
+        let chat = "01TESTCHATJOBRESULTFOLD002";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        user_msg(&host, "m-ask", "Start a background job: count the digests.");
+        agent
+            .test_finished_job(&host, chat, "job-y", "m-ask", "The count written is 11797.")
+            .await;
+        assert!(agent.fold_arrived_results(chat, &host).await.is_some());
+        let rows_before = host.lock().await.doc.messages().len();
+        let job = JobSpec {
+            id: "job-y".into(),
+            title: "Counting SHA-256 zeros".into(),
+            kind: "code".into(),
+            touches: vec![],
+            attempt: 0,
+        };
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            agent.run_result_turn(
+                chat,
+                &host,
+                "m-ask",
+                "sub-y",
+                "job-counting-sha256-zeros",
+                "done",
+                3000,
+                "The count written is 11797.",
+                None,
+                Some(&job),
+            ),
+        )
+        .await
+        .expect("no turn runs")
+        .unwrap();
+        assert_eq!(
+            host.lock().await.doc.messages().len(),
+            rows_before,
+            "no second answer row"
+        );
+        assert_eq!(
+            agent
+                .store
+                .job("job-y")
+                .unwrap()
+                .unwrap()
+                .delivered_key
+                .as_deref(),
+            Some("job:job-y:told")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #2303 (eval g2): a reply that lands while a user turn of the chat is claimed but its pi
+    /// run is not on (setup before the prompt, wrap-up after it) used to be steered into an idle
+    /// pi and marked relayed, so the next turn's fold skipped it. It stays pinned for the fold;
+    /// once the run is on, it is steered as before.
+    #[tokio::test]
+    async fn agent_reply_is_steered_only_into_a_running_pi_run() {
+        let (agent, root) = crate::status::tests::test_agent().await;
+        let (pi, log) = fake_pi(&root).await;
+        *agent.pi.lock().await = Some(pi.clone());
+        let chat = "01TESTCHATAGENTREPLYGATE01";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        user_msg(&host, "u1", "Send lane-b a hello.");
+        handoff_row(&host, "h1", "u1");
+        handoff_row(&host, "h2", "u1");
+        user_msg(&host, "u2", "What did lane-b say back?");
+        *agent.turn.lock().await = Some(TurnState::claim(chat, "u2", false));
+        let lock = agent.turn_lock.lock().await;
+        let reply = |row: &str, text: &str| {
+            json!({ "id": format!("am-{row}"), "fromName": "lane-b", "text": text, "status": "done",
+                    "originalText": "Hi from Long-task eval. How is your day going?", "chatId": chat, "messageId": row })
+        };
+        let a2 = agent.clone();
+        let p = reply(
+            "h1",
+            "Good, thanks. The cleanup still waits on owner approval.",
+        );
+        let notice = tokio::spawn(async move { a2.handle_agent_reply(p).await });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            fake_pi_commands(&log).is_empty(),
+            "no steer into an idle pi"
+        );
+        let note = agent
+            .fold_arrived_results(chat, &host)
+            .await
+            .expect("the reply waits for the turn's prompt");
+        assert!(
+            note.contains("- lane-b replied to \"Hi from Long-task eval. How is your day going?\": Good, thanks."),
+            "{note}"
+        );
+
+        agent.turn_running.store(true, Ordering::SeqCst);
+        agent
+            .handle_agent_reply(reply("h2", "Also: nothing was deleted."))
+            .await
+            .unwrap();
+        let cmds = fake_pi_commands(&log);
+        assert_eq!(cmds.len(), 1, "{cmds:?}");
+        assert_eq!(cmds[0]["type"], "steer");
+        assert!(agent.fold_arrived_results(chat, &host).await.is_none());
+        agent.turn_running.store(false, Ordering::SeqCst);
+        drop(lock);
+        notice.abort();
+        pi.shutdown().await;
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
