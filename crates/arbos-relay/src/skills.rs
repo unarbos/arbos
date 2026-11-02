@@ -1009,6 +1009,115 @@ mod tests {
         );
     }
 
+    /// A guest writing a how-to into the project they were invited to is a legitimate thing to
+    /// do (D72), and it is also indistinguishable from a skill misfiled under a stranger's
+    /// project by a name collision — the thing #2548 closes at `create`. Scoping `shared` to a
+    /// skill's owner must not take the legitimate case with it, so this pins the whole round
+    /// trip: the guest files it, the project's own box reads it like any of its Project's
+    /// skills, and the guest keeps editing it.
+    ///
+    /// Ownership follows the project, not the author: `shared` on a guest-written skill carries
+    /// it across the **owner's** Projects, because the owner is who the scope derives. The
+    /// guest's own agents never see it, which is the same answer `a_device_lists_its_own_
+    /// library_and_not_the_relays` gives for every skill of a project you do not hold.
+    #[tokio::test]
+    async fn a_guest_files_a_skill_into_the_project_they_were_invited_to() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let alices = project_of(&state, &alice, "Alice work");
+        let bobs = project_of(&state, &bob, "Bob work");
+        state
+            .db
+            .add_project_member(&alices, &bob, &alice)
+            .expect("invite");
+
+        let made = create(
+            State(state.clone()),
+            bob_dev.clone(),
+            HeaderMap::new(),
+            Json(SkillBody {
+                name: Some("How we do standups".into()),
+                body: Some("the steps the guest wrote down for the project".into()),
+                origin_project_id: Some(alices.clone()),
+                ..SkillBody::default()
+            }),
+        )
+        .await;
+        assert_eq!(
+            status(made),
+            StatusCode::CREATED,
+            "a guest may write into the project they were invited to"
+        );
+        let row = state.db.skill("how-we-do-standups").unwrap().unwrap();
+        assert_eq!(row.origin_project_id.as_deref(), Some(alices.as_str()));
+
+        // The same thing again, naming the project rather than its id. This is the spelling
+        // #2548 changes: it tries the caller's own agents of that name first and only then the
+        // plain lookup. Bob holds no "Alice work", so the fallback finds Alice's and `allows`
+        // lets a guest through.
+        assert_eq!(
+            status(
+                create(
+                    State(state.clone()),
+                    bob_dev.clone(),
+                    HeaderMap::new(),
+                    Json(SkillBody {
+                        name: Some("Where the runbooks live".into()),
+                        body: Some("the guest wrote this one by project name".into()),
+                        origin_project_id: Some("Alice work".to_owned()),
+                        ..SkillBody::default()
+                    }),
+                )
+                .await
+            ),
+            StatusCode::CREATED,
+            "naming the project works as well as naming its id"
+        );
+        assert_eq!(
+            state
+                .db
+                .skill("where-the-runbooks-live")
+                .unwrap()
+                .unwrap()
+                .origin_project_id
+                .as_deref(),
+            Some(alices.as_str())
+        );
+
+        // Alice's box reads both as its Project's own, which is how the agent gets them.
+        assert_eq!(
+            slugs_of(&what_the_box_caches(&state, &alice, &alices).await),
+            vec![
+                "how-we-do-standups".to_owned(),
+                "where-the-runbooks-live".to_owned()
+            ]
+        );
+
+        // Bob keeps it in his library and can still edit it: `owns_skill` asks `allows`, and a
+        // guest passes. His own box does not get it — it is Alice's Project's skill.
+        assert!(listed(&state, bob_dev.clone(), HeaderMap::new())
+            .await
+            .contains(&"how-we-do-standups".to_owned()));
+        assert_eq!(
+            status(
+                update(
+                    State(state.clone()),
+                    bob_dev,
+                    HeaderMap::new(),
+                    Path(row.id.clone()),
+                    Json(SkillBody {
+                        body: Some("the steps, corrected".into()),
+                        ..SkillBody::default()
+                    }),
+                )
+                .await
+            ),
+            StatusCode::OK
+        );
+        assert!(what_the_box_caches(&state, &bob, &bobs).await.is_empty());
+    }
+
     /// `allows` lets a guest of a shared project (D72) drive it, and `owns_skill` is built on
     /// `allows` rather than `owns` for that reason. The listing has to agree, or being invited
     /// to a project would show you its chats and hide its skills.
