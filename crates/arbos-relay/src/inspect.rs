@@ -134,45 +134,29 @@ impl InspectQuery {
     }
 }
 
-/// Who may see what. `Err` is the 403/404 to answer with.
-pub fn scope(
-    state: &AppState,
-    principal: &Principal,
-    project: &Project,
-) -> Result<Scope, Box<Response>> {
-    if state.owns(principal, &project.id) {
-        return Ok(Scope::Owner);
-    }
-    let Principal::Device { user_id, .. } = principal else {
-        return Err(Box::new(api_error(
-            StatusCode::FORBIDDEN,
-            "forbidden",
-            "not your agent",
-        )));
-    };
-    Err(Box::new(api_error(
-        StatusCode::FORBIDDEN,
-        "forbidden",
-        format!(
-            "not your agent: name a chat you share with it (`chat=`) to see its rows there (user {user_id})"
-        ),
-    )))
+/// The one answer for an agent the caller may not inspect: the answer a name nobody holds gets.
+/// While the two differed — `403 not your agent` for a name another owner held against `404 no
+/// such project` for a free one — these two routes told any signed-in caller which agent names
+/// were taken (`api::no_such_project`, reported 2026-11-02).
+fn hidden() -> Box<Response> {
+    Box::new(api_error(
+        StatusCode::NOT_FOUND,
+        "not_found",
+        "no such project",
+    ))
 }
 
 /// Member scope for a named chat: a people chat the caller is in with the agent in it, or a
-/// project chat of a project the caller is a guest of.
-pub fn member_scope(
+/// project chat of a project the caller is a guest of. `None` is "not a caller this chat opens
+/// the agent to", which reads as [`hidden`].
+fn member_scope(
     state: &AppState,
     principal: &Principal,
     project: &Project,
     chat: &str,
-) -> Result<Scope, Box<Response>> {
+) -> Option<Scope> {
     let Principal::Device { user_id, .. } = principal else {
-        return Err(Box::new(api_error(
-            StatusCode::FORBIDDEN,
-            "forbidden",
-            "not your agent",
-        )));
+        return None;
     };
     if state.db.people_chat(chat).ok().flatten().is_some() {
         let members = state.db.members_of(chat).unwrap_or_default();
@@ -182,16 +166,9 @@ pub fn member_scope(
         let agent_in = members
             .iter()
             .any(|m| m.project_id() == Some(project.id.as_str()));
-        if me_in && agent_in {
-            return Ok(Scope::Member {
-                chat: chat.to_owned(),
-            });
-        }
-        return Err(Box::new(api_error(
-            StatusCode::FORBIDDEN,
-            "forbidden",
-            "you and this agent are not both in that chat",
-        )));
+        return (me_in && agent_in).then(|| Scope::Member {
+            chat: chat.to_owned(),
+        });
     }
     let project_chat = state
         .db
@@ -199,16 +176,38 @@ pub fn member_scope(
         .ok()
         .flatten()
         .is_some_and(|p| p == project.id);
-    if project_chat && state.allows(principal, &project.id) {
-        return Ok(Scope::Member {
-            chat: chat.to_owned(),
-        });
-    }
-    Err(Box::new(api_error(
-        StatusCode::FORBIDDEN,
-        "forbidden",
-        "no such shared chat with this agent",
-    )))
+    (project_chat && state.allows(principal, &project.id)).then(|| Scope::Member {
+        chat: chat.to_owned(),
+    })
+}
+
+/// The agent named in the path and what this caller may see of it. The owner reads everything;
+/// anyone else has to name a chat they share with the agent. Every other caller — including one
+/// who names a chat that is not shared — gets [`hidden`], so none of them can tell an agent
+/// that is not theirs from one that is not there.
+fn project_and_scope(
+    state: &AppState,
+    principal: &Principal,
+    id_or_name: &str,
+    chat: Option<&str>,
+) -> Result<(Project, Scope), Box<Response>> {
+    let project = match state.db.project(id_or_name) {
+        Ok(Some(p)) => p,
+        Ok(None) => return Err(hidden()),
+        Err(e) => {
+            return Err(Box::new(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db",
+                e.to_string(),
+            )))
+        }
+    };
+    let scope = state
+        .owns(principal, &project.id)
+        .then_some(Scope::Owner)
+        .or_else(|| member_scope(state, principal, &project, chat?))
+        .ok_or_else(hidden)?;
+    Ok((project, scope))
 }
 
 /// The events of one page plus the cursor bookkeeping (see module docs).
@@ -564,19 +563,10 @@ pub async fn project_inspect(
     Path(id): Path<String>,
     Query(raw): Query<HashMap<String, String>>,
 ) -> Response {
-    let project = match state.db.project(&id) {
-        Ok(Some(p)) => p,
-        Ok(None) => return api_error(StatusCode::NOT_FOUND, "not_found", "no such project"),
-        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
-    };
     let mut q = InspectQuery::parse(&raw);
-    let scope = match (scope(&state, &principal, &project), q.chat.as_deref()) {
-        (Ok(s), _) => s,
-        (Err(_), Some(chat)) => match member_scope(&state, &principal, &project, chat) {
-            Ok(s) => s,
-            Err(r) => return *r,
-        },
-        (Err(r), None) => return *r,
+    let (project, scope) = match project_and_scope(&state, &principal, &id, q.chat.as_deref()) {
+        Ok(v) => v,
+        Err(r) => return *r,
     };
     if let Scope::Member { chat } = &scope {
         q.chat = Some(chat.clone());
@@ -681,19 +671,11 @@ pub async fn project_job(
     Path((id, job_id)): Path<(String, String)>,
     Query(raw): Query<HashMap<String, String>>,
 ) -> Response {
-    let project = match state.db.project(&id) {
-        Ok(Some(p)) => p,
-        Ok(None) => return api_error(StatusCode::NOT_FOUND, "not_found", "no such project"),
-        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
-    };
-    let scope = match (scope(&state, &principal, &project), raw.get("chat")) {
-        (Ok(s), _) => s,
-        (Err(_), Some(chat)) => match member_scope(&state, &principal, &project, chat) {
-            Ok(s) => s,
+    let (project, scope) =
+        match project_and_scope(&state, &principal, &id, raw.get("chat").map(String::as_str)) {
+            Ok(v) => v,
             Err(r) => return *r,
-        },
-        (Err(r), None) => return *r,
-    };
+        };
     let after = raw
         .get("after")
         .and_then(|s| s.parse::<i64>().ok())
@@ -853,18 +835,22 @@ mod tests {
         chat.id
     }
 
+    /// A stranger is told nothing but the answer a name nobody holds gets, because the two
+    /// answers used to differ and so listed the agents on the relay (`module_lookup_tests`).
     #[tokio::test]
-    async fn other_users_agent_is_forbidden_without_a_shared_chat() {
+    async fn other_users_agent_is_not_there_without_a_shared_chat() {
         let state = test_state(AuthMode::Github);
         let (owner, _) = person(&state, 1);
         let (_, stranger) = person(&state, 2);
         let project = project_of(&state, &owner, "GigChad");
         let (status, body) = call(&state, &stranger, &project, &[]).await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-        assert_eq!(body["error"]["type"], "forbidden");
-        // Naming a chat they are not in does not help.
-        let (status, _) = call(&state, &stranger, &project, &[("chat", "nope")]).await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["type"], "not_found");
+        assert_eq!(body["error"]["message"], "no such project");
+        // Naming a chat they are not in does not help, and does not say so either.
+        let (status, named) = call(&state, &stranger, &project, &[("chat", "nope")]).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(named["error"], body["error"]);
     }
 
     #[tokio::test]
@@ -951,9 +937,10 @@ mod tests {
             "no box facts for a member"
         );
         assert!(body["identity"].get("talking_model").is_none());
-        // A member must name the chat.
+        // A member must name the chat; without one they hear the same nothing a stranger does,
+        // since the route cannot tell the two apart before it knows the chat.
         let (status, _) = call(&state, &guest_dev, &project, &[]).await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
