@@ -70,6 +70,32 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// The app and the row were both fine; the aim was the only variable. A red gate is not
     /// always a red suite.
     private static let stuckTarget = "long-304"
+    /// Why both arms aimed at `stuckTarget` are skipped, and what has to be true to restore
+    /// them. Flip this to `false` in the change that fixes the rig, which is #2539.
+    ///
+    /// **Nothing here is doubt about the app.** The reveal these arms cover is shipped — it
+    /// went to TestFlight as build 202611020442 — and its landing on this very row was
+    /// measured correct on the gate, most recently with `passes=0 arrived=true`. What is
+    /// unfit is the rig's ability to stop the result list where it means to.
+    ///
+    /// `stuckTarget` is a 72 pt row, so against the aim band `y167…481` it can be aimed at
+    /// only while its top edge sits between y128 and y417: a 289 pt window. What one drag
+    /// actually moves the list has been measured at 314 pt (run 41375524808), 322 pt
+    /// (41353988578), 331 to 350 pt for a nominal 133 pt ask (41397718915) and 140 to 471 pt
+    /// (41405456143) — and those last two runs fitted different laws, so no gesture length
+    /// this rig can ask for has a travel it can bound. A travel that may exceed 289 pt steps
+    /// this row clean over its window, which is a red about one run in four and is what
+    /// reddened main on `a6770934f`.
+    ///
+    /// `convergingTarget` is 231 pt tall and its window is 448 pt, wider than any travel yet
+    /// measured, so that arm and the control stay: the behaviour at distance is still covered
+    /// and only the short-row variant goes dark.
+    private static let shortRowArmsQuarantined = true
+    private static let shortRowQuarantine =
+        "the rig cannot bound its drag travel, measured 140 to 471 pt per drag, against this "
+        + "72 pt row's 289 pt aim window, so the arm reds about one run in four; the app's "
+        + "reveal of this row is shipped and measured correct, and #2539 is the rig fix that "
+        + "removes this skip"
     /// How many drags the list may be nudged while looking for a named target before the case
     /// gives up. Twenty-nine hits separate `convergingTarget` from the newest, a drag moves
     /// one to three of them, and the measured counts were eleven and fourteen at the old 200 pt
@@ -672,7 +698,8 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     ///
     /// Aimed at `stuckTarget` so that it is the baseline for the arm below that takes the
     /// same row, and so the before/after pair is one row's behaviour rather than two.
-    func testAResultOutsideTheWindowIsTheSymptomBeforeTheFix() {
+    func testAResultOutsideTheWindowIsTheSymptomBeforeTheFix() throws {
+        try XCTSkipIf(Self.shortRowArmsQuarantined, Self.shortRowQuarantine)
         run(scrollUp: 0, preFix: true, wanted: Self.stuckTarget, expectShort: true)
     }
 
@@ -696,7 +723,8 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// about half the time" into "fails on this row every time", and it is why neither arm
     /// may go back to letting the gestures choose. The name is kept as it was so the gate's
     /// history for it stays readable.
-    func testAResultOutsideTheWindowLandsAfterTheFixAgain() {
+    func testAResultOutsideTheWindowLandsAfterTheFixAgain() throws {
+        try XCTSkipIf(Self.shortRowArmsQuarantined, Self.shortRowQuarantine)
         run(scrollUp: 0, preFix: false, wanted: Self.stuckTarget)
     }
 }
