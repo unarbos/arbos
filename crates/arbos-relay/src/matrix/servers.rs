@@ -2331,12 +2331,17 @@ mod role_residue_tests {
         owner: String,
         owner_dev: Principal,
         admin: String,
+        admin_dev: Principal,
     }
 
     /// A server whose owner has made one other person an admin.
     fn crew(state: &AppState, seed: i64) -> Crew {
+        crew_open(state, seed, false)
+    }
+
+    fn crew_open(state: &AppState, seed: i64, is_open: bool) -> Crew {
         let (owner, owner_dev) = person(state, seed);
-        let (admin, _admin_dev) = person(state, seed + 1);
+        let (admin, admin_dev) = person(state, seed + 1);
         let server = Server {
             id: ulid(),
             name: "Launch Crew".into(),
@@ -2345,7 +2350,7 @@ mod role_residue_tests {
             invite_code: format!("crew{seed}"),
             space_room_id: None,
             created_at: now_ms(),
-            is_open: false,
+            is_open,
             avatar_leaf: None,
             avatar_leaf_color: None,
         };
@@ -2363,6 +2368,7 @@ mod role_residue_tests {
             owner,
             owner_dev,
             admin,
+            admin_dev,
         }
     }
 
@@ -2513,6 +2519,52 @@ mod role_residue_tests {
                 .unwrap()
                 .role,
             "member"
+        );
+    }
+
+    /// The reset belongs to a re-join, not to every call that reaches the join statement. An
+    /// admin who never left — re-added by the owner, or tapping Join on an open server they
+    /// are already in — keeps their role. Both routes return early on a live membership; this
+    /// pins that, because the reset would demote them if either stopped doing so.
+    #[tokio::test]
+    async fn a_live_admin_who_joins_again_stays_an_admin() {
+        let state = test_state(AuthMode::Github);
+        let c = crew(&state, 5401);
+        assert_eq!(
+            re_add(&state, &c.owner_dev, &c.server, &c.admin).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            state
+                .db
+                .server_member(&c.server, &c.admin)
+                .unwrap()
+                .unwrap()
+                .role,
+            "admin",
+            "being added again is not a demotion"
+        );
+
+        let open = crew_open(&state, 5411, true);
+        let r = join(
+            State(state.clone()),
+            open.admin_dev.clone(),
+            Json(JoinBody {
+                code: None,
+                server_id: Some(open.server.clone()),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(
+            state
+                .db
+                .server_member(&open.server, &open.admin)
+                .unwrap()
+                .unwrap()
+                .role,
+            "admin",
+            "tapping Join on a server you are already an admin of is not a demotion"
         );
     }
 
