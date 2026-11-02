@@ -305,6 +305,47 @@ fn default_chat_kind() -> String {
     "chat".to_owned()
 }
 
+/// An identifier as SQLite will read it back, so a column named after a keyword cannot change
+/// the statement it appears in.
+fn quote_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// One row of `PRAGMA table_info`: what the database says a column is, used to rebuild a table
+/// without writing its columns down a second time. See [`Db::rebuild_skills_sql`].
+struct TableColumn {
+    name: String,
+    decl_type: String,
+    not_null: bool,
+    default: Option<String>,
+    /// 0 for an ordinary column, else its 1-based position in the primary key.
+    pk: i64,
+}
+
+impl TableColumn {
+    /// This column as a `CREATE TABLE` definition. `PRAGMA table_info` does not report `UNIQUE`,
+    /// so neither does this — which is what lets the `skills` rebuild drop the relay-wide
+    /// `UNIQUE` on `slug` while keeping every column, type, default and `NOT NULL` it found.
+    fn ddl(&self, sole_key: bool) -> String {
+        let mut s = quote_ident(&self.name);
+        if !self.decl_type.is_empty() {
+            s.push(' ');
+            s.push_str(&self.decl_type);
+        }
+        if sole_key && self.pk == 1 {
+            s.push_str(" PRIMARY KEY");
+        }
+        if self.not_null {
+            s.push_str(" NOT NULL");
+        }
+        if let Some(d) = &self.default {
+            s.push_str(" DEFAULT ");
+            s.push_str(d);
+        }
+        s
+    }
+}
+
 impl Chat {
     pub fn is_group(&self) -> bool {
         self.kind == "group"
@@ -722,24 +763,7 @@ impl Db {
         };
         if has_global_unique {
             tracing::info!("migrating skills: slugs scoped to their owner instead of relay-wide");
-            c.execute_batch(
-                "BEGIN;
-                 CREATE TABLE skills_new (
-                   id TEXT PRIMARY KEY, slug TEXT NOT NULL, name TEXT NOT NULL,
-                   description TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '[]',
-                   when_to_use TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '',
-                   origin_project_id TEXT, shared INTEGER NOT NULL DEFAULT 0,
-                   version INTEGER NOT NULL DEFAULT 1,
-                   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-                 );
-                 INSERT INTO skills_new(id, slug, name, description, tags, when_to_use, body,
-                                        origin_project_id, shared, version, created_at, updated_at)
-                   SELECT id, slug, name, description, tags, when_to_use, body,
-                          origin_project_id, shared, version, created_at, updated_at FROM skills;
-                 DROP TABLE skills;
-                 ALTER TABLE skills_new RENAME TO skills;
-                 COMMIT;",
-            )?;
+            c.execute_batch(&Self::rebuild_skills_sql(c)?)?;
         }
         c.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS skills_origin_slug ON skills(origin_project_id, slug)",
@@ -747,6 +771,87 @@ impl Db {
         )?;
         c.execute("CREATE INDEX IF NOT EXISTS skills_slug ON skills(slug)", [])?;
         Ok(())
+    }
+
+    /// The copy half of the rebuild above, written from the table rather than from memory.
+    ///
+    /// A rebuild that lists its columns in source is right on the day it is written and wrong
+    /// the next time a column lands: the new table is created without it and the
+    /// `INSERT … SELECT` does not carry it, so the data is gone with no error and no failing
+    /// test. That is not hypothetical here — `creator` (#2564) was already in flight when this
+    /// migration was written, and a hand-written list omitting it would have erased the author
+    /// of every skill on the relay the first time a relay booted with both changes.
+    ///
+    /// So the column list comes from `PRAGMA table_info`, and the indexes somebody wrote by hand
+    /// come from `sqlite_master`, where `sql IS NULL` marks the implicit ones — which is exactly
+    /// the `UNIQUE` on `slug` this rebuild exists to lose. Whatever `skills` holds at boot is
+    /// what the new table is given, so this migration and any future column cannot be ordered
+    /// wrongly.
+    fn rebuild_skills_sql(c: &Connection) -> Result<String> {
+        let cols = Self::table_columns(c, "skills")?;
+        if cols.is_empty() {
+            anyhow::bail!("skills has no columns to rebuild");
+        }
+        let keys = cols.iter().filter(|col| col.pk > 0).count();
+        let mut defs: Vec<String> = cols.iter().map(|col| col.ddl(keys == 1)).collect();
+        if keys > 1 {
+            let mut composite: Vec<&TableColumn> = cols.iter().filter(|col| col.pk > 0).collect();
+            composite.sort_by_key(|col| col.pk);
+            defs.push(format!(
+                "PRIMARY KEY ({})",
+                composite
+                    .iter()
+                    .map(|col| quote_ident(&col.name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        let names = cols
+            .iter()
+            .map(|col| quote_ident(&col.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let mut kept = c.prepare(
+            "SELECT sql FROM sqlite_master
+              WHERE type = 'index' AND tbl_name = 'skills' AND sql IS NOT NULL",
+        )?;
+        let kept: Vec<String> = kept
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<_>>()?;
+
+        let mut sql = format!(
+            "BEGIN;\n\
+             CREATE TABLE skills_new ({defs});\n\
+             INSERT INTO skills_new({names}) SELECT {names} FROM skills;\n\
+             DROP TABLE skills;\n\
+             ALTER TABLE skills_new RENAME TO skills;",
+            defs = defs.join(", "),
+        );
+        for index in kept {
+            sql.push_str(&format!("\n{index};"));
+        }
+        sql.push_str("\nCOMMIT;");
+        Ok(sql)
+    }
+
+    /// `skills`' columns as the database has them: name, declared type, `NOT NULL`, default and
+    /// primary-key position. `PRAGMA table_info` reports no `UNIQUE`, which is why rebuilding
+    /// from it drops the one this migration is here to drop and keeps everything else.
+    fn table_columns(c: &Connection, table: &str) -> Result<Vec<TableColumn>> {
+        let mut st = c.prepare(&format!("PRAGMA table_info({})", quote_ident(table)))?;
+        let cols = st
+            .query_map([], |r| {
+                Ok(TableColumn {
+                    name: r.get(1)?,
+                    decl_type: r.get(2)?,
+                    not_null: r.get::<_, i64>(3)? != 0,
+                    default: r.get(4)?,
+                    pk: r.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(cols)
     }
 
     /// Vault items used to belong to the whole relay (`name TEXT NOT NULL UNIQUE`, no owner), so

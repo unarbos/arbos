@@ -1399,6 +1399,96 @@ mod tests {
         );
     }
 
+    /// The rebuild must carry across whatever columns the table has, not the ones that were
+    /// written down the day it was authored.
+    ///
+    /// The test above checks the twelve columns it knows about, which is the kind of test that
+    /// passes for ever while covering less and less: it would stay green through a rebuild that
+    /// silently dropped `creator`, because it has never heard of `creator`. So this one adds a
+    /// column the migration cannot know about, under a deliberately useless name. Naming a real
+    /// column here would fix the one case in flight and miss the next one in exactly the same
+    /// way.
+    #[test]
+    fn a_rebuild_carries_across_whatever_columns_the_table_has() {
+        const LATER: &str = "a_column_added_after_this_migration_was_written";
+        let dir = std::env::temp_dir().join(format!("arbos-skills-columns-{}", ulid()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("relay.db");
+
+        let before = {
+            let c = Connection::open(&path).expect("open");
+            c.execute_batch(
+                "CREATE TABLE skills (
+                   id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+                   description TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '[]',
+                   when_to_use TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '',
+                   origin_project_id TEXT, shared INTEGER NOT NULL DEFAULT 0,
+                   version INTEGER NOT NULL DEFAULT 1,
+                   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+                 );",
+            )
+            .expect("a database on the old schema");
+            c.execute_batch(&format!("ALTER TABLE skills ADD COLUMN {LATER} TEXT"))
+                .expect("and a column that landed after this migration was written");
+            c.execute_batch(&format!(
+                "INSERT INTO skills(id, slug, name, origin_project_id, created_at, updated_at, {LATER})
+                   VALUES ('sk_hers', 'deploy-the-relay', 'Deploy the relay', 'p_alice', 10, 20,
+                           'the value nobody remembered to copy')"
+            ))
+            .expect("a row that uses it");
+            shape_of_skills(&c)
+        };
+
+        drop(Db::open(&path).expect("the migration runs on open"));
+
+        let c = Connection::open(&path).expect("reopen");
+        assert_eq!(
+            shape_of_skills(&c),
+            before,
+            "the rebuild changed the shape of the table it copied"
+        );
+        let kept: Option<String> = c
+            .query_row(
+                &format!("SELECT {LATER} FROM skills WHERE id = 'sk_hers'"),
+                [],
+                |r| r.get(0),
+            )
+            .expect("the row is still there");
+        assert_eq!(
+            kept.as_deref(),
+            Some("the value nobody remembered to copy"),
+            "the column survived but its contents did not"
+        );
+
+        // And the rebuild did happen, so none of the above passed by doing nothing.
+        c.execute(
+            "INSERT INTO skills(id, slug, name, origin_project_id, created_at, updated_at)
+               VALUES ('sk_his', 'deploy-the-relay', 'Deploy the relay', 'p_bob', 30, 30)",
+            [],
+        )
+        .expect("a second owner may hold the slug, which the old UNIQUE refused");
+    }
+
+    /// Every column of `skills`, as the database reports it: name, declared type, `NOT NULL`,
+    /// default and primary-key position. Comparing the whole shape rather than a list of names
+    /// also catches a rebuild that keeps a column and quietly changes what it is.
+    fn shape_of_skills(c: &Connection) -> Vec<String> {
+        let mut st = c.prepare("PRAGMA table_info(skills)").expect("table_info");
+        let rows = st
+            .query_map([], |r| {
+                Ok(format!(
+                    "{} {} notnull={} default={:?} pk={}",
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, i64>(5)?,
+                ))
+            })
+            .expect("columns");
+        rows.map(|r| r.expect("column")).collect()
+    }
+
     /// `skills_save` is an upsert by slug, and the fear with any scoping change is that it
     /// starts landing on a different row. It does not: the row a box may write is still the
     /// one in its own Project, chosen by `can_edit`, and a stranger holding the same slug —
