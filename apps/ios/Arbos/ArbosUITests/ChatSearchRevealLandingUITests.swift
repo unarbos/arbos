@@ -69,7 +69,29 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// 41346954704, and the pre-fix arm reproduced the symptom on *this* row at eleven drags.
     /// The app and the row were both fine; the aim was the only variable. A red gate is not
     /// always a red suite.
-    private static let stuckTarget = "long-304"
+    ///
+    /// ## Why this is no longer `long-304`
+    ///
+    /// Everything above happened on `long-304`, and it is the row #2535 is about. It is also a
+    /// 72 pt row, which after #2538 narrowed the band to the chat bar leaves it a 289 pt aim
+    /// window against a rig whose shortest possible travel is about 320 pt. By `aimWindow`'s
+    /// inequality **that row cannot be landed on by any gesture this rig can make**, which is
+    /// why the two arms aiming at it reddened `main` on `a6770934f` and were quarantined. It
+    /// was never a flake waiting on a better step.
+    ///
+    /// `long-307` is the substitute and it keeps everything that mattered. It is three rows
+    /// **deeper** in the transcript, so the hit is as far outside the row window as before and
+    /// the long drag back through the results is unchanged — the reader's motion #2404
+    /// describes is still what the arms perform. It is the same markdown body as
+    /// `convergingTarget`, so its height is already measured at 231 pt and its window is
+    /// 448 pt, clearing the 320 pt floor by 128.
+    ///
+    /// What the substitution gives up is that the pair no longer pins the exact row whose
+    /// six-of-six failure motivated #2535. **The suite checks that for itself**: the pre-fix
+    /// arm asserts `expectShort`, so a row that stops reproducing the symptom without the fix
+    /// reds the gate on its first run and names itself. That is a stronger guarantee than the
+    /// one being given up, which is the only reason this is a substitution and not a dodge.
+    private static let stuckTarget = "long-307"
     /// How many drags the list may be nudged while looking for a named target before the case
     /// gives up. Twenty-nine hits separate `convergingTarget` from the newest, a drag moves
     /// one to three of them, and the measured counts were eleven and fourteen at the old 200 pt
@@ -258,14 +280,55 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// filtered pin against, so this reads the bar's position rather than assuming it.
     private var chatBarTop: CGFloat?
 
+    /// Where the search chrome's bottom edge was on the first reading taken with the bar open.
+    ///
+    /// The band's bottom is pinned to its lowest reading, but nothing used to pin its **top**,
+    /// and the top is read fresh from the chrome every time. Run 41405456143 is what that
+    /// costs. A gesture too short to pan was delivered as a tap, the tap pushed a chat and
+    /// took the Search bar off screen, and from then on the chrome read 51 pt higher: the band
+    /// top went y167, y116, y116, y167, y116 inside one run. Nothing said a word. The aim
+    /// window silently widened upward into the search field, so the rig aimed at a field and
+    /// reported the app ignoring a touch, then spent 273 s dragging a list it could no longer
+    /// see. **Two wrong conclusions came out of that run and both were about the app.**
+    ///
+    /// So the top is pinned on its first reading and every later reading has to agree with it.
+    /// A band that quietly follows the chrome is worse than no band, because its arithmetic
+    /// stays plausible while its premise is gone.
+    private var chromeBottom: CGFloat?
+
+    /// How far a later chrome reading may differ from the pinned one before the case fails.
+    ///
+    /// Small enough that losing the Search bar cannot pass — that moves the edge 51 pt — and
+    /// loose enough for a point of layout rounding between reads.
+    private static let chromeDrift: CGFloat = 4
+
+    /// Where an element's bottom edge is, or that it is not on screen, for a failure message
+    /// that has to say which of two readings drifted.
+    private static func at(_ element: XCUIElement) -> String {
+        element.exists ? "bottom edge y\(Int(element.frame.maxY))" : "not on screen"
+    }
+
     /// The part of the window a touch actually reaches: below the header and the Search bar,
     /// above the chat bar and the keyboard. Being inside the window is not the same as being
     /// reachable, and neither is being above the keyboard.
     private func reachable(_ app: XCUIApplication, screen: CGRect) -> CGRect {
+        let button = app.descendants(matching: .any)["chat-search-button"].firstMatch
+        let field = app.textFields["chat-search-field"]
         var top = screen.minY
-        for chrome in [app.descendants(matching: .any)["chat-search-button"].firstMatch,
-                       app.textFields["chat-search-field"]] where chrome.exists {
+        for chrome in [button, field] where chrome.exists {
             top = max(top, chrome.frame.maxY)
+        }
+        // `openSearch` does not return until the field is on screen, so the first reading is
+        // always taken in the state under test and is the one worth pinning.
+        if chromeBottom == nil, field.exists { chromeBottom = top }
+        if let pinned = chromeBottom, abs(top - pinned) > Self.chromeDrift {
+            XCTFail("the search chrome moved: the band's top edge was pinned at "
+                    + "y\(Int(pinned)) and now reads y\(Int(top)) — "
+                    + "chat-search-field \(Self.at(field)), "
+                    + "chat-search-button \(Self.at(button)). Something took the Search bar "
+                    + "off screen or moved it, so every aim window computed from here on would "
+                    + "be measured against chrome that is no longer there. Read the drag log "
+                    + "above this line for what moved it; do not widen the band to fit.")
         }
         if app.keyboards.count > 0 {
             let seen = app.keyboards.firstMatch.frame.minY
@@ -403,9 +466,23 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// be taken back**: they belong to the chat bar, and an aim inside them focuses the
     /// composer, which re-pins the filtered list — the red on `6bfb3a31f`. Nor can the
     /// margins be trimmed to find the room. Taking `bubbleTopKeepOut` from 40 to 16 only
-    /// reaches 313 pt, still under the travel a drag delivers, and gives up the clearance
-    /// that keeps the aim off the sender's name and avatar. There is no constant left to turn,
-    /// which is why the drag is sized from measurement instead.
+    /// reaches 313 pt and gives up the clearance that keeps the aim off the sender's name and
+    /// avatar.
+    ///
+    /// ## Which rows this rig can land on at all
+    ///
+    /// Each drag moves the row by one travel, so the resting positions are a lattice of that
+    /// spacing, and a lattice only lands inside a window when its spacing fits in the window.
+    /// The shortest travel available is `minNudge + dragCarry`, about 320 pt on the gate, so
+    /// the rig can be relied on only where
+    ///
+    ///     band.height + frame.height - 97  >=  minNudge + carry
+    ///
+    /// which on the gate means a row of **about 103 pt or taller**. A 72 pt row gives 289 pt
+    /// against a 320 pt floor and **cannot be landed on by choosing a different step** — the
+    /// sizing below is what makes the rig honest and readable, not what makes that row
+    /// reachable. That is why `stuckTarget` moved to a 231 pt row at the same depth rather
+    /// than staying where it was and waiting for a better gesture.
     private func aimWindow(for frame: CGRect, band: CGRect) -> (highest: CGFloat, lowest: CGFloat) {
         (highest: band.minY + Self.aimBandMargin - frame.height + Self.bubbleBottomAim,
          lowest: Self.lowestAimableTop(band))
@@ -418,8 +495,8 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// 335 and 350 pt, so the carry is about 200 pt. That run went green and the fix it was
     /// testing was still wrong: a 333 pt travel against a 289 pt window leaves a 44 pt
     /// interval of approach positions from which the row steps clean over the window, which is
-    /// a one-in-four chance of a red across the two arms that aim at `long-304`. The green was
-    /// where the dice fell.
+    /// a one-in-four chance of a red across the two arms that then aimed at `long-304`. The
+    /// green was where the dice fell.
     ///
     /// **What the carry is remains unknown, and that is the reason this is measured rather
     /// than predicted.** Holding the finger still removed the variable part — five of those
@@ -449,13 +526,15 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     ///   less the carry, bounded by `minNudge` and by what the band can hold.
     ///
     /// The bound at `minNudge` is the one worth checking, because it is where the sizing gives
-    /// up precision. The shortest travel the rig can deliver is `minNudge + carry`, 230 pt on
-    /// the gate, and the worst place to be when that is more than is wanted is just above the
-    /// window: 128 + 230 = y358 for a 72 pt row, still inside a window that ends at y417. So
-    /// the sizing cannot overshoot while `minNudge + carry` stays under the window's width.
-    /// Beyond that it can, and `unnudge` is what catches it.
+    /// up precision. The shortest travel the rig can deliver is `minNudge + carry`, about
+    /// 320 pt on the gate, and the worst place to be when that is more than is wanted is just
+    /// above the window. For the 231 pt rows these arms now take, that is y-31 + 320 = y289,
+    /// comfortably inside a window that ends at y417 — so **the floor cannot overshoot while
+    /// `minNudge + carry` stays under the window's width**, which is the inequality in
+    /// `aimWindow` and the reason the targets are the height they are. Beyond it the sizing
+    /// can overshoot, and `unnudge` is the bounded way back.
     private func nudgeLength(for frame: CGRect?, band: CGRect) -> CGFloat {
-        guard let frame else { return max(60, band.height / 2) }
+        guard let frame else { return max(Self.minNudge, band.height / 2) }
         guard let dragCarry else { return Self.minNudge }
         let window = aimWindow(for: frame, band: band)
         let target = (window.highest + window.lowest) / 2
@@ -468,9 +547,25 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         nudge(app, band: band, length: nudgeLength(for: nil, band: band))
     }
 
-    /// The shortest gesture that still reads as a drag rather than a touch. Three times the
-    /// pan recognizer's start threshold, so it cannot be lost to one.
-    private static let minNudge: CGFloat = 30
+    /// The shortest gesture that still reads as a drag rather than a touch.
+    ///
+    /// This was 30 pt, reasoned from the pan recognizer's start threshold, and the gate threw
+    /// it straight out. On run 41405456143 a 30 pt press-and-drag was delivered as a **tap on
+    /// a result row** in three of the four arms: it pushed a chat, took the Search bar off
+    /// screen, and left the rest of the run aiming at chrome that was gone. A threshold the
+    /// recognizer documents is not the threshold this gesture profile, with its 0.1 s press
+    /// and 0.4 s hold, actually clears.
+    ///
+    /// 120 pt is used instead because **this file has had it pan on every run since
+    /// 41353988578** — many runs, across four arms, with no gesture ever lost to a tap. It is
+    /// the only floor here with evidence behind it rather than reasoning, which after
+    /// 41405456143 is the only kind worth having.
+    ///
+    /// It is a hard floor, not a preference: there is no shorter gesture available, so
+    /// `minNudge + dragCarry` — about 320 pt on the gate — is the shortest travel this rig can
+    /// deliver at all. That number is what decides which rows it can land on; see
+    /// `aimWindow`.
+    private static let minNudge: CGFloat = 120
 
     /// The longest gesture the band can hold, keeping 30 pt clear at each end so neither the
     /// press nor the release lands on the search chrome above or the chat bar below.
@@ -864,10 +959,14 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// to: stretch the window back from the tail, then one `scrollTo` and no correction.
     ///
     /// Measured short six times out of six, resting 18 to 35 rows newer than the message
-    /// with the message never realized.
+    /// with the message never realized — all six on the row `stuckTarget` used to name.
     ///
     /// Aimed at `stuckTarget` so that it is the baseline for the arm below that takes the
     /// same row, and so the before/after pair is one row's behaviour rather than two.
+    ///
+    /// Since `stuckTarget` moved, **this arm is also the check on the move**: it asserts the
+    /// symptom still reproduces without the fix, so a substitute row that quietly stopped
+    /// being outside the row window would red here and say which row it was.
     func testAResultOutsideTheWindowIsTheSymptomBeforeTheFix() {
         run(scrollUp: 0, preFix: true, wanted: Self.stuckTarget, expectShort: true)
     }
@@ -882,8 +981,7 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         run(scrollUp: 0, preFix: false, wanted: Self.convergingTarget)
     }
 
-    /// The same reveal aimed at `stuckTarget` — the row no run has ever landed, and the one
-    /// #2535 is about.
+    /// The same reveal aimed at `stuckTarget`, the far half of the before/after pair.
     ///
     /// **This case used to be a duplicate of the one above and is the reason the bug was
     /// found at all.** Both ran the same fourteen drags and then tapped whichever hit they
