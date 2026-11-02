@@ -130,6 +130,41 @@ load 66–167). Rule, for every rig script under `/Users/Shared/arbos-*/` and ev
 - Shared simulators stay shut down when the rig is done (`xcrun simctl shutdown <udid>`): a booted idle
   simulator keeps a dozen daemons runnable.
 
+## A free heavy slot is not permission to use the Mac (2026-11-02, found by the lane that hit it)
+
+The slot count answers "has anyone claimed a slot", not "is this box usable". Those come apart in practice: a
+lane was observed running `xcodebuild test-without-building` at one-minute load **77** while
+`arbos-heavy-slot.sh` reported a slot free. **Treat a free slot as a false signal, not a weak one** — it can
+say yes while the machine is saturated by work that never took a slot at all.
+
+**Before starting heavy work, check the machine rather than the bookkeeping.** Both of these, every time:
+
+- no `xcodebuild` and no `fastlane` running, of any kind, anyone's;
+- one-minute load average **at or under 12**.
+
+If either fails, wait. A free slot does not override them, and the slot rules above still apply on top of
+them — this check is additional, not alternative.
+
+**`nice` is not isolation.** Rig builds still run `nice -n 12` as the section above requires, but understand
+what that does and does not buy: it redistributes CPU share between runnable processes without reducing how
+many there are, so the load average climbs just the same, and it gives a timing-sensitive CoreSimulator
+device lookup no protection whatsoever. A niced build on a loaded box is still a build on a loaded box.
+
+**Recognising the failure in CI.** A gate red that reads
+
+```
+Unable to find a device matching the provided destination specifier
+```
+
+with **no test output and that single error line** is contention, not the branch. The destination lookup
+timed out against a machine too busy to answer it. Re-run it. Do **not** waive it with `accept-red` — the
+branch was never tested, so there is no red result to accept, and a waived contention failure buries the
+capacity problem that caused it.
+
+**Pin heavy simulator work to the rig device.** Use the dedicated `Arbos Nav1906`, which the gate's own
+name lookup cannot match, so your run and the gate cannot collide over one device. **Pin it by UDID, not by
+name** (`-destination "id=<udid>"`): a name lookup is exactly the call that fails under load.
+
 ## ssh to the gate Mac goes through the relay host (2026-10-26 23:40 UTC)
 
 Port 22 on the EC2 Mac (13.217.52.163) is not open to the internet: its security group (`arbos-mobile`) allows ssh
