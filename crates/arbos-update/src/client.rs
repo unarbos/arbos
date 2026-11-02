@@ -606,6 +606,7 @@ pub fn stage(
                 )
                 .context("the downloaded app failed codesign --verify")?;
             }
+            check_bundle_version(&bundle, version)?;
             Ok(bundle)
         }
         Install::Executable(current) => {
@@ -625,6 +626,96 @@ pub fn stage(
             Ok(exe)
         }
     }
+}
+
+/// The staged bundle has to be the build the feed asked for.
+///
+/// [`verify_payload`] covers the payload bytes and nothing else: the version that got past
+/// [`Appcast::newest_for`]'s "is it newer" filter came from `sparkle:shortVersionString`, which
+/// no signature touches. Whoever serves the feed can therefore offer an old, genuinely signed
+/// payload under a version higher than anything shipped and move every Mac onto that build —
+/// and keep it there, since the app then reports the old version and the feed still names the
+/// higher one. Comparing the version against the staged bundle's own `Info.plist` moves the
+/// decision onto bytes the signature did cover.
+///
+/// `scripts/bundle-mac.sh` writes `CFBundleShortVersionString` from the workspace version and
+/// `CFBundleVersion` from the build number, and publishes the build as `<short>` on stable and
+/// `<short>.<build>` on edge; both shapes are accepted and nothing else is.
+fn check_bundle_version(bundle: &Path, version: &str) -> anyhow::Result<()> {
+    let plist = bundle.join("Contents/Info.plist");
+    let xml =
+        std::fs::read_to_string(&plist).with_context(|| format!("reading {}", plist.display()))?;
+    let (short, build) =
+        bundle_versions(&xml).with_context(|| format!("reading {}", plist.display()))?;
+    let edge = build.as_deref().map(|build| format!("{short}.{build}"));
+    if version == short || edge.as_deref() == Some(version) {
+        return Ok(());
+    }
+    bail!(
+        "the feed offered this payload as {version} but the app inside it is {short}{}; \
+         not installing (a feed naming an old signed build under a new version is a downgrade)",
+        match &build {
+            Some(build) => format!(" build {build}"),
+            None => String::new(),
+        }
+    )
+}
+
+/// `CFBundleShortVersionString` and `CFBundleVersion` out of an XML `Info.plist`.
+///
+/// Apple's format is a `<dict>` of alternating `<key>`/value elements, so pairing the direct
+/// element children is enough and nested dicts and arrays are skipped with their key. Anything
+/// that does not look like that is an error rather than a missing value: this decides whether
+/// code installs.
+fn bundle_versions(xml: &str) -> anyhow::Result<(String, Option<String>)> {
+    // Apple's plists open with a DOCTYPE, which roxmltree refuses unless asked. It never
+    // resolves an external entity, so allowing the declaration fetches nothing.
+    let options = roxmltree::ParsingOptions {
+        allow_dtd: true,
+        ..roxmltree::ParsingOptions::default()
+    };
+    let doc = roxmltree::Document::parse_with_options(xml, options)
+        .context("Info.plist is not well-formed XML")?;
+    let root = doc.root_element();
+    if root.tag_name().name() != "plist" {
+        bail!(
+            "Info.plist root is <{}>, want <plist>",
+            root.tag_name().name()
+        );
+    }
+    let dict = root
+        .children()
+        .find(|n| n.has_tag_name("dict"))
+        .context("Info.plist has no top-level <dict>")?;
+    let mut short = None;
+    let mut build = None;
+    let mut nodes = dict.children().filter(|n| n.is_element());
+    while let Some(key) = nodes.next() {
+        if !key.has_tag_name("key") {
+            bail!(
+                "Info.plist has <{}> where a <key> belongs",
+                key.tag_name().name()
+            );
+        }
+        let name = key.text().map(str::trim).unwrap_or_default().to_string();
+        let value = nodes
+            .next()
+            .with_context(|| format!("Info.plist key {name:?} has no value"))?;
+        let slot = match name.as_str() {
+            "CFBundleShortVersionString" => &mut short,
+            "CFBundleVersion" => &mut build,
+            _ => continue,
+        };
+        if !value.has_tag_name("string") {
+            bail!(
+                "Info.plist {name} is <{}>, want <string>",
+                value.tag_name().name()
+            );
+        }
+        *slot = value.text().map(|t| t.trim().to_string());
+    }
+    let short = short.context("the downloaded app has no CFBundleShortVersionString")?;
+    Ok((short, build))
 }
 
 /// Swap the staged thing into place. Two renames with the old copy kept until
