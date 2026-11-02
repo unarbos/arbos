@@ -8171,8 +8171,28 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         } => {
             let shared = shared.clone();
             tokio::spawn(async move {
+                // A cut-off blob body on open (esp. a large Photo.mov) is common on flaky
+                // Wi-Fi; retry twice before failing. Transient errors only log (see
+                // is_transient) — they are not a weekly `mac:open:…` product bug.
+                let result = {
+                    let mut attempt = 0u32;
+                    loop {
+                        match fetch_blob_bytes(&shared, &project_id, &key).await {
+                            Ok(ok) => break Ok(ok),
+                            Err(err) => {
+                                let text = format!("{err:#}");
+                                if diagnostics::is_transient(&text) && attempt < 2 {
+                                    attempt += 1;
+                                    sleep(Duration::from_millis(400 * u64::from(attempt))).await;
+                                    continue;
+                                }
+                                break Err(err);
+                            }
+                        }
+                    }
+                };
                 let mut opened_path = None;
-                match fetch_blob_bytes(&shared, &project_id, &key).await {
+                match result {
                     Ok((_, bytes)) => {
                         let dir = std::env::temp_dir().join("arbos-media");
                         let _ = tokio::fs::create_dir_all(&dir).await;
@@ -8191,7 +8211,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         }
                     }
                     Err(err) => {
-                        shared.diagnostic("open", format!("{name}: {err}"));
+                        shared.diagnostic("open", format!("{name}: {err:#}"));
                         shared.fail(&format!("open {name}"), &err);
                     }
                 }
