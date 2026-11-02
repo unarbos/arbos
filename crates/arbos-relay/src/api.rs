@@ -1037,6 +1037,55 @@ pub async fn chat_history(
     }
 }
 
+/// The one answer a project lookup gives when it does not hand a project back. A project that
+/// does not exist and a project the caller may not touch must be indistinguishable: while they
+/// differed, `GET /projects/{name}/pushes` told a caller which names were taken, and the names
+/// were all an attacker needed to reach other people's agents (reported 2026-11-02).
+pub(crate) fn no_such_project() -> (StatusCode, String) {
+    (StatusCode::NOT_FOUND, "no such project".to_owned())
+}
+
+/// Accept a project id or name in the path and return the row, without asking who wants it.
+/// Only for handlers that decide access on something wider than the project itself (a group's
+/// roster, say); they must refuse with [`no_such_project`] so the two cases stay identical.
+pub(crate) fn lookup_project(
+    state: &AppState,
+    id_or_name: &str,
+) -> Result<Project, (StatusCode, String)> {
+    state
+        .db
+        .project(id_or_name.trim())
+        .map_err(internal)?
+        .ok_or_else(no_such_project)
+}
+
+/// Accept a project id or name in the path and return the row, as this caller. A project the
+/// caller may not act on answers exactly like one that is not there.
+pub(crate) fn project_for(
+    state: &AppState,
+    principal: &Principal,
+    id_or_name: &str,
+) -> Result<Project, (StatusCode, String)> {
+    let wanted = id_or_name.trim();
+    // A name is matched against the caller's own agents first. Names are not unique across
+    // owners and the plain lookup hands back whichever matching row was active last, so without
+    // this a caller's own `Lium` could resolve to a stranger's and then be refused.
+    if let Some(user_id) = principal.user_id() {
+        if let Some(p) = state
+            .db
+            .project_of_user_by_name(user_id, wanted)
+            .map_err(internal)?
+        {
+            return Ok(p);
+        }
+    }
+    match state.db.project(wanted) {
+        Ok(Some(p)) if state.allows(principal, &p.id) => Ok(p),
+        Ok(_) => Err(no_such_project()),
+        Err(e) => Err(internal(e)),
+    }
+}
+
 /// Accept a project id or name in the path and return the id.
 pub(crate) fn resolve_project_id(
     state: &AppState,
@@ -1044,7 +1093,7 @@ pub(crate) fn resolve_project_id(
 ) -> Result<String, (StatusCode, String)> {
     match state.db.project(id_or_name) {
         Ok(Some(p)) => Ok(p.id),
-        Ok(None) => Err((StatusCode::NOT_FOUND, "no such project".into())),
+        Ok(None) => Err(no_such_project()),
         Err(e) => Err(internal(e)),
     }
 }
