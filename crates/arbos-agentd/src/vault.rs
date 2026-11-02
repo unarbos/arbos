@@ -337,6 +337,28 @@ async fn owner_card_chat(agent: &Arc<Agent>, asking_chat: &str) -> String {
     main.id.clone()
 }
 
+/// The chat an ask came from: what the relay is told, so a "this chat only" answer scopes the
+/// secret to the thread the owner meant and the card says truthfully where it was asked.
+///
+/// Deliberately not `approval_chat`, which is about where a card is *shown*: it moves a card
+/// out of a side thread into the pinned chat so the owner sees it (#1440). The use side sends
+/// the turn's own chat to `/egress`, and the relay compares that with the access's
+/// `scope_chat_id`, so reporting the card's chat here would record a scope the use side can
+/// never present. `card_chat` is the last resort only, for a hint that names no chat with no
+/// turn running — there the card's chat is the only chat there is.
+async fn scope_chat(agent: &Arc<Agent>, hint: &str, card_chat: &str) -> String {
+    if agent.people.is_people_chat(hint) {
+        return hint.to_owned();
+    }
+    if let Ok(Some(c)) = agent.store.chat(hint) {
+        return c.id;
+    }
+    if let Some(t) = agent.turn.lock().await.as_ref() {
+        return t.chat_id.clone();
+    }
+    card_chat.to_owned()
+}
+
 /// User id of the human directing the current turn, when known.
 fn asked_by_user_id(agent: &Agent) -> Option<String> {
     agent.people.current_asker().map(|a| a.user_id)
@@ -1111,12 +1133,16 @@ async fn obtain_grant(
     use_kind: &str,
     host: Option<&str>,
 ) -> Result<Grant, Value> {
-    // Access cards belong on the pinned main chat (same rule as `approval_chat`).
+    // Access cards belong on the pinned main chat (same rule as `approval_chat`); the chat the
+    // relay is told about is the one that asked (`scope_chat`), which is what a "this chat
+    // only" answer scopes to and what the use side presents.
     let chat_id = agent
         .approval_chat(chat_hint)
         .await
         .unwrap_or_else(|| chat_hint.to_owned());
     let chat_id = chat_id.as_str();
+    let asked_in = scope_chat(agent, chat_hint, chat_id).await;
+    let asked_in = asked_in.as_str();
     let project = agent.cfg.project_id.clone();
     if is_paused(&project) {
         return Err(err_result("Secrets are paused by the owner. Stop and tell the user; do not ask again until they turn Pause all secrets off."));
@@ -1165,7 +1191,7 @@ async fn obtain_grant(
             // Ask me: fall through to the relay, which raises the owner's card.
         }
     }
-    let mut req = json!({ "name": name, "purpose": purpose, "use": use_kind, "host": host, "chat_id": chat_id });
+    let mut req = json!({ "name": name, "purpose": purpose, "use": use_kind, "host": host, "chat_id": asked_in });
     if let Some(uid) = asked_by_user_id(agent) {
         req["asked_by"] = json!(uid);
     }
@@ -1206,7 +1232,7 @@ async fn obtain_grant(
     }
     agent.append_audit(
         "secret_requested",
-        json!({ "requestId": request_id, "name": name, "kind": kind, "use": use_kind, "host": host, "purpose": purpose, "chatId": chat_id, "resumed": resumed }),
+        json!({ "requestId": request_id, "name": name, "kind": kind, "use": use_kind, "host": host, "purpose": purpose, "chatId": asked_in, "resumed": resumed }),
     );
     let _ = agent.store.t3_append(
         chat_id,
@@ -1255,7 +1281,7 @@ async fn obtain_grant(
                 "askedBy": asker.as_ref().map(|a| a.user_id.clone()),
                 "askedByHandle": asker.as_ref().map(|a| a.handle.clone()),
                 "askedByName": asker.as_ref().map(|a| a.spoken().to_owned()),
-                "askedIn": asker.as_ref().map(|_| chat_id),
+                "askedIn": asker.as_ref().map(|_| asked_in),
                 "answers": [
                     { "id": "once", "label": "Allow once" },
                     { "id": "chat", "label": "Allow for this chat" },
