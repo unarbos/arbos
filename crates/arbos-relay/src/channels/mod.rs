@@ -1449,6 +1449,44 @@ mod tests {
         assert!(state.db.channel_binding("bind_alice").unwrap().is_none());
     }
 
+    /// A member sees that the project is connected and where, but not the owner's own handle on
+    /// the platform. Both directions are asserted against each other in one test: a redaction
+    /// that silently inverts is worse than none, and this one turns on a single predicate.
+    #[tokio::test]
+    async fn a_member_sees_the_binding_without_the_owners_platform_handle() {
+        let state = crate::state::test_support::test_state(crate::state::AuthMode::Github);
+        let s = alice_bound(&state);
+
+        let theirs = body_of(list_bindings(State(state.clone()), s.member.clone()).await).await;
+        let theirs = &theirs["items"][0];
+        let mine = body_of(list_bindings(State(state.clone()), s.owner.clone()).await).await;
+        let mine = &mine["items"][0];
+
+        assert_eq!(mine["externalUserId"], "tg-user", "the owner is told");
+        assert_eq!(theirs["externalUserId"], "", "the member is not");
+        assert_ne!(
+            mine["externalUserId"], theirs["externalUserId"],
+            "the redaction must not be reading its predicate backwards"
+        );
+
+        // Empty, not absent: both clients decode `externalUserId` as a non-optional String.
+        assert!(
+            theirs.get("externalUserId").is_some_and(Value::is_string),
+            "the key stays, or the whole GET /channels decode fails: {theirs}"
+        );
+
+        // What the member is still told, so they can see the project is connected.
+        for field in ["id", "platform", "label", "projectId", "chatId"] {
+            assert_eq!(theirs[field], mine[field], "{field} is not secret");
+        }
+
+        // `GET /channels` answers alike, since both routes read the same helper.
+        let seen = body_of(overview(State(state.clone()), s.member).await).await;
+        assert_eq!(seen["bindings"][0]["externalUserId"], "");
+        let seen = body_of(overview(State(state.clone()), s.owner).await).await;
+        assert_eq!(seen["bindings"][0]["externalUserId"], "tg-user");
+    }
+
     /// `reply` posts text straight to a bound channel, so a member reaching it speaks to the
     /// owner's personal contacts as the owner's agent, with no turn behind the words. The box
     /// is what the route is for and it arrives as `Principal::Box`, which `owns` already
