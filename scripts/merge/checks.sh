@@ -165,6 +165,14 @@ gate_state() {
 # crates/arbos-matrix/src/client.rs, and crates/arbos-matrix/** was added to this filter after that
 # branch forked, so no run could ever have been created for its head while main would gate the merged
 # result. Judging by either filter alone misses that; the union asks for the verdict.
+# gate_definition_touched <workflow> <files>: 0 when this head's diff changes the gate's own
+# definition. <files> is repo-relative, one per line, as pr_files and commit_files emit it, and the
+# GATES entry is the same path, so the match is exact: a file whose name merely ends the same way is
+# not the gate.
+gate_definition_touched() {
+  printf '%s\n' "$2" | grep -Fxq "$1"
+}
+
 gate_applies() {
   local wf=$1 sha=$2 files=$3 phead pbase pats
   phead=$(gate_patterns "$wf" "$sha"); pbase=$(gate_patterns "$wf" "${GATE_BASE:-main}")
@@ -206,6 +214,25 @@ require_gates() {
   sha=$norm
   while IFS='|' read -r wf name; do
     [ -n "$wf" ] || continue
+    # The gate cannot judge a head that wrote it. GitHub runs the HEAD's copy of a workflow
+    # triggered by `pull_request`, so a branch that edits the gate supplies the definition whose
+    # green run this file then reads as PASS — and gate_patterns reads the path filter from that
+    # same head, so the branch also decides whether the gate applies to its own diff. Nothing
+    # stands behind this: main has no branch protection and no ruleset, so this file is the only
+    # required-check policy there is.
+    #
+    # Demonstrated, not hypothetical: #2448 changed this workflow, and its run on that head ran
+    # the jobs `route`, `Swift verdict` and `push-run verdict for this head` — job names that exist
+    # only in that PR's own copy.
+    #
+    # There is deliberately no waiver, for the same reason require_gates has none: a verdict the
+    # change under judgement defined is not a verdict to override. Land a change to a gate by
+    # reading the diff, which is the review the gate stands in for.
+    if gate_definition_touched "$wf" "$files"; then
+      echo "    required check '$name' on ${sha:0:9}: BLOCKED — this head changes $wf, the gate's own definition, so a run of it on this head was defined by the change being judged"
+      rc=2
+      continue
+    fi
     state=$(gate_applies "$wf" "$sha" "$files")
     case $? in
       1) echo "    required check '$name' on ${sha:0:9}: $state"; continue ;;
