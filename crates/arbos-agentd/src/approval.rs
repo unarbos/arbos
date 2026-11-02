@@ -200,7 +200,7 @@ impl Agent {
     pub async fn begin_approval(
         self: &Arc<Self>,
         chat_id: &str,
-        req: ApprovalRequest,
+        mut req: ApprovalRequest,
         mode: WaitMode,
         waiter: Option<oneshot::Sender<ApprovalOutcome>>,
     ) -> Result<String> {
@@ -209,6 +209,12 @@ impl Agent {
             .host(chat_id)
             .await
             .ok_or_else(|| anyhow!("approval: chat {chat_id} has no doc"))?;
+        // The card names the project whose owner may answer it, so a client can answer it over
+        // its own authenticated connection (`approval_authority.rs`). A card often lands in a
+        // people chat, which belongs to no project, so the card has to carry this itself.
+        if let Some(o) = req.payload.as_object_mut() {
+            o.insert("projectId".into(), json!(self.cfg.project_id));
+        }
         let approval_id = ulid();
         let expires_at = now_ms() + APPROVAL_TTL_MS;
         // An optional card (the secret hand-off's "that looks like a key" offer) asks nothing

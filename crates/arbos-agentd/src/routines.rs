@@ -275,6 +275,15 @@ impl Agent {
             | "secret_decided"
             | "secret_notice"
             | "secret_scrub" => crate::vault::on_push(self, kind, &payload).await,
+            // The owner answered an approval card over their own authenticated connection; the
+            // relay holds the decision and this push says there is one to read.
+            "approval_decided" => {
+                if let Some(id) = payload.get("approval_id").and_then(Value::as_str) {
+                    if let Err(e) = self.decide_approval_from_push(id).await {
+                        tracing::warn!(approval_id = id, error = %e, "approval_decided push failed");
+                    }
+                }
+            }
             // #1544: the owner added or revoked a standing shell grant in Settings.
             "shell_grants_changed" => {
                 if let Err(e) = self.refresh_shell_grants().await {

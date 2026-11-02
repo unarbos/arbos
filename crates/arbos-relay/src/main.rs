@@ -5,6 +5,7 @@ mod api_error_layer;
 #[cfg(test)]
 mod api_fixture_capture;
 mod apns;
+mod approvals;
 mod auth;
 mod avatar;
 mod avatar_image;
@@ -1040,6 +1041,15 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/box/shell-grants",
             get(shell_grants::box_list).post(shell_grants::box_create),
+        )
+        // S18 approval cards: the owner's answer is authorised here and read back by the box.
+        .route(
+            "/projects/{id}/approvals/{approval}/decision",
+            post(approvals::decide),
+        )
+        .route(
+            "/box/approvals/{approval}/decision",
+            get(approvals::box_decision),
         )
         .route(
             "/projects/{id}/shell-grants",

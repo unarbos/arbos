@@ -2377,9 +2377,11 @@ impl Agent {
                             .map(str::to_owned),
                     }
                 };
-                self.decide_approval_from_command(
+                // The row says a card was answered; the relay says what the answer was and
+                // whose it is (`approval_authority.rs`). `issuedBy` is the client's own word.
+                self.decide_approval_from_client(
                     &approval_id,
-                    outcome,
+                    &outcome,
                     &cmd.issued_by,
                     &cmd.payload,
                 )

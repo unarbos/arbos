@@ -661,6 +661,7 @@ impl Db {
         c.execute_batch(crate::agent_messages::SCHEMA)?;
         crate::db_secrets::migrate_secrets(&c);
         crate::shell_grants::ensure_schema(&c);
+        crate::approvals::ensure_schema(&c);
         c.execute_batch(crate::matrix::db::MATRIX_SCHEMA)?;
         crate::matrix::db::migrate_matrix(&c);
         c.execute_batch(crate::matrix::servers_db::SERVERS_SCHEMA)?;
