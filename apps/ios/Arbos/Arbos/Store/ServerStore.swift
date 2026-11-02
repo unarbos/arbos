@@ -273,17 +273,22 @@ extension AppModel {
             for i in list.indices where list[i].members.isEmpty {
                 if let prev = server(list[i].id) { list[i].members = prev.members }
             }
-            servers = list
+            // The 15 s poll: a write that changes nothing still publishes the whole model.
+            // `Server` is Equatable over every stored property, so a list that compares
+            // equal carries no change and this guard cannot swallow a real one.
+            // `rememberServersAvailable` stays unconditional — it is a store write, not a
+            // publish, and it is the only thing that persists the flag.
+            if list != servers { servers = list }
             reconcileArchivedServers(list)
-            serversAvailable = true
+            if !serversAvailable { serversAvailable = true }
             rememberServersAvailable(true)
             wantServerRosters()
             refreshChannelSenders()
             applyOpenServerHook()
         } catch let e as RelayError where e.status == 404 || e.status == 405 || e.status == 503 {
             // Relays without servers: nothing server-related.
-            servers = []
-            serversAvailable = false
+            if !servers.isEmpty { servers = [] }
+            if serversAvailable { serversAvailable = false }
             rememberServersAvailable(false)
         } catch {
             // Keep the last list; the loop tries again.

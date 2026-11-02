@@ -40,6 +40,8 @@ on:
       - "crates/arbos-core/**"
       - "crates/arbos-client/**"
       - "crates/arbos-ffi/**"
+      # arbos-ffi depends on arbos-matrix, whose Apple-only TLS dependencies Linux CI never compiles.
+      - "crates/arbos-matrix/**"
       - "scripts/build-xcframework.sh"
       - "packages/ArbosFFI/**"
       - "Cargo.toml"
@@ -48,6 +50,8 @@ on:
       # The phone bundles the tree avatars: an art drop is a new TestFlight build.
       - "assets/avatars/trees/manifest.json"
       - "assets/avatars/trees/lottie/**"
+      # arbos-core compiles the leaf avatars into the xcframework (include_str! in avatar/leaf.rs).
+      - "assets/avatars/leaves/**"
   workflow_dispatch:
     inputs:
       upload:
