@@ -435,8 +435,31 @@ pub(crate) fn binding_dto(b: &ChannelBinding) -> ChannelBindingDto {
     }
 }
 
-fn binding_json(b: &ChannelBinding) -> Value {
-    serde_json::to_value(binding_dto(b)).expect("ChannelBindingDto")
+/// The binding as this caller may see it. `external_user_id` is the owner's own handle on the
+/// platform — their Telegram or Slack account — which a member driving the project has no use
+/// for, so only the owner is told it. Everything that answers "is this project connected, and
+/// where" stays: platform, label, chat and project.
+///
+/// Empty rather than absent, deliberately. `externalUserId` is a non-optional `String` both in
+/// the typeshare-generated `ChannelBindingDto` (`RelayTypes.swift`) and in `arbos-mac`'s
+/// `ChannelBinding`, so a missing or null key fails the whole `GET /channels` decode on each —
+/// on iOS the entire response, since the binding decodes inside `ChannelsOverviewDto.bindings`.
+/// `Option<String>` is the honest wire shape and waits for the next client build. Until then
+/// this empty string is the redaction, not a bug: do not "fix" it by restoring the value.
+fn binding_dto_for(
+    state: &AppState,
+    principal: &Principal,
+    b: &ChannelBinding,
+) -> ChannelBindingDto {
+    let mut dto = binding_dto(b);
+    if !state.owns(principal, &b.project_id) {
+        dto.external_user_id = String::new();
+    }
+    dto
+}
+
+fn binding_json_for(state: &AppState, principal: &Principal, b: &ChannelBinding) -> Value {
+    serde_json::to_value(binding_dto_for(state, principal, b)).expect("ChannelBindingDto")
 }
 
 pub(crate) fn pair_dto(c: &ChannelPairCode) -> ChannelPairingDto {
@@ -504,7 +527,7 @@ pub async fn overview(State(state): State<AppState>, principal: Principal) -> Ap
         .collect();
     let bindings: Vec<ChannelBindingDto> = visible_bindings(&state, &principal)?
         .iter()
-        .map(binding_dto)
+        .map(|b| binding_dto_for(&state, &principal, b))
         .collect();
     // The caller's own newest live code, not the relay's: a code another user minted a moment
     // ago must not hide this caller's own. `owns`, not `allows`, because a code is a bearer
@@ -592,7 +615,7 @@ pub async fn list_bindings(State(state): State<AppState>, principal: Principal) 
     }
     let items: Vec<Value> = visible_bindings(&state, &principal)?
         .iter()
-        .map(binding_json)
+        .map(|b| binding_json_for(&state, &principal, b))
         .collect();
     Ok(Json(json!({ "items": items })).into_response())
 }
