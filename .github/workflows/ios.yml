@@ -157,7 +157,7 @@ jobs:
           export PATH="$HOME/.cargo/bin:$PATH"
           rustup show active-toolchain || rustup toolchain install
           rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         # The self-hosted Mac keeps its target dir; saving the cache cost minutes there (#1233).
         if: runner.environment != 'self-hosted'
         with:
@@ -254,7 +254,7 @@ jobs:
       # `release_published`). Best effort — TestFlight already has the build.
       - name: Relay admin token from 1Password
         if: env.UPLOAD == 'true' && env.HAVE_OP == 'true'
-        uses: 1password/load-secrets-action@v2
+        uses: 1password/load-secrets-action@581a835fb51b8e7ec56b71cf2ffddd7e68bb25e0 # v2
         with:
           export-env: true
         env:
