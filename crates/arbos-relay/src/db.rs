@@ -988,6 +988,22 @@ impl Db {
         })
     }
 
+    /// By id and nothing else. `project` also matches on `name`, which is fine for a path the
+    /// caller owns and wrong anywhere a hit tells the caller something about another owner.
+    pub fn project_by_id(&self, id: &str) -> Result<Option<Project>> {
+        self.with(|c| {
+            c.query_row(
+                &format!(
+                    "SELECT {} FROM projects WHERE id = ?1 AND deleted_at IS NULL",
+                    Self::PROJECT_COLS
+                ),
+                params![id],
+                Self::row_to_project,
+            )
+            .optional()
+        })
+    }
+
     pub fn project_of_user_by_name(&self, user_id: &str, name: &str) -> Result<Option<Project>> {
         self.with(|c| {
             c.query_row(
