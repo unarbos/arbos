@@ -246,9 +246,13 @@ jobs:
           ref: ${{ needs.plan.outputs.sha }}
       # Heavy-job cap on the shared EC2 Mac (#1839): at most two of {gate Mac half, gate iOS half, TF
       # archive, Mac release} at a time; this job waits for a slot (bounded) and releases it at the end.
+      # The release is due at once rather than after 600 s, so it no longer yields to a gate half that is only
+      # queued. The cap of two still holds: with two slots live it waits (2026-10-25: three heavy jobs, load 300–418).
       - name: Heavy-job slot
         id: slot
         if: runner.environment == 'self-hosted'
+        env:
+          ARBOS_HEAVY_RELEASE_PREEMPT_S: "0"
         run: |
           if [ -x /usr/local/bin/arbos-heavy-slot.sh ]; then
             slot=$(/usr/local/bin/arbos-heavy-slot.sh acquire "mac-release" --pid "$PPID")

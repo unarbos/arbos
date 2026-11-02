@@ -17,7 +17,9 @@
 #      commit marked `hotfix:` / `[hotfix]`, is released as soon as it is on main, ahead of its CI
 #      (P0 #1208: waiting for CI cost the crash fix two releases);
 #   3. nothing to do when the paths the Mac app is built from did not change since the last
-#      stable tag, or when a stable tag already sits on the target;
+#      stable tag (scripts/release/mac-change.sh — a Cargo.lock that moved only our own crates'
+#      version numbers is not a change; any real dependency change is), or when a stable tag
+#      already sits on the target;
 #   4. otherwise: version = next patch after the last stable tag (or Cargo.toml's version when
 #      somebody bumped it higher by hand), `release: X.Y.Z — <what landed>` commit on top of the
 #      target (Cargo.toml + Cargo.lock only), tag `vX.Y.Z` on that commit. The tag is pushed first
@@ -32,11 +34,15 @@ set -euo pipefail
 
 DRY_RUN=false
 [[ "${1:-}" == "--dry-run" ]] && DRY_RUN=true
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="${GITHUB_REPOSITORY:-unarbos/arbos}"
 TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
 DEBOUNCE="${ARBOS_RELEASE_DEBOUNCE_S:-150}"
-# Everything the Mac binary and bundle are made from. Cargo.lock: a dependency change ships too.
+# Everything the Mac binary and bundle are made from. Cargo.lock: a real dependency change ships
+# too — our own crates' version numbers moving does not (mac-change.sh).
 MAC_PATHS="${ARBOS_MAC_PATHS:-crates/arbos-mac crates/arbos-core crates/arbos-update Cargo.lock scripts/bundle-mac.sh site/assets/logo}"
+# mac-change.sh reads the same list, so step 3 and the release notes always agree on it.
+export ARBOS_MAC_PATHS="$MAC_PATHS"
 
 say() { echo "::notice::$*" >&2; }
 
@@ -141,11 +147,11 @@ if [[ -n "$last_tag" ]]; then
     emit_none "stable $last_tag already covers the newest green commit ${target:0:8}"
     exit 0
   fi
-  # shellcheck disable=SC2086
-  if git diff --quiet "$tag_base" "$target" -- $MAC_PATHS; then
-    emit_none "no Mac change since $last_tag (newest green commit ${target:0:8}$($pending_seen && echo '; newer commits still in CI'))"
+  if mac_change="$("$here/mac-change.sh" "$tag_base" "$target")"; then
+    emit_none "no Mac change since $last_tag — $mac_change (newest green commit ${target:0:8}$($pending_seen && echo '; newer commits still in CI'))"
     exit 0
   fi
+  say "Mac release needed: $mac_change"
 fi
 
 # 4. version
