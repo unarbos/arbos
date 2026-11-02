@@ -81,10 +81,20 @@ EOF
 }
 
 is_hotfix() {
-  # A revert, or a commit marked `hotfix`, on main's first-parent line: its own subject, or (a merge)
-  # the subjects of the commits it brings in. Case-insensitive; `[hotfix]` anywhere in the message.
-  git log --format='%s%n%b' "$1^1..$1" 2>/dev/null | grep -qiE '^(revert\b|hotfix\b)|\[hotfix\]' \
-    || git log -1 --format='%s%n%b' "$1" | grep -qiE '^(revert\b|hotfix\b)|\[hotfix\]'
+  # A revert, or a commit marked `hotfix`, on main's first-parent line: its own SUBJECT only.
+  # Case-insensitive; `[hotfix]` anywhere in the subject.
+  #
+  # Nothing a contributor writes may decide this. The marker selects the path that publishes to
+  # every Mac without waiting for CI, so it has to come from someone who can already release.
+  # Two sources were author-controlled and are deliberately no longer read:
+  #   - `"$1^1..$1"`, the commits a merge brought in — the PR branch's own messages;
+  #   - `%b` of the merge commit, which is GitHub's default merge body, i.e. the PR title.
+  # The subject of a merge is GitHub's template plus the branch name, and a direct push to main
+  # carries the subject of whoever had write access, so the subject is operator-controlled.
+  #
+  # The cost: merging a PR that contains a revert no longer expedites by itself. An operator who
+  # wants that pushes the revert to main directly, or marks it in the merge subject.
+  git log -1 --format='%s' "$1" | grep -qiE '^(revert\b|hotfix\b)|\[hotfix\]'
 }
 
 git fetch -q --tags --force origin "+refs/heads/main:refs/remotes/origin/main"
