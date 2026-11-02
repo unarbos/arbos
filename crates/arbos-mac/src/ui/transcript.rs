@@ -43,7 +43,6 @@ use crate::ui::theme::{
     Theme, BUBBLE_PAD_X, BUBBLE_PAD_Y, BUBBLE_RADIUS, CHAT_BODY, CHAT_LINE_HEIGHT, COLUMN_MARGIN,
     COMPOSER_HEIGHT, COMPOSER_WIDTH, LINE_HEIGHT, PLUS_BUTTON, TEXT_SMALL, TEXT_TINY,
 };
-use crate::ui::urlwrap;
 use crate::ui::veil::Veil;
 use crate::ui::widgets::QuestionCard;
 use serde_json::Value;
@@ -1144,8 +1143,7 @@ impl Transcript {
             }
         };
         if let Some(text) = text {
-            // The URLs' wrap hints stay in the app.
-            cx.write_to_clipboard(gpui::ClipboardItem::new_string(urlwrap::plain(&text)));
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
         }
     }
 
@@ -5374,9 +5372,7 @@ struct Segment {
 fn block_segments(block: &Block, literal: bool) -> Vec<Segment> {
     let inline = |t: &str| {
         if literal {
-            // As typed, except that bare URLs carry their wrap hints (as
-            // `plain_text` draws them).
-            urlwrap::hint_bare_urls(t)
+            t.to_string()
         } else {
             inline_plain(t)
         }
@@ -5459,7 +5455,7 @@ fn block_segments(block: &Block, literal: bool) -> Vec<Segment> {
 fn user_bubble_plain(text: &str) -> String {
     let blocks = split_blocks(text);
     if is_plain_paragraph(&blocks) {
-        urlwrap::hint_bare_urls(text)
+        text.to_string()
     } else {
         bubble_plain(&blocks, false)
     }
@@ -5574,8 +5570,7 @@ fn plain_text(
             }
             let url: String = chars[i..url_end].iter().collect();
             let start = full.len();
-            // `text` already carries the wrap hints; the target never does.
-            links.push((start..start + url.len(), urlwrap::plain(&url)));
+            links.push((start..start + url.len(), url.clone()));
             runs.push(TextRun {
                 len: url.len(),
                 font: font.clone(),
@@ -5669,9 +5664,8 @@ fn user_message_body(
     // A typed message with no formatting at all stays one plain element: the
     // text as typed, bare URLs linked ([`user_bubble_plain`]).
     if is_plain_paragraph(&blocks) {
-        let text = urlwrap::hint_bare_urls(text);
-        let bubble = selectable.bubble(key, text.clone());
-        return plain_text(&text, color, theme, &bubble, 0);
+        let bubble = selectable.bubble(key, text.to_string());
+        return plain_text(text, color, theme, &bubble, 0);
     }
     let bubble = selectable.bubble(key, bubble_plain(&blocks, false));
     let offsets = block_offsets(&blocks, false);
@@ -6769,34 +6763,6 @@ mod selection_tests {
         );
         let one = split_blocks("# not a heading");
         assert_eq!(bubble_plain(&one, true), "not a heading");
-    }
-
-    /// A typed bubble's plain text — what its selection reads — is the text
-    /// its elements draw: bare URLs carry their wrap hints in both, with and
-    /// without a code fence, and every block still starts at its offset.
-    #[test]
-    fn user_bubble_plain_text_hints_its_urls_like_the_elements_draw_them() {
-        let typed = "see https://a.io/x/y now";
-        assert_eq!(user_bubble_plain(typed), urlwrap::hint_bare_urls(typed));
-        assert_ne!(user_bubble_plain(typed), typed, "the hints are in");
-        assert_eq!(urlwrap::plain(&user_bubble_plain(typed)), typed);
-
-        let fenced = "see https://a.io/x/y\n\n```sh\ncurl https://a.io/x/y\n```\n\nhttps://b.io/z";
-        let blocks = split_blocks(fenced);
-        let text = bubble_plain(&blocks, true);
-        assert_eq!(user_bubble_plain(fenced), text);
-        assert!(
-            text.contains(&urlwrap::breakable("https://b.io/z")),
-            "prose URLs are hinted"
-        );
-        assert!(
-            text.contains("curl https://a.io/x/y"),
-            "code is as typed: {text:?}"
-        );
-        for (block, at) in blocks.iter().zip(block_offsets(&blocks, true)) {
-            let plain = block_plain(block, true);
-            assert_eq!(&text[at..at + plain.len()], plain, "block at {at}");
-        }
     }
 
     #[test]
@@ -9528,14 +9494,13 @@ mod link_icon_tests {
         assert_eq!(links.len(), 3);
         assert_eq!(links[0].text, format!("{cell}El Virrey"));
         assert_eq!(links[0].icon.as_deref(), Some("www.elvirrey.com"));
-        // Bare URLs (and a URL as its own label) have no cell; their text
-        // carries the wrap hints (`urlwrap`), their target never does.
-        assert_eq!(urlwrap::plain(&links[1].text), "https://x.com/a");
-        assert_eq!(links[1].text, urlwrap::breakable("https://x.com/a"));
+        assert_eq!(links[1].text, "https://x.com/a", "a bare URL has no cell");
         assert_eq!(links[1].href.as_deref(), Some("https://x.com/a"));
         assert_eq!(links[1].icon, None);
-        assert_eq!(urlwrap::plain(&links[2].text), "https://y.com");
-        assert_eq!(links[2].text, urlwrap::breakable("https://y.com"));
+        assert_eq!(
+            links[2].text, "https://y.com",
+            "a URL as its own label has no cell"
+        );
         assert_eq!(links[2].href.as_deref(), Some("https://y.com"));
         assert_eq!(links[2].icon, None);
         assert_eq!(
