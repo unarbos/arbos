@@ -1073,7 +1073,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/secrets", get(secrets::admin_status))
         .route("/admin/secrets/pause", post(secrets::admin_pause))
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
-        .layer(tower_http::trace::TraceLayer::new_for_http())
+        .layer(
+            tower_http::trace::TraceLayer::new_for_http()
+                .make_span_with(api_error_layer::request_span),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             api_error_layer::rewrite_plain_api_errors,

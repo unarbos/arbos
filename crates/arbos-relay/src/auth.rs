@@ -169,6 +169,39 @@ fn token_from(headers: &axum::http::HeaderMap, uri: &axum::http::Uri) -> Option<
         .find_map(|kv| kv.strip_prefix("token=").map(|t| t.to_owned()))
 }
 
+/// Query parameters that carry a live credential: `token=` (device and box tokens, read by
+/// [`token_from`]) and Matrix's legacy `access_token=` (`matrix::appservice`).
+const CREDENTIAL_PARAMS: [&str; 2] = ["token", "access_token"];
+
+/// A request URI safe to log. `tower_http`'s request span records the whole URI, so a dial or a
+/// picture fetch that put its token in the query used to leave that token in every line logged
+/// under the span. The parameter name and every other parameter stay, so a line still says what
+/// was asked for and whether the caller authenticated the leaky way.
+pub fn redacted_uri(uri: &axum::http::Uri) -> String {
+    let full = uri.to_string();
+    let Some(q) = uri.query() else {
+        return full;
+    };
+    let carries_credential = |kv: &str| {
+        CREDENTIAL_PARAMS
+            .iter()
+            .any(|p| kv.starts_with(&[p, "="].concat()))
+    };
+    if !q.split('&').any(carries_credential) {
+        return full;
+    }
+    let scrubbed = q
+        .split('&')
+        .map(|kv| match kv.split('=').next() {
+            Some(name) if carries_credential(kv) => format!("{name}=[redacted]"),
+            _ => kv.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    let cut = full.find('?').unwrap_or(full.len());
+    format!("{}?{scrubbed}", &full[..cut])
+}
+
 impl FromRequestParts<AppState> for Principal {
     type Rejection = Response;
 
@@ -208,5 +241,45 @@ impl FromRequestParts<AppState> for Principal {
             }
         }
         Ok(principal)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn redacted(s: &str) -> String {
+        redacted_uri(&s.parse::<axum::http::Uri>().expect("uri"))
+    }
+
+    #[test]
+    fn a_credential_in_the_query_is_hidden_and_everything_else_is_kept() {
+        // The blob route a picture fetch uses, and the room dial.
+        assert_eq!(
+            redacted("/blob/people:01CHAT/pic-1.png?w=384&token=adv_secret"),
+            "/blob/people:01CHAT/pic-1.png?w=384&token=[redacted]"
+        );
+        assert_eq!(
+            redacted("/room/people/01CHAT?token=adv_secret&since=7"),
+            "/room/people/01CHAT?token=[redacted]&since=7"
+        );
+        // Matrix's legacy query credential is the same kind of leak.
+        assert_eq!(
+            redacted("/_matrix/client/v3/sync?access_token=syt_secret"),
+            "/_matrix/client/v3/sync?access_token=[redacted]"
+        );
+        // A `=` inside the value (JWT padding) does not survive into the line.
+        assert!(!redacted("/blob/x/y?token=ey.J.z==").contains("ey.J.z"));
+    }
+
+    #[test]
+    fn a_uri_with_no_credential_is_logged_as_it_came() {
+        assert_eq!(
+            redacted("/projects/01AGENT/avatar.jpg?w=384"),
+            "/projects/01AGENT/avatar.jpg?w=384"
+        );
+        assert_eq!(redacted("/me"), "/me");
+        // A parameter that merely ends in the name is not the credential.
+        assert_eq!(redacted("/me?push_token=abc"), "/me?push_token=abc");
     }
 }
