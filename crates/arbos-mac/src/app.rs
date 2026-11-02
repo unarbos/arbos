@@ -12881,7 +12881,7 @@ fn decode_animation_pixels(bytes: &[u8]) -> Option<DecodedPixels> {
             // Running total would pass the budget at frame n (1-based).
             let n = frames.len() + 1;
             let (cw, ch) = canvas.expect("canvas set on first frame");
-            match animation_frame_side(n.saturating_mul(2), cw, ch) {
+            match animation_frame_side(n.saturating_mul(2).min(ANIM_MAX_FRAMES), cw, ch) {
                 None => {
                     return frames
                         .into_iter()
@@ -14424,6 +14424,66 @@ mod animated_image_tests {
         let bytes = encode_gif(frames);
         let image = decode_image(&bytes).expect("decodes");
         assert_eq!(image.frame_count(), 120);
+    }
+
+    // feedback app-01M6F6G7XT8G56BDAM8K5M48WS: the 2n side guess used to pass
+    // ANIM_MAX_FRAMES once n > 150, forcing a still even though 300 frames
+    // always fit at the side floor. Cap the guess so long GIFs keep animating.
+    #[test]
+    fn a_250_frame_480x270_gif_animates_within_the_cap() {
+        let delay = Delay::from_numer_denom_ms(30, 1);
+        let frames: Vec<Frame> = (0..250)
+            .map(|i| {
+                let c = (i % 255) as u8;
+                Frame::from_parts(
+                    RgbaImage::from_pixel(480, 270, Rgba([c, 0, 255 - c, 255])),
+                    0,
+                    0,
+                    delay,
+                )
+            })
+            .collect();
+        let bytes = encode_gif(frames);
+        let image = decode_image(&bytes).expect("decodes");
+        assert_eq!(image.frame_count(), 250);
+    }
+
+    #[test]
+    fn a_300_frame_480x270_gif_animates_within_the_cap() {
+        let delay = Delay::from_numer_denom_ms(30, 1);
+        let frames: Vec<Frame> = (0..300)
+            .map(|i| {
+                let c = (i % 255) as u8;
+                Frame::from_parts(
+                    RgbaImage::from_pixel(480, 270, Rgba([c, 0, 255 - c, 255])),
+                    0,
+                    0,
+                    delay,
+                )
+            })
+            .collect();
+        let bytes = encode_gif(frames);
+        let image = decode_image(&bytes).expect("decodes");
+        assert_eq!(image.frame_count(), 300);
+    }
+
+    #[test]
+    fn a_230_frame_1000x1000_gif_animates_within_the_cap() {
+        let delay = Delay::from_numer_denom_ms(30, 1);
+        let frames: Vec<Frame> = (0..230)
+            .map(|i| {
+                let c = (i % 255) as u8;
+                Frame::from_parts(
+                    RgbaImage::from_pixel(1000, 1000, Rgba([c, 0, 255 - c, 255])),
+                    0,
+                    0,
+                    delay,
+                )
+            })
+            .collect();
+        let bytes = encode_gif(frames);
+        let image = decode_image(&bytes).expect("decodes");
+        assert_eq!(image.frame_count(), 230);
     }
 
     #[test]
