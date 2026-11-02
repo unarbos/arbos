@@ -42,6 +42,29 @@ fn internal(e: impl std::fmt::Display) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }
 
+/// The user whose connectors this caller may see and spend. Every connector route goes through
+/// here: a connector holds one person's Gmail, Slack or GitHub credentials, so the owner is the
+/// only principal allowed near it. The admin token acts for no user, so it gets no connector of
+/// its own (it can still assign an owner to an unattributed one).
+fn owner(principal: &Principal) -> Result<&str, (StatusCode, String)> {
+    principal.user_id().ok_or((
+        StatusCode::FORBIDDEN,
+        "the admin token owns no connectors; call this with a device or box token".to_owned(),
+    ))
+}
+
+/// The owner of a stored connector. A connector left unattributed by the ownership migration
+/// stops here: nobody may act with credentials whose owner is unknown.
+fn connector_owner(cn: &Connector) -> Result<&str, (StatusCode, String)> {
+    cn.user_id.as_deref().ok_or((
+        StatusCode::CONFLICT,
+        format!(
+            "{} connector {} has no owner on this relay; an admin must assign one before it can be used",
+            cn.provider, cn.id
+        ),
+    ))
+}
+
 fn mock_on(state: &AppState) -> bool {
     state.cfg.connectors_mock
 }
@@ -128,11 +151,11 @@ pub async fn catalog(State(state): State<AppState>, _principal: Principal) -> Ap
     .into_response())
 }
 
-pub async fn list(State(state): State<AppState>, _principal: Principal) -> ApiResult {
+pub async fn list(State(state): State<AppState>, principal: Principal) -> ApiResult {
     let mock = mock_on(&state);
     let items = state
         .db
-        .list_connectors()
+        .list_connectors_for_user(owner(&principal)?)
         .map_err(internal)?
         .iter()
         .map(|c| connector_dto(c, mock))
@@ -173,11 +196,14 @@ pub(crate) fn pkce_pair() -> (String, String) {
 
 fn store_token(
     state: &AppState,
+    user_id: &str,
     provider: Provider,
     grant: &TokenGrant,
     config: Value,
 ) -> anyhow::Result<Connector> {
-    let existing = state.db.connector_by_provider(provider.as_str())?;
+    let existing = state
+        .db
+        .connector_by_provider_for_user(provider.as_str(), user_id)?;
     let id = existing.as_ref().map(|c| c.id.clone()).unwrap_or_else(ulid);
     let created_at = existing.as_ref().map(|c| c.created_at).unwrap_or(now_ms());
     let cn = Connector {
@@ -190,6 +216,7 @@ fn store_token(
         created_at,
         last_used_at: None,
         last_error: None,
+        user_id: Some(user_id.to_owned()),
     };
     state.db.upsert_connector(&cn)?;
     let row = ConnectorTokenRow {
@@ -202,6 +229,7 @@ fn store_token(
             .transpose()?,
         expires_at: grant.expires_in_s.map(|s| now_ms() + s * 1000),
         token_type: "Bearer".into(),
+        user_id: user_id.to_owned(),
     };
     state.db.put_connector_token(&row)?;
     Ok(cn)
@@ -221,6 +249,7 @@ pub async fn connect(
             "boxes cannot connect accounts".into(),
         ));
     }
+    let user_id = owner(&principal)?;
     let p = Provider::parse(&provider).ok_or((
         StatusCode::NOT_FOUND,
         format!("unknown provider {provider}"),
@@ -276,7 +305,7 @@ pub async fn connect(
             scopes,
             label,
         };
-        let cn = store_token(&state, p, &grant, config).map_err(internal)?;
+        let cn = store_token(&state, user_id, p, &grant, config).map_err(internal)?;
         // Verify the token with one cheap read so a typo shows up as `needs_auth` right away.
         let cn = if mock {
             cn
@@ -287,7 +316,11 @@ pub async fn connect(
                     let _ = state
                         .db
                         .set_connector_status(&cn.id, "needs_auth", Some(&e));
-                    state.db.connector(&cn.id).map_err(internal)?.unwrap_or(cn)
+                    state
+                        .db
+                        .connector_for_user(&cn.id, user_id)
+                        .map_err(internal)?
+                        .unwrap_or(cn)
                 }
             }
         };
@@ -354,6 +387,7 @@ pub async fn connect(
                 code_verifier: verifier,
                 redirect_uri: redirect.clone(),
                 scopes: oauth.scopes.iter().map(|s| s.to_string()).collect(),
+                user_id: user_id.to_owned(),
             },
             OAUTH_STATE_TTL_MS,
         )
@@ -361,7 +395,7 @@ pub async fn connect(
     // A placeholder row so the client shows "Needs sign-in" until the callback lands.
     if state
         .db
-        .connector_by_provider(p.as_str())
+        .connector_by_provider_for_user(p.as_str(), user_id)
         .map_err(internal)?
         .is_none()
     {
@@ -377,6 +411,7 @@ pub async fn connect(
                 created_at: now_ms(),
                 last_used_at: None,
                 last_error: None,
+                user_id: Some(user_id.to_owned()),
             })
             .map_err(internal)?;
     }
@@ -452,8 +487,14 @@ pub async fn oauth_callback(
     let Some(p) = Provider::parse(&os.provider) else {
         return done_page("Unknown provider", &os.provider, Some(&os.provider), false);
     };
+    // Whose connection this is: the state row the flow started from, not the browser that came
+    // back. The callback carries no bearer token, so this is the only trustworthy owner.
+    let user_id = os.user_id.clone();
     let mark_error = |e: &str| {
-        if let Ok(Some(c)) = state.db.connector_by_provider(p.as_str()) {
+        if let Ok(Some(c)) = state
+            .db
+            .connector_by_provider_for_user(p.as_str(), &user_id)
+        {
             let _ = state.db.set_connector_status(&c.id, "error", Some(e));
         }
     };
@@ -485,7 +526,7 @@ pub async fn oauth_callback(
             scopes: os.scopes,
             label: format!("{} · mock", p.label()),
         };
-        return match store_token(&state, p, &grant, json!({})) {
+        return match store_token(&state, &user_id, p, &grant, json!({})) {
             Ok(_) => done_page(
                 &format!("{} connected (mock)", p.label()),
                 "Mock mode: a fake token was stored; every action returns canned data.",
@@ -555,7 +596,7 @@ pub async fn oauth_callback(
             if grant.scopes.is_empty() {
                 grant.scopes = os.scopes;
             }
-            match store_token(&state, p, &grant, json!({})) {
+            match store_token(&state, &user_id, p, &grant, json!({})) {
                 Ok(_) => done_page(
                     &format!("{} connected", p.label()),
                     "Arbos can now act on your behalf through the relay.",
@@ -588,13 +629,83 @@ pub async fn disconnect(
             "boxes cannot disconnect accounts".into(),
         ));
     }
-    let ok = state.db.delete_connector(&id).map_err(internal)?;
+    let ok = state
+        .db
+        .delete_connector_for_user(&id, owner(&principal)?)
+        .map_err(internal)?;
     Ok(if ok {
         StatusCode::NO_CONTENT
     } else {
         StatusCode::NOT_FOUND
     }
     .into_response())
+}
+
+// ---- assigning an owner (admin) ---------------------------------------------------------------
+
+/// `GET /admin/connectors/unowned`: the connectors the ownership migration could not attribute.
+/// They are listed to no user and refuse every call until one is assigned below.
+pub async fn admin_unowned(State(state): State<AppState>, principal: Principal) -> ApiResult {
+    admin_only(&principal)?;
+    let items: Vec<Value> = state
+        .db
+        .unowned_connectors()
+        .map_err(internal)?
+        .iter()
+        .map(|c| {
+            json!({
+                "id": c.id, "provider": c.provider, "label": c.label,
+                "status": c.status, "created_at": c.created_at, "last_used_at": c.last_used_at,
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "items": items })).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct OwnerBody {
+    #[serde(rename = "userId")]
+    pub user_id: String,
+}
+
+/// `PUT /admin/connectors/{id}/owner`: say who owns a connector the migration left unattributed.
+/// Only an unattributed connector takes an owner, so this cannot move someone's account to
+/// another user; the honest way to do that is to disconnect and connect again.
+pub async fn admin_set_owner(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Json(b): Json<OwnerBody>,
+) -> ApiResult {
+    admin_only(&principal)?;
+    let user_id = b.user_id.trim();
+    if user_id.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "userId is required".to_owned()));
+    }
+    if state.db.user(user_id).map_err(internal)?.is_none() {
+        return Err((StatusCode::NOT_FOUND, format!("no user {user_id}")));
+    }
+    if !state
+        .db
+        .set_connector_owner(&id, user_id)
+        .map_err(internal)?
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("connector {id} is unknown or already owned"),
+        ));
+    }
+    tracing::info!(connector = %id, user = %user_id, "connector owner assigned by admin");
+    Ok(Json(json!({ "ok": true, "id": id, "userId": user_id })).into_response())
+}
+
+fn admin_only(principal: &Principal) -> Result<(), (StatusCode, String)> {
+    match principal {
+        Principal::Admin => Ok(()),
+        Principal::Device { .. } | Principal::Box { .. } => {
+            Err((StatusCode::FORBIDDEN, "admin token required".to_owned()))
+        }
+    }
 }
 
 // ---- broker -----------------------------------------------------------------------------------
@@ -611,11 +722,11 @@ pub struct CallBody {
 /// token and returns a redacted reply.
 pub async fn call(
     State(state): State<AppState>,
-    _principal: Principal,
+    principal: Principal,
     Json(b): Json<CallBody>,
 ) -> ApiResult {
     let args = if b.args.is_null() { json!({}) } else { b.args };
-    let v = broker_call(&state, &b.provider, &b.action, &args).await?;
+    let v = broker_call(&state, owner(&principal)?, &b.provider, &b.action, &args).await?;
     Ok(Json(v).into_response())
 }
 
@@ -627,15 +738,16 @@ async fn verify_connection(state: &AppState, p: Provider, cn: &Connector) -> Res
         Provider::Google => "list_threads",
         Provider::HarnessComms => "status",
     };
+    let user_id = connector_owner(cn).map_err(|(_, e)| e)?;
     let v = broker_call(
         state,
+        user_id,
         p.as_str(),
         action,
         &json!({ "per_page": 1, "limit": 1, "max": 1 }),
     )
     .await
     .map_err(|(_, e)| e)?;
-    let _ = cn;
     if v["ok"].as_bool() == Some(true) {
         Ok(())
     } else {
@@ -653,10 +765,15 @@ pub(crate) async fn bearer_for(
     p: Provider,
     cn: &Connector,
 ) -> Result<(String, Vec<String>), (StatusCode, String)> {
-    let row = state.db.connector_token(&cn.id).map_err(internal)?.ok_or((
-        StatusCode::CONFLICT,
-        format!("{} has no token; connect it again", p.as_str()),
-    ))?;
+    let user_id = connector_owner(cn)?;
+    let row = state
+        .db
+        .connector_token_for_user(&cn.id, user_id)
+        .map_err(internal)?
+        .ok_or((
+            StatusCode::CONFLICT,
+            format!("{} has no token; connect it again", p.as_str()),
+        ))?;
     let mut access = state
         .relay_key
         .decrypt(&row.access_token)
@@ -707,6 +824,7 @@ pub(crate) async fn bearer_for(
                                 .map_err(internal)?,
                             expires_at: grant.expires_in_s.map(|s| now_ms() + s * 1000),
                             token_type: row.token_type.clone(),
+                            user_id: user_id.to_owned(),
                         });
                         let _ = state.db.set_connector_status(&cn.id, "connected", None);
                         access = grant.access;
@@ -731,9 +849,12 @@ pub(crate) async fn bearer_for(
     Ok((access, secrets))
 }
 
-/// The broker proper, shared by the HTTP handler and the invariant test.
+/// The broker proper, shared by the HTTP handler and the invariant test. `user_id` is the owner
+/// whose connector is spent: only their own row is ever found, so a caller cannot reach another
+/// user's account by naming its provider.
 pub async fn broker_call(
     state: &AppState,
+    user_id: &str,
     provider: &str,
     action: &str,
     args: &Value,
@@ -755,7 +876,7 @@ pub async fn broker_call(
     }
     let cn = state
         .db
-        .connector_by_provider(p.as_str())
+        .connector_by_provider_for_user(p.as_str(), user_id)
         .map_err(internal)?
         .ok_or((
             StatusCode::NOT_FOUND,
@@ -961,6 +1082,7 @@ mod tests {
     #[tokio::test]
     async fn token_never_leaves_the_relay() {
         let state = test_state(true);
+        let user = "u_token_test";
         let secret = "ghp_SECRETTOKEN1234567890abcdefXYZ";
         let refresh = "refresh-SECRET-0987654321";
         let grant = TokenGrant {
@@ -970,15 +1092,19 @@ mod tests {
             scopes: vec!["repo".into()],
             label: "GitHub · test".into(),
         };
-        let cn = store_token(&state, Provider::Github, &grant, json!({})).expect("store");
+        let cn = store_token(&state, user, Provider::Github, &grant, json!({})).expect("store");
 
         // 1. Encrypted at rest: the raw token is not in the row.
-        let row = state.db.connector_token(&cn.id).unwrap().unwrap();
+        let row = state
+            .db
+            .connector_token_for_user(&cn.id, user)
+            .unwrap()
+            .unwrap();
         assert!(!row.access_token.contains(secret));
         assert_eq!(state.relay_key.decrypt(&row.access_token).unwrap(), secret);
 
         // 2. The broker reply (mock path here; the live path runs the same `redact`).
-        let reply = broker_call(&state, "github", "list_repos", &json!({}))
+        let reply = broker_call(&state, user, "github", "list_repos", &json!({}))
             .await
             .expect("call");
         let text = reply.to_string();

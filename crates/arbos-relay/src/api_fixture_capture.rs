@@ -1086,7 +1086,7 @@ async fn releases_and_push_register_match_fixtures() {
 
 // ---- connectors / channels / skills / local / feedback (step 6b-2d-3) ---------------------------
 
-fn fixture_connector() -> Connector {
+fn fixture_connector(user_id: &str) -> Connector {
     Connector {
         id: "conn_fixture".into(),
         provider: "github".into(),
@@ -1097,20 +1097,21 @@ fn fixture_connector() -> Connector {
         created_at: FIXED_AT,
         last_used_at: Some(FIXED_AT),
         last_error: None,
+        user_id: Some(user_id.to_owned()),
     }
 }
 
 #[tokio::test]
 async fn connector_fixtures() {
     let state = test_state(AuthMode::Github);
-    let (_, device) = person(&state, 501);
+    let (user, device) = person(&state, 501);
     assert_dto(
         "provider_json.json",
         providers::provider_dto(Provider::Github, false, true),
     );
     assert_dto(
         "connector_json.json",
-        connectors::connector_dto(&fixture_connector(), true),
+        connectors::connector_dto(&fixture_connector(&user), true),
     );
 
     let r = connectors::catalog(State(state.clone()), device.clone())
@@ -1118,7 +1119,10 @@ async fn connector_fixtures() {
         .expect("catalog");
     assert_dto("connectors_catalog.json", body_json(r).await);
 
-    state.db.upsert_connector(&fixture_connector()).unwrap();
+    state
+        .db
+        .upsert_connector(&fixture_connector(&user))
+        .unwrap();
     let r = connectors::list(State(state.clone()), device)
         .await
         .expect("list");

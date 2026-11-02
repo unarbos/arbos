@@ -21,10 +21,14 @@ const POLL_ENV: &str = "ARBOS_BEEPER_POLL_S";
 /// The service caches poll results for 30 s per cursor; polling faster returns the same page.
 const DEFAULT_POLL_S: u64 = 30;
 
+/// The Harness Comms account this poller runs on. The poller has no caller, so it takes the one
+/// connected account that has an owner: with no owner (the ownership migration could not
+/// attribute it) or with two owners, polling stops rather than spending someone's credentials by
+/// guess. An admin resolves it with `/admin/connectors`.
 fn connector(state: &AppState) -> Option<Connector> {
     state
         .db
-        .connector_by_provider(Provider::HarnessComms.as_str())
+        .connector_by_provider_sole_owner(Provider::HarnessComms.as_str())
         .ok()
         .flatten()
         .filter(|c| c.status == "connected")

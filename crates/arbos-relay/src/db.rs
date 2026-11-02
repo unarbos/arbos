@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
@@ -117,18 +117,23 @@ CREATE TABLE IF NOT EXISTS timings (
   id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL, kind TEXT NOT NULL, ms INTEGER NOT NULL,
   detail TEXT, at INTEGER NOT NULL
 );
+-- A connector belongs to one user: `user_id` is the owner every handler filters on. It is
+-- nullable on purpose — NULL means "owner unknown", which no owner predicate ever matches, so
+-- the connector is dead until an admin assigns one (`Db::set_connector_owner`).
 CREATE TABLE IF NOT EXISTS connectors (
   id TEXT PRIMARY KEY, provider TEXT NOT NULL, label TEXT NOT NULL DEFAULT '', scopes TEXT NOT NULL DEFAULT '[]',
   status TEXT NOT NULL DEFAULT 'needs_auth', config TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL,
-  last_used_at INTEGER, last_error TEXT
+  last_used_at INTEGER, last_error TEXT, user_id TEXT
 );
+-- The index on (user_id, provider) is created by `migrate_connector_owners`, which runs after
+-- the column exists on databases made before connectors had owners.
 CREATE TABLE IF NOT EXISTS connector_tokens (
   connector_id TEXT PRIMARY KEY, access_token TEXT NOT NULL, refresh_token TEXT, expires_at INTEGER,
-  token_type TEXT NOT NULL DEFAULT 'Bearer', updated_at INTEGER NOT NULL
+  token_type TEXT NOT NULL DEFAULT 'Bearer', updated_at INTEGER NOT NULL, user_id TEXT
 );
 CREATE TABLE IF NOT EXISTS oauth_states (
   state TEXT PRIMARY KEY, provider TEXT NOT NULL, code_verifier TEXT NOT NULL, redirect_uri TEXT NOT NULL,
-  scopes TEXT NOT NULL DEFAULT '[]', created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL
+  scopes TEXT NOT NULL DEFAULT '[]', created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, user_id TEXT
 );
 CREATE TABLE IF NOT EXISTS connector_outbox (
   id INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT NOT NULL, action TEXT NOT NULL, args TEXT NOT NULL,
@@ -437,6 +442,9 @@ pub struct Connector {
     pub created_at: i64,
     pub last_used_at: Option<i64>,
     pub last_error: Option<String>,
+    /// Owner. `None` is a row the ownership migration could not attribute: it is listed to
+    /// nobody and usable by nobody until an admin assigns an owner.
+    pub user_id: Option<String>,
 }
 
 /// Encrypted token row (`connector_tokens`). The strings are ciphertext from `connectors::crypto`.
@@ -447,6 +455,8 @@ pub struct ConnectorTokenRow {
     pub refresh_token: Option<String>,
     pub expires_at: Option<i64>,
     pub token_type: String,
+    /// The owner of the connector this token belongs to; every read filters on it as well.
+    pub user_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -456,6 +466,9 @@ pub struct OauthState {
     pub code_verifier: String,
     pub redirect_uri: String,
     pub scopes: Vec<String>,
+    /// The user who started the flow. The callback has no bearer token of its own, so this is
+    /// what decides whose connector the returned tokens are stored under.
+    pub user_id: String,
 }
 
 /// One paired external conversation (`channel_bindings`, F7): messages from `external_user_id` in
@@ -683,7 +696,88 @@ impl Db {
              CREATE INDEX IF NOT EXISTS goals_moved ON goals(last_moved_at);",
         )?;
         c.execute_batch(crate::releases::RELEASES_SCHEMA)?;
+        Self::migrate_connector_owners(&c)?;
         Ok(Self(Arc::new(Mutex::new(c))))
+    }
+
+    /// Connectors, their tokens and in-flight OAuth states used to belong to the whole relay (no
+    /// owner column at all), so any authenticated caller could act with another user's Gmail,
+    /// Slack or GitHub tokens. Add the owner column and backfill it.
+    ///
+    /// The backfill fails closed. Nothing about a legacy row says who owns it, so it is
+    /// attributed only when the relay has exactly one user — then that user is the only possible
+    /// owner, not a guess. On a relay with two or more users every legacy row keeps
+    /// `user_id = NULL`: it drops out of every listing, call and token read until an admin
+    /// assigns an owner (`PUT /admin/connectors/{id}/owner`). A broken connector is recoverable;
+    /// handing one user's inbox to another is not.
+    ///
+    /// Legacy OAuth states are deleted instead of attributed: they live ten minutes, and the
+    /// user just starts the connection again.
+    fn migrate_connector_owners(c: &Connection) -> Result<()> {
+        let _ = c.execute("ALTER TABLE connectors ADD COLUMN user_id TEXT", []);
+        let _ = c.execute("ALTER TABLE connector_tokens ADD COLUMN user_id TEXT", []);
+        let _ = c.execute("ALTER TABLE oauth_states ADD COLUMN user_id TEXT", []);
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS connectors_user_provider ON connectors(user_id, provider)",
+            [],
+        )?;
+        c.execute("DELETE FROM oauth_states WHERE user_id IS NULL", [])?;
+        const KEY: &str = "connector_owners_backfilled";
+        let done: Option<String> = c
+            .query_row("SELECT value FROM meta WHERE key = ?1", params![KEY], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        if done.is_some() {
+            return Ok(());
+        }
+        let unowned: i64 = c.query_row(
+            "SELECT COUNT(*) FROM connectors WHERE user_id IS NULL",
+            [],
+            |r| r.get(0),
+        )?;
+        if unowned > 0 {
+            // Every id a connector could belong to, from any table that names a user.
+            let mut st = c.prepare(
+                "SELECT DISTINCT user_id FROM (
+                   SELECT id AS user_id FROM users
+                   UNION SELECT user_id FROM devices
+                   UNION SELECT user_id FROM boxes
+                   UNION SELECT user_id FROM projects
+                 ) WHERE user_id IS NOT NULL AND user_id <> ''",
+            )?;
+            let owners: Vec<String> = st
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            if let [only] = owners.as_slice() {
+                tracing::info!(
+                    user = %only, connectors = unowned,
+                    "migrating connectors: the relay's only user owns the connectors that exist"
+                );
+                c.execute(
+                    "UPDATE connectors SET user_id = ?1 WHERE user_id IS NULL",
+                    params![only],
+                )?;
+                c.execute(
+                    "UPDATE connector_tokens SET user_id = ?1 WHERE user_id IS NULL",
+                    params![only],
+                )?;
+            } else {
+                tracing::warn!(
+                    users = owners.len(),
+                    connectors = unowned,
+                    "migrating connectors: {unowned} connector(s) cannot be attributed on a \
+                     relay with {} users; they stay disabled until an admin assigns an owner \
+                     (GET /admin/connectors/unowned)",
+                    owners.len()
+                );
+            }
+        }
+        c.execute(
+            "INSERT INTO meta(key, value) VALUES (?1, '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![KEY],
+        )?;
+        Ok(())
     }
 
     /// Vault items used to belong to the whole relay (`name TEXT NOT NULL UNIQUE`, no owner), so
@@ -2211,7 +2305,7 @@ impl Db {
     // ---- connectors (F1) ----------------------------------------------------------------------
 
     const CONNECTOR_COLS: &'static str =
-        "id, provider, label, scopes, status, config, created_at, last_used_at, last_error";
+        "id, provider, label, scopes, status, config, created_at, last_used_at, last_error, user_id";
 
     fn row_to_connector(r: &rusqlite::Row<'_>) -> rusqlite::Result<Connector> {
         Ok(Connector {
@@ -2224,29 +2318,111 @@ impl Db {
             created_at: r.get(6)?,
             last_used_at: r.get(7)?,
             last_error: r.get(8)?,
+            user_id: r.get(9)?,
         })
     }
 
+    /// Write a connector. The row must carry an owner, and an existing row is only updated by its
+    /// own owner: a second user asking for the same id changes nothing and gets an error.
     pub fn upsert_connector(&self, cn: &Connector) -> Result<()> {
-        self.with(|c| {
+        let owner = cn
+            .user_id
+            .as_deref()
+            .ok_or_else(|| anyhow!("connector {} has no owner", cn.id))?;
+        let wrote = self.with(|c| {
             c.execute(
-                "INSERT INTO connectors(id, provider, label, scopes, status, config, created_at, last_used_at, last_error)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+                "INSERT INTO connectors(id, provider, label, scopes, status, config, created_at, last_used_at, last_error, user_id)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
                  ON CONFLICT(id) DO UPDATE SET provider=excluded.provider, label=excluded.label, scopes=excluded.scopes,
-                    status=excluded.status, config=excluded.config, last_used_at=excluded.last_used_at, last_error=excluded.last_error",
+                    status=excluded.status, config=excluded.config, last_used_at=excluded.last_used_at, last_error=excluded.last_error
+                 WHERE connectors.user_id = excluded.user_id",
                 params![
                     cn.id, cn.provider, cn.label, serde_json::to_string(&cn.scopes).unwrap_or_else(|_| "[]".into()),
-                    cn.status, cn.config.to_string(), cn.created_at, cn.last_used_at, cn.last_error
+                    cn.status, cn.config.to_string(), cn.created_at, cn.last_used_at, cn.last_error, owner
                 ],
             )
-            .map(|_| ())
+        })?;
+        if wrote == 0 {
+            return Err(anyhow!("connector {} belongs to another user", cn.id));
+        }
+        Ok(())
+    }
+
+    pub fn list_connectors_for_user(&self, user_id: &str) -> Result<Vec<Connector>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {} FROM connectors WHERE user_id = ?1 ORDER BY created_at",
+                Self::CONNECTOR_COLS
+            ))?;
+            let rows = st.query_map(params![user_id], Self::row_to_connector)?;
+            rows.collect()
         })
     }
 
-    pub fn list_connectors(&self) -> Result<Vec<Connector>> {
+    pub fn connector_for_user(&self, id: &str, user_id: &str) -> Result<Option<Connector>> {
+        self.with(|c| {
+            c.query_row(
+                &format!(
+                    "SELECT {} FROM connectors WHERE id = ?1 AND user_id = ?2",
+                    Self::CONNECTOR_COLS
+                ),
+                params![id, user_id],
+                Self::row_to_connector,
+            )
+            .optional()
+        })
+    }
+
+    /// That user's newest connector for a provider (one account per provider per user).
+    pub fn connector_by_provider_for_user(
+        &self,
+        provider: &str,
+        user_id: &str,
+    ) -> Result<Option<Connector>> {
+        self.with(|c| {
+            c.query_row(
+                &format!(
+                    "SELECT {} FROM connectors WHERE provider = ?1 AND user_id = ?2 ORDER BY created_at DESC LIMIT 1",
+                    Self::CONNECTOR_COLS
+                ),
+                params![provider, user_id],
+                Self::row_to_connector,
+            )
+            .optional()
+        })
+    }
+
+    /// For the relay's own background work (the Harness Comms channel poller), which runs with no
+    /// caller to take an owner from: the one owned connector of a provider. `None` when none is
+    /// owned, and `None` when two users own one — the relay must not pick whose tokens to spend.
+    pub fn connector_by_provider_sole_owner(&self, provider: &str) -> Result<Option<Connector>> {
+        let owned = self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {} FROM connectors WHERE provider = ?1 AND user_id IS NOT NULL ORDER BY created_at DESC",
+                Self::CONNECTOR_COLS
+            ))?;
+            let rows = st.query_map(params![provider], Self::row_to_connector)?;
+            rows.collect::<rusqlite::Result<Vec<Connector>>>()
+        })?;
+        let mut owners: Vec<&str> = owned.iter().filter_map(|c| c.user_id.as_deref()).collect();
+        owners.sort_unstable();
+        owners.dedup();
+        if owners.len() > 1 {
+            tracing::warn!(
+                provider,
+                users = owners.len(),
+                "{provider} is connected by more than one user; relay background work needs one owner"
+            );
+            return Ok(None);
+        }
+        Ok(owned.into_iter().next())
+    }
+
+    /// Connectors the ownership migration could not attribute, for the admin to assign.
+    pub fn unowned_connectors(&self) -> Result<Vec<Connector>> {
         self.with(|c| {
             let mut st = c.prepare(&format!(
-                "SELECT {} FROM connectors ORDER BY created_at",
+                "SELECT {} FROM connectors WHERE user_id IS NULL ORDER BY created_at",
                 Self::CONNECTOR_COLS
             ))?;
             let rows = st.query_map([], Self::row_to_connector)?;
@@ -2254,32 +2430,21 @@ impl Db {
         })
     }
 
-    pub fn connector(&self, id: &str) -> Result<Option<Connector>> {
+    /// Give an unattributed connector an owner (admin only). Returns whether a row took it; an
+    /// owned connector is never moved, so this cannot hand one user's account to another.
+    pub fn set_connector_owner(&self, id: &str, user_id: &str) -> Result<bool> {
         self.with(|c| {
-            c.query_row(
-                &format!(
-                    "SELECT {} FROM connectors WHERE id = ?1",
-                    Self::CONNECTOR_COLS
-                ),
-                params![id],
-                Self::row_to_connector,
-            )
-            .optional()
-        })
-    }
-
-    /// The newest connector of a provider (one account per provider on a single-user relay).
-    pub fn connector_by_provider(&self, provider: &str) -> Result<Option<Connector>> {
-        self.with(|c| {
-            c.query_row(
-                &format!(
-                    "SELECT {} FROM connectors WHERE provider = ?1 ORDER BY created_at DESC LIMIT 1",
-                    Self::CONNECTOR_COLS
-                ),
-                params![provider],
-                Self::row_to_connector,
-            )
-            .optional()
+            let n = c.execute(
+                "UPDATE connectors SET user_id = ?2 WHERE id = ?1 AND user_id IS NULL",
+                params![id, user_id],
+            )?;
+            if n > 0 {
+                c.execute(
+                    "UPDATE connector_tokens SET user_id = ?2 WHERE connector_id = ?1 AND user_id IS NULL",
+                    params![id, user_id],
+                )?;
+            }
+            Ok(n > 0)
         })
     }
 
@@ -2303,36 +2468,56 @@ impl Db {
         })
     }
 
-    /// Delete a connector and its tokens. Returns whether a row existed.
-    pub fn delete_connector(&self, id: &str) -> Result<bool> {
+    /// Delete one of that user's connectors and its tokens. Returns whether a row of theirs
+    /// existed; another user's connector is left untouched.
+    pub fn delete_connector_for_user(&self, id: &str, user_id: &str) -> Result<bool> {
         self.with(|c| {
-            c.execute(
-                "DELETE FROM connector_tokens WHERE connector_id = ?1",
-                params![id],
+            let n = c.execute(
+                "DELETE FROM connectors WHERE id = ?1 AND user_id = ?2",
+                params![id, user_id],
             )?;
-            c.execute("DELETE FROM connectors WHERE id = ?1", params![id])
-                .map(|n| n > 0)
+            if n > 0 {
+                c.execute(
+                    "DELETE FROM connector_tokens WHERE connector_id = ?1",
+                    params![id],
+                )?;
+            }
+            Ok(n > 0)
         })
     }
 
+    /// Write a token row. The owner must match the one already on the row, so a second user
+    /// cannot overwrite the credentials behind someone else's connector.
     pub fn put_connector_token(&self, t: &ConnectorTokenRow) -> Result<()> {
-        self.with(|c| {
+        let wrote = self.with(|c| {
             c.execute(
-                "INSERT INTO connector_tokens(connector_id, access_token, refresh_token, expires_at, token_type, updated_at)
-                 VALUES (?1,?2,?3,?4,?5,?6)
+                "INSERT INTO connector_tokens(connector_id, access_token, refresh_token, expires_at, token_type, updated_at, user_id)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7)
                  ON CONFLICT(connector_id) DO UPDATE SET access_token=excluded.access_token, refresh_token=excluded.refresh_token,
-                    expires_at=excluded.expires_at, token_type=excluded.token_type, updated_at=excluded.updated_at",
-                params![t.connector_id, t.access_token, t.refresh_token, t.expires_at, t.token_type, now_ms()],
+                    expires_at=excluded.expires_at, token_type=excluded.token_type, updated_at=excluded.updated_at
+                 WHERE connector_tokens.user_id = excluded.user_id",
+                params![t.connector_id, t.access_token, t.refresh_token, t.expires_at, t.token_type, now_ms(), t.user_id],
             )
-            .map(|_| ())
-        })
+        })?;
+        if wrote == 0 {
+            return Err(anyhow!(
+                "the token for connector {} belongs to another user",
+                t.connector_id
+            ));
+        }
+        Ok(())
     }
 
-    pub fn connector_token(&self, connector_id: &str) -> Result<Option<ConnectorTokenRow>> {
+    pub fn connector_token_for_user(
+        &self,
+        connector_id: &str,
+        user_id: &str,
+    ) -> Result<Option<ConnectorTokenRow>> {
         self.with(|c| {
             c.query_row(
-                "SELECT connector_id, access_token, refresh_token, expires_at, token_type FROM connector_tokens WHERE connector_id = ?1",
-                params![connector_id],
+                "SELECT connector_id, access_token, refresh_token, expires_at, token_type, user_id
+                 FROM connector_tokens WHERE connector_id = ?1 AND user_id = ?2",
+                params![connector_id, user_id],
                 |r| {
                     Ok(ConnectorTokenRow {
                         connector_id: r.get(0)?,
@@ -2340,6 +2525,7 @@ impl Db {
                         refresh_token: r.get(2)?,
                         expires_at: r.get(3)?,
                         token_type: r.get(4)?,
+                        user_id: r.get(5)?,
                     })
                 },
             )
@@ -2352,23 +2538,25 @@ impl Db {
         self.with(|c| {
             c.execute("DELETE FROM oauth_states WHERE expires_at < ?1", params![now])?;
             c.execute(
-                "INSERT INTO oauth_states(state, provider, code_verifier, redirect_uri, scopes, created_at, expires_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                "INSERT INTO oauth_states(state, provider, code_verifier, redirect_uri, scopes, created_at, expires_at, user_id)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
                 params![
                     s.state, s.provider, s.code_verifier, s.redirect_uri,
-                    serde_json::to_string(&s.scopes).unwrap_or_else(|_| "[]".into()), now, now + ttl_ms
+                    serde_json::to_string(&s.scopes).unwrap_or_else(|_| "[]".into()), now, now + ttl_ms, s.user_id
                 ],
             )
             .map(|_| ())
         })
     }
 
-    /// Consume an OAuth state (one use). `None` when unknown or expired.
+    /// Consume an OAuth state (one use). `None` when unknown, expired, or without an owner — the
+    /// callback cannot tell whose tokens those would be.
     pub fn take_oauth_state(&self, state: &str) -> Result<Option<OauthState>> {
         self.with(|c| {
             let row = c
                 .query_row(
-                    "SELECT state, provider, code_verifier, redirect_uri, scopes FROM oauth_states WHERE state = ?1 AND expires_at >= ?2",
+                    "SELECT state, provider, code_verifier, redirect_uri, scopes, user_id FROM oauth_states
+                     WHERE state = ?1 AND expires_at >= ?2 AND user_id IS NOT NULL",
                     params![state, now_ms()],
                     |r| {
                         Ok(OauthState {
@@ -2377,6 +2565,7 @@ impl Db {
                             code_verifier: r.get(2)?,
                             redirect_uri: r.get(3)?,
                             scopes: serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default(),
+                            user_id: r.get(5)?,
                         })
                     },
                 )
