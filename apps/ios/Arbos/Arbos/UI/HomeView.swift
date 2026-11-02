@@ -87,6 +87,7 @@ struct HomeView: View {
     private var searching: Bool { searchFocused || !query.isEmpty }
 
     var body: some View {
+        let _ = FrameProbe.count(.homeBody)
         NavigationStack(path: $model.path) {
             ZStack(alignment: .top) {
                 theme.bg.ignoresSafeArea()
@@ -105,7 +106,9 @@ struct HomeView: View {
             // 2026-10-28], see-through since [feedback iphone-composer-see-through-2026-10-28]):
             // the fade is one layer at the canvas's bottom (over the rows, under the capsule),
             // not the bar's own background; rows stay readable through and between the pills.
-            .overlay(alignment: .bottom) { BottomBarFadeView(spec: BottomBarFade.home) }
+            .overlay(alignment: .bottom) {
+                BottomBarFadeView { geo, _ in BottomBarFade.home(bottomInset: geo.safeAreaInsets.bottom) }
+            }
             .safeAreaInset(edge: .bottom, spacing: 0) { bottomBar }
             .animation(.easeOut(duration: 0.18), value: searching)
             .task(id: model.link) {
@@ -154,6 +157,7 @@ struct HomeView: View {
             .sheet(isPresented: $showSettings, onDismiss: { model.pendingSettingsLanding = nil }) {
                 SettingsView(landing: model.pendingSettingsLanding ?? DebugHooks.settingsPage)
                     .environmentObject(model).environment(\.theme, theme)
+                    .onAppear { PerfSignpost.endAfterCommit(.settingsSheet) }
             }
             // A Settings row picked in search: the sheet opens straight on that page.
             .onChange(of: model.pendingSettingsLanding) { _, landing in
@@ -355,6 +359,7 @@ struct HomeView: View {
                           pinned: pinned)
             }
             .buttonStyle(.borderless)
+            .accessibilityIdentifier("home-row:\(chat.id)")
             .contextMenu {
                 // Long-press: Pin, reorder when pinned, Archive,
                 // Mute (groups), Profile/Group info, Delete.
@@ -763,7 +768,10 @@ struct HomeView: View {
 
     private var topBarRow: some View {
         HStack(spacing: 10) {
-            Button { showSettings = true } label: {
+            Button {
+                PerfSignpost.begin(.settingsSheet)
+                showSettings = true
+            } label: {
                 // My picture with the machine mark through the one presence badge (in
                 // front, ring cut out of the picture) — never a coloured dot (2026-10-27).
                 PersonAvatar(url: model.user?.avatarUrl, handle: model.user?.login ?? "?", size: Theme.control, name: model.user?.name, id: model.user?.id, colorIndex: model.user?.avatarColorIndexEffective)
