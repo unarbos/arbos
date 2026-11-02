@@ -2,6 +2,7 @@
   "chats": [
     {
       "chat_id": "people_dm",
+      "mentions": 0,
       "project_id": "people",
       "unread": 2
     }

@@ -1,6 +1,9 @@
 //! Storage for message notifications: APNs device tokens, the per-chat message event log the
 //! relay counts unread from (it never reads Loro rows, so writers tell it about whole
-//! messages), and per-user read marks. Same SQLite file; created from `Db::open`.
+//! messages), per-user read marks, and which of those messages mentioned whom.
+//! Same SQLite file; created from `Db::open`.
+
+use std::collections::{BTreeMap, HashSet};
 
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -39,7 +42,35 @@ CREATE TABLE IF NOT EXISTS chat_user_cursor (
   user_id TEXT NOT NULL, chat_id TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL,
   PRIMARY KEY (user_id, chat_id)
 );
+CREATE TABLE IF NOT EXISTS chat_mentions (
+  event_id INTEGER NOT NULL, chat_id TEXT NOT NULL, user_id TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'direct', created_at INTEGER NOT NULL,
+  PRIMARY KEY (event_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS chat_mentions_user ON chat_mentions(user_id, chat_id, event_id);
+CREATE TABLE IF NOT EXISTS chat_user_mention_reads (
+  user_id TEXT NOT NULL, chat_id TEXT NOT NULL, event_id INTEGER NOT NULL, at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, chat_id)
+);
 "#;
+
+/// What raised a mention row. Only [`MENTION_DIRECT`] counts toward the `@` mark
+/// (Jacob, 2026-10-31): a collective is recorded so the rule can widen later
+/// without a schema change, and so an `@here` that pushed can still be explained.
+pub const MENTION_DIRECT: &str = "direct";
+/// `@here` / `@everyone`: pushes today, never badges.
+pub const MENTION_COLLECTIVE: &str = "collective";
+
+/// Which mention rows (alias `m`) in one chat are still unread. `?1` user, `?2` chat, `?3`
+/// mention kind. Narrower than [`UNREAD_SCOPE`] on purpose: it leaves out the membership and
+/// archive clauses, because its one caller is reached through a route that has already checked
+/// membership, and a mention in a chat the user archived is still theirs to clear.
+const MENTION_UNREAD_WHERE: &str = "JOIN chat_events e ON e.id = m.event_id
+     WHERE m.user_id = ?1 AND m.chat_id = ?2 AND m.kind = ?3
+       AND m.event_id > COALESCE((SELECT r.event_id FROM chat_user_mention_reads r
+                                   WHERE r.user_id = ?1 AND r.chat_id = ?2), 0)
+       AND (e.sender_user IS NULL OR e.sender_user != ?1)
+       AND (e.sender_user IS NULL OR e.sender_user NOT IN (SELECT blocked FROM blocks WHERE blocker = ?1))";
 
 /// Keep the event log a month deep; unread counts older than that are noise.
 const EVENT_RETENTION_MS: i64 = 30 * 24 * 3_600_000;
@@ -79,6 +110,10 @@ pub struct UnreadChat {
     /// `None` for people chats (the apps show `people`).
     pub project_id: Option<String>,
     pub unread: i64,
+    /// Unread direct mentions of the user in this chat. Separate state from
+    /// `unread`, and allowed to outlive it: opening a chat reads its messages,
+    /// it does not mean the mention was seen.
+    pub mentions: i64,
 }
 
 impl Db {
@@ -177,6 +212,13 @@ impl Db {
             )?;
             c.execute(
                 "DELETE FROM chat_events WHERE created_at < ?1",
+                params![now - EVENT_RETENTION_MS],
+            )?;
+            // Mention rows hang off the log, so they age out with it. Without this they would
+            // outlive their event forever: the join already stops counting them, so they
+            // would be invisible and unbounded at the same time.
+            c.execute(
+                "DELETE FROM chat_mentions WHERE created_at < ?1",
                 params![now - EVENT_RETENTION_MS],
             )?;
             Ok((n > 0).then(|| c.last_insert_rowid()))
@@ -320,6 +362,72 @@ impl Db {
         })
     }
 
+    // ---- unread mentions ----------------------------------------------------------------------
+    // Two pieces of state, deliberately apart from the read mark above: `mark_chat_read` jumps to
+    // the chat's head, so a mention hung off it would clear the moment the chat was opened.
+
+    /// Record that `user_id` was mentioned by the message `event_id`, and how (`kind`:
+    /// [`MENTION_DIRECT`] or [`MENTION_COLLECTIVE`]). Written once per (message, person);
+    /// announcing the same message twice is still one mention.
+    pub fn insert_chat_mention(
+        &self,
+        event_id: i64,
+        chat_id: &str,
+        user_id: &str,
+        kind: &str,
+    ) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO chat_mentions(event_id, chat_id, user_id, kind, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(event_id, user_id) DO NOTHING",
+                params![event_id, chat_id, user_id, kind, now_ms()],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Advance the user's mention cursor, never backwards. `MAX` is the merge: two devices
+    /// writing different values converge on the larger one, so a mention can be neither
+    /// resurrected nor lost. The caller only ever passes the oldest unread mention, which is
+    /// what keeps the collapse from skipping one nobody saw.
+    pub fn advance_mention_cursor(
+        &self,
+        user_id: &str,
+        chat_id: &str,
+        event_id: i64,
+    ) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO chat_user_mention_reads(user_id, chat_id, event_id, at) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(user_id, chat_id) DO UPDATE SET
+                   event_id = MAX(chat_user_mention_reads.event_id, excluded.event_id), at = excluded.at",
+                params![user_id, chat_id, event_id.max(0), now_ms()],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// The oldest unread direct mention in a chat, as `(event_id, message_id)`. The in-chat
+    /// jump lands here, and only this row may advance the cursor.
+    pub fn oldest_unread_mention(
+        &self,
+        user_id: &str,
+        chat_id: &str,
+    ) -> Result<Option<(i64, String)>> {
+        self.with(|c| {
+            c.query_row(
+                &format!(
+                    "SELECT m.event_id, e.message_id FROM chat_mentions m {MENTION_UNREAD_WHERE}
+                     ORDER BY m.event_id LIMIT 1"
+                ),
+                params![user_id, chat_id, MENTION_DIRECT],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+        })
+    }
+
     /// The user's row cursor in a chat (one per user, shared by every device): the highest
     /// room `seq` any of their devices reported read, or that they wrote themselves.
     pub fn user_cursor(&self, user_id: &str, chat_id: &str) -> Result<i64> {
@@ -364,13 +472,23 @@ impl Db {
 
     /// Unread messages per chat for a user: events after their read mark, not their own, in
     /// chats they are a member of (people chats by membership; project chats by owning the
-    /// project or being a live guest).
+    /// project or being a live guest). Each row also carries the chat's unread direct
+    /// mentions, and a chat with a mention but no unread message is listed with `unread: 0`.
     pub fn unread_for_user(&self, user_id: &str) -> Result<Vec<UnreadChat>> {
         self.with(|c| unread_query(c, user_id))
     }
 
     pub fn unread_total(&self, user_id: &str) -> Result<i64> {
         self.with(|c| Ok(unread_query(c, user_id)?.iter().map(|u| u.unread).sum()))
+    }
+
+    /// Add unread direct mentions to counts that did not come from [`Self::unread_for_user`] —
+    /// the Stage B homeserver counts. The mention mark is the relay's own state whether or not
+    /// a user's unread *messages* are counted by Synapse, so it is read from here either way
+    /// and a flipped user is not left without the `@`.
+    pub fn merge_unread_mentions(&self, user_id: &str, chats: &mut Vec<UnreadChat>) -> Result<()> {
+        let member = format!("user:{user_id}");
+        self.with(|c| merge_mentions(c, user_id, &member, chats))
     }
 
     /// The project a (project) chat belongs to, when `chat_id` is one.
@@ -386,27 +504,91 @@ impl Db {
     }
 }
 
-fn unread_query(c: &Connection, user_id: &str) -> rusqlite::Result<Vec<UnreadChat>> {
-    let member = format!("user:{user_id}");
-    let mut st = c.prepare(
-        "SELECT e.chat_id, e.project_id, COUNT(*) FROM chat_events e
-         WHERE e.id > COALESCE((SELECT r.event_id FROM chat_user_reads r WHERE r.user_id = ?1 AND r.chat_id = e.chat_id), 0)
-           AND (e.sender_user IS NULL OR e.sender_user != ?1)
+/// Which `chat_events` rows (alias `e`) a user may be told about at all: never their own,
+/// never a sender they blocked, never an archived chat, and only in a chat they belong to —
+/// people chats by membership, project chats by owning the project or being a live guest.
+/// `?1` is the user id and `?2` is `user:<id>`. Shared by the unread and the mention queries
+/// so a chat can never count for one and not the other.
+const UNREAD_SCOPE: &str = "(e.sender_user IS NULL OR e.sender_user != ?1)
            AND (e.sender_user IS NULL OR e.sender_user NOT IN (SELECT blocked FROM blocks WHERE blocker = ?1))
            AND NOT EXISTS (SELECT 1 FROM chat_user_archive a WHERE a.user_id = ?1 AND a.chat_id = e.chat_id)
            AND (
              e.chat_id IN (SELECT chat_id FROM people_members WHERE member = ?2 AND left_at IS NULL)
              OR e.project_id IN (SELECT id FROM projects WHERE user_id = ?1)
              OR e.project_id IN (SELECT project_id FROM project_members WHERE user_id = ?1 AND left_at IS NULL)
-           )
-         GROUP BY e.chat_id ORDER BY MAX(e.id) DESC",
-    )?;
+           )";
+
+fn unread_query(c: &Connection, user_id: &str) -> rusqlite::Result<Vec<UnreadChat>> {
+    let member = format!("user:{user_id}");
+    let mut st = c.prepare(&format!(
+        "SELECT e.chat_id, e.project_id, COUNT(*) FROM chat_events e
+         WHERE e.id > COALESCE((SELECT r.event_id FROM chat_user_reads r WHERE r.user_id = ?1 AND r.chat_id = e.chat_id), 0)
+           AND {UNREAD_SCOPE}
+         GROUP BY e.chat_id ORDER BY MAX(e.id) DESC"
+    ))?;
     let rows = st.query_map(params![user_id, member], |r| {
         Ok(UnreadChat {
             chat_id: r.get(0)?,
             project_id: r.get(1)?,
             unread: r.get(2)?,
+            mentions: 0,
         })
+    })?;
+    let mut out: Vec<UnreadChat> = rows.collect::<rusqlite::Result<_>>()?;
+    merge_mentions(c, user_id, &member, &mut out)?;
+    Ok(out)
+}
+
+/// Fill each row's unread direct mentions in, and append a row for a chat that holds one but
+/// has no unread message.
+///
+/// Mentions are counted separately and merged rather than folded into the unread query: a chat
+/// whose messages are all read can still hold an unread mention (opening a chat reads its
+/// messages, it does not mean the mention was seen), and such a chat is absent from the unread
+/// rows entirely. Merging is what puts the `@` on it.
+fn merge_mentions(
+    c: &Connection,
+    user_id: &str,
+    member: &str,
+    out: &mut Vec<UnreadChat>,
+) -> rusqlite::Result<()> {
+    let mentions = mention_unread_query(c, user_id, member)?;
+    for row in out.iter_mut() {
+        row.mentions = mentions.get(&row.chat_id).map(|m| m.1).unwrap_or(0);
+    }
+    let seen: HashSet<&str> = out.iter().map(|r| r.chat_id.as_str()).collect();
+    let mut extra: Vec<UnreadChat> = mentions
+        .iter()
+        .filter(|(chat_id, _)| !seen.contains(chat_id.as_str()))
+        .map(|(chat_id, (project_id, count))| UnreadChat {
+            chat_id: chat_id.clone(),
+            project_id: project_id.clone(),
+            unread: 0,
+            mentions: *count,
+        })
+        .collect();
+    extra.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+    out.append(&mut extra);
+    Ok(())
+}
+
+/// chat id → (project id, unread direct mentions) for every chat where the user has one.
+fn mention_unread_query(
+    c: &Connection,
+    user_id: &str,
+    member: &str,
+) -> rusqlite::Result<BTreeMap<String, (Option<String>, i64)>> {
+    let mut st = c.prepare(&format!(
+        "SELECT e.chat_id, MAX(e.project_id), COUNT(*) FROM chat_mentions m
+         JOIN chat_events e ON e.id = m.event_id
+         WHERE m.user_id = ?1 AND m.kind = ?3
+           AND m.event_id > COALESCE((SELECT r.event_id FROM chat_user_mention_reads r
+                                       WHERE r.user_id = ?1 AND r.chat_id = e.chat_id), 0)
+           AND {UNREAD_SCOPE}
+         GROUP BY e.chat_id"
+    ))?;
+    let rows = st.query_map(params![user_id, member, MENTION_DIRECT], |r| {
+        Ok((r.get::<_, String>(0)?, (r.get(1)?, r.get(2)?)))
     })?;
     rows.collect()
 }

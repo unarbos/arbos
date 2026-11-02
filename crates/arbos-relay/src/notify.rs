@@ -455,6 +455,10 @@ pub async fn announce_with(
     // itself was only the client's push preview. The caller's list is kept and added to: a
     // declared id the prose does not name (a chip, an attachment with nothing but a tag) must
     // not be dropped.
+    // Kept before the resolve below: `@here` resolves to every member, so the resolved set
+    // cannot tell "Jacob named me" from "Jacob addressed the room". The unread-mention mark
+    // turns on exactly that difference, so it is decided from the writer's own list.
+    let declared = mentions;
     let mentions = &union_resolved_mentions(state, chat, &member, text, mentions);
     // Outside agents in this chat get the message as an ASP event (#2140).
     crate::outside::on_announce(state, chat, sender, message_id, text, None, mentions);
@@ -492,15 +496,35 @@ pub async fn announce_with(
     let large_group_min = eligibility::large_group_min();
     let mut pushes = Vec::new();
     for user in recipients(state, chat) {
-        let recipient = Recipient::load(state, chat, sender, &user, text, mentions);
+        let recipient = Recipient::load(state, chat, sender, &user, text, mentions, declared);
         let verdict = eligibility::decide(&recipient, shape, large_group_min);
         // The sender's own account, and a recipient who blocked the sender (the row is hidden
         // for them alone, [feedback blocked-state-relay-2026-10-26]): not even a read mark.
         if matches!(verdict, Verdict::Skip(Skip::Sender | Skip::BlockedSender)) {
             continue;
         }
+        // The unread-mention mark: recorded before the push verdict below, because it is read
+        // state and not a notification — a muted or mentions-only chat still shows the `@`.
+        // The kind is recorded and the reading side filters on it: only a mention naming the
+        // person badges, so `@here` pushes without one (Jacob, 2026-10-31).
+        if recipient.mentioned {
+            let kind = if recipient.mentioned_directly {
+                crate::db_push::MENTION_DIRECT
+            } else {
+                crate::db_push::MENTION_COLLECTIVE
+            };
+            let _ = state
+                .db
+                .insert_chat_mention(event_id, &chat.chat_id, &user, kind);
+        }
         if user_focused_on_chat(state, &user, &chat.chat_id).await {
             let _ = state.db.mark_chat_read(&user, &chat.chat_id);
+            // Looking at the chat is seeing its mentions, the same rule as the read mark
+            // above rather than a second one: every earlier mention is on screen too, so this
+            // does not depend on *this* message being one.
+            let _ = state
+                .db
+                .advance_mention_cursor(&user, &chat.chat_id, event_id);
             // Queued after the message job for this chat, so the receipt lands on it.
             state.matrix.read(state, &chat.chat_id, &user);
         }
@@ -864,19 +888,27 @@ pub async fn unregister_push(
     }
 }
 
-/// `GET /me/unread` → `{chats: [{chat_id, project_id, unread}], total}`
+/// `GET /me/unread` → `{chats: [{chat_id, project_id, unread, mentions}], total}`
+///
+/// `total` stays the unread **message** total, which is what the app badge shows. A chat with
+/// an unread mention and no unread message is listed with `unread: 0`.
 pub async fn me_unread(State(state): State<AppState>, principal: Principal) -> Response {
     let Principal::Device { user_id, .. } = &principal else {
         return api_error(StatusCode::FORBIDDEN, "forbidden", "devices only");
     };
-    // Stage B: flipped users are answered from the homeserver (relay counts on a miss).
+    // Stage B: flipped users are answered from the homeserver (relay counts on a miss). Only
+    // the message counts come from there — the mention mark is the relay's either way, so it
+    // is merged into the homeserver's rows rather than lost for a flipped user.
     let flipped = if crate::matrix::reads::reads_on(&state, user_id) {
         crate::matrix::reads::unread_for_user(&state, user_id).await
     } else {
         None
     };
     match flipped
-        .map(Ok)
+        .map(|mut chats| {
+            state.db.merge_unread_mentions(user_id, &mut chats)?;
+            Ok(chats)
+        })
         .unwrap_or_else(|| state.db.unread_for_user(user_id))
     {
         Ok(chats) => {
@@ -891,6 +923,7 @@ pub async fn me_unread(State(state): State<AppState>, principal: Principal) -> R
                             .clone()
                             .unwrap_or_else(|| people::PEOPLE_PROJECT.to_owned()),
                         unread: c.unread,
+                        mentions: c.mentions,
                     })
                     .collect(),
                 total,
@@ -2542,5 +2575,282 @@ mod chat_meta_tests {
         assert_eq!(p["chat_image_key"], "pic.png");
         assert_eq!(p["text"], "Five.");
         assert_eq!(p["sender"]["kind"], "agent");
+    }
+}
+
+#[cfg(test)]
+mod mention_tests {
+    //! The unread-mention mark. Its whole reason to exist is that it is *not* the read mark:
+    //! only a mention naming you raises it, reading the chat's messages does not lower it, and
+    //! clearing it must leave those messages alone.
+
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use axum::Json;
+
+    use arbos_core::ids::ulid;
+
+    use super::*;
+    use crate::people::tests_support::{group, person};
+    use crate::people::{chat_mentions_read, chat_read, MentionReadBody, ReadBody};
+    use crate::push::eligibility::{mentioned, mentioned_directly};
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    fn dev_id(p: &Principal) -> String {
+        match p {
+            Principal::Device { id, .. } => id.clone(),
+            Principal::Box { .. } | Principal::Admin => unreachable!("device principal"),
+        }
+    }
+
+    /// Announce `text` from `p`, declaring `who` as mentioned, and return the message id.
+    async fn say(state: &AppState, p: &Principal, chat: &str, text: &str, who: &[&str]) -> String {
+        let message_id = ulid();
+        let r = notify_people_chat(
+            State(state.clone()),
+            p.clone(),
+            Path(chat.to_owned()),
+            Json(NotifyBody {
+                message_id: message_id.clone(),
+                text: text.into(),
+                project_id: None,
+                reply_ref: None,
+                kind: None,
+                voice_text: None,
+                mentions: who.iter().map(|u| format!("user:{u}")).collect(),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK, "announce {text:?}");
+        message_id
+    }
+
+    /// `(unread messages, unread mentions)` for a chat as `GET /me/unread` would report it.
+    /// A chat absent from the rows is `(0, 0)`.
+    fn counts(state: &AppState, user: &str, chat: &str) -> (i64, i64) {
+        state
+            .db
+            .unread_for_user(user)
+            .expect("unread")
+            .iter()
+            .find(|c| c.chat_id == chat)
+            .map(|c| (c.unread, c.mentions))
+            .unwrap_or((0, 0))
+    }
+
+    async fn mark_mention_read(
+        state: &AppState,
+        p: &Principal,
+        chat: &str,
+        message_id: &str,
+    ) -> StatusCode {
+        chat_mentions_read(
+            State(state.clone()),
+            p.clone(),
+            Path(chat.to_owned()),
+            Json(MentionReadBody {
+                message_id: message_id.to_owned(),
+            }),
+        )
+        .await
+        .status()
+    }
+
+    /// Jacob's 2026-10-31 decision, at the level it is decided: `@here` still wakes a push, so
+    /// it stays a mention for [`mentioned`], and it is not one for the mark.
+    #[test]
+    fn here_pushes_but_does_not_name_you() {
+        for text in ["@here standup in five", "@everyone please read"] {
+            assert!(mentioned(text, &[], "u1", "bob"), "{text:?} pushes");
+            assert!(
+                !mentioned_directly(text, &[], "u1", "bob"),
+                "{text:?} names nobody"
+            );
+        }
+        assert!(mentioned_directly("@bob look", &[], "u1", "bob"));
+        assert!(mentioned_directly(
+            "look",
+            &["user:u1".to_owned()],
+            "u1",
+            "bob"
+        ));
+    }
+
+    #[tokio::test]
+    async fn only_a_mention_that_names_you_raises_the_mark() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, _bob_dev) = person(&state, 2);
+        let g = group(&state, &[&alice, &bob]);
+
+        say(&state, &alice_dev, &g, "@here standup in five", &[]).await;
+        assert_eq!(
+            counts(&state, &bob, &g),
+            (1, 0),
+            "`@here` is an unread message and no `@`"
+        );
+
+        say(&state, &alice_dev, &g, "over to you", &[&bob]).await;
+        assert_eq!(counts(&state, &bob, &g), (2, 1), "being named raises it");
+
+        assert_eq!(
+            counts(&state, &alice, &g),
+            (0, 0),
+            "the sender's own message is neither"
+        );
+    }
+
+    /// The case the feature exists for: Affinity reads a busy chat, so it has no unread
+    /// messages, and the mention she was tagged in days ago is still waiting. The chat has to
+    /// be listed at all for the `@` to have anywhere to go.
+    #[tokio::test]
+    async fn a_mention_outlives_the_chats_unread_messages() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let g = group(&state, &[&alice, &bob]);
+
+        say(&state, &alice_dev, &g, "morning @bob", &[&bob]).await;
+        assert_eq!(counts(&state, &bob, &g), (1, 1));
+
+        let r = chat_read(
+            State(state.clone()),
+            bob_dev.clone(),
+            Path(g.clone()),
+            Json(ReadBody { seq: 99 }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+
+        assert_eq!(
+            counts(&state, &bob, &g),
+            (0, 1),
+            "reading the messages is not seeing the mention"
+        );
+        assert!(
+            state
+                .db
+                .unread_for_user(&bob)
+                .unwrap()
+                .iter()
+                .any(|c| c.chat_id == g),
+            "a chat with no unread message but an unread mention is still listed"
+        );
+    }
+
+    /// The cursor is a watermark, so it may only ever be moved by the oldest unread mention —
+    /// otherwise clearing the newest would silently swallow the ones before it.
+    #[tokio::test]
+    async fn the_mark_clears_only_from_the_oldest_mention() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let g = group(&state, &[&alice, &bob]);
+
+        let first = say(&state, &alice_dev, &g, "@bob one", &[&bob]).await;
+        let second = say(&state, &alice_dev, &g, "@bob two", &[&bob]).await;
+        assert_eq!(counts(&state, &bob, &g).1, 2);
+
+        assert_eq!(
+            mark_mention_read(&state, &bob_dev, &g, &second).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            counts(&state, &bob, &g).1,
+            2,
+            "the newer mention cannot clear the older one"
+        );
+
+        assert_eq!(
+            mark_mention_read(&state, &bob_dev, &g, &first).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(counts(&state, &bob, &g).1, 1);
+
+        assert_eq!(
+            mark_mention_read(&state, &bob_dev, &g, &first).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(counts(&state, &bob, &g).1, 1, "marking twice is idempotent");
+
+        assert_eq!(
+            mark_mention_read(&state, &bob_dev, &g, &second).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(counts(&state, &bob, &g).1, 0);
+
+        assert_eq!(
+            mark_mention_read(&state, &bob_dev, &g, &second).await,
+            StatusCode::NO_CONTENT,
+            "nothing unread left is not an error"
+        );
+    }
+
+    /// The trap this route was written around: `chat_read` tells the other devices to clear
+    /// the chat, which drops their unread **messages**. Clearing a mention must not do that.
+    #[tokio::test]
+    async fn clearing_a_mention_leaves_the_unread_messages_alone() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let g = group(&state, &[&alice, &bob]);
+
+        let m = say(&state, &alice_dev, &g, "@bob look at this", &[&bob]).await;
+        say(&state, &alice_dev, &g, "and one more thing", &[]).await;
+        assert_eq!(counts(&state, &bob, &g), (2, 1));
+
+        assert_eq!(
+            mark_mention_read(&state, &bob_dev, &g, &m).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            counts(&state, &bob, &g),
+            (2, 0),
+            "the `@` goes, both messages stay unread"
+        );
+    }
+
+    /// "Seen means on screen": a mention that arrives while the person is looking at the chat
+    /// was seen as it landed, so it never raises the mark at all.
+    #[tokio::test]
+    async fn a_mention_arriving_while_you_watch_is_already_seen() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let g = group(&state, &[&alice, &bob]);
+
+        set_focus(&state, &dev_id(&bob_dev), Some(&g)).await;
+        say(&state, &alice_dev, &g, "@bob while you watch", &[&bob]).await;
+        assert_eq!(counts(&state, &bob, &g), (0, 0));
+
+        // And looking at the chat clears a mention left over from before.
+        set_focus(&state, &dev_id(&bob_dev), None).await;
+        say(&state, &alice_dev, &g, "@bob while you are away", &[&bob]).await;
+        assert_eq!(counts(&state, &bob, &g).1, 1);
+        set_focus(&state, &dev_id(&bob_dev), Some(&g)).await;
+        say(&state, &alice_dev, &g, "anything at all", &[]).await;
+        assert_eq!(
+            counts(&state, &bob, &g),
+            (0, 0),
+            "every mention above the new message is on screen too"
+        );
+    }
+
+    /// A non-member cannot read someone else's chat, mentions included.
+    #[tokio::test]
+    async fn the_route_keeps_chat_reads_guard() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, _bob_dev) = person(&state, 2);
+        let (_carol, carol_dev) = person(&state, 3);
+        let g = group(&state, &[&alice, &bob]);
+
+        let m = say(&state, &alice_dev, &g, "@bob hello", &[&bob]).await;
+        assert_eq!(
+            mark_mention_read(&state, &carol_dev, &g, &m).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(counts(&state, &bob, &g).1, 1, "and it stays unread");
     }
 }

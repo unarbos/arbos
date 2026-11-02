@@ -60,6 +60,10 @@ pub async fn unread_for_user(state: &AppState, user_id: &str) -> Option<Vec<Unre
                 chat_id: room.chat_id,
                 project_id: room.project_id,
                 unread: notif,
+                // Synapse counts messages here, not the unread-mention mark, which is the
+                // relay's own state: the caller merges it in with
+                // [`crate::db_push::Db::merge_unread_mentions`].
+                mentions: 0,
             });
         }
     }

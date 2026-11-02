@@ -1257,6 +1257,12 @@ pub struct Chat {
     /// the badge treats that as one missed message.
     #[serde(default)]
     pub unread_count: u32,
+    /// Unread direct `@mentions` of the viewer from `GET /me/unread` (Jacob,
+    /// 2026-10-31). Separate state from [`Self::unread_count`], not a subset
+    /// of it: opening a chat reads its messages but leaves a mention the user
+    /// never scrolled to, so a chat with nothing unread can still carry one.
+    #[serde(default)]
+    pub mention_count: u32,
     pub last_message_at: u64,
     /// §9c: archived for me (per user, synced by the relay); `None` = not archived.
     #[serde(default)]

@@ -2610,11 +2610,17 @@ public struct UnreadChatDto: Codable {
 	public let chat_id: String
 	public let project_id: String
 	public let unread: Int64
+	/// Unread mentions of the viewer that name them (`@here` is not one of those). Separate
+	/// from `unread`: reading a chat's messages does not mean its mentions were seen, so a
+	/// chat can be listed with `unread: 0` and a mention count above zero. Defaulted, so a
+	/// client built against an older relay decodes a payload without it.
+	public let mentions: Int64?
 
-	public init(chat_id: String, project_id: String, unread: Int64) {
+	public init(chat_id: String, project_id: String, unread: Int64, mentions: Int64?) {
 		self.chat_id = chat_id
 		self.project_id = project_id
 		self.unread = unread
+		self.mentions = mentions
 	}
 }
 
