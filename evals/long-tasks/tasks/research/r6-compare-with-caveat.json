@@ -13,5 +13,6 @@
     "min": 3
    }
   }
- ]
+ ],
+ "regression": "run 16: rubric 2/5 — gave a 0.6-1.1M range across mixed years and then a single 0.7M figure claiming same-year comparability; passed when re-run alone, so not reproducible"
 }

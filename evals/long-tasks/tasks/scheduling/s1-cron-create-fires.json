@@ -16,5 +16,5 @@
       "timeout_s": 300
     }
   ],
-  "regression": "run 15 part 2: not measured — the box died out of memory at 17:04:40 (#2302) with two light lanes active"
+  "regression": "run 15 part 2: not measured — the box died out of memory at 17:04:40 (#2302) with two light lanes active; run 16: t1 did not finish before the task timeout; passed when re-run alone, so not reproducible"
 }

@@ -35,5 +35,5 @@
    "peer_handle": "lt-peer"
   }
  ],
- "regression": "D72 people chats with an agent member: two humans, one agent; #2069 was a harness artefact (arbosctl replay); re-graded PASS on 0.1.163"
+ "regression": "D72 people chats with an agent member: two humans, one agent; #2069 was a harness artefact (arbosctl replay); re-graded PASS on 0.1.163; run 16: t3 did not finish before the task timeout; passed when re-run alone, so not reproducible"
 }

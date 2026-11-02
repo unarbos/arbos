@@ -38,6 +38,6 @@
   "no_truncated_reply": true,
   "no_repeated_sentence": true
  },
- "regression": "steer path: the working row's activity changes within 5 s of a steer (agentd post_activity 'Steering: …'), result applied (bc-d117b386 #1598); #1704 follow-up (steer seen, running writer never stopped → 40 lines); run 15: part 1 no steer line on the working row and a duplicated paragraph (outcome right); part 2 the quick reply claimed 'Done: … now stops at 20' in 0.7 s and the writer was never steered (40 lines) — #2276 (c)",
+ "regression": "steer path: the working row's activity changes within 5 s of a steer (agentd post_activity 'Steering: …'), result applied (bc-d117b386 #1598); #1704 follow-up (steer seen, running writer never stopped → 40 lines); run 15: part 1 no steer line on the working row and a duplicated paragraph (outcome right); part 2 the quick reply claimed 'Done: … now stops at 20' in 0.7 s and the writer was never steered (40 lines) — #2276 (c); run 16: failed again, rubric 0/5 — said it had changed the count to stop at 20, then admitted nothing had changed; last=40, lines=40, and the working row changed at 10.29 s against the 6 s limit",
  "notes": "Turn 2 goes out 4 s after turn 1's first status so it lands while the agent's own turn is still running (the detached loop outlives the turn; on 0.1.120 the agent reported and finished at +17 s, and a steer after that is just a new turn, which the guide path never sees)."
 }

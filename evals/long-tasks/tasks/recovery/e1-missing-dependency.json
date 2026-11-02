@@ -15,5 +15,6 @@
       "forbid_question": true,
       "timeout_s": 420
     }
-  ]
+  ],
+  "regression": "#2420 (run 16): failed twice on image 0.1.185, which passed it in run 15. Both replies diagnosed ModuleNotFoundError correctly, named `pip install tabulate` as the fix, and then asked 'Should I install it and run the script?' instead of installing it, against this task's own forbid_question. Reproduced 2/2; the box's network reaches pypi.org (probed 200), so the install was available"
 }

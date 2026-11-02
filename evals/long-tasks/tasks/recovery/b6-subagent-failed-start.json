@@ -31,5 +31,5 @@
     "failure_regex": "could not|couldn't|failed|unable|did not start|didn't start|never started|(timed out|stopped) before it (started|could start)"
   },
   "cleanup": "rm -f {P}/.arbos/home/.local/bin/prime-agent; pkill -f 'sleep 600' 2>/dev/null; echo cleaned",
-  "regression": "subagent failed start: plain line, kill stuck child, result turn replies only (bc-d117b386, #1349); #2240 (first line + first send_message glued in one bubble → the duplicate-sentence check; run 12 on 0.1.179, fix in 0.1.181); #2240 verified on 0.1.185 (run 13 PASS); run 15: the plain line 'The subagent timed out before it started, so nothing was written' counted as 0 failure lines — failure_regex now covers 'timed out before it started' / 'never started'"
+  "regression": "subagent failed start: plain line, kill stuck child, result turn replies only (bc-d117b386, #1349); #2240 (first line + first send_message glued in one bubble → the duplicate-sentence check; run 12 on 0.1.179, fix in 0.1.181); #2240 verified on 0.1.185 (run 13 PASS); run 15: the plain line 'The subagent timed out before it started, so nothing was written' counted as 0 failure lines — failure_regex now covers 'timed out before it started' / 'never started'; run 16: 2 failure lines shown where exactly 1 was expected; passed when re-run alone, so not reproducible"
 }

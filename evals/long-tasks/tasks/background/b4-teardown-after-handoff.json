@@ -57,6 +57,6 @@
     "background",
     "recovery"
   ],
-  "regression": "Doug teardown incident 2026-10-22 13:44 CR (owner bc-d117b386); #2258 (run 12: the teardown's follow-on job ended 'interrupted / box restart' at 00:58:24 and the turn never confirmed, though the routine was deleted and the loop killed)",
+  "regression": "Doug teardown incident 2026-10-22 13:44 CR (owner bc-d117b386); #2258 (run 12: the teardown's follow-on job ended 'interrupted / box restart' at 00:58:24 and the turn never confirmed, though the routine was deleted and the loop killed); run 16: one measured failure, having passed in run 15. t3 answered 'Before I tear anything down, I need your go-ahead... Shall I proceed?', so the loop stayed alive and the every-minute routine stayed; turns 4 and 5 asked again. The part-1 attempt was cut by an out-of-memory death and never measured, so the run holds one attempt, not two. It passed when re-run alone (20261031T0010-run16e), where t3 deleted the routine and killed the loop without asking. Read that repeat with care: a relay deploy landed between the two attempts (the deployed binary's mtime moved from 2026-10-30 01:24:24 to 23:48:40, and healthz gained a disk field it did not have during the run), so unlike the other six repeat passes it is not on the same build as its failure",
   "cleanup_routines": true
 }

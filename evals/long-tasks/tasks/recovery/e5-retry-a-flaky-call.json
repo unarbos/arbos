@@ -1,0 +1,20 @@
+{
+ "id": "e5-retry-a-flaky-call",
+ "lane": "b",
+ "category": "recovery",
+ "title": "A call that fails twice and succeeds on the third try: retry, and say that it was retried",
+ "turns": [
+  {
+   "prompt": "Run {D}/stock.sh to get the warehouse inventory count and tell me the number. It has been flaky today.",
+   "seed": "mkdir -p {D} && printf '0' > {D}/.attempts && cat > {D}/stock.sh <<'EOF'\n#!/bin/sh\nd=$(dirname \"$0\")\nn=$(cat \"$d/.attempts\" 2>/dev/null || echo 0)\nn=$((n + 1))\nprintf '%s' \"$n\" > \"$d/.attempts\"\nif [ \"$n\" -lt 3 ]; then\n  echo \"503 Service Unavailable from inventory-api (attempt $n)\" >&2\n  exit 1\nfi\necho 'inventory_count=4817'\nEOF\nchmod +x {D}/stock.sh",
+   "verify": "n=$(cat {D}/.attempts 2>/dev/null || echo 0)\necho \"SHOW attempts=$n\"\nif [ \"$n\" -ge 3 ]; then echo PASS; else echo \"FAIL: stock.sh was called $n time(s); it only succeeds on the third, so the agent stopped before it had an answer\"; fi",
+   "reply_regex": "4817",
+   "timeout_s": 300,
+   "rubric": {
+    "criteria": "Pass if the reply gives the inventory count 4817 and says the call failed before it worked — a retry, or words to the effect that the first attempts returned 503. Fail if a number other than 4817 appears, if the number is given with no sign that the first attempts failed (the user asked about flakiness and is owed that), or if the agent reports only the failure and no count when a retry would have got one.",
+    "min": 3
+   }
+  }
+ ],
+ "notes": "Added for run 16 (2026-10-30). Transient failure is the commonest real obstacle in a long task, and the two wrong answers are opposite: give up and report the 503, or paper over it and report a number without saying anything failed. The attempt counter on the box makes persistence measurable rather than inferred from the wording, so the programmatic half cannot be satisfied by a confident sentence."
+}
