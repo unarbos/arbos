@@ -291,50 +291,63 @@ mod tests {
         }
     }
 
-    /// `sender_of_event` preferred `content["life.arbos.sender"]` over the attested `sender`, so
-    /// any room member chose who a push came from. The three assertions below are the three
-    /// effects that had; each fails against the old function.
+    /// Baseline, so the three tests below are read as restricting forgery and not use: an event
+    /// nobody tampered with still resolves to the person or agent that sent it.
     #[test]
-    fn a_push_identity_comes_from_the_attested_sender_not_the_event_content() {
+    fn an_untampered_event_resolves_to_its_sender() {
         let state = test_state(AuthMode::Github);
         let (alice, _) = person(&state, 7001);
-        let (bob, _) = person(&state, 7002);
-        let alice_project = project_of(&state, &alice, "Research");
-        let bob_project = project_of(&state, &bob, "Bob's own");
+        let project = project_of(&state, &alice, "Research");
         let cfg = &state.matrix.cfg;
 
-        // Baseline: an unforged event still resolves, so the fix restricts forgery and not use.
-        let plain = sender_of_event(&state, &event(&cfg.user_mxid(&bob), body_from(None)))
-            .expect("a message from Bob resolves to Bob");
-        assert_eq!(plain.kind, "user");
-        assert_eq!(plain.user_id.as_deref(), Some(bob.as_str()));
-        let agent = sender_of_event(
-            &state,
-            &event(&cfg.agent_mxid(&alice_project), body_from(None)),
-        )
-        .expect("a message from the agent resolves to the agent");
-        assert_eq!(agent.kind, "agent");
-        assert_eq!(agent.id, alice_project);
+        let human = sender_of_event(&state, &event(&cfg.user_mxid(&alice), body_from(None)))
+            .expect("a message from Alice resolves to Alice");
+        assert_eq!(human.kind, "user");
+        assert_eq!(human.user_id.as_deref(), Some(alice.as_str()));
 
-        // 1. Misattribution: Bob claims to be the project agent. The push named the agent.
+        let agent = sender_of_event(&state, &event(&cfg.agent_mxid(&project), body_from(None)))
+            .expect("a message from the agent resolves to the agent");
+        assert_eq!(agent.kind, "agent");
+        assert_eq!(agent.id, project);
+    }
+
+    /// Effect 1, misattribution. `sender_of_event` preferred `content["life.arbos.sender"]` over
+    /// the attested `sender`, so a member who wrote that key chose who the push came from. This
+    /// variant needs no suppression: the push simply arrives named as the project agent.
+    #[test]
+    fn a_member_cannot_push_as_the_project_agent() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 7011);
+        let (bob, _) = person(&state, 7012);
+        let project = project_of(&state, &alice, "Research");
+
         let forged = sender_of_event(
             &state,
             &event(
-                &cfg.user_mxid(&bob),
-                body_from(Some(&format!("agent:{alice_project}"))),
+                &state.matrix.cfg.user_mxid(&bob),
+                body_from(Some(&format!("agent:{project}"))),
             ),
         )
         .expect("resolves");
         assert_eq!(forged.kind, "user", "a member must not push as an agent");
         assert_eq!(forged.user_id.as_deref(), Some(bob.as_str()));
+    }
 
-        // 2. Suppression: Bob claims to be Alice. `on_notify` skips a device whose user is the
-        //    sender, so Alice received the message with no notification at all -- and the shared
-        //    row mapper then rendered it in her transcript as her own words.
+    /// Effect 2, targeted suppression, and the one a user cannot detect. `on_notify` skips a
+    /// device whose user is the sender (reads.rs:180 for a mirrored chat, :214 for a channel),
+    /// so forging `user:<victim>` silenced exactly that victim: the message arrived with no
+    /// notification, and the shared row mapper rendered it in their transcript as their own
+    /// words. Nothing prompted them to look.
+    #[test]
+    fn a_member_cannot_silence_the_person_they_impersonate() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 7021);
+        let (bob, _) = person(&state, 7022);
+
         let forged = sender_of_event(
             &state,
             &event(
-                &cfg.user_mxid(&bob),
+                &state.matrix.cfg.user_mxid(&bob),
                 body_from(Some(&format!("user:{alice}"))),
             ),
         )
@@ -342,12 +355,25 @@ mod tests {
         assert_ne!(
             forged.user_id.as_deref(),
             Some(alice.as_str()),
-            "a member must not silence the person they are impersonating"
+            "the self-send skip must not be reachable by a forged identity"
         );
+        assert_eq!(forged.user_id.as_deref(), Some(bob.as_str()));
+    }
 
-        // 3. Unscoped lookup: the forged value was resolved with `Db::project`, which answers for
-        //    any project id on the relay, and the user branch for any user id -- neither has to
-        //    belong to this room. Bob borrowed a project of his own into Alice's room.
+    /// Effect 3, an unscoped lookup, which is a separate assertion from the attribution itself.
+    /// The forged value was resolved through `Db::project`, which answers for any project id on
+    /// the relay, and the user branch through `Sender::user` for any user id — neither has to
+    /// belong to this room or server. A member could therefore borrow the name and avatar of a
+    /// project they merely knew the id of, or of a user who is not in the channel at all.
+    #[test]
+    fn an_identity_from_outside_the_room_cannot_reach_a_push() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 7031);
+        let (bob, _) = person(&state, 7032);
+        let (carol, _) = person(&state, 7033);
+        let bob_project = project_of(&state, &bob, "Bob's own");
+        let cfg = &state.matrix.cfg;
+
         let forged = sender_of_event(
             &state,
             &event(
@@ -358,7 +384,21 @@ mod tests {
         .expect("resolves");
         assert_ne!(
             forged.id, bob_project,
-            "an identity from outside the room must not reach a push"
+            "a project from outside the room must not name a push"
+        );
+
+        let forged = sender_of_event(
+            &state,
+            &event(
+                &cfg.user_mxid(&alice),
+                body_from(Some(&format!("user:{carol}"))),
+            ),
+        )
+        .expect("resolves");
+        assert_ne!(
+            forged.user_id.as_deref(),
+            Some(carol.as_str()),
+            "a user from outside the room must not name a push"
         );
     }
 
