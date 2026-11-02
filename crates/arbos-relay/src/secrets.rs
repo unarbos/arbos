@@ -718,8 +718,13 @@ impl Refusal {
 }
 
 /// May `asked_by` ask for `s` in `chat_id`? The owner always may. Anyone else needs a People
-/// row that is on and whose scope covers the chat. `None` means no other person is asking
-/// (owner 1:1 chat, or asker unknown) — allowed.
+/// row that is on and whose scope covers the chat.
+///
+/// `None` is the owner, and only the owner: a box reports the human directing the turn, and a
+/// human row no client gave an account arrives as [`arbos_core::UNKNOWN_ASKER`] rather than as
+/// nothing. That sentinel is a reserved id (a real one is `gh_<github id>`), and it is refused
+/// here by name, ahead of every lookup, so that no People row can quietly turn every author no
+/// client named into a single standing director.
 pub(crate) fn may_direct(
     state: &AppState,
     s: &Secret,
@@ -728,6 +733,7 @@ pub(crate) fn may_direct(
 ) -> bool {
     match asked_by.map(str::trim).filter(|u| !u.is_empty()) {
         None => true,
+        Some(uid) if uid == arbos_core::UNKNOWN_ASKER => false,
         Some(uid) if uid == s.user_id => true,
         Some(uid) => state
             .db
@@ -755,8 +761,8 @@ pub struct Allowed {
 }
 
 /// Check one use of `s` by `project_id` at `host` in `chat_id`. `use_kind` is `header | env |
-/// browser_fill`. `asked_by` is the human directing this turn (`None` = owner / unknown).
-/// Pure except for the lookups (access, allowed_once, directors).
+/// browser_fill`. `asked_by` is the human directing this turn (`None` = the owner; see
+/// [`may_direct`]). Pure except for the lookups (access, allowed_once, directors).
 pub(crate) fn decide_use(
     state: &AppState,
     s: &Secret,
@@ -770,14 +776,22 @@ pub(crate) fn decide_use(
         return Err(Refusal::Expired);
     }
     let access = state.db.access(project_id, "secret", &s.id).ok().flatten();
-    let asker = asked_by.map(str::trim).filter(|u| !u.is_empty());
+    // The owner's own id reads as the owner, which is how a card records them: the request row
+    // is given `asked_by.filter(|u| *u != user_id)`.
+    let asker = asked_by
+        .map(str::trim)
+        .filter(|u| !u.is_empty() && *u != s.user_id);
     let once = state
         .db
         .allowed_once_for(project_id, &s.id, Some(host), use_kind)
         .ok()
         .flatten()
-        // A once-grant given for one person's ask is spent only by that person's ask.
-        .filter(|r| r.asked_by.is_none() || r.asked_by.as_deref() == asker);
+        // A once-grant is spent by the ask it was given for and by no other: the person the
+        // card named, or the owner when it named nobody. Reading "the grant names no asker" as
+        // "anyone may spend it" let a guest of the project spend a grant the owner had raised
+        // for their own ask — ahead of the People list and of `others_ask`, because this branch
+        // returns before `may_direct` is consulted.
+        .filter(|r| r.asked_by.as_deref() == asker);
     // Owner already approved this specific request card — that decision stands.
     if let Some(once) = once {
         return Ok(Allowed {
@@ -2838,7 +2852,8 @@ pub struct BoxRequestBody {
     pub host: Option<String>,
     #[serde(default, alias = "chatId")]
     pub chat_id: String,
-    /// Human directing this turn (`user_id`). Absent = owner / unknown.
+    /// Human directing this turn (`user_id`). Absent = the owner; an author no client
+    /// named is `arbos_core::UNKNOWN_ASKER`, never absent (see `secrets::may_direct`).
     #[serde(default, alias = "askedBy")]
     pub asked_by: Option<String>,
 }
@@ -4396,6 +4411,158 @@ mod tests {
             kinds.iter().any(|k| k == "secret_access_changed"),
             "{kinds:?}"
         );
+    }
+
+    /// One `allowed_once` row for `card`, as the owner's answer to a card leaves behind.
+    /// `asked_by` is what the card recorded: `None` when the ask named nobody.
+    fn insert_once_grant(
+        state: &AppState,
+        owner: &str,
+        card: &Secret,
+        id: &str,
+        asked_by: Option<&str>,
+    ) {
+        state
+            .db
+            .insert_secret_request(&SecretRequest {
+                id: id.into(),
+                user_id: owner.to_owned(),
+                project_id: "proj_people".into(),
+                chat_id: "chat_arbonites".into(),
+                target_kind: "secret".into(),
+                target_id: Some(card.id.clone()),
+                target_ref: card.env.clone(),
+                purpose: "once".into(),
+                use_kind: "header".into(),
+                host: Some("api.engy.com".into()),
+                status: "allowed_once".into(),
+                decided_by: Some(format!("card:{id}")),
+                created_at: now_ms(),
+                decided_at: Some(now_ms()),
+                expires_at: now_ms() + crate::db_secrets::ALLOW_ONCE_MS,
+                asked_by: asked_by.map(str::to_owned),
+            })
+            .unwrap();
+    }
+
+    /// The owner's own card records no asker (`insert_secret_request` is given
+    /// `asked_by.filter(|u| *u != user_id)`), and the once-grant it leaves behind is checked
+    /// before the People list is. A grant the owner raised for their own ask must not be
+    /// spendable by anyone else's.
+    #[test]
+    fn the_owners_own_once_grant_is_not_a_bearer_token() {
+        let (state, owner, secret, sam, _samir, jules) = people_setup();
+        let mut card = secret.clone();
+        card.others_ask = "card".into();
+        state.db.update_secret(&card).unwrap();
+        insert_once_grant(&state, &owner, &card, "req_once_owner", None);
+
+        // Jules is on no list, so without the grant he is sent to ask the owner first. The
+        // grant is not his to spend, so that is what he must still get.
+        let jules_use = decide_use(
+            &state,
+            &card,
+            "proj_people",
+            "api.engy.com",
+            "header",
+            Some("chat_arbonites"),
+            Some(&jules),
+        );
+        assert!(
+            matches!(jules_use, Err(Refusal::AskOwnerFirst)),
+            "a guest spent the owner's own once-grant: {:?}",
+            jules_use.map(|a| a.once.map(|r| r.id))
+        );
+
+        // The owner still spends it, whether or not the box named them.
+        let anonymous = decide_use(
+            &state,
+            &card,
+            "proj_people",
+            "api.engy.com",
+            "header",
+            Some("chat_arbonites"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            anonymous.once.map(|r| r.id).as_deref(),
+            Some("req_once_owner")
+        );
+        let named = decide_use(
+            &state,
+            &card,
+            "proj_people",
+            "api.engy.com",
+            "header",
+            Some("chat_arbonites"),
+            Some(&owner),
+        )
+        .unwrap();
+        assert_eq!(
+            named.once.map(|r| r.id).as_deref(),
+            Some("req_once_owner"),
+            "the owner's own id must read as the owner, not as a stranger"
+        );
+
+        // Sam is listed, so she passes on her own row — not on the owner's grant.
+        let sam_use = decide_use(
+            &state,
+            &card,
+            "proj_people",
+            "api.engy.com",
+            "header",
+            Some("chat_arbonites"),
+            Some(&sam),
+        )
+        .unwrap();
+        assert!(
+            sam_use.once.is_none(),
+            "a listed person's ask must not consume the owner's grant"
+        );
+    }
+
+    /// An author no client named travels as [`arbos_core::UNKNOWN_ASKER`] (#2585) so that the
+    /// relay can refuse the ask a second time. The refusal must be the relay's own rule, not
+    /// an accident of there being no People row for the sentinel.
+    #[test]
+    fn an_unidentified_asker_is_refused_even_with_a_people_row() {
+        let (state, _owner, secret, _sam, _samir, _jules) = people_setup();
+        assert_eq!(
+            verdict(&state, &secret, Some(arbos_core::UNKNOWN_ASKER)),
+            Err("not_allowed_person".into())
+        );
+        state
+            .db
+            .upsert_secret_director(&SecretDirector::new(
+                &secret.id,
+                arbos_core::UNKNOWN_ASKER,
+                "however this row got here",
+                FIXED_AT,
+            ))
+            .unwrap();
+        assert!(
+            state
+                .db
+                .is_secret_director(
+                    &secret.id,
+                    arbos_core::UNKNOWN_ASKER,
+                    Some("chat_arbonites")
+                )
+                .unwrap(),
+            "the row is on, so only may_direct's own rule can refuse the ask"
+        );
+        assert_eq!(
+            verdict(&state, &secret, Some(arbos_core::UNKNOWN_ASKER)),
+            Err("not_allowed_person".into()),
+            "a People row for the sentinel must not make every unnamed author a director"
+        );
+        assert!(!may_direct(
+            &state,
+            &secret,
+            Some(arbos_core::UNKNOWN_ASKER),
+            None
+        ));
     }
 
     #[test]

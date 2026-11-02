@@ -198,7 +198,8 @@ pub struct EgressBody {
     /// The chat the tool call runs in (chat-scoped Access).
     #[serde(default, alias = "chatId")]
     pub chat_id: Option<String>,
-    /// Human directing this turn (`user_id`). Absent = owner / unknown.
+    /// Human directing this turn (`user_id`). Absent = the owner; an author no client
+    /// named is `arbos_core::UNKNOWN_ASKER`, never absent (see `secrets::may_direct`).
     #[serde(default, alias = "askedBy")]
     pub asked_by: Option<String>,
 }
