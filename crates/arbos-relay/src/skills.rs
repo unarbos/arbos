@@ -6,6 +6,13 @@
 //! "Shared across Projects" is the whole of it: a skill is never shared across *people*. Every
 //! route here asks the same ownership question of a device, and a listing shows exactly the
 //! skills that device could also open by id (#1953).
+//!
+//! A slug names one skill per **owner** — the user behind its origin Project — and not one on
+//! the relay. It was relay-wide until the column-level `UNIQUE` came off `skills.slug`, and a
+//! shared name space is a cross-tenant channel in both directions: `POST /skills` answered 409
+//! naming the slug whenever anyone at all held it, which told a caller whether a stranger held
+//! a name, and one person taking a name took it from everybody with nothing on screen to say
+//! why. [`Db::skill_holding_slug`] is the whole of the new rule.
 
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -91,6 +98,43 @@ fn owns_skill(state: &AppState, principal: &Principal, s: &Skill) -> bool {
         Some(project) => state.allows(principal, project),
         None => true,
     }
+}
+
+/// Whether this skill is the caller's own, for choosing between skills that share a slug. Not
+/// an authorisation question — the gates on each route still answer that, and this one is
+/// deliberately narrower than they are: an ownerless skill passes `owns_skill` for everybody,
+/// which makes it a poor tie-break against a caller's own row.
+fn is_own(state: &AppState, scope: Option<&str>, principal: &Principal, s: &Skill) -> bool {
+    match principal {
+        Principal::Box { .. } => can_edit(scope, principal, s),
+        Principal::Device { .. } => s.origin_project_id.is_some() && owns_skill(state, principal, s),
+        Principal::Admin => false,
+    }
+}
+
+/// A skill by id, or by slug within what this caller can see. The by-id routes have always
+/// taken either, and `arbosctl skills show|delete <slug>` is built on that. A slug now names
+/// one skill per owner, so the slug arm is held to the caller's own scope: a stranger's skill
+/// never answers one, and the caller's own wins over a skill they merely have a view of.
+fn resolve(
+    state: &AppState,
+    principal: &Principal,
+    headers: &HeaderMap,
+    id_or_slug: &str,
+) -> Result<Option<Skill>, (StatusCode, String)> {
+    if let Some(found) = state.db.skill_by_id(id_or_slug).map_err(internal)? {
+        return Ok(Some(found));
+    }
+    let rows = state
+        .db
+        .skills_by_slug(id_or_slug, &scope_of(state, principal, headers))
+        .map_err(internal)?;
+    let project = box_project(state, principal, headers);
+    Ok(rows
+        .iter()
+        .find(|s| is_own(state, project.as_deref(), principal, s))
+        .or_else(|| rows.first())
+        .cloned())
 }
 
 /// `POST`/`PUT` body: structured fields, or `{ "markdown": "---\n…" }` with the frontmatter.
@@ -243,10 +287,7 @@ pub async fn get(
     Path(id): Path<String>,
 ) -> ApiResult {
     let scope = box_project(&state, &principal, &headers);
-    let s = state
-        .db
-        .skill(&id)
-        .map_err(internal)?
+    let s = resolve(&state, &principal, &headers, &id)?
         .ok_or((StatusCode::NOT_FOUND, "no such skill".to_owned()))?;
     if !can_see(scope.as_deref(), &principal, &s) {
         return Err((StatusCode::FORBIDDEN, "not visible to this box".into()));
@@ -282,7 +323,9 @@ pub async fn create(
     // A foreign project answers like an unknown one. `allows` takes a project's name as well
     // as its id; store the id it resolved to rather than the caller's spelling, because the
     // listing scopes on that column in SQL and cannot resolve a name the same way.
-    let origin = match origin.as_deref() {
+    // The owner comes out of the same lookup: a slug is unique within the person whose Project
+    // the skill lands in, which is not always the caller (a guest files into the host's).
+    let (origin, owner) = match origin.as_deref() {
         Some(named) => {
             let found = state
                 .db
@@ -292,9 +335,9 @@ pub async fn create(
             let Some(project) = found else {
                 return Err((StatusCode::NOT_FOUND, "no such project".to_owned()));
             };
-            Some(project.id)
+            (Some(project.id), Some(project.user_id))
         }
-        None => None,
+        None => (None, None),
     };
     let base = Skill {
         id: ulid(),
@@ -308,7 +351,12 @@ pub async fn create(
     if s.name.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "name required".into()));
     }
-    if let Some(existing) = state.db.skill(&s.slug).map_err(internal)? {
+    let visible = scope_of(&state, &principal, &headers);
+    if let Some(existing) = state
+        .db
+        .skill_holding_slug(&s.slug, &visible, owner.as_deref())
+        .map_err(internal)?
+    {
         if principal.is_box() && can_edit(scope.as_deref(), &principal, &existing) {
             let merged = Skill {
                 id: existing.id.clone(),
@@ -344,10 +392,7 @@ pub async fn update(
     Json(b): Json<SkillBody>,
 ) -> ApiResult {
     let scope = box_project(&state, &principal, &headers);
-    let existing = state
-        .db
-        .skill(&id)
-        .map_err(internal)?
+    let existing = resolve(&state, &principal, &headers, &id)?
         .ok_or((StatusCode::NOT_FOUND, "no such skill".to_owned()))?;
     if !can_edit(scope.as_deref(), &principal, &existing) {
         return Err((StatusCode::FORBIDDEN, "not this box's skill".into()));
@@ -363,7 +408,17 @@ pub async fn update(
         return Err((StatusCode::BAD_REQUEST, "name required".into()));
     }
     if next.slug != existing.slug {
-        if let Some(other) = state.db.skill(&next.slug).map_err(internal)? {
+        // A rename asks the same question a create does, and used to leak the same answer.
+        let owner = existing
+            .origin_project_id
+            .as_deref()
+            .and_then(|p| state.user_of(p));
+        let visible = scope_of(&state, &principal, &headers);
+        if let Some(other) = state
+            .db
+            .skill_holding_slug(&next.slug, &visible, owner.as_deref())
+            .map_err(internal)?
+        {
             if other.id != existing.id {
                 return Err((
                     StatusCode::CONFLICT,
@@ -391,10 +446,8 @@ pub async fn delete(
     if principal.is_box() {
         return Err((StatusCode::FORBIDDEN, "boxes cannot delete skills".into()));
     }
-    let existing = state
-        .db
-        .skill(&id)
-        .map_err(internal)?
+    // Boxes are refused above, so no `X-Arbos-Project` header is in play here.
+    let existing = resolve(&state, &principal, &HeaderMap::new(), &id)?
         .ok_or((StatusCode::NOT_FOUND, "no such skill".to_owned()))?;
     if !owns_skill(&state, &principal, &existing) {
         // Another user's skill looks like no skill at all: no enumeration oracle either.
@@ -492,7 +545,7 @@ mod tests {
         let (_bob, bob_dev) = person(&state, 2);
         let project = project_of(&state, &alice, "Comms");
         let owned = skill_of(&state, Some(&project), "deploy-the-relay");
-        let row = state.db.skill(&owned).unwrap().unwrap();
+        let row = state.db.skill_by_id(&owned).unwrap().unwrap();
 
         assert!(
             can_edit(None, &bob_dev, &row),
@@ -502,13 +555,13 @@ mod tests {
         let foreign = delete(State(state.clone()), bob_dev, Path(owned.clone())).await;
         assert_eq!(status(foreign), StatusCode::NOT_FOUND);
         assert!(
-            state.db.skill(&owned).unwrap().is_some(),
+            state.db.skill_by_id(&owned).unwrap().is_some(),
             "another user's skill survives"
         );
 
         let own = delete(State(state.clone()), alice_dev, Path(owned.clone())).await;
         assert_eq!(status(own), StatusCode::NO_CONTENT);
-        assert!(state.db.skill(&owned).unwrap().is_none());
+        assert!(state.db.skill_by_id(&owned).unwrap().is_none());
     }
 
     /// #1953, read and write by id: `can_see` and `can_edit` both return `true` for every
@@ -526,7 +579,7 @@ mod tests {
         let (_bob, bob_dev) = person(&state, 2);
         let project = project_of(&state, &alice, "Comms");
         let owned = skill_of(&state, Some(&project), "deploy-the-relay");
-        let row = state.db.skill(&owned).unwrap().unwrap();
+        let row = state.db.skill_by_id(&owned).unwrap().unwrap();
 
         assert!(
             can_see(None, &bob_dev, &row) && can_edit(None, &bob_dev, &row),
@@ -555,7 +608,7 @@ mod tests {
         .await;
         assert_eq!(status(edited), StatusCode::NOT_FOUND);
         assert_eq!(
-            state.db.skill(&owned).unwrap().unwrap().name,
+            state.db.skill_by_id(&owned).unwrap().unwrap().name,
             "deploy-the-relay",
             "another user's skill is unchanged"
         );
@@ -586,7 +639,7 @@ mod tests {
         .await;
         assert_eq!(status(own), StatusCode::OK);
         assert_eq!(
-            state.db.skill(&owned).unwrap().unwrap().name,
+            state.db.skill_by_id(&owned).unwrap().unwrap().name,
             "Deploy the relay"
         );
     }
@@ -624,7 +677,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-arbos-project", bob_project.parse().unwrap());
 
-        let row = state.db.skill(&shared.id).unwrap().unwrap();
+        let row = state.db.skill_by_id(&shared.id).unwrap().unwrap();
         assert!(
             !owns_skill(&state, &bobs_box, &row),
             "Bob's box does not own it — which is exactly why the check must not apply here"
@@ -675,7 +728,7 @@ mod tests {
 
         let r = delete(State(state.clone()), bob_dev, Path(orphan.clone())).await;
         assert_eq!(status(r), StatusCode::NO_CONTENT);
-        assert!(state.db.skill(&orphan).unwrap().is_none());
+        assert!(state.db.skill_by_id(&orphan).unwrap().is_none());
     }
 
     /// The delete check reads `origin_project_id`, and `create` takes that field straight from
@@ -895,5 +948,393 @@ mod tests {
             !text.contains("alices-notes"),
             "the index names only the skills this device can open"
         );
+    }
+
+    // ---- the slug name space ---------------------------------------------------------------
+
+    /// Ask the relay to create a skill under `project`, naming `slug`.
+    async fn create_slug(
+        state: &AppState,
+        principal: Principal,
+        headers: HeaderMap,
+        project: Option<&str>,
+        slug: &str,
+    ) -> ApiResult {
+        create(
+            State(state.clone()),
+            principal,
+            headers,
+            Json(SkillBody {
+                name: Some(slug.to_owned()),
+                slug: Some(slug.to_owned()),
+                origin_project_id: project.map(str::to_owned),
+                ..SkillBody::default()
+            }),
+        )
+        .await
+    }
+
+    /// A box of `user`, working in `project`.
+    fn box_in(user: &str, project: &str) -> (Principal, HeaderMap) {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-arbos-project", project.parse().unwrap());
+        (
+            Principal::Box {
+                user_id: user.to_owned(),
+            },
+            headers,
+        )
+    }
+
+    /// The first effect of a relay-wide name space: an existence oracle across tenants.
+    /// `POST /skills` looked a slug up over every row, so a 409 naming it told the caller that
+    /// somebody held that name. Ask for enough names and you have read the shape of a
+    /// stranger's library without ever being allowed to open one skill in it.
+    ///
+    /// Fails before the fix with 409 CONFLICT, whose body names the slug Alice holds.
+    #[tokio::test]
+    async fn a_create_does_not_say_whether_a_stranger_holds_the_slug() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let alices = project_of(&state, &alice, "Alice work");
+        let bobs = project_of(&state, &bob, "Bob work");
+        skill_with(&state, Some(&alices), "deploy-the-relay", false, ALICES_BODY);
+
+        let r = create_slug(
+            &state,
+            bob_dev.clone(),
+            HeaderMap::new(),
+            Some(&bobs),
+            "deploy-the-relay",
+        )
+        .await;
+        let (status_code, text) = match r {
+            Ok(resp) => (resp.status(), String::new()),
+            Err((s, body)) => (s, body),
+        };
+        assert_eq!(
+            status_code,
+            StatusCode::CREATED,
+            "a name a stranger holds has to answer exactly like a free one; got {text:?}"
+        );
+        assert!(
+            !text.contains("deploy-the-relay"),
+            "and no refusal may name the slug back"
+        );
+    }
+
+    /// The second effect: one tenant could take a name away from everybody. Alice holding
+    /// `deploy-the-relay` left Bob unable to call his own how-to that, with nothing he could
+    /// see to explain why — his own library looked full of names that were not there.
+    ///
+    /// Fails before the fix: Bob's skill is never created, so his listing stays empty.
+    #[tokio::test]
+    async fn a_slug_one_tenant_holds_is_free_for_another() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let alices = project_of(&state, &alice, "Alice work");
+        let bobs = project_of(&state, &bob, "Bob work");
+        let hers = skill_with(&state, Some(&alices), "deploy-the-relay", false, ALICES_BODY);
+
+        create_slug(
+            &state,
+            bob_dev.clone(),
+            HeaderMap::new(),
+            Some(&bobs),
+            "deploy-the-relay",
+        )
+        .await
+        .expect("Bob takes the name in his own library");
+
+        assert_eq!(
+            listed(&state, bob_dev.clone(), HeaderMap::new()).await,
+            vec!["deploy-the-relay".to_owned()],
+            "Bob has the name he asked for"
+        );
+        assert_eq!(
+            listed(&state, alice_dev, HeaderMap::new()).await,
+            vec!["deploy-the-relay".to_owned()],
+            "and Alice still has hers"
+        );
+        let row = state.db.skill_by_id(&hers).unwrap().unwrap();
+        assert_eq!(row.body, ALICES_BODY, "which Bob's create did not touch");
+
+        let text = body_text(
+            list(
+                State(state.clone()),
+                bob_dev,
+                HeaderMap::new(),
+                Query(std::collections::HashMap::new()),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            !text.contains(ALICES_BODY),
+            "and sharing a slug shares nothing else"
+        );
+    }
+
+    /// The agent's `skills_save` is this same create with a box token, so the denial reached
+    /// the agents too: a box could not write down a how-to under the obvious name because
+    /// another user's box had written one down first, and `arbos-agentd` surfaced it as
+    /// "relay refused: HTTP 409".
+    ///
+    /// Fails before the fix with 409 CONFLICT.
+    #[tokio::test]
+    async fn a_box_saves_a_how_to_whose_slug_a_stranger_holds() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _alice_dev) = person(&state, 1);
+        let (bob, _bob_dev) = person(&state, 2);
+        let alices = project_of(&state, &alice, "Alice work");
+        let bobs = project_of(&state, &bob, "Bob work");
+        skill_with(&state, Some(&alices), "weekly-report", false, ALICES_BODY);
+
+        let (bobs_box, headers) = box_in(&bob, &bobs);
+        let r = create_slug(&state, bobs_box, headers, None, "weekly-report").await;
+        assert_eq!(status(r), StatusCode::CREATED);
+        assert_eq!(
+            state
+                .db
+                .list_skills(&SkillScope::Project(bobs))
+                .unwrap()
+                .iter()
+                .map(|s| s.slug.clone())
+                .collect::<Vec<_>>(),
+            vec!["weekly-report".to_owned()],
+            "the box's own Project holds it"
+        );
+    }
+
+    /// A rename asks the same question a create does. `PUT /skills/{id}` checked the new slug
+    /// over every row too, so the oracle answered on that route as well.
+    ///
+    /// Fails before the fix with 409 CONFLICT.
+    #[tokio::test]
+    async fn a_rename_does_not_say_whether_a_stranger_holds_the_slug() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let alices = project_of(&state, &alice, "Alice work");
+        let bobs = project_of(&state, &bob, "Bob work");
+        skill_of(&state, Some(&alices), "deploy-the-relay");
+        let his = skill_of(&state, Some(&bobs), "bobs-notes");
+
+        let r = update(
+            State(state.clone()),
+            bob_dev,
+            HeaderMap::new(),
+            Path(his.clone()),
+            Json(SkillBody {
+                slug: Some("deploy-the-relay".into()),
+                ..SkillBody::default()
+            }),
+        )
+        .await;
+        assert_eq!(status(r), StatusCode::OK);
+        assert_eq!(
+            state.db.skill_by_id(&his).unwrap().unwrap().slug,
+            "deploy-the-relay"
+        );
+    }
+
+    /// Nothing above widens the by-id routes: a device asking for another user's skill gets
+    /// 404 whether it names the id or the slug, which is what they answered before. The slug
+    /// arm is the one worth pinning — it is the arm that now resolves within a scope, and a
+    /// scope lookup that fell back to the relay would turn these four 404s into answers.
+    #[tokio::test]
+    async fn the_by_id_routes_still_answer_404_for_another_users_skill() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _alice_dev) = person(&state, 1);
+        let (_bob, bob_dev) = person(&state, 2);
+        let alices = project_of(&state, &alice, "Alice work");
+        let hers = skill_with(&state, Some(&alices), "deploy-the-relay", false, ALICES_BODY);
+
+        for name in [hers.as_str(), "deploy-the-relay"] {
+            let read = get(
+                State(state.clone()),
+                bob_dev.clone(),
+                HeaderMap::new(),
+                Path(name.to_owned()),
+            )
+            .await;
+            assert_eq!(status(read), StatusCode::NOT_FOUND, "GET by {name}");
+
+            let edited = update(
+                State(state.clone()),
+                bob_dev.clone(),
+                HeaderMap::new(),
+                Path(name.to_owned()),
+                Json(SkillBody {
+                    name: Some("renamed by a stranger".into()),
+                    ..SkillBody::default()
+                }),
+            )
+            .await;
+            assert_eq!(status(edited), StatusCode::NOT_FOUND, "PUT by {name}");
+
+            let dropped = delete(State(state.clone()), bob_dev.clone(), Path(name.to_owned())).await;
+            assert_eq!(status(dropped), StatusCode::NOT_FOUND, "DELETE by {name}");
+        }
+        let row = state.db.skill_by_id(&hers).unwrap().unwrap();
+        assert_eq!((row.name.as_str(), row.body.as_str()), ("deploy-the-relay", ALICES_BODY));
+    }
+
+    /// `arbosctl skills show|delete <slug>` hands a slug to a by-id route, and a slug now names
+    /// one skill per owner. The caller's own answers; a stranger's never does, even when the
+    /// stranger took the name first.
+    #[tokio::test]
+    async fn a_slug_on_a_by_id_route_resolves_to_the_callers_own_skill() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let alices = project_of(&state, &alice, "Alice work");
+        let bobs = project_of(&state, &bob, "Bob work");
+        skill_with(&state, Some(&alices), "deploy-the-relay", false, ALICES_BODY);
+        create_slug(
+            &state,
+            bob_dev.clone(),
+            HeaderMap::new(),
+            Some(&bobs),
+            "deploy-the-relay",
+        )
+        .await
+        .expect("Bob's own");
+
+        let text = body_text(
+            get(
+                State(state.clone()),
+                bob_dev.clone(),
+                HeaderMap::new(),
+                Path("deploy-the-relay".to_owned()),
+            )
+            .await,
+        )
+        .await;
+        let his: Value = serde_json::from_str(&text).expect("a skill");
+        assert_eq!(
+            his["origin_project_id"].as_str(),
+            Some(bobs.as_str()),
+            "his own, not the row that took the name first"
+        );
+        assert!(!text.contains(ALICES_BODY));
+    }
+
+    /// The compatibility rule the shipped clients rest on: a slug the caller can *already see*
+    /// stays taken. No listing can come to hold one slug twice through a create, so the Mac
+    /// editor's slug-keyed selection (`arbos-mac/src/ui/skills.rs`) and the agent's
+    /// `skills_read(slug)` keep picking the row they always picked.
+    ///
+    /// Each arm is a 409 before the fix and a 409 after it; the point is that the narrowing
+    /// above did not reach them. The ownerless arm is the sharpest: those rows sit in every
+    /// device's listing and have no owner to be unique within, so they stay reserved for
+    /// everybody until #2545 gives them one.
+    #[tokio::test]
+    async fn a_slug_the_caller_can_already_see_is_still_taken() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let alices = project_of(&state, &alice, "Alice work");
+        let bobs = project_of(&state, &bob, "Bob work");
+        let bobs_other = project_of(&state, &bob, "Bob side");
+        skill_of(&state, Some(&bobs_other), "his-own-elsewhere");
+        skill_of(&state, None, "nobodys-notes");
+        skill_of(&state, Some(&alices), "hers-he-is-invited-to");
+        state
+            .db
+            .add_project_member(&alices, &bob, &alice)
+            .expect("invite");
+
+        for slug in [
+            "his-own-elsewhere",
+            "nobodys-notes",
+            "hers-he-is-invited-to",
+        ] {
+            let r = create_slug(
+                &state,
+                bob_dev.clone(),
+                HeaderMap::new(),
+                Some(&bobs),
+                slug,
+            )
+            .await;
+            assert_eq!(status(r), StatusCode::CONFLICT, "{slug} is already in view");
+        }
+    }
+
+    /// The other half of that rule, from the owner's side: a guest filing into the host's
+    /// Project cannot take a name the host already holds somewhere the guest cannot see.
+    /// Uniqueness is per owner, not per caller, or one person's own library could come to
+    /// hold one slug twice by someone else's hand.
+    #[tokio::test]
+    async fn a_guest_cannot_take_a_slug_the_hosts_other_project_holds() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let shared_with_bob = project_of(&state, &alice, "Alice shared");
+        let alices_private = project_of(&state, &alice, "Alice private");
+        skill_of(&state, Some(&alices_private), "deploy-the-relay");
+        state
+            .db
+            .add_project_member(&shared_with_bob, &bob, &alice)
+            .expect("invite");
+
+        assert!(
+            !listed(&state, bob_dev.clone(), HeaderMap::new())
+                .await
+                .contains(&"deploy-the-relay".to_owned()),
+            "the guest cannot see the skill he is about to collide with"
+        );
+        let r = create_slug(
+            &state,
+            bob_dev,
+            HeaderMap::new(),
+            Some(&shared_with_bob),
+            "deploy-the-relay",
+        )
+        .await;
+        assert_eq!(status(r), StatusCode::CONFLICT);
+    }
+
+    /// `skills_save` is an upsert by slug, and the fear with any scoping change is that it
+    /// starts landing on a different row. It does not: the row a box may write is still the
+    /// one in its own Project, chosen by `can_edit`, and a stranger holding the same slug —
+    /// which only became possible above — changes neither the row nor its version.
+    ///
+    /// This one cannot run before the fix: its fixture needs two rows to share a slug, which
+    /// the old relay-wide `UNIQUE` refused at the database.
+    #[tokio::test]
+    async fn a_boxs_upsert_still_lands_on_its_own_projects_skill() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _alice_dev) = person(&state, 1);
+        let (bob, _bob_dev) = person(&state, 2);
+        let alices = project_of(&state, &alice, "Alice work");
+        let bobs = project_of(&state, &bob, "Bob work");
+        let hers = skill_with(&state, Some(&alices), "weekly-report", false, ALICES_BODY);
+        let his = skill_with(&state, Some(&bobs), "weekly-report", false, "his own steps");
+
+        let (bobs_box, headers) = box_in(&bob, &bobs);
+        let r = create(
+            State(state.clone()),
+            bobs_box,
+            headers,
+            Json(SkillBody {
+                name: Some("Weekly report".into()),
+                slug: Some("weekly-report".into()),
+                body: Some("the steps, corrected".into()),
+                ..SkillBody::default()
+            }),
+        )
+        .await;
+        assert_eq!(status(r), StatusCode::OK, "an upsert, not a create");
+
+        let updated = state.db.skill_by_id(&his).unwrap().unwrap();
+        assert_eq!(updated.body, "the steps, corrected");
+        assert_eq!(updated.version, 2);
+        let untouched = state.db.skill_by_id(&hers).unwrap().unwrap();
+        assert_eq!(untouched.body, ALICES_BODY);
+        assert_eq!(untouched.version, 1);
     }
 }

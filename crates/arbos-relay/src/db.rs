@@ -146,7 +146,7 @@ CREATE TABLE IF NOT EXISTS routine_runs (
 );
 CREATE INDEX IF NOT EXISTS routine_runs_routine ON routine_runs(routine_id, started_at);
 CREATE TABLE IF NOT EXISTS skills (
-  id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+  id TEXT PRIMARY KEY, slug TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
   tags TEXT NOT NULL DEFAULT '[]', when_to_use TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '',
   origin_project_id TEXT, shared INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 1,
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
@@ -683,7 +683,70 @@ impl Db {
              CREATE INDEX IF NOT EXISTS goals_moved ON goals(last_moved_at);",
         )?;
         c.execute_batch(crate::releases::RELEASES_SCHEMA)?;
+        // Rebuilds `skills` once; keep it below anything that adds a column to that table.
+        Self::migrate_skill_slugs_per_owner(&c)?;
         Ok(Self(Arc::new(Mutex::new(c))))
+    }
+
+    /// Skill slugs used to be unique across the whole relay (`slug TEXT NOT NULL UNIQUE`), which
+    /// made the name space one shared pool: `POST /skills` answered 409 naming the slug whenever
+    /// *anyone* held it, so a caller could ask whether a stranger held a name, and one person
+    /// taking a name took it from everybody. Rebuild the table without that constraint and keep
+    /// a unique index on `(origin_project_id, slug)` instead, so a Project cannot hold one slug
+    /// twice; uniqueness per owner spans several Projects and is held in `skills::create`.
+    ///
+    /// Runs once: it looks for SQLite's automatic unique index on `slug`, which a column-level
+    /// `UNIQUE` creates and no `DROP INDEX` can remove. `skills_fts` keys on `id` and is not
+    /// touched. Reversible by rebuilding with the `UNIQUE` back, which the index below already
+    /// proves no row violates — as long as no two owners have taken the same slug by then.
+    fn migrate_skill_slugs_per_owner(c: &Connection) -> Result<()> {
+        let has_global_unique: bool = {
+            let mut st = c.prepare("PRAGMA index_list(skills)")?;
+            let names: Vec<(String, i64)> = st
+                .query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, i64>(2)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            let mut found = false;
+            for (name, unique) in names {
+                if unique == 0 || !name.starts_with("sqlite_autoindex_skills") {
+                    continue;
+                }
+                let mut cols = c.prepare(&format!("PRAGMA index_info({name})"))?;
+                let col_names: Vec<String> = cols
+                    .query_map([], |r| r.get::<_, String>(2))?
+                    .collect::<rusqlite::Result<_>>()?;
+                if col_names == ["slug"] {
+                    found = true;
+                }
+            }
+            found
+        };
+        if has_global_unique {
+            tracing::info!("migrating skills: slugs scoped to their owner instead of relay-wide");
+            c.execute_batch(
+                "BEGIN;
+                 CREATE TABLE skills_new (
+                   id TEXT PRIMARY KEY, slug TEXT NOT NULL, name TEXT NOT NULL,
+                   description TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '[]',
+                   when_to_use TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '',
+                   origin_project_id TEXT, shared INTEGER NOT NULL DEFAULT 0,
+                   version INTEGER NOT NULL DEFAULT 1,
+                   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+                 );
+                 INSERT INTO skills_new(id, slug, name, description, tags, when_to_use, body,
+                                        origin_project_id, shared, version, created_at, updated_at)
+                   SELECT id, slug, name, description, tags, when_to_use, body,
+                          origin_project_id, shared, version, created_at, updated_at FROM skills;
+                 DROP TABLE skills;
+                 ALTER TABLE skills_new RENAME TO skills;
+                 COMMIT;",
+            )?;
+        }
+        c.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS skills_origin_slug ON skills(origin_project_id, slug)",
+            [],
+        )?;
+        c.execute("CREATE INDEX IF NOT EXISTS skills_slug ON skills(slug)", [])?;
+        Ok(())
     }
 
     /// Vault items used to belong to the whole relay (`name TEXT NOT NULL UNIQUE`, no owner), so
@@ -3286,15 +3349,65 @@ impl Db {
         })
     }
 
-    /// One skill by id or slug.
-    pub fn skill(&self, id_or_slug: &str) -> Result<Option<Skill>> {
+    /// One skill by id. A slug no longer names one row on the relay, so it is not an id any
+    /// more: [`Self::skills_by_slug`] answers that question against a caller's own scope.
+    pub fn skill_by_id(&self, id: &str) -> Result<Option<Skill>> {
+        self.with(|c| {
+            c.query_row(
+                &format!("SELECT {} FROM skills WHERE id = ?1", Self::SKILL_COLS),
+                params![id],
+                Self::row_to_skill,
+            )
+            .optional()
+        })
+    }
+
+    /// The skills with this slug that `scope` can see, oldest first. Several owners may hold
+    /// one slug now, so a route handed a slug picks from what the caller can already read
+    /// rather than from the relay.
+    pub fn skills_by_slug(&self, slug: &str, scope: &SkillScope) -> Result<Vec<Skill>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {} FROM skills s WHERE s.slug = ?2 AND ({}) ORDER BY s.created_at",
+                Self::skill_cols_aliased(),
+                scope.predicate()
+            ))?;
+            let rows = st.query_map(params![scope.key(), slug], Self::row_to_skill)?;
+            rows.collect()
+        })
+    }
+
+    /// The skill that stops `slug` being free for a caller in `scope` filing under `owner`
+    /// (the `user_id` behind the new skill's origin Project; `None` for the ownerless rows).
+    ///
+    /// Three things take a slug, and a stranger's skill is not one of them:
+    /// * a skill the caller can already see, so a refusal never names a row they could not
+    ///   list anyway, and no listing of theirs can come to hold one slug twice;
+    /// * an ownerless skill, which has no owner to be unique within and sits in every
+    ///   device's listing, so it stays reserved relay-wide until #2545 gives it an owner;
+    /// * any other skill of the same owner, which keeps one person's library unambiguous
+    ///   even when the caller writing into it is a guest of that Project (D72).
+    pub fn skill_holding_slug(
+        &self,
+        slug: &str,
+        scope: &SkillScope,
+        owner: Option<&str>,
+    ) -> Result<Option<Skill>> {
         self.with(|c| {
             c.query_row(
                 &format!(
-                    "SELECT {} FROM skills WHERE id = ?1 OR slug = ?1",
-                    Self::SKILL_COLS
+                    "SELECT {} FROM skills s
+                      WHERE s.slug = ?2
+                        AND (({}) OR s.origin_project_id IS NULL
+                             OR (?3 IS NOT NULL AND EXISTS (
+                                   SELECT 1 FROM projects p
+                                    WHERE p.id = s.origin_project_id
+                                      AND p.deleted_at IS NULL AND p.user_id = ?3)))
+                      ORDER BY s.created_at LIMIT 1",
+                    Self::skill_cols_aliased(),
+                    scope.predicate()
                 ),
-                params![id_or_slug],
+                params![scope.key(), slug, owner],
                 Self::row_to_skill,
             )
             .optional()
