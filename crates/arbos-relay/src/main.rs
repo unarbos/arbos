@@ -29,6 +29,8 @@ mod db_push;
 mod db_secrets;
 mod db_voice;
 mod debug_api;
+#[cfg(test)]
+mod deleted_project_id_tests;
 mod diag;
 mod export;
 mod features;

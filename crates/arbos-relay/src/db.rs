@@ -971,14 +971,27 @@ impl Db {
     const PROJECT_COLS: &'static str =
         "id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state, avatar, avatar_color, description, primary_chat_id, avatar_color_index, avatar_leaf, avatar_leaf_color, image_key, avatar_version";
 
-    /// By id, else by name. Names are unique per user only, so a name lookup prefers the id
-    /// match and otherwise returns the most recently active project with that name; callers that
-    /// know the user should use `project_of_user_by_name`.
+    /// By id, else by name — but never both at once. A row whose `id` is this string settles the
+    /// lookup alone, so the name branch can only match a string that is no project's id. The
+    /// `EXISTS` probe does not look at `deleted_at`, which is the point: a soft-deleted project
+    /// keeps its id reserved for the seven days its chats, rooms and blobs are still on the disk
+    /// under that id, and `purge_deleted_projects` frees the id only once it has taken them.
+    ///
+    /// Without that reservation the two branches traded places at the delete. The id branch
+    /// stopped matching while the id was still what everything was filed under, so whoever named
+    /// a live project after that id inherited the answer, and with it the deleted project's
+    /// blobs — to read and to overwrite (reported 2026-11-02, HIGH).
+    ///
+    /// Names are unique per user only, so a name lookup returns the most recently active project
+    /// with that name; callers that know the user should use `project_of_user_by_name`.
     pub fn project(&self, id_or_name: &str) -> Result<Option<Project>> {
         self.with(|c| {
             c.query_row(
                 &format!(
-                    "SELECT {} FROM projects WHERE (id = ?1 OR name = ?1) AND deleted_at IS NULL ORDER BY (id = ?1) DESC, last_active_at DESC LIMIT 1",
+                    "SELECT {} FROM projects \
+                     WHERE (id = ?1 OR (name = ?1 AND NOT EXISTS (SELECT 1 FROM projects WHERE id = ?1))) \
+                       AND deleted_at IS NULL \
+                     ORDER BY (id = ?1) DESC, last_active_at DESC LIMIT 1",
                     Self::PROJECT_COLS
                 ),
                 params![id_or_name],
