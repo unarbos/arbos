@@ -3077,6 +3077,32 @@ class Loop:
             log(f"ALERT main's iOS unit-test target does not compile at {m.group(1)} (seen by gate {active['id']}); branches are not blamed — "
                 f"route the fix to the test's owner: " + " | ".join(errors[:3]))
 
+    # ios-gate.sh prints this when the gate Mac's simulator never launched the app: no test case ran, so the
+    # run is neither a pass nor the branch's failure. It arrives as the `infra` verdict, which already keeps
+    # the half pending and re-runs it; this only makes the reason visible on the item.
+    IOS_NO_VERDICT_MARK = "== tests: NO VERDICT"
+
+    def note_ios_no_verdict(self, active: dict, body: str) -> None:
+        """A launch timeout on the gate Mac: tell each member once per head that nothing was tested. No retry
+        is counted, no follow-up goes to the agent and nothing is merged — a run that tested nothing is not a
+        verdict in either direction, so the only thing owed is another run."""
+        lines = [l for l in body.splitlines() if l.startswith(self.IOS_NO_VERDICT_MARK)]
+        if not lines:
+            return
+        for fid, head in (active.get("members") or {}).items():
+            st = self.store.state(fid)
+            if not st.get("issue") or st.get("ios_no_verdict_noted") == head:
+                continue
+            st["ios_no_verdict_noted"] = head
+            self.store.save_state(fid, st)
+            self.store.event(fid, "ios_no_verdict", head=head, run=active["id"])
+            log(f"[{fid}] iPhone gate: no verdict at {head[:8]} — the gate Mac did not launch the app; re-running, not blaming")
+            with contextlib.suppress(HttpError):
+                self.gh.comment(st["issue"], f"iPhone gate: **no verdict** for `{st.get('branch')}`@{head[:8]}. The gate Mac's simulator "
+                                "did not launch the app, so not one test case ran. This says nothing about your change: it is not a pass "
+                                "and not a failure, and nothing is merged on it. The loop runs the half again by itself — no new commit "
+                                "is needed, and none would help.\n\n```\n" + "\n".join(lines[:6]) + "\n```")
+
     def gate_priority(self, active: dict) -> str:
         """A batch with a pinned member (hotfix / operator gate-next) tells the Mac's heavy-job cap it has
         priority: it may take the extra slot instead of queueing behind a pool gate and the TF lane."""
@@ -3228,6 +3254,7 @@ class Loop:
                     if verdict == "running":
                         pass
                     elif verdict == "infra":
+                        self.note_ios_no_verdict(active, body)
                         log(f"Gate {active['id']}: iOS half infrastructure error, retrying next tick: {body[-300:]}")
                         active["ios_started"] = None
                         self.store.save_cursor(cur)
