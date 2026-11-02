@@ -1691,8 +1691,39 @@ pub async fn forget_user(state: &AppState, user_id: &str) {
     }
 }
 
+/// Event content keys the relay writes about itself and reads back as fact: who an event came
+/// from (`sender`), the rendered parts of an agent turn (`parts`), and the marker on a message
+/// the room's creator carries for an author who has left (`on_behalf`). A client has no reason
+/// to set any of them, and every reader that trusts one — `matrix::reads::sender_of_event`, the
+/// shared row mapper in `arbos-matrix` — becomes a forgery if a client can.
+///
+/// `life.arbos.id` is deliberately absent: the apps mint that ULID themselves so the echo of a
+/// message matches the row they already drew (`arbos_matrix::client::send_text`).
+const RELAY_WRITTEN_KEYS: [&str; 3] = [
+    "life.arbos.sender",
+    "life.arbos.parts",
+    "life.arbos.on_behalf",
+];
+
+/// The first relay-written key anywhere in a proxied body, at any depth: `/send/{type}/{txn}`
+/// puts content at the root, `createRoom` nests it under `initial_state`. Recursion is bounded
+/// by `serde_json`'s own nesting limit, which rejects the body long before this walks it.
+fn relay_written_key(v: &Value) -> Option<&'static str> {
+    match v {
+        Value::Object(map) => RELAY_WRITTEN_KEYS
+            .into_iter()
+            .find(|k| map.contains_key(*k))
+            .or_else(|| map.values().find_map(relay_written_key)),
+        Value::Array(items) => items.iter().find_map(relay_written_key),
+        _ => None,
+    }
+}
+
 /// `/_matrix/client/{*rest}` → Synapse, body and headers streamed both ways. The Matrix access
-/// token in the request authenticates at the homeserver; the relay adds nothing.
+/// token in the request authenticates at the homeserver; the relay adds nothing — but it does
+/// refuse a body that writes one of its own identity keys (`RELAY_WRITTEN_KEYS`), because this
+/// proxy is the only way an app reaches the homeserver (`me_matrix` hands out this relay's
+/// public URL as the homeserver, not Synapse's).
 pub async fn proxy(State(state): State<AppState>, req: Request) -> Response {
     if !state.matrix.cfg.mode.writes() {
         return api_error(StatusCode::NOT_FOUND, "not_found", "no homeserver");
@@ -1717,6 +1748,17 @@ pub async fn proxy(State(state): State<AppState>, req: Request) -> Response {
         Ok(b) => b,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, "bad_request", e.to_string()),
     };
+    if let Some(key) = serde_json::from_slice::<Value>(&body)
+        .ok()
+        .as_ref()
+        .and_then(relay_written_key)
+    {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            format!("{key} is written by the relay, not by a client"),
+        );
+    }
     let upstream = state
         .http
         .request(method, url)
@@ -1743,6 +1785,45 @@ pub async fn proxy(State(state): State<AppState>, req: Request) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The proxy is the apps' only route to the homeserver, so it is where a client-written
+    /// identity key can be stopped. The key that must still get through is `life.arbos.id`:
+    /// every channel message an app sends carries one.
+    #[test]
+    fn a_client_may_mint_a_message_id_but_not_an_identity() {
+        let app_send = json!({ "msgtype": "m.text", "body": "hi", "life.arbos.id": "01ULID" });
+        assert_eq!(relay_written_key(&app_send), None);
+
+        for forged in [
+            json!({ "msgtype": "m.text", "body": "hi", "life.arbos.sender": "agent:01PROJECT" }),
+            json!({ "msgtype": "m.text", "body": "hi", "life.arbos.on_behalf": true }),
+            json!({ "msgtype": "m.text", "life.arbos.parts": [{ "kind": "text" }] }),
+        ] {
+            assert!(
+                relay_written_key(&forged).is_some(),
+                "a client must not write {forged}"
+            );
+        }
+    }
+
+    /// `createRoom` carries event content nested two levels down, and a `/send` body puts it at
+    /// the root; one walk covers both rather than a list of paths to keep in step with Synapse.
+    #[test]
+    fn a_nested_identity_key_is_found_too() {
+        let create = json!({
+            "name": "channel",
+            "initial_state": [
+                { "type": "m.room.topic", "content": { "topic": "hi" } },
+                { "type": "m.room.message", "content": { "life.arbos.sender": "system" } },
+            ],
+        });
+        assert_eq!(
+            relay_written_key(&create),
+            Some("life.arbos.sender"),
+            "nesting must not hide the key"
+        );
+        assert_eq!(relay_written_key(&json!({ "a": [[{ "b": 1 }]] })), None);
+    }
 
     #[test]
     fn channel_slugs() {

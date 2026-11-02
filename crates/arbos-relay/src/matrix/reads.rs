@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use arbos_core::api::{ChannelMessagePayloadDto, PushEventDto};
 
 use super::client::{Client, MxResult};
+use super::worker::room_spec;
 use super::Mode;
 use crate::db_push::UnreadChat;
 use crate::notify::{ChatRef, Sender};
@@ -150,6 +151,13 @@ pub async fn on_notify(state: &AppState, body: &Value) -> Vec<String> {
     let server = channel
         .as_ref()
         .and_then(|c| state.db.server(&c.server_id).ok().flatten());
+    // The room's creator, who is the mxid `worker.rs` posts as when the author of a mirrored
+    // message has left the room. A channel has no such carry: every message there is sent by
+    // the member who wrote it.
+    let carrier = chat
+        .as_ref()
+        .and_then(|c| room_spec(state, &c.chat_id, c.project_id.as_deref()))
+        .map(|s| s.creator);
     for d in n["devices"].as_array().into_iter().flatten() {
         if d["app_id"].as_str() != Some(PUSHER_APP_ID) {
             continue;
@@ -174,7 +182,7 @@ pub async fn on_notify(state: &AppState, body: &Value) -> Vec<String> {
                     continue;
                 };
                 let content = &ev["content"];
-                let Some(sender) = sender_of_event(state, &ev) else {
+                let Some(sender) = sender_of_event(state, &ev, carrier.as_deref()) else {
                     continue;
                 };
                 if sender.user_id.as_deref() == Some(user_id.as_str()) {
@@ -208,7 +216,7 @@ pub async fn on_notify(state: &AppState, body: &Value) -> Vec<String> {
                 if ev["type"].as_str() != Some("m.room.message") {
                     continue;
                 }
-                let Some(sender) = sender_of_event(state, &ev) else {
+                let Some(sender) = sender_of_event(state, &ev, None) else {
                     continue;
                 };
                 if sender.user_id.as_deref() == Some(user_id.as_str()) {
@@ -247,21 +255,39 @@ pub async fn on_notify(state: &AppState, body: &Value) -> Vec<String> {
 
 /// The relay `Sender` behind a Matrix event, taken from the homeserver-attested `sender`.
 ///
-/// This deliberately ignores `content["life.arbos.sender"]`. The relay writes that key for its
-/// own benefit, but any room member can write it too, and `on_notify` runs from Synapse's
-/// unauthenticated pusher callback — so the attested `sender` is the only identity anything on
-/// this path can trust. Nothing is lost by dropping the content key: `worker.rs` posts as
-/// `member_mxid(sender)` and `member_of_mxid` is its exact inverse, so for every event with a
-/// mappable sender the two agree.
-fn sender_of_event(state: &AppState, ev: &Value) -> Option<Sender> {
+/// `content["life.arbos.sender"]` is not an identity. The relay writes that key for its own
+/// benefit, but any room member can write it on an event of their own, and `on_notify` runs
+/// from Synapse's unauthenticated pusher callback — so the attested `sender` is the only
+/// identity anything on this path can trust. Almost nothing is lost by ignoring it:
+/// `worker.rs` posts as `member_mxid(sender)` and `member_of_mxid` is its exact inverse, so for
+/// every event with a mappable sender the two agree.
+///
+/// The exception is `carrier`, the mxid the relay posts as when it speaks for someone else —
+/// the room's creator, who re-sends the message of an author that has left the room. That is
+/// the one event whose content identity is the relay's own writing, and it is admitted only
+/// from that mxid, so a member still cannot name anyone but themselves.
+fn sender_of_event(state: &AppState, ev: &Value, carrier: Option<&str>) -> Option<Sender> {
+    let content = &ev["content"];
     // A notice carries no attributable relay identity. `worker.rs` and `spaces.rs` post one as
     // the room's creator with a `life.arbos.sender` of `system` or another unmappable string,
     // which this function has always resolved to `None`; without this guard a notice would start
     // pushing attributed to whoever created the room.
-    if ev["content"]["msgtype"].as_str() == Some("m.notice") {
+    if content["msgtype"].as_str() == Some("m.notice") {
         return None;
     }
-    let member = state.matrix.cfg.member_of_mxid(ev["sender"].as_str()?)?;
+    let attested = ev["sender"].as_str()?;
+    // `worker.rs` sets `life.arbos.on_behalf` only on the creator's re-send of a departed
+    // author's message, and keeps the author in `life.arbos.sender`. Both keys are writable by
+    // a client, so neither is enough alone: the pair is honoured only when the homeserver
+    // attests that this really is the carrier speaking.
+    let carried = content["life.arbos.on_behalf"].as_bool() == Some(true)
+        && carrier.is_some_and(|c| c == attested);
+    let member = if carried {
+        content["life.arbos.sender"].as_str().map(str::to_owned)
+    } else {
+        None
+    }
+    .or_else(|| state.matrix.cfg.member_of_mxid(attested))?;
     if let Some(u) = member.strip_prefix("user:") {
         return Some(Sender::user(state, u));
     }
@@ -300,13 +326,21 @@ mod tests {
         let project = project_of(&state, &alice, "Research");
         let cfg = &state.matrix.cfg;
 
-        let human = sender_of_event(&state, &event(&cfg.user_mxid(&alice), body_from(None)))
-            .expect("a message from Alice resolves to Alice");
+        let human = sender_of_event(
+            &state,
+            &event(&cfg.user_mxid(&alice), body_from(None)),
+            None,
+        )
+        .expect("a message from Alice resolves to Alice");
         assert_eq!(human.kind, "user");
         assert_eq!(human.user_id.as_deref(), Some(alice.as_str()));
 
-        let agent = sender_of_event(&state, &event(&cfg.agent_mxid(&project), body_from(None)))
-            .expect("a message from the agent resolves to the agent");
+        let agent = sender_of_event(
+            &state,
+            &event(&cfg.agent_mxid(&project), body_from(None)),
+            None,
+        )
+        .expect("a message from the agent resolves to the agent");
         assert_eq!(agent.kind, "agent");
         assert_eq!(agent.id, project);
     }
@@ -327,6 +361,7 @@ mod tests {
                 &state.matrix.cfg.user_mxid(&bob),
                 body_from(Some(&format!("agent:{project}"))),
             ),
+            None,
         )
         .expect("resolves");
         assert_eq!(forged.kind, "user", "a member must not push as an agent");
@@ -350,6 +385,7 @@ mod tests {
                 &state.matrix.cfg.user_mxid(&bob),
                 body_from(Some(&format!("user:{alice}"))),
             ),
+            None,
         )
         .expect("resolves");
         assert_ne!(
@@ -380,6 +416,7 @@ mod tests {
                 &cfg.user_mxid(&alice),
                 body_from(Some(&format!("agent:{bob_project}"))),
             ),
+            None,
         )
         .expect("resolves");
         assert_ne!(
@@ -393,6 +430,7 @@ mod tests {
                 &cfg.user_mxid(&alice),
                 body_from(Some(&format!("user:{carol}"))),
             ),
+            None,
         )
         .expect("resolves");
         assert_ne!(
@@ -414,7 +452,76 @@ mod tests {
             &state.matrix.cfg.user_mxid(&alice),
             json!({ "msgtype": "m.notice", "body": "joined", "life.arbos.sender": "system" }),
         );
-        assert!(sender_of_event(&state, &notice).is_none());
+        assert!(sender_of_event(&state, &notice, None).is_none());
+    }
+
+    /// The regression this fix nearly shipped. When the author of a mirrored message has left
+    /// the room, Synapse refuses their send and `worker.rs` re-posts it as the room's creator
+    /// with `life.arbos.on_behalf` and the real author in content (`worker.rs:774-784`). That
+    /// re-send keeps `m.text`, so the notice guard does not cover it: reading the attested
+    /// sender alone would have named the creator on every message of every departed member,
+    /// and silenced the creator's own device for them.
+    #[test]
+    fn a_message_carried_for_a_departed_author_still_names_the_author() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 7041);
+        let (bob, _) = person(&state, 7042);
+        let creator = state.matrix.cfg.user_mxid(&alice);
+
+        let sender = sender_of_event(
+            &state,
+            &event(
+                &creator,
+                json!({
+                    "msgtype": "m.text",
+                    "body": "hi",
+                    "life.arbos.sender": format!("user:{bob}"),
+                    "life.arbos.on_behalf": true,
+                }),
+            ),
+            Some(&creator),
+        )
+        .expect("resolves");
+        assert_eq!(
+            sender.user_id.as_deref(),
+            Some(bob.as_str()),
+            "the relay's own carry must keep naming the author who wrote the message"
+        );
+    }
+
+    /// The same two keys from anyone but the carrier are worth nothing, which is what keeps the
+    /// exception above from being the forgery back again: a member can write `on_behalf` just as
+    /// easily as `sender`, so the pair is admitted only when the homeserver attests the sender
+    /// is the mxid the relay carries messages as.
+    #[test]
+    fn a_member_cannot_claim_to_be_carrying_someone_elses_message() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 7051);
+        let (bob, _) = person(&state, 7052);
+        let cfg = &state.matrix.cfg;
+        let forgery = json!({
+            "msgtype": "m.text",
+            "body": "hi",
+            "life.arbos.sender": format!("user:{alice}"),
+            "life.arbos.on_behalf": true,
+        });
+
+        let sender = sender_of_event(
+            &state,
+            &event(&cfg.user_mxid(&bob), forgery.clone()),
+            Some(&cfg.user_mxid(&alice)),
+        )
+        .expect("resolves");
+        assert_eq!(
+            sender.user_id.as_deref(),
+            Some(bob.as_str()),
+            "only the carrier itself may name another identity"
+        );
+
+        // And with no carry in the room at all (a channel), the keys are equally inert.
+        let sender =
+            sender_of_event(&state, &event(&cfg.user_mxid(&bob), forgery), None).expect("resolves");
+        assert_eq!(sender.user_id.as_deref(), Some(bob.as_str()));
     }
 
     /// A sender this relay did not mint resolves to nobody, as before.
@@ -422,6 +529,6 @@ mod tests {
     fn a_foreign_mxid_resolves_to_nobody() {
         let state = test_state(AuthMode::Github);
         let foreign = event("@someone:example.org", body_from(None));
-        assert!(sender_of_event(&state, &foreign).is_none());
+        assert!(sender_of_event(&state, &foreign, None).is_none());
     }
 }
