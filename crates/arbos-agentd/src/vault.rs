@@ -35,6 +35,7 @@ use crate::agent::Agent;
 use crate::approval::WaitMode;
 use crate::config::Config;
 use crate::mcp::{err_result, text_result};
+use crate::people::UNKNOWN_ASKER;
 
 const POLL: Duration = Duration::from_secs(2);
 const DEFAULT_WAIT_S: u64 = 180;
@@ -337,26 +338,60 @@ async fn owner_card_chat(agent: &Arc<Agent>, asking_chat: &str) -> String {
     main.id.clone()
 }
 
-/// User id of the human directing the current turn, when known.
+/// Who is directing the current turn, as far as the box could tell.
+enum Director {
+    /// The owner asked, or no human did (a routine, a push, a subagent's own turn). Every
+    /// human turn in a chat leaves an asker behind — `people_turn_context` for a people chat,
+    /// `note_project_chat_author` for one of this Project's own chats, both of them also for a
+    /// row that names nobody — so "no asker" no longer doubles as "nobody could be identified".
+    Owner,
+    /// A named person who is not the owner: the secret's People list decides.
+    Person(crate::people::Asker),
+    /// A human row that names no account ([`UNKNOWN_ASKER`]). Never the owner: in a shared
+    /// project that is how a guest's unlabelled line used to be answered with the owner's keys
+    /// (#1580). Refused here, and the relay refuses the same ask again.
+    Unidentified(crate::people::Asker),
+}
+
+/// Who the current turn is for. See [`Director`] for why `Owner` covers "no asker".
+fn director(agent: &Agent) -> Director {
+    let Some(asker) = agent.people.current_asker() else {
+        return Director::Owner;
+    };
+    let owner = agent.people.project_owner();
+    if asker.role == "owner" || (!owner.is_empty() && asker.user_id == owner) {
+        return Director::Owner;
+    }
+    if asker.user_id == UNKNOWN_ASKER {
+        return Director::Unidentified(asker);
+    }
+    Director::Person(asker)
+}
+
+/// User id of the human directing the current turn, when the row named one; [`UNKNOWN_ASKER`]
+/// when a human asked and the row named nobody. `None` means the owner, which is also what the
+/// relay reads a missing `asked_by` as (`secrets::may_direct`) — so an unidentified asker must
+/// always travel as `UNKNOWN_ASKER` and never as nothing.
 fn asked_by_user_id(agent: &Agent) -> Option<String> {
     agent.people.current_asker().map(|a| a.user_id)
 }
 
-/// The person asking this turn when they are not the owner (a people-chat guest or member).
+/// The person asking this turn when they are not the owner (a people-chat guest or member, or
+/// an author the row did not name).
 fn non_owner_asker(agent: &Agent) -> Option<crate::people::Asker> {
-    let asker = agent.people.current_asker()?;
-    let owner = agent.people.project_owner();
-    if asker.role == "owner" || (!owner.is_empty() && asker.user_id == owner) {
-        return None;
+    match director(agent) {
+        Director::Owner => None,
+        Director::Person(a) | Director::Unidentified(a) => Some(a),
     }
-    Some(asker)
 }
 
-/// May the current asker direct use of this grant? Owner / no asker → yes; else the People list.
+/// May the current asker direct use of this grant? The owner may; a named person only through
+/// this secret's People list; an author the row did not name never may.
 fn asker_may_direct(agent: &Agent, g: &Grant) -> bool {
-    match non_owner_asker(agent) {
-        None => true,
-        Some(asker) => g.director_ids.iter().any(|id| id == &asker.user_id),
+    match director(agent) {
+        Director::Owner => true,
+        Director::Person(asker) => g.director_ids.iter().any(|id| id == &asker.user_id),
+        Director::Unidentified(_) => false,
     }
 }
 
@@ -1835,5 +1870,200 @@ mod tests {
             "unset GITHUB_LOGIN_PASSWORD GITHUB_LOGIN_USERNAME MAILGUN_API_KEY STRIPE_KEY\n"
         ));
         assert!(!text.contains("export"));
+    }
+}
+
+#[cfg(test)]
+mod director_tests {
+    //! #1580 in one of this Project's own chats, which its owner may have shared: who is
+    //! asking decides whether the agent may use one of the owner's secrets, and the only
+    //! thing that says who is asking is a field a client wrote on the row. A row that names
+    //! nobody — what the Mac and arbosctl sent in a project's own chats, shared or not — used
+    //! to leave no asker at all, which `asker_may_direct` read as the owner.
+
+    use arbos_core::doc::UserMessageOpts;
+    use arbos_core::ids::ulid;
+
+    use super::*;
+    use crate::status::tests::test_agent;
+    use crate::sync::SharedHost;
+
+    const OWNER: &str = "gh_owner";
+
+    /// A standing grant for a secret whose People list holds one person: not the guest.
+    fn engy_key(agent: &Agent, people: &[&str]) -> Grant {
+        Grant::from_item(
+            &agent.cfg.project_id,
+            &json!({ "env": "ENGY_API_KEY", "kind": "key", "enabled": true, "inject_env": true,
+                "placeholders": { "value": "arbos-secret://ENGY_API_KEY/value" },
+                "people": people.iter().map(|u| json!({ "user_id": u, "enabled": true })).collect::<Vec<_>>() }),
+        )
+        .expect("grant")
+    }
+
+    /// Append one human row written by `device` and run the turn's author derivation over it,
+    /// as `agent.rs` does before the first tool call. Returns the guest prelude, if any.
+    async fn ask(
+        agent: &Arc<Agent>,
+        chat: &str,
+        host: &SharedHost,
+        device: &str,
+        opts: UserMessageOpts,
+    ) -> Option<String> {
+        let id = ulid();
+        host.lock()
+            .await
+            .doc
+            .append_user_message(&id, "charge the Engy key for this run", device, &opts)
+            .unwrap();
+        agent.shared_project_guest_note(chat, host, &id).await
+    }
+
+    #[tokio::test]
+    async fn an_unlabelled_row_cannot_direct_the_owners_secret() {
+        let (agent, root) = test_agent().await;
+        agent.people.set_project_owner(OWNER);
+        let chat = "01TESTCHATVAULTDIRECTOR001";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let grant = engy_key(&agent, &["gh_listed"]);
+
+        // The row a guest's Mac writes in a project's own chat: a login handle and nothing
+        // that names an account. No forgery, no shared-project flag on the row.
+        let note = ask(
+            &agent,
+            chat,
+            &host,
+            "dev:guest-laptop",
+            UserMessageOpts {
+                sender: None,
+                sender_handle: Some("guestlogin".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(
+            note.is_none(),
+            "no account to name in the prelude: {note:?}"
+        );
+        assert!(
+            !asker_may_direct(&agent, &grant),
+            "an author the row does not name must not direct the owner's secret"
+        );
+        assert_eq!(
+            asked_by_user_id(&agent).as_deref(),
+            Some(UNKNOWN_ASKER),
+            "the relay reads a missing asked_by as the owner, so the ask must carry an asker \
+             it can refuse"
+        );
+        assert!(matches!(director(&agent), Director::Unidentified(a) if a.handle == "guestlogin"));
+
+        // The owner's own turn still works, and the guest's asker does not stand over it.
+        let note = ask(
+            &agent,
+            chat,
+            &host,
+            "dev:mac",
+            UserMessageOpts {
+                sender: Some(format!("user:{OWNER}")),
+                sender_handle: Some("jacob".into()),
+                sender_name: Some("Jacob".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(note.is_none(), "the owner gets no guest prelude: {note:?}");
+        assert!(matches!(director(&agent), Director::Owner));
+        assert!(asker_may_direct(&agent, &grant));
+        assert_eq!(asked_by_user_id(&agent), None);
+
+        // A named person on the secret's People list still directs it.
+        let note = ask(
+            &agent,
+            chat,
+            &host,
+            "dev:sam-laptop",
+            UserMessageOpts {
+                sender: Some("user:gh_listed".into()),
+                sender_handle: Some("sam".into()),
+                sender_name: Some("Sam Rivera".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(
+            note.as_deref().is_some_and(|n| n.contains("Sam Rivera")),
+            "the guest prelude names them: {note:?}"
+        );
+        assert!(asker_may_direct(&agent, &grant));
+        assert_eq!(asked_by_user_id(&agent).as_deref(), Some("gh_listed"));
+
+        // A named person who is not on it does not.
+        let note = ask(
+            &agent,
+            chat,
+            &host,
+            "dev:other-laptop",
+            UserMessageOpts {
+                sender: Some("user:gh_other".into()),
+                sender_handle: Some("ken".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(note.is_some(), "a named guest is labelled");
+        assert!(!asker_may_direct(&agent, &grant));
+        assert_eq!(asked_by_user_id(&agent).as_deref(), Some("gh_other"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The work this box starts for its owner names no account either, and must keep the
+    /// owner's authority: a routine run (`routine:<id>`), a voice line or a Projects-tab
+    /// hand-off (the plain `user`), a bound channel's message (`channel:<platform>:<id>`).
+    #[tokio::test]
+    async fn the_boxs_own_rows_still_ask_as_the_owner() {
+        let (agent, root) = test_agent().await;
+        agent.people.set_project_owner(OWNER);
+        let chat = "01TESTCHATVAULTDIRECTOR002";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let grant = engy_key(&agent, &[]);
+        let device = agent.cfg.device_id.clone();
+
+        for sender in ["routine:r-nightly", "user", "channel:telegram:4711"] {
+            let id = ulid();
+            host.lock().await.doc.append_user_message_from(
+                &id,
+                "run the nightly sweep",
+                &device,
+                sender,
+                &[],
+            );
+            // Leave a guest's asker standing first: the box's own row must clear it.
+            let guest = ask(
+                &agent,
+                chat,
+                &host,
+                "dev:guest-laptop",
+                UserMessageOpts {
+                    sender_handle: Some("guestlogin".into()),
+                    ..Default::default()
+                },
+            )
+            .await;
+            assert!(guest.is_none());
+            assert!(!asker_may_direct(&agent, &grant));
+
+            assert!(agent
+                .shared_project_guest_note(chat, &host, &id)
+                .await
+                .is_none());
+            assert!(
+                matches!(director(&agent), Director::Owner),
+                "a `{sender}` row this box wrote is its own work for its owner"
+            );
+            assert!(asker_may_direct(&agent, &grant));
+            assert_eq!(asked_by_user_id(&agent), None);
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
