@@ -51,6 +51,10 @@ def token() -> str:
     return f"{h}.{p}.{b64(r.to_bytes(32, 'big') + s.to_bytes(32, 'big'))}"
 
 
+class AscError(RuntimeError):
+    """A read from App Store Connect that did not answer 200."""
+
+
 def api(method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
     req = urllib.request.Request(
         "https://api.appstoreconnect.apple.com/v1" + path,
@@ -65,6 +69,18 @@ def api(method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
         return e.code, json.loads(e.read() or b"{}")
 
 
+def read_ok(path: str) -> dict:
+    """A GET whose status is not 200 answers with an error document, and `doc["data"] or []` turns that
+    into an empty list — which reads exactly like an account with no invitations, no users and no testers.
+    An expired key would therefore produce a silent, clean, exit-0 run every 3 minutes while nobody was
+    being added: the 2026-10-22 miss (Sami accepted and was never added) by a different route. Only a 200
+    is an answer; anything else stops the run so the timer goes red and says why."""
+    code, doc = api("GET", path)
+    if code != 200:
+        raise AscError(f"GET {path} -> HTTP {code}: {json.dumps(doc)[:400]}")
+    return doc
+
+
 def candidates(argv_emails: list[str], state: dict) -> dict[str, str]:
     """email -> where it came from."""
     out: dict[str, str] = {}
@@ -77,12 +93,12 @@ def candidates(argv_emails: list[str], state: dict) -> dict[str, str]:
                 out.setdefault(e, "asc-testers.txt")
     for e in state:
         out.setdefault(e, "state")
-    _, inv = api("GET", "/userInvitations?limit=200")
+    inv = read_ok("/userInvitations?limit=200")
     for u in inv.get("data") or []:
         e = (u["attributes"].get("email") or "").lower()
         if e:
             out.setdefault(e, "invitation")
-    _, users = api("GET", "/users?limit=200")
+    users = read_ok("/users?limit=200")
     for u in users.get("data") or []:
         a = u["attributes"]
         e = (a.get("username") or "").lower()
@@ -92,19 +108,19 @@ def candidates(argv_emails: list[str], state: dict) -> dict[str, str]:
 
 
 def tester_for(email: str) -> dict | None:
-    _, chk = api("GET", "/betaTesters?" + urllib.parse.urlencode({"filter[email]": email, "filter[apps]": APP}))
+    chk = read_ok("/betaTesters?" + urllib.parse.urlencode({"filter[email]": email, "filter[apps]": APP}))
     return (chk.get("data") or [None])[0]
 
 
 def in_group(tester_id: str) -> bool:
-    _, rel = api("GET", f"/betaTesters/{tester_id}/relationships/betaGroups")
+    rel = read_ok(f"/betaTesters/{tester_id}/relationships/betaGroups")
     return any(g.get("id") == GROUP for g in rel.get("data") or [])
 
 
 def main() -> None:
     argv_emails = [e.strip().lower() for e in (sys.argv[1] if len(sys.argv) > 1 else "").split(",") if e.strip()]
     state = json.load(open(STATE)) if os.path.exists(STATE) else {}
-    _, users = api("GET", "/users?limit=200")
+    users = read_ok("/users?limit=200")
     by_email = {(u["attributes"].get("username") or "").lower(): u for u in users.get("data") or []}
     for email, source in candidates(argv_emails, state).items():
         rec = state.get(email) or {}
@@ -137,4 +153,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except AscError as e:
+        print(f"asc-tester-watch: App Store Connect did not answer; nobody was checked this tick: {e}", file=sys.stderr)
+        sys.exit(1)
