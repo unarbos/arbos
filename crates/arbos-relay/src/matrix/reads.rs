@@ -245,21 +245,143 @@ pub async fn on_notify(state: &AppState, body: &Value) -> Vec<String> {
     rejected
 }
 
-/// The relay `Sender` behind a Matrix event: `life.arbos.sender` when the relay wrote it,
-/// else the Matrix sender mapped back.
+/// The relay `Sender` behind a Matrix event, taken from the homeserver-attested `sender`.
+///
+/// This deliberately ignores `content["life.arbos.sender"]`. The relay writes that key for its
+/// own benefit, but any room member can write it too, and `on_notify` runs from Synapse's
+/// unauthenticated pusher callback — so the attested `sender` is the only identity anything on
+/// this path can trust. Nothing is lost by dropping the content key: `worker.rs` posts as
+/// `member_mxid(sender)` and `member_of_mxid` is its exact inverse, so for every event with a
+/// mappable sender the two agree.
 fn sender_of_event(state: &AppState, ev: &Value) -> Option<Sender> {
-    let member = ev["content"]["life.arbos.sender"]
-        .as_str()
-        .map(str::to_owned)
-        .or_else(|| {
-            ev["sender"]
-                .as_str()
-                .and_then(|s| state.matrix.cfg.member_of_mxid(s))
-        })?;
+    // A notice carries no attributable relay identity. `worker.rs` and `spaces.rs` post one as
+    // the room's creator with a `life.arbos.sender` of `system` or another unmappable string,
+    // which this function has always resolved to `None`; without this guard a notice would start
+    // pushing attributed to whoever created the room.
+    if ev["content"]["msgtype"].as_str() == Some("m.notice") {
+        return None;
+    }
+    let member = state.matrix.cfg.member_of_mxid(ev["sender"].as_str()?)?;
     if let Some(u) = member.strip_prefix("user:") {
         return Some(Sender::user(state, u));
     }
     let p = member.strip_prefix("agent:")?;
     let project = state.db.project(p).ok().flatten()?;
     Some(Sender::agent(state, &project))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::people::tests_support::{person, project_of};
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+    use serde_json::json;
+
+    /// An `m.room.message` as Synapse hands it to the pusher: `sender` is attested by the
+    /// homeserver, `content` is whatever the sending client chose to put there.
+    fn event(sender_mxid: &str, content: Value) -> Value {
+        json!({ "type": "m.room.message", "sender": sender_mxid, "content": content })
+    }
+
+    fn body_from(forged: Option<&str>) -> Value {
+        match forged {
+            Some(s) => json!({ "msgtype": "m.text", "body": "hi", "life.arbos.sender": s }),
+            None => json!({ "msgtype": "m.text", "body": "hi" }),
+        }
+    }
+
+    /// `sender_of_event` preferred `content["life.arbos.sender"]` over the attested `sender`, so
+    /// any room member chose who a push came from. The three assertions below are the three
+    /// effects that had; each fails against the old function.
+    #[test]
+    fn a_push_identity_comes_from_the_attested_sender_not_the_event_content() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 7001);
+        let (bob, _) = person(&state, 7002);
+        let alice_project = project_of(&state, &alice, "Research");
+        let bob_project = project_of(&state, &bob, "Bob's own");
+        let cfg = &state.matrix.cfg;
+
+        // Baseline: an unforged event still resolves, so the fix restricts forgery and not use.
+        let plain = sender_of_event(&state, &event(&cfg.user_mxid(&bob), body_from(None)))
+            .expect("a message from Bob resolves to Bob");
+        assert_eq!(plain.kind, "user");
+        assert_eq!(plain.user_id.as_deref(), Some(bob.as_str()));
+        let agent = sender_of_event(
+            &state,
+            &event(&cfg.agent_mxid(&alice_project), body_from(None)),
+        )
+        .expect("a message from the agent resolves to the agent");
+        assert_eq!(agent.kind, "agent");
+        assert_eq!(agent.id, alice_project);
+
+        // 1. Misattribution: Bob claims to be the project agent. The push named the agent.
+        let forged = sender_of_event(
+            &state,
+            &event(
+                &cfg.user_mxid(&bob),
+                body_from(Some(&format!("agent:{alice_project}"))),
+            ),
+        )
+        .expect("resolves");
+        assert_eq!(forged.kind, "user", "a member must not push as an agent");
+        assert_eq!(forged.user_id.as_deref(), Some(bob.as_str()));
+
+        // 2. Suppression: Bob claims to be Alice. `on_notify` skips a device whose user is the
+        //    sender, so Alice received the message with no notification at all -- and the shared
+        //    row mapper then rendered it in her transcript as her own words.
+        let forged = sender_of_event(
+            &state,
+            &event(
+                &cfg.user_mxid(&bob),
+                body_from(Some(&format!("user:{alice}"))),
+            ),
+        )
+        .expect("resolves");
+        assert_ne!(
+            forged.user_id.as_deref(),
+            Some(alice.as_str()),
+            "a member must not silence the person they are impersonating"
+        );
+
+        // 3. Unscoped lookup: the forged value was resolved with `Db::project`, which answers for
+        //    any project id on the relay, and the user branch for any user id -- neither has to
+        //    belong to this room. Bob borrowed a project of his own into Alice's room.
+        let forged = sender_of_event(
+            &state,
+            &event(
+                &cfg.user_mxid(&alice),
+                body_from(Some(&format!("agent:{bob_project}"))),
+            ),
+        )
+        .expect("resolves");
+        assert_ne!(
+            forged.id, bob_project,
+            "an identity from outside the room must not reach a push"
+        );
+    }
+
+    /// The relay posts its own notices as the room's creator with an unmappable
+    /// `life.arbos.sender` (`worker.rs` fallback, `spaces.rs` system lines), which the old
+    /// function resolved to `None`. Reading the attested sender instead would have started
+    /// pushing those attributed to the creator, so the notice guard keeps the old behaviour.
+    #[test]
+    fn a_relay_notice_still_pushes_to_nobody() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 7003);
+        let notice = event(
+            &state.matrix.cfg.user_mxid(&alice),
+            json!({ "msgtype": "m.notice", "body": "joined", "life.arbos.sender": "system" }),
+        );
+        assert!(sender_of_event(&state, &notice).is_none());
+    }
+
+    /// A sender this relay did not mint resolves to nobody, as before.
+    #[test]
+    fn a_foreign_mxid_resolves_to_nobody() {
+        let state = test_state(AuthMode::Github);
+        let foreign = event("@someone:example.org", body_from(None));
+        assert!(sender_of_event(&state, &foreign).is_none());
+    }
 }
