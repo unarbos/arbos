@@ -482,6 +482,59 @@ pub struct ChannelPairCode {
     pub expires_at: i64,
 }
 
+/// `AppState::allows` over a project-id column, as SQL: the projects a person owns plus the ones
+/// they were invited to (D72). `?1` is the user id. Same shape as `REACHABLE_SKILLS`.
+fn reachable_project(column: &str) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM projects p
+                  WHERE p.id = {column} AND p.deleted_at IS NULL
+                    AND (p.user_id = ?1
+                         OR EXISTS (SELECT 1 FROM project_members m
+                                     WHERE m.project_id = p.id AND m.user_id = ?1 AND m.left_at IS NULL)))"
+    )
+}
+
+/// Whose channel rows a query is for. Every channels listing takes one and binds its
+/// [`ChannelScope::key`] as `?1`, so the scope is part of the query rather than a filter over its
+/// answer and a `LIMIT` counts rows the caller may see.
+#[derive(Debug, Clone)]
+pub enum ChannelScope {
+    /// The admin token.
+    Everything,
+    /// One person's devices: the channels of the projects that person can reach.
+    Reachable(String),
+}
+
+impl ChannelScope {
+    /// A predicate over a project-id column of the row a query selects.
+    fn predicate(&self, project_column: &str) -> String {
+        match self {
+            Self::Everything => "?1 IS NULL".to_owned(),
+            Self::Reachable(_) => reachable_project(project_column),
+        }
+    }
+
+    /// A predicate over a `channel_outbox` row aliased `o`. An outbox row belongs to whoever owns
+    /// the binding it was sent for; a row with no binding (a pairing hint to an unbound sender) is
+    /// nobody's, so only the admin reads it.
+    fn outbox_predicate(&self) -> String {
+        match self {
+            Self::Everything => "?1 IS NULL".to_owned(),
+            Self::Reachable(_) => format!(
+                "EXISTS (SELECT 1 FROM channel_bindings b WHERE b.id = o.binding_id AND {})",
+                reachable_project("b.project_id")
+            ),
+        }
+    }
+
+    fn key(&self) -> Option<&str> {
+        match self {
+            Self::Everything => None,
+            Self::Reachable(user_id) => Some(user_id),
+        }
+    }
+}
+
 /// One credential in the vault (F8). `fields` is ciphertext from `connectors::crypto` over a JSON
 /// object (`{ "url", "username", "password" }` for a login, `{ "value" }` for a secret/api_key).
 /// Owned by one user: every read and write is scoped by `user_id`, and names are unique per user.
@@ -2420,6 +2473,15 @@ impl Db {
     const BINDING_COLS: &'static str =
         "id, platform, external_chat_id, external_user_id, project_id, chat_id, label, bound_at";
 
+    /// [`Self::BINDING_COLS`] for a query that aliases `channel_bindings` as `b`.
+    fn binding_cols_aliased() -> String {
+        Self::BINDING_COLS
+            .split(", ")
+            .map(|col| format!("b.{col}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     fn row_to_binding(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChannelBinding> {
         Ok(ChannelBinding {
             id: r.get(0)?,
@@ -2447,13 +2509,21 @@ impl Db {
         })
     }
 
-    /// The newest unused, unexpired code (so a client can show it again after a restart).
-    pub fn active_channel_pair_code(&self) -> Result<Option<ChannelPairCode>> {
+    /// The scope's newest unused, unexpired code (so a client can show it again after a restart).
+    pub fn active_channel_pair_code(
+        &self,
+        scope: &ChannelScope,
+    ) -> Result<Option<ChannelPairCode>> {
         self.with(|conn| {
             conn.query_row(
-                "SELECT code, project_id, chat_id, created_at, expires_at FROM channel_pair_codes
-                 WHERE used_at IS NULL AND expires_at > ?1 ORDER BY created_at DESC LIMIT 1",
-                params![now_ms()],
+                &format!(
+                    "SELECT c.code, c.project_id, c.chat_id, c.created_at, c.expires_at
+                     FROM channel_pair_codes c
+                     WHERE c.used_at IS NULL AND c.expires_at > ?2 AND ({})
+                     ORDER BY c.created_at DESC LIMIT 1",
+                    scope.predicate("c.project_id")
+                ),
+                params![scope.key(), now_ms()],
                 |r| {
                     Ok(ChannelPairCode {
                         code: r.get(0)?,
@@ -2545,13 +2615,14 @@ impl Db {
         })
     }
 
-    pub fn list_channel_bindings(&self) -> Result<Vec<ChannelBinding>> {
+    pub fn list_channel_bindings(&self, scope: &ChannelScope) -> Result<Vec<ChannelBinding>> {
         self.with(|conn| {
             let mut st = conn.prepare(&format!(
-                "SELECT {} FROM channel_bindings ORDER BY bound_at DESC",
-                Self::BINDING_COLS
+                "SELECT {} FROM channel_bindings b WHERE ({}) ORDER BY b.bound_at DESC",
+                Self::binding_cols_aliased(),
+                scope.predicate("b.project_id")
             ))?;
-            let rows = st.query_map([], Self::row_to_binding)?;
+            let rows = st.query_map(params![scope.key()], Self::row_to_binding)?;
             rows.collect()
         })
     }
@@ -2630,13 +2701,18 @@ impl Db {
         })
     }
 
-    pub fn channel_outbox(&self, limit: i64) -> Result<Vec<serde_json::Value>> {
+    pub fn channel_outbox(
+        &self,
+        scope: &ChannelScope,
+        limit: i64,
+    ) -> Result<Vec<serde_json::Value>> {
         self.with(|conn| {
-            let mut st = conn.prepare(
-                "SELECT id, platform, external_chat_id, text, request_id, status, detail, binding_id, created_at
-                 FROM channel_outbox ORDER BY id DESC LIMIT ?1",
-            )?;
-            let rows = st.query_map(params![limit], |r| {
+            let mut st = conn.prepare(&format!(
+                "SELECT o.id, o.platform, o.external_chat_id, o.text, o.request_id, o.status, o.detail, o.binding_id, o.created_at
+                 FROM channel_outbox o WHERE ({}) ORDER BY o.id DESC LIMIT ?2",
+                scope.outbox_predicate()
+            ))?;
+            let rows = st.query_map(params![scope.key(), limit], |r| {
                 Ok(serde_json::json!({
                     "id": r.get::<_, i64>(0)?, "platform": r.get::<_, String>(1)?, "externalChatId": r.get::<_, String>(2)?,
                     "text": r.get::<_, String>(3)?, "requestId": r.get::<_, String>(4)?, "status": r.get::<_, String>(5)?,
