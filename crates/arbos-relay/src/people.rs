@@ -508,7 +508,8 @@ pub fn people_chat_dto(
         .filter(|m| m.member.starts_with("user:") && m.member != format!("user:{me}"))
         .collect();
     // Untitled group: the other people's handles — or, with no other human
-    // (a group of my agents), the agents' handles.
+    // (a group of my agents), the agents' handles. Bare, no `@`: a generated group name reads
+    // the same on every surface (see `group_name_tests`).
     let named: Vec<&ChatMemberDto> = if others.is_empty() {
         members
             .iter()
@@ -2633,7 +2634,9 @@ pub struct ProjectMemberBody {
 }
 
 /// `POST /projects/{id}/members {"handle"}` — the owner invites a person into the project: they
-/// see its chats in their rail and drive its agent.
+/// see its chats in their rail and drive its agent. Because that is an add into chats the
+/// person did not ask for, their `group_add` privacy decides, exactly as it does for a people
+/// group; the owner is the adder.
 pub async fn project_member_add(
     State(state): State<AppState>,
     principal: Principal,
@@ -2679,6 +2682,9 @@ pub async fn project_member_add(
             "not_available",
             "this person is not available",
         );
+    }
+    if !may_add_to_group(&state, &me, &other_id) {
+        return group_add_forbidden();
     }
     match state.db.add_project_member(&project.id, &other_id, &me) {
         Ok(true) => state.matrix.touch_project(&state, &project.id),
@@ -3737,10 +3743,50 @@ pub fn serving_agents(state: &AppState, cm: &ChatWithMembers) -> Vec<crate::boxe
     agents
 }
 
-/// `@handle` tokens in `text` that name a member of the chat, as the row's `mentions`
-/// (`agent:<project>` by the agent's slug, `user:<id>` by the person's handle) — what the
-/// apps' autocomplete writes, for a message posted through `POST /chats/{id}/messages`.
-pub fn resolve_mentions(state: &AppState, cm: &ChatWithMembers, text: &str) -> Vec<String> {
+/// The two collective mentions the apps offer (Jacob, 2026-10-24): `@here` is everyone in the
+/// chat — its people and its agents — and `@agents` is every agent, so it names no person. The
+/// apps expand them into member ids on the row (`expand_collectives`,
+/// `arbos-mac/src/sync/mod.rs`), so a reader of the row sees members and never these words,
+/// while a reader of the announce sees only the words.
+pub const COLLECTIVE_HERE: &str = "here";
+pub const COLLECTIVE_AGENTS: &str = "agents";
+
+/// `@token` as a whole word in `lower` (already lower-case), by the apps' rule: the character
+/// before the `@` is not part of a word and the token is not continued by one. Stricter than
+/// the handle scan in `push::eligibility`, which looks only at the character after — that is
+/// tolerable for a handle nobody writes in an address, and not for `@here`, which would
+/// otherwise make a group-wide ping out of `mail me@here.example`.
+pub fn at_token(lower: &str, token: &str) -> bool {
+    let needle = format!("@{token}");
+    lower.match_indices(&needle).any(|(i, _)| {
+        let before = lower[..i].chars().last();
+        let after = lower[i + needle.len()..].chars().next();
+        before.is_none_or(|c| !c.is_alphanumeric() && c != '@')
+            && after.is_none_or(|c| !(c.is_alphanumeric() || c == '_' || c == '-' || c == '.'))
+    })
+}
+
+/// Does `lower` (already lower-case) name a collective?
+pub fn names_a_collective(lower: &str) -> bool {
+    at_token(lower, COLLECTIVE_HERE) || at_token(lower, COLLECTIVE_AGENTS)
+}
+
+/// Who `text` mentions, as the row's `mentions`: every `@handle` that names a member
+/// (`agent:<project>` by the agent's slug, `user:<id>` by the person's handle), then the
+/// collectives expanded into member ids the way the apps expand them — `@here` to everyone but
+/// `me`, `@agents` to the chat's agents. `me` is the writer's own member id, who is never a
+/// mention of their own message; pass an empty string when there is no writer to exclude.
+///
+/// A collective that names nobody (`@agents` where the chat has none) adds nothing: the array is
+/// a list of members, so when there are no members to name it stays as it was. The prose still
+/// says the word, which is what `push::eligibility::mentioned` reads, so a person on
+/// `mentions` is still told either way.
+pub fn resolve_mentions(
+    state: &AppState,
+    cm: &ChatWithMembers,
+    text: &str,
+    me: &str,
+) -> Vec<String> {
     let mut by_handle: Vec<(String, String)> = Vec::new();
     for m in &cm.members {
         if let Some(pid) = m.project_id() {
@@ -3766,6 +3812,21 @@ pub fn resolve_mentions(state: &AppState, cm: &ChatWithMembers, text: &str) -> V
         if let Some((_, member)) = by_handle.iter().find(|(h, _)| *h == handle) {
             if !out.contains(member) {
                 out.push(member.clone());
+            }
+        }
+    }
+    let lower = text.to_lowercase();
+    let here = at_token(&lower, COLLECTIVE_HERE);
+    if here || at_token(&lower, COLLECTIVE_AGENTS) {
+        for m in &cm.members {
+            // A soft-deleted agent is no longer a member to name, as the handle scan above has
+            // it: `project()` is `None` for one.
+            let names_it = match m.project_id() {
+                Some(pid) => state.db.project(pid).ok().flatten().is_some(),
+                None => here,
+            };
+            if names_it && m.member != me && !out.contains(&m.member) {
+                out.push(m.member.clone());
             }
         }
     }
@@ -4318,7 +4379,7 @@ mod tests {
             .db
             .insert_device(&old, "old phone", &ulid(), &bob, "github")
             .expect("device");
-        state.db.revoke_device(&old).expect("revoke");
+        state.db.revoke_device_fully(&old).expect("revoke");
         let cm = load_chat(&state, &chat).expect("chat");
 
         let boxed = box_chat_json(&state, &cm, &alice, "box");
@@ -5188,17 +5249,37 @@ mod create_group_tests {
 
 #[cfg(test)]
 mod group_add_privacy_tests {
-    //! A person's `group_add` privacy blocks others from putting them into a new group or
-    //! adding them to an existing one (spam-group guard).
+    //! A person's `group_add` privacy blocks others from putting them into a new group,
+    //! adding them to an existing one, or sharing a project with them (spam-group guard).
+    //! Sharing a project drops the person into the project's chats, so it is an add in the
+    //! same sense and the owner is the adder.
 
     use axum::extract::{Path, State};
     use axum::http::StatusCode;
     use axum::Json;
 
-    use super::tests_support::person;
+    use super::tests_support::{person, project_of};
     use super::*;
     use crate::state::test_support::test_state;
     use crate::state::AuthMode;
+
+    /// Share `alice`'s project with the owner of `handle`.
+    async fn share(
+        state: &AppState,
+        owner_dev: &Principal,
+        project: &str,
+        handle: &str,
+    ) -> Response {
+        project_member_add(
+            State(state.clone()),
+            owner_dev.clone(),
+            Path(project.to_owned()),
+            Json(ProjectMemberBody {
+                handle: handle.to_owned(),
+            }),
+        )
+        .await
+    }
 
     #[tokio::test]
     async fn nobody_refuses_create_and_add() {
@@ -5327,6 +5408,107 @@ mod group_add_privacy_tests {
         )
         .await;
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn nobody_refuses_a_shared_project() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 41);
+        let (bob, _) = person(&state, 42);
+        let project = project_of(&state, &alice, "Shared");
+        state.db.set_group_add_policy(&bob, "nobody").unwrap();
+
+        let r = share(&state, &alice_dev, &project, "user42").await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        assert!(
+            !state.db.is_project_member(&project, &bob).unwrap(),
+            "a refused share leaves no membership row"
+        );
+    }
+
+    #[tokio::test]
+    async fn people_i_know_shares_only_with_an_existing_dm() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 43);
+        let (bob, _) = person(&state, 44);
+        let (carol, _) = person(&state, 45);
+        let project = project_of(&state, &alice, "Shared");
+        for p in [&bob, &carol] {
+            state.db.set_group_add_policy(p, "people_i_know").unwrap();
+        }
+
+        // Alice knows Bob through a DM; Carol is a stranger.
+        let r = dm_create(
+            State(state.clone()),
+            alice_dev.clone(),
+            Json(DmBody {
+                handle: "user44".into(),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+
+        let r = share(&state, &alice_dev, &project, "user44").await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert!(state.db.is_project_member(&project, &bob).unwrap());
+
+        let r = share(&state, &alice_dev, &project, "user45").await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        assert!(!state.db.is_project_member(&project, &carol).unwrap());
+    }
+
+    /// The default policy keeps the share route and both group paths open: the fix must not
+    /// tighten anything.
+    #[tokio::test]
+    async fn anyone_still_allows_every_add_path() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 48);
+        let (bob, _) = person(&state, 49);
+        let (_carol, _) = person(&state, 50);
+        let project = project_of(&state, &alice, "Shared");
+        assert_eq!(state.db.group_add_policy(&bob).unwrap(), "anyone");
+
+        let r = share(&state, &alice_dev, &project, "user49").await;
+        assert_eq!(r.status(), StatusCode::OK, "no DM with Bob is needed");
+        assert!(state.db.is_project_member(&project, &bob).unwrap());
+
+        let r = chats_create_group(
+            State(state.clone()),
+            alice_dev.clone(),
+            Json(CreateGroupBody {
+                kind: "group".into(),
+                members: vec!["user49".into()],
+                agent_ids: vec![],
+                title: Some("Strangers".into()),
+                avatar_leaf: None,
+                avatar_leaf_color: None,
+                description: None,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let chat_id = state
+            .db
+            .chats_of_member(&format!("user:{alice}"))
+            .unwrap()
+            .into_iter()
+            .find(|cm| cm.chat.kind == "group")
+            .unwrap()
+            .chat
+            .id;
+
+        let r = member_add(
+            State(state.clone()),
+            alice_dev,
+            Path(chat_id),
+            Json(AddMemberBody {
+                handle: Some("user50".into()),
+                handles: vec![],
+                agent_ids: vec![],
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
     }
 }
 
@@ -5537,6 +5719,81 @@ pub(crate) mod tests_support {
             })
             .expect("pinned chat");
         project.id
+    }
+}
+
+#[cfg(test)]
+mod mention_resolution_tests {
+    //! What `@here` and `@agents` resolve to on the relay, which must be what the apps resolve
+    //! them to on the row they write (`expand_collectives`, `arbos-mac/src/sync/mod.rs`):
+    //! everyone in the chat and every agent, never the writer.
+
+    use serde_json::json;
+
+    use super::tests_support::{group, person, project_of};
+    use super::*;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    #[test]
+    fn here_and_agents_resolve_to_members_and_nobody_mentions_themselves() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 8101);
+        let (bob, _) = person(&state, 8102);
+        let pid = project_of(&state, &alice, "Lium");
+        let g = group(&state, &[&alice, &bob]);
+        state
+            .db
+            .add_member(&g, &format!("agent:{pid}"), "agent", &alice, &json!({}))
+            .unwrap();
+        let Ok(cm) = load_chat(&state, &g) else {
+            panic!("chat")
+        };
+        let me = format!("user:{alice}");
+
+        let here = resolve_mentions(&state, &cm, "@here standup in five", &me);
+        assert!(here.contains(&format!("user:{bob}")));
+        assert!(here.contains(&format!("agent:{pid}")));
+        assert!(!here.contains(&me), "the writer is not mentioned by @here");
+
+        assert_eq!(
+            resolve_mentions(&state, &cm, "@agents take this one", &me),
+            vec![format!("agent:{pid}")],
+            "@agents names the agents and no person"
+        );
+
+        // A handle on its own still resolves, and only once when the collective names it too.
+        // Sorted, because what is being compared is who was named: a collective walks the
+        // roster, and `members_of` orders that by `joined_at` with no tiebreak, so members who
+        // joined in the same millisecond come back in whatever order SQLite chooses. Sorting
+        // still catches a duplicate, which is what this assertion is for — the lists would
+        // differ in length.
+        let mut handle_and_collective = resolve_mentions(&state, &cm, "@lium and @here", &me);
+        let mut collective_alone = resolve_mentions(&state, &cm, "@here", &me);
+        handle_and_collective.sort();
+        collective_alone.sort();
+        assert_eq!(handle_and_collective, collective_alone);
+    }
+
+    /// A collective that names nobody adds nothing — the array is a list of members. The word is
+    /// still in the prose, which is what `push::eligibility::mentioned` reads, so the people are
+    /// told either way.
+    #[test]
+    fn a_collective_with_nobody_to_name_resolves_to_nothing() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 8111);
+        let (bob, _) = person(&state, 8112);
+        let g = group(&state, &[&alice, &bob]);
+        let Ok(cm) = load_chat(&state, &g) else {
+            panic!("chat")
+        };
+        let me = format!("user:{alice}");
+
+        assert!(resolve_mentions(&state, &cm, "@agents anyone there?", &me).is_empty());
+        assert_eq!(
+            resolve_mentions(&state, &cm, "@here", &me),
+            vec![format!("user:{bob}")]
+        );
     }
 }
 

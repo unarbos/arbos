@@ -521,6 +521,19 @@ impl Db {
     }
 
     /// The channel behind a homeserver room id (the push gateway's way in).
+    /// The server a channel belongs to, deleted channels included: a channel's room is closed
+    /// after the channel row is marked deleted, and the close still needs its members.
+    pub fn channel_server_id(&self, channel_id: &str) -> Result<Option<String>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT server_id FROM channels WHERE id = ?1",
+                params![channel_id],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+    }
+
     pub fn channel_by_room_id(&self, room_id: &str) -> Result<Option<Channel>> {
         self.with(|c| {
             c.query_row(

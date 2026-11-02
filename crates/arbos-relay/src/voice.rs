@@ -681,7 +681,7 @@ fn enrich_humans_calling_from(state: &AppState, call: &CallRow, humans: &mut [Va
 }
 
 /// What the voice agent should call this chat: project chat title, or people-chat title / handles.
-fn voice_chat_title(state: &AppState, chat: &ChatRef) -> String {
+pub(crate) fn voice_chat_title(state: &AppState, chat: &ChatRef) -> String {
     match &chat.project_id {
         Some(pid) => state
             .db
@@ -703,14 +703,16 @@ fn voice_chat_title(state: &AppState, chat: &ChatRef) -> String {
             {
                 return t;
             }
+            // Bare handles, no `@`: this title is spoken aloud, and "at user41, at user43" is
+            // not what anyone says. The other three surfaces agree (see `group_name_tests`).
             let handles: Vec<String> = state
                 .db
                 .members_of(&chat.chat_id)
                 .unwrap_or_default()
                 .iter()
                 .filter_map(|m| m.user_id())
-                .map(|u| format!("@{}", Sender::user(state, u).handle))
-                .filter(|h| h != "@")
+                .map(|u| Sender::user(state, u).handle)
+                .filter(|h| !h.is_empty())
                 .collect();
             if handles.is_empty() {
                 "this chat".to_owned()

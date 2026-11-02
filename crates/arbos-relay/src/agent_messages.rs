@@ -118,7 +118,7 @@ pub struct SendBody {
 
 /// Grants the target's owner made, as `(grantee, enabled)`; `grantee` = `user:<id>` (every
 /// agent of that person) or `project:<id>` (one agent).
-fn grant_allows(state: &AppState, target: &Project, sender: &Project) -> bool {
+pub(crate) fn grant_allows(state: &AppState, target: &Project, sender: &Project) -> bool {
     state
         .db
         .message_grant_enabled(&target.id, &format!("user:{}", sender.user_id))
