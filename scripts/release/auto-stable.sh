@@ -13,7 +13,8 @@
 #   1. waits ARBOS_RELEASE_DEBOUNCE_S so a batch of merges that lands within a few minutes shares
 #      one release (a fix is never held longer than that) — not when a hotfix sits at the head of main;
 #   2. target = the newest commit on origin/main whose CI run is green (commits whose CI is still
-#      running are left for the next run; a red one is skipped) — except a hotfix: a revert, or a
+#      running are left for the next run; a red one is skipped; one whose CI state cannot be read
+#      stops the run with an error, so no older commit ships in its place) — except a hotfix: a revert, or a
 #      commit marked `hotfix:` / `[hotfix]`, is released as soon as it is on main, ahead of its CI
 #      (P0 #1208: waiting for CI cost the crash fix two releases);
 #   3. nothing to do when the paths the Mac app is built from did not change since the last
@@ -60,14 +61,18 @@ emit_none() {
 }
 
 ci_state() {
-  # success | pending | failed | none for the push CI run of a commit
+  # success | pending | failed | none for the push CI run of a commit. Returns non-zero when the state
+  # could not be read: "none" means GitHub answered and the commit has no push CI run, never "unknown".
   local json
   json="$(curl -fsS --max-time 30 -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
-    "https://api.github.com/repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$1&event=push&per_page=5" 2>/dev/null || true)"
-  [[ -n "$json" ]] || { echo none; return; }
+    "https://api.github.com/repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$1&event=push&per_page=5")" || return 1
+  [[ -n "$json" ]] || { echo "empty answer from the runs API" >&2; return 1; }
   python3 - "$json" <<'EOF'
 import json, sys
-runs = json.loads(sys.argv[1]).get("workflow_runs", [])
+answer = json.loads(sys.argv[1])
+if not isinstance(answer, dict) or not isinstance(answer.get("workflow_runs"), list):
+    sys.exit("the runs API answer has no workflow_runs list")
+runs = answer["workflow_runs"]
 if not runs:
     print("none"); sys.exit()
 r = sorted(runs, key=lambda r: r.get("run_number", 0))[-1]
@@ -115,7 +120,11 @@ target=""
 hotfix=false
 pending_seen=false
 for sha in $(git rev-list --first-parent origin/main -n 25); do
-  state="$(ci_state "$sha")"
+  # An unreadable commit stops the plan: stepping past it would release an older commit in its place.
+  if ! state="$(ci_state "$sha")"; then
+    echo "::error title=Release plan stopped::cannot read the push CI state of ${sha:0:8}; no release this run rather than an older commit in its place" >&2
+    exit 1
+  fi
   case "$state" in
     success) target="$sha"; break ;;
     failed) ;;
