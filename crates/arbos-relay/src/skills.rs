@@ -500,6 +500,18 @@ pub async fn refile(
         return Err((StatusCode::NOT_FOUND, "no such skill".to_owned()));
     }
     let creator = state.db.skill_creator(&existing.id).map_err(internal)?;
+    // A row with neither an origin project nor a recorded author names nobody, so there is no
+    // claim to test and the relay holds it for everyone (#2557). The test is the author and not
+    // the project: once a row *does* name its author, that author re-files it, which is how an
+    // attributed row is recovered. A guard on the origin project alone would read as the same
+    // rule and would instead lock the recovery out.
+    if existing.origin_project_id.is_none() && creator.is_none() {
+        audit_refile(&state, &principal, &existing, None, false, "no_owner");
+        return Err((
+            StatusCode::FORBIDDEN,
+            "this skill records no Project and no author, so nobody may re-file it".into(),
+        ));
+    }
     if creator.as_deref().is_some_and(|c| c != user_id) {
         audit_refile(&state, &principal, &existing, None, false, "not_the_author");
         return Err((
@@ -1297,6 +1309,68 @@ mod tests {
 
     fn origin_of(state: &AppState, skill: &str) -> Option<String> {
         state.db.skill(skill).unwrap().unwrap().origin_project_id
+    }
+
+    /// A row with no Project and no author names nobody, so the relay holds it against everyone
+    /// — the rule #2557 set for editing and deleting, which re-filing has to keep rather than
+    /// hand a stranger a way around. Without this the claim arm is reachable on these rows: both
+    /// gates pass vacuously, because `owns_skill` has no owner to test against and there is no
+    /// author to compare the caller to, so Bob walks off with Alice's text under his own name.
+    #[tokio::test]
+    async fn an_unattributed_ownerless_skill_is_refiled_by_nobody() {
+        let state = test_state(AuthMode::Github);
+        let (_alice, _alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let his = project_of(&state, &bob, "Tern");
+        let orphan = skill_with(&state, None, "ship-the-newsletter", false, ALICES_BODY);
+
+        let r = refile_to(&state, bob_dev, &orphan, &his).await;
+        assert_eq!(status(r), StatusCode::FORBIDDEN, "held, not claimable");
+        assert!(
+            state
+                .db
+                .list_skills(&SkillScope::Project(his.clone()))
+                .unwrap()
+                .is_empty(),
+            "and he has nothing of hers"
+        );
+        assert_eq!(origin_of(&state, &orphan), None, "the row is where it was");
+    }
+
+    /// The other half of the same rule, and the reason the guard asks about the author instead
+    /// of the Project. Once a row names its author — which is what the attribution migration
+    /// writes — that author re-files it and gets it back. A guard on the missing Project alone
+    /// would read as the same rule and would lock this out, leaving the migration writing a
+    /// column that no route ever acts on.
+    #[tokio::test]
+    async fn an_attributed_ownerless_skill_is_refiled_by_its_author() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let hers = project_of(&state, &alice, "Tern");
+        let now = now_ms();
+        let restored = Skill {
+            id: ulid(),
+            slug: "ship-the-newsletter".to_owned(),
+            name: "ship-the-newsletter".to_owned(),
+            body: ALICES_BODY.to_owned(),
+            origin_project_id: None,
+            version: 1,
+            created_at: now,
+            updated_at: now,
+            ..Skill::default()
+        };
+        state
+            .db
+            .insert_skill(&restored, Some(&alice))
+            .expect("an ownerless row the migration has attributed to Alice");
+
+        let r = refile_to(&state, alice_dev, &restored.id, &hers).await;
+        assert_eq!(status(r), StatusCode::OK, "moved, not copied");
+        assert_eq!(
+            origin_of(&state, &restored.id).as_deref(),
+            Some(hers.as_str()),
+            "the row itself is in her library now, so her agents read it again"
+        );
     }
 
     /// AF-589, the repair itself. Alice named "Tern" when she filed a skill, the relay resolved
