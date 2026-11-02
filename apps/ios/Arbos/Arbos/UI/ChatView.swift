@@ -2201,14 +2201,14 @@ struct ChatSession: View {
         }
     }
 
-    /// Grok's scroll-to-bottom control: a 36 pt field-coloured circle with a
-    /// chevron, right-aligned with the composer, 18 pt above it.
+    /// Grok's scroll-to-bottom control: a 36 pt circle with a chevron, right-aligned with
+    /// the composer, 18 pt above it. On dark Glass the circle is the composer's clear glass,
+    /// so the bubble it covers still reads ([feedback composer-glass-regression-2026-10-30]).
     /// UIKit `UIControl` (not SwiftUI `Button`) so a tap still fires while the
     /// transcript is decelerating — SwiftUI button gestures lose to UIScrollView.
     private var scrollToBottomButton: some View {
         ZStack {
-            Circle().fill(theme.field) // control-size: exception transcriptJumpChip
-            Circle().strokeBorder(theme.fieldBorder, lineWidth: 1) // control-size: exception transcriptJumpChip
+            TranscriptChipSurface(shape: Circle()) // control-size: exception transcriptJumpChip
             Image(systemName: "chevron.down")
                 .font(theme.font(15, weight: .medium))
                 .foregroundStyle(theme.text)
@@ -2235,8 +2235,7 @@ struct ChatSession: View {
         .foregroundStyle(theme.text)
         .padding(.horizontal, 14)
         .frame(height: Theme.voiceButton)
-        .background(Capsule().fill(theme.field)) // control-size: exception transcriptJumpChip
-        .overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1)) // control-size: exception transcriptJumpChip
+        .background(TranscriptChipSurface(shape: Capsule())) // control-size: exception transcriptJumpChip
         .contentShape(Capsule().inset(by: -4))
         .overlay { ScrollInterruptTap(action: jumpToLatest) }
         .accessibilityElement(children: .ignore)
