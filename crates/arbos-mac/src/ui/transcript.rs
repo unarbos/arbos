@@ -4599,6 +4599,11 @@ pub fn build_rows_with_cache(
                 push_reactions(&mut rows, message, is_mine, !is_mine);
             }
             Role::System => {
+                // A group's deletion audit is a record for the admin Activity screen, not a
+                // line in the conversation (#1520).
+                if message.is_hidden_audit() {
+                    continue;
+                }
                 // Call lines and membership notices ("Jacob added Home, hjkb and
                 // Doug", #1349): one centred muted line, never a bubble. Like a
                 // date stamp it breaks the sender run — the next bubble names its
@@ -10373,6 +10378,57 @@ mod system_line_tests {
         assert!(
             rows.iter().all(|r| r.id != "m-1700000001000#user"),
             "no bubble for the system row"
+        );
+    }
+
+    /// #1520: the iPhone writes its admin deletion audit into the group's chat as a system
+    /// row marked hidden (U+2063). It is an internal record for the Activity screen, not a
+    /// message — the Mac must draw no row for it, or every member reads "Jacob deleted a
+    /// message" in their transcript.
+    #[test]
+    fn a_hidden_audit_line_draws_no_row() {
+        let t = 1_700_000_000_000u64;
+        let messages = [
+            message("user", "user:gh_bob", "hi all", t),
+            message(
+                "system",
+                "system",
+                "\u{2063}Jacob deleted a message",
+                t + 1_000,
+            ),
+            message("user", "user:gh_bob", "welcome", t + 2_000),
+        ];
+        let spoken = HashSet::new();
+        let failed = HashMap::new();
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        let rows = build_rows(
+            &messages,
+            false,
+            speech,
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            true,
+        );
+        let stamps: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::Stamp { label } => Some(label.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !stamps.iter().any(|s| s.contains("deleted a message")),
+            "the audit line is not a stamp: {stamps:?}"
+        );
+        assert!(
+            rows.iter().all(|r| r.message_id != "m-1700000001000"),
+            "no row at all for the audit line"
         );
     }
 

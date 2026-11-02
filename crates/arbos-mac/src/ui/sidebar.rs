@@ -548,8 +548,14 @@ fn latest<'a>(state: &'a AppState, space: &Project) -> Option<&'a Message> {
             .messages_of(&chat.id)
             .iter()
             .rev()
-            // A row hidden for me (someone I blocked) never previews.
-            .find(|m| !m.plain_text().trim().is_empty() && !state.hides_message(&chat.id, m))
+            // A row hidden for me (someone I blocked) never previews, and neither does a
+            // group's deletion audit (#2054) — it is not a message. This decides the row's
+            // time as well as its line, so an audit must not move the row up the list.
+            .find(|m| {
+                !m.plain_text().trim().is_empty()
+                    && !m.is_hidden_audit()
+                    && !state.hides_message(&chat.id, m)
+            })
         {
             if best.map(|b| m.created_at > b.created_at).unwrap_or(true) {
                 best = Some(m);
@@ -4752,5 +4758,128 @@ mod pin_tests {
         );
         shell.update(vcx, |sh, cx| sh.finish_pin_drag(cx));
         assert!(sent_pins(&cmds).is_empty(), "a second drop is a no-op");
+    }
+}
+
+#[cfg(test)]
+mod audit_line_preview_tests {
+    //! #2054: the iPhone writes a deletion audit into the group's chat as a system row marked
+    //! hidden (U+2063). It is not a message, so it must be neither the group's last line in
+    //! the chat list nor the time the list sorts on — the Mac had no filter for the marker at
+    //! all, and `last_activity` reads the same newest row the preview does.
+
+    use futures::future::BoxFuture;
+    use gpui::{AppContext as _, TestAppContext};
+    use tokio::sync::mpsc;
+
+    use crate::app::AppState;
+    use crate::model::{Chat, Message, Person, Project, SpaceKind};
+    use crate::sync::{ClientCommand, SyncEvent, SyncSource};
+
+    struct Idle;
+
+    impl SyncSource for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            _commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    fn person(id: &str, handle: &str, name: &str) -> Person {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "handle": handle, "name": name, "status": "active",
+        }))
+        .expect("person")
+    }
+
+    fn message(id: &str, role: &str, sender: &str, text: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "chatId": "g1",
+            "role": role,
+            "sender": sender,
+            "senderHandle": if sender.starts_with("user:") { "priya" } else { "" },
+            "status": "done",
+            "createdAt": at,
+            "parts": [{ "id": format!("p-{id}"), "kind": "text", "text": text }],
+        }))
+        .expect("message")
+    }
+
+    /// A group whose newest row is a hidden audit line, over a person's real last message.
+    fn mount(cx: &mut TestAppContext) -> (tokio::runtime::Runtime, gpui::Entity<AppState>, u64) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| gpui_tokio::init_from_handle(cx, handle));
+        let state = cx.new(|cx| AppState::new(Box::new(Idle), cx));
+        let now = crate::model::now_ms();
+        state.update(cx, |s, cx| {
+            s.projects.push(Project {
+                id: "g1".into(),
+                name: "Launch week".into(),
+                kind: SpaceKind::Group,
+                people: vec![person("gh_3", "priya", "Priya Natarajan")],
+                ..Project::default()
+            });
+            let chat: Chat = serde_json::from_value(serde_json::json!({
+                "id": "g1", "project_id": "g1", "title": "Launch week", "is_pinned": false,
+                "is_system": false, "unread": false, "last_message_at": now,
+            }))
+            .expect("chat");
+            s.chats.insert("g1".into(), vec![chat]);
+            s.active_tab.insert("g1".into(), "g1".into());
+            s.messages.insert(
+                "g1".into(),
+                vec![
+                    message("m1", "user", "user:gh_3", "here", now - 2_000),
+                    message(
+                        "m2",
+                        "system",
+                        "system",
+                        "\u{2063}Jacob deleted a message",
+                        now,
+                    ),
+                ],
+            );
+            cx.notify();
+        });
+        (rt, state, now)
+    }
+
+    /// The tester's shot (#2054): the group's row read "🧙🏽 deleted a message".
+    #[gpui::test]
+    fn a_hidden_audit_line_is_never_the_preview_line(cx: &mut TestAppContext) {
+        let (_rt, state, _now) = mount(cx);
+        let preview = state.read_with(cx, |s, _| {
+            let space = s.projects[0].clone();
+            super::preview_for_tests(s, &space)
+        });
+        assert_eq!(
+            preview, "@priya: here",
+            "the preview skips the hidden audit row"
+        );
+    }
+
+    /// `last_activity` orders the chat list (`app.rs`, `Reverse(last_activity(..))`) and reads
+    /// the same newest row the preview does, so an unfiltered audit line also jumps the group
+    /// to the top of the list. Its time must stay the person's last message.
+    #[gpui::test]
+    fn a_hidden_audit_line_never_moves_the_row_up_the_list(cx: &mut TestAppContext) {
+        let (_rt, state, now) = mount(cx);
+        let at = state.read_with(cx, |s, _| {
+            let space = s.projects[0].clone();
+            super::last_activity(s, &space)
+        });
+        assert_eq!(at, now - 2_000, "the audit row is not the group's activity");
     }
 }
