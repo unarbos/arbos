@@ -128,15 +128,31 @@ pub async fn catalog(State(state): State<AppState>, _principal: Principal) -> Ap
     .into_response())
 }
 
-pub async fn list(State(state): State<AppState>, _principal: Principal) -> ApiResult {
+/// Containment while `connectors` has no owner column (#1952): the relay cannot tell whose
+/// grant a connector row holds, so every principal would otherwise reach every row. Until the
+/// column exists, only the user ids in `ARBOS_CONNECTORS_USERS` — and the admin token, which
+/// has no user — may list or use connectors. Empty, the default, means admin only.
+///
+/// A box is scoped by the same user id as its devices, so an allowed user's agent keeps
+/// working; nobody else's does.
+fn may_use_connectors(state: &AppState, principal: &Principal) -> bool {
+    match principal.user_id() {
+        None => true,
+        Some(caller) => state.cfg.connector_users.iter().any(|u| u == caller),
+    }
+}
+
+pub async fn list(State(state): State<AppState>, principal: Principal) -> ApiResult {
     let mock = mock_on(&state);
-    let items = state
-        .db
-        .list_connectors()
-        .map_err(internal)?
-        .iter()
-        .map(|c| connector_dto(c, mock))
-        .collect();
+    // Someone with no connectors of their own sees an empty library rather than an error: it is
+    // what their Settings → Connectors should say, and the Mac pane turns a refusal into a
+    // visible error note.
+    let rows = if may_use_connectors(&state, &principal) {
+        state.db.list_connectors().map_err(internal)?
+    } else {
+        Vec::new()
+    };
+    let items = rows.iter().map(|c| connector_dto(c, mock)).collect();
     Ok(Json(ConnectorsListDto { mock, items }).into_response())
 }
 
@@ -219,6 +235,16 @@ pub async fn connect(
         return Err((
             StatusCode::FORBIDDEN,
             "boxes cannot connect accounts".into(),
+        ));
+    }
+    // Connecting a provider replaces whatever row that provider already has, so leaving this
+    // route open would let someone outside the allowlist replace an allowed user's grant and
+    // have that user's agent act through a stranger's account. `oauth_callback` is covered with
+    // it: the callback only completes an `oauth_states` row that this route created.
+    if !may_use_connectors(&state, &principal) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "connectors are not available on this relay".into(),
         ));
     }
     let p = Provider::parse(&provider).ok_or((
@@ -588,6 +614,11 @@ pub async fn disconnect(
             "boxes cannot disconnect accounts".into(),
         ));
     }
+    // #1952: this route has no owner to check the caller against either, so the same allowlist
+    // stands in for one until the column exists. A row the caller may not see answers 404.
+    if !may_use_connectors(&state, &principal) {
+        return Err((StatusCode::NOT_FOUND, "no such connector".to_owned()));
+    }
     let ok = state.db.delete_connector(&id).map_err(internal)?;
     Ok(if ok {
         StatusCode::NO_CONTENT
@@ -611,9 +642,17 @@ pub struct CallBody {
 /// token and returns a redacted reply.
 pub async fn call(
     State(state): State<AppState>,
-    _principal: Principal,
+    principal: Principal,
     Json(b): Json<CallBody>,
 ) -> ApiResult {
+    if !may_use_connectors(&state, &principal) {
+        // The same answer as a provider nobody has connected, which both the agent and the
+        // Connectors pane already handle.
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("{} is not connected (Settings → Connectors)", b.provider),
+        ));
+    }
     let args = if b.args.is_null() { json!({}) } else { b.args };
     let v = broker_call(&state, &b.provider, &b.action, &args).await?;
     Ok(Json(v).into_response())
@@ -873,6 +912,7 @@ mod tests {
             default_provider: None,
             fleet: crate::fleet::FleetCfg::default(),
             connectors_mock: mock,
+            connector_users: Vec::new(),
             channels_mock: true,
             image_mock: false,
             avatar_retry_backoff_ms: Vec::new(),
@@ -953,6 +993,148 @@ mod tests {
             client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
             matrix: crate::matrix::Matrix::new(crate::matrix::Config::off()),
         }
+    }
+
+    /// [`test_state`] with an `ARBOS_CONNECTORS_USERS` allowlist.
+    fn test_state_allowing(mock: bool, users: &[&str]) -> AppState {
+        let mut state = test_state(mock);
+        let mut cfg = (*state.cfg).clone();
+        cfg.connector_users = users.iter().map(|u| (*u).to_owned()).collect();
+        state.cfg = Arc::new(cfg);
+        state
+    }
+
+    fn connected_github() -> Connector {
+        Connector {
+            id: ulid(),
+            provider: "github".into(),
+            label: "GitHub".into(),
+            scopes: vec!["repo".into()],
+            status: "connected".into(),
+            config: json!({}),
+            created_at: now_ms(),
+            last_used_at: None,
+            last_error: None,
+        }
+    }
+
+    fn device(user: &str) -> Principal {
+        Principal::Device {
+            id: "dev".into(),
+            token: String::new(),
+            user_id: user.to_owned(),
+        }
+    }
+
+    async fn listed(r: ApiResult) -> usize {
+        let body = axum::body::to_bytes(r.expect("list answers").into_body(), 1 << 20)
+            .await
+            .expect("body");
+        serde_json::from_slice::<Value>(&body).expect("json")["items"]
+            .as_array()
+            .map(Vec::len)
+            .unwrap_or(0)
+    }
+
+    fn github_call() -> Json<CallBody> {
+        Json(CallBody {
+            provider: "github".into(),
+            action: "list_repos".into(),
+            args: json!({}),
+        })
+    }
+
+    /// Containment while `connectors` has no owner column: the relay cannot tell whose grant a
+    /// row holds, so the owner is named in configuration instead. Only those user ids and the
+    /// admin token may list or use connectors; the default, an empty list, is admin only.
+    #[tokio::test]
+    async fn only_configured_users_may_list_and_use_connectors() {
+        let state = test_state_allowing(true, &["u_owner"]);
+        let cn = connected_github();
+        state.db.upsert_connector(&cn).expect("connector");
+
+        // The allowed user keeps everything: their devices list it, their agent acts with it.
+        assert_eq!(
+            listed(list(State(state.clone()), device("u_owner")).await).await,
+            1
+        );
+        assert!(
+            call(
+                State(state.clone()),
+                Principal::Box {
+                    user_id: "u_owner".into()
+                },
+                github_call(),
+            )
+            .await
+            .is_ok(),
+            "the allowed user's agent still acts through the broker"
+        );
+
+        // Nobody else sees the library or reaches the token, by device or by box.
+        assert_eq!(
+            listed(list(State(state.clone()), device("u_other")).await).await,
+            0
+        );
+        let refused = call(State(state.clone()), device("u_other"), github_call()).await;
+        assert_eq!(refused.err().map(|(s, _)| s), Some(StatusCode::NOT_FOUND));
+        let refused_box = call(
+            State(state.clone()),
+            Principal::Box {
+                user_id: "u_other".into(),
+            },
+            github_call(),
+        )
+        .await;
+        assert_eq!(
+            refused_box.err().map(|(s, _)| s),
+            Some(StatusCode::NOT_FOUND)
+        );
+
+        // The admin token has no user and stays unscoped.
+        assert_eq!(
+            listed(list(State(state.clone()), Principal::Admin).await).await,
+            1
+        );
+
+        // Connecting and disconnecting go the same way: an outsider must not replace an allowed
+        // user's grant, and `disconnect` has no owner to check against either (#1952).
+        let connect_refused = connect(
+            State(state.clone()),
+            device("u_other"),
+            Path("github".to_owned()),
+            None,
+        )
+        .await;
+        assert_eq!(
+            connect_refused.err().map(|(s, _)| s),
+            Some(StatusCode::FORBIDDEN)
+        );
+        let disconnect_refused =
+            disconnect(State(state.clone()), device("u_other"), Path(cn.id.clone())).await;
+        assert_eq!(
+            disconnect_refused.err().map(|(s, _)| s),
+            Some(StatusCode::NOT_FOUND)
+        );
+        assert!(
+            state.db.connector(&cn.id).unwrap().is_some(),
+            "the allowed user's connector survives"
+        );
+
+        // Unset means admin only.
+        let closed = test_state_allowing(true, &[]);
+        closed
+            .db
+            .upsert_connector(&connected_github())
+            .expect("connector");
+        assert_eq!(
+            listed(list(State(closed.clone()), device("u_owner")).await).await,
+            0
+        );
+        assert_eq!(
+            listed(list(State(closed.clone()), Principal::Admin).await).await,
+            1
+        );
     }
 
     /// Invariant (F1): a connector token never appears in a `/connectors/call` reply, in the

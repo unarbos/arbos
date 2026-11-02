@@ -1100,10 +1100,21 @@ fn fixture_connector() -> Connector {
     }
 }
 
+/// Connector fixtures capture the shape an allowed user sees. `connectors` has no owner column,
+/// so `ARBOS_CONNECTORS_USERS` stands in for one (#1952) and is empty everywhere else in tests.
+fn allowing_connectors(state: &AppState, user: &str) -> AppState {
+    let mut state = state.clone();
+    let mut cfg = (*state.cfg).clone();
+    cfg.connector_users.push(user.to_owned());
+    state.cfg = std::sync::Arc::new(cfg);
+    state
+}
+
 #[tokio::test]
 async fn connector_fixtures() {
     let state = test_state(AuthMode::Github);
-    let (_, device) = person(&state, 501);
+    let (user, device) = person(&state, 501);
+    let state = allowing_connectors(&state, &user);
     assert_dto(
         "provider_json.json",
         providers::provider_dto(Provider::Github, false, true),
@@ -1128,7 +1139,8 @@ async fn connector_fixtures() {
 #[tokio::test]
 async fn connect_reply_fixtures() {
     let state = test_state(AuthMode::Github);
-    let (_, device) = person(&state, 502);
+    let (user, device) = person(&state, 502);
+    let state = allowing_connectors(&state, &user);
 
     let r = connectors::connect(
         State(state.clone()),
