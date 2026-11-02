@@ -650,6 +650,7 @@ impl Db {
         c.execute_batch(crate::db_push::PUSH_SCHEMA)?;
         c.execute_batch(crate::push::store::OUTBOX_SCHEMA)?;
         c.execute_batch(crate::push::eligibility::LEVEL_SCHEMA)?;
+        c.execute_batch(crate::read_receipts::READ_RECEIPTS_SCHEMA)?;
         c.execute_batch(crate::db_calls::CALLS_SCHEMA)?;
         crate::db_calls::migrate_calls(&c);
         c.execute_batch(crate::db_voice::VOICE_SCHEMA)?;
