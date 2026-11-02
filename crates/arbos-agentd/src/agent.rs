@@ -2377,7 +2377,11 @@ impl Agent {
                             .map(str::to_owned),
                     }
                 };
-                self.decide_approval_from_command(
+                // `cmd.issued_by` is a label the sending client chose, not a principal: it is
+                // logged, never believed. Who may decide is settled from the chat the row
+                // arrived in (`approval::decide_approval_from_document`).
+                self.decide_approval_from_document(
+                    chat_id,
                     &approval_id,
                     outcome,
                     &cmd.issued_by,

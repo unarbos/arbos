@@ -468,6 +468,22 @@ impl PeopleState {
         self.chats.lock().expect("people").contains_key(chat_id)
     }
 
+    /// Is the owner the only person who can write this people chat's room? The relay admits a
+    /// people room on chat membership (`people::room_access`), so every other human member
+    /// writes the same document — which is what an approval decision raised there would have to
+    /// be trusted against. A chat this box has no snapshot of reads as shared: not knowing the
+    /// members is not the same as there being none.
+    pub fn owner_only_people_chat(&self, chat_id: &str) -> bool {
+        let Some(info) = self.info(chat_id) else {
+            return false;
+        };
+        let owner = match info.owner_user.as_str() {
+            "" => self.project_owner(),
+            u => u.to_owned(),
+        };
+        !owner.is_empty() && info.human_ids().iter().all(|u| *u == owner)
+    }
+
     pub fn asker(&self, chat_id: &str) -> Option<Asker> {
         self.askers.lock().expect("people").get(chat_id).cloned()
     }

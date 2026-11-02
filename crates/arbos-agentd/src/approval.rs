@@ -131,21 +131,35 @@ impl Agent {
     /// Chat a card belongs to when the caller only knows a session id.
     /// A request raised in a people chat (a DM or a group this agent is in) is answered where
     /// it was asked: the owner reads that chat, and a card that went to the agent's own pinned
-    /// chat instead was never seen (#1440). Otherwise prefer the pinned ("main") chat so access
-    /// / approval requests are not buried in a side thread the owner is not looking at; fall
-    /// back to the running turn, a known chat id, then any chat.
+    /// chat instead was never seen (#1440) — but only when the owner is the one person who can
+    /// write that chat. A card is a question only the owner may answer, so in a people chat
+    /// shared with other people it goes to the owner's own chat with this agent instead, the
+    /// same §7.7 route a guest's secret request already takes (`vault::owner_card_chat`).
+    /// Otherwise prefer the pinned ("main") chat so access / approval requests are not buried
+    /// in a side thread the owner is not looking at; fall back to the running turn, a known
+    /// chat id, then any chat.
     pub async fn approval_chat(&self, hint: &str) -> Option<String> {
-        if self.people.is_people_chat(hint) {
-            return Some(hint.to_owned());
-        }
-        if let Some(t) = self.turn.lock().await.as_ref() {
-            if self.people.is_people_chat(&t.chat_id) {
-                return Some(t.chat_id.clone());
+        let people_chat = if self.people.is_people_chat(hint) {
+            Some(hint.to_owned())
+        } else {
+            let turn = self.turn.lock().await;
+            turn.as_ref()
+                .map(|t| t.chat_id.clone())
+                .filter(|c| self.people.is_people_chat(c))
+        };
+        if let Some(chat) = people_chat {
+            if self.people.owner_only_people_chat(&chat) {
+                return Some(chat);
             }
+            return Some(crate::vault::owner_card_chat(self, &chat).await);
         }
         let chats = self.store.chats().ok().unwrap_or_default();
-        if let Some(pinned) = chats.iter().find(|c| c.is_pinned) {
+        let mine = |c: &&crate::store::ChatRow| !self.people.is_people_chat(&c.id);
+        if let Some(pinned) = chats.iter().find(|c| c.is_pinned && mine(c)) {
             return Some(pinned.id.clone());
+        }
+        if let Some(c) = chats.iter().find(mine) {
+            return Some(c.id.clone());
         }
         if let Some(t) = self.turn.lock().await.as_ref() {
             return Some(t.chat_id.clone());
@@ -365,6 +379,101 @@ impl Agent {
                 ApprovalOutcome::Expired
             }
         }
+    }
+
+    /// Who a decision that arrived as an `approve` / `reject` row in `chat_id`'s document may be
+    /// credited to, or the reason it may not be honoured at all.
+    ///
+    /// Nothing in a document row is attested. `issuedBy` is whatever the sending client wrote
+    /// (`arbos_core::doc::push_command`), the relay stores and forwards rows without parsing
+    /// them, and it admits a room socket on *membership* rather than ownership
+    /// (`AppState::allows`, `people::room_access`) — a client even names its own socket device
+    /// in its HELLO frame. So a decision row proves that someone who can write the room pressed
+    /// Approve, never who: matching `issuedBy` against a known device id of the owner would not
+    /// help, because device ids travel in plain document rows every member reads.
+    ///
+    /// The daemon therefore honours a document-borne decision only where the owner is the one
+    /// person who can write that document, and credits it to the owner it resolved rather than
+    /// to the row's label. Everything else is refused — including the case where the daemon
+    /// cannot tell, which is why the relay is asked for the project's member list and a failed
+    /// ask refuses too.
+    async fn document_decider(self: &Arc<Self>, chat_id: &str) -> Result<String, String> {
+        if self.people.is_people_chat(chat_id) {
+            if !self.people.owner_only_people_chat(chat_id) {
+                return Err(
+                    "this people chat has members other than the owner, so a decision written \
+                     into it does not identify the owner"
+                        .into(),
+                );
+            }
+            let owner = self
+                .people
+                .info(chat_id)
+                .map(|i| i.owner_user)
+                .filter(|o| !o.is_empty())
+                .unwrap_or_else(|| self.people.project_owner());
+            return Ok(format!("user:{owner}"));
+        }
+        // A project chat: the relay admits its room to every member of the project, so a
+        // project shared with even one guest has no document only the owner can write. The box
+        // is told nothing about guests in its `/box/projects` listing, so ask — the same box
+        // token the relay already answers `/box/shell-grants` with reads the member list.
+        let path = format!("/projects/{}/members", self.cfg.project_id);
+        let members: arbos_core::api::ProjectMembersDto = crate::vault::relay_get(self, &path)
+            .await
+            .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))
+            .map_err(|e| format!("the project's member list could not be read: {e}"))?;
+        if members.owner.is_empty() {
+            return Err("the project's member list does not name an owner".into());
+        }
+        let guests = members
+            .members
+            .iter()
+            .filter(|m| m.user_id != members.owner)
+            .count();
+        if guests > 0 {
+            return Err(format!(
+                "this project is shared with {guests} other \
+                 {}, who write the same chat documents the owner does",
+                if guests == 1 { "person" } else { "people" }
+            ));
+        }
+        Ok(format!("user:{}", members.owner))
+    }
+
+    /// The one route a decision takes from a chat document into the daemon (`agent.rs`'s
+    /// `approve` / `reject` arm, the commands the apps write). A refusal leaves the card
+    /// pending — the gated call stays blocked, nothing the row asked for is applied (a `grant`
+    /// above all), and the owner's own later decision still wins, which a foreign `reject`
+    /// would otherwise have taken from them (`store::decide_approval` is first-decision-wins).
+    pub async fn decide_approval_from_document(
+        self: &Arc<Self>,
+        chat_id: &str,
+        approval_id: &str,
+        outcome: ApprovalOutcome,
+        issued_by: &str,
+        payload: &Value,
+    ) -> Result<()> {
+        let state = outcome.state();
+        let decided_by = match self.document_decider(chat_id).await {
+            Ok(who) => who,
+            Err(why) => {
+                tracing::warn!(
+                    approval_id, chat_id, issued_by, state = state.as_str(), why = %why,
+                    "decision refused: this chat's document is not the owner's alone"
+                );
+                self.append_audit(
+                    "approval_decision_refused",
+                    json!({ "approval_id": approval_id, "chat_id": chat_id, "issued_by": issued_by,
+                            "asked_state": state.as_str(), "reason": why }),
+                );
+                return Err(anyhow!(
+                    "a decision written into this chat cannot be attributed to the owner ({why}); the card stays open"
+                ));
+            }
+        };
+        self.decide_approval_from_command(approval_id, outcome, &decided_by, payload)
+            .await
     }
 
     /// An `approve` command from a card: when it carries `grant` (option B/C), the standing grant
@@ -994,6 +1103,234 @@ impl Agent {
                     .await;
             }
         }
+    }
+}
+
+/// Only the owner decides a card, and a document says nothing about who wrote it: the rule in
+/// `decide_approval_from_document`, from the side that tries to get around it. Before it, an
+/// `approve` row any member of a shared project or a people group could write released the
+/// gated call, and a `reject` row took the decision from the owner for good.
+#[cfg(test)]
+mod decision_issuer_tests {
+    use super::*;
+    use crate::status::tests::test_agent_with;
+    use crate::sync::SharedHost;
+    use arbos_core::doc::CommandView;
+
+    const OWNER: &str = "u-test";
+    const FOREIGN_DEVICE: &str = "dev:not-the-owner";
+    const DESTRUCTIVE: &str = "rm -rf /work/app/src";
+
+    fn member_row(user_id: &str, role: &str) -> Value {
+        json!({ "id": user_id, "handle": user_id, "avatar_url": null, "name": null,
+                "status": "active", "created_at": 0, "user_id": user_id, "role": role,
+                "joined_at": 0, "last_seen_at": null, "online": false,
+                "avatar_color_index_effective": 0 })
+    }
+
+    /// The relay's `GET /projects/{id}/members` (`people::project_members_list`, which answers a
+    /// box token): the owner, plus whichever guests the project is shared with.
+    fn members_router(guests: &'static [&'static str]) -> axum::Router {
+        axum::Router::new().route(
+            "/projects/{id}/members",
+            axum::routing::get(
+                move |axum::extract::Path(id): axum::extract::Path<String>| async move {
+                    let mut members = vec![member_row(OWNER, "owner")];
+                    members.extend(guests.iter().map(|g| member_row(g, "member")));
+                    axum::Json(json!({ "project_id": id, "owner": OWNER, "members": members }))
+                },
+            ),
+        )
+    }
+
+    async fn pending_card(host: &SharedHost) -> Option<String> {
+        let h = host.lock().await;
+        h.doc
+            .approvals()
+            .into_iter()
+            .find(|p| p["state"] == "pending")
+            .and_then(|p| p["approvalId"].as_str().map(str::to_owned))
+    }
+
+    async fn wait_for_card(host: &SharedHost) -> String {
+        for _ in 0..300 {
+            if let Some(id) = pending_card(host).await {
+                return id;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the gated call posted no approval card");
+    }
+
+    /// `(approval id, the chat its card went to)` of the one card the gated call raised, found
+    /// through the store so the lookup does not assume where the card was posted.
+    async fn wait_for_card_row(agent: &Arc<Agent>) -> (String, String) {
+        for _ in 0..300 {
+            if let Some(row) = agent.store.pending_approvals().unwrap().first() {
+                return (row.id.clone(), row.chat_id.clone());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the gated call posted no approval card");
+    }
+
+    /// Write a decision into a chat document the way a client does, then read it back out as the
+    /// `CommandView` the command loop hands to `handle_command` (`workspace.rs`) — so the
+    /// issuer really travels through the document.
+    async fn decision_in_doc(
+        host: &SharedHost,
+        approve: bool,
+        approval_id: &str,
+        grant: Option<&str>,
+        device: &str,
+    ) -> CommandView {
+        let h = host.lock().await;
+        let mut payload = json!({ "approvalId": approval_id });
+        if let Some(class) = grant {
+            payload[GRANT_FIELD] = json!(class);
+        }
+        let id = h
+            .doc
+            .append_command(if approve { "approve" } else { "reject" }, payload, device);
+        h.doc
+            .commands()
+            .into_iter()
+            .find(|c| c.id == id)
+            .expect("the decision is in the document")
+    }
+
+    /// A guest of a shared project presses Approve on someone else's card. The relay admits
+    /// every project room to every member and forwards the row without reading it, so the
+    /// daemon sees an ordinary `approve` carrying a foreign `issuedBy` and a standing
+    /// `anywhere` grant. It must refuse: the card stays pending, the gated `rm -rf` stays
+    /// blocked, and no shell grant is recorded.
+    #[tokio::test]
+    async fn a_guests_approve_does_not_release_a_gated_call() {
+        let (agent, root) = test_agent_with(members_router(&["u-guest"])).await;
+        let chat = "01TESTCHATAPPROVALISSUER01";
+        agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
+        let host = agent.sync.open_room(chat).await.unwrap();
+
+        let gate = {
+            let (agent, chat) = (agent.clone(), chat.to_owned());
+            tokio::spawn(async move {
+                agent
+                    .gate_tool("bash", &json!({ "command": DESTRUCTIVE }), &chat)
+                    .await
+            })
+        };
+        let approval_id = wait_for_card(&host).await;
+
+        let cmd =
+            decision_in_doc(&host, true, &approval_id, Some("anywhere"), FOREIGN_DEVICE).await;
+        assert_eq!(cmd.issued_by, FOREIGN_DEVICE);
+        let decided = agent.handle_command(chat, cmd).await;
+        // Long enough for a released call to have come back, so "still blocked" means it.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let status = agent.approval_status(&approval_id).await;
+        let grants = agent.approvals.shell_grants.lock().await.clone();
+        assert_eq!(
+            status["state"], "pending",
+            "a guest's approve decided the owner's card: {status}"
+        );
+        assert!(
+            !gate.is_finished(),
+            "a guest's approve released the gated `{DESTRUCTIVE}`: {:?}",
+            gate.await
+        );
+        assert!(
+            grants.is_empty(),
+            "a guest's approve recorded a standing shell grant: {grants:?}"
+        );
+        let refused = decided
+            .expect_err("a guest's approve must be refused, not reported done")
+            .to_string();
+        assert!(
+            refused.contains("cannot be attributed to the owner"),
+            "{refused}"
+        );
+        gate.abort();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A people group this agent is in. The card is raised from the group but posted into the
+    /// owner's own chat (§7.7, `vault::owner_card_chat`), because only there can the owner's
+    /// word be told from a member's. A member's `reject` written into the group document is
+    /// refused and leaves the card pending — `store::decide_approval` is first-decision-wins,
+    /// so a reject that landed would have defeated the owner's own approve for good — and the
+    /// owner's decision in their own chat still works, credited to the resolved owner.
+    #[tokio::test]
+    async fn a_members_reject_cannot_defeat_the_owners_own_decision() {
+        let (agent, root) = test_agent_with(members_router(&[])).await;
+        let owner_chat = "01TESTCHATAPPROVALISSUER02";
+        let group = "01TESTCHATAPPROVALISSUER03";
+        agent
+            .store
+            .upsert_chat(owner_chat, "Main", true, 0)
+            .unwrap();
+        let owner_host = agent.sync.open_room(owner_chat).await.unwrap();
+        agent.people.set_project_owner(OWNER);
+        agent.people.test_insert(
+            group,
+            crate::people::PeopleChatInfo {
+                members: vec![
+                    json!({ "member": format!("user:{OWNER}"), "handle": "owner" }),
+                    json!({ "member": "user:u-guest", "handle": "guest" }),
+                    json!({ "member": "agent:01TESTPROJECTQUICKREPLY000", "handle": "doug" }),
+                ],
+                owner_user: OWNER.into(),
+                kind: "group".into(),
+                ..Default::default()
+            },
+        );
+        let group_host = agent.sync.open_room(group).await.unwrap();
+
+        let gate = {
+            let (agent, group) = (agent.clone(), group.to_owned());
+            tokio::spawn(async move {
+                agent
+                    .gate_tool("bash", &json!({ "command": DESTRUCTIVE }), &group)
+                    .await
+            })
+        };
+        let (approval_id, card_chat) = wait_for_card_row(&agent).await;
+
+        // A member writes `reject` where a member can write: the group's document.
+        let cmd = decision_in_doc(&group_host, false, &approval_id, None, FOREIGN_DEVICE).await;
+        let decided = agent.handle_command(group, cmd).await;
+        let status = agent.approval_status(&approval_id).await;
+        assert_eq!(
+            status["state"], "pending",
+            "a member's reject decided the owner's card: {status}"
+        );
+        decided.expect_err("a member's reject must be refused, not reported done");
+
+        // So the owner's own decision is still theirs to make, and still works.
+        let cmd = decision_in_doc(&owner_host, true, &approval_id, None, "dev-mac").await;
+        agent.handle_command(owner_chat, cmd).await.unwrap();
+        let status = agent.approval_status(&approval_id).await;
+        assert_eq!(status["state"], "approved", "{status}");
+        assert_eq!(
+            status["decidedBy"],
+            format!("user:{OWNER}"),
+            "the decision is credited to the resolved owner, not to the row's label"
+        );
+        assert!(
+            gate.await.unwrap().is_ok(),
+            "the owner's approve releases the gated call"
+        );
+
+        // And the card was decidable by the owner because it was posted in their own chat.
+        assert_eq!(
+            card_chat, owner_chat,
+            "a card raised in a shared group belongs in the owner's own chat"
+        );
+        assert!(
+            pending_card(&group_host).await.is_none(),
+            "no card is left in the shared group's document"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
