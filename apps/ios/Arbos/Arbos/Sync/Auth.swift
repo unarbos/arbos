@@ -36,6 +36,23 @@ struct AuthUser: Codable, Equatable {
     var avatarUrl: String?
     /// D79 `avatar_color_index_effective` (nil → derived from `id`).
     var avatarColorIndexEffective: Int? = nil
+    /// When the relay created this account, and when it last answered a sign-in for it
+    /// (`created_at` / `last_login_at` on `/auth/token` and `/me`).
+    var createdAt: Int64? = nil
+    var lastLoginAt: Int64? = nil
+
+    /// The relay's own answer to "did this account exist before the sign-in that sent me
+    /// this?". `upsert_github_user` writes both stamps from one clock on the insert that
+    /// creates the account, and moves only `last_login_at` on every sign-in after it, so a
+    /// later `last_login_at` means a returning user.
+    ///
+    /// A payload carrying neither stamp counts as existing. That is the only safe default:
+    /// treating an unknown account as new is what shows someone the setup form for a
+    /// profile they already chose.
+    var accountPredatesThisSignIn: Bool {
+        guard let createdAt, let lastLoginAt else { return true }
+        return lastLoginAt > createdAt
+    }
 }
 
 /// `GET /me` credits block.
@@ -265,7 +282,9 @@ extension RelayAPI {
             id: dto.id,
             login: login,
             name: dto.name.flatMap { $0 },
-            avatarUrl: dto.avatar_url.flatMap { $0 }
+            avatarUrl: dto.avatar_url.flatMap { $0 },
+            createdAt: dto.created_at,
+            lastLoginAt: dto.last_login_at.flatMap { $0 }
         )
     }
 }
