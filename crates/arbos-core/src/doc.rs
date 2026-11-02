@@ -679,6 +679,64 @@ impl ChatDoc {
         Ok(self.doc.import(bytes)?)
     }
 
+    /// A detached copy of this doc, for trying an import without touching the original. O(n) in
+    /// time and space (Loro `fork`), so callers should reach for it on a cold path only.
+    /// The copy carries its own redaction subscription and is not kept in sync with this one.
+    pub fn fork(&self) -> Self {
+        let doc = self.doc.fork();
+        let redaction_seen = Arc::new(AtomicBool::new(false));
+        let seen = redaction_seen.clone();
+        let sub = doc.subscribe_root(Arc::new(move |e: DiffEvent<'_>| {
+            if diff_marks_redaction(&e) {
+                seen.store(true, Ordering::Relaxed);
+            }
+        }));
+        Self {
+            doc,
+            live_text: RefCell::new(HashMap::new()),
+            txn_depth: Cell::new(0),
+            history_dirty: Cell::new(self.history_dirty.get()),
+            shallow_mode: Cell::new(self.shallow_mode.get()),
+            redaction_seen,
+            _redaction_sub: sub,
+        }
+    }
+
+    /// Ids of the messages carrying a `notice` field — the structured facts behind a membership
+    /// system line, which only the relay writes (`arbos-relay/src/notices.rs`). Reads the key off
+    /// each message map directly rather than building [`MessageView`]s, because the relay asks
+    /// this of whole rooms.
+    pub fn notice_message_ids(&self) -> BTreeSet<String> {
+        let list = self.messages_list();
+        let mut out = BTreeSet::new();
+        for i in 0..list.len() {
+            let Some(ValueOrContainer::Container(Container::Map(m))) = list.get(i) else {
+                continue;
+            };
+            if m.get("notice").is_none() {
+                continue;
+            }
+            if let Some(ValueOrContainer::Value(LoroValue::String(id))) = m.get("id") {
+                out.insert(id.to_string());
+            }
+        }
+        out
+    }
+
+    /// Cheap pre-filter for [`Self::notice_message_ids`] diffing: could this update possibly set
+    /// a `notice` key at all? Loro writes map keys into the update blob as plain UTF-8 and does
+    /// not compress at the sizes the relay accepts, so a blob without these bytes cannot be
+    /// setting that key and needs no doc work. **False positives are expected** — ordinary
+    /// message text containing the word matches too — so a `true` answer means "look properly",
+    /// never "refuse".
+    ///
+    /// `update_blob_keys_are_plain_utf8` guards the assumption: if a Loro upgrade ever starts
+    /// compressing, that test fails rather than this quietly returning `false` for a real one.
+    pub fn update_may_set_notice(update: &[u8]) -> bool {
+        const KEY: &[u8] = b"notice";
+        update.windows(KEY.len()).any(|w| w == KEY)
+    }
+
     pub fn oplog_vv(&self) -> VersionVector {
         self.doc.oplog_vv()
     }
@@ -3189,5 +3247,113 @@ mod tests {
         let plain = &without.to_json()["messages"][0]["parts"][0]["attachment"];
         assert!(plain.get("source").is_none());
         assert_eq!(plain["name"], "shot.png");
+    }
+}
+
+#[cfg(test)]
+mod notice_probe_tests {
+    //! The relay refuses a pushed row that introduces a `notice` field, because only the relay
+    //! writes those (`arbos-relay/src/notices.rs`). These cover the two pieces it does that with.
+
+    use super::*;
+
+    fn notice() -> Value {
+        serde_json::json!({
+            "kind": "removed",
+            "actor": "u_alice",
+            "subjects": [{ "kind": "user", "id": "u_bob" }],
+        })
+    }
+
+    /// The pre-filter's whole assumption: Loro puts map keys in the update blob as plain UTF-8
+    /// and does not compress at the sizes the relay accepts (`wire::ROW_MAX`, 1 MiB). If a Loro
+    /// upgrade breaks that, this fails here instead of the pre-filter quietly waving a forged
+    /// row through. Checked small and at ~200 KB, since compression usually starts at a size.
+    #[test]
+    fn update_blob_keys_are_plain_utf8() {
+        for filler in [0usize, 500] {
+            let d = ChatDoc::new(None, false);
+            d.transact(|x| {
+                x.append_system_line("m0", "seed", "dev:a", None).unwrap();
+            });
+            let base = d.oplog_vv();
+            d.transact(|x| {
+                for i in 0..filler {
+                    x.append_user_message(
+                        &format!("m{i:04}"),
+                        &"filler ".repeat(20),
+                        "dev:a",
+                        &UserMessageOpts::default(),
+                    )
+                    .ok();
+                }
+                x.append_system_line("m_n", "Alice removed Bob", "relay", None)
+                    .unwrap();
+                x.set_message_fields("m_n", &[("notice", notice())]);
+            });
+            let update = d.export_updates_since(&base);
+            assert!(
+                ChatDoc::update_may_set_notice(&update),
+                "a {} byte update that sets `notice` must be visible to the pre-filter",
+                update.len()
+            );
+        }
+    }
+
+    /// And the pre-filter says no when the key is absent, which is the whole point of having it.
+    #[test]
+    fn an_ordinary_message_does_not_trip_the_pre_filter() {
+        let d = ChatDoc::new(None, false);
+        d.transact(|x| {
+            x.append_system_line("m0", "seed", "dev:a", None).unwrap();
+        });
+        let base = d.oplog_vv();
+        d.transact(|x| {
+            x.append_user_message(
+                "m1",
+                "Alice removed Bob from the shared folder",
+                "dev:a",
+                &UserMessageOpts::default(),
+            )
+            .ok();
+        });
+        assert!(!ChatDoc::update_may_set_notice(
+            &d.export_updates_since(&base)
+        ));
+    }
+
+    /// `notice_message_ids` finds the field, and a fork of a doc answers for itself without
+    /// changing the original — the relay probes a pushed row that way.
+    #[test]
+    fn a_fork_can_be_probed_without_touching_the_original() {
+        let author = ChatDoc::new(None, false);
+        author.transact(|d| {
+            d.append_system_line("m_old", "earlier", "dev:a", None)
+                .unwrap();
+        });
+        let room_bytes = author.export_updates_since(&Default::default());
+        let base = author.oplog_vv();
+        author.transact(|d| {
+            d.append_system_line("m_forged", "Alice removed Bob", "relay", None)
+                .unwrap();
+            d.set_message_fields("m_forged", &[("notice", notice())]);
+        });
+        let pushed = author.export_updates_since(&base);
+
+        let mut room = ChatDoc::new(None, false);
+        room.import(&room_bytes).expect("room");
+        assert!(room.notice_message_ids().is_empty(), "nothing yet");
+
+        let mut probe = room.fork();
+        probe.import(&pushed).expect("probe import");
+        assert_eq!(
+            probe.notice_message_ids(),
+            BTreeSet::from(["m_forged".to_owned()]),
+            "the fork sees the field the push introduces"
+        );
+        assert!(
+            room.notice_message_ids().is_empty(),
+            "and the room doc is untouched by the probe"
+        );
     }
 }

@@ -1,5 +1,9 @@
 //! Sync rooms (crdt-sync §7, §9): `WS /room/{projectId}/{chatId}`. The relay
-//! stores and forwards opaque rows; it never parses Loro bytes.
+//! stores and forwards opaque rows.
+//!
+//! It parses Loro bytes on the push path in exactly one place, [`push_introduces_notice`]: a
+//! membership line's `notice` facts are the relay's to write and no client's, and the only way to
+//! know whether a row claims them is to look. Everything else about a row stays opaque.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -165,6 +169,80 @@ pub async fn room_tail_rows(
     let rows = tail(&built.doc);
     *room.doc_cache.lock().unwrap() = Some(built);
     Ok(rows)
+}
+
+/// Why the relay would not take a pushed row.
+enum NoticeVerdict {
+    /// Nothing in it claims to be a membership notice.
+    Clean,
+    /// It introduces one or more `notice` fields, which only the relay writes.
+    Forged,
+    /// Loro could not read the blob at all.
+    Unreadable,
+    /// It read, but its ops depend on history the relay does not hold, so the relay cannot see
+    /// what it contains. Only reachable for a row that already looks like a notice.
+    Unverifiable,
+}
+
+/// Does this pushed row introduce a `notice` field — the structured facts (`kind`, `actor`,
+/// `subjects`) behind a membership system line?
+///
+/// Only `notices.rs` ever writes that field, and it writes it on the relay's own authority after
+/// a membership change it performed itself. A client has no legitimate reason to set it, and a
+/// client that does gets a line the apps re-render from the live roster, so a forged one reads
+/// with everyone's correct current names (#2338).
+///
+/// Cost and how it is kept small: the answer needs the room's doc, because an update is a delta
+/// whose ops do not materialise on their own. So the common case is decided by
+/// `ChatDoc::update_may_set_notice`, a byte scan that cannot produce a false negative; only a row
+/// that scans positive is imported into a **fork** of the room's cached doc, which leaves the
+/// cached doc — and so the version vector the relay advertises — untouched whatever the verdict.
+async fn push_introduces_notice(
+    state: &AppState,
+    room: &crate::state::Room,
+    room_name: &str,
+    payload: &[u8],
+) -> anyhow::Result<NoticeVerdict> {
+    use arbos_core::doc::ChatDoc;
+
+    if !ChatDoc::update_may_set_notice(payload) {
+        return Ok(NoticeVerdict::Clean);
+    }
+    let probe = |doc: &ChatDoc| -> NoticeVerdict {
+        let before = doc.notice_message_ids();
+        let mut fork = doc.fork();
+        match fork.import(payload) {
+            Err(_) => NoticeVerdict::Unreadable,
+            // A version gap is not a refusal on its own — a device whose rows the relay lost is
+            // exactly who heals it. But the relay cannot read what it cannot assemble, and this
+            // row already scanned positive, so it is not waved through either.
+            Ok(st) if st.pending.as_ref().is_some_and(|p| !p.is_empty()) => {
+                NoticeVerdict::Unverifiable
+            }
+            Ok(_) => {
+                if fork.notice_message_ids().is_subset(&before) {
+                    NoticeVerdict::Clean
+                } else {
+                    NoticeVerdict::Forged
+                }
+            }
+        }
+    };
+    {
+        let mut guard = room.doc_cache.lock().unwrap();
+        if let Some(cached) = guard.as_mut() {
+            advance_room_doc(state, room_name, cached)?;
+            return Ok(probe(&cached.doc));
+        }
+    }
+    let state_c = state.clone();
+    let name = room_name.to_owned();
+    let built = tokio::task::spawn_blocking(move || build_room_doc(&state_c, &name))
+        .await
+        .map_err(|e| anyhow::anyhow!("room doc rebuild: {e}"))??;
+    let verdict = probe(&built.doc);
+    *room.doc_cache.lock().unwrap() = Some(built);
+    Ok(verdict)
 }
 
 /// Per-socket row ordering (see `run`).
@@ -594,6 +672,48 @@ async fn handle_frame(
                     Err(r) => {
                         sink.send(push_refused_frame(&r, &p.batch_id)).await?;
                         return Ok(());
+                    }
+                }
+            }
+            // A membership line's `notice` facts are the relay's own (`notices.rs`); a row that
+            // claims them is refused rather than stored and broadcast (#2338). This runs after
+            // the people gates so that forging costs a sender their rate budget, and it is
+            // skipped for a heal: a heal pushes back history the relay lost, which legitimately
+            // contains relay-written notices the relay can no longer corroborate. That exemption
+            // is a known limit, recorded in the pull request, not an oversight.
+            if !p.heal {
+                match push_introduces_notice(state, room, room_name, &f.payload).await {
+                    Ok(NoticeVerdict::Clean) => {}
+                    Ok(verdict) => {
+                        let (code, why) = match verdict {
+                            NoticeVerdict::Forged => (
+                                "notice_not_yours",
+                                "a membership notice is written by the relay",
+                            ),
+                            NoticeVerdict::Unreadable => {
+                                ("row_unreadable", "this row could not be read")
+                            }
+                            NoticeVerdict::Unverifiable => (
+                                "row_unverifiable",
+                                "this row needs history the relay does not hold",
+                            ),
+                            NoticeVerdict::Clean => unreachable!("handled above"),
+                        };
+                        tracing::warn!(
+                            %room_name, %device, batch_id = %p.batch_id, bytes = f.payload.len(),
+                            code, "push refused: {why}"
+                        );
+                        sink.send(error_frame(code, why)).await?;
+                        return Ok(());
+                    }
+                    // The check needs the room's doc. If that cannot be built the relay cannot
+                    // judge the row, and a storage or rebuild failure is not the sender's fault:
+                    // log it and take the row, as every other reader of this cache does.
+                    Err(e) => {
+                        tracing::error!(
+                            %room_name, %device, error = %e,
+                            "notice check skipped: the room doc could not be read"
+                        );
                     }
                 }
             }
@@ -2333,5 +2453,340 @@ mod covered_push_tests {
         assert_ne!(vv1, vv_cached);
         // And it equals encoding the writer's own vv once the room holds the same ops.
         assert_eq!(vv_cached, encode_vv(&doc.oplog_vv()));
+    }
+}
+
+#[cfg(test)]
+mod notice_forgery_tests {
+    //! #2338: the `notice` facts on a membership system line are the relay's to write
+    //! (`notices.rs` writes them after a membership change it performed). A member device that
+    //! pushes a row claiming them gets a line both apps re-render from the live roster, so it
+    //! reads with everyone's correct current names. The relay refuses such a row.
+
+    use axum::routing::get;
+    use axum::Router;
+    use futures::{SinkExt, StreamExt};
+    use serde_json::json;
+    use std::net::SocketAddr;
+    use std::time::Duration;
+    use tokio_tungstenite::tungstenite::Message as TMsg;
+
+    use arbos_core::doc::{ChatDoc, UserMessageOpts};
+    use arbos_core::ids::ulid;
+    use arbos_core::wire::{Frame, FrameType};
+
+    use crate::people::tests_support::{group, person};
+    use crate::state::test_support::test_state;
+    use crate::state::{AppState, AuthMode};
+
+    async fn serve(state: AppState) -> SocketAddr {
+        let app = Router::new()
+            .route("/room/{project}/{chat}", get(super::ws_room))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        addr
+    }
+
+    fn device_token(state: &AppState, user: &str) -> String {
+        let token = format!("adv_{}", ulid().to_ascii_lowercase());
+        state
+            .db
+            .insert_device(
+                &ulid(),
+                "t",
+                &arbos_core::auth::hash(&token),
+                user,
+                "paircode",
+            )
+            .unwrap();
+        token
+    }
+
+    fn decode(m: TMsg) -> Option<Frame> {
+        match m {
+            TMsg::Binary(b) => Frame::decode(b).ok().flatten(),
+            _ => None,
+        }
+    }
+
+    /// Catch up, push one batch, return the ACK or ERROR for it.
+    async fn push_one(
+        addr: SocketAddr,
+        room: &str,
+        token: &str,
+        device: &str,
+        batch_id: &str,
+        payload: Vec<u8>,
+        heal: bool,
+    ) -> Frame {
+        let url = format!("ws://{addr}/room/{room}?token={token}");
+        let (ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+        let (mut sink, mut stream) = ws.split();
+        sink.send(TMsg::Binary(
+            Frame::new(
+                FrameType::Hello,
+                json!({
+                    "cursor": 0, "device": device, "room": room,
+                    "proto": arbos_core::PROTO_VERSION
+                }),
+                bytes::Bytes::new(),
+            )
+            .encode(),
+        ))
+        .await
+        .unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let m = tokio::time::timeout_at(deadline, stream.next())
+                .await
+                .expect("relay answers")
+                .unwrap()
+                .unwrap();
+            let Some(f) = decode(m) else { continue };
+            match f.ty {
+                FrameType::State => {
+                    sink.send(TMsg::Binary(
+                        Frame::new(
+                            FrameType::RowsReq,
+                            json!({ "after": 0, "excludeOwn": false }),
+                            bytes::Bytes::new(),
+                        )
+                        .encode(),
+                    ))
+                    .await
+                    .unwrap();
+                }
+                FrameType::RowsDone => break,
+                _ => {}
+            }
+        }
+        sink.send(TMsg::Binary(
+            Frame::new(
+                FrameType::Push,
+                json!({ "batchId": batch_id, "heal": heal }),
+                bytes::Bytes::from(payload),
+            )
+            .encode(),
+        ))
+        .await
+        .unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let m = tokio::time::timeout_at(deadline, stream.next())
+                .await
+                .expect("ack/error")
+                .unwrap()
+                .unwrap();
+            if let Some(f) = decode(m) {
+                if matches!(f.ty, FrameType::Ack | FrameType::Error) {
+                    return f;
+                }
+            }
+        }
+    }
+
+    /// A group with a stored base row, plus the member's doc holding that base. Pushes built from
+    /// `doc` apply cleanly on the relay's side rather than parking as pending.
+    fn group_with_base(state: &AppState) -> (String, String, String, ChatDoc) {
+        let (alice, _) = person(state, 1);
+        let (bob, _) = person(state, 2);
+        let (carol, _) = person(state, 3);
+        let chat = group(state, &[&alice, &bob, &carol]);
+        let room = format!("people/{chat}");
+        let doc = ChatDoc::new(Some(7), false);
+        let base = doc.oplog_vv();
+        doc.init_meta(&chat, "people", 1);
+        doc.transact(|d| {
+            d.append_user_message("m_seed", "hi all", "dev:bob", &UserMessageOpts::default())
+                .unwrap();
+        });
+        state
+            .db
+            .append_row(&room, "dev:bob", "base", &doc.export_updates_since(&base))
+            .unwrap();
+        (bob, chat, room, doc)
+    }
+
+    fn forged_notice(doc: &ChatDoc, id: &str) -> Vec<u8> {
+        let base = doc.oplog_vv();
+        doc.transact(|d| {
+            d.append_system_line(id, "Alice removed Carol", "relay", None)
+                .unwrap();
+            d.set_message_fields(
+                id,
+                &[(
+                    "notice",
+                    json!({
+                        "kind": "removed",
+                        "actor": "u_alice",
+                        "subjects": [{ "kind": "user", "id": "u_carol" }],
+                    }),
+                )],
+            );
+        });
+        doc.export_updates_since(&base)
+    }
+
+    /// The finding: an ordinary member's push claiming a membership notice is refused, stores no
+    /// row and reaches nobody.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_pushed_membership_notice_is_refused() {
+        let state = test_state(AuthMode::Github);
+        let (bob, _chat, room, doc) = group_with_base(&state);
+        let token = device_token(&state, &bob);
+        let head_before = state.db.room_state(&room).unwrap().head;
+
+        let addr = serve(state.clone()).await;
+        let f = push_one(
+            addr,
+            &room,
+            &token,
+            "dev:bob",
+            "forge-1",
+            forged_notice(&doc, "m_forged"),
+            false,
+        )
+        .await;
+
+        assert_eq!(f.ty, FrameType::Error, "header={}", f.header);
+        assert_eq!(f.header["code"], "notice_not_yours", "header={}", f.header);
+        assert_eq!(
+            state.db.room_state(&room).unwrap().head,
+            head_before,
+            "the forged row is not stored"
+        );
+    }
+
+    /// The pre-filter matches on message text as well, so the expensive check has to say no:
+    /// a member writing the word is an ordinary message and must still send.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_ordinary_message_using_the_word_notice_is_accepted() {
+        let state = test_state(AuthMode::Github);
+        let (bob, _chat, room, doc) = group_with_base(&state);
+        let token = device_token(&state, &bob);
+        let head_before = state.db.room_state(&room).unwrap().head;
+
+        let base = doc.oplog_vv();
+        doc.transact(|d| {
+            d.append_user_message(
+                "m_word",
+                "did you see the notice about the removed bins?",
+                "dev:bob",
+                &UserMessageOpts::default(),
+            )
+            .unwrap();
+        });
+        let payload = doc.export_updates_since(&base);
+        assert!(
+            ChatDoc::update_may_set_notice(&payload),
+            "this message is exactly the pre-filter's false positive"
+        );
+
+        let addr = serve(state.clone()).await;
+        let f = push_one(addr, &room, &token, "dev:bob", "word-1", payload, false).await;
+
+        assert_eq!(f.ty, FrameType::Ack, "header={}", f.header);
+        assert_eq!(f.header["dup"], false, "header={}", f.header);
+        assert_eq!(
+            state.db.room_state(&room).unwrap().head,
+            head_before + 1,
+            "an ordinary message is stored"
+        );
+    }
+
+    /// A notice the relay already wrote is in the room, so a later push whose ops include it
+    /// again (a device resending a batch) is not a forgery: only a *new* notice is.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_push_that_re_includes_an_existing_notice_is_accepted() {
+        let state = test_state(AuthMode::Github);
+        let (bob, _chat, room, doc) = group_with_base(&state);
+        let token = device_token(&state, &bob);
+
+        // The relay's own notice, written the way `notices::write_doc` writes it: a row signed
+        // `relay`, not a client push.
+        let base = doc.oplog_vv();
+        doc.transact(|d| {
+            d.append_system_line("m_real", "Alice added Carol", "relay", None)
+                .unwrap();
+            d.set_message_fields(
+                "m_real",
+                &[(
+                    "notice",
+                    json!({ "kind": "added", "actor": "u_alice",
+                            "subjects": [{ "kind": "user", "id": "u_carol" }] }),
+                )],
+            );
+        });
+        let notice_bytes = doc.export_updates_since(&base);
+        state
+            .db
+            .append_row(
+                &room,
+                super::super::notices::RELAY_DEVICE,
+                "relay-1",
+                &notice_bytes,
+            )
+            .unwrap();
+
+        // Now the member pushes one batch covering that notice *and* a new message of its own,
+        // by exporting from before the notice.
+        doc.transact(|d| {
+            d.append_user_message("m_next", "welcome!", "dev:bob", &UserMessageOpts::default())
+                .unwrap();
+        });
+        let payload = doc.export_updates_since(&base);
+        assert!(
+            payload.len() > notice_bytes.len(),
+            "the batch really does carry the notice ops as well as the new message"
+        );
+        let head_before = state.db.room_state(&room).unwrap().head;
+
+        let addr = serve(state.clone()).await;
+        let f = push_one(
+            addr,
+            &room,
+            &token,
+            "dev:bob",
+            "reinclude-1",
+            payload,
+            false,
+        )
+        .await;
+
+        assert_eq!(f.ty, FrameType::Ack, "header={}", f.header);
+        assert_eq!(
+            state.db.room_state(&room).unwrap().head,
+            head_before + 1,
+            "the batch is stored"
+        );
+    }
+
+    /// The known limit, recorded so it is not a surprise: a heal is exempt. A heal pushes back
+    /// history the relay lost, which legitimately holds relay-written notices the relay can no
+    /// longer corroborate — refusing it would break the recovery path instead. Closing this needs
+    /// its own decision; see the pull request.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_heal_is_exempt_and_may_still_carry_a_notice() {
+        let state = test_state(AuthMode::Github);
+        let (bob, _chat, room, doc) = group_with_base(&state);
+        let token = device_token(&state, &bob);
+        let head_before = state.db.room_state(&room).unwrap().head;
+
+        let addr = serve(state.clone()).await;
+        let f = push_one(
+            addr,
+            &room,
+            &token,
+            "dev:bob",
+            "heal-1",
+            forged_notice(&doc, "m_healed"),
+            true,
+        )
+        .await;
+
+        assert_eq!(f.ty, FrameType::Ack, "a heal is not content-checked");
+        assert_eq!(state.db.room_state(&room).unwrap().head, head_before + 1);
     }
 }
