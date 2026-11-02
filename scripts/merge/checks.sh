@@ -145,28 +145,35 @@ gate_state() {
   # A job skipped by an `if:` condition did no work, so it proves nothing about this commit.
   red=$(printf '%s\n' "$list" | awk '$4!="success" && $4!="skipped" && $4!="neutral"')
   [ -n "$red" ] && { echo "RED $got run(s) on this head, none successful: $all"; return; }
-  # A live path, not a canary. This branch used to say the opposite, on the ground that under #2448
-  # every run reaches an always() verdict job that fails closed, so a wholly skipped run could only
-  # mean that guarantee had broken. #2448 has not landed: main's swift-core-check.yml has one job,
-  # `check`, and its only always() is the log-upload step. So an ordinary action reaches here — an
-  # empty commit on a gate-applying PR mints a pull_request run whose job skips, and mints no push
-  # run at all, because an empty change set matches none of the workflow's paths.
+  # A reachable state with two causes, and the branch names which one rather than asserting either.
   #
-  # Hence the two causes below. They refuse identically and are repaired in different files, so
-  # naming the wrong one is its own harm: it sends a reader to audit a workflow that is working
-  # while the head simply has no run that tested it. Which one applies is already in $list — a
-  # missing push run is visible as the absence of a push event — so it is said rather than guessed.
+  # The two are repaired in different files, so naming the wrong one is its own harm: it sends a
+  # reader to audit a workflow that is working while the head simply has no run that tested it.
+  # Which one applies is already in $list, because every run there carries its event — so it is read
+  # off the data and not inferred from what anyone believed about the workflow.
+  #   no push event   the workflow's path filter matched nothing this head changed, so no push run
+  #                   was ever minted and nothing was asked to test it. An empty commit on a PR the
+  #                   gate applies to produces exactly this: the pull_request trigger still fires on
+  #                   the three-dot diff and its job skips. A missing run.
+  #   a push event    a run was minted, so the filter did match, and it still tested nothing. Read
+  #                   the workflow's jobs for this run: something that should have run did not.
+  # This is said rather than guessed, and it stays true however the workflow is built — it is a
+  # statement about the runs GitHub recorded, not about which jobs the workflow is expected to have.
+  # A previous comment here asserted the second cause outright, on the strength of a pull request
+  # that would make the first impossible. That pull request had not landed, so every reader of this
+  # branch was told the wrong thing; an assertion about another file's future is a claim nothing can
+  # test, which is why there is none here now.
   #
-  # The branch stays whatever #2448 does. It is live for historical heads too, whose all-skipped
-  # runs sit on main's history permanently and are read by the audit paths, and it arrives here by
-  # falling through the red= filter above, which deliberately excludes skipped and neutral. Delete
-  # it and the case has to be reclassified; the convenient reclassification is "pass", which
-  # restores the original bug inside the one function written to prevent it.
+  # The branch itself stays. It is live for historical heads, whose all-skipped runs sit on main's
+  # history permanently and are read by the audit paths, and it arrives here by falling through the
+  # red= filter above, which deliberately excludes skipped and neutral. Delete it and the case has
+  # to be reclassified; the convenient reclassification is "pass", which restores the original bug
+  # inside the one function written to prevent it.
   local why
   if printf '%s\n' "$list" | awk '$2=="push"{found=1} END{exit !found}'; then
-    why="a push run exists for this head and still tested nothing, so whatever should have failed closed in ${wf##*/} did not — read that as the alarm"
+    why="a push run was minted for this head, so ${wf##*/}'s path filter did match it, and it still tested nothing — read that run's jobs: something that should have run did not"
   else
-    why="no push run exists for this head, so nothing was ever asked to test it — a change set matching none of ${wf##*/}'s paths, an empty commit for one, mints no push run. A missing run, not a broken guarantee"
+    why="no push run exists for this head, so nothing was ever asked to test it — a change set matching none of ${wf##*/}'s paths, an empty commit for one, mints no push run. A missing run, not a broken workflow"
   fi
   echo "NOVERDICT $got run(s) on this head, every one skipped or neutral, so none of them tested it ($why): $all"
 }
