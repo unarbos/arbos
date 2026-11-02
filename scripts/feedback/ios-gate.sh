@@ -43,6 +43,25 @@ failing_tests() {
     | sed -E "s/^Test Case '-\[ArbosTests\.([A-Za-z0-9_]+) ([A-Za-z0-9_]+)\]' failed.*/\1\/\2/" | sort -u
 }
 
+# case_reason <xcodebuild log> <Class/test> → "<file>:<line>: <assertion>" for that one case, or
+# nothing. run_suite runs with parallelisation off, so each failed assertion prints its own line:
+#   /Users/x/arbos-gate/apps/ios/Arbos/ArbosTests/PinPolicyTests.swift:88: error: -[ArbosTests.PinPolicyTests testAMemberCannotPin] : XCTAssertTrue failed - a plain member may not pin
+# A case can report several; the first is the one that decided it and the rest are counted. Nothing
+# is a normal answer rather than a fault, and the caller must still name the case: an interleaved
+# simulator message can cut the line mid-word, and a run on parallel clones prints no such line for
+# any failure at all (hosted run 41239073951 failed a unit case with no assertion text anywhere in
+# its 12,405-line log; the assertion lives only in the .xcresult bundle, which the gate does not keep).
+case_reason() {
+  local class=${2%%/*} test=${2#*/} hits n
+  hits=$(grep -E ": error: -\[[A-Za-z0-9_]+\.${class} ${test}\] : " "$1" 2>/dev/null \
+    | sed -E "s#^.*/([^/]+:[0-9]+): error: -\[[^]]*\] : #\1: #" | cut -c1-220)
+  [[ -n "$hits" ]] || return 0
+  n=$(printf '%s\n' "$hits" | grep -c .)
+  printf '%s' "$(printf '%s\n' "$hits" | head -n 1)"
+  (( n > 1 )) && printf ' (+%d more assertion(s))' "$(( n - 1 ))"
+  return 0
+}
+
 test_sim_udid() {
   xcrun simctl list devices available 2>/dev/null | grep -F "$TEST_SIM_NAME (" | grep -oE '[0-9A-F-]{36}' | head -n 1
 }
@@ -110,7 +129,7 @@ baseline_for() {
 }
 
 run_unit_tests() {
-  local log t0 fails base baseline new
+  local log t0 fails base baseline new tc reason
   log=$(mktemp -t ios-gate-tests); t0=$(date +%s)
   run_suite "$HOME/arbos-gate-dd-Debug" "$log"
   local trc=$?
@@ -139,8 +158,16 @@ run_unit_tests() {
     rm -f "$log"; return 0
   fi
   echo "== tests: FAIL — failing and NOT red on main (${base:0:8}):"
-  printf '%s\n' "$new" | head -20
-  grep -E "error: -\[ArbosTests\." "$log" | sed 's#/Users/[^/]*/arbos-gate/##' | head -20 | cut -c1-300
+  # Name and reason on one line each, under the "== " prefix. The bare "Class/test" list that used to
+  # be here matches neither grep rust-gate.sh's `status` forwards, so the names never reached the
+  # issue; what did reach it was an unpaired dump of every `error: -[ArbosTests.` line in the log,
+  # which also carried the reasons of the baseline-red failures this branch is not blamed for, with
+  # nothing saying which case any of them belonged to.
+  while IFS= read -r tc; do
+    [[ -n "$tc" ]] || continue
+    reason=$(case_reason "$log" "$tc")
+    echo "== tests: FAIL $tc — ${reason:-reason not captured (the log holds no assertion line for it)}"
+  done < <(printf '%s\n' "$new" | head -20)
   rm -f "$log"; return 1
 }
 
@@ -174,6 +201,22 @@ if [[ "${1:-}" == "selftest" ]]; then
     echo "selftest: failing-test parser reads Class/test"
   else
     echo "selftest: failing-test parser WRONG — got: $(failing_tests "$tlog")"; rm -f "$tlog"; exit 1
+  fi
+  # A blamed case has to say why it failed, and one the log holds no assertion line for — the third
+  # line below is a real record cut mid-name by an interleaved observer message — has to come back
+  # empty so the caller can still name it. 19 of the 65 gate logs retained on 2026-11-01 lose a case
+  # line that way, and a failure that disappears instead of reading "reason not captured" is a green
+  # gate on a red branch.
+  printf '%s\n' "/Users/x/arbos-gate/apps/ios/Arbos/ArbosTests/PinPolicyTests.swift:88: error: -[ArbosTests.PinPolicyTests testAMemberCannotPin] : XCTAssertTrue failed - a plain member may not pin" \
+                 "/Users/x/arbos-gate/apps/ios/Arbos/ArbosTests/PinPolicyTests.swift:91: error: -[ArbosTests.PinPolicyTests testAMemberCannotPin] : XCTAssertEqual failed: (\"1\") is not equal to (\"0\")" \
+                 "Test case 'PinPolicyTests.testTheRosterIs2026-10-31 19:56:34.160 xcodebuild[19432:55719] [MT] IDETestOperationsObserverDebug: 2803.401 elapsed" \
+                 "Test Case '-[ArbosTests.PinPolicyTests testAMemberCannotPin]' failed (0.002 seconds)." > "$tlog"
+  with=$(case_reason "$tlog" PinPolicyTests/testAMemberCannotPin)
+  without=$(case_reason "$tlog" PinPolicyTests/testTheRosterIsUntouched)
+  if [[ "$with" == "PinPolicyTests.swift:88: XCTAssertTrue failed - a plain member may not pin (+1 more assertion(s))" && -z "$without" ]]; then
+    echo "selftest: a failing case carries its assertion, and one with no line in the log degrades to no reason"
+  else
+    echo "selftest: reason reader WRONG — with '$with', without '$without'"; rm -f "$tlog"; exit 1
   fi
   rm -f "$tlog"
   [[ -n "$(test_sim_udid)" ]] && echo "selftest: test simulator '$TEST_SIM_NAME' present ($(test_sim_udid))" || { echo "selftest: test simulator '$TEST_SIM_NAME' MISSING"; exit 1; }
