@@ -7,7 +7,7 @@
 //! Victor owns an agent called `Lium`; on the second, nobody does. The answers must match.
 
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use axum::Json;
 
@@ -163,5 +163,62 @@ async fn your_own_agent_still_answers_to_its_own_name() {
         answer.status(),
         StatusCode::OK,
         "Mallory's own Tern, not the stranger's"
+    );
+}
+
+/// `POST /skills` files a skill under the project the caller names, and every later ownership
+/// question about that skill is answered from that one field. It resolved the name with the
+/// plain lookup, which is not scoped to the caller, so the name went to whichever `Tern` was
+/// active last. Mallory, who has her own `Tern` and is a guest of Victor's, filed her skill in
+/// Victor's library — where his box both reads it and may edit it.
+///
+/// This one needs no name/id collision, so narrowing which strings a name may match does not
+/// reach it. Two live projects sharing a name is enough.
+#[tokio::test]
+async fn a_skill_is_filed_under_the_callers_own_agent() {
+    const NAME: &str = "Tern";
+    let state = test_state(AuthMode::Github);
+    let (mallory_user, mallory) = person(&state, 9831);
+    let mine = project_of(&state, &mallory_user, NAME);
+    let (victor_user, _) = person(&state, 9832);
+    let theirs = project_of(&state, &victor_user, NAME);
+    state
+        .db
+        .add_project_member(&theirs, &mallory_user, &victor_user)
+        .expect("Mallory is a guest of Victor's Tern");
+
+    // The plain lookup breaks a name tie on `last_active_at`, and the clock counts whole
+    // milliseconds, so Victor's row is touched until it is the newer of the two.
+    loop {
+        state.db.set_project_state(&theirs, "awake").expect("touch");
+        if state.db.project(NAME).expect("lookup").expect("a row").id == theirs {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+
+    crate::skills::create(
+        State(state.clone()),
+        mallory,
+        HeaderMap::new(),
+        Json(crate::skills::SkillBody {
+            name: Some("Mallory's notes".into()),
+            slug: Some("mallory-notes".into()),
+            origin_project_id: Some(NAME.to_owned()),
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("Mallory may file a skill under her own agent");
+
+    let filed = state
+        .db
+        .skill("mallory-notes")
+        .expect("read")
+        .expect("the skill was written");
+    assert_eq!(
+        filed.origin_project_id.as_deref(),
+        Some(mine.as_str()),
+        "Mallory's skill belongs to Mallory's Tern, not the stranger's"
     );
 }
