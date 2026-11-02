@@ -37,6 +37,8 @@ mod fleet;
 mod gifs;
 mod goals;
 #[cfg(test)]
+mod group_access_tests;
+#[cfg(test)]
 mod group_name_tests;
 mod groups;
 mod image_sniff;
