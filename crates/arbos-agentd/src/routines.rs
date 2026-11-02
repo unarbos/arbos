@@ -417,6 +417,7 @@ impl Agent {
                 ],
             );
             h.mark_seen(&cmd_id);
+            self.note_own_row(&msg_id);
             CommandView {
                 id: cmd_id,
                 kind: "send".into(),
