@@ -291,6 +291,26 @@ final class SwipeDirectionsUITests: XCTestCase {
         XCTAssertFalse(replyPreview(app).exists, "a right swipe never replies")
     }
 
+    /// And on a picture. The reply side of this file covers four message types but the back
+    /// side covered only text, an album and my own bubble, so an image row that arbitrated
+    /// differently would have passed unnoticed — the picture types are exactly the ones whose
+    /// row geometry made the reply lookup fail, so they are the ones worth holding here.
+    func testSwipeRightOnAPictureOnlyBubbleGoesBackAndOpensNoReply() {
+        let app = launchGroup()
+        swipeRight(on: revealBubble(app, "g8"), app)
+        assertWentBack(app)
+        XCTAssertFalse(replyPreview(app).exists, "a right swipe never replies")
+    }
+
+    /// The tall portrait screenshot with a caption, which is the largest row in the fixture and
+    /// the one that overlaps the most of its neighbours.
+    func testSwipeRightOnAPictureBubbleGoesBackAndOpensNoReply() {
+        let app = launchGroup()
+        swipeRight(on: revealBubble(app, "g6"), app)
+        assertWentBack(app)
+        XCTAssertFalse(replyPreview(app).exists, "a right swipe never replies")
+    }
+
     /// "Back" takes a deliberate swipe, not a flick: 50 pt is under the 70 pt rule, so the chat
     /// stays. On `7bbfaf425` this armed a reply (the arrow fired at 39 pt) — the test is here to
     /// catch a threshold quietly dropping back to that build's 40 pt.
