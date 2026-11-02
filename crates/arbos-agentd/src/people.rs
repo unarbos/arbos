@@ -160,7 +160,7 @@ impl PeopleChatInfo {
 
     /// The person whose device wrote a row, from the box-facing roster's `devices` lists.
     /// Row ids may carry the `dev:` prefix (Mac, arbosctl); the roster has bare ids.
-    fn user_of_device(&self, device_id: &str) -> Option<String> {
+    pub(crate) fn user_of_device(&self, device_id: &str) -> Option<String> {
         let bare = device_id.strip_prefix("dev:").unwrap_or(device_id);
         if bare.is_empty() {
             return None;
@@ -356,6 +356,11 @@ pub struct PeopleState {
     owner_profile: Mutex<(Option<String>, Option<String>)>,
     /// The whole owner block as last seen (for the prompt's "Your owner" section).
     owner_full: Mutex<crate::identity::OwnerProfile>,
+    /// The owner's own device ids from the relay's box listing (`owner.devices`), refreshed on
+    /// every poll. The approval gate reads this to tell the owner's Approve from a guest's in
+    /// chats that have no member roster. Kept out of `owner_full` on purpose: the relay orders
+    /// it by last-seen, so it churns, and `owner_full` changing rebuilds the pi prompt.
+    owner_devices: Mutex<Vec<String>>,
     /// Judge verdicts by user message id: one call per message, whatever drives the command
     /// (send, steer, retry, a catch-up re-gate). Bounded; see `GATE_CACHE_MAX`.
     gate_cache: Mutex<GateCache>,
@@ -443,6 +448,29 @@ impl PeopleState {
         };
         *self.owner_profile.lock().expect("people") = (pick("address_name"), pick("name"));
         *self.owner_full.lock().expect("people") = crate::identity::OwnerProfile::from_json(owner);
+        // An older relay sends no `devices`; leave the last list alone rather than forgetting
+        // which devices are the owner's (see `Agent::decider`).
+        if let Some(ids) = owner.get("devices").and_then(Value::as_array) {
+            *self.owner_devices.lock().expect("people") = ids
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|d| !d.is_empty())
+                .map(str::to_owned)
+                .collect();
+        }
+    }
+
+    /// The owner's own device ids as the relay last listed them. Empty means the box has not
+    /// been told (first poll, or a relay too old to send the field).
+    pub fn owner_devices(&self) -> Vec<String> {
+        self.owner_devices.lock().expect("people").clone()
+    }
+
+    /// Test-only: stand in for the relay's `owner.devices`.
+    #[cfg(test)]
+    pub(crate) fn test_set_owner_devices(&self, ids: &[&str]) {
+        *self.owner_devices.lock().expect("people") = ids.iter().map(|d| (*d).to_owned()).collect();
     }
 
     pub fn owner_profile(&self) -> crate::identity::OwnerProfile {

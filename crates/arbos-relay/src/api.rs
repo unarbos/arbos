@@ -1982,14 +1982,26 @@ pub struct BoxHelloBody {
     pub seed_sha: Option<String>,
 }
 
-/// The box's owner as the agent should know them: login, the profile name (a label) and
-/// `address_name` — the name the user set themselves, the only one agents use to address them.
+/// How many of the owner's device ids ride on the box listing, most recently seen first.
+/// Matches `people::MEMBER_DEVICES_MAX`, which carries the same ids per chat member.
+const OWNER_DEVICES_MAX: usize = 64;
+
+/// The box's owner as the agent should know them: login, the profile name (a label),
+/// `address_name` — the name the user set themselves, the only one agents use to address them —
+/// and `devices`, the ids the owner's own apps write into a row's `deviceId` / a command's
+/// `issuedBy`. The box needs `devices` to tell its owner's Approve from a guest's in a shared
+/// chat (`arbos-agentd/src/approval.rs`); a project chat has no member roster to resolve it
+/// from. Box-facing only (`/box/hello`, `/box/projects`); the apps never get this block.
 fn owner_json(state: &AppState, user_id: &str) -> Value {
+    let devices = state
+        .db
+        .device_ids_of_user(user_id, OWNER_DEVICES_MAX)
+        .unwrap_or_default();
     match state.db.user_address(user_id) {
         Ok(Some((login, name, address_name, former_names))) => {
-            json!({ "id": user_id, "login": login, "name": name, "address_name": address_name, "former_names": former_names })
+            json!({ "id": user_id, "login": login, "name": name, "address_name": address_name, "former_names": former_names, "devices": devices })
         }
-        _ => json!({ "id": user_id }),
+        _ => json!({ "id": user_id, "devices": devices }),
     }
 }
 
