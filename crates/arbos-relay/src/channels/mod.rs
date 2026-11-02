@@ -1552,6 +1552,101 @@ mod tests {
         );
     }
 
+    /// Blanking `externalUserId` hides nothing if another field of the same row repeats it, and
+    /// on two of the four platforms it does. WhatsApp uses the counterpart's phone number as
+    /// both the chat id and the user id (`whatsapp.rs:126`), and a Telegram private chat is
+    /// identified by the user's own id — the Mac demo fixture pairs `"8812"` with `"8812"`
+    /// (`arbos-mac/src/sync/fixture.rs:2785`). Slack repeats its channel id inside the label,
+    /// because `kind` is `format!("#{channel}")` for anything that is not a DM (`slack.rs:141`).
+    ///
+    /// So the attack is not to read `externalUserId`. It is to read every *other* field of the
+    /// member's row and look for the identifier back.
+    #[tokio::test]
+    async fn no_field_of_a_members_row_repeats_an_identifier_the_row_redacts() {
+        let state = crate::state::test_support::test_state(crate::state::AuthMode::Github);
+        let s = alice_bound(&state);
+
+        // Id, platform, chat id, user id, label, and the one string that must not reach a member.
+        let rows = [
+            (
+                "wa",
+                "whatsapp",
+                "15555550123",
+                "15555550123",
+                "WhatsApp · Jacob",
+                "15555550123",
+            ),
+            (
+                "tg",
+                "telegram",
+                "8812",
+                "8812",
+                "Telegram · DM · Jacob",
+                "8812",
+            ),
+            (
+                "sl",
+                "slack",
+                "C024BE91L",
+                "U024BE7LH",
+                "Slack · #C024BE91L · Jacob",
+                "C024BE91L",
+            ),
+            // Beeper's chat id is a room, not a person, and its user id is the only copy — so
+            // this row is expected to hold already. The contrast is the finding.
+            (
+                "bp",
+                "beeper",
+                "!room:beeper.local",
+                "@signal_15555550123:beeper.local",
+                "Beeper · Signal · Jacob",
+                "@signal_15555550123:beeper.local",
+            ),
+        ];
+        for (id, platform, chat, user, label, _) in rows {
+            state
+                .db
+                .upsert_channel_binding(&ChannelBinding {
+                    id: id.into(),
+                    platform: platform.into(),
+                    external_chat_id: chat.into(),
+                    external_user_id: user.into(),
+                    project_id: s.project.clone(),
+                    chat_id: "c1".into(),
+                    label: label.into(),
+                    bound_at: 0,
+                })
+                .unwrap();
+        }
+
+        let theirs = body_of(list_bindings(State(state.clone()), s.member.clone()).await).await;
+        let theirs = theirs["items"].as_array().unwrap().clone();
+        for (id, platform, _, _, _, secret) in rows {
+            let row = theirs
+                .iter()
+                .find(|r| r["id"] == id)
+                .unwrap_or_else(|| panic!("{platform} row"));
+            for (field, value) in row.as_object().unwrap() {
+                let Some(text) = value.as_str() else { continue };
+                assert!(
+                    !text.contains(secret),
+                    "{platform}: `{field}` still hands a member `{secret}`: {row}"
+                );
+            }
+            assert_eq!(row["platform"], platform, "the platform is still answered");
+        }
+
+        // The owner is still told all of it, or the row is useless to the person it belongs to.
+        let mine = body_of(list_bindings(State(state.clone()), s.owner).await).await;
+        let mine = mine["items"].as_array().unwrap();
+        for (id, platform, chat, user, label, _) in rows {
+            let row = mine.iter().find(|r| r["id"] == id).unwrap();
+            assert_eq!(row["externalChatId"], chat, "{platform}");
+            assert_eq!(row["externalUserId"], user, "{platform}");
+            assert_eq!(row["label"], label, "{platform}");
+        }
+    }
+
     /// The real shapes, from each adapter, plus what a truncation must never do. The name is
     /// always the last segment; the leading segments are platform metadata.
     #[test]
