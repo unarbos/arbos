@@ -170,7 +170,7 @@ impl Agent {
             return "Your".to_owned();
         };
         // Same author rule as the asker prelude (#1580): an unidentified author is a guest.
-        match info.author_of(&msg).as_deref() {
+        match info.display_author_of(&msg).as_deref() {
             Some(uid) if uid == info.owner_user => "Your".to_owned(),
             _ => info.owner_spoken_possessive(),
         }
