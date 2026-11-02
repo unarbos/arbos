@@ -335,9 +335,11 @@ async fn run(
     }
     let _open = OpenSocket::new(&state);
     let is_box = principal.is_box();
-    // Rows from the box carry the box's device id (`box:<sandbox>` / `box:local-<user>`), the same
-    // id agentd writes into the doc, so clients see one stable author across restarts.
-    let mut device = match (&principal, principal.user_id()) {
+    // The socket's device identity, fixed for its whole life: it comes from the authenticated
+    // principal, never from a frame the client sends afterwards. Rows from the box carry the box's
+    // device id (`box:<sandbox>` / `box:local-<user>`), the same id agentd writes into the doc, so
+    // clients see one stable author across restarts.
+    let device = match (&principal, principal.user_id()) {
         (Principal::Box { .. }, Some(u)) => state
             .db
             .user_box(u)
@@ -383,7 +385,7 @@ async fn run(
                     }
                 };
                 let was_hello = f.ty == FrameType::Hello;
-                match handle_frame(&state, &room, &project_id, &room_name, conn_id, &mut device, &principal, f, &mut sink, &mut delivery).await {
+                match handle_frame(&state, &room, &project_id, &room_name, conn_id, &device, &principal, f, &mut sink, &mut delivery).await {
                     Ok(()) => {}
                     Err(e) => {
                         tracing::warn!(%room_name, error = %e, "room frame error");
@@ -465,7 +467,7 @@ async fn handle_frame(
     project_id: &str,
     room_name: &str,
     conn_id: u64,
-    device: &mut String,
+    device: &str,
     principal: &Principal,
     f: Frame,
     sink: &mut futures::stream::SplitSink<WebSocket, Message>,
@@ -481,19 +483,16 @@ async fn handle_frame(
                     .await?;
                 return Ok(());
             }
-            if !h.device.is_empty() {
-                *device = h.device.clone();
-            }
+            // `h.device` is client-written and decides nothing: this socket's identity was
+            // settled from its authenticated principal at upgrade, and every stored row and
+            // broadcast frame is attributed to that. A client naming another device here could
+            // otherwise forge row provenance and steer `excludeOwn` onto another device's rows.
             crate::room_health::note_hello(room, device, h.cursor);
             send_state(state, project_id, room_name, sink).await?;
         }
         FrameType::RowsReq => {
             let r: wire::RowsReq = serde_json::from_value(f.header)?;
-            let exclude = if r.exclude_own {
-                Some(device.as_str())
-            } else {
-                None
-            };
+            let exclude = if r.exclude_own { Some(device) } else { None };
             let mut after = r.after;
             delivery.catching_up = true;
             loop {
@@ -2333,5 +2332,257 @@ mod covered_push_tests {
         assert_ne!(vv1, vv_cached);
         // And it equals encoding the writer's own vv once the room holds the same ops.
         assert_eq!(vv_cached, encode_vv(&doc.oplog_vv()));
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    //! A room socket's device identity is the authenticated principal's, settled at upgrade. The
+    //! HELLO frame is a client-written frame, so the id it carries decides nothing: it must not
+    //! become the `device` column of stored rows, the `device` of broadcast ROW headers, or the
+    //! id the `excludeOwn` replay filter drops.
+
+    use axum::routing::get;
+    use axum::Router;
+    use futures::stream::{SplitSink, SplitStream};
+    use futures::{SinkExt, StreamExt};
+    use serde_json::json;
+    use std::net::SocketAddr;
+    use std::time::Duration;
+    use tokio::net::TcpStream;
+    use tokio_tungstenite::tungstenite::Message as TMsg;
+    use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+
+    use arbos_core::doc::{ChatDoc, UserMessageOpts};
+    use arbos_core::ids::ulid;
+    use arbos_core::wire::{Frame, FrameType};
+
+    use crate::auth::Principal;
+    use crate::people::tests_support::{dm, person};
+    use crate::state::test_support::test_state;
+    use crate::state::{AppState, AuthMode};
+
+    /// The id Alice's phone writes under, and the one Bob's HELLO claims.
+    const ALICE_PHONE: &str = "dev:alices-phone";
+
+    type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+    async fn serve(state: AppState) -> SocketAddr {
+        let app = Router::new()
+            .route("/room/{project}/{chat}", get(super::ws_room))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        addr
+    }
+
+    /// A device of `user`, with the name the relay authenticates it as and its raw token.
+    fn device(state: &AppState, user: &str) -> (String, String) {
+        let id = ulid();
+        let token = format!("adv_{}", ulid().to_ascii_lowercase());
+        state
+            .db
+            .insert_device(&id, "t", &arbos_core::auth::hash(&token), user, "paircode")
+            .unwrap();
+        let name = Principal::Device {
+            id,
+            token: token.clone(),
+            user_id: user.to_owned(),
+        }
+        .device_name();
+        (name, token)
+    }
+
+    fn decode(m: TMsg) -> Option<Frame> {
+        match m {
+            TMsg::Binary(b) => Frame::decode(b).ok().flatten(),
+            _ => None,
+        }
+    }
+
+    async fn next_frame(stream: &mut SplitStream<Ws>) -> Frame {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let m = tokio::time::timeout_at(deadline, stream.next())
+                .await
+                .expect("the relay answers in time")
+                .unwrap()
+                .unwrap();
+            if let Some(f) = decode(m) {
+                return f;
+            }
+        }
+    }
+
+    /// Open a socket, say HELLO under `hello_device`, replay from 0, and return the socket halves
+    /// with the ROW frames the replay delivered.
+    async fn connect_and_replay(
+        addr: SocketAddr,
+        room: &str,
+        token: &str,
+        hello_device: &str,
+        exclude_own: bool,
+    ) -> (SplitSink<Ws, TMsg>, SplitStream<Ws>, Vec<Frame>) {
+        let (ws, _) =
+            tokio_tungstenite::connect_async(format!("ws://{addr}/room/{room}?token={token}"))
+                .await
+                .unwrap();
+        let (mut sink, mut stream) = ws.split();
+        sink.send(TMsg::Binary(
+            Frame::new(
+                FrameType::Hello,
+                json!({ "cursor": 0, "device": hello_device, "room": room, "proto": arbos_core::PROTO_VERSION }),
+                bytes::Bytes::new(),
+            )
+            .encode(),
+        ))
+        .await
+        .unwrap();
+        let mut rows = Vec::new();
+        loop {
+            let f = next_frame(&mut stream).await;
+            match f.ty {
+                FrameType::State => {
+                    sink.send(TMsg::Binary(
+                        Frame::new(
+                            FrameType::RowsReq,
+                            json!({ "after": 0, "excludeOwn": exclude_own }),
+                            bytes::Bytes::new(),
+                        )
+                        .encode(),
+                    ))
+                    .await
+                    .unwrap();
+                }
+                FrameType::Row => rows.push(f),
+                FrameType::RowsDone => return (sink, stream, rows),
+                _ => {}
+            }
+        }
+    }
+
+    /// Two rows written by Alice's phone, the state both tests start from.
+    fn alice_wrote_two_rows(state: &AppState, room: &str, chat: &str) -> ChatDoc {
+        let doc = ChatDoc::new(Some(7), false);
+        let base = doc.oplog_vv();
+        doc.init_meta(chat, "people", 1);
+        state
+            .db
+            .append_row(room, ALICE_PHONE, "meta", &doc.export_updates_since(&base))
+            .unwrap();
+        let before = doc.oplog_vv();
+        doc.append_user_message("m-alice", "mine", ALICE_PHONE, &UserMessageOpts::default())
+            .unwrap();
+        state
+            .db
+            .append_row(
+                room,
+                ALICE_PHONE,
+                "b-alice",
+                &doc.export_updates_since(&before),
+            )
+            .unwrap();
+        doc
+    }
+
+    /// Bob's device replays with `excludeOwn` while naming Alice's device in HELLO. "Own" is the
+    /// authenticated socket, so Alice's rows must still arrive.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn hello_cannot_steer_exclude_own_onto_another_devices_rows() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        let room = format!("people/{chat}");
+        let (_, bob_token) = device(&state, &bob);
+        alice_wrote_two_rows(&state, &room, &chat);
+
+        let addr = serve(state.clone()).await;
+        let (_sink, _stream, replayed) =
+            connect_and_replay(addr, &room, &bob_token, ALICE_PHONE, true).await;
+
+        assert_eq!(
+            replayed.len(),
+            2,
+            "excludeOwn drops this socket's own rows, not the rows of the device HELLO named"
+        );
+    }
+
+    /// Bob's device pushes a row while naming Alice's device in HELLO. The stored row and the
+    /// broadcast ROW header must both name Bob's authenticated device.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_pushed_row_is_attributed_to_the_authenticated_device() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        let room = format!("people/{chat}");
+        let (alice_device, alice_token) = device(&state, &alice);
+        let (bob_device, bob_token) = device(&state, &bob);
+        let alice_doc = alice_wrote_two_rows(&state, &room, &chat);
+
+        let addr = serve(state.clone()).await;
+        // Alice watches the room live, so the broadcast attribution is observable.
+        let (_alice_sink, mut alice_stream, _) =
+            connect_and_replay(addr, &room, &alice_token, &alice_device, false).await;
+        let (mut bob_sink, mut bob_stream, _) =
+            connect_and_replay(addr, &room, &bob_token, ALICE_PHONE, false).await;
+
+        // Bob pushes a message of his own on top of Alice's.
+        let mut bob_doc = ChatDoc::new(Some(8), false);
+        bob_doc.import(&alice_doc.snapshot()).unwrap();
+        let before_bob = bob_doc.oplog_vv();
+        bob_doc
+            .append_user_message(
+                "m-bob",
+                "mine too",
+                ALICE_PHONE,
+                &UserMessageOpts::default(),
+            )
+            .unwrap();
+        bob_sink
+            .send(TMsg::Binary(
+                Frame::new(
+                    FrameType::Push,
+                    json!({ "batchId": "b-bob" }),
+                    bytes::Bytes::from(bob_doc.export_updates_since(&before_bob)),
+                )
+                .encode(),
+            ))
+            .await
+            .unwrap();
+
+        let ack = loop {
+            let f = next_frame(&mut bob_stream).await;
+            assert_ne!(f.ty, FrameType::Error, "push refused: {}", f.header);
+            if f.ty == FrameType::Ack {
+                break f;
+            }
+        };
+        let seq = ack.header["seq"].as_i64().unwrap();
+
+        let stored = state
+            .db
+            .rows_between(&room, seq - 1, seq, 1)
+            .unwrap()
+            .pop()
+            .expect("the pushed row is stored");
+        assert_eq!(
+            stored.device, bob_device,
+            "a stored row is attributed to the authenticated device, not the one HELLO named"
+        );
+
+        let live = loop {
+            let f = next_frame(&mut alice_stream).await;
+            if f.ty == FrameType::Row && f.header["seq"].as_i64() == Some(seq) {
+                break f;
+            }
+        };
+        assert_eq!(
+            live.header["device"].as_str(),
+            Some(bob_device.as_str()),
+            "a broadcast ROW is attributed to the authenticated device, not the one HELLO named"
+        );
     }
 }
