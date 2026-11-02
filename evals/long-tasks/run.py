@@ -724,6 +724,9 @@ def main():
         for ln in LANES:
             print(ln, [t["id"] for t in tasks if t["lane"] == ln])
         return
+    if not gr.OPENROUTER_KEY and any(t.get("rubric") for task in tasks for t in task.get("turns") or []):
+        # a skipped judge adds no reason, so without the key every rubric turn would pass unjudged
+        raise SystemExit("preflight: blocked — OPENROUTER_API_KEY is empty, the rubric judge cannot run; not a result")
     rl.ensure_test_user(TEST_HANDLE, "Long-task eval")
     # every run on its own signed-in device: a refresh token consumed by another process (a waiter,
     # a check, a crashed run) cannot take the run down mid-way
