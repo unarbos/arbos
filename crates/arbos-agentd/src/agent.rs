@@ -1675,7 +1675,7 @@ impl Agent {
             box_slots,
             http: reqwest::Client::new(),
             settings: crate::settings::Settings::new(&cfg_for_settings),
-            skills: SkillsIndex::new(),
+            skills: SkillsIndex::new(cfg_for_settings.project_id.clone()),
             approvals: crate::approval::Approvals::default(),
             subagent_msgs: Mutex::new(HashMap::new()),
             posted_ledger: Mutex::new(HashMap::new()),
@@ -1748,12 +1748,7 @@ impl Agent {
     pub async fn refresh_skills(&self) {
         match self
             .skills
-            .refresh(
-                &self.http,
-                &self.cfg.relay_url,
-                &self.cfg.box_token,
-                &self.cfg.project_id,
-            )
+            .refresh(&self.http, &self.cfg.relay_url, &self.cfg.box_token)
             .await
         {
             Ok(n) => {
