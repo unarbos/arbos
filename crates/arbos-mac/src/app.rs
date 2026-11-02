@@ -1374,11 +1374,7 @@ impl AppState {
             renaming_project: None,
             muted: load_muted(),
             read_receipts: load_read_receipts(),
-            link_previews: {
-                let on = load_link_previews();
-                crate::ui::link_card::set_enabled(on);
-                on
-            },
+            link_previews: load_link_previews(),
             message_receipts: HashMap::new(),
             presence_seen: HashMap::new(),
             notify_prompt_answered: false,
@@ -6989,7 +6985,6 @@ impl AppState {
             return;
         }
         self.link_previews = enabled;
-        crate::ui::link_card::set_enabled(enabled);
         save_link_previews(enabled);
         cx.notify();
     }
