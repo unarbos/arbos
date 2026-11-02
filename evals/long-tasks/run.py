@@ -75,6 +75,43 @@ def budget_left(run_state):
     return run_state["budget"] - run_cost, run_cost, spent, cap
 
 
+def restore_project_name(project, name, run_state):
+    """Put a renamed lane project's name back; True once the relay agrees it is back.
+
+    The PATCH is read back because the old `restore_name` ignored its status: a rename lost to a failed
+    call looked exactly like one that worked."""
+    rl.patch_project(project, {"name": name})
+    if rl.project_name(project) != name:
+        return False
+    with run_state["lock"]:
+        run_state.get("renames", {}).pop(project, None)
+    return True
+
+
+def end_of_run_sweep(run_state):
+    """What the run must not leave behind on the test user.
+
+    Routines, because they keep spending: s1 creates an every-minute ticker that s3 deletes two tasks
+    later — in run 7 s3 was skipped on budget and the ticker fired a model turn a minute for 14 h, which
+    emptied the day's cap (2026-10-26). Names, because a lane left under a task's name is a project the
+    next run cannot find and replaces, and both halves of the pair then cost the box an idle agent."""
+    swept = 0
+    for ln, pid in run_state["projects"].items():
+        try:
+            for r in rl.routines(pid):
+                if r.get("id"):
+                    rl.delete_routine(pid, r["id"])
+                    swept += 1
+        except Exception as e:  # noqa: BLE001
+            print(f"routine sweep on lane {ln} failed: {e}", flush=True)
+    if swept:
+        print(f"end-of-run sweep: deleted {swept} leftover routine(s)", flush=True)
+    for pid, name in sorted(run_state.get("renames", {}).items()):
+        ok = restore_project_name(pid, name, run_state)
+        print(f"end-of-run sweep: lane project {pid} {'is back to' if ok else 'IS NOT BACK TO'} {name!r}"
+              f"{'' if ok else ' — the next run will create a second project for that lane'}", flush=True)
+
+
 class Lane(threading.Thread):
     def __init__(self, name, project, tasks, box, run_state, out_dir, log):
         super().__init__(daemon=True, name=f"lane-{name}")
@@ -107,9 +144,18 @@ class Lane(threading.Thread):
             except Exception as e:
                 rec = {"task": task["id"], "category": task["category"], "lane": self.lane, "success": False, "reasons": [f"driver error: {e}"], "traceback": traceback.format_exc()[-1500:]}
                 self.say(f"{task['id']}: DRIVER ERROR {e}")
+            self.restore_name_if_owed()
             self.results.append(rec)
             with self.rs["lock"]:
                 (self.out / "records.jsonl").open("a").write(json.dumps(rec) + "\n")
+
+    def restore_name_if_owed(self):
+        """After every task, pass or fail: a task that threw before its `restore_name` cleanup, or whose
+        restore did not land, must not leave the lane under the task's name for the tasks that follow."""
+        with self.rs["lock"]:
+            owed = self.rs.get("renames", {}).get(self.project)
+        if owed and not restore_project_name(self.project, owed, self.rs):
+            self.say(f"{self.project} is not back to {owed!r}; owed to the end-of-run sweep")
 
     def driver_action(self, act, st):
         """Things the user (or the product) does between turns: rename the agent, store a secret,
@@ -118,12 +164,19 @@ class Lane(threading.Thread):
         if kind == "rename_project":
             if st.get("old_name") is None:
                 st["old_name"] = rl.project_name(self.project)
+            # The run owes this name back until it is back. `ensure_project` matches on the name, so a
+            # lane left under the task's name makes the next run create a *second* project for it — one
+            # more agent the box keeps a parked `pi` resident for (#2302) and whose every chat reopens a
+            # room at boot (#2367), on the box the suite then measures. Run 16 counted 15 projects on
+            # the eval user for the five lanes this names.
+            with self.rs["lock"]:
+                self.rs.setdefault("renames", {}).setdefault(self.project, st["old_name"])
             rl.patch_project(self.project, {"name": act["name"]})
             st["renamed_at_ms"] = int(time.time() * 1000)
             time.sleep(act.get("settle_s", 8))
         elif kind == "restore_name":
             if st.get("old_name"):
-                rl.patch_project(self.project, {"name": st["old_name"]})
+                restore_project_name(self.project, st["old_name"], self.rs)
         elif kind == "create_secret":
             import secrets as _s
             value = "evaltok-" + _s.token_hex(12)
@@ -778,7 +831,8 @@ def main():
     out_dir = Path(args.out or (HERE / "results" / args.run_id))
     out_dir.mkdir(parents=True, exist_ok=True)
     log = (out_dir / "run.log").open("a")
-    run_state = {"run_id": args.run_id, "budget": args.budget_usd, "spent_at_start": spent, "lock": threading.Lock()}
+    run_state = {"run_id": args.run_id, "budget": args.budget_usd, "spent_at_start": spent, "lock": threading.Lock(),
+                 "renames": {}}  # lane project -> the name it is owed back
     projects = {ln: rl.ensure_project(f"lane-{ln}") for ln in LANES}
     run_state["projects"] = projects
     late = [t for t in tasks if t["lane"] in LATE_LANES]
@@ -813,20 +867,7 @@ def main():
         late_lane.start()
         late_lane.join()
         results += late_lane.results
-    # Nothing of the run may keep spending after it: delete every routine on the lane projects. s1 creates
-    # an every-minute ticker that s3 deletes two tasks later — in run 7 s3 was skipped on budget and the
-    # ticker fired a model turn a minute for 14 h, which emptied the day's cap (2026-10-26).
-    swept = 0
-    for ln, pid in run_state["projects"].items():
-        try:
-            for r in rl.routines(pid):
-                if r.get("id"):
-                    rl.delete_routine(pid, r["id"])
-                    swept += 1
-        except Exception as e:  # noqa: BLE001
-            print(f"routine sweep on lane {ln} failed: {e}", flush=True)
-    if swept:
-        print(f"end-of-run sweep: deleted {swept} leftover routine(s)", flush=True)
+    end_of_run_sweep(run_state)
     spent_end, _ = rl.spent_today()
     meta["ended_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     meta["relay_build_at_end"] = box.relay_build()
