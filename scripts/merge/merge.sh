@@ -4,8 +4,9 @@
 # Refuses if main's head moves between the GO check and the merge call, and names each commit that landed.
 # The PAT lives in one shell variable of this process (sent to curl over stdin, never argv or a file)
 # and is unset as soon as the merge call returns.
-# Run from the repo checkout. MERGE_KIT (default /tmp/k) holds this session's files: merge-allow (the PR numbers
-# the coordinator cleared, `#` starts a comment), watch-solo (merge-window.sh) and op-last.err.
+# Run from a clean checkout at main's live head; checks.sh refuses anything else. MERGE_KIT (default
+# /tmp/k) holds this session's files: merge-allow (the PR numbers the coordinator cleared, `#` starts a
+# comment), watch-solo (merge-window.sh) and op-last.err.
 set -u
 D=$(cd "$(dirname "$0")" && pwd); K=${MERGE_KIT:-/tmp/k}
 source "$D/opread.sh"
@@ -16,9 +17,10 @@ PR=$1; SHA=$2; FLAKE=""; OVER=""; PEND=""
 for a in "${@:3}"; do case "$a" in accept-red=*) FLAKE=$a ;; over-serialize=*) OVER=${a#over-serialize=} ;; accept-pending=*) PEND=${a#accept-pending=} ;; *) echo "REFUSED: unknown argument $a"; exit 2;; esac; done
 R=unarbos/arbos
 case " $ALLOW " in *" $PR "*) ;; *) echo "REFUSED: #$PR is not in the coordinator's merge list ($ALLOW)"; exit 2;; esac
+# Before anything is read: the GO below is computed from this checkout, and merge-window.sh judges main
+# through its local refs and objects. A stale, dirty or off-main checkout answers for a different tree.
+require_main_checkout || exit 2
 
-# main's head, read live from GitHub (never the local origin/main, which another fetch can move mid-run).
-main_head() { local o; o=$(git ls-remote origin refs/heads/main 2>&1) || { echo "git ls-remote failed: ${o:0:160}"; return; }; echo "$o" | awk '$2=="refs/heads/main"{print $1}'; }
 # main_moved <old> <new>: main's first-parent commits after <old>, newest first, each with what landed it.
 # Every lane merges as the same GitHub account, so "merged by" never tells lanes apart: the head branch's
 # suffix (cursor/<name>-<suffix>) is the only lane identifier in main's history.

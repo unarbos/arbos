@@ -1,5 +1,6 @@
 #!/bin/bash
-# checks.sh — the required-check reader shared by merge.sh and merge-window.sh. Sourced, never run.
+# checks.sh — the required-check reader and checkout guard shared by merge.sh and merge-window.sh.
+# Sourced, never run.
 #
 # Why this file exists. Until 2026-10-31 both tools judged a head by rejecting known-bad conclusions
 # among whatever the PR's check rollup happened to report. "skipped" and "neutral" are on no
@@ -29,6 +30,50 @@
 # the protection endpoint needs a token with Administration:Read, which the merge lane's token is
 # not. Nothing on GitHub's side requires any check, so nothing but this file does. Keep it in step
 # with .github/workflows/.
+
+# main's head, read live from GitHub (never the local origin/main, which another fetch can move mid-run).
+main_head() { local o; o=$(git ls-remote origin refs/heads/main 2>&1) || { echo "git ls-remote failed: ${o:0:160}"; return; }; echo "$o" | awk '$2=="refs/heads/main"{print $1}'; }
+
+# require_main_checkout: 0 only when this is a clean checkout of unarbos/arbos sitting on main's
+# live head. Otherwise it names what it found and what it expected, and returns 1.
+#
+# "Run from the repo checkout" was the entire specification, and nothing read the checkout to see
+# whether it was true. Most of what this kit judges about main comes from local refs and objects:
+# changes_since() takes the range <tag>..origin/main, verdict() asks `git tag --contains`, the
+# NOPATH branch reads that commit's ci.yml and diff out of the object store. A stale origin/main
+# silently narrows the range, so a GO clears commits it never looked at; a feature branch or a
+# dirty tree means the kit being run is not the kit main carries. The fetches inside this kit do
+# not close that — each is `git fetch -q ... 2>/dev/null`, so a fetch that failed is
+# indistinguishable from one that had nothing to do, which is how a stale ref gets this far.
+#
+# Judged against GitHub rather than against the local refs, for the same reason main_head() exists.
+# Untracked files count as dirty: this kit keeps its session state in $MERGE_KIT, outside the
+# checkout, so nothing a lane legitimately needs lives loose in the worktree.
+require_main_checkout() {
+  local url live ref head on dirty
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    || { echo "REFUSED: $PWD is not a git checkout; run the merge kit from the repo checkout"; return 1; }
+  url=$(git remote get-url origin 2>/dev/null) \
+    || { echo "REFUSED: this checkout has no 'origin' remote, so main's head cannot be read from it"; return 1; }
+  case "$url" in *github.com[:/]"$R"|*github.com[:/]"$R".git) ;;
+    *) echo "REFUSED: origin is $(printf '%s' "$url" | sed 's#://[^/@]*@#://#'), not $R, so this checkout is some other main"; return 1 ;;
+  esac
+  live=$(main_head)
+  [ ${#live} -eq 40 ] || { echo "REFUSED: cannot read main's live head, so this checkout cannot be judged: ${live:-empty answer}"; return 1; }
+  ref=$(git rev-parse -q --verify refs/remotes/origin/main) \
+    || { echo "REFUSED: this checkout has no origin/main ref; main is ${live:0:9} on GitHub. Fetch it and check it out"; return 1; }
+  [ "$ref" = "$live" ] \
+    || { echo "REFUSED: local origin/main is ${ref:0:9}, main is ${live:0:9} on GitHub, so every range judged here is the wrong one. Fetch it and check it out"; return 1; }
+  head=$(git rev-parse -q --verify HEAD) \
+    || { echo "REFUSED: this checkout has no HEAD commit; expected main's head ${live:0:9}"; return 1; }
+  if [ "$head" != "$live" ]; then
+    on=$(git rev-parse --abbrev-ref HEAD); [ "$on" = HEAD ] && on="a detached HEAD"
+    echo "REFUSED: HEAD is ${head:0:9} ($on), not main's head ${live:0:9}, so this would judge a tree main does not have"
+    return 1
+  fi
+  dirty=$(git status --porcelain)
+  [ -z "$dirty" ] || { echo "REFUSED: the working tree or index is not clean, so this checkout is not main at ${live:0:9}:"; printf '%s\n' "$dirty" | head -10 | sed 's/^/    /'; return 1; }
+}
 
 # rd <gh api args>: the read, or "BLOCKED:<error>" with a non-zero status. A failed read never
 # becomes a verdict.

@@ -8,7 +8,8 @@
 # merge-window.sh checks <sha>  — the required-check reading for one head, on its own. Read only.
 # merge-window.sh range-gate <from-ref> — the required checks GO applies to main since <from-ref>
 #                                     (MW_TEST_HEAD=<sha> ends the range early, to replay one). Read only.
-# Read only. Run from the repo checkout. Needs: gh (read), op (Arbos vault), check3.sh, checks.sh and
+# Read only. Run from a clean checkout at main's live head (every subcommand but `checks`, which reads
+# nothing locally, refuses otherwise). Needs: gh (read), op (Arbos vault), check3.sh, checks.sh and
 # loop-public.sh next to this file, and in $MERGE_KIT (default /tmp/k): config (ssh, relay host entry;
 # LOOP_SRC=host only) and, optionally, watch-solo ("<feedback-id>:<recorded-head-sha>" pairs; a push to
 # any of them is a NO-GO).
@@ -335,6 +336,12 @@ checks() {
   return $rc
 }
 
+# Every subcommand below reaches main through this checkout's refs and objects — changes_since()'s
+# range, `git tag --contains`, the ci.yml and diff reads behind NOPATH — so each refuses a checkout
+# that is not main's live head, clean. `checks` is exempt: it resolves its argument and reads each
+# gate through the API (rd, pr_files, commit_files, require_gates) and touches no local git at all,
+# so it stays usable from wherever an operator happens to be.
+case "${1:-}" in go|after|verdict|range-gate) require_main_checkout || exit 2 ;; esac
 case "${1:-}" in
   go) shift; go "$@" ;;
   after) after "$2" ;;
