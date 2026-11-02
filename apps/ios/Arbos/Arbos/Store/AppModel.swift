@@ -5447,11 +5447,17 @@ final class AppModel: ObservableObject {
     // MARK: Commands (crdt-sync §6.2: the client writes rows and commands)
 
     /// An attachment staged in the composer, uploaded on send.
+    ///
+    /// `data` is always what goes up: the editor replaces it on Done, so the upload path,
+    /// the relay and the doc row are untouched by cropping and drawing. `edit` is the
+    /// reversible half, which only a staged still picture has, and which the send clears
+    /// with the rest of the pending list.
     struct PendingAttachment: Identifiable, Equatable {
         let id = UUID()
         var name: String
         var mime: String
         var data: Data
+        var edit: PhotoEdit? = nil
     }
 
     /// Retry on one of my bubbles the relay refused (`status == .error`): the failed row
