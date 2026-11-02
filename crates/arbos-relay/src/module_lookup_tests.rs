@@ -8,7 +8,7 @@
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 
 use crate::auth::Principal;
@@ -222,3 +222,170 @@ async fn a_skill_is_filed_under_the_callers_own_agent() {
         "Mallory's skill belongs to Mallory's Tern, not the stranger's"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// The handler modules this file did not reach the first time (swept 2026-11-02).
+//
+// The sweep asked every route that takes a project id or name from the caller the same question
+// the tests above ask, on the same two relays. Routes whose answers already match are pinned
+// here. The ones that do not are listed at the foot of the file with the answers they gave; they
+// want a source change, which is not this file's to make.
+// ---------------------------------------------------------------------------------------------
+
+/// Like [`both`], but keeps the body as well as the status.
+///
+/// Status alone is not a strong enough comparison for this question. `GET
+/// /projects/{file}/avatar.jpg` answers 404 either way and still gives the game away, because
+/// one 404 says "no picture" and the other says "no such agent". A route is only silent when
+/// both halves of the answer match.
+async fn both_answers<F, Fut>(route: F) -> ((StatusCode, String), (StatusCode, String))
+where
+    F: Fn(AppState, Principal, String) -> Fut,
+    Fut: std::future::Future<Output = Response>,
+{
+    let mut out = Vec::new();
+    for victim in [true, false] {
+        let (state, mallory) = relay(victim);
+        let answer = route(state, mallory, GUESS.to_owned()).await;
+        let status = answer.status();
+        let body = axum::body::to_bytes(answer.into_body(), 64 * 1024)
+            .await
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_default();
+        out.push((status, body));
+    }
+    (out.remove(0), out.remove(0))
+}
+
+macro_rules! same_answer {
+    ($label:literal, $call:expr) => {{
+        let (taken, free) = both_answers($call).await;
+        assert_eq!(
+            taken, free,
+            concat!(
+                $label,
+                ": a name someone holds must read like a name nobody holds"
+            )
+        );
+    }};
+}
+
+/// The routes that settle access before they look a project up. A stranger is refused the same
+/// way whether the name is Victor's or nobody's, because `AppState::allows` answers `false` for
+/// a project that is not there just as it does for one that is not yours — so the refusal that
+/// reaches the caller cannot be used to tell the two apart.
+///
+/// This is the shape worth keeping. It is also why these are cheap to pin and worth pinning:
+/// moving the lookup above the gate is a one-line edit that would read like a tidy-up.
+#[tokio::test]
+async fn the_gated_project_routes_keep_the_same_silence() {
+    same_answer!("voice (get)", |s, p, id| async move {
+        crate::voice::get_agent_settings(State(s), p, Path(id)).await
+    });
+    same_answer!("notify (project chat)", |s, p, id| async move {
+        crate::notify::notify_project_chat(
+            State(s),
+            p,
+            Path((id, "c1".to_owned())),
+            Json(
+                serde_json::from_value(serde_json::json!({ "message_id": "m1", "text": "hi" }))
+                    .expect("NotifyBody"),
+            ),
+        )
+        .await
+    });
+    same_answer!("calls (start)", |s, p, id| async move {
+        crate::calls::start_project_call(
+            State(s),
+            p,
+            Path((id, "c1".to_owned())),
+            HeaderMap::new(),
+            None,
+        )
+        .await
+    });
+}
+
+/// `POST /projects/{id}/local/{device}` wants a box token, and the refusal for the missing token
+/// sits one line below the lookup. A device probe would be turned away there and never reach the
+/// branch this file is about, so the caller here is Mallory's own box: the most privileged
+/// principal who is still a stranger to Victor.
+#[tokio::test]
+async fn running_an_op_on_a_computer_does_not_say_whose_name_is_taken() {
+    same_answer!("local (exec)", |s, p, id| async move {
+        let as_a_box = Principal::Box {
+            user_id: p.user_id().unwrap_or_default().to_owned(),
+        };
+        crate::local::exec(
+            State(s),
+            as_a_box,
+            Path((id, "d1".to_owned())),
+            Json(
+                serde_json::from_value(serde_json::json!({ "op": "list_dir", "path": "/" }))
+                    .expect("LocalOp"),
+            ),
+        )
+        .await
+        .into_response()
+    });
+}
+
+/// The group routes go through `api::lookup_project`, which was built for exactly this and
+/// collapses "no such host", "no such chat", "not a group" and "nothing to do with you" into one
+/// answer. Pinned because `groups.rs` reaches that helper through two different doors
+/// (`project_for` on the way in, `open_group` afterwards) and only one of them is obvious.
+#[tokio::test]
+async fn the_group_routes_keep_the_same_silence() {
+    same_answer!("groups (create)", |s, p, id| async move {
+        crate::groups::create_group(
+            State(s),
+            p,
+            Path(id),
+            Json(
+                serde_json::from_value(serde_json::json!({ "participants": ["x"] }))
+                    .expect("CreateGroupBody"),
+            ),
+        )
+        .await
+        .into_response()
+    });
+    same_answer!("groups (get)", |s, p, id| async move {
+        crate::groups::get_group(State(s), p, Path((id, "c1".to_owned())))
+            .await
+            .into_response()
+    });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Still open, measured 2026-11-02 with the harness above. Not asserted here, because the
+// assertion is the fix's to add and a red test in `main` helps nobody.
+//
+// Eighteen routes answer `403 not your project` for a name Victor holds and `404 no such
+// project` for one nobody holds. They come from six lookups:
+//
+//   goals::authorize       — list, create, get, patch, delete, append_log      (6 routes)
+//   routines::authorize    — list, create, patch, delete, run_now, runs,
+//                            report_run                                        (7 routes)
+//   inspect::project_inspect                                                   (1 route)
+//   inspect::project_job                                                       (1 route)
+//   images::avatar_generate                                                    (1 route)
+//   secrets::project_secrets  (403 "not your agent" / 404 "no such agent")     (1 route)
+//
+// All six are the same two statements in the same order: a bare `state.db.project(caller_input)`
+// that 404s on a miss, then a separate refusal on a hit. `goals::authorize` and
+// `routines::authorize` are character-for-character the same function, so thirteen of the
+// eighteen routes are two edits.
+//
+// `GET /projects/{file}/avatar.jpg` (`images::project_avatar`) belongs to the same family and
+// wants a different answer. It takes no principal at all, and it answers 404 "no picture" for a
+// name someone holds against 404 "no such agent" for one nobody does — so the oracle is open to
+// anyone on the internet, not just to a signed-in stranger. Wording will not close it: an agent
+// that has a picture answers with the picture. What closes it is matching on the id only
+// (`db::project_by_id`), which is what that method's own comment already asks for.
+//
+// Two routes could not be measured rather than being found clean: `browser::browser_stream` and
+// `rooms::ws_room` take a `WebSocketUpgrade`, which cannot be built without a real upgradable
+// connection, so a harness that calls handlers directly cannot reach them. Read rather than run,
+// `browser_stream` has the leaking shape (lookup, then `allows`) and `ws_room` has the safe one
+// (`allows`, then lookup).
+// ---------------------------------------------------------------------------------------------
