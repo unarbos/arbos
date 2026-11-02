@@ -1035,6 +1035,12 @@ enum MediaFetch {
         // A profile picture: its public URL (the relay's `/avatars/…`, GitHub's CDN, or a
         // tokened blob URL) — never with the device bearer, which must not reach another host.
         if let picture = item.pictureURL {
+            #if DEBUG || ARBOS_FIXTURE
+            // The fixture's picture is painted into a file (`FixtureMedia.avatarFile`), not held by a host.
+            if model.isFixture, let file = URL(string: picture), file.isFileURL {
+                return (try? Data(contentsOf: file)).map { ($0, "image/png") }
+            }
+            #endif
             guard let url = URL(string: picture), url.scheme?.hasPrefix("http") == true else { return nil }
             return await data(url, headers: [:])
         }
@@ -1132,6 +1138,40 @@ enum FixtureMedia {
         case .video:
             return nil
         }
+    }
+
+    /// A person's picture as a file in the media temp folder, for the URL the fixture hands to
+    /// the avatar cache and to the sample notification: painted here, never fetched, so a rig
+    /// launch asks the internet for nothing.
+    static func avatarFile(seed: String) -> URL? {
+        avatarPNG(seed: seed).flatMap { MediaFetch.tempFile($0, name: "fixture-avatar-\(seed).png") }
+    }
+
+    /// A 192 px two-tone disc seeded by the handle (the Mac fixture's `avatar_png`).
+    private static func avatarPNG(seed: String) -> Data? {
+        var h: UInt32 = 7
+        for byte in seed.utf8 { h = h &* 31 &+ UInt32(byte) }
+        let (r, g, b) = (120 + Int(h % 100), 90 + Int((h >> 8) % 120), 140 + Int((h >> 16) % 100))
+        let face = UIColor(red: CGFloat(r) / 255, green: CGFloat(g) / 255, blue: CGFloat(b) / 255, alpha: 1)
+        let shade = UIColor(red: CGFloat(r / 2 + 40) / 255, green: CGFloat(g / 2 + 40) / 255,
+                            blue: CGFloat(b / 2 + 40) / 255, alpha: 1)
+        let side = 192
+        let img = UIGraphicsImageRenderer(size: CGSize(width: side, height: side), format: {
+            let f = UIGraphicsImageRendererFormat(); f.scale = 1; f.opaque = false; return f
+        }()).image { ctx in
+            let cg = ctx.cgContext
+            cg.addEllipse(in: CGRect(x: 0, y: 0, width: side, height: side))
+            cg.clip()
+            cg.setFillColor(shade.cgColor)
+            cg.fill(CGRect(x: 0, y: 0, width: side, height: side))
+            cg.setFillColor(face.cgColor)
+            cg.move(to: CGPoint(x: side, y: 0))
+            cg.addLine(to: CGPoint(x: side, y: side))
+            cg.addLine(to: CGPoint(x: 0, y: side))
+            cg.closePath()
+            cg.fillPath()
+        }
+        return img.pngData()
     }
 
     private static func png(seed: String) -> Data? {

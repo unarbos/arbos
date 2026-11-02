@@ -6,6 +6,11 @@ import Foundation
 
 #if DEBUG || ARBOS_FIXTURE
 extension AppModel {
+    /// The one fixture person with a picture (D79 initials for the rest). It is painted on
+    /// first use and kept as a file, so neither the avatar cache nor the sample notification
+    /// fetches a real photo from the internet when the rig launches.
+    static let fixturePictureURL: String? = FixtureMedia.avatarFile(seed: "unconst")?.absoluteString
+
     func loadFixture() {
         isFixture = true
         waitlistPosition = DebugHooks.fixtureWaitlist
@@ -172,7 +177,7 @@ extension AppModel {
         let meMember = ChatMember(id: "fx-me", kind: .user, member: "user:fx-me", role: "owner", handle: "jacob", avatarUrl: nil, name: "Jacob Steeves", status: "member",
                                   joinedAt: now - 40 * 60_000, project: nil, ownerId: nil, ownerHandle: nil, replyPolicy: nil)
         let unconst = ChatMember(id: "gh_32490803", kind: .user, member: "user:gh_32490803", role: "member", handle: "unconst",
-                                 avatarUrl: "https://avatars.githubusercontent.com/u/32490803?v=4", name: "Unconst", status: "member",
+                                 avatarUrl: Self.fixturePictureURL, name: "Unconst", status: "member",
                                  joinedAt: now - 40 * 60_000, project: nil, ownerId: nil, ownerHandle: nil, replyPolicy: nil,
                                  lastSeenAt: now - 7 * 60_000, online: false)
         // A small group too, for the group page.
@@ -690,7 +695,7 @@ extension AppModel {
             chatId: "fx-dm-unconst", projectId: peopleSlot, title: "Unconst",
             body: "@main who is in the standup tomorrow?",
             senderKind: "user", senderId: "gh_32490803", senderName: "Unconst", senderHandle: "unconst",
-            avatar: nil, avatarColor: nil, avatarUrl: "https://avatars.githubusercontent.com/u/32490803?v=4")
+            avatar: nil, avatarColor: nil, avatarUrl: Self.fixturePictureURL)
         Task {
             await PushManager.shared.postMessage(id: "sample-agent", info: agentInfo)
             try? await Task.sleep(nanoseconds: 2_500_000_000)
