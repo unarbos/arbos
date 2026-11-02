@@ -1404,21 +1404,27 @@ pub async fn put_agent_settings(
     Path(id): Path<String>,
     Json(b): Json<AgentSettingsBody>,
 ) -> Response {
-    let Some(p) = state.db.project(&id).ok().flatten() else {
-        return api_error(StatusCode::NOT_FOUND, "not_found", "no such project");
-    };
-    let owner = match &principal {
+    // Someone else's agent reads exactly like one that is not there, so the pair of answers
+    // cannot be used to ask which names are taken (reported 2026-11-02). A name is matched
+    // against the caller's own agents first, because names are not unique across owners.
+    let own = |p: &Project| match &principal {
         Principal::Admin => true,
         Principal::Device { user_id, .. } => *user_id == p.user_id,
         Principal::Box { .. } => false,
     };
-    if !owner {
-        return api_error(
-            StatusCode::FORBIDDEN,
-            "forbidden",
-            "only the agent's owner changes its voice settings",
-        );
-    }
+    let found = principal
+        .user_id()
+        .and_then(|u| {
+            state
+                .db
+                .project_of_user_by_name(u, id.trim())
+                .ok()
+                .flatten()
+        })
+        .or_else(|| state.db.project(id.trim()).ok().flatten());
+    let Some(p) = found.filter(own) else {
+        return api_error(StatusCode::NOT_FOUND, "not_found", "no such project");
+    };
     if let Some(c) = b.chattiness.as_deref() {
         if !CHATTINESS_LEVELS.contains(&c) {
             return api_error(

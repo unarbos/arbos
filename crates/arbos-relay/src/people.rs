@@ -1617,24 +1617,37 @@ fn default_agent_settings() -> Value {
     json!({ "reply_policy": "mention", "restrict_guests": false })
 }
 
-/// The project, if it belongs to the caller.
+/// The project, if it belongs to the caller. Someone else's project reads exactly like one that
+/// is not there: the pair of answers used to be a way to ask which names were taken
+/// (`api::no_such_project`, reported 2026-11-02).
 fn own_project(
     state: &AppState,
     me: &str,
     project_id: &str,
 ) -> Result<crate::db::Project, Box<Response>> {
-    match state.db.project(project_id) {
-        Ok(Some(p)) if p.user_id == me => Ok(p),
-        Ok(Some(_)) => Err(Box::new(api_error(
-            StatusCode::FORBIDDEN,
-            "own_project_only",
-            "you can only add or change your own Project's agent",
-        ))),
-        Ok(None) => Err(Box::new(api_error(
+    let wanted = project_id.trim();
+    let missing = || {
+        Box::new(api_error(
             StatusCode::NOT_FOUND,
             "not_found",
             "no such project",
-        ))),
+        ))
+    };
+    // Names are not unique across owners, so the caller's own agents are matched first.
+    match state.db.project_of_user_by_name(me, wanted) {
+        Ok(Some(p)) => return Ok(p),
+        Ok(None) => {}
+        Err(e) => {
+            return Err(Box::new(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db",
+                e.to_string(),
+            )))
+        }
+    }
+    match state.db.project(wanted) {
+        Ok(Some(p)) if p.user_id == me => Ok(p),
+        Ok(_) => Err(missing()),
         Err(e) => Err(Box::new(api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "db",
@@ -2612,19 +2625,37 @@ pub(crate) fn project_members_dto(
     }
 }
 
-fn project_for(state: &AppState, id: &str) -> Result<crate::db::Project, Box<Response>> {
-    match state.db.project(id) {
-        Ok(Some(p)) => Ok(p),
-        Ok(None) => Err(Box::new(api_error(
+/// The project, as this caller. A project the caller is not on reads exactly like one that is not
+/// there; the owner-only checks the callers make afterwards therefore reach invited members only,
+/// who can see the project anyway. Mirrors `api::project_for`.
+fn project_for(
+    state: &AppState,
+    principal: &Principal,
+    id: &str,
+) -> Result<crate::db::Project, Box<Response>> {
+    let wanted = id.trim();
+    let db_err = |e: anyhow::Error| {
+        Box::new(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "db",
+            e.to_string(),
+        ))
+    };
+    if let Some(user_id) = principal.user_id() {
+        match state.db.project_of_user_by_name(user_id, wanted) {
+            Ok(Some(p)) => return Ok(p),
+            Ok(None) => {}
+            Err(e) => return Err(db_err(e)),
+        }
+    }
+    match state.db.project(wanted) {
+        Ok(Some(p)) if state.allows(principal, &p.id) => Ok(p),
+        Ok(_) => Err(Box::new(api_error(
             StatusCode::NOT_FOUND,
             "not_found",
             "no such project",
         ))),
-        Err(e) => Err(Box::new(api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "db",
-            e.to_string(),
-        ))),
+        Err(e) => Err(db_err(e)),
     }
 }
 
@@ -2647,7 +2678,7 @@ pub async fn project_member_add(
         Ok(u) => u,
         Err(r) => return *r,
     };
-    let project = match project_for(&state, &id) {
+    let project = match project_for(&state, &principal, &id) {
         Ok(p) => p,
         Err(r) => return *r,
     };
@@ -2715,7 +2746,7 @@ pub async fn project_members_list(
     principal: Principal,
     Path(id): Path<String>,
 ) -> Response {
-    let project = match project_for(&state, &id) {
+    let project = match project_for(&state, &principal, &id) {
         Ok(p) => p,
         Err(r) => return *r,
     };
@@ -2735,7 +2766,7 @@ pub async fn project_member_remove(
         Ok(u) => u,
         Err(r) => return *r,
     };
-    let project = match project_for(&state, &id) {
+    let project = match project_for(&state, &principal, &id) {
         Ok(p) => p,
         Err(r) => return *r,
     };
@@ -3017,7 +3048,7 @@ pub async fn invite_create(
         return api_error(StatusCode::BAD_REQUEST, "bad_handle", "that is you");
     }
     let (kind, target) = if let Some(pid) = b.project_id.as_deref() {
-        let project = match project_for(&state, pid) {
+        let project = match project_for(&state, &principal, pid) {
             Ok(p) => p,
             Err(r) => return *r,
         };
@@ -4458,7 +4489,9 @@ mod agent_tests {
             }),
         )
         .await;
-        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        // Not found, not forbidden: Alice's agent reads to Bob exactly like one that is not
+        // there, so the refusal cannot be used to ask which agents exist.
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
         assert!(state.db.members_of(&chat).unwrap().len() == 2);
 
         // Alice adds her own: fine, the box is told.
@@ -4509,7 +4542,8 @@ mod agent_tests {
             Path((chat.clone(), alices_project.clone())),
         )
         .await;
-        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        // Alice's agent is not Bob's to remove, and he is not told it exists.
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
         let r = agent_remove(
             State(state.clone()),
             alice_dev.clone(),
@@ -5237,7 +5271,8 @@ mod create_group_tests {
             }),
         )
         .await;
-        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        // Bob's agent reads to Alice exactly like one that is not there.
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
         let after = state
             .db
             .chats_of_member(&format!("user:{alice}"))
@@ -5547,7 +5582,8 @@ mod shared_project_tests {
             }),
         )
         .await;
-        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        // Before Alice invites him, the project reads to Bob exactly like one that is not there.
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
         let r = project_member_add(
             State(state.clone()),
             alice_dev.clone(),
@@ -5576,7 +5612,9 @@ mod shared_project_tests {
             Path((project.clone(), bob.clone())),
         )
         .await;
-        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        // Carol is not on this project at all, so it reads to her as not there. A guest who IS
+        // on it still gets a plain refusal, which is what the `owns` check below covers.
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
         let r = project_member_remove(
             State(state.clone()),
             alice_dev.clone(),
