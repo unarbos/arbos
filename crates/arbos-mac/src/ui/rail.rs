@@ -650,7 +650,7 @@ pub(crate) fn render_overlay(
                         .w(b.size.width)
                         .h(b.size.height)
                         .rounded(px(radius))
-                        .bg(theme.surface_2),
+                        .bg(highlight::fills(&theme).selected),
                 );
             }
         }
