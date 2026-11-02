@@ -357,8 +357,85 @@ pub async fn box_create(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::people::tests_support::{person, project_of};
     use crate::state::test_support::test_state;
     use crate::state::AuthMode;
+
+    /// A standing grant is the owner's approval authority: adding one removes the card for a
+    /// whole rule class, for every later run. A guest of a shared project drives the agent but
+    /// does not hold that authority, so the three grant routes must refuse their device token.
+    #[tokio::test]
+    async fn a_guest_cannot_read_or_change_the_owners_shell_grants() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 6101);
+        let (bob, bob_dev) = person(&state, 6102);
+        let project = project_of(&state, &alice, "Doug");
+        state
+            .db
+            .add_project_member(&project, &bob, &alice)
+            .expect("invite");
+        assert!(
+            state.allows(&bob_dev, &project),
+            "the guest drives the project: the bug is that this is taken for ownership"
+        );
+
+        let owners = state
+            .db
+            .add_shell_grant(
+                &project,
+                "file-delete",
+                PathClass::Anywhere,
+                None,
+                &alice,
+                None,
+            )
+            .expect("owner grant");
+
+        let e = list(State(state.clone()), bob_dev.clone(), Path(project.clone()))
+            .await
+            .expect_err("a guest must not read the owner's standing approvals");
+        assert_eq!(e.0, StatusCode::FORBIDDEN);
+        assert_eq!(e.1, "not_owner");
+
+        let e = create(
+            State(state.clone()),
+            bob_dev.clone(),
+            Path(project.clone()),
+            Json(GrantBody {
+                rule_class: "file-delete".into(),
+                path_class: "anywhere".into(),
+                chat_id: None,
+                approval_id: None,
+            }),
+        )
+        .await
+        .expect_err("a guest must not hand the agent a standing approval");
+        assert_eq!(e.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            state.db.shell_grants(&project).unwrap().len(),
+            1,
+            "the guest added nothing"
+        );
+
+        let e = revoke(
+            State(state.clone()),
+            bob_dev,
+            Path((project.clone(), owners.id.clone())),
+        )
+        .await
+        .expect_err("a guest must not revoke the owner's standing approval");
+        assert_eq!(e.0, StatusCode::FORBIDDEN);
+        assert!(
+            state.db.shell_grant(&owners.id).unwrap().is_some(),
+            "the owner's grant is still active"
+        );
+
+        // The owner is unaffected.
+        let r = list(State(state.clone()), alice_dev, Path(project.clone()))
+            .await
+            .expect("the owner reads their own grants");
+        assert_eq!(r.status(), StatusCode::OK);
+    }
 
     #[test]
     fn grants_dedupe_and_revoke() {

@@ -1090,6 +1090,70 @@ mod shell_grant_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// "This chat only" has to mean this chat. A card is deliberately posted in the pinned chat
+    /// even when the call came from a side thread (`approval_chat`, #1440/#1544), so a grant
+    /// that follows the card instead of the asking thread lands on the pinned chat — and every
+    /// other thread resolves to that same pinned chat on the way in, so the narrowed grant
+    /// covers all of them.
+    #[tokio::test]
+    async fn a_chat_only_grant_covers_only_the_thread_it_was_made_in() {
+        let (agent, root) = test_agent().await;
+        let main = "01TESTCHATSHELLGRANT000010";
+        let side = "01TESTCHATSHELLGRANT000011";
+        let other = "01TESTCHATSHELLGRANT000012";
+        agent.store.upsert_chat(main, "Main", true, 0).unwrap();
+        agent.store.upsert_chat(side, "Side", false, 1).unwrap();
+        agent.store.upsert_chat(other, "Other", false, 2).unwrap();
+        let _host = agent.sync.open_room(main).await.unwrap();
+
+        // A card raised from the side thread; the owner answers it with "always allow, this
+        // chat only".
+        let v = agent
+            .hook_approval("bash", &json!({ "command": "rm -rf /opt/app" }), side, "main")
+            .await;
+        assert_eq!(v["state"], "pending", "{v}");
+        let id = v["approvalId"].as_str().unwrap().to_owned();
+        agent
+            .decide_approval_from_command(
+                &id,
+                ApprovalOutcome::Approved,
+                "dev-mac",
+                &json!({ "approvalId": id, GRANT_FIELD: "anywhere", "grant_chat_only": true }),
+            )
+            .await
+            .unwrap();
+
+        // The attack: a third thread the owner never granted anything in.
+        let v = agent
+            .hook_approval(
+                "bash",
+                &json!({ "command": "rm -rf /opt/elsewhere" }),
+                other,
+                "main",
+            )
+            .await;
+        assert_eq!(
+            v["state"], "pending",
+            "a grant narrowed to one thread must not cover another: {v}"
+        );
+
+        let grants = agent.approvals.shell_grants.lock().await.clone();
+        assert_eq!(grants.len(), 1);
+        assert_eq!(
+            grants[0].chat_id.as_deref(),
+            Some(side),
+            "the grant belongs to the thread that asked, not to the chat the card was shown in"
+        );
+        drop(grants);
+
+        // The thread it was made in still runs without a card.
+        let v = agent
+            .hook_approval("bash", &json!({ "command": "rm -rf /opt/app2" }), side, "main")
+            .await;
+        assert_eq!(v["state"], "allowed", "{v}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Option B/C on the card (`approve` with `grant`): the grant takes effect locally at once,
     /// even before the relay confirms it, and the next matching command runs without a card.
     #[tokio::test]
