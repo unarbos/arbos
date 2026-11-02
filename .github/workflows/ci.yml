@@ -62,6 +62,9 @@ jobs:
           shellcheck -S warning scripts/*.sh scripts/release/*.sh scripts/runner/*.sh scripts/feedback/*.sh scripts/merge/*.sh image/*.sh
           # One avatar resolver on both platforms (ARB-394): no surface draws an agent picture outside it.
           ./scripts/avatar-lint.sh
+          # merge.sh decides rule 9 from a check rollup it cannot be handed on demand, so the cases run
+          # against a recorded one.
+          ./scripts/merge/merge-selftest.sh
           curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash | bash -s -- latest /tmp >/dev/null
           /tmp/actionlint -color
 

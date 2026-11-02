@@ -101,16 +101,54 @@ if [ -n "$OVER" ] && [[ "$v" == *": NO-GO — a loop item the timer can release 
 else
   case "$v" in *": GO —"*) ;; *) echo "NOT MERGED: verdict is not GO"; exit 3;; esac
 fi
+# rollup_red: a statusCheckRollup object on stdin, one line out per non-success row:
+#   <the run id of a green twin, or "-"> <this row's run id, or "untraceable"> <check name> <conclusion>
+#
+# The twin field is rule 9's "a run on the identical head sha is green for that same check", read out
+# of the rollup rather than asked for again. Every row in one rollup belongs to one commit — the PR's
+# head, pinned to $SHA above and re-read below — so two rows are on the identical sha by construction,
+# which is the one part of the rule that would otherwise have to be inferred. A twin counts only when
+# it is the same kind of row, from the same workflow, under the same name: GitHub files the push run's
+# copy of a job and the pull_request run's copy under one name, and that pair is the shape rule 9 is
+# about. SKIPPED and NEUTRAL are not twins; a job that did no work proves nothing, which is the point
+# checks.sh is built around.
+rollup_red() {
+  jq -r '
+    def runid: ((.detailsUrl // .targetUrl // "") | [capture("runs/(?<id>[0-9]+)").id] | first);
+    def rowkey: [.__typename, (.workflowName // ""), (.name // .context)];
+    [.statusCheckRollup[] | select((.conclusion // .state) == "SUCCESS")] as $green
+    | .statusCheckRollup[]
+    | select((.conclusion // .state) as $c | ["FAILURE","CANCELLED","TIMED_OUT","ACTION_REQUIRED","STARTUP_FAILURE","ERROR","STALE"] | index($c))
+    | . as $row
+    | ([$green[] | select(rowkey == ($row | rowkey)) | (runid // "untraceable")] | first) as $twin
+    | "\($twin // "-") \(($row | runid) // "untraceable") \($row | .name // .context) \($row | .conclusion // .state)"'
+}
 # A second pass, over every other check the rollup reports. The required gates above decide whether the
 # checks that matter ran and passed; this one catches a red result in a check nobody thought to name,
-# and accept-red=<id>[,<id>] can waive it (rule 9 flake, or a run that did not test this PR).
+# and accept-red=<id>[,<id>] can waive it (a run that did not test this PR).
 # It cannot waive a required gate: that refusal already happened, above, and took no arguments.
-red=$(gh pr view "$PR" -R $R --json statusCheckRollup --jq '.statusCheckRollup[]
-  | select((.conclusion // .state) as $c | ["FAILURE","CANCELLED","TIMED_OUT","ACTION_REQUIRED","STARTUP_FAILURE","ERROR","STALE"] | index($c))
-  | "\(((.detailsUrl // .targetUrl // "") | [capture("runs/(?<id>[0-9]+)").id] | first) // "untraceable") \(.name // .context) \(.conclusion // .state)"') || { echo "NOT MERGED: cannot read the check rollup"; exit 3; }
+#
+# The green-twin half of rule 9 is settled here rather than left to accept-red. gate_state has read a
+# head that way since it was written, and the comment above this file's required-gate refusal leans on
+# it — "a run on the identical head sha is green for that same check" is given there as the reason the
+# legitimate flake case needs no override. This pass did not read it, so the kit refused merges its own
+# stated rule allows and an argument was the only way past, which is how two of tonight's hours went.
+# Measured on f4297c758f30acfbce5fbe4f83e3adab3cb106d0: `rust (fmt, clippy, test)` concluded failure in
+# run 41513010699 and success in run 41513719101, both on that sha. This is the opposite of a waiver —
+# it is a fact about the head, it takes no argument, and nobody asserts it.
+#
+# One thing it inherits from gate_state and deliberately does not narrow: the two runs sharing a head
+# sha are usually the push run, which tests the head exactly, and the pull_request run, which tests the
+# head merged into main's tip. So a push-run green can settle a pull_request-run red that was a genuine
+# conflict with newer main. Rule 9 is written at the level of the sha and gate_state has always applied
+# it at that level; making it asymmetric is a policy change that needs its own proof, not a detail to
+# settle in passing here. The green run's id is printed so the reader can go and see which run it was.
+rollup=$(gh pr view "$PR" -R $R --json statusCheckRollup) || { echo "NOT MERGED: cannot read the check rollup"; exit 3; }
+red=$(printf '%s' "$rollup" | rollup_red) || { echo "NOT MERGED: cannot read the check rollup: it did not parse"; exit 3; }
 acc=",${FLAKE#accept-red=},"
-while read -r id name; do
+while read -r twin id name; do
   [ -n "$id" ] || continue
+  [ "$twin" = "-" ] || { echo "    red check settled by run $twin, green for this same check on ${SHA:0:9} (rule 9): $id $name"; continue; }
   case "$acc" in *",$id,"*) echo "    red check accepted by run id: $id $name" ;;
     *) echo "NOT MERGED: red check not accepted: run $id $name"; exit 3 ;; esac
 done <<< "$red"
