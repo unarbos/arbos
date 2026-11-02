@@ -36,11 +36,11 @@ use crate::model::{
     BoxReport, BoxState, BoxWorkspace, ChannelBinding, ChannelPairing, ChannelPlatform,
     ChannelPlatformState, ChannelsView, Chat, ChatKind, ChoiceOption, Connector, ConnectorAction,
     ConnectorProvider, ConnectorStatus, ConnectorsView, DeviceView, Effort, FieldKind, FormField,
-    Id, Job, JobRollout, JobState, Link, LocalDevice, LocalView, Message, MessageStatus, Part,
-    Project, QuestionState, Role, RolloutEntry, RolloutKind, RolloutParent, Routine, RoutineRun,
-    RoutineRunStatus, RoutineTrigger, Secret, SecretActivity, SecretAgent, SecretDirector,
-    SecretRequest, SecretScope, SecretsView, ServerChannel, ServerInfo, Skill, StatusKind,
-    ToolCall, ToolStatus, TurnKind, Widget,
+    Id, Job, JobRef, JobRollout, JobState, Link, LocalDevice, LocalView, Message, MessageStatus,
+    Part, Project, QuestionState, Role, RolloutEntry, RolloutKind, RolloutParent, Routine,
+    RoutineRun, RoutineRunStatus, RoutineTrigger, Secret, SecretActivity, SecretAgent,
+    SecretDirector, SecretRequest, SecretScope, SecretsView, ServerChannel, ServerInfo, Skill,
+    StatusKind, ToolCall, ToolStatus, TurnKind, Widget,
 };
 
 pub const STREAM_FRAME_MS: u64 = arbos_core::STREAM_COMMIT_MS;
@@ -246,6 +246,7 @@ impl SyncSource for FixtureSource {
             emit_typing_hook(&shared);
             emit_working_hook(&shared);
             emit_jobs_hook(&shared);
+            emit_reads_hook(&shared);
 
             loop {
                 tokio::select! {
@@ -710,6 +711,81 @@ const FIXTURE_JOBS: [(&str, &str, JobState, &str, u64); 3] = [
         12,
     ),
 ];
+
+/// `ARBOS_FIXTURE_READS=1` (screenshot rig, [feedback
+/// library-chat-only-mac-2026-10-25]): every agent chat ends the way Bubble's
+/// did — a hidden job row that read a source file (the page as a link, the file
+/// as an attachment) and a finished reply naming ten files and a docs page.
+/// None of it was exchanged in the chat, so the Library must show none of it.
+fn fixture_reads_on() -> bool {
+    std::env::var("ARBOS_FIXTURE_READS").is_ok_and(|v| v.trim() == "1")
+}
+
+const READ_FILES: [&str; 10] = [
+    "app.rs",
+    "calls.rs",
+    "auth.rs",
+    "update.rs",
+    "search.rs",
+    "onboarding.rs",
+    "transcript.rs",
+    "relay.rs",
+    "agent.rs",
+    "people.rs",
+];
+
+fn emit_reads_hook(shared: &Arc<Shared>) {
+    if !fixture_reads_on() {
+        return;
+    }
+    let spaces: Vec<Project> = shared.projects.lock().unwrap().clone();
+    let now = now_ms();
+    for space in spaces.iter().filter(|s| !s.is_people()) {
+        let chats: Vec<Id> = shared
+            .chats
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.project_id == space.id)
+            .map(|c| c.id.clone())
+            .collect();
+        for chat_id in chats {
+            let mut job = agent_message(
+                &chat_id,
+                "Read https://github.com/unarbos/arbos/blob/main/crates/arbos-mac/src/app.rs",
+                now - 40_000,
+            );
+            job.hidden = true;
+            job.worker = true;
+            job.job = Some(JobRef {
+                id: format!(
+                    "01J9JOBREADS0000000000{}",
+                    &chat_id[chat_id.len().saturating_sub(4)..]
+                ),
+                title: "Reading the repo".into(),
+            });
+            job.parts.push(attachment(
+                "app.rs",
+                "text/plain",
+                AttachmentKind::File,
+                "app.rs",
+                48_000,
+            ));
+            let reply = agent_message(
+                &chat_id,
+                &format!(
+                    "I read {} — nothing to change. Notes on the layout API: https://docs.rs/gpui",
+                    READ_FILES.join(", ")
+                ),
+                now - 20_000,
+            );
+            with_doc(shared, &chat_id, |doc| {
+                insert_message_via_core(doc, &job);
+                insert_message_via_core(doc, &reply);
+            });
+        }
+    }
+}
 
 fn emit_jobs_hook(shared: &Arc<Shared>) {
     let n = fixture_jobs_count();
@@ -7061,6 +7137,28 @@ fn human_message(chat_id: &str, who: &Person, text: &str, at: u64) -> Message {
         greeting: false,
         preview: None,
     }
+}
+
+/// The agent's own finished line in its chat (`role: assistant`, `sender: agent`).
+fn agent_message(chat_id: &str, text: &str, at: u64) -> Message {
+    let nobody = Person {
+        id: String::new(),
+        handle: String::new(),
+        name: None,
+        avatar_url: String::new(),
+        status: String::new(),
+        role: String::new(),
+        last_seen_at: None,
+        online: false,
+        avatar_color_index: None,
+    };
+    let mut m = human_message(chat_id, &nobody, text, at);
+    m.role = Role::Assistant;
+    m.sender = "agent".into();
+    m.sender_name = None;
+    m.sender_handle = None;
+    m.sender_avatar = None;
+    m
 }
 
 fn text_part(text: &str) -> Part {
