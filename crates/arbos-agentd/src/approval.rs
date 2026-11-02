@@ -76,6 +76,11 @@ pub struct Approvals {
 /// `approve` payload field a card option B/C sets: the path class to allow from now on.
 pub const GRANT_FIELD: &str = "grant";
 
+/// Card payload field naming the thread a "this chat only" grant is scoped to (see
+/// `Agent::grant_scope`). The card's own chat will not do: it is the pinned chat whenever the
+/// call came from a side thread.
+pub const GRANT_SCOPE_FIELD: &str = "grant_scope_chat";
+
 /// The standing options a destructive-shell card offers, in order, for the card renderer:
 /// `[{ path_class, label, detail }]`. Empty for anything a standing grant cannot cover.
 pub fn grant_options(hit: &RiskMatch) -> Vec<Value> {
@@ -154,6 +159,25 @@ impl Agent {
             return Some(c.id);
         }
         chats.first().map(|c| c.id.clone())
+    }
+
+    /// The thread a "this chat only" shell grant belongs to, used both when the grant is
+    /// recorded and when it is matched. This is not `approval_chat`: that one moves a card out
+    /// of a side thread into the pinned chat so the owner sees it, and every side thread
+    /// collapses to the same pinned chat, so a grant scoped that way covers the whole project.
+    /// Here a hint that names no chat scopes to the running turn's chat, and failing that to
+    /// itself — a narrowed grant can only ever narrow.
+    pub async fn grant_scope(&self, hint: &str) -> String {
+        if self.people.is_people_chat(hint) {
+            return hint.to_owned();
+        }
+        if let Ok(Some(c)) = self.store.chat(hint) {
+            return c.id;
+        }
+        if let Some(t) = self.turn.lock().await.as_ref() {
+            return t.chat_id.clone();
+        }
+        hint.to_owned()
     }
 
     /// Append one line to `/work/.arbos/audit.jsonl` and mirror it to the relay (`POST
@@ -793,7 +817,7 @@ impl Agent {
     async fn record_shell_grant(
         self: &Arc<Self>,
         row_payload: &Value,
-        chat_id: &str,
+        card_chat: &str,
         approval_id: &str,
         class: PathClass,
         decided_by: &str,
@@ -815,9 +839,15 @@ impl Agent {
             .get("grant_chat_only")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        // The thread that asked, not the chat the card was shown in: cards from a side thread
+        // are posted in the pinned chat, and scoping a grant there covers the whole project.
+        let scope = row_payload
+            .get(GRANT_SCOPE_FIELD)
+            .and_then(Value::as_str)
+            .unwrap_or(card_chat);
         let body = json!({
             "rule_class": rule_class, "path_class": class.as_str(),
-            "chat_id": if per_chat { Some(chat_id) } else { None },
+            "chat_id": if per_chat { Some(scope) } else { None },
             "approval_id": approval_id, "granted_by": decided_by,
         });
         let local = ShellGrant {
@@ -825,7 +855,7 @@ impl Agent {
             project_id: self.cfg.project_id.clone(),
             rule_class: rule_class.clone(),
             path_class: class,
-            chat_id: per_chat.then(|| chat_id.to_owned()),
+            chat_id: per_chat.then(|| scope.to_owned()),
             granted_by: decided_by.to_owned(),
             approval_id: Some(approval_id.to_owned()),
             created_at: now_ms(),
@@ -842,7 +872,7 @@ impl Agent {
         self.append_audit(
             "shell_grant_added",
             json!({ "approval_id": approval_id, "rule_class": rule_class, "path_class": class.as_str(),
-                "chat_id": per_chat.then_some(chat_id), "by": decided_by }),
+                "chat_id": per_chat.then_some(scope), "by": decided_by }),
         );
     }
 
@@ -861,11 +891,12 @@ impl Agent {
             tracing::info!(tool, approval_id = granted, "pre-approved call");
             return Ok(());
         }
+        let scope = self.grant_scope(chat_hint).await;
         let Some(chat_id) = self.approval_chat(chat_hint).await else {
             return Err("no chat to post the approval card in".into());
         };
         if self
-            .shell_grant_for(&hit, Some(&chat_id), tool, args)
+            .shell_grant_for(&hit, Some(&scope), tool, args)
             .await
             .is_some()
         {
@@ -877,6 +908,7 @@ impl Agent {
             summary,
             risk: hit.risk,
             payload: json!({ "kind": "tool_call", "tool": tool, "input": args, "class": hit.class, "why": hit.why,
+                GRANT_SCOPE_FIELD: scope,
                 "path_class": hit.path_class.map(PathClass::as_str), "grant_options": grant_options(&hit) }),
         };
         let outcome = self.request_approval(&chat_id, req).await;
@@ -923,13 +955,11 @@ impl Agent {
         if let Some(granted) = self.take_grant(tool, input).await {
             return json!({ "ok": true, "state": "allowed", "approvalId": granted });
         }
+        let scope = self.grant_scope(session_id).await;
         let Some(chat_id) = self.approval_chat(session_id).await else {
             return json!({ "ok": false, "error": "no chat to post the approval card in" });
         };
-        if let Some(g) = self
-            .shell_grant_for(&hit, Some(&chat_id), tool, input)
-            .await
-        {
+        if let Some(g) = self.shell_grant_for(&hit, Some(&scope), tool, input).await {
             return json!({ "ok": true, "state": "allowed", "grantId": g.id });
         }
         let (title, summary) = describe_tool(tool, input, &hit);
@@ -938,6 +968,7 @@ impl Agent {
             summary,
             risk: hit.risk,
             payload: json!({ "kind": "tool_call", "tool": tool, "input": input, "class": hit.class, "why": hit.why, "session_id": session_id, "role": role,
+                GRANT_SCOPE_FIELD: scope,
                 "path_class": hit.path_class.map(PathClass::as_str), "grant_options": grant_options(&hit) }),
         };
         match self
@@ -1109,7 +1140,12 @@ mod shell_grant_tests {
         // A card raised from the side thread; the owner answers it with "always allow, this
         // chat only".
         let v = agent
-            .hook_approval("bash", &json!({ "command": "rm -rf /opt/app" }), side, "main")
+            .hook_approval(
+                "bash",
+                &json!({ "command": "rm -rf /opt/app" }),
+                side,
+                "main",
+            )
             .await;
         assert_eq!(v["state"], "pending", "{v}");
         let id = v["approvalId"].as_str().unwrap().to_owned();
@@ -1148,7 +1184,12 @@ mod shell_grant_tests {
 
         // The thread it was made in still runs without a card.
         let v = agent
-            .hook_approval("bash", &json!({ "command": "rm -rf /opt/app2" }), side, "main")
+            .hook_approval(
+                "bash",
+                &json!({ "command": "rm -rf /opt/app2" }),
+                side,
+                "main",
+            )
             .await;
         assert_eq!(v["state"], "allowed", "{v}");
         let _ = std::fs::remove_dir_all(&root);

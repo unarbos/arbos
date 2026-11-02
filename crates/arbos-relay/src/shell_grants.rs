@@ -175,6 +175,10 @@ fn push_box(state: &AppState, project_id: &str) {
         .enqueue_push(project_id, "shell_grants_changed", &json!({}));
 }
 
+/// The project, for its owner only. Standing grants are approval authority, not project work:
+/// one of them removes the destructive-shell card for a whole rule class, for every later run.
+/// A guest of a shared project drives the agent (`state.allows`) but never holds that, so this
+/// asks `state.owns`. Clients already read the 403 `not_owner` as "not mine" and show nothing.
 fn owned_project(
     state: &AppState,
     principal: &Principal,
@@ -185,7 +189,7 @@ fn owned_project(
         .project(id)
         .map_err(internal)?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "no such project"))?;
-    if !state.allows(principal, &p.id) {
+    if !state.owns(principal, &p.id) {
         return Err(err(StatusCode::FORBIDDEN, "not_owner", "not your project"));
     }
     Ok(p)
