@@ -22,6 +22,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine;
+use futures::StreamExt;
 use hmac::{Hmac, Mac};
 use rand::RngCore;
 use serde::Deserialize;
@@ -184,28 +185,57 @@ fn user_json(state: &AppState, user_id: &str) -> Value {
 }
 
 /// End a device's session everywhere it exists: the relay `devices` row, that device's refresh
-/// tokens, and its Matrix device and access token. Returns whether the relay row was still live.
+/// tokens, its Matrix device and access token, its live room sockets and its `arbos-local`
+/// helper socket. Returns whether the relay row was still live.
 ///
-/// Both halves are needed. `/_matrix` forwards any valid Matrix access token straight to the
-/// homeserver and never consults the `devices` table, so a path that revokes the relay rows alone
-/// leaves a working Matrix session behind for a device the user believes is signed out. The
+/// Every half is needed.
+///
+/// *Matrix.* `/_matrix` forwards any valid Matrix access token straight to the homeserver and
+/// never consults the `devices` table, so a path that revokes the relay rows alone leaves a
+/// working Matrix session behind for a device the user believes is signed out. The
 /// refresh-token replay branches below did exactly that: 11 Matrix access tokens across 7 users,
 /// for devices revoked between Oct 22 and Oct 30, were still live with their `matrix_devices` rows
 /// intact. Every caller comes through here so a sign-out path cannot do one half and skip the other.
 ///
-/// The Matrix logout runs even when the relay row was already revoked: a `matrix_devices` row left
-/// over from an earlier half-revocation is cleaned up the next time the device is revoked. The
-/// Matrix half is best effort and logs its own failures; the database half is returned, so a
-/// caller that cannot revoke can say so instead of reporting a sign-out that did not happen.
+/// *Sockets.* A room socket resolves its principal once, at the upgrade, and a helper socket
+/// registers once; neither reads `devices` again. Revoking the row therefore does not reach a
+/// connection that is already open, and until the #2460 review a signed-out laptop kept reading
+/// its chats and kept posting rows that appear as the owner. `note_device_revoked` wakes every
+/// room socket, which re-reads the row and closes; `local::disconnect` unregisters the helper.
+///
+/// Both failures are reported. The Matrix logout runs even when the relay row was already
+/// revoked, so a `matrix_devices` row left over from an earlier half-revocation is cleaned up
+/// the next time the device is revoked.
+///
+/// *Order.* The row goes first, then the sockets, then Matrix. The first two are local and take
+/// about ten milliseconds; the Matrix logout is a network call that waits up to
+/// [`LOGOUT_TIMEOUT`](crate::matrix::servers) for a homeserver that may never answer. The
+/// re-review's probe C found that ordering reversed: with a hung homeserver the device's row was
+/// revoked in 11 ms but its room socket kept reading for the full ten seconds, and it stayed in
+/// `local_conns`, where `local::exec` would still dispatch file operations to it. Nothing that
+/// cuts a live connection may sit behind a network call.
 pub(crate) async fn revoke_device_everywhere(
     state: &AppState,
     device_id: &str,
 ) -> anyhow::Result<bool> {
-    // Both halves run before anything is reported: a database failure must not stop the Matrix
-    // session from being closed.
+    // Every half runs before anything is reported: a database failure must not stop the Matrix
+    // session from being closed, and neither must stop the sockets from being cut.
     let relay = state.db.revoke_device_fully(device_id);
-    crate::matrix::servers::revoke_device(state, device_id).await;
-    relay
+    crate::local::disconnect(state, device_id, "device signed out").await;
+    state.note_device_revoked();
+    let matrix = crate::matrix::servers::revoke_device(state, device_id).await;
+    match (relay, matrix) {
+        (Ok(live), Ok(())) => Ok(live),
+        // The relay row is the one the caller asked about, so its error wins; the Matrix error
+        // is logged rather than lost.
+        (Err(e), m) => {
+            if let Err(m) = m {
+                tracing::warn!(device = %device_id, error = %m, "matrix: device not logged out");
+            }
+            Err(e)
+        }
+        (Ok(_), Err(m)) => Err(m.context("the device's Matrix session is still live")),
+    }
 }
 
 /// Access + refresh pair for a device. The refresh token is stored hashed, bound to the device.
@@ -544,7 +574,10 @@ pub async fn github_callback(
         .revoke_named_github_devices(&user.id, &flow.device_name, None)
     {
         for id in &prev {
-            crate::matrix::servers::revoke_device(&state, id).await;
+            crate::matrix::servers::revoke_device_logging(&state, id).await;
+        }
+        if !prev.is_empty() {
+            state.note_device_revoked();
         }
     }
     let device_id = ulid();
@@ -741,6 +774,295 @@ pub async fn logout(State(state): State<AppState>, principal: Principal) -> Resp
     }
 }
 
+/// `audit` rows written by [`sign_out_everywhere`], under the slot `account:<user id>`.
+pub const SIGN_OUT_AUDIT_KIND: &str = "account";
+
+/// One audit row per sign-out-everywhere: what happened, from which device, how much of it
+/// worked, and how many Matrix dead letters it swept up.
+///
+/// **This row is for the operator, not for the owner.** Nothing serves it: the only API reader
+/// of the `audit` table is `GET /projects/{id}/audit`, which resolves a `projects` row first, and
+/// `account:<user id>` is not a project. So the row is reachable by someone with access to the
+/// relay's database and by nobody else. An earlier version of this comment claimed the owner
+/// could read it by signing in again; that was not true, and it is written down here because it
+/// read like an available control.
+///
+/// **There is still no owner notification, and that is not an omission.** Every other
+/// destructive account operation pushes a `/me/pushes` event (`db_people::push_user_event`),
+/// which fans out to the account's live devices. This call revokes all of them, so by the time
+/// there is anything to say there is nobody left to say it to: `push_user` queues per live
+/// device, so the fan-out is to zero, and a device that signs in later gets a new row and would
+/// not pick an older event up. That argument stands on its own and does not need this row.
+fn note_sign_out_audit(state: &AppState, user_id: &str, from_device: &str, tally: &SignOutTally) {
+    let entry = json!({
+        "ts": now_ms(),
+        "target": "account",
+        "id": user_id,
+        "action": "sign_out_everywhere",
+        "principal": format!("user:{user_id}"),
+        "device_id": from_device,
+        "revoked": tally.revoked,
+        "swept": tally.swept,
+        "failed": tally.failed,
+    });
+    if let Err(e) =
+        state
+            .db
+            .record_audit(&format!("account:{user_id}"), SIGN_OUT_AUDIT_KIND, &entry)
+    {
+        tracing::warn!(user = %user_id, error = %e, "sign-out-everywhere audit row not written");
+    }
+}
+
+/// What one pass over an account's devices achieved.
+#[derive(Default)]
+struct SignOutTally {
+    revoked: usize,
+    failed: usize,
+    /// Matrix sessions closed that no live `devices` row pointed at any more — the dead letters
+    /// an earlier failed attempt left behind. Counted separately because they are repair work,
+    /// not sessions this call found open.
+    swept: usize,
+}
+
+/// How many devices are revoked at once.
+///
+/// Most of the work per device is a Matrix logout that waits up to `LOGOUT_TIMEOUT` (ten
+/// seconds) for a homeserver that may never answer. Done one at a time, an account with eight
+/// devices and a dead homeserver took eight timeouts — eighty seconds — and the handler awaits
+/// the whole thing, so the owner sat behind a proxy read timeout, got a gateway error, and never
+/// learned the outcome. Then the retry hit the dead-letter defect (probe D). Concurrently it is
+/// one timeout, whatever the device count. The cap exists because each slot holds an open
+/// connection to the homeserver; the database writes inside take the connection mutex and
+/// serialise among themselves regardless, which is fine because they take milliseconds.
+const REVOKE_AT_ONCE: usize = 8;
+
+/// Revoke every id, counting outcomes. A device that was already revoked is not a failure.
+/// Nothing stops early: one wedged row must not leave the rest signed in.
+async fn revoke_each(state: &AppState, user_id: &str, ids: &[String]) -> SignOutTally {
+    let mut jobs = Vec::with_capacity(ids.len());
+    for id in ids {
+        jobs.push(async move { (id, revoke_device_everywhere(state, id).await) });
+    }
+    let outcomes = futures::stream::iter(jobs)
+        .buffer_unordered(REVOKE_AT_ONCE)
+        .collect::<Vec<_>>()
+        .await;
+    let mut tally = SignOutTally::default();
+    for (id, outcome) in outcomes {
+        match outcome {
+            Ok(true) => tally.revoked += 1,
+            Ok(false) => {}
+            Err(e) => {
+                tally.failed += 1;
+                tracing::error!(device = %id, user = %user_id, error = %e, "sign out everywhere: device not revoked");
+            }
+        }
+    }
+    tally
+}
+
+/// Revoke the **caller's own** device, closing its Matrix session *before* its relay row.
+///
+/// Every other device wants the opposite order ([`revoke_device_everywhere`]): take the
+/// credential away first and argue with the homeserver afterwards. The caller is the one
+/// exception, because its row is the credential the failure message tells the owner to retry
+/// with. The re-review's probe A caught that: the caller's Matrix logout failed, so the handler
+/// answered "this device is still signed in, so try again" — but `revoke_device_fully` had
+/// already run, the caller was locked out, and the instruction could not be followed.
+///
+/// So the slow, failable half goes first and the row is only revoked once it has landed. The
+/// cost is that the caller's own session outlives the others by up to one Matrix timeout, which
+/// is the right trade: it is the device the owner is holding.
+async fn revoke_own_device(state: &AppState, device_id: &str) -> anyhow::Result<bool> {
+    crate::matrix::servers::revoke_device(state, device_id)
+        .await
+        .map_err(|e| e.context("the device's Matrix session is still live"))?;
+    revoke_device_everywhere(state, device_id).await
+}
+
+/// Close any Matrix session of this account that no live `devices` row points at any more.
+///
+/// These are dead letters. [`revoke_device_everywhere`] revokes the relay row before it calls
+/// the homeserver, and `live_devices_of_user` lists only live rows, so a device whose Matrix
+/// half failed drops off every work list the relay has while its `matrix_devices` row — and the
+/// access token behind it — stays good. `/_matrix` forwards any valid Matrix token straight to
+/// Synapse without consulting `devices`, so that session keeps working.
+///
+/// The re-review's probe D is what this exists for: call 1 returned 500 with the Mac's Matrix
+/// session still live, and call 2 answered **204** because the Mac was no longer in `others`.
+/// Nothing retried it and the owner was told the account was clear. Keying the sweep on
+/// `matrix_devices` instead of on `devices` is the fix: that table is exactly the set of
+/// sessions still owed a logout, whatever state the relay rows are in.
+/// `already_tried` are the devices this call has just been through. They are skipped: their
+/// Matrix row surviving means the logout failed moments ago, and retrying it here would buy
+/// nothing and cost a second timeout per device while the owner waits on the response.
+async fn sweep_orphan_matrix_sessions(
+    state: &AppState,
+    user_id: &str,
+    already_tried: &[String],
+    tally: &mut SignOutTally,
+) {
+    let orphans: Vec<String> = match state.db.matrix_devices_of_user(user_id) {
+        Ok(ids) => ids
+            .into_iter()
+            .filter(|id| !already_tried.contains(id))
+            .collect(),
+        Err(e) => {
+            tally.failed += 1;
+            tracing::error!(user = %user_id, error = %e, "sign out everywhere: Matrix sessions unreadable");
+            return;
+        }
+    };
+    let mut jobs = Vec::with_capacity(orphans.len());
+    for device_id in &orphans {
+        jobs.push(async move {
+            (
+                device_id,
+                crate::matrix::servers::revoke_device(state, device_id).await,
+            )
+        });
+    }
+    let outcomes = futures::stream::iter(jobs)
+        .buffer_unordered(REVOKE_AT_ONCE)
+        .collect::<Vec<_>>()
+        .await;
+    for (device_id, outcome) in outcomes {
+        match outcome {
+            Ok(()) => {
+                tally.swept += 1;
+                tracing::info!(user = %user_id, device = %device_id, "sign out everywhere: a Matrix session an earlier attempt left open was closed");
+            }
+            Err(e) => {
+                tally.failed += 1;
+                tracing::error!(user = %user_id, device = %device_id, error = %e, "sign out everywhere: Matrix session still live");
+            }
+        }
+    }
+}
+
+/// `POST /auth/sign-out-everywhere` (Bearer header only): end every session of the caller's
+/// account, the calling device included. Each device goes through [`revoke_device_everywhere`],
+/// so the relay row, that device's refresh tokens, its Matrix session and its open sockets all
+/// close — a path that revoked the relay rows alone would leave live Matrix access tokens
+/// behind (#2433) and live room sockets writing as the owner (#2460 review).
+///
+/// "Every session" means every live row in `devices`, whatever its `kind`: a read-only reader
+/// token (`export::READER_KIND`) is a credential on the account like any other, and a person
+/// signing out everywhere after losing a laptop means that one too.
+///
+/// The caller's own device is revoked only once every other device has been revoked without a
+/// failure. The ordering alone did not do that: the loop runs to completion either way, so the
+/// first version of this handler revoked the caller whatever happened, destroying the one
+/// credential its own "try again" message asks the owner to retry with.
+///
+/// The work runs on its own task. Axum drops a handler's future when the client connection
+/// closes, and a phone that loses signal part-way through would otherwise leave an account
+/// half signed out with nothing in the response to say which half.
+pub async fn sign_out_everywhere(
+    State(state): State<AppState>,
+    crate::auth::HeaderPrincipal(principal): crate::auth::HeaderPrincipal,
+) -> Response {
+    let (user_id, current) = match &principal {
+        Principal::Device { id, user_id, .. } => (user_id.clone(), id.clone()),
+        Principal::Box { .. } | Principal::Admin => {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "a signed-in device is required",
+            )
+        }
+    };
+    // On a GitHub relay `u_default` is not an account: it is where rows created before the
+    // `user_id` column existed were left, so it can hold devices belonging to different people.
+    // Signing "the account" out would sign strangers out. A paircode relay is the other case —
+    // there the shared bucket is deliberate, every paired machine is a session of the one
+    // account the relay serves, and signing them all out is the point.
+    if state.cfg.auth_mode == AuthMode::Github && user_id == crate::auth::LEGACY_USER {
+        tracing::warn!(device = %current, "sign out everywhere refused: a legacy device with no account of its own");
+        // The remedy has to be honest about what the owner can actually do. Signing in again
+        // does not help: `github_callback` only touches rows already owned by the GitHub user,
+        // so it mints a *new* row and leaves this one live in the bucket, invisible to this
+        // endpoint and absent from `GET /auth/devices`. Only the relay's admin token can reach
+        // it, so that is what the message says.
+        return api_error(
+            StatusCode::CONFLICT,
+            "no_account",
+            "this device predates accounts on this relay, so it has no account to sign out of; \
+             signing in again mints a new session and leaves this one live. Ask the relay's \
+             operator to revoke it.",
+        );
+    }
+    let live = match state.db.live_devices_of_user(&user_id) {
+        Ok(list) => list,
+        Err(e) => {
+            tracing::error!(user = %user_id, error = %e, "sign out everywhere: device list unreadable");
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db",
+                "the account's devices could not be read; try again",
+            );
+        }
+    };
+    let others: Vec<String> = live
+        .iter()
+        .filter_map(|d| d["id"].as_str())
+        .filter(|id| *id != current)
+        .map(|id| id.to_owned())
+        .collect();
+
+    let work = {
+        let state = state.clone();
+        let user_id = user_id.clone();
+        let current = current.clone();
+        tokio::spawn(async move {
+            let mut tally = revoke_each(&state, &user_id, &others).await;
+            // Before the caller's own device, and whatever happened above: a Matrix session an
+            // earlier attempt failed to close is invisible to every list keyed on `devices`, so
+            // this call is the only chance to retry it. Without the sweep a second call reports
+            // a clean sweep over a session nothing ever closed (probe D).
+            sweep_orphan_matrix_sessions(&state, &user_id, &others, &mut tally).await;
+            if tally.failed == 0 {
+                // Last, and only now: the caller keeps its session when something went wrong,
+                // so "try again" is an instruction it can follow. Its Matrix logout runs before
+                // its row is touched, so a failure here leaves the caller signed in too.
+                match revoke_own_device(&state, &current).await {
+                    Ok(true) => tally.revoked += 1,
+                    Ok(false) => {}
+                    Err(e) => {
+                        tally.failed += 1;
+                        tracing::error!(device = %current, user = %user_id, error = %e, "sign out everywhere: the calling device was left signed in");
+                    }
+                }
+            }
+            note_sign_out_audit(&state, &user_id, &current, &tally);
+            tally
+        })
+    };
+    let tally = match work.await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!(user = %user_id, error = %e, "sign out everywhere: the revoke task died");
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+                "the sign-out did not finish; try again",
+            );
+        }
+    };
+    if tally.failed > 0 {
+        let revoked = tally.revoked;
+        let failed = tally.failed;
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "db",
+            format!("{revoked} sessions were signed out and {failed} could not be; this device is still signed in, so try again"),
+        );
+    }
+    tracing::info!(user = %user_id, revoked = tally.revoked, swept = tally.swept, "signed out everywhere");
+    StatusCode::NO_CONTENT.into_response()
+}
+
 /// `GET /auth/devices` — the caller's signed-in devices (this one marked `current`). Rows a
 /// sign-out or revoke already closed (`revoked_at` set) are left out: until 2026-10-28 they were
 /// listed too, so a tester who had signed four Macs out still saw "9 devices". Same-name GitHub
@@ -756,7 +1078,10 @@ pub async fn devices_list(
         Principal::Device { id, user_id, .. } => {
             if let Ok(extra) = state.db.collapse_github_device_duplicates(user_id, id) {
                 for rid in &extra {
-                    crate::matrix::servers::revoke_device(&state, rid).await;
+                    crate::matrix::servers::revoke_device_logging(&state, rid).await;
+                }
+                if !extra.is_empty() {
+                    state.note_device_revoked();
                 }
             }
             (user_id.clone(), Some(id.as_str()), false)
@@ -800,7 +1125,14 @@ pub async fn devices_list(
             }
             Json(list).into_response()
         }
-        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+        Err(e) => {
+            tracing::error!(user = %user_id, error = %e, "device list unreadable");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db",
+                "the account's devices could not be read; try again",
+            )
+        }
     }
 }
 
@@ -814,7 +1146,14 @@ pub async fn device_revoke(
     let owner = match state.db.device_status(&target) {
         Ok(Some((owner, _))) => owner,
         Ok(None) => return api_error(StatusCode::NOT_FOUND, "not_found", "no such device"),
-        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+        Err(e) => {
+            tracing::error!(device = %target, error = %e, "device row unreadable");
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db",
+                "that device could not be read; try again",
+            );
+        }
     };
     let allowed = match &principal {
         Principal::Admin => true,
@@ -1794,6 +2133,453 @@ mod devices_list_tests {
         // A second list call is a no-op once collapsed.
         let (_, rows2) = list(devices_list(State(state.clone()), dev_a, query(&[])).await).await;
         assert_eq!(rows2.len(), rows.len());
+    }
+}
+
+#[cfg(test)]
+mod sign_out_everywhere_tests {
+    //! `POST /auth/sign-out-everywhere` ends every session of one account — the calling device,
+    //! the other apps and the read-only tokens — and reaches no other account.
+
+    use axum::extract::State;
+    use axum::http::StatusCode;
+
+    use arbos_core::auth::hash;
+    use arbos_core::ids::ulid;
+
+    use super::*;
+    use crate::auth::{resolve_checked, HeaderPrincipal, Refused};
+    use crate::export::READER_KIND;
+    use crate::people::tests_support::person;
+    use crate::state::test_support::test_state;
+
+    /// Another signed-in app of the same account, with a legacy `adv_` bearer we can present.
+    fn device(state: &AppState, user: &str, name: &str, kind: &str) -> (String, String) {
+        let id = ulid();
+        let token = format!("adv_{}", ulid());
+        state
+            .db
+            .insert_device(&id, name, &hash(&token), user, kind)
+            .expect("device");
+        (id, token)
+    }
+
+    fn live_ids(state: &AppState, user: &str) -> Vec<String> {
+        state
+            .db
+            .live_devices_of_user(user)
+            .expect("devices")
+            .iter()
+            .filter_map(|d| d["id"].as_str().map(str::to_owned))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn one_call_ends_every_session_of_the_account_and_touches_no_other() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_phone) = person(&state, 1);
+        let (bob, bob_phone) = person(&state, 2);
+        let (alice_mac, _) = device(&state, &alice, "Alice's Mac", "github");
+        let (alice_reader, reader_token) = device(&state, &alice, "Grok Bot", READER_KIND);
+        let (bob_mac, bob_token) = device(&state, &bob, "Bob's Mac", "github");
+        let phone_id = match &alice_phone {
+            Principal::Device { id, .. } => id.clone(),
+            _ => unreachable!("person() hands back a device"),
+        };
+        // An access token minted a moment ago: it must die with its device row, not an hour later.
+        let phone_jwt = mint_access(&state.jwt_key, &alice, &phone_id, ACCESS_TTL_S);
+        assert!(resolve_checked(&state, &phone_jwt).is_ok());
+        assert_eq!(live_ids(&state, &alice).len(), 3);
+
+        let r = sign_out_everywhere(State(state.clone()), HeaderPrincipal(alice_phone)).await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+
+        assert!(
+            live_ids(&state, &alice).is_empty(),
+            "every one of Alice's sessions is closed, the calling device included"
+        );
+        for id in [&phone_id, &alice_mac, &alice_reader] {
+            assert!(
+                state.db.device_status(id).unwrap().unwrap().1,
+                "device {id} is revoked"
+            );
+        }
+        assert_eq!(
+            resolve_checked(&state, &phone_jwt).unwrap_err(),
+            Refused::Invalid,
+            "an unexpired access token of a signed-out device is refused"
+        );
+        assert_eq!(
+            resolve_checked(&state, &reader_token).unwrap_err(),
+            Refused::Invalid,
+            "a read-only token is a credential on the account and goes with the rest"
+        );
+
+        // Bob was never in it: both his sessions and his bearer still work.
+        let bob_phone_id = match &bob_phone {
+            Principal::Device { id, .. } => id.clone(),
+            _ => unreachable!("person() hands back a device"),
+        };
+        let bobs = live_ids(&state, &bob);
+        assert_eq!(bobs.len(), 2, "Bob keeps both sessions: {bobs:?}");
+        assert!(bobs.contains(&bob_phone_id) && bobs.contains(&bob_mac));
+        assert!(resolve_checked(&state, &bob_token).is_ok());
+
+        // Asking again when nothing is live is a no-op, not an error.
+        let r = sign_out_everywhere(
+            State(state.clone()),
+            HeaderPrincipal(Principal::Device {
+                id: phone_id,
+                token: String::new(),
+                user_id: alice.clone(),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        assert!(live_ids(&state, &alice).is_empty());
+    }
+
+    #[tokio::test]
+    async fn only_a_signed_in_device_may_sign_an_account_out() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _alice_phone) = person(&state, 7);
+        let before = live_ids(&state, &alice);
+        assert_eq!(before.len(), 1);
+
+        // A box serves the account's projects; it is not the account's owner.
+        let r = sign_out_everywhere(
+            State(state.clone()),
+            HeaderPrincipal(Principal::Box {
+                user_id: alice.clone(),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+
+        // The admin token has no account to sign out of; it revokes one device at a time.
+        let r = sign_out_everywhere(State(state.clone()), HeaderPrincipal(Principal::Admin)).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+
+        assert_eq!(live_ids(&state, &alice), before, "nothing was signed out");
+    }
+
+    /// A bearer that can empty an account must not be written into an access log, a proxy log,
+    /// a `Referer` or a shell history. `?token=` exists for WebSocket dials, which cannot carry
+    /// a header; this route is a POST and has no such excuse.
+    #[tokio::test]
+    async fn the_bearer_must_arrive_in_a_header_and_not_in_the_url() {
+        use axum::extract::FromRequestParts;
+
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 8);
+        let (_mac_id, token) = device(&state, &alice, "Alice's Mac", "github");
+
+        let parts = |uri: &str, header: Option<&str>| {
+            let mut b = axum::http::Request::builder().uri(uri);
+            if let Some(h) = header {
+                b = b.header(axum::http::header::AUTHORIZATION, format!("Bearer {h}"));
+            }
+            b.body(()).expect("request").into_parts().0
+        };
+
+        // In the URL and nowhere else: refused, and the account is untouched.
+        let mut p = parts(&format!("/auth/sign-out-everywhere?token={token}"), None);
+        let refused = HeaderPrincipal::from_request_parts(&mut p, &state).await;
+        assert!(
+            refused.is_err(),
+            "a query-string bearer is refused on this route"
+        );
+        assert_eq!(live_ids(&state, &alice).len(), 2, "nothing was signed out");
+
+        // In the header: accepted.
+        let mut p = parts("/auth/sign-out-everywhere", Some(&token));
+        assert!(
+            HeaderPrincipal::from_request_parts(&mut p, &state)
+                .await
+                .is_ok(),
+            "a header bearer is how this route is called"
+        );
+    }
+
+    /// Finding 3 of the #2460 review. The ordering alone did not do this: the loop runs to
+    /// completion, so the caller was revoked whatever happened, and the 500 told the owner to
+    /// retry with a credential the same request had destroyed.
+    #[tokio::test]
+    async fn a_failure_part_way_through_leaves_the_caller_able_to_try_again() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 9);
+        let (mac_id, mac_token) = device(&state, &alice, "Alice's Mac", "github");
+        let (phone_id, phone_token) = device(&state, &alice, "Alice's phone", "github");
+
+        // The Mac's row cannot be updated, so revoking it fails and nothing else does.
+        state
+            .db
+            .with(|c| {
+                c.execute_batch(&format!(
+                    "CREATE TRIGGER wedge BEFORE UPDATE ON devices WHEN NEW.id = '{mac_id}'
+                     BEGIN SELECT RAISE(ABORT, 'wedged'); END;"
+                ))
+            })
+            .expect("trigger");
+
+        let r = sign_out_everywhere(
+            State(state.clone()),
+            HeaderPrincipal(Principal::Device {
+                id: phone_id.clone(),
+                token: phone_token.clone(),
+                user_id: alice.clone(),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            resolve_checked(&state, &phone_token).is_ok(),
+            "the caller keeps its session, so 'try again' is an instruction it can follow"
+        );
+        assert!(
+            resolve_checked(&state, &mac_token).is_ok(),
+            "the device that could not be revoked is still signed in, which is what the 500 says"
+        );
+    }
+
+    /// A relay pointed at a homeserver nothing listens on: every logout fails fast.
+    fn with_dead_homeserver(state: &mut AppState) {
+        let mut cfg = crate::matrix::Config::off();
+        cfg.mode = crate::matrix::Mode::Dual;
+        cfg.as_token_users = "t".into();
+        cfg.hs_token_users = "h".into();
+        cfg.hs_url = "http://127.0.0.1:1".into();
+        state.matrix = crate::matrix::Matrix::new(cfg);
+    }
+
+    /// Give a device a live Matrix session, the way a signed-in app has one.
+    fn with_matrix_session(state: &AppState, device_id: &str, user: &str) {
+        let enc = state
+            .relay_key
+            .encrypt("syt_live_matrix_access_token")
+            .expect("encrypt");
+        state
+            .db
+            .matrix_insert_device(device_id, user, "@alice:arbos.life", "MXDEV1", &enc)
+            .expect("matrix device");
+    }
+
+    fn caller(state_user: &str, id: &str, token: &str) -> HeaderPrincipal {
+        HeaderPrincipal(Principal::Device {
+            id: id.to_owned(),
+            token: token.to_owned(),
+            user_id: state_user.to_owned(),
+        })
+    }
+
+    /// Finding 4 of the #2460 review. `/_matrix` forwards any valid Matrix token straight to
+    /// the homeserver without consulting `devices`, so a sign-out that could not log the device
+    /// out there has not signed it out. Saying 204 re-creates #2433 at account scope.
+    ///
+    /// This device is also the caller, so the adversarial re-review's H2 is asserted here too:
+    /// the original version of this test checked the status code and the surviving row, and
+    /// never checked whether the caller it told to "try again" could still make a request. It
+    /// could not. A test that covers one half of a precondition is how a careful fix ships a bug.
+    #[tokio::test]
+    async fn a_matrix_logout_that_failed_is_not_reported_as_a_sign_out() {
+        let mut state = test_state(AuthMode::Github);
+        with_dead_homeserver(&mut state);
+
+        let (alice, _) = person(&state, 10);
+        let (dev_id, token) = device(&state, &alice, "Alice's Mac", "github");
+        with_matrix_session(&state, &dev_id, &alice);
+
+        let r = sign_out_everywhere(State(state.clone()), caller(&alice, &dev_id, &token)).await;
+        assert_eq!(
+            r.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the homeserver was never reached, so the session is not closed"
+        );
+        assert!(
+            state.db.matrix_device(&dev_id).unwrap().is_some(),
+            "the encrypted token stays, because it is the only handle a retry has"
+        );
+        assert!(
+            resolve_checked(&state, &token).is_ok(),
+            "the 500 says this device is still signed in, so it has to be"
+        );
+    }
+
+    /// Adversarial re-review H2. The "caller last" guard covers a failure of some *other*
+    /// device. It cannot cover a failure of the caller's own, because the relay row is revoked
+    /// before the Matrix call that fails — so the caller is locked out and handed a retry
+    /// instruction it cannot follow. The caller's Matrix logout now runs first.
+    ///
+    /// The precondition the old tests never put together: more than one device, **and** the
+    /// failing one is the caller.
+    #[tokio::test]
+    async fn the_caller_keeps_its_session_when_its_own_matrix_logout_is_what_failed() {
+        let mut state = test_state(AuthMode::Github);
+        with_dead_homeserver(&mut state);
+
+        let (alice, _) = person(&state, 11);
+        let (mac_id, mac_token) = device(&state, &alice, "Alice's Mac", "github");
+        let (phone_id, phone_token) = device(&state, &alice, "Alice's phone", "github");
+        // Only the caller has a Matrix session, so every other device revokes cleanly.
+        with_matrix_session(&state, &phone_id, &alice);
+
+        let r = sign_out_everywhere(
+            State(state.clone()),
+            caller(&alice, &phone_id, &phone_token),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            resolve_checked(&state, &phone_token).is_ok(),
+            "the caller was told to try again, so it must still hold a working credential"
+        );
+        assert_eq!(
+            state.db.device_status(&phone_id).unwrap().map(|(_, r)| r),
+            Some(false),
+            "and its row is untouched, not merely cached as live"
+        );
+        assert_eq!(
+            resolve_checked(&state, &mac_token).unwrap_err(),
+            Refused::Invalid,
+            "the other device is still signed out: the caller's failure is not an excuse"
+        );
+        let _ = mac_id;
+    }
+
+    /// Adversarial re-review H1, the one that re-created #2433 at account scope.
+    ///
+    /// `revoke_device_everywhere` revokes the relay row before it calls the homeserver, and
+    /// `live_devices_of_user` lists only live rows. So a device whose Matrix half failed drops
+    /// off the work list while its access token stays good, and the second call — the one the
+    /// first call's own "try again" asks for — found nothing to do and answered 204 over a live
+    /// session. The sweep keys on `matrix_devices` instead, which is the set of sessions still
+    /// owed a logout whatever the relay rows say.
+    #[tokio::test]
+    async fn a_matrix_session_an_earlier_call_left_open_is_retried_not_reported_clean() {
+        let mut state = test_state(AuthMode::Github);
+        with_dead_homeserver(&mut state);
+
+        let (alice, _) = person(&state, 12);
+        let (mac_id, _) = device(&state, &alice, "Alice's Mac", "github");
+        let (phone_id, phone_token) = device(&state, &alice, "Alice's phone", "github");
+        // The stolen Mac holds the Matrix session; the caller's phone does not.
+        with_matrix_session(&state, &mac_id, &alice);
+
+        let first = sign_out_everywhere(
+            State(state.clone()),
+            caller(&alice, &phone_id, &phone_token),
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            state.db.matrix_device(&mac_id).unwrap().is_some(),
+            "the Mac's session could not be closed, so its row is kept for a retry"
+        );
+        assert!(
+            !live_ids(&state, &alice).contains(&mac_id),
+            "and its relay row is gone from every list this endpoint used to work from"
+        );
+
+        let second = sign_out_everywhere(
+            State(state.clone()),
+            caller(&alice, &phone_id, &phone_token),
+        )
+        .await;
+        assert_ne!(
+            second.status(),
+            StatusCode::NO_CONTENT,
+            "a session nothing closed must never be reported as a clean sign-out"
+        );
+    }
+
+    /// The sweep is for dead letters an *earlier* call left. Retrying a device this same call
+    /// has just failed on buys nothing and costs another homeserver timeout while the owner
+    /// waits on the response, so those are skipped.
+    #[tokio::test]
+    async fn the_sweep_does_not_retry_what_this_call_already_tried() {
+        let mut state = test_state(AuthMode::Github);
+        with_dead_homeserver(&mut state);
+
+        let (alice, _) = person(&state, 13);
+        let (mac_id, _) = device(&state, &alice, "Alice's Mac", "github");
+        let (phone_id, phone_token) = device(&state, &alice, "Alice's phone", "github");
+        with_matrix_session(&state, &mac_id, &alice);
+
+        let r = sign_out_everywhere(
+            State(state.clone()),
+            caller(&alice, &phone_id, &phone_token),
+        )
+        .await;
+        let body = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        let body = String::from_utf8_lossy(&body);
+        assert!(
+            body.contains("1 could not be"),
+            "the Mac is one failure, not two: the loop and the sweep must not both count it \
+             ({body})"
+        );
+    }
+
+    /// Finding 2 of the #2460 review. The bucket means different things on the two relays, and
+    /// the difference is the whole of the fix.
+    #[tokio::test]
+    async fn the_shared_bucket_is_an_account_on_a_paircode_relay_and_not_on_a_github_one() {
+        // Paircode: one relay, one account, several paired machines. Signing them all out is
+        // the point, and `redeem_pairing_code` now says so rather than leaving it to a default.
+        let paired = test_state(AuthMode::Paircode);
+        let mut tokens = Vec::new();
+        for (i, name) in ["Mac", "Mac mini"].iter().enumerate() {
+            let code = format!("CODE-{i}");
+            paired.db.new_pairing_code(&code, 600_000).expect("code");
+            let id = ulid();
+            let token = format!("adv_{}", ulid());
+            assert!(paired
+                .db
+                .redeem_pairing_code(&code, &id, name, &hash(&token))
+                .expect("redeem"));
+            assert_eq!(
+                paired.db.device_user(&id).unwrap().as_deref(),
+                Some(crate::auth::LEGACY_USER),
+                "a paired machine is a session of the relay's one account"
+            );
+            tokens.push(token);
+        }
+        let caller = resolve_checked(&paired, &tokens[0]).expect("sign in");
+        let r = sign_out_everywhere(State(paired.clone()), HeaderPrincipal(caller)).await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            resolve_checked(&paired, &tokens[1]).unwrap_err(),
+            Refused::Invalid,
+            "every machine paired into the account is signed out"
+        );
+
+        // GitHub: the same id is a legacy bucket, left over from before the column existed, and
+        // it can hold rows belonging to different people. Signing "the account" out would sign
+        // strangers out, so the route refuses rather than guessing.
+        let hosted = test_state(AuthMode::Github);
+        let (legacy_id, legacy_token) =
+            device(&hosted, crate::auth::LEGACY_USER, "An old Mac", "github");
+        let (stranger_id, stranger_token) = device(
+            &hosted,
+            crate::auth::LEGACY_USER,
+            "Someone else's old Mac",
+            "github",
+        );
+        let r = sign_out_everywhere(
+            State(hosted.clone()),
+            HeaderPrincipal(Principal::Device {
+                id: legacy_id.clone(),
+                token: legacy_token.clone(),
+                user_id: crate::auth::LEGACY_USER.to_owned(),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::CONFLICT);
+        for (id, token) in [(&legacy_id, &legacy_token), (&stranger_id, &stranger_token)] {
+            assert!(
+                resolve_checked(&hosted, token).is_ok(),
+                "device {id} was left alone"
+            );
+        }
     }
 }
 

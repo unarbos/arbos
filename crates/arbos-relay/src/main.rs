@@ -377,6 +377,7 @@ async fn main() -> anyhow::Result<()> {
         default_snapshot: Arc::new(std::sync::RwLock::new(String::new())),
         started_at: std::time::Instant::now(),
         restart: Arc::new(crate::state::RestartSignal::default()),
+        revocations: Arc::new(tokio::sync::watch::Sender::new(0)),
         voice_dispatched: Arc::new(Mutex::new(HashMap::new())),
         voice_worker: Arc::new(Mutex::new(None)),
         voice_inbox: crate::voice::VoiceInbox::default(),
@@ -443,6 +444,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/auth/token", post(signin::token))
         .route("/auth/refresh", post(signin::refresh))
         .route("/auth/logout", post(signin::logout))
+        .route(
+            "/auth/sign-out-everywhere",
+            post(signin::sign_out_everywhere),
+        )
         .route(
             "/auth/devices",
             get(signin::devices_list).post(export::mint_reader),

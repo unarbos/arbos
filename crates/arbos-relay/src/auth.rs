@@ -122,16 +122,33 @@ pub fn resolve_checked(state: &AppState, token: &str) -> Result<Principal, Refus
     resolve_legacy(state, token).ok_or(Refused::Invalid)
 }
 
+/// The account id a device row carries when nothing gave it one: the column default
+/// (`devices.user_id`, `db.rs`).
+///
+/// It means two different things depending on the relay. On a paircode relay it is *the*
+/// account — one self-hosted relay serves one person, every paired machine is a session of it,
+/// and the projects table defaults the same way. On a GitHub relay it is a legacy bucket: rows
+/// created before the column existed were left in it, and those rows can belong to different
+/// people. Anything that treats the bucket as an account has to know which relay it is on.
+pub const LEGACY_USER: &str = "u_default";
+
 /// `adv_` device tokens and `abx_` box tokens (hash lookup).
 fn resolve_legacy(state: &AppState, token: &str) -> Option<Principal> {
     let h = hash(token);
     if let Ok(Some(id)) = state.db.device_by_token_hash(&h) {
-        let user_id = state
-            .db
-            .device_user(&id)
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| "u_default".to_owned());
+        // `Ok(None)` is a row with no owner, which is the legacy bucket and is what the default
+        // means. `Err` is a database failure and means nothing of the kind: treating it as the
+        // bucket resolved a legitimately-owned device as a `LEGACY_USER` principal, which on a
+        // GitHub relay carries `allows()` over every project left in that bucket. A transient
+        // SQLite error must refuse, not widen.
+        let user_id = match state.db.device_user(&id) {
+            Ok(Some(user_id)) => user_id,
+            Ok(None) => LEGACY_USER.to_owned(),
+            Err(e) => {
+                tracing::error!(device = %id, error = %e, "auth: a device's owner could not be read; refusing rather than defaulting to the legacy bucket");
+                return None;
+            }
+        };
         return Some(Principal::Device {
             id,
             token: token.to_owned(),
@@ -148,6 +165,22 @@ fn resolve_legacy(state: &AppState, token: &str) -> Option<Principal> {
 /// Token from `Authorization: Bearer …` or `?token=` (WebSocket dials, crdt-sync §10.2).
 pub fn token_from_parts(parts: &Parts) -> Option<String> {
     token_from(&parts.headers, &parts.uri)
+}
+
+/// Token from `Authorization: Bearer …` and nowhere else.
+///
+/// A token in a query string is written down by everything it passes: the relay's access log,
+/// Caddy's, any proxy in between, the `Referer` of the next request, and the shell history of
+/// whoever typed the `curl`. `?token=` exists because a WebSocket dial cannot carry a header
+/// (crdt-sync §10.2), and [`token_from`] offers it on every route rather than on the dials that
+/// need it. A route with no WebSocket upgrade has no reason to accept it.
+pub fn bearer_from_header(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|t| t.trim().to_owned())
+        .filter(|t| !t.is_empty())
 }
 
 /// [`token_from_parts`] for a whole request (the request layer, before the handler runs).
@@ -208,5 +241,84 @@ impl FromRequestParts<AppState> for Principal {
             }
         }
         Ok(principal)
+    }
+}
+
+/// [`Principal`], but the bearer must arrive in the `Authorization` header: a `?token=` query
+/// string is refused rather than honoured. Use it on any route that does not upgrade to a
+/// WebSocket, and on every route whose token is worth more than one request —
+/// `POST /auth/sign-out-everywhere` can empty an account, and a bearer that can do that does
+/// not belong in a log line.
+pub struct HeaderPrincipal(pub Principal);
+
+impl FromRequestParts<AppState> for HeaderPrincipal {
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        if bearer_from_header(&parts.headers).is_none() {
+            return Err(crate::signin::api_error(
+                StatusCode::UNAUTHORIZED,
+                "missing token",
+                "send the token in an Authorization: Bearer header; this route refuses ?token=",
+            ));
+        }
+        // The header is present, and `token_from` prefers it, so whatever is in the query
+        // string cannot be what gets resolved.
+        Ok(Self(Principal::from_request_parts(parts, state).await?))
+    }
+}
+
+#[cfg(test)]
+mod legacy_bucket_tests {
+    //! `LEGACY_USER` means "nobody gave this row an owner". A database failure means nothing of
+    //! the kind, and the two must not resolve to the same principal.
+
+    use arbos_core::auth::hash;
+    use arbos_core::ids::ulid;
+
+    use super::*;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    /// Adversarial re-review of #2460, L3. `device_user(..).ok().flatten()` swallowed a genuine
+    /// `Err` as well as "no row", so a transient SQLite failure resolved a legitimately-owned
+    /// device as a `LEGACY_USER` principal — which on a GitHub relay carries `allows()` over
+    /// every project still sitting in that bucket. Widening a principal is never the safe
+    /// reading of an error.
+    #[test]
+    fn a_database_error_refuses_instead_of_widening_a_device_into_the_legacy_bucket() {
+        let state = test_state(AuthMode::Github);
+        let id = ulid();
+        let token = format!("adv_{}", ulid().to_ascii_lowercase());
+        state
+            .db
+            .insert_device(&id, "Alice's Mac", &hash(&token), "gh_alice", "github")
+            .expect("device");
+        assert!(
+            matches!(resolve_legacy(&state, &token), Some(Principal::Device { user_id, .. })
+                if user_id == "gh_alice"),
+            "the owned device resolves to its owner"
+        );
+
+        // Make the owner read fail the way a transient storage error does, and only that read:
+        // `device_by_token_hash` selects `id` alone, so the token still resolves to a row and
+        // the refusal has to come from the owner lookup rather than from the row going missing.
+        state
+            .db
+            .with(|c| c.execute_batch("ALTER TABLE devices RENAME COLUMN user_id TO user_id_gone"))
+            .expect("break the column");
+        assert_eq!(
+            state.db.device_by_token_hash(&hash(&token)).unwrap(),
+            Some(id),
+            "the row is still found, so this is a failed owner read and not a missing device"
+        );
+        assert!(state.db.device_user("anything").is_err(), "the read fails");
+        assert!(
+            resolve_legacy(&state, &token).is_none(),
+            "a device whose owner cannot be read is refused, not promoted into the bucket"
+        );
     }
 }

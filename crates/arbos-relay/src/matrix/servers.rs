@@ -13,6 +13,7 @@
 //! `POST /servers/{id}/leave` · `GET /me/matrix` (token for the SDK) ·
 //! `/_matrix/client/{*rest}` (proxy to Synapse; the Matrix token authenticates there).
 
+use anyhow::Context;
 use axum::body::Body;
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -21,6 +22,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::time::Duration;
 
 use arbos_core::api::{
     PushEventDto, ServerDeletedPayloadDto, ServerMemberJoinedPayloadDto,
@@ -1647,23 +1649,56 @@ pub async fn me_matrix(State(state): State<AppState>, principal: Principal) -> R
         .into_response()
 }
 
+/// How long one device's Matrix logout may take. The shared `reqwest::Client` carries no
+/// request timeout, so without this a hung homeserver hangs the caller for as long as it likes
+/// — and a sign-out-everywhere makes that call once per device.
+const LOGOUT_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// A signed-out Arbos device takes its Matrix device with it (`/logout` with its own token).
-pub async fn revoke_device(state: &AppState, device_id: &str) {
-    let Ok(Some((_, _, enc))) = state.db.matrix_delete_device(device_id) else {
-        return;
+///
+/// Returns an error when the Matrix session is still live at the homeserver, so a caller that
+/// promises "signed out everywhere" can tell the truth. `/_matrix` forwards any valid Matrix
+/// token straight to Synapse and never consults the `devices` table, so a token left behind
+/// here is a working session for a device the user believes is gone (#2433).
+///
+/// The `matrix_devices` row is deleted only once the logout has landed. It holds the encrypted
+/// access token, which is the relay's one handle on that session: deleting it first — as this
+/// did until the #2460 review — makes a failed logout permanent, because no retry can find the
+/// token again.
+pub async fn revoke_device(state: &AppState, device_id: &str) -> anyhow::Result<()> {
+    let row = state
+        .db
+        .matrix_device_to_revoke(device_id)
+        .context("read the device's Matrix identity")?;
+    let Some((_, _, enc)) = row else {
+        return Ok(());
     };
-    let token = match state.relay_key.decrypt(&enc) {
-        Ok(t) => t,
+    let token = state.relay_key.decrypt(&enc).map_err(|e| {
         // Silence here is how a signed-out device kept a live Matrix token (#2433): the row
         // went, the token did not.
-        Err(e) => {
-            tracing::warn!(device = %device_id, error = %e, "matrix: device token unreadable; it stays live at the homeserver");
-            return;
-        }
-    };
+        anyhow::anyhow!("the device's Matrix token cannot be read, so it stays live: {e}")
+    })?;
     let client = Client::new(state.http.clone(), state.matrix.cfg.clone());
-    if let Err(e) = client.logout_token(&token).await {
-        tracing::warn!(device = %device_id, error = %e, "matrix: device logout failed");
+    match tokio::time::timeout(LOGOUT_TIMEOUT, client.logout_token(&token)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            return Err(anyhow::Error::new(e).context("log the device out at the homeserver"))
+        }
+        Err(_) => {
+            anyhow::bail!("the homeserver did not answer the logout within {LOGOUT_TIMEOUT:?}")
+        }
+    }
+    state
+        .db
+        .matrix_forget_device(device_id)
+        .context("forget the device's Matrix identity")?;
+    Ok(())
+}
+
+/// [`revoke_device`] for callers that have nothing to do with a failure beyond logging it.
+pub async fn revoke_device_logging(state: &AppState, device_id: &str) {
+    if let Err(e) = revoke_device(state, device_id).await {
+        tracing::warn!(device = %device_id, error = %e, "matrix: device not logged out; its session stays live");
     }
 }
 
@@ -1684,7 +1719,7 @@ pub async fn forget_user(state: &AppState, user_id: &str) {
         }
     }
     for device_id in state.db.matrix_devices_of_user(user_id).unwrap_or_default() {
-        revoke_device(state, &device_id).await;
+        revoke_device_logging(state, &device_id).await;
     }
     if let Err(e) = state.db.matrix_forget_user(user_id) {
         tracing::warn!(user = %user_id, error = %e, "matrix: rows of a deleted user not cleared");
