@@ -2372,21 +2372,24 @@ class Loop:
     # keeps every unpinned item that touches crates/arbos-mac (or the workspace manifest) out of the gate, so
     # the Mac release lane carries nothing but the pinned hotfix until it is published; iOS / relay / agentd
     # items flow as usual. The hold is the cursor's `lane_hold` ("mac"); `status` shows it.
-    MAC_LANE_PATHS = ("crates/arbos-mac/", "Cargo.toml", "Cargo.lock")
+    # A hold is only as real as the footprint the gate can match, so LANE_PATHS is the whole list of lanes that
+    # can be held: `lane-hold` refuses any other name instead of writing one that reads as live and holds nothing.
+    LANE_PATHS = {"mac": ("crates/arbos-mac/", "Cargo.toml", "Cargo.lock")}
 
-    def touches_mac_lane(self, st: dict) -> bool:
-        return any(f.startswith(self.MAC_LANE_PATHS[0]) or f in self.MAC_LANE_PATHS[1:] for f in (st.get("files") or []))
+    def touches_lane(self, lane: str, st: dict) -> bool:
+        paths = self.LANE_PATHS.get(lane) or ()
+        return any(f.startswith(p) if p.endswith("/") else f == p for f in (st.get("files") or []) for p in paths)
 
     def rust_gate_ready(self) -> list[tuple[str, dict]]:
         """Gating items that need a Rust verdict for their current head, oldest first."""
         out = []
-        hold = (self.store.cursor().get("lane_hold") or {}).get("mac")
+        holds = [l for l in (self.store.cursor().get("lane_hold") or {}) if l in self.LANE_PATHS]
         for fid in self.store.items():
             st = self.store.state(fid)
             if st.get("status") != "gating" or not (st.get("expects_rust") or st.get("expects_ios")) or not st.get("branch_head"):
                 continue
-            if hold and not st.get("gate_pinned") and self.touches_mac_lane(st):
-                continue  # Mac lane held for a hotfix; this item waits (it is not bumped, not bounced)
+            if not st.get("gate_pinned") and any(self.touches_lane(l, st) for l in holds):
+                continue  # that lane is held for a hotfix; this item waits (it is not bumped, not bounced)
             done = st.get("rust_gate") or {}
             if done.get("head") == st["branch_head"] and done.get("ok"):
                 continue
@@ -5253,7 +5256,11 @@ class Loop:
             if cur.get("pool_first"):
                 print(f"  POOL-FIRST since {cur['pool_first']}: solo slots and deferred-fairness wait behind the pool batch until it merges once")
             for lane, h in (cur.get("lane_hold") or {}).items():
-                held = [f for f in self.store.items() if self.store.state(f).get("status") == "gating" and not self.store.state(f).get("gate_pinned") and self.touches_mac_lane(self.store.state(f))]
+                if lane not in self.LANE_PATHS:
+                    print(f"  lane hold {lane} since {h.get('since')} ({h.get('reason')}): NOT ENFORCED — the gate has no "
+                          f"footprint for '{lane}', every {lane} item gates as usual; clear it with `lane-hold {lane} off`")
+                    continue
+                held = [f for f in self.store.items() if self.store.state(f).get("status") == "gating" and not self.store.state(f).get("gate_pinned") and self.touches_lane(lane, self.store.state(f))]
                 print(f"  LANE HOLD {lane} since {h.get('since')} ({h.get('reason')}): {len(held)} unpinned {lane} item(s) wait: " + ", ".join(tag(f) for f in held))
         with_owner = [fid for fid in self.store.items() if self.store.state(fid).get("status") == "handed_off" and self.store.state(fid).get("branch_head")]
         if with_owner:
@@ -5926,19 +5933,27 @@ def main(argv: list[str]) -> int:
         return 0
     if cmd == "lane-hold":
         # `lane-hold mac on [reason] | off | status`: hold unpinned items touching crates/arbos-mac out of the gate.
+        # Only a lane in Loop.LANE_PATHS can be held: any other name is refused, because the gate reads the
+        # footprint and not the name, so `lane-hold ios on` used to print ON while every iOS item kept gating.
         store = Store(cfg)
         with (cfg.state_dir / ".lock").open("w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             cur = store.cursor()
             lane, sub = (argv[2] if len(argv) > 2 else "mac"), (argv[3] if len(argv) > 3 else "status")
             holds = cur.get("lane_hold") or {}
+            if sub == "on" and lane not in Loop.LANE_PATHS:
+                print(f"lane-hold: nothing in the gate enforces a '{lane}' hold; holdable lanes: {', '.join(sorted(Loop.LANE_PATHS))}")
+                return 2
             if sub == "on":
                 holds[lane] = {"since": iso(), "reason": " ".join(argv[4:]) or "operator"}
                 store.event("_loop", "lane_hold_on", lane=lane, reason=holds[lane]["reason"])
             elif sub == "off":
                 holds.pop(lane, None); store.event("_loop", "lane_hold_off", lane=lane)
             cur["lane_hold"] = holds; store.save_cursor(cur)
-            print(f"lane-hold {lane}: " + (f"ON since {holds[lane]['since']} — {holds[lane]['reason']}" if holds.get(lane) else "off"))
+            state = f"ON since {holds[lane]['since']} — {holds[lane]['reason']}" if holds.get(lane) else "off"
+            if holds.get(lane) and lane not in Loop.LANE_PATHS:  # written before the lane was checked
+                state += f" (NOT ENFORCED: no footprint for '{lane}'; `lane-hold {lane} off` clears it)"
+            print(f"lane-hold {lane}: {state}")
         return 0
     if cmd == "pool-first":
         # `pool-first on|off|status`: until the next pool batch merges, solo slots and the deferred-fairness batch
