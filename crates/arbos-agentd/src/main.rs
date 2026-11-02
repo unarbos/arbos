@@ -3,6 +3,7 @@ mod agent;
 mod agent_messages;
 mod approval;
 mod approval_authority;
+mod approval_binding;
 mod attachments;
 mod budget;
 mod channels;
