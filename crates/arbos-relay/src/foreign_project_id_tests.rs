@@ -12,6 +12,18 @@
 //! payload — a listing, a search result, an error string, a push — hands over the one input the
 //! card turns into a name, and every uniform 404 in the relay keeps passing while they do it.
 //!
+//! One qualification, because the bare rule "no foreign id in a cross-owner payload" is already
+//! false and a reader who finds that out on their own will conclude this file is wrong. When an
+//! agent speaks in a people chat, `notify::Sender::agent` puts its project id in the push as
+//! `sender.id`, and every human in that chat gets it whether or not they are in the project.
+//! That is harmless for an exact reason worth stating: the card's whole output for a project
+//! grantee is `(p.name, agent_slug(&p.name))`, and `agent_slug` is a pure function of the name,
+//! so the card tells you nothing once you have the name — and that push carries `sender.name`
+//! in the same object. **The property that matters is therefore not whether the id travels, but
+//! whether the name travels with it.** An id handed over bare is the whole of the gain; an id
+//! handed over beside the name it resolves to is a no-op. The routes below are scanned for the
+//! id because on those routes no name accompanies it.
+//!
 //! So a stranger's device is given everything it can legitimately ask for, and **every string in
 //! every answer** is scanned for the one id that would complete the chain. Scanning the whole
 //! response rather than the fields that look like ids is the method, not fussiness: the id would
