@@ -470,11 +470,12 @@ async fn naming_someone_elses_agent_as_the_speaker_does_not_say_whose_name_is_ta
 // MEASURED LEAK (run against both relays, answers differ), MEASURED AND NOT ENUMERABLE (answers
 // differ, but only for input a stranger cannot guess), and UNMEASURED (read, never run).
 //
-// -- MEASURED LEAK: eighteen routes, six lookups -----------------------------------------------
+// -- MEASURED LEAK: nineteen routes, eight lookups ----------------------------------------------
 //
-// Each answers `403 not your project` for a name Victor holds and `404 no such project` for one
-// nobody holds. Not asserted here: the assertion belongs with the fix, and a red test in `main`
-// helps nobody.
+// Not asserted here: the assertion belongs with the fix, and a red test in `main` helps nobody.
+//
+// Seventeen of the nineteen are one family — `403 not your project` for a name Victor holds,
+// `404 no such project` for one nobody holds — and come from six lookups:
 //
 //   goals::authorize       — list, create, get, patch, delete, append_log      (6 routes)
 //   routines::authorize    — list, create, patch, delete, run_now, runs,
@@ -486,8 +487,18 @@ async fn naming_someone_elses_agent_as_the_speaker_does_not_say_whose_name_is_ta
 //
 // All six are the same two statements in the same order: a bare `state.db.project(caller_input)`
 // that 404s on a miss, then a separate refusal on a hit. `goals::authorize` and
-// `routines::authorize` are character-for-character the same function, so thirteen of the
-// eighteen routes are two edits.
+// `routines::authorize` are character-for-character the same function, so thirteen of those
+// seventeen routes are two edits.
+//
+// The remaining two routes are one each, and neither is quite that family:
+//
+// `GET /projects/{id}/browser/stream` (`browser::browser_stream`) joins them, measured over a
+// real socket by the harness at the foot of this file: `403` with an **empty body** for a name
+// Victor holds against `404 no such project` for one nobody holds. Two things for whoever takes
+// it. The empty body is a bare `StatusCode::FORBIDDEN`, which the error layer leaves alone, so
+// this route's refusal has no JSON envelope and is already inconsistent with the rest of the
+// API — worth settling in the same change. And the fix is the same reordering as the other six:
+// it asks `allows` one line too late.
 //
 // `GET /projects/{file}/avatar.jpg` (`images::project_avatar`) is measured too, and wants a
 // different remedy. It takes no principal at all, and answers 404 "no picture" for a name
@@ -508,14 +519,177 @@ async fn naming_someone_elses_agent_as_the_speaker_does_not_say_whose_name_is_ta
 //
 // -- UNMEASURED: READ, NOT RUN ------------------------------------------------------------------
 //
-// `browser::browser_stream` and `rooms::ws_room` take a `WebSocketUpgrade`, which cannot be
-// constructed without a real upgradable connection (the extractor fails
-// `ConnectionNotUpgradable`), so a harness that calls handlers directly cannot reach them at all.
-// Reaching them needs a router-level harness that serves requests over a real connection, which
-// this crate does not have and which is a larger piece of work than this file.
+// Empty. The two routes that sat here — `browser::browser_stream` and `rooms::ws_room` — are now
+// measured over a real socket by the harness further down, and have moved: `ws_room` is silent
+// and pinned by a test, `browser_stream` is a measured leak and is listed above.
 //
-// By reading only: `browser_stream` has the leaking shape (lookup, then `allows`) and `ws_room`
-// has the safe one (`allows`, then lookup). Neither statement is evidence. A suspicious shape is
-// not a measured leak and a safe-looking shape is not a cleared route; both are guesses until
-// something runs them.
+// Both readings turned out to be right, which is not the point. They were guesses, and a guess
+// that happens to be correct is still not evidence; `browser_stream` in particular would have
+// gone to whoever fixes it as "suspicious shape, unverified" rather than "403 with an empty body
+// against 404 no such project, measured". Keep this heading even while it is empty, so the next
+// route that cannot be reached has somewhere honest to sit.
 // ---------------------------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------------------------
+// A router-level harness, for the two routes that cannot be called directly.
+//
+// `browser::browser_stream` and `rooms::ws_room` take a `WebSocketUpgrade`, and that extractor
+// refuses (`ConnectionNotUpgradable`) unless the request arrived over a connection hyper can
+// actually hand over. Calling the handler with a hand-built `Parts` does not work and cannot be
+// made to work, so these two sat in this file as read-but-never-run while everything else was
+// measured. This serves them over a real loopback socket instead and dials them with a real
+// client, which is the only way to find out what they do.
+// ---------------------------------------------------------------------------------------------
+
+/// The two upgrading routes, wrapped in the error layer the real app wraps them in.
+///
+/// Deliberately not the whole application router, which is built inline inside `main` and cannot
+/// be reached from a test without reshaping `main.rs`. The error layer is here because it is the
+/// difference between a handler's answer and the answer a client sees — it is what turns a plain
+/// `(404, "no such project")` into the JSON envelope — and this file compares the bytes.
+fn upgrading_routes(state: AppState) -> axum::Router {
+    axum::Router::new()
+        .route(
+            "/projects/{id}/browser/stream",
+            axum::routing::get(crate::browser::browser_stream),
+        )
+        .route(
+            "/room/{project}/{chat}",
+            axum::routing::get(crate::rooms::ws_room),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::api_error_layer::rewrite_plain_api_errors,
+        ))
+        .with_state(state)
+}
+
+async fn serve(state: AppState) -> std::net::SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("loopback port");
+    let addr = listener.local_addr().expect("addr");
+    let app = upgrading_routes(state);
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    addr
+}
+
+/// A device token that will actually authenticate. `tests_support::person` leaves the token
+/// empty, which is fine for a direct call and useless over a socket.
+fn token_for(state: &AppState, user_id: &str) -> String {
+    let token = format!("adv_{}", arbos_core::ids::ulid());
+    state
+        .db
+        .insert_device(
+            &arbos_core::ids::ulid(),
+            "harness",
+            &arbos_core::auth::hash(&token),
+            user_id,
+            "github",
+        )
+        .expect("device");
+    token
+}
+
+/// Dial one route and report what came back: `101` when the upgrade completed, otherwise the
+/// refusal the client was handed.
+///
+/// A transport failure panics rather than being folded into the answer. "The relay never
+/// answered" and "the relay refused" are different facts, and a harness that returns the first
+/// as if it were the second is the trap this whole file exists to avoid.
+async fn dial(addr: std::net::SocketAddr, path: &str, token: &str) -> (u16, String) {
+    let url = format!("ws://{addr}{path}?token={token}");
+    match tokio_tungstenite::connect_async(url).await {
+        Ok((stream, _)) => {
+            drop(stream);
+            (101, String::new())
+        }
+        Err(tokio_tungstenite::tungstenite::Error::Http(r)) => {
+            let status = r.status().as_u16();
+            let body = r
+                .body()
+                .as_ref()
+                .map(|b| String::from_utf8_lossy(b).into_owned())
+                .unwrap_or_default();
+            (status, body)
+        }
+        Err(e) => panic!("harness never reached the relay: {e}"),
+    }
+}
+
+/// Before any websocket measurement is worth reading, the harness has to be shown to reach the
+/// inside of the handlers. A socket that refuses every request looks exactly like a relay that
+/// refuses every request, and a differential between two such refusals is vacuous: two matching
+/// 403s prove nothing unless something pins which 403.
+///
+/// So this asserts four separate things, each of which is a way the harness could be lying:
+/// that an upgrade can complete at all, that a non-upgrading answer can still come from deep
+/// inside a handler, that a route the router does not serve is distinguishable from a handler's
+/// own 404, and that the token is really being read.
+#[tokio::test]
+async fn the_websocket_harness_reaches_the_handlers() {
+    let state = test_state(AuthMode::Github);
+    let (mallory_user, _) = person(&state, 9871);
+    let mine = project_of(&state, &mallory_user, "Mallory's agent");
+    let token = token_for(&state, &mallory_user);
+    let addr = serve(state).await;
+
+    let upgraded = dial(addr, &format!("/room/{mine}/project"), &token).await;
+    assert_eq!(
+        upgraded.0, 101,
+        "the harness must be able to complete a real upgrade, or every refusal it reports is \
+         unexplained: {upgraded:?}"
+    );
+
+    let deep = dial(addr, &format!("/projects/{mine}/browser/stream"), &token).await;
+    assert!(
+        deep.1.contains("no sandbox"),
+        "a non-upgrading answer must still come from inside the handler, past the branch these \
+         tests are about: {deep:?}"
+    );
+
+    let unserved = dial(addr, "/nope/nope", &token).await;
+    assert_eq!(
+        unserved,
+        (404, String::new()),
+        "a route the router does not serve must be tellable apart from a handler's own 404"
+    );
+
+    let anonymous = dial(addr, &format!("/projects/{mine}/browser/stream"), "").await;
+    assert_eq!(
+        anonymous.0, 401,
+        "the token must really be read: {anonymous:?}"
+    );
+}
+
+/// Measured at last, rather than guessed from the shape: `GET /room/{project}/{chat}` settles
+/// access before it looks the project up, so a stranger is refused identically whether the name
+/// is Victor's or nobody's.
+///
+/// Asserted on the refusal `ws_room` actually gives, not merely on the two answers matching. If
+/// the harness ever stops reaching the handler, both relays will agree on something else and
+/// this must fail rather than pass.
+#[tokio::test]
+async fn opening_a_room_does_not_say_whose_name_is_taken() {
+    let mut answers = Vec::new();
+    for victim in [true, false] {
+        let state = test_state(AuthMode::Github);
+        let (mallory_user, _) = person(&state, 9881);
+        project_of(&state, &mallory_user, "Mallory's agent");
+        if victim {
+            let (victor_user, _) = person(&state, 9882);
+            project_of(&state, &victor_user, GUESS);
+        }
+        let token = token_for(&state, &mallory_user);
+        let addr = serve(state).await;
+        answers.push(dial(addr, &format!("/room/{GUESS}/project"), &token).await);
+    }
+    assert!(
+        answers[0].1.contains("not your project"),
+        "the dial must have reached `ws_room`'s own refusal: {:?}",
+        answers[0]
+    );
+    assert_eq!(answers[0], answers[1], "taken and free names read alike");
+}
