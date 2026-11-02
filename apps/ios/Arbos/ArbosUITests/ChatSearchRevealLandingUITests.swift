@@ -88,6 +88,16 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// worst and 122 at best. That is the whole of the evidence for this number, and 24 is
     /// chosen to sit above the worst good tap rather than just above the bad one.
     private static let aimBandMargin: CGFloat = 24
+    /// Clear space the aim point must have *below* it, above the chat bar, before this will
+    /// tap there.
+    ///
+    /// `reachable` now ends the band at the chat bar, so an aim inside the band is already
+    /// above it. This is the margin on top of that, and it is here because the bar's probe
+    /// marks the top of its container rather than the top of what takes a touch: on
+    /// `6bfb3a31f` an aim 2 pt inside the strip (y483) was acted on and one 34 pt inside it
+    /// (y514) was not, so the interactive edge sits a little below the reported one and this
+    /// suite should not be deciding exactly where. 24 pt, the same as the top margin.
+    private static let aimBandBottomMargin: CGFloat = 24
     /// How far above a row's bottom edge to aim, inside the bubble's own vertical padding.
     ///
     /// This suite was written against `Transcript.runGap` 4 and `turnGap` 16 and aimed 5 pt up,
@@ -209,8 +219,30 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// says out loud rather than silently widening the band.
     private var keyboardTop: CGFloat?
 
+    /// The chat bar's top edge, kept on the same terms as `keyboardTop`.
+    ///
+    /// The keyboard is not the only thing between the result list and the bottom of the
+    /// window. The chat bar sits on top of the keyboard and on top of the rows: on the gate's
+    /// 874 pt screen its `ChatBarHeightProbe` reads y481 while the keyboard reports y583, so
+    /// there is a **102 pt strip the old band called reachable and no result row owns**. A
+    /// touch there goes to the bar.
+    ///
+    /// That strip is what reddened `main` on `6bfb3a31f`. Three passing runs had aimed at
+    /// y290, y294 and y290 — all roughly 190 pt clear of the bar — and then #2527's tighter
+    /// `runGap` and `turnGap` changed where a fixed 120 pt drag leaves a row, the fifteenth
+    /// drag left `long-265` at y292…523, and the aim went to y514: 34 pt inside the strip.
+    /// XCUITest resolved the row and synthesized the event against it with no interrupting
+    /// element reported, the bar took the touch, and focusing the bar re-pinned the filtered
+    /// stack to its end — which is why the list was found resting at its newest rows
+    /// afterwards. The jump was the consequence of the mis-aimed tap, not its cause.
+    ///
+    /// The probe is DEBUG-only and is the same element `ChatSearchCloseUITests` measures the
+    /// filtered pin against, so this reads the bar's position rather than assuming it.
+    private var chatBarTop: CGFloat?
+
     /// The part of the window a touch actually reaches: below the header and the Search bar,
-    /// above the keyboard. Being inside the window is not the same as being reachable.
+    /// above the chat bar and the keyboard. Being inside the window is not the same as being
+    /// reachable, and neither is being above the keyboard.
     private func reachable(_ app: XCUIApplication, screen: CGRect) -> CGRect {
         var top = screen.minY
         for chrome in [app.descendants(matching: .any)["chat-search-button"].firstMatch,
@@ -221,8 +253,48 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
             let seen = app.keyboards.firstMatch.frame.minY
             keyboardTop = min(keyboardTop ?? seen, seen)
         }
-        let bottom = min(screen.maxY, keyboardTop ?? screen.maxY)
+        let bar = app.descendants(matching: .any)["chat-bar-height"].firstMatch
+        if bar.exists {
+            let seen = bar.frame.minY
+            chatBarTop = min(chatBarTop ?? seen, seen)
+        }
+        var bottom = screen.maxY
+        if let keyboardTop { bottom = min(bottom, keyboardTop) }
+        if let chatBarTop { bottom = min(bottom, chatBarTop) }
         return CGRect(x: screen.minX, y: top, width: screen.width, height: max(0, bottom - top))
+    }
+
+    /// The row's frame once it has stopped moving, or `nil` if it never does.
+    ///
+    /// `aimable` already checks that a candidate's frame is unchanged across 400 ms, but it
+    /// does that before two full tree walks and a set of prints, so by the time the touch is
+    /// synthesized the reading can be seconds old. This is the same discipline the filtered
+    /// pin needed in `ChatSearchCloseUITests` — wait for two consecutive agreeing samples and
+    /// measure that, rather than trusting the first snapshot — applied to the frame a tap is
+    /// aimed at rather than to one being asserted about.
+    ///
+    /// It was not the cause of `6bfb3a31f`: the band, not the motion, is what put that touch
+    /// on the chat bar, and the list was no more in motion there than in the runs that passed
+    /// (the three `Find the "bubble:…"` calls XCUITest makes inside `Synthesize event` appear
+    /// identically in the green runs, so they are its normal resolution and not a sign of a
+    /// moving target). This is here because the list *can* re-pin under the rig — focusing the
+    /// chat bar does exactly that — and a tap aimed at a stale frame is a fault that reports
+    /// itself as the app ignoring a touch, which costs hours to read back.
+    private func settledFrame(_ element: XCUIElement, arm: String) -> CGRect? {
+        let deadline = Date().addingTimeInterval(settle)
+        var last: CGRect?
+        while Date() < deadline {
+            guard element.exists else { return nil }
+            let now = element.frame
+            if let last, abs(now.minY - last.minY) < 0.5, abs(now.maxY - last.maxY) < 0.5 {
+                return now
+            }
+            last = now
+            usleep(250_000)
+        }
+        print("[rig] \(arm) never came to rest inside \(settle)s; last frame "
+              + "\(last.map { "\($0)" } ?? "none")")
+        return nil
     }
 
     /// One drag back through the results, toward older hits — the reader scrolling the list.
@@ -273,6 +345,11 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
             guard point.y - band.minY >= Self.aimBandMargin else {
                 print("[rig] skipped \(id): aim y\(Int(point.y)) is only "
                       + "\(Int(point.y - band.minY))pt below the band top y\(Int(band.minY))")
+                continue
+            }
+            guard band.maxY - point.y >= Self.aimBandBottomMargin else {
+                print("[rig] skipped \(id): aim y\(Int(point.y)) is only "
+                      + "\(Int(band.maxY - point.y))pt above the band bottom y\(Int(band.maxY))")
                 continue
             }
             // The point must belong to this row and to no other. Result rows are reported
@@ -351,7 +428,9 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         guard e.exists else { return false }
         let band = reachable(app, screen: screen)
         let point = CGPoint(x: e.frame.midX, y: e.frame.maxY - Self.bubbleBottomAim)
-        return band.contains(point) && point.y - band.minY >= Self.aimBandMargin
+        return band.contains(point)
+            && point.y - band.minY >= Self.aimBandMargin
+            && band.maxY - point.y >= Self.aimBandBottomMargin
     }
 
     /// Has the named row gone out below the band, where no further drag can bring it back?
@@ -410,26 +489,49 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         guard liveTarget.exists else {
             return XCTFail("the aimed row \(id) is gone from the result list before the tap")
         }
-        // Read a fresh frame for the record, and to say whether the list moved. The touch
-        // below does not use it: it is reported so that a mis-tap can be told apart from a
-        // list that slid, which is the distinction the frames of the last one could not make.
-        let live = liveTarget.frame
+        // Everything that costs element queries happens here, before the frame the touch will
+        // use is read. Settle, then measure, then act: the band and the neighbours are two
+        // full tree walks over a long list, and a point chosen before them has had seconds of
+        // list movement to go stale by the time the touch is built.
+        let band = reachable(app, screen: screen)
+        let neighbours = bubbles(app)
+
+        // The frame the touch is aimed at, confirmed to have stopped moving, read last so
+        // that nothing but one `print` stands between the measurement and the tap.
+        guard let live = settledFrame(liveTarget, arm: arm) else {
+            return XCTFail("the aimed row \(id) never came to rest in \(settle)s "
+                           + "(results: \(describe(bubbles(app))))")
+        }
         let aim = CGPoint(x: live.midX, y: live.maxY - Self.bubbleBottomAim)
         if abs(aim.y - point.y) > 1 {
             print("[rig] \(arm) re-aimed: the list moved \(Int(aim.y - point.y))pt between "
                   + "choosing \(point) and tapping \(aim)")
         }
-        let band = reachable(app, screen: screen)
-        let below = bubbles(app)
+        let below = neighbours
             .filter { $0.id != "bubble:\(id)" && $0.frame.minY > live.midY }
             .min { $0.frame.minY < $1.frame.minY }
         let gap = below.map { "\(Int($0.frame.minY - aim.y))pt to \($0.id)" } ?? "no row below"
         // The band's bottom is logged as well as its top, because the aim that was delivered
-        // and ignored was 13 pt below a bottom the band did not have at the time.
+        // and ignored was 13 pt below a bottom the band did not have at the time. The chat
+        // bar's edge is logged beside the keyboard's for the same reason: on `6bfb3a31f` the
+        // band ended at the keyboard, the aim cleared it by 68 pt, and the chat bar took the
+        // touch 34 pt above it.
         print("[rig] \(arm) aim \(aim): \(Int(aim.y - band.minY))pt below the band top "
-              + "y\(Int(band.minY)), band ends y\(Int(band.maxY)) "
-              + "(keyboard \(app.keyboards.count > 0 ? "up" : "not reported"), bound "
-              + "\(keyboardTop.map { "y\(Int($0))" } ?? "never seen")), \(gap)")
+              + "y\(Int(band.minY)), \(Int(band.maxY - aim.y))pt above the band bottom "
+              + "y\(Int(band.maxY)) (keyboard \(app.keyboards.count > 0 ? "up" : "not reported"), "
+              + "bound \(keyboardTop.map { "y\(Int($0))" } ?? "never seen"); chat bar "
+              + "\(chatBarTop.map { "y\(Int($0))" } ?? "never seen")), \(gap)")
+        // A point that has drifted out of the band is not worth tapping: the touch would be
+        // delivered to whatever owns that part of the screen and the case would report the
+        // app doing nothing. Say which edge it left, and leave the rig's fault in the rig.
+        guard aim.y - band.minY >= Self.aimBandMargin,
+              band.maxY - aim.y >= Self.aimBandBottomMargin else {
+            return XCTFail("the list moved \(id)'s aim out of the reachable band before the "
+                           + "tap: aim \(aim) against band y\(Int(band.minY))…"
+                           + "\(Int(band.maxY)) (chat bar "
+                           + "\(chatBarTop.map { "y\(Int($0))" } ?? "never seen"), keyboard "
+                           + "\(keyboardTop.map { "y\(Int($0))" } ?? "never seen"))")
+        }
         // dy 1 is the row's bottom edge; `bubbleBottomAim` back up lands in `Theme.bubbleVPad`,
         // the same place the coordinate aim used to target. XCUITest resolves the frame
         // itself, at the moment of the touch.
