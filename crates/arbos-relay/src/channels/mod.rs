@@ -453,6 +453,23 @@ fn pair_json(c: &ChannelPairCode) -> Value {
     serde_json::to_value(pair_dto(c)).expect("ChannelPairingDto")
 }
 
+/// The bindings this caller may see. `channel_bindings` has no user column, so ownership is
+/// reachable only through the binding's project, which is what `allows` resolves: the owner, the
+/// user's other devices, an invited project member and the admin. `DELETE /channels/bindings/{id}`
+/// has gated on this since #1952; the read routes did not.
+fn visible_bindings(
+    state: &AppState,
+    principal: &Principal,
+) -> Result<Vec<ChannelBinding>, (StatusCode, String)> {
+    Ok(state
+        .db
+        .list_channel_bindings()
+        .map_err(internal)?
+        .into_iter()
+        .filter(|b| state.allows(principal, &b.project_id))
+        .collect())
+}
+
 /// `GET /channels`: platform states, bindings, the active pairing code.
 pub async fn overview(State(state): State<AppState>, principal: Principal) -> ApiResult {
     if principal.is_box() {
@@ -485,18 +502,19 @@ pub async fn overview(State(state): State<AppState>, principal: Principal) -> Ap
             }
         })
         .collect();
-    let bindings: Vec<ChannelBindingDto> = state
-        .db
-        .list_channel_bindings()
-        .map_err(internal)?
+    let bindings: Vec<ChannelBindingDto> = visible_bindings(&state, &principal)?
         .iter()
         .map(binding_dto)
         .collect();
+    // Newest live code the caller is allowed on, not the relay's newest: a code another user
+    // minted a moment ago must not hide this caller's own.
     let pairing = state
         .db
-        .active_channel_pair_code()
+        .live_channel_pair_codes()
         .map_err(internal)?
-        .map(|c| pair_dto(&c));
+        .iter()
+        .find(|c| state.allows(&principal, &c.project_id))
+        .map(pair_dto);
     Ok(Json(ChannelsOverviewDto {
         mock: mock_on(&state),
         platforms,
@@ -560,10 +578,7 @@ pub async fn list_bindings(State(state): State<AppState>, principal: Principal) 
     if principal.is_box() {
         return Err((StatusCode::FORBIDDEN, "device only".into()));
     }
-    let items: Vec<Value> = state
-        .db
-        .list_channel_bindings()
-        .map_err(internal)?
+    let items: Vec<Value> = visible_bindings(&state, &principal)?
         .iter()
         .map(binding_json)
         .collect();
@@ -727,13 +742,24 @@ fn outcome_json(o: &Outcome) -> Value {
     }
 }
 
-/// `GET /channels/mock/outbox`: what was (or would have been) sent, newest first.
+/// `GET /channels/mock/outbox`: what was (or would have been) sent to the caller's own channels,
+/// newest first. Reachable on a production relay on purpose — the rows are the only record of
+/// what the relay tried to send, which is what makes it worth reading when a channel is
+/// misbehaving. The scoping is what keeps it safe to leave up: it answers for the caller's own
+/// bindings and nobody else's.
 pub async fn mock_outbox(State(state): State<AppState>, principal: Principal) -> ApiResult {
     if principal.is_box() {
         return Err((StatusCode::FORBIDDEN, "device only".into()));
     }
-    let items = state.db.channel_outbox(100).map_err(internal)?;
-    Ok(Json(json!({ "mock": mock_on(&state), "items": items })).into_response())
+    let ids: Vec<String> = visible_bindings(&state, &principal)?
+        .into_iter()
+        .map(|b| b.id)
+        .collect();
+    let items = state
+        .db
+        .channel_outbox_for_bindings(&ids, 100)
+        .map_err(internal)?;
+    Ok(Json(json!({ "mock": true, "items": items })).into_response())
 }
 
 /// Background pollers: Beeper (always, when Harness Comms is connected) and Telegram long polling.
@@ -1176,5 +1202,83 @@ mod tests {
         let own = unbind(State(state.clone()), alice_dev, Path("bind_1".to_owned())).await;
         assert_eq!(status(own), StatusCode::NO_CONTENT);
         assert!(state.db.channel_binding("bind_1").unwrap().is_none());
+    }
+
+    async fn body_of(r: ApiResult) -> Value {
+        let resp = r.expect("ok");
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        serde_json::from_slice(&bytes).expect("json")
+    }
+
+    /// `unbind` was gated on the caller's project (#1952) but the three reads beside it were not,
+    /// so any signed-in device read every user's bindings, outbound message text and live pairing
+    /// code. Each read now answers with the caller's own rows only.
+    #[tokio::test]
+    async fn channel_reads_show_only_the_callers_own_rows() {
+        let state = crate::state::test_support::test_state(crate::state::AuthMode::Github);
+        let (alice, alice_dev) = crate::people::tests_support::person(&state, 1);
+        let (bob, bob_dev) = crate::people::tests_support::person(&state, 2);
+        let alice_project = crate::people::tests_support::project_of(&state, &alice, "Comms");
+
+        let binding = ChannelBinding {
+            id: "bind_alice".into(),
+            platform: "telegram".into(),
+            external_chat_id: "tg-chat".into(),
+            external_user_id: "tg-user".into(),
+            project_id: alice_project.clone(),
+            chat_id: "c1".into(),
+            label: "Telegram · Alice".into(),
+            bound_at: 0,
+        };
+        state.db.upsert_channel_binding(&binding).unwrap();
+        state
+            .db
+            .record_channel_outbox(
+                "telegram",
+                "tg-chat",
+                "Alice's private reply",
+                "req_1",
+                "sent",
+                None,
+                Some("bind_alice"),
+            )
+            .unwrap();
+        let now = now_ms();
+        state
+            .db
+            .new_channel_pair_code(&ChannelPairCode {
+                code: "111111".into(),
+                project_id: alice_project,
+                chat_id: "c1".into(),
+                created_at: now,
+                expires_at: now + PAIR_CODE_TTL_MS,
+            })
+            .unwrap();
+
+        let seen = body_of(list_bindings(State(state.clone()), bob_dev.clone()).await).await;
+        assert_eq!(seen["items"].as_array().unwrap().len(), 0, "{seen}");
+        let seen = body_of(overview(State(state.clone()), bob_dev.clone()).await).await;
+        assert_eq!(seen["bindings"].as_array().unwrap().len(), 0, "{seen}");
+        assert!(seen["pairing"].is_null(), "another user's code: {seen}");
+        let seen = body_of(mock_outbox(State(state.clone()), bob_dev.clone()).await).await;
+        assert_eq!(seen["items"].as_array().unwrap().len(), 0, "{seen}");
+
+        let mine = body_of(list_bindings(State(state.clone()), alice_dev.clone()).await).await;
+        assert_eq!(mine["items"][0]["id"], "bind_alice");
+        let mine = body_of(overview(State(state.clone()), alice_dev.clone()).await).await;
+        assert_eq!(mine["bindings"][0]["id"], "bind_alice");
+        assert_eq!(mine["pairing"]["code"], "111111");
+        let mine = body_of(mock_outbox(State(state.clone()), alice_dev.clone()).await).await;
+        assert_eq!(mine["items"][0]["text"], "Alice's private reply");
+
+        // An invited member of the project sees it too, as `allows` and `unbind` both already hold.
+        state
+            .db
+            .add_project_member(&binding.project_id, &bob, &alice)
+            .unwrap();
+        let invited = body_of(list_bindings(State(state.clone()), bob_dev).await).await;
+        assert_eq!(invited["items"][0]["id"], "bind_alice");
     }
 }

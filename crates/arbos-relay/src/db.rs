@@ -2463,24 +2463,25 @@ impl Db {
         })
     }
 
-    /// The newest unused, unexpired code (so a client can show it again after a restart).
-    pub fn active_channel_pair_code(&self) -> Result<Option<ChannelPairCode>> {
+    /// Every unused, unexpired code, newest first. The caller picks the newest one it is allowed
+    /// on: taking the relay-global newest row and then filtering would hide a caller's own live
+    /// code whenever another user minted more recently.
+    pub fn live_channel_pair_codes(&self) -> Result<Vec<ChannelPairCode>> {
         self.with(|conn| {
-            conn.query_row(
+            let mut st = conn.prepare(
                 "SELECT code, project_id, chat_id, created_at, expires_at FROM channel_pair_codes
-                 WHERE used_at IS NULL AND expires_at > ?1 ORDER BY created_at DESC LIMIT 1",
-                params![now_ms()],
-                |r| {
-                    Ok(ChannelPairCode {
-                        code: r.get(0)?,
-                        project_id: r.get(1)?,
-                        chat_id: r.get(2)?,
-                        created_at: r.get(3)?,
-                        expires_at: r.get(4)?,
-                    })
-                },
-            )
-            .optional()
+                 WHERE used_at IS NULL AND expires_at > ?1 ORDER BY created_at DESC",
+            )?;
+            let rows = st.query_map(params![now_ms()], |r| {
+                Ok(ChannelPairCode {
+                    code: r.get(0)?,
+                    project_id: r.get(1)?,
+                    chat_id: r.get(2)?,
+                    created_at: r.get(3)?,
+                    expires_at: r.get(4)?,
+                })
+            })?;
+            rows.collect()
         })
     }
 
@@ -2646,22 +2647,58 @@ impl Db {
         })
     }
 
+    /// Outbound rows belonging to `binding_ids`, newest first. The limit is applied after
+    /// scoping, so a caller still sees its own newest rows when another user's traffic is busier.
+    /// A row with no `binding_id` is attributable to nobody and is never returned here.
+    pub fn channel_outbox_for_bindings(
+        &self,
+        binding_ids: &[String],
+        limit: i64,
+    ) -> Result<Vec<serde_json::Value>> {
+        if binding_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.with(|conn| {
+            let holes = std::iter::repeat_n("?", binding_ids.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut st = conn.prepare(&format!(
+                "SELECT id, platform, external_chat_id, text, request_id, status, detail, binding_id, created_at
+                 FROM channel_outbox WHERE binding_id IN ({holes}) ORDER BY id DESC LIMIT ?{}",
+                binding_ids.len() + 1
+            ))?;
+            let mut args: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(binding_ids.len() + 1);
+            for id in binding_ids {
+                args.push(id);
+            }
+            args.push(&limit);
+            let rows = st.query_map(args.as_slice(), Self::row_to_outbox_json)?;
+            rows.collect()
+        })
+    }
+
+    /// Every outbound row, unscoped. Tests assert on what a send recorded; no route serves this,
+    /// because a relay-global read of other users' message text is what #1952's sibling defect
+    /// turned out to be.
+    #[cfg(test)]
     pub fn channel_outbox(&self, limit: i64) -> Result<Vec<serde_json::Value>> {
         self.with(|conn| {
             let mut st = conn.prepare(
                 "SELECT id, platform, external_chat_id, text, request_id, status, detail, binding_id, created_at
                  FROM channel_outbox ORDER BY id DESC LIMIT ?1",
             )?;
-            let rows = st.query_map(params![limit], |r| {
-                Ok(serde_json::json!({
-                    "id": r.get::<_, i64>(0)?, "platform": r.get::<_, String>(1)?, "externalChatId": r.get::<_, String>(2)?,
-                    "text": r.get::<_, String>(3)?, "requestId": r.get::<_, String>(4)?, "status": r.get::<_, String>(5)?,
-                    "detail": r.get::<_, Option<String>>(6)?, "bindingId": r.get::<_, Option<String>>(7)?,
-                    "created_at": r.get::<_, i64>(8)?,
-                }))
-            })?;
+            let rows = st.query_map(params![limit], Self::row_to_outbox_json)?;
             rows.collect()
         })
+    }
+
+    fn row_to_outbox_json(r: &rusqlite::Row<'_>) -> rusqlite::Result<serde_json::Value> {
+        Ok(serde_json::json!({
+            "id": r.get::<_, i64>(0)?, "platform": r.get::<_, String>(1)?, "externalChatId": r.get::<_, String>(2)?,
+            "text": r.get::<_, String>(3)?, "requestId": r.get::<_, String>(4)?, "status": r.get::<_, String>(5)?,
+            "detail": r.get::<_, Option<String>>(6)?, "bindingId": r.get::<_, Option<String>>(7)?,
+            "created_at": r.get::<_, i64>(8)?,
+        }))
     }
 
     // ---- local helpers (F9) -------------------------------------------------------------------
