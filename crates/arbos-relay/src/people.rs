@@ -1395,6 +1395,62 @@ pub async fn chat_read(
     StatusCode::NO_CONTENT.into_response()
 }
 
+#[derive(Deserialize)]
+pub struct MentionReadBody {
+    /// The CRDT `message_id` of the mention the user has seen — the only id a client holds,
+    /// since a `chat_events.id` never leaves the relay. It must name the oldest unread
+    /// mention; anything else is a no-op, which is what stops a cursor collapse from clearing
+    /// a mention nobody looked at.
+    pub message_id: String,
+}
+
+/// `PUT /chats/{id}/mentions/read {"message_id"}` — the user has seen that mention (it came on
+/// screen). The cursor is per user, so their other devices stop showing the chat's `@` when
+/// they next read `GET /me/unread`.
+///
+/// Deliberately **not** a caller of `clear_on_read`: that event makes every other device drop
+/// the chat's unread **messages** too, so clearing a mention would wrongly clear the chat.
+pub async fn chat_mentions_read(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Json(b): Json<MentionReadBody>,
+) -> Response {
+    let me = match user_of(&principal) {
+        Ok(u) => u,
+        Err(r) => return *r,
+    };
+    // The same two guards `chat_read` applies: membership for a people chat, project access
+    // for a project chat.
+    if state.db.people_chat(&id).ok().flatten().is_some() {
+        if let Err(r) = member_chat(&state, &principal, &id) {
+            return *r;
+        }
+    } else {
+        let Ok(Some(project_id)) = state.db.chat_project_id(&id) else {
+            return api_error(StatusCode::NOT_FOUND, "not_found", "no such chat");
+        };
+        if !state.allows(&principal, &project_id) {
+            return api_error(StatusCode::FORBIDDEN, "not_member", "not your chat");
+        }
+    }
+    // The oldest unread mention carries its own `message_id`, so the client's id is matched
+    // against it directly rather than looked up and then compared.
+    match state.db.oldest_unread_mention(&me, &id) {
+        Ok(Some((event_id, message_id))) if message_id == b.message_id => {
+            if let Err(e) = state.db.advance_mention_cursor(&me, &id, event_id) {
+                return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
+        // Already seen, or not the oldest: nothing to do and nothing wrong. A client that
+        // marks the same mention twice (two devices, a re-sent cursor on foreground) must not
+        // see an error, and one that names a newer mention must not skip the older.
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    }
+}
+
 /// `POST /chats/{id}/hide` — delete-for-me on this device (a new message un-hides it).
 pub async fn chat_hide(
     State(state): State<AppState>,
