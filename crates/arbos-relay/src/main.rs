@@ -61,6 +61,8 @@ mod perf;
 mod pins;
 #[cfg(test)]
 mod preview_token_tests;
+#[cfg(test)]
+mod project_lookup_tests;
 mod proxy;
 mod push;
 mod releases;
