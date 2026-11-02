@@ -435,17 +435,47 @@ pub(crate) fn binding_dto(b: &ChannelBinding) -> ChannelBindingDto {
     }
 }
 
-/// The binding as this caller may see it. `external_user_id` is the owner's own handle on the
-/// platform — their Telegram or Slack account — which a member driving the project has no use
-/// for, so only the owner is told it. Everything that answers "is this project connected, and
-/// where" stays: platform, label, chat and project.
+/// The label without the display name every adapter appends: `"Telegram · direct · Ada
+/// Lovelace"` becomes `"Telegram · direct"`. The name is always the last segment
+/// (`telegram.rs`, `slack.rs`, `whatsapp.rs`, `beeper.rs`), and the leading segments are
+/// platform metadata, so keep at most two of those and never the last. A label with no
+/// separator is a bare sender name — `handle_inbound` falls back to one when the adapter gives
+/// no label — and only the platform survives it.
 ///
-/// Empty rather than absent, deliberately. `externalUserId` is a non-optional `String` both in
-/// the typeshare-generated `ChannelBindingDto` (`RelayTypes.swift`) and in `arbos-mac`'s
-/// `ChannelBinding`, so a missing or null key fails the whole `GET /channels` decode on each —
-/// on iOS the entire response, since the binding decodes inside `ChannelsOverviewDto.bindings`.
-/// `Option<String>` is the honest wire shape and waits for the next client build. Until then
-/// this empty string is the redaction, not a bug: do not "fix" it by restoring the value.
+/// The result is never empty, which matters: Settings → Channels renders
+/// `"{platform} · {external_chat_id}"` in place of a blank label (`arbos-mac`
+/// `ui/channels.rs:302`), so emptying this field would put a *different* identifier on screen.
+fn label_without_the_name(b: &ChannelBinding) -> String {
+    let parts: Vec<&str> = b.label.split(" · ").collect();
+    match parts.len().saturating_sub(1).min(2) {
+        0 => Platform::parse(&b.platform)
+            .map_or_else(|| b.platform.clone(), |p| p.label().to_owned()),
+        keep => parts[..keep].join(" · "),
+    }
+}
+
+/// The binding as this caller may see it. A member keeps what answers "is this project
+/// connected, and where" — platform, kind of conversation, chat and project — and loses the two
+/// fields that say *who the owner is* on that platform: `external_user_id`, their account, and
+/// the display name the adapters bake into `label`.
+///
+/// Redacting only the account id would be the worse half of the job: the name sitting beside it
+/// is bound to a platform the owner actually uses, and across several bindings that composes
+/// into a map of where they can be reached, which is the thing being hidden.
+///
+/// **The two fields are redacted differently, on purpose, and the client is what decides which.**
+/// `external_user_id` is blanked: nothing renders it, so an empty string is invisible.
+/// `label` is truncated instead, because it is the only thing distinguishing one row from
+/// another in the interface, and because a blank one makes the Mac fall back to drawing the
+/// external chat id. Do not flatten these into one rule — ask what the client does with the
+/// field.
+///
+/// Blanked rather than absent, also deliberately. Both clients decode
+/// `arbos_core::api::ChannelBindingDto` — `arbos-mac` directly (`sync/relay.rs`), iOS through
+/// the typeshare-generated Swift mirror — and every field of it is required, so a missing or
+/// null key fails the decode. `Option<String>` is the honest wire shape and waits for the next
+/// client build. Until then the empty string is the redaction, not a bug: do not "fix" it by
+/// restoring the value.
 fn binding_dto_for(
     state: &AppState,
     principal: &Principal,
@@ -454,6 +484,7 @@ fn binding_dto_for(
     let mut dto = binding_dto(b);
     if !state.owns(principal, &b.project_id) {
         dto.external_user_id = String::new();
+        dto.label = label_without_the_name(b);
     }
     dto
 }
@@ -1359,7 +1390,8 @@ mod tests {
                 external_user_id: "tg-user".into(),
                 project_id: project.clone(),
                 chat_id: "c1".into(),
-                label: "Telegram · Alice".into(),
+                // The shape every adapter builds: platform, kind, then the person's name.
+                label: "Telegram · direct · Ada Lovelace".into(),
                 bound_at: 0,
             })
             .unwrap();
@@ -1498,16 +1530,63 @@ mod tests {
             "the key stays, or the whole GET /channels decode fails: {theirs}"
         );
 
+        // The label carries the owner's display name on the platform, so a member gets it
+        // truncated to the platform metadata rather than blanked — see below for why not blank.
+        assert_eq!(mine["label"], "Telegram · direct · Ada Lovelace");
+        assert_eq!(theirs["label"], "Telegram · direct");
+
         // What the member is still told, so they can see the project is connected.
-        for field in ["id", "platform", "label", "projectId", "chatId"] {
+        for field in ["id", "platform", "projectId", "chatId"] {
             assert_eq!(theirs[field], mine[field], "{field} is not secret");
         }
 
         // `GET /channels` answers alike, since both routes read the same helper.
         let seen = body_of(overview(State(state.clone()), s.member).await).await;
         assert_eq!(seen["bindings"][0]["externalUserId"], "");
+        assert_eq!(seen["bindings"][0]["label"], "Telegram · direct");
         let seen = body_of(overview(State(state.clone()), s.owner).await).await;
         assert_eq!(seen["bindings"][0]["externalUserId"], "tg-user");
+        assert_eq!(
+            seen["bindings"][0]["label"],
+            "Telegram · direct · Ada Lovelace"
+        );
+    }
+
+    /// The real shapes, from each adapter, plus what a truncation must never do. The name is
+    /// always the last segment; the leading segments are platform metadata.
+    #[test]
+    fn a_truncated_label_keeps_the_platform_and_drops_the_person() {
+        let labelled = |platform: &str, label: &str| ChannelBinding {
+            id: "b".into(),
+            platform: platform.into(),
+            external_chat_id: "chat".into(),
+            external_user_id: "user".into(),
+            project_id: "p".into(),
+            chat_id: "c".into(),
+            label: label.into(),
+            bound_at: 0,
+        };
+        for (platform, built, expected) in [
+            // telegram.rs:91, slack.rs:159, whatsapp.rs:135, beeper.rs:103.
+            ("telegram", "Telegram · direct · Ada", "Telegram · direct"),
+            ("slack", "Slack · channel · Ada", "Slack · channel"),
+            ("whatsapp", "WhatsApp · Ada", "WhatsApp"),
+            ("beeper", "Beeper · signal · Ada", "Beeper · signal"),
+            // A name with the separator inside it must not survive on the strength of it.
+            (
+                "telegram",
+                "Telegram · direct · Ada · Lovelace",
+                "Telegram · direct",
+            ),
+            // `handle_inbound` falls back to a bare sender name when the adapter gives none.
+            ("telegram", "Ada Lovelace", "Telegram"),
+            ("nonsense", "Ada Lovelace", "nonsense"),
+        ] {
+            let got = label_without_the_name(&labelled(platform, built));
+            assert_eq!(got, expected, "{built}");
+            assert!(!got.is_empty(), "never empty, or the Mac draws the chat id");
+            assert!(!got.contains("Ada"), "the person does not survive: {got}");
+        }
     }
 
     /// `reply` posts text straight to a bound channel, so a member reaching it speaks to the
