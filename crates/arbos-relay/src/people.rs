@@ -2013,13 +2013,13 @@ pub async fn agent_remove(
         .remove_member(&id, &format!("agent:{project_id}"), false)
     {
         Ok(true) => {}
-        Ok(false) => {
-            return api_error(
-                StatusCode::NOT_FOUND,
-                "not_found",
-                "that agent is not in this chat",
-            )
-        }
+        // Not "that agent is not in this chat". `may_remove_agent` lets a group's owner or admin
+        // through for an agent they do not own, so this arm is reachable by someone who has been
+        // told nothing about the Project — and saying it is merely absent from the chat tells
+        // them it exists. That is the name oracle again, on the one route that already carried
+        // it: `agent_settings` can word it this way because `own_project` gates it and only the
+        // owner arrives.
+        Ok(false) => return api_error(StatusCode::NOT_FOUND, "not_found", "no such project"),
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
     }
     state.matrix.touch_chat(&state, &id, None);
@@ -6833,5 +6833,61 @@ mod picture_tests {
             StatusCode::OK
         );
         assert_eq!(picture_of(&state, &chat), None);
+    }
+}
+
+#[cfg(test)]
+mod agent_remove_oracle_tests {
+    //! `DELETE /chats/{id}/agents/{project_id}`, asked the same question on two relays that
+    //! differ in one fact: on the first Victor owns an agent called `Lium`, on the second
+    //! nobody does. The answers must match word for word.
+    //!
+    //! The method is `project_lookup_tests.rs`'s, and it is better here than comparing two
+    //! project ids on one relay as a plain member. A plain member is refused by
+    //! `may_remove_agent` before the route reaches the membership write, so that probe never
+    //! runs the arm this covers; the owner of any group does reach it, and anyone can make one.
+
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+
+    use super::tests_support::{group, person, project_of};
+    use super::*;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    const GUESS: &str = "Lium";
+
+    /// Mallory and a group she owns, plus Victor's `Lium` only when `victim` is set. Mallory
+    /// owning the group is the whole point: that is what carries her past `can_manage_members`
+    /// to an agent that is nobody's to shield, and making a group costs nothing.
+    fn relay(victim: bool) -> (AppState, Principal, String) {
+        let state = test_state(AuthMode::Github);
+        let (mallory, mallory_device) = person(&state, 9801);
+        project_of(&state, &mallory, "Mallory's agent");
+        if victim {
+            let (victor, _) = person(&state, 9802);
+            project_of(&state, &victor, GUESS);
+        }
+        let chat = group(&state, &[&mallory]);
+        (state, mallory_device, chat)
+    }
+
+    #[tokio::test]
+    async fn removing_an_agent_does_not_say_whether_the_name_is_taken() {
+        let mut answers = Vec::new();
+        for victim in [true, false] {
+            let (state, mallory, chat) = relay(victim);
+            let r = agent_remove(State(state), mallory, Path((chat, GUESS.to_owned()))).await;
+            let status = r.status();
+            let body = axum::body::to_bytes(r.into_body(), 1 << 16)
+                .await
+                .expect("a refusal body");
+            answers.push((status, String::from_utf8_lossy(&body).into_owned()));
+        }
+        assert_eq!(
+            answers[0], answers[1],
+            "a name Victor holds must read exactly like a name nobody holds"
+        );
+        assert_eq!(answers[0].0, StatusCode::NOT_FOUND);
     }
 }
