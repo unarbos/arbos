@@ -63,20 +63,32 @@ pub fn room_access(state: &AppState, principal: &Principal, chat_id: &str) -> bo
             .ok()
             .flatten()
             .is_some(),
-        Principal::Box { user_id } => state
-            .db
-            .members_of(chat_id)
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|m| m.project_id().map(str::to_owned))
-            .any(|pid| {
-                state
-                    .db
-                    .project(&pid)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|p| p.user_id == *user_id)
-            }),
+        Principal::Box { user_id } => {
+            // A ban is final, whatever the rows say. Without this an `agent:` row that
+            // outlived the ban — or one attached afterwards — would hand the banned person's
+            // box the room back: the log, the roster and every member's device ids.
+            if state
+                .db
+                .member_is_banned(chat_id, &format!("user:{user_id}"))
+                .unwrap_or(false)
+            {
+                return false;
+            }
+            state
+                .db
+                .members_of(chat_id)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|m| m.project_id().map(str::to_owned))
+                .any(|pid| {
+                    state
+                        .db
+                        .project(&pid)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|p| p.user_id == *user_id)
+                })
+        }
     }
 }
 
@@ -1423,6 +1435,9 @@ pub async fn chat_leave(
     if let Err(e) = state.db.remove_member(&id, &format!("user:{me}"), false) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
+    // Leaving takes your agents too, or walking out before a moderator removes you would keep
+    // your box in the room on the same stale row.
+    detach_agents_of(&state, &cm, &id, &me, &me);
     state.matrix.touch_chat(&state, &id, None);
     notify_members(
         &state,
@@ -1847,8 +1862,127 @@ pub fn detach_agent_from_people_chats(state: &AppState, project_id: &str, by_use
     }
 }
 
-/// `DELETE /chats/{id}/agents/{project_id}` — the agent's owner only. The agent's queue ends at
-/// once and its memory of the chat is soft-invalidated on the box.
+/// Take a person's agents out of one chat when the person goes. Returns the Projects detached,
+/// so the caller can name them in its membership notice.
+///
+/// An agent is in a people chat because its owner is: every attach route asks a live member for
+/// a Project they own. Sparing the `agent:` rows on a remove, a ban or a leave left the departed
+/// person's box in the room — reading the row log, the checkpoint, the roster and every member's
+/// device ids, and writing rows that fanned out to everyone still there — and no moderator could
+/// end it, because `agent_remove` answered only to the Project's owner.
+fn detach_agents_of(
+    state: &AppState,
+    cm: &ChatWithMembers,
+    chat_id: &str,
+    user_id: &str,
+    by: &str,
+) -> Vec<String> {
+    let by_handle = handle_of(state, by);
+    let mut detached = Vec::new();
+    for pid in state
+        .db
+        .agent_members_of_user(chat_id, user_id)
+        .unwrap_or_default()
+    {
+        match state
+            .db
+            .remove_member(chat_id, &format!("agent:{pid}"), false)
+        {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(e) => {
+                tracing::warn!(
+                    chat = %chat_id,
+                    project = %pid,
+                    error = %e,
+                    "agent not detached with its owner"
+                );
+                continue;
+            }
+        }
+        let _ = state
+            .db
+            .enqueue_push(&pid, "people_agent_removed", &json!({ "chat_id": chat_id }));
+        notify_members(
+            state,
+            cm,
+            by,
+            &PushEventDto::PeopleAgentRemoved(PeopleAgentRemovedPayloadDto {
+                chat_id: chat_id.to_owned(),
+                project_id: pid.clone(),
+                by_handle: by_handle.clone(),
+            }),
+        );
+        crate::outside::on_membership(state, &pid, chat_id, false);
+        tracing::info!(
+            chat = %chat_id,
+            project = %pid,
+            user = %user_id,
+            "agent detached with its owner"
+        );
+        detached.push(pid);
+    }
+    detached
+}
+
+/// May I take this agent out of the chat? Its owner always may. So may the group's owner or an
+/// admin, under the hierarchy they already hold over people: whoever may remove the person may
+/// remove what that person attached. Without it an attachment is unclearable by the one person
+/// who needs to clear it, because `own_project` answers only to the Project's owner and
+/// `can_moderate_member` resolves only `user:` rows.
+fn may_remove_agent(
+    state: &AppState,
+    cm: &ChatWithMembers,
+    me: &str,
+    project_id: &str,
+) -> Result<(), Box<Response>> {
+    let project = match state.db.project(project_id) {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            return Err(Box::new(api_error(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "no such project",
+            )))
+        }
+        Err(e) => {
+            return Err(Box::new(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db",
+                e.to_string(),
+            )))
+        }
+    };
+    if project.user_id == me {
+        return Ok(());
+    }
+    if !can_manage_members(cm, me) {
+        return Err(Box::new(api_error(
+            StatusCode::FORBIDDEN,
+            "own_project_only",
+            "you can only add or change your own Project's agent",
+        )));
+    }
+    // An owner who is no longer in the chat shields nothing — that leftover is what a moderator
+    // is here to clear.
+    match my_role(cm, &project.user_id) {
+        Some("owner") => Err(Box::new(api_error(
+            StatusCode::FORBIDDEN,
+            "owner_stays",
+            "the group owner's agent cannot be removed",
+        ))),
+        Some("admin") if my_role(cm, me) == Some("admin") => Err(Box::new(api_error(
+            StatusCode::FORBIDDEN,
+            "owner_only",
+            "only the owner manages an admin's agent",
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// `DELETE /chats/{id}/agents/{project_id}` — the agent's owner, or a group owner or admin who
+/// may moderate the person who owns it. The agent's queue ends at once and its memory of the
+/// chat is soft-invalidated on the box.
 pub async fn agent_remove(
     State(state): State<AppState>,
     principal: Principal,
@@ -1858,7 +1992,7 @@ pub async fn agent_remove(
         Ok(v) => v,
         Err(r) => return *r,
     };
-    if let Err(r) = own_project(&state, &me, &project_id) {
+    if let Err(r) = may_remove_agent(&state, &cm, &me, &project_id) {
         return *r;
     }
     match state
@@ -2233,6 +2367,7 @@ pub async fn member_remove(
         Ok(false) => return api_error(StatusCode::NOT_FOUND, "not_found", "not a member"),
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
     }
+    let detached = detach_agents_of(&state, &cm, &id, &user_id, &me);
     state.matrix.touch_chat(&state, &id, None);
     let event = PushEventDto::PeopleMemberRemoved(PeopleMemberRemovedPayloadDto {
         chat_id: id.clone(),
@@ -2243,15 +2378,19 @@ pub async fn member_remove(
     });
     let _ = state.db.push_user_event(&user_id, &event, None);
     notify_members(&state, &cm, &me, &event);
-    let line = notices::removed_line(
-        &notices::person_name(&state, &me),
-        &[notices::person_name(&state, &user_id)],
-    );
+    // One line for the person and whatever left with them, the same shape a batch add writes.
+    let mut names = vec![notices::person_name(&state, &user_id)];
+    let mut subjects = vec![notices::subject_user(&user_id)];
+    for pid in &detached {
+        names.push(notices::agent_name(&state, pid));
+        subjects.push(notices::subject_agent(pid));
+    }
+    let line = notices::removed_line(&notices::person_name(&state, &me), &names);
     if let Some(line) = line {
         let n = notices::Notice {
             kind: "removed",
             actor: me.clone(),
-            subjects: vec![notices::subject_user(&user_id)],
+            subjects,
         };
         if let Err(e) = notices::post_people_notice(&state, &id, &line, n).await {
             tracing::warn!(chat = %id, error = %e, "membership notice not written");
@@ -2504,13 +2643,19 @@ pub async fn box_people_chat(
     }
 }
 
-/// People chats a project's agent is in, for `/box/projects`.
+/// People chats a project's agent is in, for `/box/projects`. Only the ones the box may open:
+/// this listing carries the same roster and device ids as the room, so a chat it is refused at
+/// `room_access` must not arrive here instead.
 pub fn people_chats_of_project(state: &AppState, project_id: &str, owner: &str) -> Vec<Value> {
+    let principal = Principal::Box {
+        user_id: owner.to_owned(),
+    };
     state
         .db
         .chats_of_member(&format!("agent:{project_id}"))
         .unwrap_or_default()
         .iter()
+        .filter(|cm| room_access(state, &principal, &cm.chat.id))
         .map(|cm| box_chat_json(state, cm, owner, "box"))
         .collect()
 }
@@ -4856,6 +5001,312 @@ mod agent_tests {
         )
         .await;
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// A group with Alice owning it and Bob a plain member who has attached his own agent.
+    async fn group_with_bobs_agent(
+        state: &AppState,
+        alice: &str,
+        bob: &str,
+        bob_dev: &Principal,
+    ) -> (String, String) {
+        let chat = dm(state, alice, bob);
+        let _ = state.db.set_people_chat_kind(&chat, "group");
+        state
+            .db
+            .add_member(&chat, &format!("user:{bob}"), "member", alice, &json!({}))
+            .expect("bob is a plain member");
+        let project = project_of(state, bob, "Bob's agent");
+        let r = agent_add(
+            State(state.clone()),
+            bob_dev.clone(),
+            Path(chat.clone()),
+            Json(AddAgentBody {
+                project_id: project.clone(),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        (chat, project)
+    }
+
+    /// The removal hole: clearing someone's `user:` row left behind the `agent:` row they had
+    /// attached, and `room_access` admits a box through exactly that row. A removed member went
+    /// on reading the row log, the checkpoint, the roster and every member's device ids, and
+    /// went on writing rows that fanned out to the people still in the chat. Removal has to
+    /// take the agents with the person.
+    #[tokio::test]
+    async fn removing_a_member_takes_their_agents_out_of_the_chat() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 51);
+        let (bob, bob_dev) = person(&state, 52);
+        let (chat, project) = group_with_bobs_agent(&state, &alice, &bob, &bob_dev).await;
+        let bobs_box = Principal::Box {
+            user_id: bob.clone(),
+        };
+        let key = format!("{PEOPLE_ACL_PREFIX}{chat}");
+        assert!(
+            state.allows(&bobs_box, &key),
+            "the attachment is what lets the box into the room"
+        );
+        assert!(
+            !state
+                .db
+                .rows_after(&room_of(&chat), 0, None, 10)
+                .unwrap()
+                .is_empty(),
+            "there is a row log here to protect"
+        );
+
+        let r = member_remove(
+            State(state.clone()),
+            alice_dev.clone(),
+            Path((chat.clone(), bob.clone())),
+            Query(std::collections::HashMap::new()),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+
+        assert!(
+            state
+                .db
+                .membership(&chat, &format!("agent:{project}"))
+                .unwrap()
+                .is_none(),
+            "the agent leaves with the person who attached it"
+        );
+        assert!(
+            !state.allows(&bobs_box, &key),
+            "a removed member's box has no way left into the room: no reading the log, \
+             no writing rows that reach the people still here"
+        );
+        let r = box_people_chat(State(state.clone()), bobs_box.clone(), Path(chat.clone())).await;
+        assert_eq!(
+            r.status(),
+            StatusCode::FORBIDDEN,
+            "and no roster read, which is where the device ids are"
+        );
+        assert!(
+            people_chats_of_project(&state, &project, &bob).is_empty(),
+            "nor does the box's own chat list hand the same roster back"
+        );
+        let pushes = state.db.take_pushes(&project).unwrap_or_default();
+        assert!(
+            pushes.iter().any(|(_, k, _)| k == "people_agent_removed"),
+            "the box is told to drop the room: {pushes:?}"
+        );
+    }
+
+    /// Leaving cascades for the same reason: walking out a moment before a moderator removes
+    /// you must not be a way to keep the box in the room.
+    #[tokio::test]
+    async fn leaving_takes_your_agents_with_you() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _alice_dev) = person(&state, 61);
+        let (bob, bob_dev) = person(&state, 62);
+        let (chat, project) = group_with_bobs_agent(&state, &alice, &bob, &bob_dev).await;
+        let bobs_box = Principal::Box {
+            user_id: bob.clone(),
+        };
+
+        let r = chat_leave(State(state.clone()), bob_dev.clone(), Path(chat.clone())).await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        assert!(state
+            .db
+            .membership(&chat, &format!("agent:{project}"))
+            .unwrap()
+            .is_none());
+        assert!(!state.allows(&bobs_box, &format!("{PEOPLE_ACL_PREFIX}{chat}")));
+    }
+
+    /// A ban has to be final. The cascade clears the row, and `room_access` refuses a banned
+    /// person's box whatever rows exist — so a row that outlives the ban, or one attached after
+    /// it, does not hand the room back.
+    #[tokio::test]
+    async fn a_ban_shuts_the_agent_route_even_when_a_row_survives() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 71);
+        let (bob, bob_dev) = person(&state, 72);
+        let (chat, project) = group_with_bobs_agent(&state, &alice, &bob, &bob_dev).await;
+        let bobs_box = Principal::Box {
+            user_id: bob.clone(),
+        };
+        let key = format!("{PEOPLE_ACL_PREFIX}{chat}");
+
+        let mut ban = std::collections::HashMap::new();
+        ban.insert("ban".to_owned(), "1".to_owned());
+        let r = member_remove(
+            State(state.clone()),
+            alice_dev.clone(),
+            Path((chat.clone(), bob.clone())),
+            Query(ban),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        assert!(state
+            .db
+            .membership(&chat, &format!("agent:{project}"))
+            .unwrap()
+            .is_none());
+        assert!(!state.allows(&bobs_box, &key));
+
+        // The row comes back — a leftover from before the cascade, or an attach the ban did not
+        // cover, since `add_member` only reads the ban on a `user:` row.
+        state
+            .db
+            .add_member(
+                &chat,
+                &format!("agent:{project}"),
+                "agent",
+                &bob,
+                &json!({}),
+            )
+            .expect("a row can still be written for a banned person's project");
+        assert!(
+            !state.allows(&bobs_box, &key),
+            "the ban is read at access time, so the row buys nothing"
+        );
+        let r = box_people_chat(State(state.clone()), bobs_box, Path(chat.clone())).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        assert!(people_chats_of_project(&state, &project, &bob).is_empty());
+    }
+
+    /// The access-time half of the ban, on its own: whatever `agent:` rows a banned person's
+    /// Projects hold — left over from before the cascade, or attached by some later route —
+    /// the box is refused. `add_member` reads the ban only on a `user:` row, so the data layer
+    /// alone cannot promise this.
+    #[tokio::test]
+    async fn a_banned_members_box_is_refused_whatever_rows_exist() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _alice_dev) = person(&state, 101);
+        let (bob, bob_dev) = person(&state, 102);
+        let (chat, project) = group_with_bobs_agent(&state, &alice, &bob, &bob_dev).await;
+        let bobs_box = Principal::Box {
+            user_id: bob.clone(),
+        };
+        let key = format!("{PEOPLE_ACL_PREFIX}{chat}");
+        assert!(state.allows(&bobs_box, &key));
+
+        state
+            .db
+            .remove_member(&chat, &format!("user:{bob}"), true)
+            .expect("ban bob");
+        assert!(
+            state
+                .db
+                .membership(&chat, &format!("agent:{project}"))
+                .unwrap()
+                .is_some(),
+            "the row is deliberately left in place here: this test is about access, not cascade"
+        );
+        assert!(
+            !state.allows(&bobs_box, &key),
+            "a banned person's box is refused on the ban, not on the rows"
+        );
+        let r = box_people_chat(State(state.clone()), bobs_box, Path(chat.clone())).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        assert!(people_chats_of_project(&state, &project, &bob).is_empty());
+    }
+
+    /// The moderator half: an attachment already in the chat — left by a removal that happened
+    /// before the cascade existed — must be clearable by the people who run the group. Only the
+    /// Project's owner could remove an agent, and the owner here is the person who was removed.
+    #[tokio::test]
+    async fn a_moderator_clears_an_agent_left_behind_by_a_removal() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 81);
+        let (bob, bob_dev) = person(&state, 82);
+        let (carol, carol_dev) = person(&state, 83);
+        let (chat, project) = group_with_bobs_agent(&state, &alice, &bob, &bob_dev).await;
+        state
+            .db
+            .add_member(
+                &chat,
+                &format!("user:{carol}"),
+                "member",
+                &alice,
+                &json!({}),
+            )
+            .expect("carol joins");
+        // The state a pre-cascade removal left: Bob is gone, his agent is not.
+        state
+            .db
+            .remove_member(&chat, &format!("user:{bob}"), false)
+            .expect("bob removed the old way");
+        let bobs_box = Principal::Box {
+            user_id: bob.clone(),
+        };
+        let key = format!("{PEOPLE_ACL_PREFIX}{chat}");
+        assert!(
+            state.allows(&bobs_box, &key),
+            "this is the chat the moderator has to be able to fix"
+        );
+
+        // A plain member still may not touch someone else's agent.
+        let r = agent_remove(
+            State(state.clone()),
+            carol_dev,
+            Path((chat.clone(), project.clone())),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+
+        let r = agent_remove(
+            State(state.clone()),
+            alice_dev.clone(),
+            Path((chat.clone(), project.clone())),
+        )
+        .await;
+        assert_eq!(
+            r.status(),
+            StatusCode::NO_CONTENT,
+            "the group's owner can clear it without owning the Project"
+        );
+        assert!(state
+            .db
+            .membership(&chat, &format!("agent:{project}"))
+            .unwrap()
+            .is_none());
+        assert!(!state.allows(&bobs_box, &key));
+    }
+
+    /// The moderator route keeps the hierarchy it borrows: an admin reaches a member's agent,
+    /// not the group owner's.
+    #[tokio::test]
+    async fn an_admin_cannot_remove_the_group_owners_agent() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 91);
+        let (bob, bob_dev) = person(&state, 92);
+        let chat = dm(&state, &alice, &bob);
+        let _ = state.db.set_people_chat_kind(&chat, "group");
+        state
+            .db
+            .add_member(&chat, &format!("user:{bob}"), "admin", &alice, &json!({}))
+            .expect("bob is an admin");
+        let alices_project = project_of(&state, &alice, "Alice's agent");
+        let r = agent_add(
+            State(state.clone()),
+            alice_dev.clone(),
+            Path(chat.clone()),
+            Json(AddAgentBody {
+                project_id: alices_project.clone(),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+
+        let r = agent_remove(
+            State(state.clone()),
+            bob_dev,
+            Path((chat.clone(), alices_project.clone())),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        assert!(state
+            .db
+            .membership(&chat, &format!("agent:{alices_project}"))
+            .unwrap()
+            .is_some());
     }
 }
 

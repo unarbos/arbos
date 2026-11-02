@@ -225,6 +225,19 @@ fn server_json(state: &AppState, s: &Server, me: &ServerMember, detail: bool) ->
             .iter()
             .map(|m| member_json(state, m))
             .collect::<Vec<_>>());
+        // What a removal before this was fixed left behind: people who are not in the server
+        // but whose row still says `admin`, so they would come back as one. The owner is the
+        // only one who can clear it (`PUT /servers/{id}/members/{uid} {role: "member"}`), so
+        // the owner is the only one shown it.
+        if s.owner_user_id == me.user_id {
+            v["residual_roles"] = json!(state
+                .db
+                .departed_members_with_role(&s.id)
+                .unwrap_or_default()
+                .iter()
+                .map(|m| member_json(state, m))
+                .collect::<Vec<_>>());
+        }
     }
     v
 }
@@ -2290,5 +2303,266 @@ mod picture_tests {
             StatusCode::OK
         );
         assert_eq!(picture(&state), None);
+    }
+}
+
+#[cfg(test)]
+mod role_residue_tests {
+    //! Removal has to take the role with it. A `left_at` written over a row that still says
+    //! `admin` is a standing promise of admin rights on the next join, kept in a row nobody
+    //! could see: the roster lists live members only, and `set_server_role` reached live rows
+    //! only, so the one person who would want to clear it could neither see it nor reach it.
+
+    use std::collections::HashMap;
+
+    use axum::body::to_bytes;
+    use axum::extract::{Path, Query, State};
+    use axum::Json;
+
+    use arbos_core::ids::{now_ms, ulid};
+
+    use super::*;
+    use crate::people::tests_support::person;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    struct Crew {
+        server: String,
+        owner: String,
+        owner_dev: Principal,
+        admin: String,
+    }
+
+    /// A server whose owner has made one other person an admin.
+    fn crew(state: &AppState, seed: i64) -> Crew {
+        let (owner, owner_dev) = person(state, seed);
+        let (admin, _admin_dev) = person(state, seed + 1);
+        let server = Server {
+            id: ulid(),
+            name: "Launch Crew".into(),
+            owner_user_id: owner.clone(),
+            image_key: None,
+            invite_code: format!("crew{seed}"),
+            space_room_id: None,
+            created_at: now_ms(),
+            is_open: false,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
+        };
+        state.db.insert_server(&server).expect("server");
+        state
+            .db
+            .add_server_member(&server.id, &admin, &owner)
+            .expect("joined");
+        state
+            .db
+            .set_server_role(&server.id, &admin, "admin")
+            .expect("promoted");
+        Crew {
+            server: server.id,
+            owner,
+            owner_dev,
+            admin,
+        }
+    }
+
+    async fn detail(state: &AppState, who: &Principal, server: &str) -> Value {
+        let r = get(State(state.clone()), who.clone(), Path(server.to_owned())).await;
+        let body = to_bytes(r.into_body(), usize::MAX).await.expect("body");
+        serde_json::from_slice(&body).expect("json")
+    }
+
+    async fn remove(state: &AppState, by: &Principal, server: &str, uid: &str) -> StatusCode {
+        member_remove(
+            State(state.clone()),
+            by.clone(),
+            Path((server.to_owned(), uid.to_owned())),
+            Query(HashMap::new()),
+        )
+        .await
+        .status()
+    }
+
+    async fn re_add(state: &AppState, by: &Principal, server: &str, uid: &str) -> StatusCode {
+        member_add(
+            State(state.clone()),
+            by.clone(),
+            Path(server.to_owned()),
+            Json(AddMemberBody {
+                user_id: uid.to_owned(),
+            }),
+        )
+        .await
+        .status()
+    }
+
+    fn residual_user_ids(detail: &Value) -> Vec<String> {
+        detail["residual_roles"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|m| m["user_id"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The attack: remove an admin, let them back in, and they are an admin again — the
+    /// removal never rewrote `role`, and the re-join never reset it either.
+    #[tokio::test]
+    async fn a_removed_admin_comes_back_a_member() {
+        let state = test_state(AuthMode::Github);
+        let c = crew(&state, 5101);
+        assert_eq!(
+            state
+                .db
+                .server_member(&c.server, &c.admin)
+                .unwrap()
+                .unwrap()
+                .role,
+            "admin"
+        );
+
+        assert_eq!(
+            remove(&state, &c.owner_dev, &c.server, &c.admin).await,
+            StatusCode::NO_CONTENT
+        );
+        assert!(state
+            .db
+            .server_member(&c.server, &c.admin)
+            .unwrap()
+            .is_none());
+
+        assert_eq!(
+            re_add(&state, &c.owner_dev, &c.server, &c.admin).await,
+            StatusCode::OK
+        );
+        let back = state
+            .db
+            .server_member(&c.server, &c.admin)
+            .unwrap()
+            .expect("rejoined");
+        assert_eq!(
+            back.role, "member",
+            "a removed admin rejoins as a member: the role left with the membership"
+        );
+    }
+
+    /// The owner's half: a role a removal left behind before this was fixed has to be visible
+    /// to the owner and clearable by them. Neither was true — the roster hides departed rows,
+    /// and the only route that writes a role refused to touch one.
+    #[tokio::test]
+    async fn an_owner_sees_and_clears_a_role_left_behind() {
+        let state = test_state(AuthMode::Github);
+        let c = crew(&state, 5201);
+        assert_eq!(
+            remove(&state, &c.owner_dev, &c.server, &c.admin).await,
+            StatusCode::NO_CONTENT
+        );
+        // Put the role back on the departed row: the exact state an old removal left, which no
+        // backfill is going to clean up for us.
+        assert!(
+            state
+                .db
+                .set_server_role(&c.server, &c.admin, "admin")
+                .unwrap(),
+            "a departed row has to be reachable, or the residue cannot be written or cleared"
+        );
+
+        let v = detail(&state, &c.owner_dev, &c.server).await;
+        assert_eq!(
+            residual_user_ids(&v),
+            vec![c.admin.clone()],
+            "the owner sees who would come back an admin: {v:#}"
+        );
+        assert!(
+            !v["members"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["user_id"] == json!(c.admin)),
+            "and they are still not in the roster"
+        );
+
+        let r = member_role(
+            State(state.clone()),
+            c.owner_dev.clone(),
+            Path((c.server.clone(), c.admin.clone())),
+            Json(RoleBody {
+                role: "member".into(),
+            }),
+        )
+        .await;
+        assert_eq!(
+            r.status(),
+            StatusCode::NO_CONTENT,
+            "the owner can demote a row that is not a live membership"
+        );
+        let v = detail(&state, &c.owner_dev, &c.server).await;
+        assert!(residual_user_ids(&v).is_empty(), "cleared: {v:#}");
+
+        assert_eq!(
+            re_add(&state, &c.owner_dev, &c.server, &c.admin).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            state
+                .db
+                .server_member(&c.server, &c.admin)
+                .unwrap()
+                .unwrap()
+                .role,
+            "member"
+        );
+    }
+
+    /// Residue is the owner's to clear, so it is the owner's to see. An admin is not shown it,
+    /// and no role write may take the server's owner off their own server.
+    #[tokio::test]
+    async fn only_the_owner_is_shown_residue_and_the_owner_role_is_not_writable() {
+        let state = test_state(AuthMode::Github);
+        let c = crew(&state, 5301);
+        let (live_admin, live_admin_dev) = person(&state, 5399);
+        state
+            .db
+            .add_server_member(&c.server, &live_admin, &c.owner)
+            .unwrap();
+        state
+            .db
+            .set_server_role(&c.server, &live_admin, "admin")
+            .unwrap();
+        assert_eq!(
+            remove(&state, &c.owner_dev, &c.server, &c.admin).await,
+            StatusCode::NO_CONTENT
+        );
+        state
+            .db
+            .set_server_role(&c.server, &c.admin, "admin")
+            .unwrap();
+
+        let as_admin = detail(&state, &live_admin_dev, &c.server).await;
+        assert!(
+            as_admin.get("residual_roles").is_none(),
+            "an admin is not shown the owner's cleanup list: {as_admin:#}"
+        );
+        let as_owner = detail(&state, &c.owner_dev, &c.server).await;
+        assert_eq!(residual_user_ids(&as_owner), vec![c.admin.clone()]);
+
+        assert!(
+            !state
+                .db
+                .set_server_role(&c.server, &c.owner, "member")
+                .unwrap(),
+            "nothing demotes the owner of the server"
+        );
+        assert_eq!(
+            state
+                .db
+                .server_member(&c.server, &c.owner)
+                .unwrap()
+                .unwrap()
+                .role,
+            "owner"
+        );
     }
 }
