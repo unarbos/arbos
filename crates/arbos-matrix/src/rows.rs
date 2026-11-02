@@ -89,12 +89,13 @@ pub fn member_of_mxid(mxid: &str) -> String {
 /// handle was written into `senderName` too and every channel bubble read "A" for Scout).
 /// An agent's row keeps its name in `senderName`.
 ///
-/// `may_declare_sender` answers whether an mxid is entitled to name a sender other than
-/// itself in event content; pass the room's creators ([`crate::client`] does). Every device
-/// holds its own homeserver access token and sends straight to the homeserver, so event
-/// content is the sending member's to choose: without this, a member could declare
-/// `life.arbos.sender` and have the apps draw their message as the system, as the project's
-/// agent, or as another person. The relay needs the key honoured in exactly two places —
+/// `may_declare_sender` answers whether an mxid is entitled to speak for the room — to name
+/// a sender other than itself and to supply rendered parts; pass the room's creators
+/// ([`crate::client`] does). Every device holds its own homeserver access token and sends
+/// straight to the homeserver, so event content is the sending member's to choose: without
+/// this, a member could declare `life.arbos.sender` and have the apps draw their message as
+/// the system, as the project's agent, or as another person. The relay needs the key
+/// honoured in exactly two places —
 /// a room creator carrying a notice or a departed member's message
 /// (`matrix/spaces.rs::channel_notice`, `matrix/worker.rs` on behalf) — and otherwise writes
 /// the value the sender's own mxid already implies.
@@ -157,8 +158,15 @@ pub fn message_row(
         String::new()
     };
     let mut parts = vec![json!({ "id": format!("{event_id}#text"), "kind": "text", "text": text })];
-    if let Some(extra) = content["life.arbos.parts"].as_array() {
-        parts.extend(extra.iter().cloned());
+    // Rendered parts are the room's to write, not a member's: the apps draw a `link_preview`
+    // as a branded card that opens whatever destination it names, and an `approval` as the
+    // native secret hand-off card with its own project id. The apps' own send path writes no
+    // parts ([`crate::client::MatrixClient::send_text`]), and the relay writes them only for
+    // mirrored chat rooms, which this client never surfaces.
+    if may_declare_sender(mxid) {
+        if let Some(extra) = content["life.arbos.parts"].as_array() {
+            parts.extend(extra.iter().cloned());
+        }
     }
     let mut row = json!({
         "id": id,
@@ -342,5 +350,48 @@ mod tests {
         });
         let row = message_row(&ev, &|_| None, &nobody).unwrap();
         assert_eq!(row.sender, "user:u_01ABCDEF");
+    }
+
+    /// A member's own message renders its text and nothing else. The part kinds the apps draw
+    /// carry a destination (`link_preview` opens `canonicalUrl` while showing `siteHost`) or
+    /// an action (`approval` with a `secret_offer` payload draws the credential card and
+    /// chooses the project its Save writes to), so a member must not be able to author them.
+    #[test]
+    fn a_member_cannot_inject_rendered_parts() {
+        let ev = json!({
+            "type": "m.room.message", "event_id": "$p", "sender": "@gh_9:arbos.life",
+            "origin_server_ts": 2400,
+            "content": {
+                "msgtype": "m.text", "body": "look at this",
+                "life.arbos.parts": [
+                    { "id": "p1", "kind": "link_preview", "specVersion": 1, "url": "https://github.com/arbos/arbos", "canonicalUrl": "file:///etc/passwd", "siteHost": "github.com", "title": "arbos/arbos" },
+                    { "id": "p2", "kind": "approval", "approvalId": "a1", "state": "pending", "payload": { "kind": "secret_offer", "name": "STRIPE_KEY", "projectId": "01ATTACKERPROJECT" } }
+                ]
+            }
+        });
+        let row = message_row(&ev, &|_| None, &nobody).unwrap();
+        let v: Value = serde_json::from_str(&row.json).unwrap();
+        assert_eq!(v["parts"][0]["text"], "look at this");
+        assert_eq!(
+            v["parts"].as_array().map(Vec::len),
+            Some(1),
+            "a member's row carries only its text: {v}"
+        );
+    }
+
+    /// The relay is the room's creator, and its own rows keep their parts.
+    #[test]
+    fn the_room_creator_still_carries_parts() {
+        let ev = json!({
+            "type": "m.room.message", "event_id": "$c", "sender": "@_arbos:arbos.life",
+            "origin_server_ts": 2500,
+            "content": {
+                "msgtype": "m.notice", "body": "a link",
+                "life.arbos.parts": [{ "id": "p1", "kind": "link_preview", "specVersion": 1, "url": "https://arbos.life", "siteHost": "arbos.life" }]
+            }
+        });
+        let row = message_row(&ev, &|_| None, &|m| m == "@_arbos:arbos.life").unwrap();
+        let v: Value = serde_json::from_str(&row.json).unwrap();
+        assert_eq!(v["parts"][1]["kind"], "link_preview");
     }
 }
