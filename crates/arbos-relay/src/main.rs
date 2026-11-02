@@ -50,6 +50,8 @@ mod local;
 mod matrix;
 mod migrate;
 mod moderation;
+#[cfg(test)]
+mod module_lookup_tests;
 mod notices;
 mod notify;
 mod outside;

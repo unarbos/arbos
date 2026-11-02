@@ -294,21 +294,17 @@ pub async fn create(
     };
     // A device names its own origin project, and every ownership question about the skill is
     // answered from that field afterwards, so it has to be a project the caller actually has.
-    // A foreign project answers like an unknown one. `allows` takes a project's name as well
-    // as its id; store the id it resolved to rather than the caller's spelling, because the
-    // listing scopes on that column in SQL and cannot resolve a name the same way.
+    // A foreign project answers like an unknown one. Store the id the lookup resolved rather
+    // than the caller's spelling, because the listing scopes on that column in SQL and cannot
+    // resolve a name the same way.
+    //
+    // The lookup has to be the caller's own, not a bare `db.project`: names are not unique
+    // across owners, and the plain lookup hands back whichever matching row was active last.
+    // A device with its own `Tern` who is also a guest of a stranger's `Tern` used to file its
+    // skill under the stranger's project, which handed that project's box the skill to read and
+    // to edit (`api::project_for`, reported 2026-11-02).
     let origin = match origin.as_deref() {
-        Some(named) => {
-            let found = state
-                .db
-                .project(named)
-                .map_err(internal)?
-                .filter(|_| state.allows(&principal, named));
-            let Some(project) = found else {
-                return Err((StatusCode::NOT_FOUND, "no such project".to_owned()));
-            };
-            Some(project.id)
-        }
+        Some(named) => Some(crate::api::project_for(&state, &principal, named)?.id),
         None => None,
     };
     let base = Skill {
