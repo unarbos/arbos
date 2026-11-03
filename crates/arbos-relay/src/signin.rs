@@ -14,6 +14,7 @@
 //! `ARBOS_GITHUB_OAUTH_CLIENT_*` spellings work too), `ARBOS_PUBLIC_URL`, `ARBOS_JWT_KEY` (optional).
 
 use std::collections::HashMap;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
@@ -27,6 +28,7 @@ use rand::RngCore;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::Sha256;
+use url::{Host, Origin, Url};
 
 use arbos_core::api::{
     AccountUserDto, ApiErrorBodyDto, ApiErrorDto, CreditsDto, MeDeviceDto, MeLimitsDto,
@@ -264,27 +266,79 @@ fn callback_url(state: &AppState) -> String {
     )
 }
 
-/// Where the relay may send the browser after sign-in: the apps' custom scheme, a loopback
-/// listener, the relay's own origin, or an operator-listed prefix.
+/// The apps' own callback: a custom scheme the operating system hands to the installed Arbos
+/// app, so it has no origin to compare. Only a query string may follow it.
+const APP_CALLBACK: &str = "arbos://auth/callback";
+
+/// The origin of a URL — scheme, host and port together — or `None` when it has none a browser
+/// would compare: a relative URL, a custom scheme such as `arbos://`, or anything unparseable.
+///
+/// Everything below compares these values and never the text of a URL. The parser is the WHATWG
+/// one, the same rules the browser that follows the redirect uses, so the origin here is the
+/// origin that will actually receive the grant: the host is lowercased, the default port is
+/// filled in, and a `user:password@` part is kept out of the host.
+pub(crate) fn origin_of(url: &str) -> Option<Origin> {
+    match Url::parse(url.trim()).ok()?.origin() {
+        tuple @ Origin::Tuple(..) => Some(tuple),
+        Origin::Opaque(_) => None,
+    }
+}
+
+/// Is this origin a listener on the user's own machine? A sign-in helper binds a free port of
+/// loopback and waits there, so the port is free but the scheme and the host are not.
+///
+/// Read the three hosts as hosts. They are the entries most likely to be loosened later, and
+/// the loosening to refuse is a text comparison: `http://127.0.0.1:1@attacker.example/` begins
+/// with the characters `http://127.0.0.1:` while the browser sends the grant to
+/// `attacker.example`. The host below comes from the parsed URL, so the userinfo part cannot
+/// pose as the host, and `localhost.attacker.example` is a different host than `localhost`.
+fn is_loopback(origin: &Origin) -> bool {
+    let Origin::Tuple(scheme, host, _port) = origin else {
+        return false;
+    };
+    if scheme != "http" {
+        return false;
+    }
+    match host {
+        Host::Domain(name) => name == "localhost",
+        Host::Ipv4(ip) => *ip == Ipv4Addr::LOCALHOST,
+        Host::Ipv6(ip) => *ip == Ipv6Addr::LOCALHOST,
+    }
+}
+
+/// Where the relay may send the browser after sign-in: the apps' custom scheme, an `http`
+/// loopback listener, the relay's own origin, or an operator-listed origin
+/// (`ARBOS_AUTH_REDIRECTS`).
+///
+/// A redirect that passes here receives a one-time grant on the way back from GitHub
+/// (`github_callback`), and that grant buys a session at `POST /auth/token`. So an origin that
+/// passes is an origin that can sign in as whoever just signed in, and the comparison has to be
+/// exact. Until 2026-11-02 it was not: every entry was matched against the *start* of the
+/// redirect, so an allowlisted `https://arbos.life` also admitted a host named
+/// `arbos.life.attacker.example`, and whoever owned that host collected other people's grants.
+///
+/// Origins are compared whole — scheme, host and port — never as text. The path and query of
+/// an allowlist entry are ignored: an entry names an origin, and any path on that origin is
+/// allowed, which is what a sign-in landing page needs.
 pub(crate) fn redirect_allowed(state: &AppState, redirect: &str) -> bool {
-    if redirect == "arbos://auth/callback" || redirect.starts_with("arbos://auth/callback?") {
+    let redirect = redirect.trim();
+    if redirect == APP_CALLBACK
+        || redirect
+            .strip_prefix(APP_CALLBACK)
+            .is_some_and(|rest| rest.starts_with('?'))
+    {
         return true;
     }
-    let loopback = ["http://127.0.0.1:", "http://localhost:", "http://[::1]:"]
-        .iter()
-        .any(|p| redirect.starts_with(p));
-    if loopback {
+    let Some(target) = origin_of(redirect) else {
+        return false;
+    };
+    if is_loopback(&target) {
         return true;
     }
-    let own = state.cfg.public_url.trim_end_matches('/');
-    if redirect == own || redirect.starts_with(&format!("{own}/")) {
-        return true;
-    }
-    state
-        .cfg
-        .auth_redirects
-        .iter()
-        .any(|p| !p.is_empty() && redirect.starts_with(p))
+    std::iter::once(state.cfg.public_url.as_str())
+        .chain(state.cfg.auth_redirects.iter().map(String::as_str))
+        .filter_map(origin_of)
+        .any(|allowed| allowed == target)
 }
 
 fn with_query(redirect: &str, pairs: &[(&str, &str)]) -> String {
@@ -332,7 +386,8 @@ pub async fn github_start(State(state): State<AppState>, Query(q): Query<StartQu
         return api_error(
             StatusCode::BAD_REQUEST,
             "bad_redirect",
-            "redirect must be arbos://auth/callback, a loopback URL, or this relay's origin",
+            "redirect must be arbos://auth/callback, an http loopback URL, or an allowed \
+             origin — scheme, host and port all have to match",
         );
     }
     let (verifier, challenge) = crate::connectors::pkce_pair();
@@ -1371,6 +1426,253 @@ pub async fn download_mac(State(state): State<AppState>) -> Response {
     };
     *state.download_cache.lock().await = Some((now, url.clone()));
     found(&url)
+}
+
+#[cfg(test)]
+mod redirect_tests {
+    //! Who may receive a sign-in grant.
+    //!
+    //! `GET /auth/github/start` is the only gate on this. The `redirect` it accepts is written
+    //! into the auth flow; on the way back from GitHub `github_callback` sends the browser to
+    //! that same redirect with `?code=<grant>` on it, and `POST /auth/token` trades that grant
+    //! for an access token and a refresh token for the account that just signed in. An origin
+    //! that gets past the gate therefore signs in as the person who clicked the button.
+    //!
+    //! Until 2026-11-02 the gate compared each allowlist entry against the *start* of the
+    //! redirect. With `https://arbos.life` allowed, `https://arbos.life.attacker.example/`
+    //! began with it and passed, so the attacker's host collected the grant. The tests below
+    //! are the near misses of that comparison: a suffix on the host, another port, another
+    //! scheme, a host whose own name starts with an allowed one, and a `user@` part posing as
+    //! the host.
+
+    use std::sync::Arc;
+
+    use axum::extract::{Query, State};
+    use axum::http::{header, StatusCode};
+    use rusqlite::params;
+
+    use super::*;
+    use crate::state::test_support::test_state;
+
+    const SITE: &str = "https://arbos.life";
+    const RELAY: &str = "https://relay.arbos.life";
+
+    fn relay(allowed: &[&str]) -> AppState {
+        let mut state = test_state(AuthMode::Github);
+        let mut cfg = (*state.cfg).clone();
+        cfg.public_url = RELAY.to_owned();
+        cfg.auth_redirects = allowed.iter().map(|s| (*s).to_owned()).collect();
+        state.cfg = Arc::new(cfg);
+        state
+    }
+
+    /// Every redirect the relay has remembered — the exact targets a grant would be delivered to.
+    fn remembered_redirects(state: &AppState) -> Vec<String> {
+        state
+            .db
+            .with(|c| {
+                c.prepare("SELECT redirect FROM auth_flows")?
+                    .query_map(params![], |r| r.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<String>>>()
+            })
+            .expect("auth flows")
+    }
+
+    async fn start(state: &AppState, redirect: &str) -> Response {
+        github_start(
+            State(state.clone()),
+            Query(StartQuery {
+                redirect: redirect.to_owned(),
+                device_name: None,
+            }),
+        )
+        .await
+    }
+
+    fn location(r: &Response) -> String {
+        r.headers()
+            .get(header::LOCATION)
+            .map(|v| v.to_str().unwrap().to_owned())
+            .unwrap_or_default()
+    }
+
+    async fn error_kind(r: Response) -> String {
+        let body = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        v["error"]["type"].as_str().unwrap_or_default().to_owned()
+    }
+
+    /// The attack, end to end at the gate: a host that merely begins with the allowed origin
+    /// asks for a sign-in, is refused, and is never written down as a place to send a grant.
+    #[tokio::test]
+    async fn a_host_that_begins_with_an_allowed_origin_is_refused_and_never_remembered() {
+        let state = relay(&[SITE]);
+        let attacker = "https://arbos.life.attacker.example/catch";
+
+        let r = start(&state, attacker).await;
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST, "to {attacker}");
+        assert_eq!(error_kind(r).await, "bad_redirect");
+        assert!(
+            remembered_redirects(&state).is_empty(),
+            "a refused redirect must leave no auth flow behind: the flow's redirect is where \
+             github_callback delivers ?code=<grant>"
+        );
+
+        // The site's own welcome page still signs people in, and the remembered redirect is
+        // exactly the one place that grant can go.
+        let r = start(&state, "https://arbos.life/welcome").await;
+        assert_eq!(r.status(), StatusCode::FOUND);
+        assert!(
+            location(&r).starts_with("https://github.com/login/oauth/authorize?"),
+            "{}",
+            location(&r)
+        );
+        let remembered = remembered_redirects(&state);
+        assert_eq!(remembered, vec!["https://arbos.life/welcome".to_owned()]);
+        assert_eq!(
+            with_query(&remembered[0], &[("code", "GRANT")]),
+            "https://arbos.life/welcome?code=GRANT",
+        );
+    }
+
+    #[test]
+    fn an_allowed_origin_is_matched_whole_and_its_near_misses_are_refused() {
+        let state = relay(&[SITE]);
+
+        for refused in [
+            // The host has something appended to it.
+            "https://arbos.life.attacker.example/catch",
+            "https://arbos.life.attacker.example",
+            // The host's own name starts with the allowed one.
+            "https://arbos.lifeguard.example/catch",
+            "https://arbos.lifex/catch",
+            // Another port on the right host.
+            "https://arbos.life:8443/welcome",
+            // Another scheme on the right host.
+            "http://arbos.life/welcome",
+            // The allowed origin as a `user:password@` part: the browser goes to the host
+            // after the `@`, and so does the grant.
+            "https://arbos.life@attacker.example/catch",
+            "https://arbos.life:443@attacker.example/catch",
+            // The allowed origin anywhere else in the URL is still somebody else's origin.
+            "https://attacker.example/?next=https://arbos.life",
+            "https://attacker.example/https://arbos.life",
+            // Not a URL with an origin at all.
+            "/welcome",
+            "arbos.life",
+            "",
+        ] {
+            assert!(
+                !redirect_allowed(&state, refused),
+                "must be refused: {refused}"
+            );
+        }
+
+        for ok in [
+            "https://arbos.life",
+            "https://arbos.life/",
+            "https://arbos.life/welcome",
+            "https://arbos.life/welcome?from=mac",
+            // The default port is part of the origin whether it is written out or not.
+            "https://arbos.life:443/welcome",
+            // The host is compared case-insensitively, as a host always is.
+            "https://ARBOS.life/welcome",
+        ] {
+            assert!(redirect_allowed(&state, ok), "must stay allowed: {ok}");
+        }
+    }
+
+    #[test]
+    fn loopback_means_the_users_own_machine_and_nothing_else() {
+        let state = relay(&[]);
+
+        for refused in [
+            // The old text comparison accepted this: it begins with "http://127.0.0.1:", and
+            // the browser sends the grant to attacker.example.
+            "http://127.0.0.1:9999@attacker.example/catch",
+            "http://localhost:9999@attacker.example/catch",
+            // A host that only looks loopback.
+            "http://127.0.0.1.attacker.example:8080/catch",
+            "http://localhost.attacker.example:9999/catch",
+            "http://notlocalhost:9999/catch",
+            // A different machine, loopback-shaped port and all.
+            "http://10.0.0.5:52123/callback",
+            // Loopback over TLS was never a target the apps use.
+            "https://127.0.0.1:52123/callback",
+        ] {
+            assert!(
+                !redirect_allowed(&state, refused),
+                "must be refused: {refused}"
+            );
+        }
+
+        for ok in [
+            "http://127.0.0.1:52123/callback",
+            "http://localhost:9090/callback?x=1",
+            "http://[::1]:7777/callback",
+            "http://LOCALHOST:9090/callback",
+        ] {
+            assert!(redirect_allowed(&state, ok), "must stay allowed: {ok}");
+        }
+    }
+
+    #[test]
+    fn the_relays_own_origin_is_allowed_and_look_alikes_are_not() {
+        let state = relay(&[]);
+
+        assert!(redirect_allowed(&state, RELAY));
+        assert!(redirect_allowed(&state, "https://relay.arbos.life/welcome"));
+        for refused in [
+            "https://relay.arbos.life.attacker.example/catch",
+            "https://relay.arbos.life:8443/welcome",
+            "http://relay.arbos.life/welcome",
+            "https://relay.arbos.life@attacker.example/catch",
+        ] {
+            assert!(
+                !redirect_allowed(&state, refused),
+                "must be refused: {refused}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_apps_callback_scheme_is_matched_whole() {
+        let state = relay(&[]);
+
+        assert!(redirect_allowed(&state, APP_CALLBACK));
+        assert!(redirect_allowed(&state, "arbos://auth/callback?from=mac"));
+        for refused in [
+            "arbos://auth/callbackx",
+            "arbos://auth/callback/elsewhere",
+            "arbos://auth/callback.attacker.example/catch",
+            "arbos://attacker.example/arbos://auth/callback",
+            "https://attacker.example/arbos://auth/callback",
+        ] {
+            assert!(
+                !redirect_allowed(&state, refused),
+                "must be refused: {refused}"
+            );
+        }
+    }
+
+    /// An operator entry that is not an origin allows nothing — it must not fall back to
+    /// matching text (`auth_redirects_from_env` warns about one at start).
+    #[test]
+    fn an_allowlist_entry_that_names_no_origin_allows_nothing() {
+        let state = relay(&["arbos.life", "", "/welcome"]);
+
+        for refused in [
+            "https://arbos.life/welcome",
+            "arbos.life/welcome",
+            "/welcome",
+            "https://attacker.example/welcome",
+        ] {
+            assert!(
+                !redirect_allowed(&state, refused),
+                "must be refused: {refused}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

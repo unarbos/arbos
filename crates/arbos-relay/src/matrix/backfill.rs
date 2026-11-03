@@ -671,7 +671,13 @@ mod doc_tests {
         );
         state
             .db
-            .insert_chat_event(&chat_id, None, &announced, Some(&alice))
+            .insert_chat_event(
+                &chat_id,
+                None,
+                &announced,
+                Some(&alice),
+                &format!("user:{alice}"),
+            )
             .expect("event");
 
         let rep = resync_chat(&state, &chat_id, None);

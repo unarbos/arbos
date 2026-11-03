@@ -49,9 +49,11 @@ fn build_room_doc(state: &AppState, room_name: &str) -> anyhow::Result<crate::st
             break;
         }
     }
+    let message_ids = doc.message_ids();
     Ok(crate::state::RoomDocCache {
         key: (st.head, st.floor),
         doc,
+        message_ids,
     })
 }
 
@@ -71,19 +73,102 @@ fn advance_room_doc(
         return Ok(());
     }
     let mut after = cached.key.0;
+    let mut imported = false;
+    let before = cached.doc.frontiers();
     loop {
         let rows = state.db.rows_after(room_name, after, None, ROWS_BATCH)?;
         let n = rows.len() as i64;
         for r in rows {
             after = r.seq;
-            let _ = cached.doc.import(&r.bytes);
+            if cached.doc.import(&r.bytes).is_ok() {
+                imported = true;
+            }
         }
         if n < ROWS_BATCH {
             break;
         }
     }
+    // The mirror of message ids is carried forward by the same diff the push path uses, not
+    // rebuilt. Rebuilding costs 15 ms at 2 000 messages and 82 ms at 10 000, and every push
+    // moves the head — so a rebuild here would put that cost on the reader after every single
+    // message. A diff costs what the change costs.
+    if imported {
+        let changes =
+            cached
+                .doc
+                .messages_changed(&before, &cached.doc.frontiers(), &cached.message_ids);
+        // A mirror that may have drifted is worse than a slow one: an id out of place would
+        // make a later push's deletion name the wrong message. Pay the sweep instead.
+        cached.message_ids = if changes.unreadable {
+            cached.doc.message_ids()
+        } else {
+            changes.ids_after
+        };
+    }
     cached.key = key;
     Ok(())
+}
+
+/// What a pushed row does to the room's messages, read from the room's own doc.
+///
+/// A Loro update cannot be read on its own — it is a delta against history — so the payload is
+/// imported into the cached doc and the diff taken across the import. Three things follow from
+/// that, and all three are why this is one function holding one lock:
+///
+/// * The mirror of message ids must advance in the same locked section as the diff. Two sockets
+///   pushing at once would otherwise both diff against the same pre-image, and the second's
+///   deletions would name the first's messages.
+/// * The ops are in the cached doc before anything has authorised them. A caller that refuses
+///   the push must drop the cache (`Db` rows, not this doc, are the room's record), which is
+///   why the refusal path exists in the caller rather than here.
+/// * An import that fails leaves nothing to judge, so it is reported as unreadable rather than
+///   as "changed nothing".
+async fn push_message_changes(
+    state: &AppState,
+    room: &crate::state::Room,
+    room_name: &str,
+    payload: &[u8],
+) -> anyhow::Result<arbos_core::doc::MessageChanges> {
+    {
+        let mut guard = room.doc_cache.lock().unwrap();
+        if let Some(cached) = guard.as_mut() {
+            advance_room_doc(state, room_name, cached)?;
+            return Ok(diff_pushed_row(cached, payload));
+        }
+    }
+    let state_c = state.clone();
+    let name = room_name.to_owned();
+    let mut built = tokio::task::spawn_blocking(move || build_room_doc(&state_c, &name))
+        .await
+        .map_err(|e| anyhow::anyhow!("room doc rebuild: {e}"))??;
+    let changes = diff_pushed_row(&mut built, payload);
+    *room.doc_cache.lock().unwrap() = Some(built);
+    Ok(changes)
+}
+
+/// [`push_message_changes`] over a cache already in step with the room's stored rows.
+fn diff_pushed_row(
+    cached: &mut crate::state::RoomDocCache,
+    payload: &[u8],
+) -> arbos_core::doc::MessageChanges {
+    let before = cached.doc.frontiers();
+    if cached.doc.import(payload).is_err() {
+        // Bytes the relay cannot import are bytes it cannot judge. It has never parsed rows
+        // before, so this is not a rejection of malformed input — it is "nothing is known
+        // about what this does", which the caller fails closed on.
+        return arbos_core::doc::MessageChanges {
+            unreadable: true,
+            ..Default::default()
+        };
+    }
+    let changes =
+        cached
+            .doc
+            .messages_changed(&before, &cached.doc.frontiers(), &cached.message_ids);
+    if !changes.unreadable {
+        cached.message_ids = changes.ids_after.clone();
+    }
+    changes
 }
 
 /// Encoded version vector of the room's stored doc (checkpoint ∪ rows). Keeps a ChatDoc on the
@@ -579,12 +664,53 @@ async fn handle_frame(
                     }
                 }
             }
+            // What this row does to the chat's messages. Until now the arm checked size,
+            // duplicate batch ids and the people gates, and nothing about content — so three
+            // client-written things decided authorisation: whose message a delete touched,
+            // whose name an insert carried, and whether the push was a heal. All three are now
+            // read from the diff and from the relay's own record of who announced what.
+            let chat_of_room = room_name
+                .rsplit_once('/')
+                .map(|(_, c)| c)
+                .unwrap_or(room_name);
+            let changes = push_message_changes(state, room, room_name, &f.payload).await?;
+            let (carries_new_message, attributed) = match crate::push_guard::check_push(
+                state,
+                principal,
+                project_id,
+                chat_of_room,
+                p.heal,
+                &changes,
+            ) {
+                crate::push_guard::PushCheck::Allow {
+                    carries_new_message,
+                    attributed,
+                } => (carries_new_message, attributed),
+                crate::push_guard::PushCheck::Refuse { code, detail } => {
+                    // The refused ops are in the cached doc now and in no stored row. The
+                    // rows are the room's record, so drop the cache rather than serve readers
+                    // a doc the rows do not account for.
+                    *room.doc_cache.lock().unwrap() = None;
+                    tracing::warn!(
+                        %room_name, %device, code, detail = %detail, batch_id = %p.batch_id,
+                        "room push refused"
+                    );
+                    sink.send(error_frame(code, &detail)).await?;
+                    return Ok(());
+                }
+            };
+            // The one notion of kind for the rest of the arm. The header asks to be treated as
+            // history; the diff decides whether it is. A push carrying a message the relay has
+            // no record of is a new message however the header is spelled, and from here on it
+            // is handled as one — gated, unfurled, notified — so the flag changes nothing a
+            // client could want it to change.
+            let is_heal = p.heal && !carries_new_message;
             let mut wake_owners = Vec::new();
             // A heal carries other members' history, not a message of this device: the
             // message gates (rate limit, blocks, member pushes) do not apply — the socket's ACL
             // already does. 20:42 Oct 23: the first production heal (60 KB, Arbonites) was
             // dropped because a member had blocked the healing user.
-            if p.heal {
+            if is_heal {
                 // nothing to gate or wake
             } else if let Some(chat_id) =
                 room_name.strip_prefix(&format!("{}/", people::PEOPLE_PROJECT))
@@ -600,6 +726,19 @@ async fn handle_frame(
             let (seq, dup) = state
                 .db
                 .append_row(room_name, device, &p.batch_id, &f.payload)?;
+            // Whose message each new row carries, recorded from the socket that pushed it and
+            // before anyone can read the row. The announce routes write this record too, but
+            // they take the message id from a request body and are gated only on membership —
+            // so on a first-write-wins insert any member could become the author of record for
+            // a message that had none. Here the row and its author arrive together.
+            for (message_id, who) in &attributed {
+                if let Err(e) = state
+                    .db
+                    .record_message_author(chat_of_room, message_id, who)
+                {
+                    tracing::warn!(%room_name, %message_id, error = %e, "recording the author failed");
+                }
+            }
             sink.send(frame(
                 FrameType::Ack,
                 json!({ "batchId": p.batch_id, "seq": seq, "dup": dup }),
@@ -618,14 +757,14 @@ async fn handle_frame(
                     bytes: row,
                     seq,
                 });
-                if !p.heal {
+                if !is_heal {
                     // A link in a finished message gets its preview card (#2064), off the
                     // socket task.
                     if let Some((_, chat_id)) = room_name.rsplit_once('/') {
                         crate::unfurl::on_row(state, project_id, chat_id, is_box);
                     }
                 }
-                if p.heal {
+                if is_heal {
                     // History, not a new message: no read-cursor move, no notification, no
                     // wake. The Matrix mirror resync picks the rows up on its own.
                 } else if !is_box {
@@ -925,6 +1064,13 @@ pub fn checkpoint_covers_store(
                     before = now;
                     status.pending.is_some() || applied
                 }
+                // A row that does not decode cannot be in any snapshot, so no candidate can ever
+                // cover it and this arm refuses every one of them — correct for this function's
+                // purpose, and on its own a permanent wedge for the room. The exit is
+                // `repair_undecodable_rows`, which takes the row out of `rows` altogether. Making
+                // this arm `false` instead would reopen the hole the whole function exists to close:
+                // it would let a candidate that is genuinely missing ops delete the rows holding
+                // them.
                 Err(_) => true,
             };
             if applied_or_parked {
@@ -943,6 +1089,131 @@ pub fn checkpoint_covers_store(
         )));
     }
     Ok(CheckpointVerdict::Covers)
+}
+
+/// What [`repair_undecodable_rows`] did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct RoomRepair {
+    /// Seqs moved out of `rows` and into `quarantine`.
+    pub quarantined: Vec<i64>,
+    /// The seq the relay's own checkpoint now covers, when one was written.
+    pub checkpoint_seq: Option<i64>,
+}
+
+/// Reopen compaction for a room wedged by a row the relay cannot decode: move those rows to
+/// `quarantine`, then write a checkpoint covering their seqs.
+///
+/// **Both halves are required, and the checkpoint is the half that is easy to miss.** Moving the
+/// row only unblocks the *relay*: a box that failed to import it is holding it as owed, and the
+/// box's compaction gate has exactly one exit, a checkpoint covering that seq. The box is the
+/// ordinary producer of checkpoints, so a closed gate cannot clear itself, and a re-pushed copy of
+/// the bad row lands *above* any existing checkpoint, so nothing already written clears it either.
+/// The relay is the only actor that can break that cycle, which is why the repair ends here rather
+/// than leaving a box to notice.
+///
+/// The candidate is built by the relay from its own rows, as `notices::compact_shallow` does, but it
+/// is a **full** snapshot and it is still put through [`checkpoint_covers_store`] before anything is
+/// deleted. Skipping that guard would be defensible on the same grounds `compact_shallow` skips it,
+/// and it is not worth it: running the repair's own candidate through the same check every box
+/// candidate faces is what keeps this path from becoming a second way to lose a room's history.
+pub fn repair_undecodable_rows(
+    state: &AppState,
+    project_id: Option<&str>,
+    chat_id: &str,
+) -> anyhow::Result<RoomRepair> {
+    use arbos_core::doc::ChatDoc;
+
+    let room_name = wire::room_name(project_id.unwrap_or(people::PEOPLE_PROJECT), chat_id);
+    let head = state.db.room_state(&room_name)?.head;
+    let mut repair = RoomRepair::default();
+
+    // Which rows cannot be imported, decided exactly as the validation walk decides it: an update
+    // whose dependencies are missing parks as pending and returns `Ok`, so only a genuine decode
+    // failure reaches the `Err` arm. Accumulating one scratch doc therefore cannot manufacture a
+    // failure that the walk would not also see.
+    let mut scratch = ChatDoc::new(None, false);
+    let mut after = 0i64;
+    loop {
+        let rows = state.db.rows_between(&room_name, after, head, ROWS_BATCH)?;
+        let n = rows.len() as i64;
+        for row in rows {
+            after = row.seq;
+            if scratch.import(&row.bytes).is_err() {
+                repair.quarantined.push(row.seq);
+            }
+        }
+        if n < ROWS_BATCH {
+            break;
+        }
+    }
+    if repair.quarantined.is_empty() {
+        return Ok(repair);
+    }
+    for seq in &repair.quarantined {
+        state.db.quarantine_row(&room_name, *seq)?;
+        tracing::warn!(
+            %room_name, seq, "row quarantined: it does not decode, and it was blocking compaction"
+        );
+    }
+
+    let Some(doc) = crate::matrix::backfill::load_doc(state, chat_id, project_id)? else {
+        return Ok(repair);
+    };
+    let bytes = doc.snapshot();
+    anyhow::ensure!(!bytes.is_empty(), "empty snapshot");
+    let frontier = arbos_core::doc::encode_vv(&doc.oplog_vv());
+    match checkpoint_covers_store(&state.db, &room_name, head, &bytes)? {
+        CheckpointVerdict::Covers => {}
+        CheckpointVerdict::Incomplete(why) => {
+            anyhow::bail!("repair candidate does not cover the room's rows: {why}")
+        }
+    }
+    anyhow::ensure!(
+        state
+            .db
+            .put_checkpoint(&room_name, head, &frontier, &bytes)?,
+        "head below floor"
+    );
+    repair.checkpoint_seq = Some(head);
+    Ok(repair)
+}
+
+/// `POST /room/{project}/{chat}/repair` — admin only. Reopens compaction for a room wedged by an
+/// undecodable row.
+///
+/// Operator-triggered rather than automatic, deliberately. The relay failing to decode a row is not
+/// proof the row is garbage: apps and boxes ship their own Loro builds, so bytes this binary cannot
+/// read may be a newer encode version that a peer reads fine. Quarantining on the relay's own
+/// verdict is therefore a judgement about version skew, and this keeps a human making it. The bytes
+/// are retained either way (`Db::quarantined_rows`).
+pub async fn post_room_repair(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((project_id, chat_id)): Path<(String, String)>,
+) -> Response {
+    if !matches!(principal, Principal::Admin) {
+        return (StatusCode::FORBIDDEN, "admin only").into_response();
+    }
+    let room_name = wire::room_name(&project_id, &chat_id);
+    match repair_undecodable_rows(&state, Some(&project_id), &chat_id) {
+        Ok(r) => {
+            // What is still held, so "the bytes are retained" is answerable rather than asserted.
+            let retained: Vec<_> = state
+                .db
+                .quarantined_rows(&room_name)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|q| json!({ "seq": q.seq, "batchId": q.batch_id, "bytes": q.bytes.len() }))
+                .collect();
+            axum::Json(json!({
+                "quarantined": r.quarantined,
+                "checkpointSeq": r.checkpoint_seq,
+                "retained": retained,
+            }))
+            .into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 /// `GET /room/{project}/{chat}/stats`.
@@ -2333,5 +2604,174 @@ mod covered_push_tests {
         assert_ne!(vv1, vv_cached);
         // And it equals encoding the writer's own vv once the room holds the same ops.
         assert_eq!(vv_cached, encode_vv(&doc.oplog_vv()));
+    }
+}
+
+#[cfg(test)]
+mod quarantine_tests {
+    //! One pushed row that does not decode used to end compaction for a room permanently: no
+    //! snapshot can contain it, so `checkpoint_covers_store` counted it as missing from every
+    //! candidate, forever, and `put_checkpoint` is the only path that prunes rows. The bar to
+    //! trigger it was "be in the room" — the `Push` handler checks the payload's size and nothing
+    //! else. These tests pin the wedge, the repair, and the two ways the repair could be undone.
+
+    use arbos_core::doc::{ChatDoc, UserMessageOpts};
+
+    use super::{checkpoint_covers_store, repair_undecodable_rows, CheckpointVerdict};
+    use crate::people::tests_support::{person, project_of};
+    use crate::state::test_support::test_state;
+    use crate::state::AppState;
+    use crate::state::AuthMode;
+
+    const GARBAGE: &[u8] = b"this is not a loro update";
+
+    /// A room with `n` real messages, then one undecodable row, then one more real message, so the
+    /// bad row sits in the middle of history rather than at its end.
+    fn wedged_room(state: &AppState, project: &str, chat: &str) -> (String, ChatDoc, i64) {
+        let room = arbos_core::wire::room_name(project, chat);
+        let doc = ChatDoc::new(Some(5), false);
+        for i in 0..3 {
+            let before = doc.oplog_vv();
+            doc.append_user_message(
+                &format!("m{i}"),
+                "hello",
+                "dev:phone",
+                &UserMessageOpts::default(),
+            )
+            .unwrap();
+            state
+                .db
+                .append_row(
+                    &room,
+                    "dev:phone",
+                    &format!("b{i}"),
+                    &doc.export_updates_since(&before),
+                )
+                .unwrap();
+        }
+        let (bad_seq, _) = state
+            .db
+            .append_row(&room, "dev:bad", "bad1", GARBAGE)
+            .unwrap();
+        let before = doc.oplog_vv();
+        doc.append_user_message("m9", "after", "dev:phone", &UserMessageOpts::default())
+            .unwrap();
+        state
+            .db
+            .append_row(&room, "dev:phone", "b9", &doc.export_updates_since(&before))
+            .unwrap();
+        (room, doc, bad_seq)
+    }
+
+    /// The wedge, and that the repair is the exit. The first assertion is the old behaviour: a
+    /// snapshot from the replica that holds *every* readable op is still refused.
+    #[tokio::test]
+    async fn an_undecodable_row_wedges_compaction_until_the_repair_runs() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let project = project_of(&state, &alice, "Wedge");
+        let chat = arbos_core::ids::ulid();
+        let (room, doc, bad_seq) = wedged_room(&state, &project, &chat);
+        let head = state.db.room_state(&room).unwrap().head;
+
+        // A perfect candidate is refused, and names the bad row as the first thing missing.
+        let verdict = checkpoint_covers_store(&state.db, &room, head, &doc.snapshot()).unwrap();
+        assert!(
+            matches!(&verdict, CheckpointVerdict::Incomplete(why)
+                if why.contains(&format!("from seq {bad_seq}"))),
+            "{verdict:?}"
+        );
+        assert_eq!(state.db.room_state(&room).unwrap().row_count, head);
+
+        let repair = repair_undecodable_rows(&state, Some(&project), &chat).unwrap();
+        assert_eq!(repair.quarantined, vec![bad_seq]);
+        assert_eq!(repair.checkpoint_seq, Some(head));
+
+        // Compaction happened: the rows are gone and the relay's checkpoint covers the bad seq,
+        // which is the only thing that retires the row a box is holding as owed.
+        let st = state.db.room_state(&room).unwrap();
+        assert_eq!((st.row_count, st.floor), (0, head));
+        assert!(st.checkpoint_seq >= bad_seq);
+
+        // No message was lost with the row: a full snapshot, not a shallow one.
+        let restored = ChatDoc::from_snapshot(
+            None,
+            false,
+            &state.db.checkpoint_bytes(&room).unwrap().unwrap().1,
+        )
+        .unwrap();
+        assert_eq!(restored.messages().len(), doc.messages().len());
+
+        // And the bytes are retained, so the relay's verdict is reviewable rather than final.
+        let held = state.db.quarantined_rows(&room).unwrap();
+        assert_eq!(held.len(), 1);
+        assert_eq!((held[0].seq, held[0].bytes.as_slice()), (bad_seq, GARBAGE));
+    }
+
+    /// The inverse of the wedge, and the one change that would bring it back in full: if the
+    /// validation walk ever unioned `quarantine`, it would re-import exactly the bytes that cannot
+    /// be imported and refuse every candidate again. A later room still compacts with a quarantined
+    /// row on file, which is only true while that union does not exist.
+    #[tokio::test]
+    async fn checkpoint_validation_never_reads_the_quarantine_table() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let project = project_of(&state, &alice, "Isolation");
+        let chat = arbos_core::ids::ulid();
+        let (room, doc, bad_seq) = wedged_room(&state, &project, &chat);
+        repair_undecodable_rows(&state, Some(&project), &chat).unwrap();
+        assert_eq!(state.db.quarantined_rows(&room).unwrap().len(), 1);
+
+        // More history, then a candidate that covers it. Refusal here would mean validation had
+        // read the quarantined row back.
+        let before = doc.oplog_vv();
+        doc.append_user_message("m10", "more", "dev:phone", &UserMessageOpts::default())
+            .unwrap();
+        state
+            .db
+            .append_row(
+                &room,
+                "dev:phone",
+                "b10",
+                &doc.export_updates_since(&before),
+            )
+            .unwrap();
+        let head = state.db.room_state(&room).unwrap().head;
+        assert!(head > bad_seq);
+        assert_eq!(
+            checkpoint_covers_store(&state.db, &room, head, &doc.snapshot()).unwrap(),
+            CheckpointVerdict::Covers
+        );
+    }
+
+    /// The cross-table duplicate check. Before quarantine existed the deepest layer of this defence
+    /// was the `rows_batch` UNIQUE index rather than any query, and a moved row leaves that index
+    /// with no error and no diagnostic. SQLite cannot span two tables with one unique index, so the
+    /// lookup is the only remaining defence — and a batch that is not recognised is appended at a
+    /// **new seq** and broadcast, which the box's seq-keyed bookkeeping cannot account for.
+    #[tokio::test]
+    async fn a_replayed_batch_whose_row_was_quarantined_is_still_a_duplicate() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let project = project_of(&state, &alice, "Replay");
+        let chat = arbos_core::ids::ulid();
+        let (room, _doc, bad_seq) = wedged_room(&state, &project, &chat);
+        let head_before = state.db.room_state(&room).unwrap().head;
+        assert!(state.db.quarantine_row(&room, bad_seq).unwrap());
+
+        // The batch id is still taken, at the seq it was given.
+        assert_eq!(
+            state.db.row_seq_for_batch(&room, "bad1").unwrap(),
+            Some(bad_seq)
+        );
+        // And re-pushing it is a dup rather than a second seq.
+        assert_eq!(
+            state
+                .db
+                .append_row(&room, "dev:bad", "bad1", GARBAGE)
+                .unwrap(),
+            (bad_seq, true)
+        );
+        assert_eq!(state.db.room_state(&room).unwrap().head, head_before);
     }
 }

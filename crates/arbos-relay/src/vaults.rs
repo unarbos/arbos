@@ -1053,12 +1053,23 @@ fn grant_access(
     enabled: bool,
     created_from: &str,
 ) -> Result<Option<Access>, ApiErr> {
-    let Some(p) = state.db.project(project_id).map_err(internal)? else {
-        return Err(err(StatusCode::NOT_FOUND, "not_found", "no such agent"));
+    // Another owner's agent reads exactly like one that is not there, so the two answers cannot
+    // be used to ask which agent names exist (`api::no_such_project`, reported 2026-11-02).
+    // Names are matched against the caller's own agents first; they are not unique across owners.
+    let wanted = project_id.trim();
+    let p = match state
+        .db
+        .project_of_user_by_name(user_id, wanted)
+        .map_err(internal)?
+    {
+        Some(p) => p,
+        None => state
+            .db
+            .project(wanted)
+            .map_err(internal)?
+            .filter(|p| p.user_id == user_id)
+            .ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "no such agent"))?,
     };
-    if p.user_id != user_id {
-        return Err(err(StatusCode::FORBIDDEN, "not_owner", "not your agent"));
-    }
     let existing = state.db.access(&p.id, "vault", &v.id).map_err(internal)?;
     let was_on = existing.as_ref().is_some_and(|a| a.enabled);
     let now = now_ms();

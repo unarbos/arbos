@@ -72,7 +72,10 @@ pub struct Config {
     pub auth_mode: AuthMode,
     pub github_client_id: Option<String>,
     pub github_client_secret: Option<String>,
-    /// Extra allowed `redirect` prefixes for `/auth/github/start` (`ARBOS_AUTH_REDIRECTS`).
+    /// Extra origins `/auth/github/start` may send the browser to (`ARBOS_AUTH_REDIRECTS`,
+    /// comma-separated). Each entry names one origin — `https://arbos.life` — and is compared
+    /// whole: scheme, host and port. A path on an entry is ignored, and no entry is ever
+    /// matched against the start of a redirect (`signin::redirect_allowed`).
     pub auth_redirects: Vec<String>,
     /// Credits a new GitHub account starts with (`ARBOS_DEFAULT_GRANT_USD`).
     pub default_grant_usd: f64,
@@ -154,6 +157,14 @@ pub type HeadCache<T> = std::sync::Mutex<Option<((i64, i64), T)>>;
 pub struct RoomDocCache {
     pub key: (i64, i64),
     pub doc: arbos_core::doc::ChatDoc,
+    /// Every message id of `doc`, in list order, kept in step with it.
+    ///
+    /// The pre-image a push check needs: Loro's list diff reports a deletion as a count of
+    /// removed entries and never the entries themselves, so without this the id of a deleted
+    /// message is nowhere to be found. Rebuilding it per push is not an option — the projection
+    /// costs ~15 ms at 2 000 messages and ~82 ms at 10 000 — so it is maintained from each
+    /// diff instead.
+    pub message_ids: Vec<String>,
 }
 
 pub struct Room {
