@@ -166,18 +166,43 @@ struct Line {
 
 type HmacSha256 = Hmac<Sha256>;
 
-fn blob_sig(key: &[u8], chat_id: &str, blob_key: &str, exp: i64) -> String {
+fn blob_sig(key: &[u8], chat_id: &str, blob_key: &str, exp: i64, device_id: &str) -> String {
     let mut mac = HmacSha256::new_from_slice(key).expect("hmac key");
-    mac.update(format!("{chat_id}\n{blob_key}\n{exp}").as_bytes());
+    mac.update(format!("{chat_id}\n{blob_key}\n{exp}\n{device_id}").as_bytes());
     hex::encode(mac.finalize().into_bytes())
 }
 
-/// `https://relay/export/blob/{chat}/{key}?exp=…&sig=…`, good for an hour.
-pub fn signed_blob_url(state: &AppState, chat_id: &str, blob_key: &str, now: i64) -> String {
+/// Which device an export's attachment links belong to. `Some(id)` for a signed-in device,
+/// reader tokens included; `None` for the admin token and for a box, neither of which is a
+/// session an account can sign out.
+pub fn minting_device(principal: &Principal) -> Option<&str> {
+    match principal {
+        Principal::Device { id, .. } => Some(id.as_str()),
+        Principal::Box { .. } | Principal::Admin => None,
+    }
+}
+
+/// `https://relay/export/blob/{chat}/{key}?exp=…&dev=…&sig=…`, good for an hour.
+///
+/// `dev` is the device whose export produced the link, and it is inside the signature, so it
+/// can be neither forged nor stripped. [`signed_blob`] refuses the link once that device is
+/// revoked: the URL carries no bearer, so without it a sign-out cannot reach the link at all
+/// and an hour's worth of attachments stay readable by anyone holding the URL.
+///
+/// A device id in a URL is not a secret — it is already in the box roster of a shared chat and
+/// in the `reachable` block of a call start — and the HMAC is still the credential.
+pub fn signed_blob_url(
+    state: &AppState,
+    chat_id: &str,
+    blob_key: &str,
+    now: i64,
+    device_id: Option<&str>,
+) -> String {
     let exp = now + BLOB_URL_TTL_MS;
-    let sig = blob_sig(state.jwt_key.as_ref(), chat_id, blob_key, exp);
+    let dev = device_id.unwrap_or_default();
+    let sig = blob_sig(state.jwt_key.as_ref(), chat_id, blob_key, exp, dev);
     format!(
-        "{}/export/blob/{chat_id}/{blob_key}?exp={exp}&sig={sig}",
+        "{}/export/blob/{chat_id}/{blob_key}?exp={exp}&dev={dev}&sig={sig}",
         state.cfg.public_url.trim_end_matches('/')
     )
 }
@@ -215,7 +240,13 @@ fn sender_json(state: &AppState, row: &Value) -> Value {
     json!({ "kind": "system" })
 }
 
-fn lines(state: &AppState, chat_id: &str, rows: &[Value], now: i64) -> Vec<Line> {
+fn lines(
+    state: &AppState,
+    chat_id: &str,
+    rows: &[Value],
+    now: i64,
+    device_id: Option<&str>,
+) -> Vec<Line> {
     rows.iter()
         .filter(|r| !matches!(r["status"].as_str(), Some("queued" | "streaming")))
         .filter_map(|r| {
@@ -234,7 +265,7 @@ fn lines(state: &AppState, chat_id: &str, rows: &[Value], now: i64) -> Vec<Line>
                             let key = a["ref"].as_str()?;
                             Some(json!({
                                 "name": a["name"], "mime": a["mime"], "kind": a["kind"],
-                                "url": signed_blob_url(state, chat_id, key, now),
+                                "url": signed_blob_url(state, chat_id, key, now, device_id),
                                 "url_expires_at": now + BLOB_URL_TTL_MS,
                             }))
                         })
@@ -319,7 +350,15 @@ pub async fn export_chat(
     let now = now_ms();
     let mut all = doc
         .as_ref()
-        .map(|d| lines(&state, &id, &d.projected_rows(), now))
+        .map(|d| {
+            lines(
+                &state,
+                &id,
+                &d.projected_rows(),
+                now,
+                minting_device(&principal),
+            )
+        })
         .unwrap_or_default();
     // Stable by time: lines written in the same millisecond keep the doc's own order, which is
     // what the Matrix backfill mirrors. The cursor is (time, id): everything after `since`,
@@ -534,10 +573,14 @@ pub async fn send_message(
 pub struct BlobQuery {
     pub exp: i64,
     pub sig: String,
+    /// The device whose export minted the link. Empty for an admin or box export.
+    #[serde(default)]
+    pub dev: String,
 }
 
-/// `GET /export/blob/{chat}/{key}?exp=&sig=` — the signed attachment URL from an export. No
-/// bearer: the signature is the credential, and it stops working after `exp`.
+/// `GET /export/blob/{chat}/{key}?exp=&dev=&sig=` — the signed attachment URL from an export.
+/// No bearer: the signature is the credential. It stops working after `exp`, and at once if
+/// the device that minted it is signed out.
 pub async fn signed_blob(
     State(state): State<AppState>,
     Path((chat_id, key)): Path<(String, String)>,
@@ -550,9 +593,18 @@ pub async fn signed_blob(
             "this link has expired; export again",
         );
     }
-    let want = blob_sig(state.jwt_key.as_ref(), &chat_id, &key, q.exp);
+    let want = blob_sig(state.jwt_key.as_ref(), &chat_id, &key, q.exp, &q.dev);
     if !constant_eq(want.as_bytes(), q.sig.as_bytes()) {
         return api_error(StatusCode::FORBIDDEN, "bad_signature", "bad link");
+    }
+    // The link outlives the request that made it, so the revoke has to be checked here: a
+    // signed-out device's export links stop serving in the same moment its bearer does.
+    if !q.dev.is_empty() && !state.device_is_live(&q.dev) {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "signed_out",
+            "the device this link came from was signed out; export again",
+        );
     }
     crate::blobs::serve(&state, &format!("{PEOPLE_ACL_PREFIX}{chat_id}"), &key).await
 }
@@ -1062,7 +1114,7 @@ mod tests {
         std::fs::write(dir.join("att-1"), b"%PDF-1.4 hello").unwrap();
 
         let now = now_ms();
-        let url = signed_blob_url(&state, &chat, "att-1", now);
+        let url = signed_blob_url(&state, &chat, "att-1", now, None);
         let query = url.split('?').nth(1).unwrap();
         let exp: i64 = query
             .split('&')
@@ -1084,7 +1136,11 @@ mod tests {
                 signed_blob(
                     State(state),
                     Path((chat, key)),
-                    Query(BlobQuery { exp, sig }),
+                    Query(BlobQuery {
+                        exp,
+                        sig,
+                        dev: String::new(),
+                    }),
                 )
                 .await
             }
@@ -1104,10 +1160,74 @@ mod tests {
         let (status, _) = json_of(fetch(chat.clone(), "att-1", exp + 1, sig).await).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
         let past = now - 1;
-        let past_sig = blob_sig(state.jwt_key.as_ref(), &chat, "att-1", past);
+        let past_sig = blob_sig(state.jwt_key.as_ref(), &chat, "att-1", past, "");
         let (status, body) = json_of(fetch(chat.clone(), "att-1", past, past_sig).await).await;
         assert_eq!(status, StatusCode::GONE);
         assert_eq!(body["error"]["type"], "expired");
+    }
+
+    /// Finding 6 of the #2460 review. An export's attachment links carry no bearer, so without
+    /// a device inside the signature nothing a sign-out does can reach them: an hour's worth of
+    /// attachments stayed readable by anyone holding the URL, which is the credential class
+    /// `POST /auth/sign-out-everywhere` exists to close.
+    #[tokio::test]
+    async fn an_attachment_link_stops_serving_when_its_device_is_signed_out() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 3017);
+        let (bob, _) = person(&state, 3018);
+        let chat = dm(&state, &alice, &bob);
+        let dir = state
+            .cfg
+            .data_dir
+            .join("blobs")
+            .join(format!("people:{chat}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("att-1"), b"%PDF-1.4 secret").unwrap();
+
+        let (reader, _) = device(&state, &alice, READER_KIND);
+        let dev_id = match &reader {
+            Principal::Device { id, .. } => id.clone(),
+            _ => unreachable!("device() hands back a device"),
+        };
+        let url = signed_blob_url(&state, &chat, "att-1", now_ms(), Some(&dev_id));
+        let query = url.split('?').nth(1).unwrap();
+        let exp: i64 = query
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("exp="))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let sig = query
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("sig="))
+            .unwrap()
+            .to_owned();
+        let fetch = |dev: &str, sig: &str| {
+            let state = state.clone();
+            let (chat, dev, sig) = (chat.clone(), dev.to_owned(), sig.to_owned());
+            async move {
+                signed_blob(
+                    State(state),
+                    Path((chat, "att-1".to_owned())),
+                    Query(BlobQuery { exp, sig, dev }),
+                )
+                .await
+            }
+        };
+        let (status, body) = text_of(fetch(&dev_id, &sig).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "%PDF-1.4 secret");
+
+        // `dev` is inside the signature, so it cannot simply be dropped from the URL.
+        let (status, _) = json_of(fetch("", &sig).await).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        crate::signin::revoke_device_everywhere(&state, &dev_id)
+            .await
+            .unwrap();
+        let (status, body) = json_of(fetch(&dev_id, &sig).await).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["type"], "signed_out");
     }
 
     #[tokio::test]
@@ -1348,13 +1468,16 @@ mod tests {
     }
 
     #[test]
-    fn blob_signature_binds_chat_key_and_expiry() {
+    fn blob_signature_binds_chat_key_expiry_and_device() {
         let k = [7u8; 32];
-        let s = blob_sig(&k, "c1", "att-1", 10);
-        assert_eq!(s, blob_sig(&k, "c1", "att-1", 10));
-        assert_ne!(s, blob_sig(&k, "c2", "att-1", 10));
-        assert_ne!(s, blob_sig(&k, "c1", "att-2", 10));
-        assert_ne!(s, blob_sig(&k, "c1", "att-1", 11));
+        let s = blob_sig(&k, "c1", "att-1", 10, "dev1");
+        assert_eq!(s, blob_sig(&k, "c1", "att-1", 10, "dev1"));
+        assert_ne!(s, blob_sig(&k, "c2", "att-1", 10, "dev1"));
+        assert_ne!(s, blob_sig(&k, "c1", "att-2", 10, "dev1"));
+        assert_ne!(s, blob_sig(&k, "c1", "att-1", 11, "dev1"));
+        assert_ne!(s, blob_sig(&k, "c1", "att-1", 10, "dev2"));
+        // Dropping `dev` from the URL does not hand back an unbound link.
+        assert_ne!(s, blob_sig(&k, "c1", "att-1", 10, ""));
         assert!(constant_eq(s.as_bytes(), s.as_bytes()));
         assert!(!constant_eq(s.as_bytes(), b"nope"));
     }
