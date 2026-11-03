@@ -5,18 +5,23 @@
 //! now: the relay takes the message's author from its own record of the announce, applies the
 //! rule below, and writes the deletion itself (`notices::write_doc`), or answers 403.
 //!
-//! The author comes from `message_authors` (`Db::message_author`), written by
-//! `notify::announce_with` from the principal that announced the message. It does **not** come
-//! from the doc. Reading it from the doc was the whole defect: the rule below decides "is this
-//! yours", the doc's `sender` field is writable by every member of the chat
-//! (`ChatDoc::set_message_fields` is public in the crate the apps link, and the socket's `Push`
-//! arm validates no content), so a member could put their own id on someone else's message and
-//! then ask this route to delete it. The relay's record is the only account of the author that
-//! the author's peers cannot edit.
+//! The author comes from `message_authors` (`Db::message_author`), written from the principal
+//! the relay resolved — by `push_guard` where the row arrives, and by `notify::announce_with`
+//! where a message is announced. It does **not** come from the doc. Reading it from the doc was
+//! the whole defect: the rule below decides "is this yours", and the doc's `sender` field is
+//! writable by every member of the chat (`ChatDoc::set_message_fields` is public in the crate
+//! the apps link), so a member could put their own id on someone else's message and then ask
+//! this route to delete it. The relay's record is the only account of the author that the
+//! author's peers cannot edit.
+//!
+//! `push_guard` also closes the way round this route: a doc update that deletes someone else's
+//! message used to be stored unread, which is the bypass this module was written against.
 //!
 //! A message with no record — a system line, an app too old to announce, anything written
 //! before the record existed — is nobody's but a moderator's, because there is no sound way to
-//! tell whose it is.
+//! tell whose it is. That default is only defensible because the population it covers is dated
+//! and closed: from `push_guard` onward every row names its author as it arrives, so the set of
+//! unrecorded messages stops growing and only shrinks.
 //!
 //! The rule (`may_delete`): you delete your own messages. In a people group the owner — and
 //! an admin, once that role exists — deletes anyone's (moderation). A message an agent wrote
@@ -52,6 +57,30 @@ impl Deleter<'_> {
     pub fn moderates(&self) -> bool {
         self.project_owner || matches!(self.role, Some("owner") | Some("admin"))
     }
+}
+
+/// Does this principal moderate this chat — a people group's owner or admin, or the owner of
+/// the project a chat belongs to? Shared with `push_guard` so the socket and the HTTP route
+/// answer "may you touch someone else's message" from one rule rather than two.
+pub fn moderates(state: &AppState, principal: &Principal, project: &str, chat_id: &str) -> bool {
+    let Principal::Device { user_id: me, .. } = principal else {
+        return false;
+    };
+    if project != PEOPLE_PROJECT {
+        return state.owns(principal, project);
+    }
+    let Ok(cm) = people::load_chat(state, chat_id) else {
+        return false;
+    };
+    cm.members
+        .iter()
+        .find(|m| m.user_id() == Some(me.as_str()))
+        .map(|mine| Deleter {
+            me,
+            role: Some(mine.role.as_str()),
+            project_owner: false,
+        })
+        .is_some_and(|d| d.moderates())
 }
 
 /// May `who` delete a message whose normalised sender is `sender` (`user:<id>`,

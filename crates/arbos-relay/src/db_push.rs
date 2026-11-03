@@ -207,6 +207,11 @@ impl Db {
     ///
     /// Deliberately not pruned with `chat_events`: unread counts a month old are noise, but
     /// "whose message is this" has to answer for as long as the message exists.
+    ///
+    /// A primary-key lookup, answerable at any time by any handler — not a by-product of the
+    /// push that recorded it. Two separate authority decisions read it after the fact (the
+    /// moderation route, and `secrets.rs`'s "save this" path, which otherwise takes the owner's
+    /// own-message test from a doc field the asker writes), so it is a general query by design.
     pub fn message_author(&self, chat_id: &str, message_id: &str) -> Result<Option<String>> {
         self.with(|c| {
             c.query_row(
@@ -215,6 +220,46 @@ impl Db {
                 |r| r.get(0),
             )
             .optional()
+        })
+    }
+
+    /// Record who wrote a message, from the socket that pushed the row carrying it.
+    ///
+    /// `INSERT OR IGNORE`, so the first attestation stands. The announce route reaches this
+    /// record too ([`Db::insert_chat_event`]), and the two can race for a message the client
+    /// announces and pushes at the same moment — but both resolve the author from the
+    /// authenticated principal, so a race between them agrees. What it stops is an announce
+    /// arriving *later*, for a message whose row the relay has already seen, and renaming it.
+    pub fn record_message_author(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        sender: &str,
+    ) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT OR IGNORE INTO message_authors(chat_id, message_id, sender, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![chat_id, message_id, sender, now_ms()],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Has the relay attested *any* message in this chat?
+    ///
+    /// [`Db::message_author`] returning `None` has two different meanings, and a caller
+    /// deciding authorisation has to tell them apart. In a chat the relay has attested
+    /// something in, `None` means "the relay never saw that message announced". In a chat it
+    /// has attested nothing in, `None` means "the record does not reach this chat" — every
+    /// message in it predates the record, so absence is not evidence about any one of them.
+    pub fn chat_has_authors(&self, chat_id: &str) -> Result<bool> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT EXISTS (SELECT 1 FROM message_authors WHERE chat_id = ?1)",
+                params![chat_id],
+                |r| r.get(0),
+            )
         })
     }
 

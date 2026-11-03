@@ -67,6 +67,7 @@ mod preview_token_tests;
 mod project_lookup_tests;
 mod proxy;
 mod push;
+mod push_guard;
 mod releases;
 mod restart;
 mod room_health;
