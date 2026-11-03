@@ -5,7 +5,8 @@ Description=Run the Arbos feedback poller every 2 minutes
 OnBootSec=2min
 OnUnitActiveSec=2min
 AccuracySec=15s
-Persistent=true
+# No Persistent=: it only applies to OnCalendar=, and its stamp file makes systemd count OnBootSec=
+# as already fired after a reboot, which leaves OnUnitActiveSec= with no base and the timer idle.
 
 [Install]
 WantedBy=timers.target

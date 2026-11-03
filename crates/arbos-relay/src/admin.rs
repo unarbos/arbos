@@ -52,6 +52,11 @@ pub async fn list_users(State(state): State<AppState>, principal: Principal) -> 
             "since": since,
             "sandbox_id": sb.as_ref().and_then(|s| s.sandbox_id.clone()),
             "snapshot": sb.as_ref().and_then(|s| s.snapshot.clone()),
+            // The `users.snapshot` pin, null when the user follows the default. An upgrade targets
+            // `pinned_snapshot ?? default`, so a box already on its pin is deliberately not rolling
+            // and the deploy worker must not count it as pending (see pending_boxes in
+            // scripts/deploy/arbos-deploy-worker).
+            "pinned_snapshot": state.db.user_snapshot(&u.id).ok().flatten(),
             "image_outdated": sb.as_ref().is_some_and(|s| crate::upgrade::image_outdated(&state, s)),
             "upgrade": crate::upgrade::status_json(&state, &u.id).await,
             "agentd": state.db.box_agentd(&u.id).ok().flatten().map(|a| json!({ "sha": a.sha, "version": a.version, "image": a.image, "seed_sha": a.seed_sha, "reported_at": a.reported_at })),
@@ -341,6 +346,9 @@ pub async fn delete_test_user(
             "stop and delete the user's box first",
         );
     }
+    // Before the rows go: the device list and its encrypted Matrix tokens are what the logout
+    // is made of, and a Matrix account left with live tokens outlives the account it belonged to.
+    crate::matrix::servers::forget_user(&state, &id).await;
     match state.db.delete_test_user(&id) {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => api_error(

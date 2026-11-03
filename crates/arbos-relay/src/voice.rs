@@ -681,7 +681,7 @@ fn enrich_humans_calling_from(state: &AppState, call: &CallRow, humans: &mut [Va
 }
 
 /// What the voice agent should call this chat: project chat title, or people-chat title / handles.
-fn voice_chat_title(state: &AppState, chat: &ChatRef) -> String {
+pub(crate) fn voice_chat_title(state: &AppState, chat: &ChatRef) -> String {
     match &chat.project_id {
         Some(pid) => state
             .db
@@ -703,14 +703,16 @@ fn voice_chat_title(state: &AppState, chat: &ChatRef) -> String {
             {
                 return t;
             }
+            // Bare handles, no `@`: this title is spoken aloud, and "at user41, at user43" is
+            // not what anyone says. The other three surfaces agree (see `group_name_tests`).
             let handles: Vec<String> = state
                 .db
                 .members_of(&chat.chat_id)
                 .unwrap_or_default()
                 .iter()
                 .filter_map(|m| m.user_id())
-                .map(|u| format!("@{}", Sender::user(state, u).handle))
-                .filter(|h| h != "@")
+                .map(|u| Sender::user(state, u).handle)
+                .filter(|h| !h.is_empty())
                 .collect();
             if handles.is_empty() {
                 "this chat".to_owned()
@@ -1402,21 +1404,27 @@ pub async fn put_agent_settings(
     Path(id): Path<String>,
     Json(b): Json<AgentSettingsBody>,
 ) -> Response {
-    let Some(p) = state.db.project(&id).ok().flatten() else {
-        return api_error(StatusCode::NOT_FOUND, "not_found", "no such project");
-    };
-    let owner = match &principal {
+    // Someone else's agent reads exactly like one that is not there, so the pair of answers
+    // cannot be used to ask which names are taken (reported 2026-11-02). A name is matched
+    // against the caller's own agents first, because names are not unique across owners.
+    let own = |p: &Project| match &principal {
         Principal::Admin => true,
         Principal::Device { user_id, .. } => *user_id == p.user_id,
         Principal::Box { .. } => false,
     };
-    if !owner {
-        return api_error(
-            StatusCode::FORBIDDEN,
-            "forbidden",
-            "only the agent's owner changes its voice settings",
-        );
-    }
+    let found = principal
+        .user_id()
+        .and_then(|u| {
+            state
+                .db
+                .project_of_user_by_name(u, id.trim())
+                .ok()
+                .flatten()
+        })
+        .or_else(|| state.db.project(id.trim()).ok().flatten());
+    let Some(p) = found.filter(own) else {
+        return api_error(StatusCode::NOT_FOUND, "not_found", "no such project");
+    };
     if let Some(c) = b.chattiness.as_deref() {
         if !CHATTINESS_LEVELS.contains(&c) {
             return api_error(

@@ -86,6 +86,26 @@ CREATE TABLE IF NOT EXISTS rows (
   PRIMARY KEY (room, seq)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS rows_batch ON rows(room, batch_id);
+-- Rows the relay could not decode as a Loro update, moved out of `rows` so that compaction can
+-- proceed. The bytes are kept, never served: `rooms::quarantine_undecodable_rows` moves a row here
+-- and the relay then checkpoints over its seq, which is the only way to reopen a room whose
+-- compaction has wedged.
+--
+-- This table is deliberately OUTSIDE every read path over `rows`, and that is what it is FOR, not an
+-- oversight to tidy up. In particular `rooms::checkpoint_covers_store` must never union it. The
+-- wedge this table exists to fix is caused by a row that cannot be imported into any snapshot being
+-- counted as missing from it, forever; a validation walk that reads quarantine re-imports exactly
+-- those bytes, fails again, and restores the original bug in full. "While we are here, we should
+-- validate against everything we have stored" is the one change that must not be made.
+--
+-- `batch_id` is carried, and uniquely indexed, for a reason that outlives this table's own purpose:
+-- see `Db::row_seq_for_batch`.
+CREATE TABLE IF NOT EXISTS quarantine (
+  room TEXT NOT NULL, seq INTEGER NOT NULL, device TEXT NOT NULL, batch_id TEXT NOT NULL,
+  bytes BLOB NOT NULL, created_at INTEGER NOT NULL, quarantined_at INTEGER NOT NULL,
+  PRIMARY KEY (room, seq)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS quarantine_batch ON quarantine(room, batch_id);
 CREATE TABLE IF NOT EXISTS checkpoints (
   room TEXT PRIMARY KEY, seq INTEGER NOT NULL, frontier BLOB NOT NULL, bytes BLOB NOT NULL,
   size INTEGER NOT NULL, created_at INTEGER NOT NULL
@@ -482,6 +502,59 @@ pub struct ChannelPairCode {
     pub expires_at: i64,
 }
 
+/// `AppState::allows` over a project-id column, as SQL: the projects a person owns plus the ones
+/// they were invited to (D72). `?1` is the user id. Same shape as `REACHABLE_SKILLS`.
+fn reachable_project(column: &str) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM projects p
+                  WHERE p.id = {column} AND p.deleted_at IS NULL
+                    AND (p.user_id = ?1
+                         OR EXISTS (SELECT 1 FROM project_members m
+                                     WHERE m.project_id = p.id AND m.user_id = ?1 AND m.left_at IS NULL)))"
+    )
+}
+
+/// Whose channel rows a query is for. Every channels listing takes one and binds its
+/// [`ChannelScope::key`] as `?1`, so the scope is part of the query rather than a filter over its
+/// answer and a `LIMIT` counts rows the caller may see.
+#[derive(Debug, Clone)]
+pub enum ChannelScope {
+    /// The admin token.
+    Everything,
+    /// One person's devices: the channels of the projects that person can reach.
+    Reachable(String),
+}
+
+impl ChannelScope {
+    /// A predicate over a project-id column of the row a query selects.
+    fn predicate(&self, project_column: &str) -> String {
+        match self {
+            Self::Everything => "?1 IS NULL".to_owned(),
+            Self::Reachable(_) => reachable_project(project_column),
+        }
+    }
+
+    /// A predicate over a `channel_outbox` row aliased `o`. An outbox row belongs to whoever owns
+    /// the binding it was sent for; a row with no binding (a pairing hint to an unbound sender) is
+    /// nobody's, so only the admin reads it.
+    fn outbox_predicate(&self) -> String {
+        match self {
+            Self::Everything => "?1 IS NULL".to_owned(),
+            Self::Reachable(_) => format!(
+                "EXISTS (SELECT 1 FROM channel_bindings b WHERE b.id = o.binding_id AND {})",
+                reachable_project("b.project_id")
+            ),
+        }
+    }
+
+    fn key(&self) -> Option<&str> {
+        match self {
+            Self::Everything => None,
+            Self::Reachable(user_id) => Some(user_id),
+        }
+    }
+}
+
 /// One credential in the vault (F8). `fields` is ciphertext from `connectors::crypto` over a JSON
 /// object (`{ "url", "username", "password" }` for a login, `{ "value" }` for a secret/api_key).
 /// Owned by one user: every read and write is scoped by `user_id`, and names are unique per user.
@@ -857,7 +930,13 @@ impl Db {
         })
     }
 
-    /// Consume a pairing code and register a device. Returns the device id.
+    /// Consume a pairing code and register a device. Returns whether the code was good.
+    ///
+    /// The device joins [`crate::auth::LEGACY_USER`], which is what a paircode relay means by
+    /// "the account": the operator mints the codes, one relay serves one person, and `projects`
+    /// defaults to the same id. Written out rather than left to the column default, because
+    /// account-wide operations key on this column and the default made the choice invisible —
+    /// `sign_out_everywhere` reads it and ends every session that shares it.
     pub fn redeem_pairing_code(
         &self,
         code: &str,
@@ -875,8 +954,8 @@ impl Db {
                 return Ok(false);
             }
             c.execute(
-                "INSERT INTO devices(id, name, token_hash, created_at) VALUES (?1, ?2, ?3, ?4)",
-                params![device_id, name, token_hash, now],
+                "INSERT INTO devices(id, name, token_hash, user_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![device_id, name, token_hash, crate::auth::LEGACY_USER, now],
             )?;
             Ok(true)
         })
@@ -900,16 +979,6 @@ impl Db {
                 [],
                 |r| r.get(0),
             )
-        })
-    }
-
-    pub fn revoke_device(&self, id: &str) -> Result<bool> {
-        self.with(|c| {
-            c.execute(
-                "UPDATE devices SET revoked_at = ?2 WHERE id = ?1 AND revoked_at IS NULL",
-                params![id, now_ms()],
-            )
-            .map(|n| n > 0)
         })
     }
 
@@ -992,6 +1061,22 @@ impl Db {
                     Self::PROJECT_COLS
                 ),
                 params![id_or_name],
+                Self::row_to_project,
+            )
+            .optional()
+        })
+    }
+
+    /// By id and nothing else. `project` also matches on `name`, which is fine for a path the
+    /// caller owns and wrong anywhere a hit tells the caller something about another owner.
+    pub fn project_by_id(&self, id: &str) -> Result<Option<Project>> {
+        self.with(|c| {
+            c.query_row(
+                &format!(
+                    "SELECT {} FROM projects WHERE id = ?1 AND deleted_at IS NULL",
+                    Self::PROJECT_COLS
+                ),
+                params![id],
                 Self::row_to_project,
             )
             .optional()
@@ -1762,12 +1847,28 @@ impl Db {
         })
     }
 
-    /// Seq of a stored batch id, if any — used to ACK a resent push as `dup` before the people
-    /// gates (so a reconnect storm does not burn the message rate limit).
+    /// Seq of a batch id this room has already taken, if any — used to ACK a resent push as `dup`
+    /// before the people gates (so a reconnect storm does not burn the message rate limit).
+    ///
+    /// Reads `rows` **and** `quarantine`, and that second read is load-bearing rather than
+    /// bookkeeping. Before quarantine existed, the deepest layer of this defence was not this query
+    /// at all: it was the `rows_batch` UNIQUE index, so even with every lookup wrong SQLite itself
+    /// refused the duplicate insert. A row moved to `quarantine` leaves that index, and since SQLite
+    /// cannot express a unique index spanning two tables, the database-level guarantee silently stops
+    /// covering those bytes — no error and no diagnostic. This lookup is therefore the *only*
+    /// remaining defence for a quarantined batch, where for a stored one it is the outer of two.
+    ///
+    /// What it protects is not only unbounded storage. A re-pushed batch that is not recognised is
+    /// appended at a **new seq** and broadcast to every socket in the room, and the box's sync
+    /// bookkeeping is keyed on seq, so it cannot recognise bytes arriving at a seq it has never
+    /// seen. Relaxing this check corrupts another component's state machine.
     pub fn row_seq_for_batch(&self, room: &str, batch_id: &str) -> Result<Option<i64>> {
         self.with(|c| {
             c.query_row(
-                "SELECT seq FROM rows WHERE room = ?1 AND batch_id = ?2",
+                "SELECT seq FROM rows WHERE room = ?1 AND batch_id = ?2
+                 UNION ALL
+                 SELECT seq FROM quarantine WHERE room = ?1 AND batch_id = ?2
+                 LIMIT 1",
                 params![room, batch_id],
                 |r| r.get(0),
             )
@@ -1785,8 +1886,18 @@ impl Db {
     ) -> Result<(i64, bool)> {
         let now = now_ms();
         self.with(|c| {
+            // Both tables, for the reason given on `row_seq_for_batch`: a quarantined row is no
+            // longer covered by the `rows_batch` unique index, so this query is all that stands
+            // between a replayed batch and a second seq for bytes the room already took.
             let existing: Option<i64> = c
-                .query_row("SELECT seq FROM rows WHERE room = ?1 AND batch_id = ?2", params![room, batch_id], |r| r.get(0))
+                .query_row(
+                    "SELECT seq FROM rows WHERE room = ?1 AND batch_id = ?2
+                     UNION ALL
+                     SELECT seq FROM quarantine WHERE room = ?1 AND batch_id = ?2
+                     LIMIT 1",
+                    params![room, batch_id],
+                    |r| r.get(0),
+                )
                 .optional()?;
             if let Some(seq) = existing {
                 return Ok((seq, true));
@@ -1830,6 +1941,55 @@ impl Db {
             )?;
             let rows = st.query_map(params![room, after, upto, limit], |r| {
                 Ok(Row { seq: r.get(0)?, device: r.get(1)?, batch_id: r.get(2)?, bytes: r.get(3)? })
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// Move one row out of `rows` and into `quarantine`, keeping its seq and bytes. Returns false
+    /// when that seq is not in `rows` (already moved, or already covered by a checkpoint).
+    ///
+    /// A move, not a flag: every read path over `rows` — the catch-up walk, `room_health`,
+    /// `load_doc`, the row count and bytes in `room_state`, and the checkpoint validation walk — is
+    /// correct for the same single reason, that `put_checkpoint` has deleted everything at or below
+    /// the last checkpoint. Marking a row in place would break that one precondition for all of them
+    /// at once and leave six readers to patch; taking the row out of the table keeps every one of
+    /// them correct untouched.
+    pub fn quarantine_row(&self, room: &str, seq: i64) -> Result<bool> {
+        let now = now_ms();
+        self.with(|c| {
+            let tx = c.unchecked_transaction()?;
+            let moved = tx.execute(
+                "INSERT INTO quarantine(room, seq, device, batch_id, bytes, created_at, quarantined_at)
+                 SELECT room, seq, device, batch_id, bytes, created_at, ?3 FROM rows
+                 WHERE room = ?1 AND seq = ?2",
+                params![room, seq, now],
+            )?;
+            if moved == 0 {
+                tx.rollback()?;
+                return Ok(false);
+            }
+            tx.execute("DELETE FROM rows WHERE room = ?1 AND seq = ?2", params![room, seq])?;
+            tx.commit()?;
+            Ok(true)
+        })
+    }
+
+    /// Quarantined rows for a room, oldest first. For operator inspection and recovery: the bytes
+    /// are retained precisely because the relay's inability to decode them is not proof they are
+    /// garbage — a replica on a newer encode version may read what this binary cannot.
+    pub fn quarantined_rows(&self, room: &str) -> Result<Vec<Row>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT seq, device, batch_id, bytes FROM quarantine WHERE room = ?1 ORDER BY seq",
+            )?;
+            let rows = st.query_map(params![room], |r| {
+                Ok(Row {
+                    seq: r.get(0)?,
+                    device: r.get(1)?,
+                    batch_id: r.get(2)?,
+                    bytes: r.get(3)?,
+                })
             })?;
             rows.collect()
         })
@@ -2430,6 +2590,15 @@ impl Db {
     const BINDING_COLS: &'static str =
         "id, platform, external_chat_id, external_user_id, project_id, chat_id, label, bound_at";
 
+    /// [`Self::BINDING_COLS`] for a query that aliases `channel_bindings` as `b`.
+    fn binding_cols_aliased() -> String {
+        Self::BINDING_COLS
+            .split(", ")
+            .map(|col| format!("b.{col}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     fn row_to_binding(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChannelBinding> {
         Ok(ChannelBinding {
             id: r.get(0)?,
@@ -2457,13 +2626,21 @@ impl Db {
         })
     }
 
-    /// The newest unused, unexpired code (so a client can show it again after a restart).
-    pub fn active_channel_pair_code(&self) -> Result<Option<ChannelPairCode>> {
+    /// The scope's newest unused, unexpired code (so a client can show it again after a restart).
+    pub fn active_channel_pair_code(
+        &self,
+        scope: &ChannelScope,
+    ) -> Result<Option<ChannelPairCode>> {
         self.with(|conn| {
             conn.query_row(
-                "SELECT code, project_id, chat_id, created_at, expires_at FROM channel_pair_codes
-                 WHERE used_at IS NULL AND expires_at > ?1 ORDER BY created_at DESC LIMIT 1",
-                params![now_ms()],
+                &format!(
+                    "SELECT c.code, c.project_id, c.chat_id, c.created_at, c.expires_at
+                     FROM channel_pair_codes c
+                     WHERE c.used_at IS NULL AND c.expires_at > ?2 AND ({})
+                     ORDER BY c.created_at DESC LIMIT 1",
+                    scope.predicate("c.project_id")
+                ),
+                params![scope.key(), now_ms()],
                 |r| {
                     Ok(ChannelPairCode {
                         code: r.get(0)?,
@@ -2555,13 +2732,14 @@ impl Db {
         })
     }
 
-    pub fn list_channel_bindings(&self) -> Result<Vec<ChannelBinding>> {
+    pub fn list_channel_bindings(&self, scope: &ChannelScope) -> Result<Vec<ChannelBinding>> {
         self.with(|conn| {
             let mut st = conn.prepare(&format!(
-                "SELECT {} FROM channel_bindings ORDER BY bound_at DESC",
-                Self::BINDING_COLS
+                "SELECT {} FROM channel_bindings b WHERE ({}) ORDER BY b.bound_at DESC",
+                Self::binding_cols_aliased(),
+                scope.predicate("b.project_id")
             ))?;
-            let rows = st.query_map([], Self::row_to_binding)?;
+            let rows = st.query_map(params![scope.key()], Self::row_to_binding)?;
             rows.collect()
         })
     }
@@ -2640,13 +2818,18 @@ impl Db {
         })
     }
 
-    pub fn channel_outbox(&self, limit: i64) -> Result<Vec<serde_json::Value>> {
+    pub fn channel_outbox(
+        &self,
+        scope: &ChannelScope,
+        limit: i64,
+    ) -> Result<Vec<serde_json::Value>> {
         self.with(|conn| {
-            let mut st = conn.prepare(
-                "SELECT id, platform, external_chat_id, text, request_id, status, detail, binding_id, created_at
-                 FROM channel_outbox ORDER BY id DESC LIMIT ?1",
-            )?;
-            let rows = st.query_map(params![limit], |r| {
+            let mut st = conn.prepare(&format!(
+                "SELECT o.id, o.platform, o.external_chat_id, o.text, o.request_id, o.status, o.detail, o.binding_id, o.created_at
+                 FROM channel_outbox o WHERE ({}) ORDER BY o.id DESC LIMIT ?2",
+                scope.outbox_predicate()
+            ))?;
+            let rows = st.query_map(params![scope.key(), limit], |r| {
                 Ok(serde_json::json!({
                     "id": r.get::<_, i64>(0)?, "platform": r.get::<_, String>(1)?, "externalChatId": r.get::<_, String>(2)?,
                     "text": r.get::<_, String>(3)?, "requestId": r.get::<_, String>(4)?, "status": r.get::<_, String>(5)?,
@@ -2734,6 +2917,24 @@ impl Db {
                 Self::LOCAL_COLS
             ))?;
             let rows = st.query_map([], Self::row_to_local)?;
+            rows.collect()
+        })
+    }
+
+    /// The helpers belonging to one user. `local_devices` has no owner column; a helper's row is
+    /// keyed by the relay `devices.id` its token was minted for, so ownership comes from there.
+    pub fn local_devices_of_user(&self, user_id: &str) -> Result<Vec<LocalDevice>> {
+        self.with(|c| {
+            let cols = Self::LOCAL_COLS
+                .split(", ")
+                .map(|col| format!("l.{col}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut st = c.prepare(&format!(
+                "SELECT {cols} FROM local_devices l JOIN devices d ON d.id = l.device_id
+                 WHERE d.user_id = ?1 ORDER BY l.first_seen"
+            ))?;
+            let rows = st.query_map(params![user_id], Self::row_to_local)?;
             rows.collect()
         })
     }
@@ -3145,6 +3346,48 @@ impl Db {
     }
 }
 
+/// The skills of the projects a person can reach: the ones they own and the ones they were
+/// invited to (D72), plus the skills filed under no project at all, which have nobody to check
+/// a caller against. This is `AppState::allows` over `origin_project_id` written as SQL, so a
+/// listing holds the same opinion as `GET /skills/{id}` (#1953).
+const REACHABLE_SKILLS: &str = "s.origin_project_id IS NULL OR EXISTS (
+     SELECT 1 FROM projects p
+      WHERE p.id = s.origin_project_id AND p.deleted_at IS NULL
+        AND (p.user_id = ?1
+             OR EXISTS (SELECT 1 FROM project_members m
+                         WHERE m.project_id = p.id AND m.user_id = ?1 AND m.left_at IS NULL)))";
+
+/// Whose skills a query is for. The `skills` table has no owner column, so the only owner a
+/// skill can have is the user behind its origin project.
+#[derive(Debug, Clone)]
+pub enum SkillScope {
+    /// The admin token.
+    Everything,
+    /// One box, in the workspace it named: the relay's shared skills plus that project's own.
+    Project(String),
+    /// One person's devices.
+    Reachable(String),
+}
+
+impl SkillScope {
+    /// A predicate over the `skills` row aliased `s`, reading the scope's value from `?1`.
+    fn predicate(&self) -> &'static str {
+        match self {
+            Self::Everything => "?1 IS NULL",
+            Self::Project(_) => "s.shared = 1 OR s.origin_project_id = ?1",
+            Self::Reachable(_) => REACHABLE_SKILLS,
+        }
+    }
+
+    fn key(&self) -> Option<&str> {
+        match self {
+            Self::Everything => None,
+            Self::Project(id) => Some(id),
+            Self::Reachable(user_id) => Some(user_id),
+        }
+    }
+}
+
 impl Db {
     // ---- skills (F5) --------------------------------------------------------------------------
 
@@ -3251,44 +3494,53 @@ impl Db {
         })
     }
 
-    /// Every skill (devices), or the shared ones plus a project's own (`visible_to = Some(project)`).
-    pub fn list_skills(&self, visible_to: Option<&str>) -> Result<Vec<Skill>> {
+    /// Every skill query takes one of these and binds its [`SkillScope::key`] as `?1`.
+    fn skill_cols_aliased() -> String {
+        Self::SKILL_COLS
+            .split(", ")
+            .map(|col| format!("s.{col}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    pub fn list_skills(&self, scope: &SkillScope) -> Result<Vec<Skill>> {
         self.with(|c| {
             let mut st = c.prepare(&format!(
-                "SELECT {} FROM skills WHERE ?1 IS NULL OR shared = 1 OR origin_project_id = ?1 ORDER BY name",
-                Self::SKILL_COLS
+                "SELECT {} FROM skills s WHERE ({}) ORDER BY s.name",
+                Self::skill_cols_aliased(),
+                scope.predicate()
             ))?;
-            let rows = st.query_map(params![visible_to], Self::row_to_skill)?;
+            let rows = st.query_map(params![scope.key()], Self::row_to_skill)?;
             rows.collect()
         })
     }
 
-    /// FTS5 over name/description/tags/when_to_use, best match first.
-    pub fn search_skills(
-        &self,
-        query: &str,
-        visible_to: Option<&str>,
-        limit: i64,
-    ) -> Result<Vec<Skill>> {
+    /// FTS5 over name/description/tags/when_to_use, best match first. The scope is part of the
+    /// query rather than a filter over its answer, so `limit` counts rows the caller may see.
+    pub fn search_skills(&self, query: &str, scope: &SkillScope, limit: i64) -> Result<Vec<Skill>> {
         let q = fts_query(query);
         self.with(|c| {
             let mut st = c.prepare(&format!(
                 "SELECT {} FROM skills_fts JOIN skills s ON s.id = skills_fts.id
-                 WHERE skills_fts MATCH ?1 AND (?2 IS NULL OR s.shared = 1 OR s.origin_project_id = ?2)
+                 WHERE skills_fts MATCH ?2 AND ({})
                  ORDER BY bm25(skills_fts) LIMIT ?3",
-                Self::SKILL_COLS.split(", ").map(|col| format!("s.{col}")).collect::<Vec<_>>().join(", ")
+                Self::skill_cols_aliased(),
+                scope.predicate()
             ))?;
-            let rows = st.query_map(params![q, visible_to, limit], Self::row_to_skill)?;
+            let rows = st.query_map(params![scope.key(), q, limit], Self::row_to_skill)?;
             rows.collect()
         })
     }
 
-    /// Cheap change marker for the box poll: `count:max(updated_at)` over the skills a project sees.
-    pub fn skills_rev(&self, visible_to: Option<&str>) -> Result<String> {
+    /// Cheap change marker for the box poll: `count:max(updated_at)` over the skills a caller sees.
+    pub fn skills_rev(&self, scope: &SkillScope) -> Result<String> {
         self.with(|c| {
             c.query_row(
-                "SELECT COUNT(*), COALESCE(MAX(updated_at), 0) FROM skills WHERE ?1 IS NULL OR shared = 1 OR origin_project_id = ?1",
-                params![visible_to],
+                &format!(
+                    "SELECT COUNT(*), COALESCE(MAX(s.updated_at), 0) FROM skills s WHERE ({})",
+                    scope.predicate()
+                ),
+                params![scope.key()],
                 |r| Ok(format!("{}:{}", r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
             )
         })

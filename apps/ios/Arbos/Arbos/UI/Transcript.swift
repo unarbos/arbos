@@ -223,29 +223,108 @@ enum MediaSender: Equatable {
     case agent(id: String?, handle: String, name: String?, avatar: String?)
 }
 
+/// One transcript row. The fields live in one immutable `Box`, so copying a row is one retain,
+/// and SwiftUI's compare of the row arrays (the `ForEach` data and the `rows` state, on every
+/// streamed token) is a pointer check for each row nobody rebuilt.
+///
+/// The box is never mutated: every setter makes a new box with the one field changed, so two
+/// rows can never share storage that one of them edits. Do not add an in-place
+/// (`isKnownUniquelyReferenced`) path; rows are built once and read many times.
 struct Row: Identifiable, Equatable {
-    var id: String
-    var messageId: Id
-    var role: Role
-    var kind: RowKind
+    private struct Fields: Equatable {
+        var id: String
+        var messageId: Id
+        var role: Role
+        var kind: RowKind
+        var reactions: [MessageReaction]
+        var replyCount: Int
+        var createdAt: Int64
+        var gapBefore: CGFloat
+        var runStart: Bool
+        var showsAvatar: Bool
+    }
+
+    private final class Box {
+        let fields: Fields
+        init(_ fields: Fields) { self.fields = fields }
+    }
+
+    private var box: Box
+
+    init(id: String, messageId: Id, role: Role, kind: RowKind, reactions: [MessageReaction] = [],
+         replyCount: Int = 0, createdAt: Int64 = 0, gapBefore: CGFloat = 0, runStart: Bool = true,
+         showsAvatar: Bool = true) {
+        box = Box(Fields(id: id, messageId: messageId, role: role, kind: kind, reactions: reactions,
+                         replyCount: replyCount, createdAt: createdAt, gapBefore: gapBefore,
+                         runStart: runStart, showsAvatar: showsAvatar))
+    }
+
+    private mutating func replace<T>(_ field: WritableKeyPath<Fields, T>, _ value: T) {
+        var fields = box.fields
+        fields[keyPath: field] = value
+        box = Box(fields)
+    }
+
+    /// The same box short-cuts to equal; anything else compares every field.
+    static func == (lhs: Row, rhs: Row) -> Bool {
+        lhs.box === rhs.box || lhs.box.fields == rhs.box.fields
+    }
+
+    /// Whether `==` against `other` takes the pointer short-cut (tests).
+    func sharesStorage(with other: Row) -> Bool { box === other.box }
+
+    var id: String {
+        get { box.fields.id }
+        set { replace(\.id, newValue) }
+    }
+    var messageId: Id {
+        get { box.fields.messageId }
+        set { replace(\.messageId, newValue) }
+    }
+    var role: Role {
+        get { box.fields.role }
+        set { replace(\.role, newValue) }
+    }
+    var kind: RowKind {
+        get { box.fields.kind }
+        set { replace(\.kind, newValue) }
+    }
     /// Emoji reactions shown under this bubble (stamped on the last prose/media row of a message).
-    var reactions: [MessageReaction] = []
+    var reactions: [MessageReaction] {
+        get { box.fields.reactions }
+        set { replace(\.reactions, newValue) }
+    }
     /// How many messages reply to this one via `replyTo` (long-press Reply); shown top-right when > 0.
-    var replyCount: Int = 0
+    var replyCount: Int {
+        get { box.fields.replyCount }
+        set { replace(\.replyCount, newValue) }
+    }
     /// The message's `createdAt` (ms), so the swipe-revealed time needs no lookup.
-    var createdAt: Int64 = 0
+    var createdAt: Int64 {
+        get { box.fields.createdAt }
+        set { replace(\.createdAt, newValue) }
+    }
     /// Space above this row (`Transcript.runGap` inside a sender run, `turnGap` where a
     /// new run starts, `systemGap` around system lines), fixed at build time so a row's
     /// layout does not depend on its position in the visible window.
-    var gapBefore: CGFloat = 0
+    var gapBefore: CGFloat {
+        get { box.fields.gapBefore }
+        set { replace(\.gapBefore, newValue) }
+    }
     /// The row's message starts a sender run (see `Transcript.runWindowMs`): its first
     /// bubble carries the name and the row above it opens the turn gap. A message that
     /// continues the run sits under the first one's text in the in-run gap.
-    var runStart: Bool = true
+    var runStart: Bool {
+        get { box.fields.runStart }
+        set { replace(\.runStart, newValue) }
+    }
     /// Draw the sender's avatar beside this row: once per run, on the last avatar-bearing
     /// row of the run's first message; every other row keeps the avatar column empty
     /// ([feedback grouped-messages-ios-2026-10-28]).
-    var showsAvatar: Bool = true
+    var showsAvatar: Bool {
+        get { box.fields.showsAvatar }
+        set { replace(\.showsAvatar, newValue) }
+    }
 }
 
 enum Transcript {
@@ -259,12 +338,12 @@ enum Transcript {
     /// Mac's `transcript::RUN_WINDOW_MS` (the row builders live in the two clients, not in
     /// `arbos_core`): keep the two in step.
     static let runWindowMs: Int64 = 2 * 60 * 1000
-    /// Space between two bubbles of one run — half of the 8 pt the phone had.
-    static let runGap: CGFloat = 4
-    /// Space a new run opens (a sender change, the window passed, a quoted reply): Grok
-    /// Bot's iPhone turn gap (≈ 15–16 pt measured on `internal/refs/grokbot-ios/ref-01`,
-    /// 1.17 px/pt); was 24.
-    static let turnGap: CGFloat = 16
+    /// Space between two bubbles of one run: 4–5 px on Jacob's 2026-11-01 reference at
+    /// 2.03 px/pt (was 4, and 8 before that).
+    static let runGap: CGFloat = 2
+    /// Space a new run opens (a sender change, the window passed, a quoted reply):
+    /// 24–28 px on the same reference, mean 26 (was Grok Bot's 16, 24 before that).
+    static let turnGap: CGFloat = 13
     /// Space around a centred system line (dates, hand-offs, membership notices).
     static let systemGap: CGFloat = 20
 
@@ -1437,6 +1516,21 @@ struct RowView: View, Equatable {
         return same
     }
 
+    /// Every route this row has for opening the sender's page — the avatar on the lane and
+    /// the name inside the bubble, on a text row and on a media row, for a person and for
+    /// an agent — is built here, so the rule that stands them down inside a search result
+    /// (`ChatSearchClose.rowOwnsInnerTap`) is asked once. `searchHit` is the same flag that
+    /// mounts the row's result tap in ChatView, so exactly the rows that take that tap
+    /// suppress. It is a stored input rather than an `@Environment` read for the reason the
+    /// inputs above are: this view is used `.equatable()`, and an environment read here
+    /// would not re-run the body when the filter opens or closes.
+    private func openProfile(_ target: ProfileTarget) -> () -> Void {
+        return {
+            guard !ChatSearchClose.rowOwnsInnerTap(resultRow: searchHit) else { return }
+            model.toggleProfile(target)
+        }
+    }
+
     /// The widest a bubble on this row may be: the screen minus the chat kind's inset
     /// (`Theme.bubbleInset(people:)`); an incoming people-chat bubble also loses the lane.
     private var maxBubble: CGFloat { Self.maxBubble(width: width, people: people) }
@@ -1466,6 +1560,7 @@ struct RowView: View, Equatable {
     }
 
     var body: some View {
+        let _ = FrameProbe.count(.rowBody)
         #if DEBUG
         let _ = PerfCounters.bump("rowBody")
         let _ = DebugHooks.perfChanges ? Self._printChanges() : ()
@@ -1569,7 +1664,7 @@ struct RowView: View, Equatable {
             let personTarget = model.personTarget(handle: handle, avatarUrl: avatar, chatId: chatId)
             let personName = model.personName(handle: handle) ?? "@\(handle)"
             let personLabel = ProfileToggle.label(name: personName, showing: model.profileShows(personTarget))
-            let openPerson = { model.toggleProfile(personTarget) }
+            let openPerson = openProfile(personTarget)
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
                 avatarColumn {
                     Button(action: openPerson) {
@@ -1622,7 +1717,7 @@ struct RowView: View, Equatable {
             let memberTarget: ProfileTarget = agentId.map { ProfileTarget.agent(projectId: $0) }
                 ?? model.personTarget(handle: handle, avatarUrl: avatar, chatId: chatId)
             let memberLabel = ProfileToggle.label(name: agent.name, showing: model.profileShows(memberTarget))
-            let openMember = { model.toggleProfile(memberTarget) }
+            let openMember = openProfile(memberTarget)
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
                 avatarColumn {
                     Button(action: openMember) { memberAvatar(agent) }
@@ -1964,7 +2059,7 @@ struct RowView: View, Equatable {
         return sender
     }
 
-    /// Match the avatar offset used by people-chat bubbles (26 pt + 8 pt gap).
+    /// Match the avatar offset used by people-chat bubbles (`Theme.memberLane`).
     private var reactionLeading: CGFloat {
         Self.reactionLeading(for: row.kind, composerInset: composerInset)
     }
@@ -1999,11 +2094,11 @@ struct RowView: View, Equatable {
     private func avatarColumn<Avatar: View>(@ViewBuilder avatar: () -> Avatar) -> some View {
         if row.showsAvatar {
             avatar()
-                .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
+                .padding(.leading, Theme.avatarColumnInset)
         } else {
             Color.clear
                 .frame(width: Theme.memberAvatar, height: 1)
-                .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
+                .padding(.leading, Theme.avatarColumnInset)
                 .accessibilityHidden(true)
                 .accessibilityIdentifier("sender-avatar-slot")
         }
@@ -2020,7 +2115,7 @@ struct RowView: View, Equatable {
             let personTarget = model.personTarget(handle: handle, avatarUrl: avatar, chatId: chatId)
             let personName = model.personName(handle: handle) ?? "@\(handle)"
             let personLabel = ProfileToggle.label(name: personName, showing: model.profileShows(personTarget))
-            let openPerson = { model.toggleProfile(personTarget) }
+            let openPerson = openProfile(personTarget)
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
                 avatarColumn {
                     Button(action: openPerson) {
@@ -2050,7 +2145,7 @@ struct RowView: View, Equatable {
             let memberTarget: ProfileTarget = id.map { ProfileTarget.agent(projectId: $0) }
                 ?? model.personTarget(handle: handle, avatarUrl: avatar, chatId: chatId)
             let memberLabel = ProfileToggle.label(name: agent.name, showing: model.profileShows(memberTarget))
-            let openMember = { model.toggleProfile(memberTarget) }
+            let openMember = openProfile(memberTarget)
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
                 avatarColumn {
                     Button(action: openMember) { memberAvatar(agent) }
@@ -2211,6 +2306,7 @@ struct BlockView: View {
     private var muted: Color { ink == nil ? theme.muted : color.opacity(0.72) }
 
     var body: some View {
+        let _ = FrameProbe.count(.blockBody)
         #if DEBUG
         let _ = PerfCounters.bump("blockBody")
         #endif
@@ -2748,16 +2844,26 @@ private struct LiveSenderBar: ViewModifier {
 /// Not an `ObservableObject`: one finished download must not invalidate every
 /// avatar on screen (group-chat scroll lag). Each `PersonAvatar` holds its own
 /// `@State` and awaits `load`.
+///
+/// Bounded: each picture is a 384 px bitmap (~590 KB), so the limit holds about 110 —
+/// more than twice what `warm` asks for. An evicted picture reloads from the URL cache.
 @MainActor
 final class AvatarImageCache {
     static let shared = AvatarImageCache()
 
-    private(set) var images: [String: UIImage] = [:]
+    nonisolated static let costLimitBytes = 64 * 1024 * 1024
+
+    private let images: NSCache<NSString, UIImage> = {
+        let c = NSCache<NSString, UIImage>()
+        c.totalCostLimit = AvatarImageCache.costLimitBytes
+        return c
+    }()
+    /// URLs with a download or decode in flight.
     private var requested: Set<String> = []
     private var waiters: [String: [CheckedContinuation<UIImage?, Never>]] = [:]
 
     func image(for url: String?) -> UIImage? {
-        url.flatMap { images[$0] }
+        url.flatMap { images.object(forKey: $0 as NSString) }
     }
 
     /// Pictures are kept at the largest size a row draws (128 pt hero at 3x). The relay's
@@ -2807,7 +2913,7 @@ final class AvatarImageCache {
     /// changed picture is a new URL. Failures retry with backoff before giving up; a 404 ("no
     /// picture") does not retry.
     func load(_ url: String) async -> UIImage? {
-        if let img = images[url] { return img }
+        if let img = image(for: url) { return img }
         if requested.contains(url) {
             return await withCheckedContinuation { cont in
                 waiters[url, default: []].append(cont)
@@ -2818,14 +2924,15 @@ final class AvatarImageCache {
         var img: UIImage?
         var attempt = 0
         while true {
-            let (data, status) = await Task.detached(priority: .userInitiated) { () -> (Data?, Int) in
+            let (decoded, status) = await Task.detached(priority: .userInitiated) { () -> (UIImage?, Int) in
                 var req = URLRequest(url: u)
                 req.cachePolicy = .returnCacheDataElseLoad
                 guard let (data, resp) = try? await URLSession.shared.data(for: req) else { return (nil, 0) }
                 let code = (resp as? HTTPURLResponse)?.statusCode ?? 200
-                return (code / 100 == 2 ? data : nil, code)
+                guard code / 100 == 2 else { return (nil, code) }
+                return (AvatarImageCache.decode(data), code)
             }.value
-            if let data, let decoded = AvatarImageCache.decode(data) {
+            if let decoded {
                 img = decoded
                 break
             }
@@ -2833,10 +2940,9 @@ final class AvatarImageCache {
             try? await Task.sleep(nanoseconds: AvatarImageCache.retrySeconds[attempt] * 1_000_000_000)
             attempt += 1
         }
+        requested.remove(url)
         if let img {
-            images[url] = img
-        } else {
-            requested.remove(url)
+            images.setObject(img, forKey: url as NSString, cost: AvatarImageCache.cost(of: img))
         }
         let pending = waiters.removeValue(forKey: url) ?? []
         for cont in pending { cont.resume(returning: img) }
@@ -2854,6 +2960,11 @@ final class AvatarImageCache {
         ]
         guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
         return UIImage(cgImage: cg)
+    }
+
+    nonisolated static func cost(of image: UIImage) -> Int {
+        guard let cg = image.cgImage else { return 1 }
+        return cg.bytesPerRow * cg.height
     }
 }
 

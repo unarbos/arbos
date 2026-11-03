@@ -10,8 +10,10 @@ on:
       - "crates/arbos-core/**"
       - "crates/arbos-client/**"
       - "crates/arbos-ffi/**"
+      - "crates/arbos-matrix/**"
       - "scripts/build-xcframework.sh"
       - "packages/ArbosFFI/**"
+      - "assets/avatars/leaves/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
@@ -22,8 +24,10 @@ on:
       - "crates/arbos-core/**"
       - "crates/arbos-client/**"
       - "crates/arbos-ffi/**"
+      - "crates/arbos-matrix/**"
       - "scripts/build-xcframework.sh"
       - "packages/ArbosFFI/**"
+      - "assets/avatars/leaves/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
@@ -40,8 +44,14 @@ concurrency:
 jobs:
   check:
     name: build-xcframework + fastlane test
+    # A branch in this repo already gets the push run; its pull_request run is the same commit again on
+    # GitHub's macOS pool, which allows this repo five jobs at once (2026-10-30: 33 queued, ~4 h wait).
+    # Pull requests from forks have no push run here, so they keep theirs.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: macos-15
-    timeout-minutes: 60
+    # 46-63 min measured on identical content, the spread being runner draw not diff. The old 60
+    # killed runs mid-bundle, which is no verdict rather than a red one; this change took 63.4.
+    timeout-minutes: 90
     env:
       APP_DIR: apps/ios/Arbos
     steps:

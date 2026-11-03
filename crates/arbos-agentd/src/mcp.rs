@@ -103,6 +103,45 @@ pub enum SessionRole {
     Subagent,
 }
 
+/// The bearer a request presented, trimmed; `""` when it presented none.
+fn bearer(headers: &HeaderMap) -> &str {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("")
+        .trim()
+}
+
+/// Which role a bearer token earns here, or `None` for no role at all.
+///
+/// The same check the hook server makes (`hooks::role_for_token`), which this one must not drift
+/// from: both verifiers answer one question from one pair of tokens, so a session either admits
+/// to both or to neither.
+///
+/// Both guards fail closed before any comparison. `ARBOS_MCP_TOKEN` defaults to empty
+/// (`config.rs`) and an absent header reads as `""`, so the bare comparison this replaced matched
+/// the main arm for a request carrying no credential — the highest role, granted anonymously. The
+/// subagent arm was no safer, because `subagent_mcp_token()` hashes the configured value and so is
+/// a constant anyone can compute offline once that value is empty. A workspace that was given a
+/// token refuses nothing it used to accept.
+fn role_for_token(configured: &str, derived: &str, headers: &HeaderMap) -> Option<SessionRole> {
+    if configured.trim().is_empty() {
+        return None;
+    }
+    let tok = bearer(headers);
+    if tok.is_empty() {
+        return None;
+    }
+    if tok == configured {
+        Some(SessionRole::Main)
+    } else if tok == derived {
+        Some(SessionRole::Subagent)
+    } else {
+        None
+    }
+}
+
 /// Tools only the main agent may use: anything that talks to another agent (D69 — subagents
 /// never reach the cross-project surface). `group_send` / `projects_send` are the old names,
 /// still accepted from older sessions.
@@ -882,17 +921,8 @@ pub(crate) fn materialize_handle(a: &Agent, chat_id: &str, note: &str, text: &st
 }
 
 async fn mcp(State(a): State<S>, headers: HeaderMap, Json(req): Json<Value>) -> Response {
-    let tok = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or("");
-    let role = if tok == a.cfg.mcp_token {
-        SessionRole::Main
-    } else if tok == a.cfg.subagent_mcp_token() {
-        SessionRole::Subagent
-    } else {
-        tracing::warn!(got = %tok.chars().take(8).collect::<String>(), "mcp: bad token");
+    let Some(role) = role_for_token(&a.cfg.mcp_token, &a.cfg.subagent_mcp_token(), &headers) else {
+        tracing::warn!(got = %bearer(&headers).chars().take(8).collect::<String>(), "mcp: bad token");
         return (StatusCode::UNAUTHORIZED, "bad token").into_response();
     };
     let id = req.get("id").cloned().unwrap_or(Value::Null);
@@ -937,5 +967,87 @@ mod tests {
         assert!(refusal_for(SessionRole::Main, "send_message").is_none());
         assert!(refusal_for(SessionRole::Main, "group_send").is_none());
         assert!(refusal_for(SessionRole::Main, "projects_send").is_none());
+    }
+
+    fn auth(value: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(
+            axum::http::header::AUTHORIZATION,
+            value.parse().expect("header value"),
+        );
+        h
+    }
+
+    /// `sub_` + sha256("subagent:" + token), as `Config::subagent_mcp_token` derives it.
+    fn derive(token: &str) -> String {
+        use sha2::Digest;
+        let digest = sha2::Sha256::digest(format!("subagent:{token}").as_bytes());
+        format!("sub_{}", hex::encode(&digest[..16]))
+    }
+
+    /// An unconfigured daemon authenticates nobody. `ARBOS_MCP_TOKEN` defaults to empty and an
+    /// absent header reads as `""` too, so the bare comparison this guard replaced handed the
+    /// main role to a request carrying no credential at all. The subagent arm was no safer: it
+    /// hashes the configured value, so with nothing configured it is a constant computable
+    /// offline — asserted here with that very constant, not with a placeholder.
+    #[test]
+    fn an_unset_token_authenticates_nobody() {
+        let computable = derive("");
+        assert_eq!(role_for_token("", &computable, &HeaderMap::new()), None);
+        assert_eq!(role_for_token("", &computable, &auth("Bearer ")), None);
+        assert_eq!(
+            role_for_token("", &computable, &auth(&format!("Bearer {computable}"))),
+            None,
+        );
+        assert_eq!(
+            role_for_token("   ", &computable, &auth("Bearer    ")),
+            None
+        );
+    }
+
+    /// A configured workspace still refuses a request that brings no token.
+    #[test]
+    fn a_request_without_a_token_earns_no_role() {
+        let main = "mcp_0123456789abcdef";
+        assert_eq!(role_for_token(main, &derive(main), &HeaderMap::new()), None,);
+        assert_eq!(role_for_token(main, &derive(main), &auth("Bearer ")), None);
+        assert_eq!(
+            role_for_token(main, &derive(main), &auth("Basic xyz")),
+            None
+        );
+    }
+
+    /// One workspace's token is not another's. Since #2630 each workspace derives its own
+    /// `mcp_…` value, and this is the comparison that has to hold the line: a sibling's token,
+    /// and the sibling's subagent token, earn no role here.
+    #[test]
+    fn one_workspaces_token_is_not_anothers() {
+        let (mine, sibling) = ("mcp_aaaaaaaaaaaaaaaa", "mcp_bbbbbbbbbbbbbbbb");
+
+        assert_eq!(
+            role_for_token(mine, &derive(mine), &auth(&format!("Bearer {mine}"))),
+            Some(SessionRole::Main),
+        );
+        assert_eq!(
+            role_for_token(
+                mine,
+                &derive(mine),
+                &auth(&format!("Bearer {}", derive(mine))),
+            ),
+            Some(SessionRole::Subagent),
+        );
+
+        assert_eq!(
+            role_for_token(mine, &derive(mine), &auth(&format!("Bearer {sibling}"))),
+            None,
+        );
+        assert_eq!(
+            role_for_token(
+                mine,
+                &derive(mine),
+                &auth(&format!("Bearer {}", derive(sibling))),
+            ),
+            None,
+        );
     }
 }

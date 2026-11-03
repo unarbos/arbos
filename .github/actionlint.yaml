@@ -1,0 +1,5 @@
+self-hosted-runner:
+  # Not self-hosted: `xcode-27` is GitHub's hosted preview image (swift-ios27-advisory.yml). actionlint
+  # knows only GA hosted labels, and this list is its one way to accept another.
+  labels:
+    - xcode-27

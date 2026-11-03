@@ -4,7 +4,7 @@
 
 import Foundation
 
-#if DEBUG
+#if DEBUG || ARBOS_FIXTURE
 extension AppModel {
     func loadFixture() {
         isFixture = true
@@ -310,6 +310,38 @@ extension AppModel {
             messages["fx-group-launch"] = Self.longGroupTranscript(rows: rows, before: now - 4 * 3_600_000, rich: DebugHooks.fixtureLongRich)
                 + (messages["fx-group-launch"] ?? [])
         }
+        // `ARBOS_FIXTURE_HOME_ROWS=<n>` (perf baseline): n more DMs under the two above, so the
+        // chat list is long enough to scroll. Initials only, so no picture comes off the network.
+        for i in 0..<DebugHooks.fixtureHomeRows {
+            let id = "fx-pad-\(i)"
+            let person = ChatMember(id: "fx-pad-u\(i)", kind: .user, member: "user:fx-pad-u\(i)", role: "member", handle: "person\(i)",
+                                    avatarUrl: nil, name: "Person \(i)", status: "member", joinedAt: now - 86_400_000, project: nil,
+                                    ownerId: nil, ownerHandle: nil, replyPolicy: nil)
+            let at = now - Int64(i + 2) * 600_000
+            peopleChats.append(PeopleChat(id: id, kind: "dm", createdBy: person.id, createdAt: at, title: "@person\(i)", pending: false,
+                                          members: [person, meMember], headSeq: 3, readSeq: i % 4 == 0 ? 2 : 3, unread: i % 4 == 0,
+                                          lockState: "people_only", lastActivityAt: at, myRole: "member", muted: false, silenced: false))
+            var lines: [Message] = []
+            for k in 0..<3 {
+                let mine = k == 1
+                let sender: String = mine ? "user:fx-me" : person.member
+                let created: Int64 = at - Int64(3 - k) * 60_000
+                let text = "Line \(k + 1) of a padded chat, long enough to fill the preview row in the list."
+                lines.append(Message(id: "\(id)-\(k)", chatId: id, role: .user, sender: sender, status: .done, turn: nil,
+                                     decision: nil, subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil,
+                                     createdAt: created, completedAt: nil, pending: false,
+                                     parts: [.text(id: "\(id)-\(k)t", text: text)],
+                                     hiddenCount: 0, senderHandle: mine ? "jacob" : person.handle,
+                                     senderName: mine ? "Jacob Steeves" : person.name))
+            }
+            messages[id] = lines
+        }
+        if let chatId = DebugHooks.fixtureStreamChat {
+            Task { await fixtureStream(chatId: chatId) }
+        }
+        if let spec = DebugHooks.perfOpens {
+            Task { await fixtureOpens(spec) }
+        }
         // `ARBOS_FIXTURE_DOC=<path>`: the fixture group becomes a real chat doc (a Loro
         // snapshot exported from the relay), so the transcript has the true shape —
         // members, avatars, mentions, replies, media, system rows (long-chat perf rig).
@@ -341,10 +373,12 @@ extension AppModel {
                 messages["fx-group-launch"] = list
             }
         }
+        #if DEBUG
         if let replay = DebugHooks.perfReplay {
             perfReplay(checkpointPath: replay.checkpoint, rowsPath: replay.rows, rooms: DebugHooks.perfReplayRooms,
                        gapMs: DebugHooks.perfReplayGapMs, afterMs: DebugHooks.perfReplayAfterMs)
         }
+        #endif
         // `ARBOS_FIXTURE_WORKING=<n>`: the first n agents of the group (and the opened
         // agent chat's one agent) stream a row with no words yet — "<name> is working".
         if DebugHooks.fixtureWorking > 0 {
@@ -940,6 +974,61 @@ extension AppModel {
             ? "Got `subtensor/` on main. What do you want to do with it?"
             : "Done. Short replies from now on, and I'll keep anything that goes out on Discord to one or two casual lines in your voice."
         append(bubble(resultText))
+    }
+
+    /// `ARBOS_FIXTURE_STREAM=<chat>` (perf baseline): from 15 s after launch, an agent answer
+    /// grows in that chat one word every 40 ms — the cadence of a relay text delta — then
+    /// finishes, and 2 s later the next one starts, until the app quits. Each word does what a
+    /// live token does in the doc's `onChange`: one `messages` write, then `markActivity`.
+    private func fixtureStream(chatId: Id) async {
+        let words = (AppModel.longReview + "\n\n" + AppModel.bubbleSortReply + "\n\n" + AppModel.longReply)
+            .split(separator: " ", omittingEmptySubsequences: false)
+        try? await Task.sleep(nanoseconds: 15_000_000_000)
+        while !Task.isCancelled {
+            let id = newId()
+            var m = assistant(id, chatId, "", at: nowMs())
+            m.status = .streaming
+            m.completedAt = nil
+            if peopleChats.contains(where: { $0.id == chatId }) {
+                m.sender = "agent:fx-foreign-testagent"
+                m.senderHandle = "testagent"
+                m.senderName = "TestAgent"
+            }
+            messages[chatId, default: []].append(m)
+            for n in 1...words.count {
+                try? await Task.sleep(nanoseconds: 40_000_000)
+                m.parts = [.text(id: "\(id)-t", text: words.prefix(n).joined(separator: " "))]
+                if n == words.count {
+                    m.status = .done
+                    m.completedAt = nowMs()
+                }
+                guard let i = messages[chatId]?.lastIndex(where: { $0.id == id }) else { return }
+                messages[chatId]?[i] = m
+                markActivity(chatId: chatId)
+                FrameProbe.count(.streamToken)
+            }
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+        }
+    }
+
+    /// `ARBOS_PERF_OPENS=<chat>[,<chat>…]:<n>` (perf baseline): from 6 s after launch, n chat
+    /// opens through `open(peopleChat:)`, the chats in turn — 1.5 s on the chat list, then
+    /// 3.5 s in the chat. No XCUITest in the loop, so a profile of an open holds only the
+    /// app's own work. Each open is a `PerfSignpost` `open-chat` interval.
+    private func fixtureOpens(_ spec: String) async {
+        let parts = spec.split(separator: ":")
+        let chats = parts.first.map { $0.split(separator: ",").map(String.init) } ?? []
+        let count = parts.count > 1 ? Int(parts[1]) ?? 10 : 10
+        guard !chats.isEmpty else { return }
+        try? await Task.sleep(nanoseconds: 6_000_000_000)
+        for i in 0..<count {
+            path = []
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard let chat = peopleChats.first(where: { $0.id == chats[i % chats.count] }) else { return }
+            open(peopleChat: chat)
+            try? await Task.sleep(nanoseconds: 3_500_000_000)
+        }
+        path = []
     }
 
     /// A several-paragraph agent answer with a list and a code span — the shape

@@ -30,6 +30,16 @@ enum DebugHooks {
     static var composerDraft: String? { value("ARBOS_COMPOSER_DRAFT").flatMap { $0.isEmpty ? nil : $0 } }
     /// Rig (#1596): print each people-chat send's text and `mentions` ids to the console.
     static var traceSends: Bool { value("ARBOS_TRACE_SENDS") == "1" }
+    /// Rig (#2404): print what moves the transcript around a reveal — the target's place in
+    /// the list, the row window before and after, and every near-top grow step with the
+    /// scroll offset that triggered it. A reveal that lands short does so because something
+    /// moved the content under it, and this says what and when.
+    static var traceReveal: Bool { value("ARBOS_TRACE_REVEAL") == "1" }
+    /// Rig (#2404): reveal a message the way the code did before the fix — stretch the row
+    /// window back to the tail, then one `scrollTo` and no correction — so one build can
+    /// measure the symptom beside the fix. Goes away with the rig; nothing but a measurement
+    /// should ever set it.
+    static var revealPreFix: Bool { value("ARBOS_REVEAL_PRE_FIX") == "1" }
     static var pairCode: String? { value("ARBOS_PAIR_CODE") }
     /// Rig: a test-token sign-in skips the first-login stages (the account exists already).
     static var skipFirstLogin: Bool { value("ARBOS_SKIP_FIRST_LOGIN") == "1" }
@@ -190,6 +200,12 @@ enum DebugHooks {
     /// "Launch week" with this many synthetic rows — mixed people / agent prose with
     /// markdown, relay system lines, replies, attachments.
     static var fixtureLongRows: Int? { value("ARBOS_FIXTURE_LONG_ROWS").flatMap { Int($0) } }
+    /// Perf baseline: pad the fixture chat list with this many DMs so it scrolls.
+    static var fixtureHomeRows: Int { value("ARBOS_FIXTURE_HOME_ROWS").flatMap { Int($0) } ?? 0 }
+    /// Perf baseline: this chat gets an agent answer streamed word by word, over and over.
+    static var fixtureStreamChat: String? { value("ARBOS_FIXTURE_STREAM") }
+    /// Perf baseline: `<chat>[,<chat>…]:<n>` — n timed opens from the chat list, in turn.
+    static var perfOpens: String? { value("ARBOS_PERF_OPENS") }
     /// Log frame pacing (dropped frames, worst frame, time over budget) and memory every
     /// 2 s to `com.unarbos.arbos.ios` / `perf` for the duration of the launch.
     static let perfLog: Bool = value("ARBOS_PERF_LOG") == "1"
@@ -245,8 +261,34 @@ enum DebugHooks {
         #if DEBUG
         let v = ProcessInfo.processInfo.environment[key] ?? ""
         return v.isEmpty ? nil : v
+        #elseif ARBOS_FIXTURE
+        let v = launchEnvironment[key] ?? ""
+        return v.isEmpty ? nil : v
         #else
         return nil
+        #endif
+    }
+
+    #if ARBOS_FIXTURE
+    /// Read once: a Release build measured for performance must not pay Debug's per-call
+    /// copy of the environment inside row bodies.
+    private static let launchEnvironment = ProcessInfo.processInfo.environment
+    #endif
+
+    /// One line at boot naming the `ARBOS_` variables this process actually received.
+    ///
+    /// A rig run whose launch environment does not arrive looks exactly like a rig run whose
+    /// app is broken: no fixture, no landing screen, no trace, and a UI test that waits out
+    /// its timeout on an element that was never going to exist. Four cases and a heavy slot
+    /// went on telling those two apart. The line costs one `print` per launch in Debug and
+    /// settles it in the first second of the log.
+    static func logEnvironment() {
+        #if DEBUG
+        let seen = ProcessInfo.processInfo.environment.keys
+            .filter { $0.hasPrefix("ARBOS_") }
+            .sorted()
+        // Values can carry a relay token; the names are what a rig needs and are safe.
+        print("[arbos rig] launch environment: \(seen.isEmpty ? "no ARBOS_ variables" : seen.joined(separator: " "))")
         #endif
     }
 }

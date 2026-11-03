@@ -19,7 +19,7 @@ use arbos_core::wire::{BoxState, PROJECT_DOC_CHAT_ID};
 
 use crate::auth::Principal;
 use crate::boxes::{self, Provider};
-use crate::db::{Chat, Project};
+use crate::db::{Chat, Project, SkillScope};
 use crate::state::{AppState, AuthMode};
 
 pub(crate) type ApiResult = Result<Response, (StatusCode, String)>;
@@ -73,8 +73,37 @@ pub async fn healthz(State(state): State<AppState>) -> Response {
         // a retired model shows here before a person's Generate fails.
         let images = state.image_health.try_lock().ok().and_then(|g| g.clone());
         obj.insert("images".into(), serde_json::json!(images));
+        // Root-volume headroom on the host (the relay DB, the deploy worker's image builds and the
+        // poller's state all live on it): the operators' guards read `disk_low` here and stop
+        // queueing image builds / gate runs instead of letting the host fill up (94–99 % on
+        // 2026-10-26 13:16; the consumer was outside Arbos, the consequence would not have been).
+        obj.insert("disk".into(), disk_json());
     }
     Json(v).into_response()
+}
+
+/// `{"free_gb": N, "total_gb": N, "disk_low": bool}` for the filesystem under `ARBOS_DISK_WATCH_PATH` (default
+/// `/var/lib/arbos-relay`, i.e. the host root volume in production);
+/// `disk_low` when free space is under `ARBOS_DISK_LOW_GB` (default 40).
+fn disk_json() -> serde_json::Value {
+    let path = std::env::var("ARBOS_DISK_WATCH_PATH")
+        .unwrap_or_else(|_| "/var/lib/arbos-relay".to_owned());
+    let low_gb: u64 = std::env::var("ARBOS_DISK_LOW_GB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(40);
+    // statvfs field widths differ per libc (u32 on macOS, u64 on Linux): the casts are needed on one of them.
+    #[allow(clippy::unnecessary_cast)]
+    match nix::sys::statvfs::statvfs(path.as_str()) {
+        Ok(st) => {
+            let bsize = st.fragment_size() as u64;
+            let avail = st.blocks_available() as u64 * bsize;
+            let total = st.blocks() as u64 * bsize;
+            let free_gb = avail / 1_000_000_000;
+            serde_json::json!({ "free_gb": free_gb, "total_gb": total / 1_000_000_000, "disk_low": free_gb < low_gb, "low_gb": low_gb })
+        }
+        Err(_) => serde_json::json!(null),
+    }
 }
 
 // ---- pairing (D35) ----------------------------------------------------------------------------
@@ -177,10 +206,9 @@ pub async fn revoke_device(
     // Same revocation as `DELETE /auth/devices/{id}`: the legacy path only flagged the device row
     // and left its refresh tokens live (14 such devices since Oct 14), so a "revoked" device could
     // still mint access tokens.
-    let ok = state.db.revoke_device_fully(&id).map_err(internal)?;
-    if ok {
-        crate::matrix::servers::revoke_device(&state, &id).await;
-    }
+    let ok = crate::signin::revoke_device_everywhere(&state, &id)
+        .await
+        .map_err(internal)?;
     Ok(if ok {
         StatusCode::NO_CONTENT
     } else {
@@ -284,7 +312,10 @@ pub async fn create_project(
     };
     let now = now_ms();
     let id = ulid();
-    let owner = principal.user_id().unwrap_or("u_default").to_owned();
+    let owner = principal
+        .user_id()
+        .unwrap_or(crate::auth::LEGACY_USER)
+        .to_owned();
     // Defaults are deduped within the user's (tree, colour) pairs so sibling tiles differ.
     let taken: Vec<(String, String)> = state
         .db
@@ -539,14 +570,7 @@ pub async fn get_project(
     principal: Principal,
     Path(id): Path<String>,
 ) -> ApiResult {
-    let p = state
-        .db
-        .project(&id)
-        .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !state.allows(&principal, &p.id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    let p = project_for(&state, &principal, &id)?;
     let viewer = match &principal {
         Principal::Device { user_id, .. } => Some(user_id.clone()),
         Principal::Box { .. } | Principal::Admin => None,
@@ -564,7 +588,10 @@ pub async fn get_project(
         .usage_since(&p.id, start_of_day())
         .map_err(internal)?;
     // The box polls this every 3 s; a changed marker tells it to refetch `/skills/index` (F5).
-    let skills_rev = state.db.skills_rev(Some(&p.id)).map_err(internal)?;
+    let skills_rev = state
+        .db
+        .skills_rev(&SkillScope::Project(p.id.clone()))
+        .map_err(internal)?;
     let mut v = serde_json::to_value(GetProjectResponseDto {
         project: project_dto(&state, &p).await,
         chats,
@@ -668,14 +695,7 @@ pub async fn patch_project(
     Path(id): Path<String>,
     Json(b): Json<PatchProjectBody>,
 ) -> ApiResult {
-    let p = state
-        .db
-        .project(&id)
-        .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !state.owns(&principal, &p.id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    let p = project_owned_by(&state, &principal, &id)?;
     if let Some(o) = b.models.as_ref().and_then(Value::as_object) {
         for (slot, v) in o {
             if !matches!(
@@ -890,10 +910,7 @@ pub async fn archive_project(
             "a signed-in device is required".into(),
         ));
     };
-    let id = resolve_project_id(&state, &id)?;
-    if !state.allows(&principal, &id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    let id = resolve_project_id(&state, &principal, &id)?;
     let at = state
         .db
         .set_space_archived(user_id, &id, "project", b.archived)
@@ -922,10 +939,7 @@ pub async fn patch_chat(
     Path((id, chat)): Path<(String, String)>,
     Json(b): Json<PatchChatBody>,
 ) -> ApiResult {
-    let id = resolve_project_id(&state, &id)?;
-    if !state.allows(&principal, &id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    let id = resolve_project_id(&state, &principal, &id)?;
     let ok = state
         .db
         .update_chat_title(&id, &chat, b.title.trim())
@@ -944,8 +958,9 @@ pub async fn delete_chat(
     principal: Principal,
     Path((id, chat)): Path<(String, String)>,
 ) -> ApiResult {
-    let id = resolve_project_id(&state, &id)?;
-    if !state.allows(&principal, &id) || principal.is_box() {
+    let id = resolve_project_id(&state, &principal, &id)?;
+    // Closing a tab is a person's doing; a box keeps its own chats open.
+    if principal.is_box() {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     match state.db.close_chat(&id, &chat).map_err(internal)? {
@@ -969,10 +984,7 @@ pub async fn chat_history(
     Path((id, chat)): Path<(String, String)>,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> ApiResult {
-    let id = resolve_project_id(&state, &id)?;
-    if !state.allows(&principal, &id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    let id = resolve_project_id(&state, &principal, &id)?;
     let sb = state
         .db
         .box_for_project(&id)
@@ -1006,16 +1018,79 @@ pub async fn chat_history(
     }
 }
 
-/// Accept a project id or name in the path and return the id.
-pub(crate) fn resolve_project_id(
+/// The one answer a project lookup gives when it does not hand a project back. A project that
+/// does not exist and a project the caller may not touch must be indistinguishable: while they
+/// differed, `GET /projects/{name}/pushes` told a caller which names were taken, and the names
+/// were all an attacker needed to reach other people's agents (reported 2026-11-02).
+pub(crate) fn no_such_project() -> (StatusCode, String) {
+    (StatusCode::NOT_FOUND, "no such project".to_owned())
+}
+
+/// Accept a project id or name in the path and return the row, without asking who wants it.
+/// Only for handlers that decide access on something wider than the project itself (a group's
+/// roster, say); they must refuse with [`no_such_project`] so the two cases stay identical.
+pub(crate) fn lookup_project(
     state: &AppState,
     id_or_name: &str,
-) -> Result<String, (StatusCode, String)> {
-    match state.db.project(id_or_name) {
-        Ok(Some(p)) => Ok(p.id),
-        Ok(None) => Err((StatusCode::NOT_FOUND, "no such project".into())),
+) -> Result<Project, (StatusCode, String)> {
+    state
+        .db
+        .project(id_or_name.trim())
+        .map_err(internal)?
+        .ok_or_else(no_such_project)
+}
+
+/// Accept a project id or name in the path and return the row, as this caller. A project the
+/// caller may not act on answers exactly like one that is not there.
+pub(crate) fn project_for(
+    state: &AppState,
+    principal: &Principal,
+    id_or_name: &str,
+) -> Result<Project, (StatusCode, String)> {
+    let wanted = id_or_name.trim();
+    // A name is matched against the caller's own agents first. Names are not unique across
+    // owners and the plain lookup hands back whichever matching row was active last, so without
+    // this a caller's own `Lium` could resolve to a stranger's and then be refused.
+    if let Some(user_id) = principal.user_id() {
+        if let Some(p) = state
+            .db
+            .project_of_user_by_name(user_id, wanted)
+            .map_err(internal)?
+        {
+            return Ok(p);
+        }
+    }
+    match state.db.project(wanted) {
+        Ok(Some(p)) if state.allows(principal, &p.id) => Ok(p),
+        Ok(_) => Err(no_such_project()),
         Err(e) => Err(internal(e)),
     }
+}
+
+/// [`project_for`], narrowed to the project's owner. Routes that reshape a project or drive its
+/// box use this. The refusal below is not the one an outsider meets: [`project_for`] has already
+/// hidden the project from anyone outside it, so only an invited member — who can see the project
+/// anyway, and so learns nothing from the wording — can reach it.
+pub(crate) fn project_owned_by(
+    state: &AppState,
+    principal: &Principal,
+    id_or_name: &str,
+) -> Result<Project, (StatusCode, String)> {
+    let p = project_for(state, principal, id_or_name)?;
+    if !state.owns(principal, &p.id) {
+        return Err((StatusCode::FORBIDDEN, "not your project".into()));
+    }
+    Ok(p)
+}
+
+/// [`project_for`], keeping only the id. Takes the principal so that no route can resolve a
+/// project without saying who is asking.
+pub(crate) fn resolve_project_id(
+    state: &AppState,
+    principal: &Principal,
+    id_or_name: &str,
+) -> Result<String, (StatusCode, String)> {
+    project_for(state, principal, id_or_name).map(|p| p.id)
 }
 
 /// The project record as clients see it (additive; `arbos-mac` maps it onto its `Project`).
@@ -1210,14 +1285,7 @@ pub async fn project_status(
     principal: Principal,
     Path(id): Path<String>,
 ) -> ApiResult {
-    let p = state
-        .db
-        .project(&id)
-        .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !state.allows(&principal, &p.id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    let p = project_for(&state, &principal, &id)?;
     let (bs, since) = state.box_state(&p.user_id).await;
     let mut provider = boxes::provider_status(&state, &p.user_id).await;
     // Laptops cannot reach a Daytona preview URL without its token: hand them the relay's proxy instead.
@@ -1544,7 +1612,7 @@ pub async fn machine_migrate(
 ) -> ApiResult {
     let user_id = match &principal {
         Principal::Device { user_id, .. } => user_id.clone(),
-        Principal::Admin => "u_default".to_owned(),
+        Principal::Admin => crate::auth::LEGACY_USER.to_owned(),
         Principal::Box { .. } => return Err((StatusCode::FORBIDDEN, "devices only".into())),
     };
     let reports = crate::migrate::migrate_user(&state, &user_id, q.project.as_deref(), q.force)
@@ -1636,14 +1704,7 @@ pub async fn create_chat(
     Path(id): Path<String>,
     Json(b): Json<CreateChatBody>,
 ) -> ApiResult {
-    let p = state
-        .db
-        .project(&id)
-        .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !state.allows(&principal, &p.id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    let p = project_for(&state, &principal, &id)?;
     let kind = match b.kind.as_deref() {
         None | Some("chat") => "chat",
         Some("projects") => "projects",
@@ -1761,14 +1822,7 @@ pub async fn list_chats(
     principal: Principal,
     Path(id): Path<String>,
 ) -> ApiResult {
-    let p = state
-        .db
-        .project(&id)
-        .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !state.allows(&principal, &p.id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    let p = project_for(&state, &principal, &id)?;
     let viewer = match &principal {
         Principal::Device { user_id, .. } => Some(user_id.clone()),
         Principal::Box { .. } | Principal::Admin => None,
@@ -1792,14 +1846,7 @@ pub async fn wake(
     principal: Principal,
     Path(id): Path<String>,
 ) -> ApiResult {
-    let p = state
-        .db
-        .project(&id)
-        .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !state.allows(&principal, &p.id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    let p = project_for(&state, &principal, &id)?;
     boxes::ensure_awake(&state, &p.user_id, "api").await;
     let (bs, since) = state.box_state(&p.user_id).await;
     Ok(Json(json!({ "box": bs, "since": since })).into_response())
@@ -1810,12 +1857,9 @@ pub async fn start(
     principal: Principal,
     Path(id): Path<String>,
 ) -> ApiResult {
-    let p = state
-        .db
-        .project(&id)
-        .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !state.allows(&principal, &p.id) || principal.is_box() {
+    let p = project_for(&state, &principal, &id)?;
+    // A box keeps the agent it serves running; this is a person's switch.
+    if principal.is_box() {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     if state.upgrading.lock().await.contains_key(&p.user_id) {
@@ -1843,12 +1887,9 @@ pub async fn stop(
     Path(id): Path<String>,
     Query(q): Query<StopQuery>,
 ) -> ApiResult {
-    let p = state
-        .db
-        .project(&id)
-        .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !state.owns(&principal, &p.id) || principal.is_box() {
+    let p = project_owned_by(&state, &principal, &id)?;
+    // A box keeps the agent it serves running; this is a person's switch.
+    if principal.is_box() {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     boxes::stop_box(&state, &p.user_id, q.force)
@@ -1870,10 +1911,7 @@ pub async fn keepalive(
     Path(id): Path<String>,
     Json(b): Json<KeepaliveBody>,
 ) -> ApiResult {
-    let id = resolve_project_id(&state, &id)?;
-    if !state.allows(&principal, &id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    let id = resolve_project_id(&state, &principal, &id)?;
     let owner = state
         .user_of(&id)
         .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
@@ -1918,7 +1956,10 @@ fn workspace_json(state: &AppState, p: &Project) -> Result<Value, (StatusCode, S
     let chats = state.db.list_chats(&p.id).map_err(internal)?;
     let pushes = state.db.take_pushes(&p.id).map_err(internal)?;
     let mut project = serde_json::to_value(p).unwrap_or(Value::Null);
-    project["skills_rev"] = json!(state.db.skills_rev(Some(&p.id)).map_err(internal)?);
+    project["skills_rev"] = json!(state
+        .db
+        .skills_rev(&SkillScope::Project(p.id.clone()))
+        .map_err(internal)?);
     project["primary_chat_id"] = json!(primary_chat_id(state, p));
     project["avatar_color_index_effective"] = json!(crate::avatar::effective_color_index(
         &p.id,
@@ -2018,7 +2059,10 @@ pub async fn box_projects(State(state): State<AppState>, principal: Principal) -
             .avatar
             .clone()
             .unwrap_or_else(|| crate::avatar::default_for(&p.id, &state.cfg.avatar_slugs)));
-        project["skills_rev"] = json!(state.db.skills_rev(Some(&p.id)).map_err(internal)?);
+        project["skills_rev"] = json!(state
+            .db
+            .skills_rev(&SkillScope::Project(p.id.clone()))
+            .map_err(internal)?);
         if let Ok(Some(src)) = state.db.project_fork_source(&p.id) {
             project["forked_from"] = json!(src);
         }
@@ -2085,18 +2129,10 @@ pub async fn push(
     Path(id): Path<String>,
     Json(b): Json<PushBody>,
 ) -> ApiResult {
-    let p = state
-        .db
-        .project(&id)
-        .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
     // The write side was open to any signed-in device or box until 2026-10-26 (#1951): a push is
-    // a message into that project's agent plus a wake of its box, so the caller must be allowed on
-    // the project — its owner's devices and boxes, or an invited member. Cross-user agent traffic
-    // goes through /agent-messages and its grants, never through here.
-    if !state.allows(&principal, &p.id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    // a message into that project's agent plus a wake of its box. Cross-user agent traffic goes
+    // through /agent-messages and its grants, never through here.
+    let p = project_for(&state, &principal, &id)?;
     state
         .db
         .enqueue_push(&p.id, &b.kind, &b.payload)
@@ -2113,10 +2149,7 @@ pub async fn take_pushes(
     principal: Principal,
     Path(id): Path<String>,
 ) -> ApiResult {
-    let id = resolve_project_id(&state, &id)?;
-    if !state.allows(&principal, &id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    let id = resolve_project_id(&state, &principal, &id)?;
     let pushes = state.db.take_pushes(&id).map_err(internal)?;
     Ok(Json(
         pushes
@@ -2132,10 +2165,7 @@ pub async fn usage(
     principal: Principal,
     Path(id): Path<String>,
 ) -> ApiResult {
-    let id = resolve_project_id(&state, &id)?;
-    if !state.allows(&principal, &id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    let id = resolve_project_id(&state, &principal, &id)?;
     let today = state
         .db
         .usage_since(&id, start_of_day())
@@ -2159,10 +2189,7 @@ pub async fn record_timing(
     Path(id): Path<String>,
     Json(b): Json<TimingBody>,
 ) -> ApiResult {
-    let id = resolve_project_id(&state, &id)?;
-    if !state.allows(&principal, &id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    let id = resolve_project_id(&state, &principal, &id)?;
     state
         .db
         .record_timing(&id, &b.kind, b.ms, b.detail.as_deref())
@@ -2188,10 +2215,7 @@ pub async fn set_activity(
     Path(id): Path<String>,
     Json(b): Json<ActivityBody>,
 ) -> ApiResult {
-    let id = resolve_project_id(&state, &id)?;
-    if !state.allows(&principal, &id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    let id = resolve_project_id(&state, &principal, &id)?;
     let mut map = state.activity.lock().await;
     let jobs = b
         .jobs
@@ -2234,10 +2258,7 @@ pub async fn record_audit(
     Path(id): Path<String>,
     Json(entry): Json<Value>,
 ) -> ApiResult {
-    let id = resolve_project_id(&state, &id)?;
-    if !state.allows(&principal, &id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    let id = resolve_project_id(&state, &principal, &id)?;
     let kind = entry
         .get("kind")
         .and_then(Value::as_str)
@@ -2262,10 +2283,7 @@ pub async fn list_audit(
     Path(id): Path<String>,
     Query(q): Query<AuditQuery>,
 ) -> ApiResult {
-    let id = resolve_project_id(&state, &id)?;
-    if !state.allows(&principal, &id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
+    let id = resolve_project_id(&state, &principal, &id)?;
     let limit = q.limit.unwrap_or(200).clamp(1, 1000);
     let entries = state.db.audit(&id, limit).map_err(internal)?;
     Ok(Json(json!({ "project_id": id, "entries": entries })).into_response())
@@ -2515,15 +2533,30 @@ mod primary_chat_tests {
             .unwrap();
         assert_eq!(row["archived_at"], json!(at));
         assert!(state.db.project(&project).unwrap().is_some());
-        // Bob's device cannot touch alice's project; alice unarchives and the flag is gone.
+        // Bob's device cannot touch alice's project, and is told only that there is no such
+        // project — the same words it gets for a project that truly is not there, so the
+        // route cannot be asked which ids and names are taken.
         let denied = archive_project(
             State(state.clone()),
-            bob_dev,
+            bob_dev.clone(),
             Path(project.clone()),
             Json(ArchiveBody { archived: true }),
         )
         .await;
-        assert_eq!(denied.err().map(|(s, _)| s), Some(StatusCode::FORBIDDEN));
+        let imaginary = archive_project(
+            State(state.clone()),
+            bob_dev,
+            Path("01JUNKJUNKJUNKJUNKJUNKJUNK".to_owned()),
+            Json(ArchiveBody { archived: true }),
+        )
+        .await;
+        assert_eq!(
+            denied.as_ref().err().map(|(s, _)| *s),
+            Some(StatusCode::NOT_FOUND)
+        );
+        assert_eq!(denied.err(), imaginary.err());
+
+        // Alice unarchives and the flag is gone.
         archive_project(
             State(state.clone()),
             dev,
