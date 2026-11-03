@@ -60,6 +60,32 @@ final class SwipeDirectionsUITests: XCTestCase {
         app.descendants(matching: .any).matching(identifier: "composer-reply-preview").firstMatch
     }
 
+    /// `g2b`'s caption, enough of it to tell that row from its neighbours: `g2` is an
+    /// attachment-only message quoted by its file name, `g3` is Mira's signup link.
+    private static let albumQuote = "Deck, dashboard"
+
+    /// The composer is quoting the message that was swiped, not merely quoting something.
+    ///
+    /// "A reply preview exists" is a weaker claim than it looks. `RowFrameIndex.replyableRow`
+    /// breaks ties toward the *smallest* frame containing the touch, and a tall album overlaps
+    /// its neighbours, so a swipe that replies to the wrong row satisfies a bare existence
+    /// check. The preview combines its children (`composer-reply-preview`), so its label
+    /// carries both "Replying to @sam" and `Quote.line` of the original — which is what makes
+    /// the quoted message identifiable from here.
+    ///
+    /// The failure prints the whole label rather than just the missing fragment: which row was
+    /// quoted instead is the thing worth knowing from a gate log, and re-deriving it from a
+    /// screenshot costs a cycle.
+    private func assertQuotes(_ app: XCUIApplication, _ expected: String,
+                              file: StaticString = #filePath, line: UInt = #line) {
+        let preview = replyPreview(app)
+        XCTAssertTrue(preview.waitForExistence(timeout: settle),
+                      "the reply quote is in the composer", file: file, line: line)
+        XCTAssertTrue(preview.label.contains(expected),
+                      "the quote is the swiped message — wanted \"\(expected)\", got \"\(preview.label)\"",
+                      file: file, line: line)
+    }
+
     /// The element published as `bubble:<id>`, resolved to exactly one.
     ///
     /// A row that draws several accessibility elements publishes the identifier on each of them
@@ -250,7 +276,7 @@ final class SwipeDirectionsUITests: XCTestCase {
     func testSwipeLeftOnAnAlbumBubbleReplies() {
         let app = launchGroup()
         swipeLeft(on: revealBubble(app, "g2b"), app)
-        XCTAssertTrue(replyPreview(app).waitForExistence(timeout: settle), "the album's reply quote is in the composer")
+        assertQuotes(app, Self.albumQuote)
         XCTAssertTrue(chatBack(app).exists, "a left swipe never goes back")
     }
 
