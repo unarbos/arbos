@@ -22,12 +22,12 @@ use crate::model::{
     MembershipNotice, NoticeSubject, OptimisticNotice, Person, Reachable, Sender, Voice,
 };
 use crate::model::{
-    new_id, now_ms, Attachment, AttachmentKind, AttachmentSource, BoxReport, BoxState, ChannelSel,
-    ChannelsView, Chat, ChatKind, ConnectorsView, DevicesView, Effort, GifPage, Id, Job,
-    JobRollout, Link, LinkState, LocalView, Machine, MediaPick, Message, MessageBody,
-    MessageStatus, NewSecret, Part, Project, ProjectDocView, ProjectSecrets, QuestionState,
-    ReplyRef, Role, Routine, RoutineRun, RoutineTrigger, SecretDirector, SecretScope, SecretsView,
-    ServerInfo, Skill, StatusKind, StickerPack,
+    new_id, now_ms, AgentLinkReveal, AgentLinksView, Attachment, AttachmentKind, AttachmentSource,
+    BoxReport, BoxState, ChannelSel, ChannelsView, Chat, ChatKind, ConnectorsView, DevicesView,
+    Effort, GifPage, Id, Job, JobRollout, Link, LinkState, LocalView, Machine, MediaPick, Message,
+    MessageBody, MessageStatus, NewSecret, Part, Project, ProjectDocView, ProjectSecrets,
+    QuestionState, ReplyRef, Role, Routine, RoutineRun, RoutineTrigger, SecretDirector,
+    SecretScope, SecretsView, ServerInfo, Skill, StatusKind, StickerPack,
 };
 use crate::palette;
 use crate::search;
@@ -870,6 +870,11 @@ pub struct AppState {
     pub secrets: SecretsView,
     /// Settings → Devices (`GET /auth/devices`).
     pub devices: DevicesView,
+    /// Settings → Agent access link (`GET /me/agent-links`).
+    pub agent_links: AgentLinksView,
+    /// The copy sheet over the page, after a mint: the one screen a link's URL
+    /// exists on. It is never written anywhere else and never comes back.
+    pub agent_link_reveal: Option<AgentLinkReveal>,
     /// Agent profile → Secrets, per project.
     pub project_secrets: std::collections::HashMap<Id, ProjectSecrets>,
     /// Standing shell approvals per agent (#1544), loaded when the agent pane opens.
@@ -1345,6 +1350,8 @@ impl AppState {
             connectors: ConnectorsView::default(),
             secrets: SecretsView::default(),
             devices: DevicesView::default(),
+            agent_links: AgentLinksView::default(),
+            agent_link_reveal: None,
             project_secrets: std::collections::HashMap::new(),
             shell_grants: std::collections::HashMap::new(),
             handoff: std::collections::HashMap::new(),
@@ -3161,6 +3168,28 @@ impl AppState {
                     Err(why) => self.devices.error = Some(why),
                 }
                 self.devices.loaded = true;
+                cx.notify();
+            }
+            SyncEvent::AgentLinks(result) => {
+                match result {
+                    Ok(items) => {
+                        self.agent_links.items = items;
+                        self.agent_links.error = None;
+                    }
+                    Err(why) => self.agent_links.error = Some(why),
+                }
+                self.agent_links.loaded = true;
+                cx.notify();
+            }
+            SyncEvent::AgentLinkMinted(result) => {
+                self.agent_links.minting = false;
+                match result {
+                    Ok(reveal) => {
+                        self.agent_links.error = None;
+                        self.agent_link_reveal = Some(reveal);
+                    }
+                    Err(why) => self.agent_links.error = Some(why),
+                }
                 cx.notify();
             }
             SyncEvent::Routines {
@@ -11373,6 +11402,65 @@ impl AppState {
             return;
         }
         self.command(ClientCommand::DeviceRevoke { id });
+        cx.notify();
+    }
+
+    // ----- agent access links (Settings → Agent access link) --------------
+
+    /// The page opened: ask the relay for the list. The last list shows
+    /// meanwhile, so the page is never blank on a revisit.
+    pub fn agent_links_refresh(&mut self, cx: &mut Context<Self>) {
+        self.agent_links.error = None;
+        self.command(ClientCommand::AgentLinksRefresh);
+        cx.notify();
+    }
+
+    /// Make one link. The URL comes back on the copy sheet and nowhere else,
+    /// so there is nothing optimistic to show here: the list waits for the
+    /// relay.
+    pub fn mint_agent_link(
+        &mut self,
+        label: String,
+        scope: crate::ui::agent_links::Scope,
+        ttl_hours: i64,
+        cx: &mut Context<Self>,
+    ) {
+        if self.agent_links.minting {
+            return;
+        }
+        self.agent_links.minting = true;
+        self.agent_links.error = None;
+        self.command(ClientCommand::AgentLinkMint {
+            label,
+            scope: scope.wire(),
+            ttl_hours,
+        });
+        cx.notify();
+    }
+
+    /// Cut a link off. The row goes at once, as the footnote promises; the
+    /// relay's next list confirms it.
+    pub fn revoke_agent_link(&mut self, id: Id, cx: &mut Context<Self>) {
+        if !crate::ui::agent_links::remove(&mut self.agent_links.items, &id) {
+            return;
+        }
+        self.command(ClientCommand::AgentLinkRevoke { id });
+        cx.notify();
+    }
+
+    /// The copy row was pressed. This unlocks Done: the sheet will not let the
+    /// user leave a link they never took.
+    pub fn mark_agent_link_copied(&mut self, cx: &mut Context<Self>) {
+        if let Some(reveal) = self.agent_link_reveal.as_mut() {
+            reveal.copied = true;
+            cx.notify();
+        }
+    }
+
+    /// Done or ×. The URL leaves memory with the sheet.
+    pub fn close_agent_link_reveal(&mut self, cx: &mut Context<Self>) {
+        self.agent_link_reveal = None;
+        self.command(ClientCommand::AgentLinksRefresh);
         cx.notify();
     }
 

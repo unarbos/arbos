@@ -1,3 +1,5 @@
+pub mod agent_link_reveal;
+pub mod agent_links;
 pub mod agent_picker;
 pub mod approve;
 pub mod attachments;
