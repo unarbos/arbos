@@ -689,6 +689,11 @@ pub const USER_BLOB_PREFIX: &str = "users:";
 
 /// `GET /projects/{id}/avatar.jpg` — the agent's current picture (the blob its `image_key`
 /// names), public like `GET /avatars/{user}.jpg` (the same role as a GitHub CDN avatar URL).
+/// The id and nothing else: this route takes no principal, so while it also matched on `name` a
+/// guess at a name answered with the picture when someone held that name and 404 when nobody
+/// did — a list of every agent on the relay, readable by anyone (`api::no_such_project`,
+/// reported 2026-11-02). Clients build this URL from the id already (`arbos-mac`'s
+/// `sync::agent_avatar`, iOS `Project.pictureURL`).
 /// Why not `/blob/{project}/{key}`: that slot is the owner's and the project's guests' (it holds
 /// the agent's working files too), so a viewer who only shares a group with the agent got 403
 /// and drew the automatic leaf instead of the owner's picture (Jacob, 2026-10-25: "Hezbola,
@@ -701,8 +706,8 @@ pub async fn project_avatar(
     axum::extract::Query(size): axum::extract::Query<crate::avatar_image::SizeQuery>,
 ) -> Response {
     let project_id = file.strip_suffix(".jpg").unwrap_or(file.as_str());
-    let Ok(Some(p)) = state.db.project(project_id) else {
-        return crate::signin::api_error(StatusCode::NOT_FOUND, "not_found", "no such agent");
+    let Ok(Some(p)) = state.db.project_by_id(project_id) else {
+        return crate::signin::api_error(StatusCode::NOT_FOUND, "not_found", "no picture");
     };
     let Some(key) = p
         .image_key
