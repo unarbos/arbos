@@ -90,15 +90,20 @@ impl Refused {
     }
 }
 
+/// Whether this raw token is the one configured admin token. Split out of [`resolve_checked`] so
+/// `admin_audit` can ask the question without the device and box lookups — those touch the
+/// database and bump `last_seen`, which an audit layer running on every request must not do.
+pub fn is_admin_token(state: &AppState, token: &str) -> bool {
+    !token.is_empty() && state.cfg.admin_token.as_deref() == Some(token)
+}
+
 /// Resolve a raw token string to a principal, or say why not.
 pub fn resolve_checked(state: &AppState, token: &str) -> Result<Principal, Refused> {
     if token.is_empty() {
         return Err(Refused::Missing);
     }
-    if let Some(admin) = &state.cfg.admin_token {
-        if token == admin {
-            return Ok(Principal::Admin);
-        }
+    if is_admin_token(state, token) {
+        return Ok(Principal::Admin);
     }
     if crate::signin::looks_like_jwt(token) {
         // Access tokens are bound to a device row: a revoked device's tokens die with it even
