@@ -207,7 +207,7 @@ pub fn signed_blob_url(
     )
 }
 
-fn sender_json(state: &AppState, row: &Value) -> Value {
+pub(crate) fn sender_json(state: &AppState, row: &Value) -> Value {
     let raw = row["sender"].as_str().unwrap_or("");
     let role = row["role"].as_str().unwrap_or("");
     if let Some(uid) = raw.strip_prefix("user:") {

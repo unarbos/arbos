@@ -1001,7 +1001,7 @@ fn device_user(principal: &Principal) -> Option<String> {
     }
 }
 
-fn not_found() -> Response {
+pub(crate) fn not_found() -> Response {
     api_error(StatusCode::NOT_FOUND, "not_found", "no such agent link")
 }
 
@@ -1017,7 +1017,7 @@ fn invalid_token() -> Response {
 /// operator can read it; the caller is told only that the call failed. Review of #2460 found
 /// rusqlite's text reaching clients on the devices route, which hands table and column names to
 /// anyone who can provoke an error — and here the caller may be a stranger's agent.
-fn db_error(what: &str, e: impl std::fmt::Display) -> Response {
+pub(crate) fn db_error(what: &str, e: impl std::fmt::Display) -> Response {
     tracing::error!(error = %e, op = what, "agent link: storage failed");
     api_error(
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -1059,7 +1059,7 @@ fn rate_limited(state: &AppState, key: &str, kind: &str, window_ms: i64) -> Resp
 /// The caller's address as the front proxy reported it. **Not authenticated**: nothing stops a
 /// caller that reaches the relay directly from inventing the header, so an audit row's `ip` is
 /// evidence about what was claimed, never proof of where a request came from.
-fn client_ip(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn client_ip(headers: &HeaderMap) -> Option<String> {
     headers
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
@@ -1068,7 +1068,7 @@ fn client_ip(headers: &HeaderMap) -> Option<String> {
         .filter(|s: &String| !s.is_empty())
 }
 
-fn user_agent(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn user_agent(headers: &HeaderMap) -> Option<String> {
     headers
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
