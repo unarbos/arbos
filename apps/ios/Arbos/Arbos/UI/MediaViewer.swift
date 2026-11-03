@@ -350,13 +350,13 @@ struct MediaViewer: View {
             }
             // The full row is wider than any iPhone, so SwiftUI used to shrink the
             // labels until they broke inside a word ("Clos e" — [feedback
-            // viewer-pill-labels-ios-2026-10-29]). The compact size takes over when
-            // the full one does not fit.
+            // viewer-pill-labels-ios-2026-10-29]). A smaller size takes over when the
+            // one above it does not fit; `ViewerPill.sizes` is the same order.
             ViewThatFits(in: .horizontal) {
                 pillRow(.full)
                 pillRow(.compact)
+                pillRow(.tight)
             }
-            .padding(.horizontal, ViewerPill.rowInset)
             .padding(.bottom, 14)
         }
         .animation(.easeOut(duration: 0.2), value: toast)
@@ -382,6 +382,7 @@ struct MediaViewer: View {
                     .opacity(canAct ? 1 : 0.5)
             }
         }
+        .padding(.horizontal, size.inset)
     }
 
     private func pill(_ label: String, system: String, size: ViewerPill,
@@ -391,6 +392,7 @@ struct MediaViewer: View {
                 Image(systemName: system).font(.system(size: size.glyph, weight: .semibold))
                 Text(label).font(theme.font(size.label, weight: .medium))
                     .lineLimit(1)
+                    .minimumScaleFactor(ViewerPill.minimumLabelScale)
                     .fixedSize(horizontal: size.labelKeepsItsWidth, vertical: false)
             }
             .foregroundStyle(.white)
@@ -555,12 +557,18 @@ struct ViewerChromeBackground<S: InsettableShape>: View {
     }
 }
 
-/// The two sizes of the viewer's bottom pills ([feedback
+/// The sizes of the viewer's bottom pills ([feedback
 /// viewer-pill-labels-ios-2026-10-29]: "Clos e", "Downl oad"). The full row —
 /// Close · Copy · Download · Forward at the design size — is wider than every iPhone,
 /// and the row had no inset, so SwiftUI squeezed each label below its own width and
-/// broke it inside the word. The row now takes the first size that fits, every label
-/// is one line, and the row keeps `rowInset` from the screen edges.
+/// broke it inside the word. The row now takes the first of `sizes` that fits, every
+/// label is one line, and the row keeps its own `inset` from the screen edges.
+///
+/// The labels must also stay whole at every step of the app's Text Size, up to the
+/// largest (`TextScale.steps`, 1.3 — the viewer does not use Dynamic Type; `theme.font`
+/// is the one scale). The tight size buys the room for that; below it the label itself
+/// gives, shrinking to `minimumLabelScale` the way the sheet header's title does.
+/// `ViewerPillStyleTests` measures every size against every width and every step.
 struct ViewerPill {
     /// Label point size, scaled by the app's text size through `theme.font`.
     let label: CGFloat
@@ -573,20 +581,36 @@ struct ViewerPill {
     let height: CGFloat
     /// Pill → pill.
     let gap: CGFloat
-    /// The full row either fits whole or gives way to the compact one, so its labels
-    /// never squeeze. The compact row is the last size there is: at the largest text
-    /// steps on the narrowest iPhone its labels may end in an ellipsis, which is what
-    /// a one-line label does instead of breaking.
+    /// Row → screen edge, both sides.
+    let inset: CGFloat
+    /// The full row either fits whole or gives way to a smaller size, so its labels never
+    /// squeeze. The smaller sizes let the label take the width it is given and scale.
     let labelKeepsItsWidth: Bool
 
     /// The size the viewer shipped with (#1381), unchanged.
     static let full = ViewerPill(label: 15, glyph: 14, innerSpacing: 8, padding: 16,
-                                 height: 38, gap: 12, labelKeepsItsWidth: true)
+                                 height: 38, gap: 12, inset: 12, labelKeepsItsWidth: true)
     static let compact = ViewerPill(label: 13, glyph: 13, innerSpacing: 5, padding: 9,
-                                    height: 34, gap: 6, labelKeepsItsWidth: false)
+                                    height: 34, gap: 6, inset: 12, labelKeepsItsWidth: false)
+    /// The last size: the chrome around each label is as small as the family allows, so the
+    /// four labels keep their own width on the narrowest iPhone at the largest Text Size.
+    static let tight = ViewerPill(label: 13, glyph: 12, innerSpacing: 4, padding: 8,
+                                  height: 34, gap: 4, inset: 8, labelKeepsItsWidth: false)
 
-    /// Row → screen edge, both sides.
-    static let rowInset: CGFloat = 12
+    /// Widest first — the order `ViewThatFits` tries them in. The last one is the floor.
+    static let sizes: [ViewerPill] = [.full, .compact, .tight]
+
+    /// How far a label may shrink before a one-line label would be cut instead — the sheet
+    /// header's rule for its title (`SheetHeaderLayout.minimumTitleScale`) applied here.
+    ///
+    /// 0.65 is the smallest Text Size step over the largest (0.85 / 1.3): a label shrunk all
+    /// the way at the largest step is still no smaller than the same label at the smallest
+    /// step, so the biggest setting never reads smaller than the smallest one.
+    ///
+    /// It is the backstop under `tight`, not the plan. On every width and every step the app
+    /// ships, `ViewerPillStyleTests` shows the labels need less shrink than this, so no label
+    /// is cut and none wraps.
+    static let minimumLabelScale: CGFloat = 0.65
 }
 
 /// The caption, counter and page dots have no plate; a soft dark halo keeps them
