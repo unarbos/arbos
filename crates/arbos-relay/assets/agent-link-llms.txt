@@ -128,7 +128,7 @@ start of the conversation.
 That order is for your benefit: the end of a conversation is almost always
 the part you were asked about, so you do not have to read a year of history
 to reach it. Read backwards only as far as the question needs. Every message
-you are handed is counted against the budget in section 6.
+you are handed is counted against the budget in section 7.
 
 `sender.kind` is `user`, `agent` or `system`. An unfinished agent reply is
 not in the list: you only ever see messages that have settled.
@@ -190,11 +190,88 @@ text. It is empty for an agent that has no connector.
 Reading a log does not spend your message budget, so you can debug freely
 without using up your ability to read the conversation.
 
-## 6. Limits, and what to do when you hit one
+## 6. Watch for new messages
+
+  GET /agent-link/stream
+  Accept: text/event-stream
+
+Server-Sent Events: a plain GET that stays open. Use `curl -N`, a streaming
+HTTP client, or anything that reads a response as it arrives. The same
+`Authorization` header as every other call — there is nothing new to carry.
+Add `?chat=01M6…` to watch one conversation instead of all of them.
+
+  event: hello
+  data: {"protocol":"link/1","user":{"id":"u_7f…"},"scope":"reply",
+         "chat":null,"since":4820,"expires_at":1793462400000,
+         "keepalive_s":20}
+
+  event: message.received
+  id: 4821
+  data: {"chat":{"id":"01M6…","kind":"agent","title":"codingarbos",
+                 "created_at":1793…,"agent":"01M6B…"},
+         "message":{"id":"01M6C…","at":1793449100000,
+                    "sender":{"kind":"agent","name":"codingarbos",…},
+                    "text":"still failing at step 4","reply_to":null,
+                    "attachments":[]}}
+
+  : ping
+
+`hello` is always the first frame. `since` in it is the cursor the stream
+started from, so you know where you are before anything else arrives.
+
+`message` is the identical object section 3 returns, field for field: same
+text, same sender, same attachment paths. You do not need a second parser,
+and you can open an attachment from a stream event exactly as section 4
+describes.
+
+Two kinds of event, and the difference matters:
+
+  with an `id:`      durable. Remember the last one. On reconnect send it as
+                     `Last-Event-ID: 4821` and you get everything after it.
+                     The header wins over `?since=`.
+  without an `id:`   never stored and never replayed. If you miss one it is
+                     gone, and that is correct.
+
+Events you will see today:
+
+  message.received   a new message in a chat you may read
+  limited            you are out of message budget (see below)
+  bye                the link was revoked or expired. Stop and tell your
+                     person; do not reconnect.
+
+More durable event types are coming — edits, deletions, reactions,
+membership, typing. Ignore an `event:` you do not recognise rather than
+failing on it, and keep its `id:` as your cursor if it has one.
+
+**A connection with no cursor starts from now.** It does not replay the
+backlog, because you have the history routes for history. Send
+`Last-Event-ID` when you want the gap you missed.
+
+**Stream messages spend the same read budget as history.** When the budget
+runs out you get one `limited` frame and then silence:
+
+  event: limited
+  data: {"retry_after":3600,
+         "message":"the hourly message budget is spent; …"}
+
+The stream stays open and your place is kept. Nothing is lost: when the
+budget refills, the messages you missed arrive in order. Do not reconnect —
+reconnecting re-reads the same rows and spends the budget again.
+
+Two streams at once per link, and thirty opens an hour. Over either you get
+429 with `Retry-After`. If a connection drops, back off before retrying:
+1 s, 2 s, 4 s, up to 30 s.
+
+The `: ping` comment lines every 20 seconds are keepalive. Ignore them.
+
+A revoke closes the stream within 30 seconds, with `bye`.
+
+## 7. Limits, and what to do when you hit one
 
   120 requests a minute, every endpoint together
   5,000 messages an hour handed to this link
   10,000 messages an hour handed to every link of this account together
+  30 stream opens an hour, and 2 streams open at once
 
 Over a limit you get:
 
@@ -209,7 +286,7 @@ nothing is half-read: wait, then continue from the same `before` cursor.
 `Retry-After` on that one is 3600, because the window is an hour and
 retrying sooner cannot help.
 
-## 7. When something goes wrong
+## 8. When something goes wrong
 
   401 invalid_token      the link was revoked or has expired. Stop. Tell your
                          person; only the account owner can make a new one.
@@ -226,12 +303,12 @@ retrying sooner cannot help.
                          ask them to revoke it.
   410 open_expired       the link was made more than fifteen minutes before
                          anyone opened it. Ask your person for a new one.
-  429 rate_limited       see section 6.
+  429 rate_limited       see section 7.
 
 Never post an error into a chat and never retry a failed write in a loop.
 Fix it, or tell the person who gave you the link.
 
-## 8. What the owner can see
+## 9. What the owner can see
 
 Everything this link does is recorded against it — when it was opened, from
 what address, every chat you read and how many messages you were handed, and
@@ -239,7 +316,7 @@ every call that changes anything. The person who made it reads that list in
 Arbos, and can revoke the link at any moment. A revoked link stops working on
 its very next call.
 
-## 9. If you need this permanently
+## 10. If you need this permanently
 
 This link is for one job and expires on its own. If the person wants you in
 their chats as a standing member — with your own name, your own avatar and

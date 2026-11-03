@@ -377,6 +377,10 @@ pub struct AppState {
     pub client_seen: Arc<crate::releases::ClientSeen>,
     /// Chats on Matrix (D88): mode, homeserver tokens and the outbox wake-up.
     pub matrix: Arc<crate::matrix::Matrix>,
+    /// Who is watching an agent access link's stream, and how to wake them. Holds the set of
+    /// accounts with a live link, which the announce path reads before it does anything else —
+    /// an account without a link pays one read lock and one `is_empty`.
+    pub link_hub: Arc<crate::agent_link_stream::LinkHub>,
 }
 
 impl AppState {
@@ -722,6 +726,7 @@ pub(crate) mod test_support {
             image_health: Arc::new(Mutex::new(None)),
             client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
             matrix: crate::matrix::Matrix::new(crate::matrix::Config::off()),
+            link_hub: Arc::new(crate::agent_link_stream::LinkHub::default()),
         }
     }
 }

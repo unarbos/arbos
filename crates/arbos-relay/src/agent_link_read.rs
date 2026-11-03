@@ -93,7 +93,7 @@ impl ChatView {
         }
     }
 
-    fn json(&self) -> Value {
+    pub(crate) fn json(&self) -> Value {
         json!({
             "id": self.id,
             "kind": self.kind,
@@ -227,7 +227,11 @@ impl Db {
 
 /// Is there room in both budgets for `want` more messages? Checked **before** the page is built,
 /// so a refusal hands over nothing at all.
-fn read_budget(state: &AppState, link: &AgentLink, want: i64) -> Result<(), Box<Response>> {
+pub(crate) fn read_budget(
+    state: &AppState,
+    link: &AgentLink,
+    want: i64,
+) -> Result<(), Box<Response>> {
     let mine = state
         .db
         .link_messages_read(&link.id, HOUR_MS)
@@ -262,7 +266,13 @@ fn read_limited(message: &str) -> Response {
 
 /// Record a read. `messages` is what [`Db::link_messages_read`] sums, so every path that hands
 /// messages over must come through here or the budget silently stops counting.
-fn note_read(state: &AppState, link: &AgentLink, headers: &HeaderMap, chat: &str, messages: i64) {
+pub(crate) fn note_read(
+    state: &AppState,
+    link: &AgentLink,
+    headers: &HeaderMap,
+    chat: &str,
+    messages: i64,
+) {
     let _ = state.db.note_link_audit(
         &link.id,
         &link.user_id,
@@ -402,6 +412,37 @@ struct Line {
     reply_to: Option<String>,
 }
 
+impl Line {
+    fn json(&self) -> Value {
+        json!({
+            "id": self.id,
+            "at": self.at,
+            "sender": self.sender,
+            "text": self.text,
+            "attachments": self.attachments,
+            "reply_to": self.reply_to,
+        })
+    }
+}
+
+/// One message of a chat doc, rendered exactly as a page of history renders it.
+///
+/// The stream (PR 4) sends this rather than building its own shape, so the two surfaces cannot
+/// drift: an agent that read a message from `…/messages` and then saw it arrive on the stream
+/// sees the same text, the same sender and the same attachment paths both times. `None` when the
+/// doc does not hold the message — deleted, or not applied yet.
+pub(crate) fn line_json(
+    state: &AppState,
+    view: &ChatView,
+    rows: &[Value],
+    message_id: &str,
+) -> Option<Value> {
+    lines(state, view, rows)
+        .iter()
+        .find(|l| l.id == message_id)
+        .map(Line::json)
+}
+
 /// `GET /agent-link/chats/{id}/messages?before=&limit=&format=json|md` — history, newest last.
 ///
 /// Newest-last inside the page but paged backwards from the newest: an agent asked to debug a
@@ -458,10 +499,7 @@ pub async fn messages(
     }
     Json(json!({
         "chat": view.json(),
-        "messages": page.iter().map(|l| json!({
-            "id": l.id, "at": l.at, "sender": l.sender, "text": l.text,
-            "attachments": l.attachments, "reply_to": l.reply_to,
-        })).collect::<Vec<_>>(),
+        "messages": page.iter().map(Line::json).collect::<Vec<_>>(),
         "has_more": more,
         "before": next,
     }))
