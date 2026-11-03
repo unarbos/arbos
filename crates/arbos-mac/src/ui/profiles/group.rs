@@ -13,13 +13,15 @@
 use std::sync::Arc;
 
 use gpui::{
-    div, prelude::*, px, Context, Div, ElementId, Focusable, RenderImage, SharedString, Stateful,
+    div, prelude::*, px, AnyElement, Context, Div, ElementId, Focusable, RenderImage, SharedString,
+    Stateful,
 };
 
 use crate::app::{AppState, ProfilePage};
-use crate::model::{Person, Project};
+use crate::model::{Person, Project, ServerInviteLink, SpaceKind};
 use crate::ui::avatars;
 use crate::ui::blocked;
+use crate::ui::glass;
 use crate::ui::groups;
 use crate::ui::highlight;
 use crate::ui::people;
@@ -38,6 +40,10 @@ pub(super) const TABS: [&str; 2] = ["Members", "Library"];
 pub(crate) const ADD_MEMBERS_ID: &str = "profile-add-members";
 /// The labelled Description row under it on a people group that has one.
 pub(crate) const DESCRIPTION_ID: &str = "profile-description";
+/// Members › "Copy invite link" (people groups): copies a usable link, or mints one first.
+pub(crate) const COPY_INVITE_ID: &str = "group-invite-copy-link";
+/// Members › Invite links › "New invite link".
+pub(crate) const NEW_INVITE_ID: &str = "group-invite-new";
 /// The description value's width cap: the card is 308 wide (pane 340 − 2 × 16),
 /// the glyph tile + gap + "Description" take ~110; 180 leaves the title whole.
 const DESCRIPTION_VALUE_MAX_W: f32 = 180.0;
@@ -140,6 +146,12 @@ pub(super) fn page(
         .map(|p| p.handle.clone())
         .collect();
     let content = collect(state, &chats_of(state, &space.id));
+    let invite_preparing = state.group_invite_copy_pending.as_deref() == Some(&space.id);
+    let invites = state
+        .group_invites
+        .get(&space.id)
+        .cloned()
+        .unwrap_or_default();
 
     // ----- hero: picture with the crayon, name as an inline field ----------------
     let picture = groups::picture(&space, state, HERO_AVATAR, &theme).into_any_element();
@@ -266,6 +278,42 @@ pub(super) fn page(
                         &theme,
                     )
                     .debug_selector(|| DESCRIPTION_ID.into())
+                    .into_any_element(),
+                );
+            }
+            // A people group (not a DM, not a shared project): one click copies an invite
+            // link, minting one when the group has none that still works.
+            if space.kind == SpaceKind::Group {
+                let sid = space.id.clone();
+                add_rows.push(
+                    kit::row(
+                        COPY_INVITE_ID,
+                        kit::Leading::Glyph("doc.on.doc"),
+                        if invite_preparing {
+                            "Preparing link…"
+                        } else {
+                            "Copy invite link"
+                        },
+                        None,
+                        None,
+                        None,
+                        false,
+                        &theme,
+                    )
+                    .debug_selector(|| COPY_INVITE_ID.into())
+                    .cursor_pointer()
+                    .group(kit::HOT)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let (expires, single) =
+                            (this.group_invite_expires, this.group_invite_single_use);
+                        let ready = this.state.read(cx).usable_group_invite(&sid);
+                        match ready {
+                            Some(url) => this.copy_invite(&url, cx),
+                            None => this.state.update(cx, |s, cx| {
+                                s.copy_group_invite(sid.clone(), expires, single, cx)
+                            }),
+                        }
+                    }))
                     .into_any_element(),
                 );
             }
@@ -473,6 +521,9 @@ pub(super) fn page(
                 out.push(Section::Card(add_rows));
             }
             out.push(Section::Card(list));
+            if space.kind == SpaceKind::Group {
+                out.extend(invite_sections(&space.id, &invites, shell, &theme, cx));
+            }
             out
         }
         _ => {
@@ -499,6 +550,165 @@ pub(super) fn page(
         shell,
         cx,
     ))
+}
+
+/// Members › Invite links (people groups, any member — the relay lets every human member mint
+/// and revoke): each link with its terms, Copy and ✕; then the two options and "New
+/// invite link"; the server pane's Settings section in shape, the iPhone's in content.
+fn invite_sections(
+    space_id: &str,
+    invites: &[ServerInviteLink],
+    shell: &Shell,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> Vec<Section> {
+    let now = arbos_core::ids::now_ms();
+    let mut rows: Vec<AnyElement> = Vec::new();
+    if invites.is_empty() {
+        rows.push(
+            kit::row(
+                "group-invites-none",
+                kit::Leading::Tile("link"),
+                "No invite links",
+                Some("People you add by name need none".into()),
+                None,
+                None,
+                false,
+                theme,
+            )
+            .into_any_element(),
+        );
+    }
+    for inv in invites {
+        let url = inv.url.clone();
+        let copy = glass::sheet_button(
+            ElementId::Name(SharedString::from(format!("group-invite-copy-{}", inv.id))),
+            "Copy",
+            theme,
+        )
+        .h(px(28.0))
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(move |this, _, _, cx| {
+            cx.stop_propagation();
+            this.copy_invite(&url, cx);
+        }));
+        let (sid, iid) = (space_id.to_owned(), inv.id.clone());
+        let revoke = round_button(format!("group-invite-revoke-{}", inv.id), "xmark", theme)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                let (sid, iid) = (sid.clone(), iid.clone());
+                this.state
+                    .update(cx, |s, cx| s.revoke_group_invite(sid, iid, cx));
+            }));
+        let controls = div()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .flex_shrink_0()
+            .when(inv.usable, |el| el.child(copy))
+            .child(revoke)
+            .into_any_element();
+        let short = inv.url.rsplit('/').next().unwrap_or(&inv.code).to_owned();
+        rows.push(
+            kit::row(
+                ElementId::Name(SharedString::from(format!("group-invite-{}", inv.id))),
+                kit::Leading::Tile("link"),
+                format!("…/g/{short}"),
+                Some(inv.terms(now).into()),
+                None,
+                Some(controls),
+                false,
+                theme,
+            )
+            .debug_selector(|| format!("group-invite-{}", inv.id))
+            .when(!inv.usable, |el| el.opacity(0.55))
+            .into_any_element(),
+        );
+    }
+
+    let (expires, single) = (shell.group_invite_expires, shell.group_invite_single_use);
+    let sid = space_id.to_owned();
+    let new_link: Vec<AnyElement> = vec![
+        kit::row(
+            "group-invite-expires",
+            kit::Leading::None,
+            "Expires after 7 days",
+            None,
+            None,
+            Some(glass::switch(expires, theme).into_any_element()),
+            false,
+            theme,
+        )
+        .cursor_pointer()
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.group_invite_expires = !this.group_invite_expires;
+            cx.notify();
+        }))
+        .into_any_element(),
+        kit::row(
+            "group-invite-single",
+            kit::Leading::None,
+            "Single use",
+            Some("One person joins, then the link is spent".into()),
+            None,
+            Some(glass::switch(single, theme).into_any_element()),
+            false,
+            theme,
+        )
+        .cursor_pointer()
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.group_invite_single_use = !this.group_invite_single_use;
+            cx.notify();
+        }))
+        .into_any_element(),
+        kit::row(
+            NEW_INVITE_ID,
+            kit::Leading::Glyph("plus"),
+            "New invite link",
+            None,
+            None,
+            None,
+            false,
+            theme,
+        )
+        .debug_selector(|| NEW_INVITE_ID.into())
+        .cursor_pointer()
+        .group(kit::HOT)
+        .on_click(cx.listener(move |this, _, _, cx| {
+            let sid = sid.clone();
+            let (expires, single) = (this.group_invite_expires, this.group_invite_single_use);
+            this.state
+                .update(cx, |s, cx| s.create_group_invite(sid, expires, single, cx));
+        }))
+        .into_any_element(),
+    ];
+
+    vec![
+        Section::Title("Invite links".into()),
+        Section::Card(rows),
+        Section::Card(new_link),
+        Section::Footnote(
+            "Share a link so someone can join this group. Add people who already have an \
+             account from Add members above."
+                .into(),
+        ),
+    ]
+}
+
+/// A 24 pt round glyph button at a row's trailing edge (the invite rows' ✕).
+fn round_button(id: String, glyph: &'static str, theme: &Theme) -> Stateful<Div> {
+    let el = div()
+        .id(ElementId::Name(SharedString::from(id)))
+        .size(px(24.0))
+        .flex_shrink_0()
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer();
+    highlight::button(el, theme)
+        .child(sf_symbols::glyph(glyph, 11.0, theme.label_muted()))
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
 }
 
 /// The hover-only ✕ at a member row's trailing edge; click arms the confirm.
@@ -597,9 +807,11 @@ mod render_tests {
     };
     use tokio::sync::mpsc;
 
-    use super::{ADD_MEMBERS_ID, DESCRIPTION_ID};
+    use super::{ADD_MEMBERS_ID, COPY_INVITE_ID, DESCRIPTION_ID, NEW_INVITE_ID};
     use crate::app::{AppState, ProfilePage};
-    use crate::model::{AccountView, AgentMember, Person, Project, ServerInfo, SpaceKind};
+    use crate::model::{
+        AccountView, AgentMember, Person, Project, ServerInfo, ServerInviteLink, SpaceKind,
+    };
     use crate::sync::{ClientCommand, SyncEvent, SyncSource};
     use crate::ui::motion::PulseClock;
     use crate::ui::people::{AGENTS_SECTION_ID, AGENTS_SECTION_LABEL};
@@ -897,6 +1109,159 @@ mod render_tests {
             vcx.debug_bounds(ADD_MEMBERS_ID).expect("Add members").top(),
             add.top()
         );
+    }
+
+    fn invite(id: &str, usable: bool) -> ServerInviteLink {
+        ServerInviteLink {
+            id: id.into(),
+            code: format!("code-{id}"),
+            url: format!("https://arbos.life/g/code-{id}"),
+            created_at: 1,
+            expires_at: None,
+            uses_left: if usable { None } else { Some(0) },
+            usable,
+        }
+    }
+
+    /// Issue #2316: a people group's Members tab has Copy invite link under Add members and,
+    /// below the member list, the Invite links section (each link, then New invite link); a
+    /// shared project shown as a group has neither.
+    #[gpui::test]
+    fn a_people_group_offers_invite_links_and_a_shared_project_does_not(cx: &mut TestAppContext) {
+        let (_rt, state, shell, vcx) = mount(cx);
+        open(
+            &state,
+            vcx,
+            ProfilePage::Group {
+                space_id: "g1".into(),
+            },
+            0,
+        );
+        settle(&shell, vcx);
+        let add = vcx.debug_bounds(ADD_MEMBERS_ID).expect("Add members row");
+        let copy = vcx
+            .debug_bounds(COPY_INVITE_ID)
+            .expect("Copy invite link row");
+        assert!(copy.top() >= add.bottom() - px(1.0), "under Add members");
+        let new = vcx
+            .debug_bounds(NEW_INVITE_ID)
+            .expect("New invite link row");
+        assert!(
+            new.top() > copy.bottom(),
+            "the section is below the members"
+        );
+
+        state.update(vcx, |s, cx| {
+            s.apply(
+                SyncEvent::GroupInvites {
+                    chat_id: "g1".into(),
+                    invites: vec![invite("i1", true), invite("i2", false)],
+                },
+                cx,
+            )
+        });
+        settle(&shell, vcx);
+        let i1 = vcx.debug_bounds("group-invite-i1").expect("a usable link");
+        let i2 = vcx.debug_bounds("group-invite-i2").expect("a spent link");
+        let new = vcx
+            .debug_bounds(NEW_INVITE_ID)
+            .expect("New invite link row");
+        assert!(
+            i1.top() < i2.top() && i2.bottom() <= new.top(),
+            "links, then New"
+        );
+
+        open(
+            &state,
+            vcx,
+            ProfilePage::Group {
+                space_id: "p-shared".into(),
+            },
+            0,
+        );
+        settle(&shell, vcx);
+        assert!(vcx.debug_bounds(COPY_INVITE_ID).is_none());
+        assert!(vcx.debug_bounds(NEW_INVITE_ID).is_none());
+    }
+
+    /// Copy invite link with no usable link mints one and copies it when the relay answers;
+    /// with one, it is copied again without minting.
+    #[gpui::test]
+    fn copy_invite_link_mints_one_when_none_works_then_copies_it(cx: &mut TestAppContext) {
+        let (_rt, state, shell, vcx) = mount(cx);
+        open(
+            &state,
+            vcx,
+            ProfilePage::Group {
+                space_id: "g1".into(),
+            },
+            0,
+        );
+        state.update(vcx, |s, cx| {
+            s.apply(
+                SyncEvent::GroupInvites {
+                    chat_id: "g1".into(),
+                    invites: vec![invite("spent", false)],
+                },
+                cx,
+            )
+        });
+        settle(&shell, vcx);
+
+        let copy = vcx.debug_bounds(COPY_INVITE_ID).expect("Copy invite link");
+        vcx.simulate_click(centre(copy), Modifiers::default());
+        settle(&shell, vcx);
+        assert_eq!(
+            state.read_with(&*vcx, |s, _| s.group_invite_copy_pending.clone()),
+            Some("g1".into()),
+            "only a spent link: a new one is on its way"
+        );
+
+        state.update(vcx, |s, cx| {
+            s.apply(
+                SyncEvent::GroupInviteCreated {
+                    chat_id: "g1".into(),
+                    invite: invite("fresh", true),
+                },
+                cx,
+            )
+        });
+        settle(&shell, vcx);
+        let url = "https://arbos.life/g/code-fresh";
+        let (pending, queued, first, copied) = state.read_with(&*vcx, |s, _| {
+            (
+                s.group_invite_copy_pending.clone(),
+                s.group_invite_to_copy.clone(),
+                s.group_invites["g1"].first().map(|i| i.id.clone()),
+                s.notices.iter().any(|n| n.text == "Invite link copied"),
+            )
+        });
+        assert_eq!(pending, None);
+        assert_eq!(queued, None, "the shell took it");
+        assert_eq!(first.as_deref(), Some("fresh"), "newest first");
+        assert!(copied);
+        assert_eq!(
+            vcx.read_from_clipboard().and_then(|c| c.text()).as_deref(),
+            Some(url)
+        );
+
+        vcx.write_to_clipboard(gpui::ClipboardItem::new_string(String::new()));
+        vcx.simulate_click(centre(copy), Modifiers::default());
+        settle(&shell, vcx);
+        assert_eq!(
+            state.read_with(&*vcx, |s, _| s.group_invite_copy_pending.clone()),
+            None,
+            "a usable link is copied as it is"
+        );
+        assert_eq!(
+            vcx.read_from_clipboard().and_then(|c| c.text()).as_deref(),
+            Some(url)
+        );
+
+        state.update(vcx, |s, cx| {
+            s.revoke_group_invite("g1".into(), "fresh".into(), cx)
+        });
+        assert!(state.read_with(&*vcx, |s, _| s.usable_group_invite("g1").is_none()));
     }
 
     #[gpui::test]

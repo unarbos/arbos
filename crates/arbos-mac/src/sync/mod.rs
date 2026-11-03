@@ -31,7 +31,7 @@ use crate::sync::user_error::UserError;
 
 use crate::model::{
     AccountView, Call, CallEnded, CallKind, CallMissed, Person, Reachable, Sender, ServerInfo,
-    Voice,
+    ServerInviteLink, Voice,
 };
 use crate::model::{
     Attachment, BoxReport, BoxState, ChannelsView, ChartBody, Chat, ConnectorsView, DeviceView,
@@ -270,6 +270,21 @@ pub enum SyncEvent {
     /// `CreatePeopleGroup` succeeded: the new group's id, sent after the
     /// registry refresh that lists it. The sheet closes and the group opens.
     PeopleGroupCreated {
+        chat_id: Id,
+    },
+    /// `GET /chats/{id}/invites`: every invite link of a people group (spent and expired
+    /// ones included, so the pane shows why they no longer work).
+    GroupInvites {
+        chat_id: Id,
+        invites: Vec<ServerInviteLink>,
+    },
+    /// `POST /chats/{id}/invites` answered with the new link.
+    GroupInviteCreated {
+        chat_id: Id,
+        invite: ServerInviteLink,
+    },
+    /// `POST /chats/join` let me in: the group is in the list and opens.
+    GroupJoined {
         chat_id: Id,
     },
     /// Calls v1: `POST …/calls` or `/join` answered with a call (and my token).
@@ -748,6 +763,25 @@ pub enum ClientCommand {
     /// `POST /chats/{id}/leave`.
     LeaveChat {
         chat_id: Id,
+    },
+    /// `GET /chats/{id}/invites` (any member of a people group); answered by `GroupInvites`.
+    GroupInvitesLoad {
+        chat_id: Id,
+    },
+    /// `POST /chats/{id}/invites {expires, max_uses}` (any member); `GroupInviteCreated`.
+    GroupInviteCreate {
+        chat_id: Id,
+        expires: bool,
+        max_uses: Option<i64>,
+    },
+    /// `DELETE /chats/{id}/invites/{iid}` (any member): the link stops working at once.
+    GroupInviteRevoke {
+        chat_id: Id,
+        invite_id: Id,
+    },
+    /// `POST /chats/join {code}` from `arbos://join-group/<code>`; `GroupJoined`.
+    GroupJoin {
+        code: String,
     },
     /// `POST /blocks {handle}`.
     BlockUser {
