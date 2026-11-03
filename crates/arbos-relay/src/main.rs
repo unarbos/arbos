@@ -1,6 +1,7 @@
 mod admin;
 mod agent_link;
 mod agent_link_read;
+mod agent_link_stream;
 mod agent_messages;
 mod api;
 mod api_error_layer;
@@ -386,6 +387,7 @@ async fn main() -> anyhow::Result<()> {
         image_health: Arc::new(Mutex::new(None)),
         client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
         matrix: matrix::Matrix::new(matrix::Config::from_env()?),
+        link_hub: Arc::new(agent_link_stream::LinkHub::load(&db)),
     };
     tracing::info!(auth_mode = auth_mode.as_str(), public_url = %state.cfg.public_url, "sign-in");
     people::rename_agents_that_shadow_people(&state);
@@ -660,6 +662,7 @@ async fn main() -> anyhow::Result<()> {
             get(agent_link_read::agent_log),
         )
         .route("/agent-link/files/{slot}/{key}", get(agent_link_read::file))
+        .route("/agent-link/stream", get(agent_link_stream::stream))
         // Session log (spec §13.3): the sidecar uploads, the owner reads.
         .route("/asp/log", post(outside_log::upload))
         .route("/outside-agents/{id}/log", get(outside_log::read))

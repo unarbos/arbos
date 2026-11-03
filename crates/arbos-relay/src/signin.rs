@@ -1098,6 +1098,9 @@ pub async fn sign_out_everywhere(
                         );
                     }
                     tally.links = ids.len();
+                    // Every link of the account is gone, so its open streams close and its
+                    // stream backlog goes with them.
+                    state.link_hub.forget_if_dead(&state.db, &user_id);
                 }
                 Err(e) => {
                     tally.failed += 1;
