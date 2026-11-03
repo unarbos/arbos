@@ -2,8 +2,21 @@
 //! edits the doc. Until now a bubble's Delete edited the shared Loro doc straight from the
 //! client and the relay stored the bytes without reading them — so any member could delete
 //! anyone's message. `DELETE /room/{project}/{chat}/messages/{message_id}` is the one path
-//! now: the relay reads the message's sender out of the doc, applies the rule below, and
-//! writes the deletion itself (`notices::write_doc`), or answers 403.
+//! now: the relay takes the message's author from its own record of the announce, applies the
+//! rule below, and writes the deletion itself (`notices::write_doc`), or answers 403.
+//!
+//! The author comes from `message_authors` (`Db::message_author`), written by
+//! `notify::announce_with` from the principal that announced the message. It does **not** come
+//! from the doc. Reading it from the doc was the whole defect: the rule below decides "is this
+//! yours", the doc's `sender` field is writable by every member of the chat
+//! (`ChatDoc::set_message_fields` is public in the crate the apps link, and the socket's `Push`
+//! arm validates no content), so a member could put their own id on someone else's message and
+//! then ask this route to delete it. The relay's record is the only account of the author that
+//! the author's peers cannot edit.
+//!
+//! A message with no record — a system line, an app too old to announce, anything written
+//! before the record existed — is nobody's but a moderator's, because there is no sound way to
+//! tell whose it is.
 //!
 //! The rule (`may_delete`): you delete your own messages. In a people group the owner — and
 //! an admin, once that role exists — deletes anyone's (moderation). A message an agent wrote
@@ -132,26 +145,46 @@ async fn authorise(
             )))
         }
     };
-    let Some(message) = doc.message(message_id) else {
+    if doc.message(message_id).is_none() {
         return Ok(None);
-    };
-    let sender = normalised_sender(
-        message.rest["sender"].as_str().unwrap_or_default(),
-        &message.role,
-        project_id
-            .as_deref()
-            .and_then(|p| state.user_of(p))
-            .as_deref(),
-        project_id.as_deref(),
-    );
-    let agent_owner = sender
-        .strip_prefix("agent:")
-        .and_then(|pid| state.user_of(pid));
+    }
     let who = Deleter {
         me,
         role: role.as_deref(),
         project_owner,
     };
+    // Whose message this is comes from the relay's own record of the announce, never from the
+    // doc: `ChatDoc::set_message_fields` is public in the crate the apps link and the push path
+    // validates no content, so a member can write any `sender` on anyone's row — including, in
+    // the version this replaces, their own id onto someone else's message just before asking to
+    // delete it.
+    let attested = state.db.message_author(chat_id, message_id).map_err(|e| {
+        Box::new(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "db",
+            e.to_string(),
+        ))
+    })?;
+    let Some(sender) = attested else {
+        // No record of the announce: a system line, an app too old to announce, or a message
+        // from before the record existed. There is no sound way to tell whose it is, so only
+        // moderation can act -- the same answer `may_delete` already gives for a system line.
+        if !who.moderates() {
+            return Err(Box::new(api_error(
+                StatusCode::FORBIDDEN,
+                "not_yours",
+                format!("only this chat's owner can {verb} a message the relay has no author for"),
+            )));
+        }
+        return Ok(Some(Authorised {
+            project_id,
+            me: me.clone(),
+            sender: "unknown".to_owned(),
+        }));
+    };
+    let agent_owner = sender
+        .strip_prefix("agent:")
+        .and_then(|pid| state.user_of(pid));
     if !may_delete(&who, &sender, agent_owner.as_deref()) {
         return Err(Box::new(api_error(
             StatusCode::FORBIDDEN,
@@ -237,24 +270,6 @@ pub async fn remove_preview(
     }
 }
 
-/// The sender as the rule sees it: bare `user` is the project owner, bare `agent` /
-/// `assistant` the project's agent; anything else that is not `user:`/`agent:` is `system`.
-fn normalised_sender(
-    raw: &str,
-    role: &str,
-    owner: Option<&str>,
-    project_id: Option<&str>,
-) -> String {
-    if raw.starts_with("user:") || raw.starts_with("agent:") {
-        return raw.to_owned();
-    }
-    match (role, owner, project_id) {
-        ("user", Some(o), _) => format!("user:{o}"),
-        ("assistant", _, Some(p)) => format!("agent:{p}"),
-        _ => "system".to_owned(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,26 +335,6 @@ mod tests {
         assert!(!may_delete(&guest, "user:u_me", None));
         assert!(!may_delete(&guest, "agent:p_mine", Some(ME)));
     }
-
-    #[test]
-    fn bare_senders_resolve_to_the_project() {
-        assert_eq!(
-            normalised_sender("user", "user", Some("u_me"), Some("p1")),
-            "user:u_me"
-        );
-        assert_eq!(
-            normalised_sender("agent", "assistant", Some("u_me"), Some("p1")),
-            "agent:p1"
-        );
-        assert_eq!(
-            normalised_sender("user:u_x", "user", Some("u_me"), Some("p1")),
-            "user:u_x"
-        );
-        assert_eq!(
-            normalised_sender("system", "system", Some("u_me"), Some("p1")),
-            "system"
-        );
-    }
 }
 
 #[cfg(test)]
@@ -359,7 +354,22 @@ mod handler_tests {
     use crate::state::test_support::test_state;
     use crate::state::AuthMode;
 
+    /// A message as it exists after a real send: the row in the doc, **and** the relay's own
+    /// record of who announced it. In production `notify::announce_with` writes the second from
+    /// the authenticated principal; here it is written directly so the test does not need the
+    /// whole push-and-notify path.
     fn seed(state: &AppState, chat: &str, sender: &str, id: &str) {
+        seed_row(state, chat, sender, id);
+        let user = sender.strip_prefix("user:");
+        state
+            .db
+            .insert_chat_event(chat, None, id, user, sender)
+            .unwrap();
+    }
+
+    /// A message in the doc that the relay never saw announced: an app too old to announce, a
+    /// system line, or anything written before `message_authors` existed.
+    fn seed_row(state: &AppState, chat: &str, sender: &str, id: &str) {
         let doc = load_doc(state, chat, None)
             .unwrap()
             .unwrap_or_else(|| ChatDoc::new(Some(3), false));
@@ -478,6 +488,122 @@ mod handler_tests {
         .await;
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
         assert_eq!(ids(&state, &chat), ["m_alice"]);
+    }
+
+    /// The defect: `authorise` decided whose message this was from `message.rest["sender"]`, a
+    /// doc field every member of the chat can rewrite. Bob relabels Alice's message as his own
+    /// and asks the relay to delete it — which is the exact move this module was built to stop,
+    /// made through the module itself.
+    #[tokio::test]
+    async fn a_member_cannot_relabel_someone_elses_message_as_their_own() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 21);
+        let (bob, bob_dev) = person(&state, 22);
+        let chat = dm(&state, &alice, &bob);
+        state
+            .db
+            .add_member(
+                &chat,
+                &format!("user:{bob}"),
+                "member",
+                &alice,
+                &serde_json::json!({}),
+            )
+            .unwrap();
+        seed(&state, &chat, &format!("user:{alice}"), "m_alice");
+
+        // Bob rewrites the sender on Alice's row, exactly as a client can: the push path
+        // validates no content, so the relay stores and forwards whatever he writes.
+        let doc = load_doc(&state, &chat, None).unwrap().unwrap();
+        let base = doc.oplog_vv();
+        doc.set_message_fields(
+            "m_alice",
+            &[("sender", serde_json::Value::from(format!("user:{bob}")))],
+        );
+        let bytes = doc.export_updates_since(&base);
+        state
+            .db
+            .append_row(
+                &wire::room_name(PEOPLE_PROJECT, &chat),
+                "dev",
+                &ulid(),
+                &bytes,
+            )
+            .unwrap();
+        assert_eq!(
+            load_doc(&state, &chat, None)
+                .unwrap()
+                .unwrap()
+                .message("m_alice")
+                .unwrap()
+                .rest["sender"],
+            serde_json::Value::from(format!("user:{bob}")),
+            "the forged field really is in the doc the relay serves"
+        );
+
+        let r = delete_message(
+            State(state.clone()),
+            bob_dev,
+            Path((
+                PEOPLE_PROJECT.to_owned(),
+                chat.clone(),
+                "m_alice".to_owned(),
+            )),
+        )
+        .await;
+        assert_eq!(
+            r.status(),
+            StatusCode::FORBIDDEN,
+            "the doc's account of the author is not the relay's"
+        );
+        assert_eq!(ids(&state, &chat), ["m_alice"]);
+    }
+
+    /// The cost of the fix, stated as a test rather than left to be discovered: a message the
+    /// relay has no author for is a moderator's alone, even for the member who wrote it.
+    #[tokio::test]
+    async fn a_message_with_no_recorded_author_is_the_owners_alone() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 31);
+        let (bob, bob_dev) = person(&state, 32);
+        let chat = dm(&state, &alice, &bob);
+        state
+            .db
+            .add_member(
+                &chat,
+                &format!("user:{bob}"),
+                "member",
+                &alice,
+                &serde_json::json!({}),
+            )
+            .unwrap();
+        seed_row(&state, &chat, &format!("user:{bob}"), "m_unannounced");
+
+        let r = delete_message(
+            State(state.clone()),
+            bob_dev,
+            Path((
+                PEOPLE_PROJECT.to_owned(),
+                chat.clone(),
+                "m_unannounced".to_owned(),
+            )),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN, "even though it is his");
+        assert_eq!(ids(&state, &chat), ["m_unannounced"]);
+
+        let r = delete_message(
+            State(state.clone()),
+            alice_dev,
+            Path((
+                PEOPLE_PROJECT.to_owned(),
+                chat.clone(),
+                "m_unannounced".to_owned(),
+            )),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT, "the owner moderates");
+        assert!(ids(&state, &chat).is_empty());
     }
 
     #[tokio::test]
