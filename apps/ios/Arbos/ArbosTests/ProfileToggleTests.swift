@@ -1,11 +1,13 @@
 import XCTest
 @testable import Arbos
 
-/// Profile targets toggle the sheet ([feedback profile-pane-toggle-ios-2026-10-26];
+/// Profile targets toggle one page ([feedback profile-pane-toggle-ios-2026-10-26];
 /// the Mac's `profile_target::tests` twin): a sender name, the avatar beside a
 /// bubble, an @mention chip, the header pill and a status-row picture all go
-/// through `AppModel.toggleProfile` — open, dismiss on the same subject from any
-/// target, swap for someone else — and carry one label.
+/// through `AppModel.toggleProfile` — open, go back on the same subject from any
+/// target, swap for someone else — and carry one label. Since 2026-11-01 that page
+/// is a push onto the chat's own stack; only a profile opened from inside another
+/// sheet still uses the sheet.
 final class ProfileToggleTests: XCTestCase {
     private let allanFromChat = ProfileTarget.user(ProfilePerson(id: "gh_2", handle: "allan", name: "Allan", avatarUrl: nil))
     /// A chip's person: the same account carried with the handle as its id.
@@ -46,30 +48,57 @@ final class ProfileToggleTests: XCTestCase {
         XCTAssertEqual(ProfileToggle.label(name: "Allan", showing: true), "Close profile")
     }
 
-    /// The model: open, the same person from another target dismisses (path and
-    /// root cleared), a different one swaps with nothing pushed.
+    /// The model on the stack (Jacob 2026-11-01: a profile is a push, not a sheet): a
+    /// target opens on top of the chat it was tapped in, the same person from another
+    /// target goes back to that chat, and a different one swaps the top page in place so
+    /// a chain of taps never deepens the stack.
     @MainActor
-    func testTheModelTogglesAndSwaps() {
+    func testTheModelTogglesAndSwapsOnTheStack() {
         let model = AppModel()
-        XCTAssertNil(model.profile)
+        let chat = AppModel.Route.chat(chatId: "dm1", projectId: peopleSlot)
+        model.path = [chat]
+
         model.toggleProfile(allanFromChat)
-        XCTAssertEqual(model.profile, allanFromChat)
+        XCTAssertEqual(model.path, [chat, .profile(allanFromChat)], "pushed over the chat")
         XCTAssertTrue(model.profileShows(allanFromChip), "the chip's page is his too")
+
         model.toggleProfile(allanFromChip)
-        XCTAssertNil(model.profile, "the same person again dismisses")
-        XCTAssertEqual(model.profilePath, [])
+        XCTAssertEqual(model.path, [chat], "the same person again goes back to the chat")
+
         model.toggleProfile(allanFromChat)
         model.toggleProfile(affine)
-        XCTAssertEqual(model.profile, affine, "swapped in place")
-        XCTAssertEqual(model.profilePath, [], "nothing pushed")
+        XCTAssertEqual(model.path, [chat, .profile(affine)], "someone else swaps in place")
         XCTAssertFalse(model.profileShows(allanFromChat))
-        // A page pushed over the root (a member row): the top page is what a tap toggles against.
+
+        // A member row on a page that is already up pushes, so back returns to that page
+        // with its tab and scroll untouched.
+        model.path = [chat]
         model.showProfile(.group(chatId: "g1", projectId: nil))
         model.showProfile(allanFromChat)
-        XCTAssertEqual(model.profilePath, [allanFromChat], "a group's row still pushes")
+        XCTAssertEqual(model.path, [chat, .profile(.group(chatId: "g1", projectId: nil)), .profile(allanFromChat)],
+                       "a group's row still pushes")
         XCTAssertTrue(model.profileShows(allanFromChat))
         model.toggleProfile(allanFromChip)
-        XCTAssertNil(model.profile, "his target while his pushed page is up dismisses the sheet")
+        XCTAssertEqual(model.path, [chat, .profile(.group(chatId: "g1", projectId: nil))],
+                       "his target while his pushed page is up goes back to the group")
+
+        // The same page twice from one row is one page.
+        model.showProfile(allanFromChat)
+        model.showProfile(allanFromChat)
+        XCTAssertEqual(model.path.count, 3, "the page already on top is not pushed again")
+    }
+
+    /// A profile opened from inside another sheet cannot push onto the stack underneath
+    /// it, so it keeps the sheet-local presentation (`ProjectMembersSheet`'s member rows).
+    @MainActor
+    func testASheetHostKeepsTheSheetPresentation() {
+        let model = AppModel()
+        model.showProfile(allanFromChat, in: .sheet)
+        XCTAssertEqual(model.profile, allanFromChat)
+        XCTAssertTrue(model.path.isEmpty, "nothing was pushed onto the stack behind the sheet")
+        XCTAssertTrue(model.profileShows(allanFromChip), "the sheet's page still answers the label")
+        model.toggleProfile(allanFromChip, in: .sheet)
+        XCTAssertNil(model.profile, "the same person again dismisses the sheet")
         XCTAssertEqual(model.profilePath, [])
     }
 

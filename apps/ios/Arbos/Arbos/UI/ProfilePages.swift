@@ -3,12 +3,31 @@
 // then the tab's list. Three pages share the scaffold: a person
 // (`UserProfileView`), a group chat (`GroupProfileView`, people groups and
 // shared project chats), and an agent (`AgentProfileView`, its own file).
-// `AppModel.showProfile(_:)` opens one from anywhere; the root presents it.
+// `AppModel.showProfile(_:)` opens one from anywhere; `ProfilePage` draws it, on the
+// navigation stack (Jacob, 2026-11-01) or inside the sheet a profile opened from
+// another sheet still uses.
 
 import ArbosFFI
 import PhotosUI
 import SwiftUI
 import UIKit
+
+/// One profile target as a page. Shared by the stack's `navigationDestination` and the
+/// sheet-local stack, so both routes draw the same page from the same switch.
+struct ProfilePage: View {
+    @EnvironmentObject private var model: AppModel
+    let target: ProfileTarget
+
+    var body: some View {
+        switch target {
+        case .user(let p): UserProfileView(person: p)
+        case .group(let chatId, let projectId): GroupProfileView(chatId: chatId, projectId: projectId)
+        case .agent(let pid): AgentProfileView(projectId: pid, fallback: model.foreignAgent(pid))
+        case .server(let sid): ServerProfileView(serverId: sid)
+        case .channel(let cid): ChannelProfileView(channelId: cid)
+        }
+    }
+}
 
 /// Who a user page is about — from a chat member, a search result or a sender row.
 struct ProfilePerson: Identifiable, Equatable, Hashable {
@@ -1116,6 +1135,8 @@ struct GroupProfileView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
+    /// A member row pushes onto whichever stack this page is on.
+    @Environment(\.profileHost) private var profileHost
     let chatId: String
     /// nil for people groups; the project for a shared project chat.
     let projectId: String?
@@ -1365,13 +1386,12 @@ struct GroupProfileView: View {
             }
             .confirm(ConfirmSpec(title: "Leave \(title)?", message: "You leave the group. It stays for everyone else.",
                                  action: "Leave group chat"), isPresented: $confirmLeave) {
+                // No `dismiss()` on either: both take the path home, this page included.
                 model.leavePeopleChat(chatId)
-                dismiss()
             }
             .confirm(ConfirmSpec(title: "Delete \(title)?", message: "Deletes the group for everyone in it.",
                                  action: "Delete group chat"), isPresented: $confirmDelete) {
                 model.deletePeopleChat(chatId)
-                dismiss()
             }
     }
 
@@ -1615,7 +1635,7 @@ struct GroupProfileView: View {
             .accessibilityLabel("Unban @\(r.person.handle)")
         ) : nil
         return Button {
-            model.showProfile(.user(r.person))
+            model.showProfile(.user(r.person), in: profileHost)
         } label: {
             PaneRow(
                 leading: .avatar(AnyView(PersonAvatar(url: r.person.avatarUrl, handle: r.person.handle, size: PaneKit.avatar, name: r.person.name, id: r.person.id, colorIndex: r.person.avatarColorIndex))),
@@ -1627,7 +1647,7 @@ struct GroupProfileView: View {
         .buttonStyle(.borderless)
         .contextMenu {
             Button {
-                model.showProfile(.user(r.person))
+                model.showProfile(.user(r.person), in: profileHost)
             } label: { Label("View profile", systemImage: "person.crop.circle") }
             if iCanMuteBan {
                 Divider()
@@ -1769,9 +1789,9 @@ struct GroupProfileView: View {
         }()
         return Button {
             if let a = r.agent {
-                model.showProfile(.agent(projectId: a.id))
+                model.showProfile(.agent(projectId: a.id), in: profileHost)
             } else if isMe {
-                model.showProfile(.user(r.person))
+                model.showProfile(.user(r.person), in: profileHost)
             } else {
                 // Offer Send private message alongside View profile (#1455).
                 memberActions = r.person
@@ -1797,7 +1817,7 @@ struct GroupProfileView: View {
                 } label: { Label("Send private message", systemImage: "bubble.left") }
             }
             Button {
-                if let a = r.agent { model.showProfile(.agent(projectId: a.id)) } else { model.showProfile(.user(r.person)) }
+                if let a = r.agent { model.showProfile(.agent(projectId: a.id), in: profileHost) } else { model.showProfile(.user(r.person), in: profileHost) }
             } label: { Label("View profile", systemImage: "person.crop.circle") }
             if showManage {
                 Divider()
@@ -1874,7 +1894,7 @@ struct GroupProfileView: View {
                 }
             }
             Button("View profile") {
-                model.showProfile(.user(r.person))
+                model.showProfile(.user(r.person), in: profileHost)
                 memberActions = nil
             }
             Button("Cancel", role: .cancel) { memberActions = nil }
@@ -2063,6 +2083,8 @@ struct ServerProfileView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
+    /// A member row pushes onto whichever stack this page is on.
+    @Environment(\.profileHost) private var profileHost
     let serverId: String
     @State private var tab = "Channels"
     @State private var showRename = false
@@ -2325,15 +2347,13 @@ struct ServerProfileView: View {
         v
             .confirm(ConfirmSpec(title: "Leave \(server?.name ?? "this server")?", message: "You can come back with an invite link.",
                                  action: "Leave"), isPresented: $confirmLeave) {
-                Task {
-                    if await model.leaveServer(serverId) { dismiss() }
-                }
+                // No `dismiss()` on either: the model leaves every screen about the
+                // server, this page included, and popping as well would overshoot.
+                Task { _ = await model.leaveServer(serverId) }
             }
             .confirm(ConfirmSpec(title: "Delete \(server?.name ?? "this server")?", message: "Every channel and message goes, for everyone.",
                                  action: "Delete server"), isPresented: $confirmDelete) {
-                Task {
-                    if await model.deleteServer(serverId) { dismiss() }
-                }
+                Task { _ = await model.deleteServer(serverId) }
             }
             .confirm(ConfirmSpec(title: "Reset the invite link?", message: "The old link stops working. People already in stay.",
                                  action: "Reset link"), isPresented: $confirmReset) {
@@ -2477,7 +2497,7 @@ struct ServerProfileView: View {
         let person = ProfilePerson(id: m.id, handle: m.handle, name: m.name, avatarUrl: m.avatarUrl,
                                    lastSeenAt: m.lastSeenAt, online: m.online, avatarColorIndex: m.avatarColorIndex)
         return Button {
-            model.showProfile(.user(person))
+            model.showProfile(.user(person), in: profileHost)
         } label: {
             PaneRow(
                 leading: .avatar(AnyView(PersonAvatar(url: m.avatarUrl, handle: m.handle, size: PaneKit.avatar, name: m.name, id: m.id, colorIndex: m.avatarColorIndex))),
@@ -2900,6 +2920,8 @@ struct ChannelProfileView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
+    /// The server row pushes onto whichever stack this page is on.
+    @Environment(\.profileHost) private var profileHost
     let channelId: String
     @State private var tab = "Profile"
     @State private var showRename = false
@@ -2963,7 +2985,9 @@ struct ChannelProfileView: View {
         .confirm(ConfirmSpec(title: channel.map { "Delete #\($0.name)?" } ?? "Delete channel?",
                              message: "Deletes the channel and its messages for everyone in the server.", action: "Delete"),
                  isPresented: $confirmDelete) {
-            if let c = channel { Task { if await model.deleteChannel(c) { dismiss() } } }
+            // No `dismiss()`: the model leaves every screen about the channel itself,
+            // this page included. Dismissing as well would pop the channel list too.
+            if let c = channel { Task { _ = await model.deleteChannel(c) } }
         }
     }
 
@@ -2973,7 +2997,7 @@ struct ChannelProfileView: View {
 
     private func serverRow(_ server: Server) -> AnyView {
         AnyView(Button {
-            model.showProfile(.server(serverId: server.id))
+            model.showProfile(.server(serverId: server.id), in: profileHost)
         } label: {
             PaneRow(leading: .avatar(AnyView(
                 InitialsAvatar(name: server.name, handle: nil, id: server.id,
@@ -2997,7 +3021,7 @@ struct ChannelProfileView: View {
             about.append(AnyView(PaneTextRow(text: topic)))
         }
         about.append(AnyView(Button {
-            model.showProfile(.server(serverId: server.id))
+            model.showProfile(.server(serverId: server.id), in: profileHost)
         } label: {
             PaneRow(title: "Members", value: "\(count)", chevron: true)
         }.buttonStyle(.plain)))
