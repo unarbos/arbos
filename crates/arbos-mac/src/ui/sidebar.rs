@@ -1129,7 +1129,8 @@ pub(crate) fn faded_list(list: impl IntoElement) -> gpui::AnyElement {
 /// ([feedback mac-sidebar-rail-2026-10-26]: "do not change the expanded
 /// sidebar").
 pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
-    render_with(shell, false, cx)
+    let sidebar_width = shell.state.read(cx).sidebar_width;
+    render_with(shell, false, sidebar_width, cx)
 }
 
 /// `hide_morphing`: while the collapse / open slide runs, the strip's discs,
@@ -1138,7 +1139,16 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
 /// keep their layout slot but are not painted (`invisible`), so nothing shows
 /// twice. Their resting bounds are recorded into `Shell::morph` every frame
 /// they are painted, which is what the overlay interpolates from.
-pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<Shell>) -> Div {
+///
+/// `sidebar_width` is the width the column is laid out at: the saved width,
+/// or the rail morph's (`slide::PaneSlides::sidebar_layout`) while a fold
+/// that left from a narrower column runs.
+pub(crate) fn render_with(
+    shell: &Shell,
+    hide_morphing: bool,
+    sidebar_width: f32,
+    cx: &mut Context<Shell>,
+) -> Div {
     let theme = Theme::of(cx).clone();
     let (pinned_rows, rest_rows) = list_sections(shell, cx);
     let pinned_count = pinned_rows.len();
@@ -1146,7 +1156,6 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
     let snap = shell.morph.clone();
     let state = shell.state.read(cx);
     let machine = state.machine.shown_state();
-    let sidebar_width = state.sidebar_width;
     // Inside a server the left pane shows its channels (D88 rule 2).
     let open_server = state.open_server_info().cloned();
     let open_server_admin = open_server.as_ref().is_some_and(ServerInfo::can_admin);
@@ -1492,10 +1501,11 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
         let card_id = entry.id().clone();
         let row = match entry {
             ListEntry::Chat(row) => {
-                render_row(*row, shell, hide_morphing, &theme, cx).into_any_element()
+                render_row(*row, shell, hide_morphing, sidebar_width, &theme, cx).into_any_element()
             }
             ListEntry::Server(row) => {
-                render_server_row(*row, shell, hide_morphing, &theme, cx).into_any_element()
+                render_server_row(*row, shell, hide_morphing, sidebar_width, &theme, cx)
+                    .into_any_element()
             }
         };
         list = list.child(
@@ -1627,7 +1637,7 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
         })
         .child(match open_server.as_ref() {
             // Inside a server the left pane shows its channels (mockup h).
-            Some(server) => faded_list(server_channels(server, shell, &theme, cx)),
+            Some(server) => faded_list(server_channels(server, shell, sidebar_width, &theme, cx)),
             None => faded_list(list),
         });
     // Grok Bot's update disc at the footer's right end, only when an update is
@@ -1706,6 +1716,7 @@ fn render_server_row(
     row: ServerRowView,
     shell: &Shell,
     hide_morphing: bool,
+    sidebar_width: f32,
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> gpui::Stateful<Div> {
@@ -1825,7 +1836,7 @@ fn render_server_row(
                         )
                         .child(div().flex_1())
                         .when(pinned, |el| el.child(pin_mark(&mark_id, theme)))
-                        .when_some(row_time_size(shell, cx), |el, size| {
+                        .when_some(row_time_size(sidebar_width), |el, size| {
                             el.child(time_el(time, size, theme))
                         }),
                 )
@@ -1857,6 +1868,7 @@ fn render_server_row(
 fn server_channels(
     server: &ServerInfo,
     shell: &Shell,
+    sidebar_width: f32,
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> gpui::Stateful<Div> {
@@ -2011,7 +2023,7 @@ fn server_channels(
                                     el.child(sf_symbols::glyph("lock", 11.0, theme.text_faint))
                                 })
                                 .child(div().flex_1())
-                                .when_some(row_time_size(shell, cx), |el, size| {
+                                .when_some(row_time_size(sidebar_width), |el, size| {
                                     el.child(time_el(time, size, theme))
                                 }),
                         )
@@ -2199,8 +2211,8 @@ pub fn channel_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
 /// The rows' time size at the column's width — `None` hides it: the name
 /// wins as the column narrows (`ui::sidebar_fit::row_time`,
 /// [feedback sidebar-narrow-wrap-2026-10-27]).
-fn row_time_size(shell: &Shell, cx: &Context<Shell>) -> Option<f32> {
-    match sidebar_fit::row_time(shell.state.read(cx).sidebar_width) {
+fn row_time_size(sidebar_width: f32) -> Option<f32> {
+    match sidebar_fit::row_time(sidebar_width) {
         sidebar_fit::RowTime::Full => Some(TEXT_TINY),
         sidebar_fit::RowTime::Small => Some(sidebar_fit::TIME_SMALL_SIZE),
         sidebar_fit::RowTime::Hidden => None,
@@ -2233,6 +2245,7 @@ fn render_row(
     row: RowView,
     shell: &Shell,
     hide_morphing: bool,
+    sidebar_width: f32,
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> impl IntoElement {
@@ -2280,7 +2293,7 @@ fn render_row(
     // The name wins over the time as the column narrows: the time shrinks,
     // then hides, and the `@handle` goes first (`ui::sidebar_fit::row_time`,
     // [feedback sidebar-narrow-wrap-2026-10-27]).
-    let handle_shown = sidebar_fit::handle_shown(shell.state.read(cx).sidebar_width);
+    let handle_shown = sidebar_fit::handle_shown(sidebar_width);
     // A group row reads like an agent row: name and preview, no member count.
     let handle = space
         .person()
@@ -2423,7 +2436,7 @@ fn render_row(
                         })
                         .child(div().flex_1())
                         .when(pinned, |el| el.child(pin_mark(&id, theme)))
-                        .when_some(row_time_size(shell, cx), |el, size| {
+                        .when_some(row_time_size(sidebar_width), |el, size| {
                             el.child(
                                 time_el(time, size, theme)
                                     .debug_selector(|| format!("row-time-{id}")),
@@ -4340,6 +4353,75 @@ mod status_cell_tests {
         let text_h = row_h(vcx, "row-preview-line-dm");
         assert_eq!(row_h(vcx, "row-preview-line-dm-emoji"), text_h);
         assert_eq!(row_h(vcx, "row-preview-line-dm-mixed"), text_h);
+    }
+
+    /// ARB-619: a drag folds the column into the rail from the width the hand
+    /// left it at. The column follows the pointer down to the snap width (220:
+    /// no times, no `@handle`); past the snap point the state goes to the rail
+    /// and the saved width back to the 296 the drag began from. The morph's
+    /// faded column used to be laid out at that 296 from its first frame —
+    /// times and `@handle` back, the collapse disc 76 pt to the right, the
+    /// text a third of the way through its fade — so the fold jumped where the
+    /// unfold and the toggle glide. Now it starts at the 220 it left from.
+    #[gpui::test]
+    fn a_drag_fold_morphs_from_the_width_the_hand_left_the_column_at(cx: &mut TestAppContext) {
+        use super::STRIP_INSET;
+        use crate::ui::sidebar_fit::SNAP_WIDTH;
+        let (_rt, state, _shell, vcx) = mount(cx);
+        let collapse_right = |vcx: &mut VisualTestContext| {
+            f32::from(
+                vcx.debug_bounds("sidebar-collapse")
+                    .expect("the expanded column's collapse disc")
+                    .right(),
+            )
+        };
+        state.update(vcx, |s, cx| {
+            s.rail_collapsed = false;
+            s.sidebar_width = 296.0;
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        let at_296 = collapse_right(vcx);
+        assert!((296.0 - STRIP_INSET - 1.0..=296.0 - STRIP_INSET).contains(&at_296));
+        assert!(vcx.debug_bounds("row-handle-dm").is_some(), "296: @handle");
+        assert!(vcx.debug_bounds("row-time-quiet").is_some(), "296: times");
+
+        // The hand drags the edge in: the column follows it to the snap width.
+        state.update(vcx, |s, cx| {
+            s.sidebar_width = SNAP_WIDTH;
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        let at_snap = collapse_right(vcx);
+        assert_eq!(at_snap, at_296 - (296.0 - SNAP_WIDTH));
+        assert!(vcx.debug_bounds("row-handle-dm").is_none());
+        assert!(vcx.debug_bounds("row-time-quiet").is_none());
+
+        // Past the snap point, as `AppState::drag_sidebar_edge` leaves it: the
+        // rail, with the width the drag began from saved.
+        state.update(vcx, |s, cx| {
+            s.rail_collapsed = true;
+            s.sidebar_width = 296.0;
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert!(
+            vcx.debug_bounds("rail-collapse").is_none(),
+            "the morph is running, not the rail at rest"
+        );
+        assert_eq!(
+            collapse_right(vcx),
+            at_snap,
+            "the faded column stays laid out at the width the hand left it at"
+        );
+        assert!(
+            vcx.debug_bounds("row-handle-dm").is_none(),
+            "no @handle comes back as the fold begins"
+        );
+        assert!(
+            vcx.debug_bounds("row-time-quiet").is_none(),
+            "no time comes back as the fold begins"
+        );
     }
 }
 

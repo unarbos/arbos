@@ -569,12 +569,17 @@ pub(crate) fn render_tip(shell: &Shell, cx: &Context<Shell>) -> Option<Div> {
 }
 
 /// The sidebar column while the slide runs: `width` wide this frame, holding
-/// the expanded layout at its full width with the morphing pieces unpainted
-/// and the rest fading ([`text_alpha`]); the pieces themselves travel in
-/// [`render_overlay`].
-pub(crate) fn render_morph(shell: &Shell, t: f32, width: f32, cx: &mut Context<Shell>) -> Div {
+/// the expanded layout at its full width `full` (`slide::PaneSlides::sidebar_layout`)
+/// with the morphing pieces unpainted and the rest fading ([`text_alpha`]);
+/// the pieces themselves travel in [`render_overlay`].
+pub(crate) fn render_morph(
+    shell: &Shell,
+    t: f32,
+    width: f32,
+    full: f32,
+    cx: &mut Context<Shell>,
+) -> Div {
     let theme = Theme::of(cx).clone();
-    let full = shell.state.read(cx).sidebar_width;
     div()
         .h_full()
         .w(px(width.max(0.0)))
@@ -589,7 +594,7 @@ pub(crate) fn render_morph(shell: &Shell, t: f32, width: f32, cx: &mut Context<S
                 .w(px(full))
                 .flex_shrink_0()
                 .opacity(text_alpha(t))
-                .child(sidebar::render_with(shell, true, cx)),
+                .child(sidebar::render_with(shell, true, full, cx)),
         )
 }
 
@@ -597,11 +602,12 @@ pub(crate) fn render_morph(shell: &Shell, t: f32, width: f32, cx: &mut Context<S
 /// the three discs between the strip and the rail column, every row's
 /// picture between its row and its rail slot (the selected row's card
 /// shrinking into its tile), and my footer picture sliding to the rail's
-/// centre.
+/// centre. `full` is the expanded layout's width, as in [`render_morph`].
 pub(crate) fn render_overlay(
     shell: &Shell,
     t: f32,
     window_height: f32,
+    full: f32,
     cx: &mut Context<Shell>,
 ) -> Div {
     let theme = Theme::of(cx).clone();
@@ -618,7 +624,7 @@ pub(crate) fn render_overlay(
         .absolute()
         .left_0()
         .top(px(clip_top))
-        .w(px(shell.state.read(cx).sidebar_width.max(metrics::WIDTH)))
+        .w(px(full.max(metrics::WIDTH)))
         .h(px((window_height - clip_top - FOOTER_HEIGHT).max(0.0)))
         .overflow_hidden();
     for (index, entry) in entries.iter().enumerate() {
