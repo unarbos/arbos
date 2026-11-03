@@ -348,39 +348,54 @@ struct MediaViewer: View {
                 .padding(.bottom, 12)
                 .accessibilityHidden(true)
             }
-            HStack(spacing: 12) {
-                // Close beside Download / Forward — same as Mac; always exits even
-                // when swipe-down or the top × lose the gesture race with zoom/paging.
-                pill("Close", system: "xmark") { close() }
-                // A profile picture is not a chat attachment: Close only.
-                if item?.pictureURL == nil {
-                    // The picture itself, original bytes under its own type
-                    // ([feedback copy-image-messages-ios-2026-10-27]).
-                    pill("Copy", system: "doc.on.doc") { Task { await copy() } }
-                        .disabled(!canAct || busy)
-                        .opacity(canAct ? 1 : 0.5)
-                    pill("Download", system: "arrow.down.to.line") { Task { await download() } }
-                        .disabled(!canAct || busy)
-                        .opacity(canAct ? 1 : 0.5)
-                    pill("Forward", system: "arrowshape.turn.up.right") { showForward = true }
-                        .disabled(!canAct || busy)
-                        .opacity(canAct ? 1 : 0.5)
-                }
+            // The full row is wider than any iPhone, so SwiftUI used to shrink the
+            // labels until they broke inside a word ("Clos e" — [feedback
+            // viewer-pill-labels-ios-2026-10-29]). The compact size takes over when
+            // the full one does not fit.
+            ViewThatFits(in: .horizontal) {
+                pillRow(.full)
+                pillRow(.compact)
             }
+            .padding(.horizontal, ViewerPill.rowInset)
             .padding(.bottom, 14)
         }
         .animation(.easeOut(duration: 0.2), value: toast)
     }
 
-    private func pill(_ label: String, system: String, action: @escaping () -> Void) -> some View {
+    private func pillRow(_ size: ViewerPill) -> some View {
+        HStack(spacing: size.gap) {
+            // Close beside Download / Forward — same as Mac; always exits even
+            // when swipe-down or the top × lose the gesture race with zoom/paging.
+            pill("Close", system: "xmark", size: size) { close() }
+            // A profile picture is not a chat attachment: Close only.
+            if item?.pictureURL == nil {
+                // The picture itself, original bytes under its own type
+                // ([feedback copy-image-messages-ios-2026-10-27]).
+                pill("Copy", system: "doc.on.doc", size: size) { Task { await copy() } }
+                    .disabled(!canAct || busy)
+                    .opacity(canAct ? 1 : 0.5)
+                pill("Download", system: "arrow.down.to.line", size: size) { Task { await download() } }
+                    .disabled(!canAct || busy)
+                    .opacity(canAct ? 1 : 0.5)
+                pill("Forward", system: "arrowshape.turn.up.right", size: size) { showForward = true }
+                    .disabled(!canAct || busy)
+                    .opacity(canAct ? 1 : 0.5)
+            }
+        }
+    }
+
+    private func pill(_ label: String, system: String, size: ViewerPill,
+                      action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            HStack(spacing: 8) {
-                Image(systemName: system).font(.system(size: 14, weight: .semibold))
-                Text(label).font(theme.font(15, weight: .medium))
+            HStack(spacing: size.innerSpacing) {
+                Image(systemName: system).font(.system(size: size.glyph, weight: .semibold))
+                Text(label).font(theme.font(size.label, weight: .medium))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: size.labelKeepsItsWidth, vertical: false)
             }
             .foregroundStyle(.white)
-            .padding(.horizontal, 16)
-            .frame(height: 38)
+            .padding(.horizontal, size.padding)
+            .frame(height: size.height)
             .background(ViewerChromeBackground(shape: Capsule(), interactive: true))
         }
         .buttonStyle(.plain)
@@ -538,6 +553,40 @@ struct ViewerChromeBackground<S: InsettableShape>: View {
             plate
         }
     }
+}
+
+/// The two sizes of the viewer's bottom pills ([feedback
+/// viewer-pill-labels-ios-2026-10-29]: "Clos e", "Downl oad"). The full row —
+/// Close · Copy · Download · Forward at the design size — is wider than every iPhone,
+/// and the row had no inset, so SwiftUI squeezed each label below its own width and
+/// broke it inside the word. The row now takes the first size that fits, every label
+/// is one line, and the row keeps `rowInset` from the screen edges.
+struct ViewerPill {
+    /// Label point size, scaled by the app's text size through `theme.font`.
+    let label: CGFloat
+    /// The SF symbol beside the label.
+    let glyph: CGFloat
+    /// Glyph → label.
+    let innerSpacing: CGFloat
+    /// Capsule end → glyph, and label → capsule end.
+    let padding: CGFloat
+    let height: CGFloat
+    /// Pill → pill.
+    let gap: CGFloat
+    /// The full row either fits whole or gives way to the compact one, so its labels
+    /// never squeeze. The compact row is the last size there is: at the largest text
+    /// steps on the narrowest iPhone its labels may end in an ellipsis, which is what
+    /// a one-line label does instead of breaking.
+    let labelKeepsItsWidth: Bool
+
+    /// The size the viewer shipped with (#1381), unchanged.
+    static let full = ViewerPill(label: 15, glyph: 14, innerSpacing: 8, padding: 16,
+                                 height: 38, gap: 12, labelKeepsItsWidth: true)
+    static let compact = ViewerPill(label: 13, glyph: 13, innerSpacing: 5, padding: 9,
+                                    height: 34, gap: 6, labelKeepsItsWidth: false)
+
+    /// Row → screen edge, both sides.
+    static let rowInset: CGFloat = 12
 }
 
 /// The caption, counter and page dots have no plate; a soft dark halo keeps them
