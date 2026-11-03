@@ -594,6 +594,9 @@ pub async fn mint(
         &json!({ "scope": scope.as_str(), "label": label, "chats": chats }),
     );
     tracing::info!(user = %user_id, link = %id, scope = scope.as_str(), "agent link minted");
+    // Stream events for this account start being kept now, before the agent has opened the
+    // link: otherwise the first thing it watches is a conversation that already moved on.
+    state.link_hub.note_live(user_id);
 
     let Ok(Some(link)) = state.db.agent_link(&id) else {
         return api_error(
@@ -733,6 +736,9 @@ pub async fn revoke(
                 user_agent(&headers).as_deref(),
                 &json!({ "by": "owner" }),
             );
+            // Closes the link's open streams and throws away its stream backlog, but only once
+            // the account's *last* link is gone.
+            state.link_hub.forget_if_dead(&state.db, &user_id);
             tracing::info!(user = %user_id, link = %id, "agent link revoked");
             return StatusCode::NO_CONTENT.into_response();
         }

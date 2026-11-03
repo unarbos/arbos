@@ -953,6 +953,7 @@ mod tests {
             image_health: Arc::new(tokio::sync::Mutex::new(None)),
             client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
             matrix: crate::matrix::Matrix::new(crate::matrix::Config::off()),
+            link_hub: Arc::new(crate::agent_link_stream::LinkHub::default()),
         }
     }
 
