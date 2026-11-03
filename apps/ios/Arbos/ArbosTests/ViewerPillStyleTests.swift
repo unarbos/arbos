@@ -103,10 +103,10 @@ final class ViewerPillStyleTests: XCTestCase {
     /// whole when it needs no more shrink than `ViewerPill.minimumLabelScale`; past that
     /// point a one-line label is cut with an ellipsis instead.
     ///
-    /// The worst corner is printed, so the gate log says how much room is left rather than
-    /// only that there was some.
+    /// `testReportTheWorstCornerOfTheTextSizeSweep` below reports how much room the tightest
+    /// corner had left.
+    ///
     func testTheRowHoldsEveryTextSizeStepIncludingTheLargest() {
-        var worst = (required: CGFloat.greatestFiniteMagnitude, note: "")
         for width in widths {
             for scale in TextScale.steps {
                 let size = chosenSize(width: width, scale: scale)
@@ -120,13 +120,33 @@ final class ViewerPillStyleTests: XCTestCase {
                 XCTAssertLessThanOrEqual(
                     chromeWidth(size) + labelsWidth(size, scale: scale) * required,
                     available(size, width) + 0.01, context(width, scale))
+            }
+        }
+    }
+
+    /// The tightest corner of that sweep, as a number, because "it passed" does not say how
+    /// much room was left. The font metrics only exist on a simulator, so the figure has to
+    /// come out of a test run rather than off a desk.
+    ///
+    /// It is reported as a skip reason on purpose. The gate keeps `xcodebuild-test.log`, and
+    /// that log carries XCTest's own skip reasons and failure messages but **not** a test
+    /// process's `print`. A skip is the one channel that reaches the log from a green run, and
+    /// this repo already uses it that way (`CaptureRigUITests`, `PerfBaselineUITests`). It
+    /// checks nothing — `testTheRowHoldsEveryTextSizeStepIncludingTheLargest` above is what
+    /// holds the guarantee — so it costs the gate one skipped case and no simulator work.
+    func testReportTheWorstCornerOfTheTextSizeSweep() throws {
+        var worst = (required: CGFloat.greatestFiniteMagnitude, note: "")
+        for width in widths {
+            for scale in TextScale.steps {
+                let size = chosenSize(width: width, scale: scale)
+                let required = requiredLabelScale(size, width: width, scale: scale)
                 if required < worst.required {
                     worst = (required: required, note: "\(context(width, scale)), label \(size.label) pt")
                 }
             }
         }
-        print("ARBOS_PILL_FIT worst corner: \(worst.required) of the label width needed "
-                + "(floor \(ViewerPill.minimumLabelScale)) at \(worst.note)")
+        throw XCTSkip("worst corner: \(worst.required) of the label width needed, "
+                        + "floor \(ViewerPill.minimumLabelScale), at \(worst.note)")
     }
 
     /// The largest Text Size the app ships, on the narrowest iPhone — the corner the tester
