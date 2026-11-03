@@ -113,8 +113,8 @@ final class BackDragTests: XCTestCase {
     // MARK: Slowly, and on the diagonal
 
     /// Jacob's "finicky" case: a slow drag. Speed is nothing to the tracking — the screen
-    /// goes where the finger is — and it only reaches the release, where a slow 240 pt is
-    /// past half the screen and goes back anyway.
+    /// goes where the finger is — and it only reaches the release, where 240 pt sideways and
+    /// nothing vertical goes back however slowly it got there.
     func testASlowDragTracksJustTheSame() {
         let samples = [12, 18, 26, 38, 55, 80, 120, 180, 240].map { Sample(CGFloat($0), 0, speed: 45) }
         let steps = play(samples)
@@ -124,7 +124,7 @@ final class BackDragTests: XCTestCase {
         for (sample, progress) in zip(samples, travel) {
             XCTAssertEqual(progress * width, sample.translation.width, accuracy: 0.001)
         }
-        XCTAssertEqual(steps.last, .finish, "240 pt of a 393 pt screen is past halfway, however slowly it got there")
+        XCTAssertEqual(steps.last, .finish, "a slow 240 pt is still the release rule's answer, not the tracking's")
     }
 
     /// A drag that starts on the diagonal — the finger comes down and goes out at the same
@@ -154,34 +154,46 @@ final class BackDragTests: XCTestCase {
         XCTAssertEqual(steps.last, .cancel)
     }
 
-    // MARK: What the release decides
+    // MARK: What the release decides, which this lane does not change
 
-    func testPastHalfTheScreenGoesBackHoweverItEnded() {
-        let half = CGSize(width: width / 2, height: 0)
-        XCTAssertTrue(BackSwipe.popFinishes(translation: half, velocity: .zero, width: width))
-        XCTAssertTrue(BackSwipe.popFinishes(translation: CGSize(width: width / 2, height: 300), velocity: .zero, width: width),
-                      "half a screen sideways is a decision, whatever the hand did vertically")
-        XCTAssertFalse(BackSwipe.popFinishes(translation: CGSize(width: width / 2 - 1, height: 240), velocity: .zero, width: width),
-                       "just short of half, and too crooked for the flick rule")
+    /// The release asks exactly the question it always asked. `BackDrag` holds no threshold of
+    /// its own, so the commit rule stays where it belongs: with Jacob's locked 0.75 fraction,
+    /// in its own build (`docs/ios-navigation-parity-scope.md`). A threshold invented here
+    /// would be a second change in a one-fix build, and that build would have to undo it.
+    func testTheReleaseIsStillFullScreenPopsAndNothingElse() {
+        let cases: [(CGSize, CGSize)] = [
+            (CGSize(width: 210, height: 0), CGSize(width: 600, height: 0)),      // long and brisk
+            (CGSize(width: 60, height: 4), CGSize(width: 90, height: 0)),        // short and gentle
+            (CGSize(width: 90, height: 8), CGSize(width: 1400, height: 40)),     // a flick
+            (CGSize(width: 196, height: 300), CGSize(width: 40, height: 900)),   // far out, but dragged down
+            (CGSize(width: 350, height: 10), .zero),                             // pushed across and paused
+        ]
+        for (translation, velocity) in cases {
+            let expected: BackDrag.Step =
+                BackSwipe.fullScreenPops(translation: translation, velocity: velocity) ? .finish : .cancel
+            XCTAssertEqual(BackDrag(width: width).step(for: .ended, translation: translation, velocity: velocity),
+                           expected, "the release agrees with fullScreenPops at \(translation)")
+        }
     }
 
-    /// Short of halfway a deliberate flick still goes back: that is `fullScreenPops`, left
-    /// exactly as it was so #2386's direction guarantee keeps testing the same function.
+    /// A deliberate flick goes back from well short of the screen, as it always has.
     func testAShortFlickStillGoesBack() {
-        let flick = CGSize(width: 90, height: 8)
-        XCTAssertTrue(BackSwipe.fullScreenPops(translation: flick, velocity: CGSize(width: 1400, height: 40)))
-        XCTAssertTrue(BackSwipe.popFinishes(translation: flick, velocity: CGSize(width: 1400, height: 40), width: width))
+        XCTAssertTrue(BackSwipe.fullScreenPops(translation: CGSize(width: 90, height: 8),
+                                               velocity: CGSize(width: 1400, height: 40)))
         XCTAssertEqual(play([Sample(30), Sample(60), Sample(90, 8, speed: 1400)]).last, .finish)
     }
 
-    /// A leftward drag can never go back, at any distance: `popFinishes` guards the direction
-    /// itself and leans on `fullScreenPops`, which has always required `dx > 0`. That is the
+    /// A leftward drag can never go back, at any distance: `fullScreenPops` has always
+    /// required `dx > 0`, and the release is still the only thing that asks it. That is the
     /// half of #2386's "right is back, left is reply" guarantee this lane must not weaken.
     func testALeftwardDragNeverGoesBack() {
         for dx in stride(from: CGFloat(-12), through: -400, by: -8) {
             let translation = CGSize(width: dx, height: 0)
-            XCTAssertFalse(BackSwipe.popFinishes(translation: translation, velocity: CGSize(width: -2000, height: 0), width: width),
+            let velocity = CGSize(width: -2000, height: 0)
+            XCTAssertFalse(BackSwipe.fullScreenPops(translation: translation, velocity: velocity),
                            "a \(Int(-dx)) pt swipe left is not back")
+            XCTAssertEqual(BackDrag(width: width).step(for: .ended, translation: translation, velocity: velocity),
+                           .cancel, "and letting go of one puts the screen back")
         }
     }
 

@@ -77,20 +77,6 @@ enum BackSwipe {
         return abs(velocity.width) >= abs(velocity.height) || absX > 120
     }
 
-    /// What letting go of an interactive back drag does: finish the pop, or put the screen
-    /// back where it was. Past half the screen it finishes — that is the line the system's
-    /// edge pop draws, and by then the reader can see most of the page underneath — and short
-    /// of it a deliberate flick (`fullScreenPops`) finishes too.
-    ///
-    /// `fullScreenPops` is left exactly as it is, because it is also the direction guarantee:
-    /// it needs `dx > 0`, so a leftward drag can never go back. The guard here says the same
-    /// thing again for the halfway clause.
-    static func popFinishes(translation: CGSize, velocity: CGSize, width: CGFloat) -> Bool {
-        guard translation.width > 0 else { return false }
-        if width > 0, translation.width >= width / 2 { return true }
-        return fullScreenPops(translation: translation, velocity: velocity)
-    }
-
     /// The keyboard goes down with the pop.
     static func dismissKeyboard() {
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
@@ -200,6 +186,13 @@ enum SwipeClaim: Equatable {
 /// and then it doesn't register until i let go … as i slide my finger across the chat slides
 /// out with my finger") — before it every sample but the last answered nothing at all, and a
 /// swipe was a threshold read once, at touch-up.
+///
+/// **What letting go does is not changed here.** The release still asks `fullScreenPops`, the
+/// same question with the same numbers it has always had, so this lane moves only *when* the
+/// screen moves and never *whether* the swipe commits. The commit rule is Jacob's — a locked
+/// 0.75 of the screen with a velocity projection, which `docs/ios-navigation-parity-scope.md`
+/// puts in its own build on top of this one. Putting a threshold of my own here would make
+/// that build undo this one.
 struct BackDrag: Equatable {
     /// The travel of a complete pop: the screen's width, so the page follows the finger 1:1.
     var width: CGFloat
@@ -209,7 +202,7 @@ struct BackDrag: Equatable {
         case idle
         /// The screen sits `progress` (0…1) of the way out.
         case track(progress: CGFloat)
-        /// Let go past the line (`BackSwipe.popFinishes`): run the pop out.
+        /// Let go past the line (`BackSwipe.fullScreenPops`): run the pop out.
         case finish
         /// Let go short of it, or the touch was taken away: put the screen back.
         case cancel
@@ -220,7 +213,7 @@ struct BackDrag: Equatable {
         case .began, .changed:
             return .track(progress: Self.progress(dx: translation.width, width: width))
         case .ended:
-            return BackSwipe.popFinishes(translation: translation, velocity: velocity, width: width) ? .finish : .cancel
+            return BackSwipe.fullScreenPops(translation: translation, velocity: velocity) ? .finish : .cancel
         case .cancelled, .failed:
             return .cancel
         case .possible:
