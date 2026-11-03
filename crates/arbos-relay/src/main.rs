@@ -50,6 +50,8 @@ mod local;
 mod matrix;
 mod migrate;
 mod moderation;
+#[cfg(test)]
+mod module_lookup_tests;
 mod notices;
 mod notify;
 mod outside;
@@ -61,6 +63,8 @@ mod perf;
 mod pins;
 #[cfg(test)]
 mod preview_token_tests;
+#[cfg(test)]
+mod project_lookup_tests;
 mod proxy;
 mod push;
 mod push_guard;
@@ -877,6 +881,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/room/{project}/{chat}/checkpoint",
             get(rooms::get_checkpoint).post(rooms::post_checkpoint),
+        )
+        .route(
+            "/room/{project}/{chat}/repair",
+            post(rooms::post_room_repair),
         )
         .route("/room/{project}/{chat}/stats", get(rooms::room_stats))
         .route(

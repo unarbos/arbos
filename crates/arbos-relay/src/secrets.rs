@@ -1480,6 +1480,58 @@ pub async fn create(
     Ok((StatusCode::CREATED, Json(secret_envelope(&state, &s))).into_response())
 }
 
+/// The caller's own agent, by id or name. Another owner's agent reads exactly like one that is
+/// not there, so the two answers cannot be used to ask which agent names exist
+/// (`api::no_such_project`, reported 2026-11-02). Names are matched against the caller's own
+/// agents first, because they are not unique across owners.
+fn own_agent(
+    state: &AppState,
+    user_id: &str,
+    project_id: &str,
+) -> Result<crate::db::Project, ApiErr> {
+    let wanted = project_id.trim();
+    if let Some(p) = state
+        .db
+        .project_of_user_by_name(user_id, wanted)
+        .map_err(internal)?
+    {
+        return Ok(p);
+    }
+    state
+        .db
+        .project(wanted)
+        .map_err(internal)?
+        .filter(|p| p.user_id == user_id)
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "no such agent"))
+}
+
+/// [`own_agent`], widened to the agents the caller was invited into: the owner and the guests
+/// are who may read an agent's secrets card. An agent that is neither reads exactly like one
+/// that is not there, so these answers cannot be used to ask which agent names exist
+/// (`api::no_such_project`, reported 2026-11-02).
+fn visible_agent(
+    state: &AppState,
+    user_id: &str,
+    project_id: &str,
+) -> Result<crate::db::Project, ApiErr> {
+    let wanted = project_id.trim();
+    if let Some(p) = state
+        .db
+        .project_of_user_by_name(user_id, wanted)
+        .map_err(internal)?
+    {
+        return Ok(p);
+    }
+    state
+        .db
+        .project(wanted)
+        .map_err(internal)?
+        .filter(|p| {
+            p.user_id == user_id || state.db.is_project_member(&p.id, user_id).unwrap_or(false)
+        })
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "no such agent"))
+}
+
 /// Create or update the access row for `(secret, project)`; audits on/off. `Ok(None)` when the
 /// project is not the user's.
 #[allow(clippy::too_many_arguments)]
@@ -1493,12 +1545,7 @@ fn grant_access(
     enabled: bool,
     created_from: &str,
 ) -> Result<Option<Access>, ApiErr> {
-    let Some(p) = state.db.project(project_id).map_err(internal)? else {
-        return Err(err(StatusCode::NOT_FOUND, "not_found", "no such agent"));
-    };
-    if p.user_id != user_id {
-        return Err(err(StatusCode::FORBIDDEN, "not_owner", "not your agent"));
-    }
+    let p = own_agent(state, user_id, project_id)?;
     let existing = state.db.access(&p.id, "secret", &s.id).map_err(internal)?;
     let was_on = existing.as_ref().is_some_and(|a| a.enabled);
     let now = now_ms();
@@ -2453,16 +2500,7 @@ pub async fn project_secrets(
     Path(project_id): Path<String>,
 ) -> ApiResult {
     let user_id = device_user(&principal)?;
-    let p = state
-        .db
-        .project(&project_id)
-        .map_err(internal)?
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "no such agent"))?;
-    let member =
-        p.user_id == user_id || state.db.is_project_member(&p.id, &user_id).unwrap_or(false);
-    if !member {
-        return Err(err(StatusCode::FORBIDDEN, "forbidden", "not your agent"));
-    }
+    let p = visible_agent(&state, &user_id, &project_id)?;
     let owner = p.user_id.clone();
     let settings = state.db.secrets_settings(&owner).map_err(internal)?;
     let mut items = Vec::new();
