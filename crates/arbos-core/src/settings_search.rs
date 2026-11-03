@@ -45,9 +45,6 @@ pub enum SettingsItem {
     SecretsNew,
     SecretsConnectOnePassword,
     Devices,
-    /// "Agent access link": the links and tokens this account gave an agent.
-    /// Mac only until the iPhone page ships.
-    AgentLinks,
     /// "On this Mac" (the paired `arbos-local` helpers) / "On this iPhone"
     /// (the storage line in the Settings list; no page of its own).
     OnThisDevice,
@@ -193,21 +190,6 @@ pub const INDEX: &[SettingsEntry] = &[
             "this iphone"
         ],
         BOTH
-    ),
-    entry!(
-        AgentLinks,
-        "Agent access link",
-        "Settings",
-        [
-            "agent access",
-            "agent link",
-            "read only",
-            "reply as me",
-            "share chats",
-            "give an agent access",
-            "revoke link"
-        ],
-        MAC
     ),
     SettingsEntry {
         item: SettingsItem::OnThisDevice,
