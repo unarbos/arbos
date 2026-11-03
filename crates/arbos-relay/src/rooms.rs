@@ -49,9 +49,11 @@ fn build_room_doc(state: &AppState, room_name: &str) -> anyhow::Result<crate::st
             break;
         }
     }
+    let message_ids = doc.message_ids();
     Ok(crate::state::RoomDocCache {
         key: (st.head, st.floor),
         doc,
+        message_ids,
     })
 }
 
@@ -71,19 +73,102 @@ fn advance_room_doc(
         return Ok(());
     }
     let mut after = cached.key.0;
+    let mut imported = false;
+    let before = cached.doc.frontiers();
     loop {
         let rows = state.db.rows_after(room_name, after, None, ROWS_BATCH)?;
         let n = rows.len() as i64;
         for r in rows {
             after = r.seq;
-            let _ = cached.doc.import(&r.bytes);
+            if cached.doc.import(&r.bytes).is_ok() {
+                imported = true;
+            }
         }
         if n < ROWS_BATCH {
             break;
         }
     }
+    // The mirror of message ids is carried forward by the same diff the push path uses, not
+    // rebuilt. Rebuilding costs 15 ms at 2 000 messages and 82 ms at 10 000, and every push
+    // moves the head — so a rebuild here would put that cost on the reader after every single
+    // message. A diff costs what the change costs.
+    if imported {
+        let changes =
+            cached
+                .doc
+                .messages_changed(&before, &cached.doc.frontiers(), &cached.message_ids);
+        // A mirror that may have drifted is worse than a slow one: an id out of place would
+        // make a later push's deletion name the wrong message. Pay the sweep instead.
+        cached.message_ids = if changes.unreadable {
+            cached.doc.message_ids()
+        } else {
+            changes.ids_after
+        };
+    }
     cached.key = key;
     Ok(())
+}
+
+/// What a pushed row does to the room's messages, read from the room's own doc.
+///
+/// A Loro update cannot be read on its own — it is a delta against history — so the payload is
+/// imported into the cached doc and the diff taken across the import. Three things follow from
+/// that, and all three are why this is one function holding one lock:
+///
+/// * The mirror of message ids must advance in the same locked section as the diff. Two sockets
+///   pushing at once would otherwise both diff against the same pre-image, and the second's
+///   deletions would name the first's messages.
+/// * The ops are in the cached doc before anything has authorised them. A caller that refuses
+///   the push must drop the cache (`Db` rows, not this doc, are the room's record), which is
+///   why the refusal path exists in the caller rather than here.
+/// * An import that fails leaves nothing to judge, so it is reported as unreadable rather than
+///   as "changed nothing".
+async fn push_message_changes(
+    state: &AppState,
+    room: &crate::state::Room,
+    room_name: &str,
+    payload: &[u8],
+) -> anyhow::Result<arbos_core::doc::MessageChanges> {
+    {
+        let mut guard = room.doc_cache.lock().unwrap();
+        if let Some(cached) = guard.as_mut() {
+            advance_room_doc(state, room_name, cached)?;
+            return Ok(diff_pushed_row(cached, payload));
+        }
+    }
+    let state_c = state.clone();
+    let name = room_name.to_owned();
+    let mut built = tokio::task::spawn_blocking(move || build_room_doc(&state_c, &name))
+        .await
+        .map_err(|e| anyhow::anyhow!("room doc rebuild: {e}"))??;
+    let changes = diff_pushed_row(&mut built, payload);
+    *room.doc_cache.lock().unwrap() = Some(built);
+    Ok(changes)
+}
+
+/// [`push_message_changes`] over a cache already in step with the room's stored rows.
+fn diff_pushed_row(
+    cached: &mut crate::state::RoomDocCache,
+    payload: &[u8],
+) -> arbos_core::doc::MessageChanges {
+    let before = cached.doc.frontiers();
+    if cached.doc.import(payload).is_err() {
+        // Bytes the relay cannot import are bytes it cannot judge. It has never parsed rows
+        // before, so this is not a rejection of malformed input — it is "nothing is known
+        // about what this does", which the caller fails closed on.
+        return arbos_core::doc::MessageChanges {
+            unreadable: true,
+            ..Default::default()
+        };
+    }
+    let changes =
+        cached
+            .doc
+            .messages_changed(&before, &cached.doc.frontiers(), &cached.message_ids);
+    if !changes.unreadable {
+        cached.message_ids = changes.ids_after.clone();
+    }
+    changes
 }
 
 /// Encoded version vector of the room's stored doc (checkpoint ∪ rows). Keeps a ChatDoc on the
@@ -579,12 +664,53 @@ async fn handle_frame(
                     }
                 }
             }
+            // What this row does to the chat's messages. Until now the arm checked size,
+            // duplicate batch ids and the people gates, and nothing about content — so three
+            // client-written things decided authorisation: whose message a delete touched,
+            // whose name an insert carried, and whether the push was a heal. All three are now
+            // read from the diff and from the relay's own record of who announced what.
+            let chat_of_room = room_name
+                .rsplit_once('/')
+                .map(|(_, c)| c)
+                .unwrap_or(room_name);
+            let changes = push_message_changes(state, room, room_name, &f.payload).await?;
+            let (carries_new_message, attributed) = match crate::push_guard::check_push(
+                state,
+                principal,
+                project_id,
+                chat_of_room,
+                p.heal,
+                &changes,
+            ) {
+                crate::push_guard::PushCheck::Allow {
+                    carries_new_message,
+                    attributed,
+                } => (carries_new_message, attributed),
+                crate::push_guard::PushCheck::Refuse { code, detail } => {
+                    // The refused ops are in the cached doc now and in no stored row. The
+                    // rows are the room's record, so drop the cache rather than serve readers
+                    // a doc the rows do not account for.
+                    *room.doc_cache.lock().unwrap() = None;
+                    tracing::warn!(
+                        %room_name, %device, code, detail = %detail, batch_id = %p.batch_id,
+                        "room push refused"
+                    );
+                    sink.send(error_frame(code, &detail)).await?;
+                    return Ok(());
+                }
+            };
+            // The one notion of kind for the rest of the arm. The header asks to be treated as
+            // history; the diff decides whether it is. A push carrying a message the relay has
+            // no record of is a new message however the header is spelled, and from here on it
+            // is handled as one — gated, unfurled, notified — so the flag changes nothing a
+            // client could want it to change.
+            let is_heal = p.heal && !carries_new_message;
             let mut wake_owners = Vec::new();
             // A heal carries other members' history, not a message of this device: the
             // message gates (rate limit, blocks, member pushes) do not apply — the socket's ACL
             // already does. 20:42 Oct 23: the first production heal (60 KB, Arbonites) was
             // dropped because a member had blocked the healing user.
-            if p.heal {
+            if is_heal {
                 // nothing to gate or wake
             } else if let Some(chat_id) =
                 room_name.strip_prefix(&format!("{}/", people::PEOPLE_PROJECT))
@@ -600,6 +726,19 @@ async fn handle_frame(
             let (seq, dup) = state
                 .db
                 .append_row(room_name, device, &p.batch_id, &f.payload)?;
+            // Whose message each new row carries, recorded from the socket that pushed it and
+            // before anyone can read the row. The announce routes write this record too, but
+            // they take the message id from a request body and are gated only on membership —
+            // so on a first-write-wins insert any member could become the author of record for
+            // a message that had none. Here the row and its author arrive together.
+            for (message_id, who) in &attributed {
+                if let Err(e) = state
+                    .db
+                    .record_message_author(chat_of_room, message_id, who)
+                {
+                    tracing::warn!(%room_name, %message_id, error = %e, "recording the author failed");
+                }
+            }
             sink.send(frame(
                 FrameType::Ack,
                 json!({ "batchId": p.batch_id, "seq": seq, "dup": dup }),
@@ -618,14 +757,14 @@ async fn handle_frame(
                     bytes: row,
                     seq,
                 });
-                if !p.heal {
+                if !is_heal {
                     // A link in a finished message gets its preview card (#2064), off the
                     // socket task.
                     if let Some((_, chat_id)) = room_name.rsplit_once('/') {
                         crate::unfurl::on_row(state, project_id, chat_id, is_box);
                     }
                 }
-                if p.heal {
+                if is_heal {
                     // History, not a new message: no read-cursor move, no notification, no
                     // wake. The Matrix mirror resync picks the rows up on its own.
                 } else if !is_box {
