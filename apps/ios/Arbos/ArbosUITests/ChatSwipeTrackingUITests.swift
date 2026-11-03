@@ -10,8 +10,8 @@ import XCTest
 /// and once it is up, a chat that tracked the whole way and a chat that jumped at touch-up
 /// look exactly the same. So the app records what it did, sample by sample, on the
 /// `back-swipe-trace` element (`ARBOS_SWIPE_TRACE=1`, Debug only) and the cases read that
-/// afterwards: `start`, one `track:<fraction of the screen>` per touch sample the chat moved
-/// on, then `finish` or `cancel` for the release.
+/// afterwards: `start`, then `track:<fraction of the screen>` for every further 1% the chat
+/// moved while the finger was down, then `finish` or `cancel` for the release.
 ///
 /// Each case drags **short of the halfway line and lets go slowly**, so the swipe cancels and
 /// the chat is still there to be read. That is the whole point: a drag that goes back proves
@@ -171,8 +171,8 @@ final class ChatSwipeTrackingUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter().wait(for: [left], timeout: settle), .completed, "the chat went back")
         XCTAssertTrue(app.buttons["Agents"].waitForExistence(timeout: settle), "Home is underneath")
 
-        let row = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "label CONTAINS %@", "Launch week")).firstMatch
+        // Home opens on the All tab, which lists the group (`HomeFilterTabsUITests`).
+        let row = app.descendants(matching: .any)["home-row:\(chatId)"].firstMatch
         XCTAssertTrue(row.waitForExistence(timeout: settle), "the group is in the list again")
         row.tap()
         XCTAssertTrue(back(app).waitForExistence(timeout: settle),

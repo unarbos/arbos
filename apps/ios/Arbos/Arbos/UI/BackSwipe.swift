@@ -972,16 +972,30 @@ enum BackSwipeTrace {
     static weak var readout: UILabel?
     private(set) static var entries: [String] = []
 
+    /// How much the screen must move before the drag is worth another entry. A drag at
+    /// `XCUIGestureVelocity.slow` is under the finger for ten seconds or more and is sampled
+    /// at the display's rate, so one entry per sample would be thousands of them: a readout
+    /// too long to hand back, rewritten thousands of times while the rig is mid-drag. One
+    /// per 1% of the screen (about 4 pt) is still far finer than the thing being proved.
+    private static let step: CGFloat = 0.01
+    /// A finger that wavers can cross the same 1% over and over; this is the hard stop, and
+    /// it is on the movement only, so the release always gets the last word.
+    private static let maximumTracked = 150
+    private static var lastTracked: CGFloat?
+
     static var text: String { entries.joined(separator: " ") }
 
     static func start() {
         guard on else { return }
         entries = []
+        lastTracked = nil
         note("start")
     }
 
     static func track(_ progress: CGFloat) {
-        guard on else { return }
+        guard on, entries.count < maximumTracked else { return }
+        if let lastTracked, abs(progress - lastTracked) < step { return }
+        lastTracked = progress
         note("track:" + String(format: "%.3f", progress))
     }
 
