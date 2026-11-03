@@ -1,5 +1,6 @@
 mod admin;
 mod agent_link;
+mod agent_link_read;
 mod agent_messages;
 mod api;
 mod api_error_layer;
@@ -645,6 +646,20 @@ async fn main() -> anyhow::Result<()> {
         .route("/me/agent-links/{id}/activity", get(agent_link::activity))
         .route("/agent-link/open/{secret}", get(agent_link::open_sheet))
         .route("/agent-link/me", get(agent_link::me))
+        // PR 3: what a link may read. Every one takes a `LinkPrincipal`, so an `arbl_` bearer
+        // reaches these and nothing else in the relay.
+        .route("/agent-link/chats", get(agent_link_read::chats))
+        .route("/agent-link/chats/{id}", get(agent_link_read::chat))
+        .route(
+            "/agent-link/chats/{id}/messages",
+            get(agent_link_read::messages),
+        )
+        .route("/agent-link/agents", get(agent_link_read::agents))
+        .route(
+            "/agent-link/agents/{id}/log",
+            get(agent_link_read::agent_log),
+        )
+        .route("/agent-link/files/{slot}/{key}", get(agent_link_read::file))
         // Session log (spec §13.3): the sidecar uploads, the owner reads.
         .route("/asp/log", post(outside_log::upload))
         .route("/outside-agents/{id}/log", get(outside_log::read))
