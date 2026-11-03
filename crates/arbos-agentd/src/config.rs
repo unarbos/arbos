@@ -239,13 +239,17 @@ pub fn memory_walk_fast_on(override_file: &std::path::Path) -> bool {
     switch_on("ARBOS_MEMORY_WALK_FAST", override_file, true)
 }
 
-/// Box-level settings: what every workspace shares.
+/// Box-level settings: what every workspace shares, plus the box-wide values each workspace's
+/// own are derived from.
 #[derive(Debug, Clone)]
 pub struct BoxConfig {
     /// Owner of the box; `None` until `/box/hello` answers (legacy env without it).
     pub user_id: Option<String>,
     pub relay_url: String,
     pub box_token: String,
+    /// The box-wide MCP token: the relay's credential for the box port (`http::box_admin_authed`),
+    /// which reaches every workspace. Each workspace's loopback servers get their own token
+    /// derived from this one; see `workspace_mcp_token`.
     pub mcp_token: String,
     /// `/work`: workspaces live in `<work_root>/<project>`; box-level state in `<work_root>/.arbos`.
     pub work_root: PathBuf,
@@ -318,6 +322,25 @@ impl BoxConfig {
         }
     }
 
+    /// The MCP and hook token for one workspace. Derived per project, because the loopback servers
+    /// authenticate by comparing this value alone (`mcp.rs`, `hooks.rs`) and the ports are
+    /// `7800 + 10·index` — guessable, not secret. Sharing one value let a child of one workspace
+    /// act on another's turn, jobs and working set, which is the boundary `/work/<project>` and the
+    /// per-workspace Unix users exist to hold.
+    ///
+    /// Not the box-wide `mcp_token`: that stays the relay's credential for the box port, where
+    /// `http::box_admin_authed` reaches every workspace.
+    ///
+    /// Keyed on the project, not on `index`: the index comes from a boot-order counter that
+    /// compacts across restarts, so keying on it would rotate the token for no reason.
+    fn workspace_mcp_token(&self, project_id: &str) -> String {
+        use sha2::Digest;
+        let digest = sha2::Sha256::digest(
+            format!("arbos-mcp:v1:{}:{project_id}", self.mcp_token).as_bytes(),
+        );
+        format!("mcp_{}", hex::encode(&digest[..16]))
+    }
+
     /// The per-workspace config for one project.
     pub fn workspace(&self, project: &Value, index: u16) -> Config {
         let project_id = project
@@ -346,7 +369,7 @@ impl BoxConfig {
                 .to_owned(),
             relay_url: self.relay_url.clone(),
             box_token: self.box_token.clone(),
-            mcp_token: self.mcp_token.clone(),
+            mcp_token: self.workspace_mcp_token(&project_id),
             mcp_port: base + 1,
             hook_port: base + 2,
             proxy_port: base + 3,
@@ -425,6 +448,7 @@ pub struct Config {
     pub project_name: String,
     pub relay_url: String,
     pub box_token: String,
+    /// This workspace's own bearer for its MCP and hook servers (`BoxConfig::workspace_mcp_token`).
     pub mcp_token: String,
     pub state_dir: PathBuf,
     pub work_dir: PathBuf,
@@ -471,7 +495,8 @@ impl Config {
     /// The bearer token subagent sessions present to the MCP server and hooks. Derived from
     /// the main token so the main session's token never reaches a subagent process; the MCP
     /// server tells the two apart to refuse main-only tools (D69: subagents never talk
-    /// project-to-project).
+    /// project-to-project). Its input is this workspace's own token, so it separates workspaces
+    /// as well as roles.
     pub fn subagent_mcp_token(&self) -> String {
         use sha2::Digest;
         let digest = sha2::Sha256::digest(format!("subagent:{}", self.mcp_token).as_bytes());
