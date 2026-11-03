@@ -266,11 +266,14 @@ pub fn short_url(url: &str) -> String {
     format!("{host}/…/{tail}")
 }
 
-/// The label the next link gets. The approved design has no name field — the
-/// screen asks two questions and no more — but the relay defaults every
-/// unlabelled link to the same "Agent link", and five of those in one list
-/// tell the owner nothing. So the first is "Agent link" and each later one
-/// counts up past whatever is already live.
+/// The longest label the relay accepts (`LABEL_MAX`); a longer name is cut to
+/// it rather than sent and refused.
+pub const LABEL_MAX: usize = 60;
+
+/// The label a link gets when the owner names it nothing. The relay defaults
+/// every unlabelled link to the same "Agent link", and five of those in one
+/// list tell the owner nothing — so the first is "Agent link" and each later
+/// one counts up past whatever is already live.
 pub fn next_label(items: &[AgentLinkView]) -> String {
     const BASE: &str = "Agent link";
     let taken: Vec<&str> = live(items).map(|l| l.label.trim()).collect();

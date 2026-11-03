@@ -1323,9 +1323,29 @@ impl Shell {
                     )),
             );
 
-            // Create: the one button, named after the scope it is about to
-            // grant and tinted by it, so the consequence is restated at the
-            // moment of commitment.
+            // Create: a name for the list, then the one button — named after
+            // the scope it is about to grant and tinted by it, so the
+            // consequence is restated at the moment of commitment.
+            let name_row = div()
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .min_h(px(kit::ROW_MIN_H))
+                .px(px(kit::INSET))
+                .debug_selector(|| "agent-link-name".into())
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_size(px(TEXT_BODY))
+                        .text_color(theme.text)
+                        .child("Name"),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(TEXT_BODY))
+                        .child(self.agent_link_name_input.clone()),
+                );
             let create_ink = if scope.is_danger() {
                 theme.danger
             } else {
@@ -1339,24 +1359,30 @@ impl Shell {
             )
             .debug_selector(|| "agent-link-create".into())
             .when(!view.minting, |el| {
-                el.on_click(cx.listener(move |this, _, _, cx| {
-                    let label = agent_links::next_label(&this.state.read(cx).agent_links.items);
-                    this.state
-                        .update(cx, |s, cx| s.mint_agent_link(label, scope, ttl, cx));
-                }))
+                el.on_click(cx.listener(|this, _, _, cx| this.create_agent_link(cx)))
             })
             .when(view.minting, |el| el.opacity(0.5));
+            // The blank default is live, so the owner can see what leaving the
+            // field empty will call this one before pressing Create.
+            let blank_default = agent_links::next_label(&view.items);
             body = body.child(
                 div()
                     .flex()
                     .flex_col()
                     .child(
-                        kit::section(vec![create.into_any_element()], &theme)
-                            .mx(px(0.0))
-                            .mb(px(0.0)),
+                        kit::section(
+                            vec![name_row.into_any_element(), create.into_any_element()],
+                            &theme,
+                        )
+                        .mx(px(0.0))
+                        .mb(px(0.0)),
                     )
                     .child(footnote(
-                        "One link is all you hand over. Shown on the next screen, once.".into(),
+                        format!(
+                            "Name it for the agent you are giving it to. Left blank it is called \
+                             “{blank_default}”. One link is all you hand over, shown on the next \
+                             screen, once."
+                        ),
                         &theme,
                     )),
             );
