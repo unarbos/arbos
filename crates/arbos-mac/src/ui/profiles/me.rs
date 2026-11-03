@@ -14,6 +14,7 @@ use gpui::{
 use crate::app::ProfilePage;
 use crate::model::{now_ms, MachineState};
 use crate::sync::user_error::UserError;
+use crate::ui::agent_links;
 use crate::ui::devices;
 use crate::ui::error_note;
 use crate::ui::glass;
@@ -78,6 +79,12 @@ impl Shell {
             0 => String::new(),
             1 => "1 device".to_string(),
             n => format!("{n} devices"),
+        };
+        let agent_links_view = state.agent_links.clone();
+        let agent_links_summary = match agent_links::live(&state.agent_links.items).count() {
+            0 => String::new(),
+            1 => "1 link".to_string(),
+            n => format!("{n} links"),
         };
         let store_usage = state.store_usage;
         let update = state.update.clone();
@@ -1170,12 +1177,291 @@ impl Shell {
                 }
                 body = body.child(kit::section(rows, &theme).mx(px(0.0)).mb(px(0.0)));
                 body = body.child(footnote(
-                    "Every GitHub sign-in is a device. Signing one out ends its session at once; it can sign in again. This Mac signs out from the Settings tab."
+                    "Every GitHub sign-in is a device. Signing one out ends its session at once; it can sign in again. This Mac signs out from the Settings tab. Agent tokens live in Agent access link."
                         .into(),
                     &theme,
                 ));
             }
             body
+        };
+
+        // ----- Agent access link page body (Jacob, approved 2026-11-03) -----------
+        // Scope, Expires, Create, then every live link. The two scope rows carry
+        // their own consequence and the card's footer swaps with the choice, so
+        // the dangerous sentence is never on screen while Read only is selected
+        // (`internal/settings-agent-access-link-one-copy.md`).
+        let agent_links_body = {
+            let view = agent_links_view;
+            let scope = self.agent_link_scope;
+            let ttl = self.agent_link_ttl_hours;
+            let mut body = div().flex().flex_col().gap(px(22.0));
+
+            // The page's note: under the pane header, before the first card.
+            if let Some(err) = view.error.clone() {
+                body = body.child(error_note::render(
+                    "agent-links-error",
+                    &err,
+                    self.agent_links_error_details_open,
+                    error_note::Style::Inline,
+                    &theme,
+                    error_note::Handlers::new()
+                        .try_again(cx.listener(|this, _, _, cx| {
+                            this.state.update(cx, |s, cx| s.agent_links_refresh(cx));
+                        }))
+                        .toggle_details(cx.listener(|this, _, _, cx| {
+                            this.agent_links_error_details_open =
+                                !this.agent_links_error_details_open;
+                            cx.notify();
+                        })),
+                ));
+            }
+
+            // Scope: two rows, a checkmark on the chosen one, danger ink only
+            // while reply-as-me is the chosen one.
+            let mut scope_rows: Vec<gpui::AnyElement> = Vec::new();
+            for choice in agent_links::SCOPES {
+                let on = choice == scope;
+                // Red means one thing in this section: this can speak as you.
+                let red = on && choice.is_danger();
+                let title_ink = if red { theme.danger } else { theme.text };
+                let sub_ink = if red {
+                    theme.danger
+                } else {
+                    theme.label_muted()
+                };
+                scope_rows.push(
+                    div()
+                        .id(ElementId::Name(SharedString::from(format!(
+                            "agent-link-scope-{}",
+                            choice.wire()
+                        ))))
+                        .debug_selector(move || format!("agent-link-scope-{}", choice.wire()))
+                        .flex()
+                        .items_center()
+                        .gap(px(12.0))
+                        .min_h(px(kit::ROW_MIN_H))
+                        .px(px(kit::INSET))
+                        .py(px(8.0))
+                        .cursor_pointer()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_w_0()
+                                .gap(px(2.0))
+                                .child(
+                                    div()
+                                        .text_size(px(TEXT_BODY))
+                                        .text_color(title_ink)
+                                        .child(choice.title()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(TEXT_SMALL))
+                                        .text_color(sub_ink)
+                                        .child(choice.subtitle()),
+                                ),
+                        )
+                        .when(on, |el| {
+                            el.child(div().flex_shrink_0().child(sf_symbols::glyph(
+                                "checkmark",
+                                13.0,
+                                title_ink,
+                            )))
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.agent_link_scope = choice;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+            }
+            body = body.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(kit::section_title("Scope", &theme))
+                    .child(kit::section(scope_rows, &theme).mx(px(0.0)).mb(px(0.0)))
+                    .child(footnote(scope.consequence().into(), &theme)),
+            );
+
+            // Expires: the small control, for the safe and reversible setting.
+            let segments = div()
+                .flex()
+                .items_center()
+                .gap(px(2.0))
+                .p(px(2.0))
+                .mx(px(0.0))
+                .rounded(px(kit::CARD_RADIUS))
+                .bg(theme.field_fill())
+                .border_1()
+                .border_color(theme.field_border)
+                .children(agent_links::EXPIRIES.map(|e| {
+                    glass::segment(
+                        ElementId::Name(SharedString::from(format!("agent-link-ttl-{}", e.hours))),
+                        e.label,
+                        e.hours == ttl,
+                        &theme,
+                    )
+                    .flex_1()
+                    .justify_center()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.agent_link_ttl_hours = e.hours;
+                        cx.notify();
+                    }))
+                }));
+            body = body.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(kit::section_title("Expires", &theme))
+                    .child(segments)
+                    .child(footnote(
+                        "Every link expires. Revoke it sooner when the agent is done.".into(),
+                        &theme,
+                    )),
+            );
+
+            // Create: the one button, named after the scope it is about to
+            // grant and tinted by it, so the consequence is restated at the
+            // moment of commitment.
+            let create_ink = if scope.is_danger() {
+                theme.danger
+            } else {
+                theme.accent
+            };
+            let create = kit::action_row(
+                "agent-link-create",
+                scope.create_label(),
+                create_ink,
+                &theme,
+            )
+            .debug_selector(|| "agent-link-create".into())
+            .when(!view.minting, |el| {
+                el.on_click(cx.listener(move |this, _, _, cx| {
+                    let label = agent_links::next_label(&this.state.read(cx).agent_links.items);
+                    this.state
+                        .update(cx, |s, cx| s.mint_agent_link(label, scope, ttl, cx));
+                }))
+            })
+            .when(view.minting, |el| el.opacity(0.5));
+            body = body.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        kit::section(vec![create.into_any_element()], &theme)
+                            .mx(px(0.0))
+                            .mb(px(0.0)),
+                    )
+                    .child(footnote(
+                        "One link is all you hand over. Shown on the next screen, once.".into(),
+                        &theme,
+                    )),
+            );
+
+            // Active links.
+            let mut list = div()
+                .flex()
+                .flex_col()
+                .child(kit::section_title("Active links", &theme));
+            if !view.loaded && view.items.is_empty() {
+                list = list.child(kit::empty("Loading…", &theme));
+            } else {
+                let rows = agent_links::rows(&view.items, now_ms() as i64);
+                if rows.is_empty() {
+                    list = list.child(kit::empty("No links yet", &theme));
+                } else {
+                    let mut els: Vec<gpui::AnyElement> = Vec::new();
+                    for r in rows {
+                        let id = r.id.clone();
+                        // The tag sits beside the name, because which of the two
+                        // scopes a live link has is the most important fact about
+                        // it — not something to read off the far edge.
+                        let tag = div()
+                            .flex_shrink_0()
+                            .px(px(6.0))
+                            .py(px(1.0))
+                            .rounded_full()
+                            .bg(if r.scope.is_danger() {
+                                theme.danger_soft
+                            } else {
+                                theme.control_fill()
+                            })
+                            .text_size(px(TEXT_TINY))
+                            .text_color(if r.scope.is_danger() {
+                                theme.danger
+                            } else {
+                                theme.label_muted()
+                            })
+                            .whitespace_nowrap()
+                            .child(r.scope.tag());
+                        els.push(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(12.0))
+                                .min_h(px(kit::ROW_MIN_H))
+                                .px(px(kit::INSET))
+                                .py(px(6.0))
+                                .child(glass::icon_tile("link", &theme))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .gap(px(2.0))
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(7.0))
+                                                .child(
+                                                    div()
+                                                        .min_w_0()
+                                                        .truncate()
+                                                        .text_size(px(TEXT_BODY))
+                                                        .text_color(theme.text)
+                                                        .child(r.name.clone()),
+                                                )
+                                                .child(tag),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(TEXT_SMALL))
+                                                .text_color(theme.label_muted())
+                                                .whitespace_nowrap()
+                                                .child(r.subtitle.clone()),
+                                        ),
+                                )
+                                // Revoke acts at once, as its footnote says: the
+                                // link is already out of the owner's hands, so a
+                                // confirm step only keeps it alive longer.
+                                .child(
+                                    link_button("agent-link-revoke", "Revoke", true, &theme)
+                                        .id(ElementId::Name(SharedString::from(format!(
+                                            "agent-link-revoke-{id}"
+                                        ))))
+                                        .whitespace_nowrap()
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            let id = id.clone();
+                                            this.state
+                                                .update(cx, |s, cx| s.revoke_agent_link(id, cx));
+                                        })),
+                                )
+                                .into_any_element(),
+                        );
+                    }
+                    list = list.child(kit::section(els, &theme).mx(px(0.0)).mb(px(0.0)));
+                }
+                list = list.child(footnote(
+                    "Revoking stops a link at once. What an agent already read stays read.".into(),
+                    &theme,
+                ));
+            }
+            body.child(list)
         };
 
         let page = self.settings_page;
@@ -1200,6 +1486,7 @@ impl Shell {
                     SettingsPage::Updates => updates_body,
                     SettingsPage::About => about_body,
                     SettingsPage::Devices => devices_body,
+                    SettingsPage::AgentLinks => agent_links_body,
                     SettingsPage::Root
                     | SettingsPage::Connectors
                     | SettingsPage::Routines
@@ -1224,7 +1511,8 @@ impl Shell {
                     | SettingsPage::Notifications
                     | SettingsPage::Updates
                     | SettingsPage::About
-                    | SettingsPage::Devices => unreachable!("handled above"),
+                    | SettingsPage::Devices
+                    | SettingsPage::AgentLinks => unreachable!("handled above"),
                     SettingsPage::Connectors => self.connectors.clone().into_any_element(),
                     SettingsPage::Routines => self.routines.clone().into_any_element(),
                     SettingsPage::Channels => self.channels.clone().into_any_element(),
@@ -1425,7 +1713,8 @@ impl Shell {
                 )
                 .into_any_element(),
             ]));
-            // Secrets · Devices (Credits · Connected apps hidden until implemented).
+            // Secrets · Devices · Agent access link (Credits · Connected apps
+            // hidden until implemented).
             body.push(Section::Card(vec![
                 page_row(
                     "settings-secrets",
@@ -1441,6 +1730,15 @@ impl Shell {
                     "laptopcomputer",
                     SettingsPage::Devices,
                     Some(devices_summary),
+                    &theme,
+                    cx,
+                )
+                .into_any_element(),
+                page_row(
+                    "settings-agent-links",
+                    "link",
+                    SettingsPage::AgentLinks,
+                    Some(agent_links_summary),
                     &theme,
                     cx,
                 )

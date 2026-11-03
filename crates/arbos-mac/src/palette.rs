@@ -234,6 +234,7 @@ pub fn setting_target(item: SettingsItem) -> Option<SettingTarget> {
         SettingsItem::SecretsNew => SettingTarget::SecretsNew,
         SettingsItem::SecretsConnectOnePassword => SettingTarget::SecretsConnect,
         SettingsItem::Devices => SettingTarget::Page(SettingsPage::Devices),
+        SettingsItem::AgentLinks => SettingTarget::Page(SettingsPage::AgentLinks),
         SettingsItem::OnThisDevice => SettingTarget::Page(SettingsPage::ThisMac),
         SettingsItem::Machine => SettingTarget::Page(SettingsPage::Machine),
         SettingsItem::Updates => SettingTarget::Page(SettingsPage::Updates),
@@ -265,7 +266,8 @@ pub fn target_glyph(target: &SettingTarget) -> &'static str {
         SettingTarget::Page(SettingsPage::Updates) => "arrow.down",
         SettingTarget::Page(SettingsPage::About) => "info.circle",
         SettingTarget::Page(SettingsPage::Credits) => "creditcard",
-        SettingTarget::Page(SettingsPage::Connectors) => "link",
+        SettingTarget::Page(SettingsPage::Connectors)
+        | SettingTarget::Page(SettingsPage::AgentLinks) => "link",
         SettingTarget::Page(
             SettingsPage::Root
             | SettingsPage::Routines

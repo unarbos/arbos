@@ -174,7 +174,8 @@ enum GlobalSearch {
     }
 
     /// Which of the iPhone's pages a shared index item is; nil for the Mac-only
-    /// Updates page and for the per-agent items (built with the agent id).
+    /// Updates and Agent access link pages and for the per-agent items (built
+    /// with the agent id).
     static func settingsRoute(for item: SettingsItem) -> SettingsRoute? {
         switch item {
         case .appearance, .appearanceOpacity: return .page(.appearance)
@@ -183,6 +184,9 @@ enum GlobalSearch {
         case .secretsNew: return .page(.newSecret)
         case .secretsConnectOnePassword: return .page(.connectOnePassword)
         case .devices: return .page(.devices)
+        // Mac-only until the iPhone's Agent access link page ships; the shared
+        // index does not list it for this platform either.
+        case .agentLinks: return nil
         case .onThisDevice: return .page(.root)
         case .machine: return .page(.machine)
         case .updates: return nil

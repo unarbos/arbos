@@ -18,6 +18,7 @@ pub enum SettingsItem {
     SecretsNew,
     SecretsConnectOnePassword,
     Devices,
+    AgentLinks,
     OnThisDevice,
     Machine,
     Updates,
@@ -45,6 +46,7 @@ impl From<core::SettingsItem> for SettingsItem {
                 SettingsItem::SecretsConnectOnePassword
             }
             core::SettingsItem::Devices => SettingsItem::Devices,
+            core::SettingsItem::AgentLinks => SettingsItem::AgentLinks,
             core::SettingsItem::OnThisDevice => SettingsItem::OnThisDevice,
             core::SettingsItem::Machine => SettingsItem::Machine,
             core::SettingsItem::Updates => SettingsItem::Updates,
