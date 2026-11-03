@@ -9344,9 +9344,14 @@ async fn mint_agent_link(shared: &Arc<Shared>, label: String, scope: &'static st
         Ok(value) => match value.get("url").and_then(|u| u.as_str()) {
             Some(url) => Ok(crate::model::AgentLinkReveal {
                 url: url.to_owned(),
+                // The relay echoes the label back, but an older one may send
+                // none or send it blank; either way the name we composed is
+                // the one the owner will see in the list.
                 label: value
                     .get("label")
                     .and_then(|l| l.as_str())
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
                     .unwrap_or(&label)
                     .to_owned(),
                 scope: value

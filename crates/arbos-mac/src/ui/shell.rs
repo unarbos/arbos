@@ -1523,20 +1523,9 @@ impl Shell {
         if self.state.read(cx).agent_links.minting {
             return;
         }
-        let typed = self
-            .agent_link_name_input
-            .read(cx)
-            .text()
-            .trim()
-            .to_string();
-        let label = if typed.is_empty() {
-            crate::ui::agent_links::next_label(&self.state.read(cx).agent_links.items)
-        } else {
-            typed
-                .chars()
-                .take(crate::ui::agent_links::LABEL_MAX)
-                .collect()
-        };
+        let typed = self.agent_link_name_input.read(cx).text().to_string();
+        let label =
+            crate::ui::agent_links::label_for(&typed, &self.state.read(cx).agent_links.items);
         let scope = self.agent_link_scope;
         let ttl = self.agent_link_ttl_hours;
         self.agent_link_name_input

@@ -1,6 +1,6 @@
 //! Settings → Agent access link (Jacob, approved mockups 2026-11-03): every
-//! token this account ever handed an agent, in one list, plus the Scope and
-//! Expires controls that mint the next one.
+//! token this account ever handed an agent, in one list, plus the Name, Scope
+//! and Expires controls that mint the next one.
 //!
 //! One copy, everywhere: the owner copies **one** URL — a single-use open
 //! secret whose response body carries the agent's bearer — so no screen in
@@ -270,6 +270,20 @@ pub fn short_url(url: &str) -> String {
 /// it rather than sent and refused.
 pub const LABEL_MAX: usize = 60;
 
+/// The label to send for a link the owner named `typed`.
+///
+/// Never empty. The relay does not number an unlabelled link — it stores the
+/// one literal "Agent link" — so the numbering is ours to compose and ours to
+/// send, and a blank field becomes [`next_label`] here rather than an absent
+/// `label` on the wire.
+pub fn label_for(typed: &str, items: &[AgentLinkView]) -> String {
+    let typed = typed.trim();
+    if typed.is_empty() {
+        return next_label(items);
+    }
+    typed.chars().take(LABEL_MAX).collect()
+}
+
 /// The label a link gets when the owner names it nothing. The relay defaults
 /// every unlabelled link to the same "Agent link", and five of those in one
 /// list tell the owner nothing — so the first is "Agent link" and each later
@@ -463,8 +477,8 @@ mod tests {
         assert_eq!(short_url("relay.arbos.life"), "relay.arbos.life");
     }
 
-    /// No two live links share a name, so the list stays readable without a
-    /// name field the design does not have.
+    /// No two live links share a name, so the list stays readable whether or
+    /// not the owner typed one.
     #[test]
     fn a_new_link_is_named_past_the_live_ones() {
         assert_eq!(next_label(&[]), "Agent link");
@@ -481,6 +495,24 @@ mod tests {
             next_label(&[link("c", "Jacob's Claude", "reply")]),
             "Agent link"
         );
+    }
+
+    /// The relay stores the one literal "Agent link" for an unlabelled link
+    /// and never numbers it, so the name that goes on the wire is composed
+    /// here and is never empty.
+    #[test]
+    fn the_name_we_send_is_ours_to_compose_and_never_blank() {
+        let live = [link("a", "Agent link", "read")];
+        assert_eq!(label_for("", &live), "Agent link 2");
+        assert_eq!(label_for("   ", &live), "Agent link 2");
+        assert_eq!(label_for("\t\n", &[]), "Agent link");
+        // A typed name is kept, trimmed, and never reaches the relay over its limit.
+        assert_eq!(label_for("  Jacob's Claude  ", &live), "Jacob's Claude");
+        let long = "x".repeat(LABEL_MAX + 40);
+        assert_eq!(label_for(&long, &live).chars().count(), LABEL_MAX);
+        for typed in ["", " ", "Codex", &long] {
+            assert!(!label_for(typed, &live).is_empty());
+        }
     }
 
     #[test]
