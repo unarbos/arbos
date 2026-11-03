@@ -141,6 +141,9 @@ pub(crate) enum SettingsPage {
     Secrets,
     /// Signed-in devices of my account: list + sign out another (Oct 23).
     Devices,
+    /// Links that let an outside agent read — or reply as me. This page owns
+    /// every agent token of my account, Devices owns none of them.
+    AgentLinks,
 }
 
 impl SettingsPage {
@@ -148,11 +151,12 @@ impl SettingsPage {
     /// its order); the search index must find each of them
     /// ([feedback search-settings-mac-2026-10-26], `palette::tests`).
     #[cfg(test)]
-    pub(crate) const LISTED: [SettingsPage; 8] = [
+    pub(crate) const LISTED: [SettingsPage; 9] = [
         SettingsPage::Appearance,
         SettingsPage::Notifications,
         SettingsPage::Secrets,
         SettingsPage::Devices,
+        SettingsPage::AgentLinks,
         SettingsPage::ThisMac,
         SettingsPage::Machine,
         SettingsPage::Updates,
@@ -175,6 +179,7 @@ impl SettingsPage {
             SettingsPage::ThisMac => "This Mac",
             SettingsPage::Secrets => "Secrets",
             SettingsPage::Devices => "Devices",
+            SettingsPage::AgentLinks => "Agent access link",
         }
     }
 
@@ -189,10 +194,11 @@ impl SettingsPage {
                 | SettingsPage::Updates
                 | SettingsPage::About
                 | SettingsPage::Devices
+                | SettingsPage::AgentLinks
         )
     }
 
-    /// The pane grows for the two pages laid out wider than the card list.
+    /// The pane grows for the pages laid out wider than the card list.
     pub(crate) fn sheet_width(self) -> f32 {
         match self {
             SettingsPage::Root
@@ -207,6 +213,9 @@ impl SettingsPage {
             | SettingsPage::ThisMac
             | SettingsPage::Secrets
             | SettingsPage::Devices => SETTINGS_WIDTH,
+            // The scope rows carry two lines of consequence each; 340 would
+            // wrap them to four.
+            SettingsPage::AgentLinks => 400.0,
             SettingsPage::Routines => crate::ui::routines::PANEL_WIDTH + 32.0,
             SettingsPage::Skills => skills::CARD_WIDTH + 32.0,
         }
@@ -423,6 +432,19 @@ pub struct Shell {
     pub(crate) device_revoke_armed: Option<String>,
     /// Settings → Devices: the load-failure note's Details disclosure.
     pub(crate) devices_error_details_open: bool,
+    /// Settings → Agent access link: what the next link may do. Read only,
+    /// always, until the user says otherwise on this visit — reply-as-me is
+    /// never pre-selected and never remembered.
+    pub(crate) agent_link_scope: crate::ui::agent_links::Scope,
+    /// Settings → Agent access link: how long the next link lives, in hours.
+    pub(crate) agent_link_ttl_hours: i64,
+    /// Settings → Agent access link: what to call the next link. The relay
+    /// names every unlabelled link the same literal "Agent link", so without
+    /// this every row of the list would read alike; left blank, the name is
+    /// auto-numbered instead ([`crate::ui::agent_links::next_label`]).
+    pub(crate) agent_link_name_input: Entity<ComposerInput>,
+    /// Settings → Agent access link: the load-failure note's Details disclosure.
+    pub(crate) agent_links_error_details_open: bool,
     /// Settings → Updates: the failed-install note's Details disclosure.
     pub(crate) update_error_details_open: bool,
     /// The chat-level notes' Details disclosures (machine error, delivery refusal).
@@ -522,6 +544,7 @@ impl Shell {
                 || v == "appearance"
                 || v == "credits"
                 || v == "devices"
+                || v == "agent-links"
                 || v.starts_with("secrets")
         });
         let settings_scroll = ScrollHandle::new();
@@ -863,6 +886,18 @@ impl Shell {
         }
         cx.observe(&agent_name_input, |_, _, cx| cx.notify())
             .detach();
+        let agent_link_name_input = cx.new(ComposerInput::new);
+        {
+            let weak = cx.weak_entity();
+            agent_link_name_input.update(cx, |input, _| {
+                input.set_placeholder("Codex on my laptop");
+                input.on_submit = Some(Rc::new(move |_window, cx| {
+                    let _ = weak.update(cx, |this, cx| this.create_agent_link(cx));
+                }));
+            });
+        }
+        cx.observe(&agent_link_name_input, |_, _, cx| cx.notify())
+            .detach();
         let model_search_input = cx.new(ComposerInput::new);
         {
             let weak = cx.weak_entity();
@@ -1155,6 +1190,7 @@ impl Shell {
                 Some("appearance") => SettingsPage::Appearance,
                 Some("credits") => SettingsPage::Credits,
                 Some("devices") => SettingsPage::Devices,
+                Some("agent-links") => SettingsPage::AgentLinks,
                 Some(v) if v.starts_with("secrets") => SettingsPage::Secrets,
                 _ => SettingsPage::Root,
             },
@@ -1168,6 +1204,10 @@ impl Shell {
             unblock_armed: None,
             device_revoke_armed: None,
             devices_error_details_open: false,
+            agent_link_scope: crate::ui::agent_links::Scope::Read,
+            agent_link_ttl_hours: crate::ui::agent_links::EXPIRY_DEFAULT_HOURS,
+            agent_link_name_input,
+            agent_links_error_details_open: false,
             update_error_details_open: false,
             machine_error_details_open: false,
             delivery_error_details_open: false,
@@ -1266,6 +1306,9 @@ impl Shell {
             });
             if shell.settings_page == SettingsPage::Devices {
                 shell.state.update(cx, |s, cx| s.devices_refresh(cx));
+            }
+            if shell.settings_page == SettingsPage::AgentLinks {
+                shell.state.update(cx, |s, cx| s.agent_links_refresh(cx));
             }
         }
         // Rig: `ARBOS_RIG_TOGGLE_RAIL_MS=1500,3500` presses the sidebar toggle at those
@@ -1375,6 +1418,7 @@ impl Shell {
             || focused(&self.wake_auth_input)
             || focused(&self.avatar_prompt_input)
             || focused(&self.model_search_input)
+            || focused(&self.agent_link_name_input)
             || focused(&self.tab_rename_input)
             || focused(&self.feedback.read(cx).note)
             || self.connectors.read(cx).input_focused(window, cx)
@@ -1442,6 +1486,7 @@ impl Shell {
             | SettingsPage::Updates
             | SettingsPage::About => {}
             SettingsPage::Devices => self.state.update(cx, |s, cx| s.devices_refresh(cx)),
+            SettingsPage::AgentLinks => self.state.update(cx, |s, cx| s.agent_links_refresh(cx)),
             SettingsPage::Connectors => self.connectors.update(cx, |p, cx| {
                 p.show(cx);
                 p.embedded = true;
@@ -1480,6 +1525,25 @@ impl Shell {
         cx.notify();
     }
 
+    /// Mint the link the Create card describes, from the Create button or from
+    /// Return in the Name field. A blank name is auto-numbered past the live
+    /// links rather than sent empty: the relay would otherwise call this one
+    /// the same literal "Agent link" as every other unlabelled link.
+    pub(crate) fn create_agent_link(&mut self, cx: &mut Context<Self>) {
+        if self.state.read(cx).agent_links.minting {
+            return;
+        }
+        let typed = self.agent_link_name_input.read(cx).text().to_string();
+        let label =
+            crate::ui::agent_links::label_for(&typed, &self.state.read(cx).agent_links.items);
+        let scope = self.agent_link_scope;
+        let ttl = self.agent_link_ttl_hours;
+        self.agent_link_name_input
+            .update(cx, |input, cx| input.clear(cx));
+        self.state
+            .update(cx, |s, cx| s.mint_agent_link(label, scope, ttl, cx));
+    }
+
     /// Close whichever page is embedded in the sheet (its entity stops rendering).
     fn hide_settings_page(&mut self, cx: &mut Context<Self>) {
         match self.settings_page {
@@ -1490,7 +1554,8 @@ impl Shell {
             | SettingsPage::Notifications
             | SettingsPage::Updates
             | SettingsPage::About
-            | SettingsPage::Devices => {}
+            | SettingsPage::Devices
+            | SettingsPage::AgentLinks => {}
             SettingsPage::Connectors => self.connectors.update(cx, |p, cx| p.hide(cx)),
             SettingsPage::Routines => {
                 self.routines_open = false;
@@ -1631,7 +1696,8 @@ impl Shell {
             | SettingsPage::Notifications
             | SettingsPage::Updates
             | SettingsPage::About
-            | SettingsPage::Devices => true,
+            | SettingsPage::Devices
+            | SettingsPage::AgentLinks => true,
             SettingsPage::Connectors => self.connectors.read(cx).is_open(),
             SettingsPage::Routines => self.routines_open,
             SettingsPage::Channels => self.channels.read(cx).is_open(),
@@ -5647,6 +5713,9 @@ impl Render for Shell {
         }
         if let Some(reveal) = self.state.read(cx).connect_reveal.clone() {
             root = root.child(connect_agent::reveal_sheet(self, &reveal, cx));
+        }
+        if let Some(reveal) = self.state.read(cx).agent_link_reveal.clone() {
+            root = root.child(crate::ui::agent_link_reveal::sheet(&reveal, cx));
         }
         if self.feedback.read(cx).is_open() {
             root = root.child(self.feedback.clone());
