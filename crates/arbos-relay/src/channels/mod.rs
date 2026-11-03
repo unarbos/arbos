@@ -28,7 +28,7 @@ use arbos_core::ids::{now_ms, ulid};
 
 use crate::auth::Principal;
 use crate::boxes;
-use crate::db::{ChannelBinding, ChannelPairCode};
+use crate::db::{ChannelBinding, ChannelPairCode, ChannelScope};
 use crate::state::AppState;
 
 type ApiResult = Result<Response, (StatusCode, String)>;
@@ -453,11 +453,25 @@ fn pair_json(c: &ChannelPairCode) -> Value {
     serde_json::to_value(pair_dto(c)).expect("ChannelPairingDto")
 }
 
-/// `GET /channels`: platform states, bindings, the active pairing code.
+/// Whose channels a listing here shows: the relay for the admin, the projects its user can reach
+/// for a device. That is `state.allows` as SQL, so a listing agrees with what `unbind` and `reply`
+/// let the same caller touch one row at a time. A box never gets this far (`is_box` is refused by
+/// every route below), so its arm only keeps the match exhaustive.
+fn scope_of(principal: &Principal) -> ChannelScope {
+    match principal {
+        Principal::Admin => ChannelScope::Everything,
+        Principal::Device { user_id, .. } | Principal::Box { user_id } => {
+            ChannelScope::Reachable(user_id.clone())
+        }
+    }
+}
+
+/// `GET /channels`: platform states, the caller's bindings, the caller's active pairing code.
 pub async fn overview(State(state): State<AppState>, principal: Principal) -> ApiResult {
     if principal.is_box() {
         return Err((StatusCode::FORBIDDEN, "device only".into()));
     }
+    let scope = scope_of(&principal);
     let platforms: Vec<ChannelPlatformDto> = Platform::ALL
         .iter()
         .map(|p| {
@@ -487,14 +501,14 @@ pub async fn overview(State(state): State<AppState>, principal: Principal) -> Ap
         .collect();
     let bindings: Vec<ChannelBindingDto> = state
         .db
-        .list_channel_bindings()
+        .list_channel_bindings(&scope)
         .map_err(internal)?
         .iter()
         .map(binding_dto)
         .collect();
     let pairing = state
         .db
-        .active_channel_pair_code()
+        .active_channel_pair_code(&scope)
         .map_err(internal)?
         .map(|c| pair_dto(&c));
     Ok(Json(ChannelsOverviewDto {
@@ -561,13 +575,14 @@ pub async fn pair_new(
     Ok(Json(pair_json(&code)).into_response())
 }
 
+/// `GET /channels/bindings`: the caller's own bindings, newest first.
 pub async fn list_bindings(State(state): State<AppState>, principal: Principal) -> ApiResult {
     if principal.is_box() {
         return Err((StatusCode::FORBIDDEN, "device only".into()));
     }
     let items: Vec<Value> = state
         .db
-        .list_channel_bindings()
+        .list_channel_bindings(&scope_of(&principal))
         .map_err(internal)?
         .iter()
         .map(binding_json)
@@ -732,12 +747,16 @@ fn outcome_json(o: &Outcome) -> Value {
     }
 }
 
-/// `GET /channels/mock/outbox`: what was (or would have been) sent, newest first.
+/// `GET /channels/mock/outbox`: what was (or would have been) sent to the caller's own channels,
+/// newest first.
 pub async fn mock_outbox(State(state): State<AppState>, principal: Principal) -> ApiResult {
     if principal.is_box() {
         return Err((StatusCode::FORBIDDEN, "device only".into()));
     }
-    let items = state.db.channel_outbox(100).map_err(internal)?;
+    let items = state
+        .db
+        .channel_outbox(&scope_of(&principal), 100)
+        .map_err(internal)?;
     Ok(Json(json!({ "mock": mock_on(&state), "items": items })).into_response())
 }
 
@@ -862,6 +881,9 @@ mod tests {
         }
     }
 
+    /// These tests assert over the whole table, not over one caller's view of it.
+    const ALL: ChannelScope = ChannelScope::Everything;
+
     fn inbound(text: &str) -> Inbound {
         Inbound {
             platform: Platform::Telegram,
@@ -931,7 +953,7 @@ mod tests {
             Outcome::Ignored("unbound")
         );
         assert!(state.db.take_pushes("p1").unwrap().is_empty());
-        let outbox = state.db.channel_outbox(10).unwrap();
+        let outbox = state.db.channel_outbox(&ALL, 10).unwrap();
         assert_eq!(outbox.len(), 1, "exactly one hint reply");
         assert_eq!(outbox[0]["text"], HINT_TEXT);
 
@@ -940,7 +962,7 @@ mod tests {
             handle_inbound(&state, inbound("/pair 000000")).await,
             Outcome::PairFailed
         );
-        assert!(state.db.list_channel_bindings().unwrap().is_empty());
+        assert!(state.db.list_channel_bindings(&ALL).unwrap().is_empty());
         assert!(state.db.take_pushes("p1").unwrap().is_empty());
 
         // 3. Untrusted senders (Beeper contacts) get neither a hint nor a binding.
@@ -951,7 +973,7 @@ mod tests {
             handle_inbound(&state, stranger).await,
             Outcome::Ignored("untrusted sender")
         );
-        assert_eq!(state.db.channel_outbox(10).unwrap().len(), 2);
+        assert_eq!(state.db.channel_outbox(&ALL, 10).unwrap().len(), 2);
 
         // 4. The real code pairs; the next message is the first thing a box ever sees.
         let code = ChannelPairCode {
@@ -1065,7 +1087,7 @@ mod tests {
         .await
         .expect("owner box");
         assert_eq!(r.status(), StatusCode::OK);
-        let out = state.db.channel_outbox(10).unwrap();
+        let out = state.db.channel_outbox(&ALL, 10).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0]["text"], "from box A");
 
@@ -1083,9 +1105,9 @@ mod tests {
         .await
         .expect("owner device");
         assert_eq!(r.status(), StatusCode::OK);
-        assert_eq!(state.db.channel_outbox(10).unwrap().len(), 2);
+        assert_eq!(state.db.channel_outbox(&ALL, 10).unwrap().len(), 2);
 
-        let before = state.db.channel_outbox(10).unwrap().len();
+        let before = state.db.channel_outbox(&ALL, 10).unwrap().len();
         let box_b = Principal::Box {
             user_id: "user_b".into(),
         };
@@ -1098,7 +1120,7 @@ mod tests {
         .await
         .expect_err("other box");
         assert_eq!(err.0, StatusCode::FORBIDDEN);
-        assert_eq!(state.db.channel_outbox(10).unwrap().len(), before);
+        assert_eq!(state.db.channel_outbox(&ALL, 10).unwrap().len(), before);
 
         let device_b = Principal::Device {
             id: "dev_b".into(),
@@ -1114,7 +1136,7 @@ mod tests {
         .await
         .expect_err("other device");
         assert_eq!(err.0, StatusCode::FORBIDDEN);
-        assert_eq!(state.db.channel_outbox(10).unwrap().len(), before);
+        assert_eq!(state.db.channel_outbox(&ALL, 10).unwrap().len(), before);
 
         state
             .db
@@ -1129,7 +1151,7 @@ mod tests {
         .await
         .expect("invited member");
         assert_eq!(r.status(), StatusCode::OK);
-        let out = state.db.channel_outbox(10).unwrap();
+        let out = state.db.channel_outbox(&ALL, 10).unwrap();
         assert_eq!(out.len(), before + 1);
         assert_eq!(out[0]["text"], "from invited B");
     }
@@ -1203,18 +1225,176 @@ mod tests {
         let foreign = pair_new(State(state.clone()), bob_dev.clone(), body()).await;
         assert_eq!(status(foreign), StatusCode::FORBIDDEN);
         assert!(
-            state.db.active_channel_pair_code().unwrap().is_none(),
+            state.db.active_channel_pair_code(&ALL).unwrap().is_none(),
             "no code was minted for another user's project"
         );
 
         // The owner still mints one, and so does a member alice invited.
         let own = pair_new(State(state.clone()), alice_dev, body()).await;
         assert_eq!(status(own), StatusCode::OK);
-        let minted = state.db.active_channel_pair_code().unwrap().expect("code");
+        let minted = state
+            .db
+            .active_channel_pair_code(&ALL)
+            .unwrap()
+            .expect("code");
         assert_eq!(minted.project_id, project);
 
         state.db.add_project_member(&project, &bob, &alice).unwrap();
         let invited = pair_new(State(state.clone()), bob_dev, body()).await;
         assert_eq!(status(invited), StatusCode::OK);
+    }
+
+    async fn body_json(r: Response) -> Value {
+        let bytes = axum::body::to_bytes(r.into_body(), 1 << 20)
+            .await
+            .expect("body");
+        serde_json::from_slice(&bytes).expect("json body")
+    }
+
+    fn ids_of(items: &Value) -> Vec<&str> {
+        items
+            .as_array()
+            .expect("array")
+            .iter()
+            .map(|b| b["id"].as_str().expect("id"))
+            .collect()
+    }
+
+    /// `GET /channels`, `GET /channels/bindings` and `GET /channels/mock/outbox` refused boxes and
+    /// nothing else, so any signed-in device read the whole relay: every tenant's bindings, every
+    /// tenant's sent message, and the newest live pairing code on the relay whoever minted it. The
+    /// code is a credential — holding another tenant's code binds a channel of your own to their
+    /// project — so the leak handed out the very thing `pair_new` now guards.
+    #[tokio::test]
+    async fn channel_reads_are_scoped_to_the_callers_projects() {
+        let state = crate::state::test_support::test_state(crate::state::AuthMode::Github);
+        let (alice, _alice_dev) = crate::people::tests_support::person(&state, 5);
+        let (bob, bob_dev) = crate::people::tests_support::person(&state, 6);
+        let alice_project = crate::people::tests_support::project_of(&state, &alice, "Alice comms");
+        let bob_project = crate::people::tests_support::project_of(&state, &bob, "Bob comms");
+
+        // Distinct `bound_at`: the listing orders on it, so the assertions below are total.
+        let bind = |id: &str, project: &str, bound_at: i64| ChannelBinding {
+            id: id.to_owned(),
+            platform: "telegram".into(),
+            external_chat_id: format!("tg-chat-{id}"),
+            external_user_id: format!("tg-user-{id}"),
+            project_id: project.to_owned(),
+            chat_id: "c1".into(),
+            label: format!("Telegram · {id}"),
+            bound_at,
+        };
+        for b in [
+            bind("bind_alice", &alice_project, 1),
+            bind("bind_bob", &bob_project, 2),
+        ] {
+            state.db.upsert_channel_binding(&b).unwrap();
+        }
+
+        // Bob mints first, so alice's code is the newest on the relay — the one the unscoped read
+        // handed to everyone.
+        let code = |code: &str, project: &str, created_at: i64| ChannelPairCode {
+            code: code.to_owned(),
+            project_id: project.to_owned(),
+            chat_id: "c1".into(),
+            created_at,
+            expires_at: now_ms() + PAIR_CODE_TTL_MS,
+        };
+        state
+            .db
+            .new_channel_pair_code(&code("111111", &bob_project, 1_000))
+            .unwrap();
+        state
+            .db
+            .new_channel_pair_code(&code("222222", &alice_project, 2_000))
+            .unwrap();
+
+        for (binding, text) in [
+            ("bind_alice", "alice's private reply"),
+            ("bind_bob", "bob's own reply"),
+        ] {
+            state
+                .db
+                .record_channel_outbox(
+                    "telegram",
+                    "tg-chat",
+                    text,
+                    &format!("req-{binding}"),
+                    "mock",
+                    None,
+                    Some(binding),
+                )
+                .unwrap();
+        }
+        // A hint to an unbound sender is filed under no binding, so no tenant owns it.
+        state
+            .db
+            .record_channel_outbox(
+                "telegram",
+                "tg-stranger",
+                HINT_TEXT,
+                "req-hint",
+                "mock",
+                None,
+                None,
+            )
+            .unwrap();
+
+        // The attack, three ways: bob reads alice's bindings, alice's live code, alice's messages.
+        let v = body_json(
+            overview(State(state.clone()), bob_dev.clone())
+                .await
+                .expect("overview"),
+        )
+        .await;
+        assert_eq!(ids_of(&v["bindings"]), ["bind_bob"]);
+        assert_eq!(
+            v["pairing"]["code"], "111111",
+            "bob's own live code, not alice's newer one"
+        );
+
+        let v = body_json(
+            list_bindings(State(state.clone()), bob_dev.clone())
+                .await
+                .expect("bindings"),
+        )
+        .await;
+        assert_eq!(ids_of(&v["items"]), ["bind_bob"]);
+
+        let v = body_json(
+            mock_outbox(State(state.clone()), bob_dev.clone())
+                .await
+                .expect("outbox"),
+        )
+        .await;
+        let texts: Vec<&str> = v["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .map(|r| r["text"].as_str().expect("text"))
+            .collect();
+        assert_eq!(texts, ["bob's own reply"]);
+
+        // A member alice invited reads her channels, as `unbind` and `reply` already let him.
+        state
+            .db
+            .add_project_member(&alice_project, &bob, &alice)
+            .unwrap();
+        let v = body_json(
+            overview(State(state.clone()), bob_dev)
+                .await
+                .expect("overview"),
+        )
+        .await;
+        assert_eq!(ids_of(&v["bindings"]), ["bind_bob", "bind_alice"]);
+
+        // The admin's relay-wide view is unchanged, down to the ownerless hint row.
+        let v = body_json(
+            mock_outbox(State(state.clone()), Principal::Admin)
+                .await
+                .expect("outbox"),
+        )
+        .await;
+        assert_eq!(v["items"].as_array().expect("items").len(), 3);
     }
 }
