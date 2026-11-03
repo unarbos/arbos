@@ -39,6 +39,9 @@
 // 2026-11-03: "i swipe and then it doesn't register until i let go … should register on first
 // touch and then as i slide my finger across the chat slides out with my finger"). The release
 // now only decides whether to finish or to put the screen back — the movement is the drag's.
+// The drag is measured in the WINDOW and not in the recognizer's own view, because the pop
+// moves that view out from under the measurement on its very first frame; see
+// `DirectionalSwipeRecognizer.startInWindow`, which is the whole of that bug.
 
 import SwiftUI
 import UIKit
@@ -244,10 +247,27 @@ final class DirectionalSwipeRecognizer: UIGestureRecognizer {
     /// Fail on touch-down when the finger landed somewhere this gesture must leave alone.
     var shouldStart: (_ touch: UITouch, _ start: CGPoint) -> Bool = { _, _ in true }
 
+    /// Where the finger landed, in the recognizer's own view. Only the two callbacks above
+    /// read it, and both want it there: the composer bar and the edge zone are measured in
+    /// the screen's space.
     private(set) var start = CGPoint.zero
+    /// How far the finger has moved, **in the window**, which is the only frame in this view
+    /// hierarchy that a running transition cannot move. See `startInWindow`.
     private(set) var translation = CGSize.zero
-    /// Points per second over the last two samples.
+    /// Points per second over the last two samples, in the window for the same reason.
     private(set) var velocity = CGSize.zero
+    /// Where the finger landed, in the window.
+    ///
+    /// Measuring the drag in the recognizer's own view is what broke the interactive pop, and
+    /// it is worth spelling out because the bug is invisible in the recognizer: the moment the
+    /// pop begins, `BackPopAnimator` sets the leaving screen's `transform` to its finished
+    /// position, because that is what `UIView.animate` does — the model value jumps to the end
+    /// state and only the presentation layer is animated. The recognizer sits on that screen.
+    /// So from the second touch sample onwards `location(in: view)` was read in a frame that
+    /// had already slid a whole screen width to the right, the translation collapsed to about
+    /// minus one screen, and a rightward drag read as a leftward one: the screen moved on the
+    /// first sample, snapped back, and the release cancelled. The window never moves.
+    private var startInWindow = CGPoint.zero
     private var lastPoint = CGPoint.zero
     private var lastTime: TimeInterval = 0
     private var tracked: UITouch?
@@ -267,7 +287,8 @@ final class DirectionalSwipeRecognizer: UIGestureRecognizer {
         }
         tracked = t
         start = t.location(in: view)
-        lastPoint = start
+        startInWindow = t.location(in: nil)
+        lastPoint = startInWindow
         lastTime = t.timestamp
         translation = .zero
         velocity = .zero
@@ -275,15 +296,15 @@ final class DirectionalSwipeRecognizer: UIGestureRecognizer {
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
-        guard let t = tracked, touches.contains(t), let view else { return }
-        let p = t.location(in: view)
+        guard let t = tracked, touches.contains(t) else { return }
+        let p = t.location(in: nil)
         let dt = t.timestamp - lastTime
         if dt > 0 {
             velocity = CGSize(width: (p.x - lastPoint.x) / dt, height: (p.y - lastPoint.y) / dt)
         }
         lastPoint = p
         lastTime = t.timestamp
-        translation = CGSize(width: p.x - start.x, height: p.y - start.y)
+        translation = CGSize(width: p.x - startInWindow.x, height: p.y - startInWindow.y)
         switch state {
         case .possible:
             guard abs(translation.width) + abs(translation.height) >= minimumDistance else { return }
@@ -316,6 +337,7 @@ final class DirectionalSwipeRecognizer: UIGestureRecognizer {
     override func reset() {
         super.reset()
         tracked = nil
+        startInWindow = .zero
         translation = .zero
         velocity = .zero
     }
@@ -547,7 +569,10 @@ final class BackSwipePlayer {
             reset()
         case .cancel:
             #if DEBUG
-            BackSwipeTrace.note("cancel")
+            // "taken" rather than "cancel" when the touch was pulled out from under the drag
+            // instead of being let go. The two are one answer here and very different faults
+            // to read back off a rig.
+            BackSwipeTrace.note(recognizer.state == .ended ? "cancel" : "taken")
             #endif
             pop?.cancel()
             reset()
@@ -951,8 +976,8 @@ extension View {
 
 #if DEBUG
 /// Rig (`ARBOS_SWIPE_TRACE=1`): what a back drag did, in order, read off the
-/// `back-swipe-trace` element — `track:<progress>` once per touch sample the screen moved
-/// on, then `finish` or `cancel` for the release.
+/// `back-swipe-trace` element — `track:<progress>` as the screen moves, then `finish` or
+/// `cancel` for a release, or `taken` for a touch pulled out from under the drag.
 ///
 /// It exists because the two things this fix is between look identical once the finger is
 /// up: a screen that followed the finger the whole way, and a screen that jumped at

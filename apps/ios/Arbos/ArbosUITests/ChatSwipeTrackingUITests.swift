@@ -11,7 +11,8 @@ import XCTest
 /// look exactly the same. So the app records what it did, sample by sample, on the
 /// `back-swipe-trace` element (`ARBOS_SWIPE_TRACE=1`, Debug only) and the cases read that
 /// afterwards: `start`, then `track:<fraction of the screen>` for every further 1% the chat
-/// moved while the finger was down, then `finish` or `cancel` for the release.
+/// moved while the finger was down, then `finish` or `cancel` for the release — or `taken`,
+/// if the touch was pulled out from under the drag rather than let go.
 ///
 /// Each case drags **short of the line that commits** (`comesBack`), so the swipe cancels and
 /// the chat is still there to be read. That is the whole point: a drag that goes back proves
@@ -92,7 +93,8 @@ final class ChatSwipeTrackingUITests: XCTestCase {
         return app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: x, dy: window.midY))
     }
 
-    /// What the chat did, in order. Entries are `start`, `track:<0…1>` and `finish` / `cancel`.
+    /// What the chat did, in order. Entries are `start`, `track:<0…1>`, and one of `finish`,
+    /// `cancel` or `taken`.
     private func trace(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) -> [String] {
         let readout = app.descendants(matching: .any)["back-swipe-trace"].firstMatch
         XCTAssertTrue(readout.waitForExistence(timeout: settle),
@@ -100,15 +102,29 @@ final class ChatSwipeTrackingUITests: XCTestCase {
         return ((readout.value as? String) ?? "").split(separator: " ").map(String.init)
     }
 
+    /// Where a `distance` pt drag leaves the chat if it follows the finger 1:1 — the pop
+    /// travels one screen, so the fraction is the drag over the screen's width.
+    private func oneToOne(_ app: XCUIApplication, _ distance: CGFloat) -> Double {
+        Double(distance / app.windows.firstMatch.frame.width)
+    }
+
     /// How far out the chat was at each sample taken while the finger was down.
     private func travel(_ entries: [String]) -> [Double] {
         entries.compactMap { $0.hasPrefix("track:") ? Double(String($0.dropFirst("track:".count))) : nil }
     }
 
-    /// Every case asks the same three things of a trace: the chat moved while the finger was
-    /// down, it kept moving as the finger did, and the release is the last word and not the
-    /// first one.
+    /// Every case asks the same four things of a trace: the chat moved while the finger was
+    /// down, it kept moving as the finger did, it ended up **where the finger was** rather
+    /// than merely somewhere, and the release is the last word and not the first one.
+    ///
+    /// `reaching` is the one that earns its place. "The chat moved" is satisfied by a single
+    /// frame of movement, and a single frame is exactly what the first version of this fix
+    /// produced: it tracked one sample, then measured the finger inside the view the
+    /// transition had just moved, read the drag as leftward and sat at zero for the rest of
+    /// the touch. The trace still said the chat had moved. Asserting where it came to rest is
+    /// what tells 1:1 tracking from one frame of it.
     private func assertTrackedUnderTheFinger(_ entries: [String], endingWith ending: String,
+                                             reaching: Double? = nil,
                                              file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertEqual(entries.first, "start", "the drag was read: \(entries)", file: file, line: line)
         XCTAssertEqual(entries.last, ending, "the release is the last entry: \(entries)", file: file, line: line)
@@ -124,6 +140,13 @@ final class ChatSwipeTrackingUITests: XCTestCase {
         XCTAssertGreaterThan(moves.last ?? 0, moves.first ?? 0,
                              "the chat kept up with the finger across the drag: \(entries)",
                              file: file, line: line)
+        if let reaching {
+            // 0.05 of a 393 pt screen is 20 pt: wide enough for the last sample before the
+            // hold and the trace's own 1 % rounding, far tighter than any collapse.
+            XCTAssertEqual(moves.last ?? 0, reaching, accuracy: 0.05,
+                           "the chat came to rest under the finger and not short of it: \(entries)",
+                           file: file, line: line)
+        }
         let between = Array(entries.dropFirst().dropLast()).filter { !$0.hasPrefix("track:") }
         XCTAssertEqual(between, [], "nothing but movement happened while the finger was down: \(entries)",
                        file: file, line: line)
@@ -141,7 +164,7 @@ final class ChatSwipeTrackingUITests: XCTestCase {
         start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: distance, dy: 0)),
                     withVelocity: .slow, thenHoldForDuration: 0.6)
 
-        assertTrackedUnderTheFinger(trace(app), endingWith: "cancel")
+        assertTrackedUnderTheFinger(trace(app), endingWith: "cancel", reaching: oneToOne(app, distance))
         XCTAssertTrue(back(app).exists, "the chat is still here: a drag this short does not go back")
         XCTAssertTrue(back(app).isHittable, "and it is usable again")
     }
@@ -157,7 +180,8 @@ final class ChatSwipeTrackingUITests: XCTestCase {
         start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: distance, dy: distance * 0.55)),
                     withVelocity: .slow, thenHoldForDuration: 0.6)
 
-        assertTrackedUnderTheFinger(trace(app), endingWith: "cancel")
+        // The sideways part only: the chat does not follow the finger down the screen.
+        assertTrackedUnderTheFinger(trace(app), endingWith: "cancel", reaching: oneToOne(app, distance))
         XCTAssertTrue(back(app).exists, "the chat is still here")
     }
 
