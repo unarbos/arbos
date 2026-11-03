@@ -1949,15 +1949,20 @@ fn may_remove_agent(
     me: &str,
     project_id: &str,
 ) -> Result<(), Box<Response>> {
+    // Every refusal here is the one answer `own_project` gives, and deliberately the same one:
+    // a Project you may not touch has to read exactly like a Project that is not there. Telling
+    // the cases apart is the name oracle, and this route carried it from the moment it stopped
+    // borrowing `own_project`.
+    let missing = || {
+        Box::new(api_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no such project",
+        ))
+    };
     let project = match state.db.project(project_id) {
         Ok(Some(p)) => p,
-        Ok(None) => {
-            return Err(Box::new(api_error(
-                StatusCode::NOT_FOUND,
-                "not_found",
-                "no such project",
-            )))
-        }
+        Ok(None) => return Err(missing()),
         Err(e) => {
             return Err(Box::new(api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1970,25 +1975,19 @@ fn may_remove_agent(
         return Ok(());
     }
     if !can_manage_members(cm, me) {
-        return Err(Box::new(api_error(
-            StatusCode::FORBIDDEN,
-            "own_project_only",
-            "you can only add or change your own Project's agent",
-        )));
+        return Err(missing());
     }
-    // An owner who is no longer in the chat shields nothing — that leftover is what a moderator
-    // is here to clear.
+    // The hierarchy the moderator route borrows: an owner who is no longer in the chat shields
+    // nothing — that leftover is what a moderator is here to clear — but the group owner's agent
+    // stays, and an admin does not reach another admin's.
+    //
+    // These two refuse as "no such project" rather than explaining themselves, because
+    // `can_manage_members` is not the moderator test it reads as: `agent_add` promotes a DM to a
+    // group and both people keep the `owner` row the DM gave them, so a peer who moderates
+    // nobody passes it. An explanatory refusal would hand that peer the oracle back.
     match my_role(cm, &project.user_id) {
-        Some("owner") => Err(Box::new(api_error(
-            StatusCode::FORBIDDEN,
-            "owner_stays",
-            "the group owner's agent cannot be removed",
-        ))),
-        Some("admin") if my_role(cm, me) == Some("admin") => Err(Box::new(api_error(
-            StatusCode::FORBIDDEN,
-            "owner_only",
-            "only the owner manages an admin's agent",
-        ))),
+        Some("owner") => Err(missing()),
+        Some("admin") if my_role(cm, me) == Some("admin") => Err(missing()),
         _ => Ok(()),
     }
 }
@@ -3203,6 +3202,9 @@ pub async fn invite_create(
                 "owner_only",
                 "only the project's owner invites people",
             );
+        }
+        if !may_add_to_group(&state, &me, &other_id) {
+            return group_add_forbidden();
         }
         let _ = state.db.add_project_member(&project.id, &other_id, &me);
         state.matrix.touch_project(&state, &project.id);
@@ -5276,14 +5278,14 @@ mod agent_tests {
             "this is the chat the moderator has to be able to fix"
         );
 
-        // A plain member still may not touch someone else's agent.
+        // A plain member still may not touch someone else's agent, and is not told it exists.
         let r = agent_remove(
             State(state.clone()),
             carol_dev,
             Path((chat.clone(), project.clone())),
         )
         .await;
-        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
 
         let r = agent_remove(
             State(state.clone()),
@@ -5305,7 +5307,7 @@ mod agent_tests {
     }
 
     /// The moderator route keeps the hierarchy it borrows: an admin reaches a member's agent,
-    /// not the group owner's.
+    /// not the group owner's — and is not told whose it is.
     #[tokio::test]
     async fn an_admin_cannot_remove_the_group_owners_agent() {
         let state = test_state(AuthMode::Github);
@@ -5335,7 +5337,55 @@ mod agent_tests {
             Path((chat.clone(), alices_project.clone())),
         )
         .await;
-        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
+        assert!(state
+            .db
+            .membership(&chat, &format!("agent:{alices_project}"))
+            .unwrap()
+            .is_some());
+    }
+
+    /// Asserted against each other rather than against a literal: the oracle came back once
+    /// because a call site stopped borrowing `own_project` while the assertion that pinned its
+    /// shape moved in another branch, and two separately-correct halves merged clean. A test
+    /// that compares the two answers cannot be satisfied by changing one of them.
+    #[tokio::test]
+    async fn a_project_that_is_not_mine_answers_exactly_like_one_that_is_not_there() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 93);
+        let (bob, bob_dev) = person(&state, 94);
+        let chat = dm(&state, &alice, &bob);
+        let alices_project = project_of(&state, &alice, "Research");
+        let r = agent_add(
+            State(state.clone()),
+            alice_dev,
+            Path(chat.clone()),
+            Json(AddAgentBody {
+                project_id: alices_project.clone(),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+
+        let answer = |project: String| {
+            let state = state.clone();
+            let bob_dev = bob_dev.clone();
+            let chat = chat.clone();
+            async move {
+                let r = agent_remove(State(state), bob_dev, Path((chat, project))).await;
+                let status = r.status();
+                let bytes = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+                (status, bytes)
+            }
+        };
+        let real = answer(alices_project.clone()).await;
+        let absent = answer(format!("p_{}", ulid())).await;
+
+        assert_eq!(
+            real, absent,
+            "a Project Bob does not own must be indistinguishable from one that does not exist"
+        );
+        assert_eq!(real.0, StatusCode::NOT_FOUND);
         assert!(state
             .db
             .membership(&chat, &format!("agent:{alices_project}"))
@@ -5767,6 +5817,25 @@ mod group_add_privacy_tests {
         .await
     }
 
+    /// Mint a sign-in invite link that carries project membership.
+    async fn invite_into(
+        state: &AppState,
+        owner_dev: &Principal,
+        project: &str,
+        handle: &str,
+    ) -> Response {
+        invite_create(
+            State(state.clone()),
+            owner_dev.clone(),
+            Json(InviteBody {
+                handle: handle.to_owned(),
+                chat_id: None,
+                project_id: Some(project.to_owned()),
+            }),
+        )
+        .await
+    }
+
     #[tokio::test]
     async fn nobody_refuses_create_and_add() {
         let state = test_state(AuthMode::Github);
@@ -5943,20 +6012,39 @@ mod group_add_privacy_tests {
         assert!(!state.db.is_project_member(&project, &carol).unwrap());
     }
 
-    /// The default policy keeps the share route and both group paths open: the fix must not
-    /// tighten anything.
+    #[tokio::test]
+    async fn nobody_refuses_a_project_invite_link() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 46);
+        let (bob, _) = person(&state, 47);
+        let project = project_of(&state, &alice, "Shared");
+        state.db.set_group_add_policy(&bob, "nobody").unwrap();
+
+        let r = invite_into(&state, &alice_dev, &project, "user47").await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        assert!(
+            !state.db.is_project_member(&project, &bob).unwrap(),
+            "the invite link writes membership up front, so it must be refused up front"
+        );
+    }
+
+    /// The default policy keeps every add path open: the fix must not tighten anything.
     #[tokio::test]
     async fn anyone_still_allows_every_add_path() {
         let state = test_state(AuthMode::Github);
         let (alice, alice_dev) = person(&state, 48);
         let (bob, _) = person(&state, 49);
-        let (_carol, _) = person(&state, 50);
+        let (carol, _) = person(&state, 50);
         let project = project_of(&state, &alice, "Shared");
         assert_eq!(state.db.group_add_policy(&bob).unwrap(), "anyone");
 
         let r = share(&state, &alice_dev, &project, "user49").await;
         assert_eq!(r.status(), StatusCode::OK, "no DM with Bob is needed");
         assert!(state.db.is_project_member(&project, &bob).unwrap());
+
+        let r = invite_into(&state, &alice_dev, &project, "user50").await;
+        assert_eq!(r.status(), StatusCode::CREATED);
+        assert!(state.db.is_project_member(&project, &carol).unwrap());
 
         let r = chats_create_group(
             State(state.clone()),
