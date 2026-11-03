@@ -157,9 +157,9 @@ final class BackDragTests: XCTestCase {
     // MARK: What the release decides, which this lane does not change
 
     /// The release asks exactly the question it always asked. `BackDrag` holds no threshold of
-    /// its own, so the commit rule stays where it belongs: with Jacob's locked 0.75 fraction,
-    /// in its own build (`docs/ios-navigation-parity-scope.md`). A threshold invented here
-    /// would be a second change in a one-fix build, and that build would have to undo it.
+    /// its own, so where the swipe commits stays Jacob's to set — about three quarters of the
+    /// way across with a velocity escape, as constants he can feel on his own phone — and it
+    /// stays a separate build. This case is what keeps the two apart.
     func testTheReleaseIsStillFullScreenPopsAndNothingElse() {
         let cases: [(CGSize, CGSize)] = [
             (CGSize(width: 210, height: 0), CGSize(width: 600, height: 0)),      // long and brisk

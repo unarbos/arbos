@@ -188,11 +188,12 @@ enum SwipeClaim: Equatable {
 /// swipe was a threshold read once, at touch-up.
 ///
 /// **What letting go does is not changed here.** The release still asks `fullScreenPops`, the
-/// same question with the same numbers it has always had, so this lane moves only *when* the
-/// screen moves and never *whether* the swipe commits. The commit rule is Jacob's — a locked
-/// 0.75 of the screen with a velocity projection, which `docs/ios-navigation-parity-scope.md`
-/// puts in its own build on top of this one. Putting a threshold of my own here would make
-/// that build undo this one.
+/// same question with the same numbers it has always had, so this moves only *when* the screen
+/// moves and never *whether* the swipe commits. Where it commits is Jacob's to set — about
+/// three quarters of the way across, with a velocity escape, both as constants he can feel on
+/// his own phone (2026-11-01: "telegram registers back nearly at the full screen let's go with
+/// that") — and it is a separate build. A threshold invented here would be a second change in
+/// a one-fix build, and that build would have to undo it.
 struct BackDrag: Equatable {
     /// The travel of a complete pop: the screen's width, so the page follows the finger 1:1.
     var width: CGFloat
