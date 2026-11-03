@@ -333,7 +333,16 @@ impl BoxConfig {
     ///
     /// Keyed on the project, not on `index`: the index comes from a boot-order counter that
     /// compacts across restarts, so keying on it would rotate the token for no reason.
+    ///
+    /// Empty in, empty out. With no `ARBOS_MCP_TOKEN` there is no secret to mix in, so the digest
+    /// would be a constant anyone knowing the project id could compute — and a *non-empty*
+    /// constant, which every `tok == configured` arm then accepts as the main session. Answering
+    /// the empty string instead is what lets the servers' `configured.is_empty()` guard fire and
+    /// authenticate nobody: an unconfigured box serves no one rather than serving everyone.
     fn workspace_mcp_token(&self, project_id: &str) -> String {
+        if self.mcp_token.trim().is_empty() {
+            return String::new();
+        }
         use sha2::Digest;
         let digest = sha2::Sha256::digest(
             format!("arbos-mcp:v1:{}:{project_id}", self.mcp_token).as_bytes(),
