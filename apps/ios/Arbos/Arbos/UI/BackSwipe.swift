@@ -466,10 +466,9 @@ final class BackPopAnimator: NSObject, UIViewControllerAnimatedTransitioning {
     }
 
     func animateTransition(using context: UIViewControllerContextTransitioning) {
-        guard let leaving = context.viewController(forKey: .from),
-              let arriving = context.viewController(forKey: .to),
-              let leavingView = context.view(forKey: .from) ?? leaving.view,
-              let arrivingView = context.view(forKey: .to) ?? arriving.view else {
+        guard let arriving = context.viewController(forKey: .to),
+              let leavingView = context.view(forKey: .from),
+              let arrivingView = context.view(forKey: .to) else {
             context.completeTransition(false)
             return
         }
@@ -635,7 +634,7 @@ struct TranscriptSwipeHost: UIViewRepresentable {
         private var recognizer: DirectionalSwipeRecognizer?
         private enum Mode { case time, back }
         private var mode: Mode?
-        private let back = BackSwipePlayer()
+        private let backPop = BackSwipePlayer()
 
         init(timePeek: Bool, backSwipe: Bool, onEvent: @escaping (TranscriptSwipeEvent) -> Void, onScrollPanBegan: @escaping () -> Void) {
             self.timePeek = timePeek
@@ -698,7 +697,7 @@ struct TranscriptSwipeHost: UIViewRepresentable {
                 // The screen follows the finger from the first sample; `onEvent(.back)` is
                 // only reached when there is no stack to pop interactively.
                 guard let scroll else { return }
-                back.play(gr, in: scroll) {
+                backPop.play(gr, in: scroll) {
                     #if DEBUG
                     SwipeLog.event("transcript back dx=\(Int(gr.translation.width))")
                     #endif
@@ -888,7 +887,7 @@ private struct FullScreenBackHost: UIViewRepresentable {
         private weak var root: UIView?
         private weak var host: HostView?
         private var recognizer: DirectionalSwipeRecognizer?
-        private let back = BackSwipePlayer()
+        private let backPop = BackSwipePlayer()
 
         init(onBack: @escaping () -> Void) {
             self.onBack = onBack
@@ -920,7 +919,7 @@ private struct FullScreenBackHost: UIViewRepresentable {
             // The screen follows the finger from the first sample. `onBack()` — SwiftUI's
             // `dismiss()`, which animates at its own speed — is left for the one case the
             // interactive pop cannot serve: a screen that is not on a navigation stack.
-            back.play(gr, in: root) {
+            backPop.play(gr, in: root) {
                 #if DEBUG
                 SwipeLog.event("full-screen back dx=\(Int(gr.translation.width))")
                 #endif
