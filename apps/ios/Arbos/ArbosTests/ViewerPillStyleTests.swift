@@ -94,11 +94,19 @@ final class ViewerPillStyleTests: XCTestCase {
                              "full row \(rowWidth(.full)) pt vs \(available(.full, iPhone17)) pt")
     }
 
-    /// The whole requirement in one test: on every iPhone width, at every Text Size step the
-    /// app ships — up to the largest, 1.3 — the row the viewer draws keeps all four labels on
-    /// one line and whole. A label is whole when it needs no more shrink than
-    /// `ViewerPill.minimumLabelScale`; past that point a one-line label is cut.
-    func testEveryLabelStaysWholeOnOneLineAtEveryTextSize() {
+    /// The whole requirement in one test. This is the PR's red → green check: it is
+    /// `testTheCompactRowHoldsTheDefaultAndSmallerTextSizes` with its `where scale <= 1`
+    /// filter dropped, so it now covers the steps the viewer used to break at.
+    ///
+    /// On every iPhone width, at every Text Size step the app ships — up to the largest,
+    /// 1.3 — the row the viewer draws keeps all four labels on one line and whole. A label is
+    /// whole when it needs no more shrink than `ViewerPill.minimumLabelScale`; past that
+    /// point a one-line label is cut with an ellipsis instead.
+    ///
+    /// The worst corner is printed, so the gate log says how much room is left rather than
+    /// only that there was some.
+    func testTheRowHoldsEveryTextSizeStepIncludingTheLargest() {
+        var worst = (required: CGFloat.greatestFiniteMagnitude, note: "")
         for width in widths {
             for scale in TextScale.steps {
                 let size = chosenSize(width: width, scale: scale)
@@ -107,8 +115,18 @@ final class ViewerPillStyleTests: XCTestCase {
                     required, ViewerPill.minimumLabelScale,
                     "\(context(width, scale)): the labels need \(required) of their width, "
                         + "below the \(ViewerPill.minimumLabelScale) floor, so one would be cut")
+                // The row as it is actually drawn — labels at the factor they need — is inside
+                // the screen, which is the other half of "no label wraps".
+                XCTAssertLessThanOrEqual(
+                    chromeWidth(size) + labelsWidth(size, scale: scale) * required,
+                    available(size, width) + 0.01, context(width, scale))
+                if required < worst.required {
+                    worst = (required: required, note: "\(context(width, scale)), label \(size.label) pt")
+                }
             }
         }
+        print("ARBOS_PILL_FIT worst corner: \(worst.required) of the label width needed "
+                + "(floor \(ViewerPill.minimumLabelScale)) at \(worst.note)")
     }
 
     /// The largest Text Size the app ships, on the narrowest iPhone — the corner the tester
@@ -146,12 +164,30 @@ final class ViewerPillStyleTests: XCTestCase {
 
     // MARK: The sizes
 
-    func testTheCompactRowFitsEveryIPhoneAtTheDefaultTextSizeAndBelow() {
+    /// The tight size is for the large steps, so it must not creep into the ordinary ones: on
+    /// a real iPhone at the default Text Size and below, the compact row still fits and is
+    /// what `ViewThatFits` lands on.
+    func testTheTightSizeDoesNotEngageAtTheDefaultTextSizeOrBelow() {
         for width in widths where width >= 375 {
             for scale in TextScale.steps where scale <= 1 {
                 XCTAssertLessThanOrEqual(rowWidth(.compact, scale: scale), available(.compact, width),
                                          "compact row at \(context(width, scale))")
+                XCTAssertGreaterThanOrEqual(chosenSize(width: width, scale: scale).padding,
+                                            ViewerPill.compact.padding,
+                                            "tight is not what shows at \(context(width, scale))")
             }
+        }
+    }
+
+    /// The capsule's height is a fixed `.frame(height:)` and does not grow with the text, so
+    /// the label's own line must stay inside it at the largest step — the text scales within
+    /// the pill, the pill does not grow around the text.
+    func testTheLabelLineFitsInsideTheCapsuleAtTheLargestTextSize() throws {
+        let largest = try XCTUnwrap(TextScale.steps.max())
+        for size in ViewerPill.sizes {
+            let line = UIFont.systemFont(ofSize: labelPoints(size.label, scale: largest), weight: .medium).lineHeight
+            XCTAssertLessThanOrEqual(line, size.height,
+                                     "a \(line) pt line in a \(size.height) pt capsule at Text Size \(largest)")
         }
     }
 
