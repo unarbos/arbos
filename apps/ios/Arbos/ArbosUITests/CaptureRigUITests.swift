@@ -32,6 +32,9 @@ import XCTest
 ///                                          `presslast bubble:` is the newest bubble on screen
 ///       type <text…>                       type into whatever has focus
 ///       drag <x1> <y1> <x2> <y2>           normalised window coordinates
+///       holddrag <x1> <y1> <x2> <y2> <s> <name>
+///                                          drag, hold the finger down <s> seconds, and
+///                                          shoot <tag>-<name>.png while it is still down
 ///
 ///   A step whose element never appears is recorded and the script carries on, because a lookup
 ///   can miss while the screen is right (`message-menu-delete` did, with the menu plainly up).
@@ -144,6 +147,8 @@ final class CaptureRigUITests: XCTestCase {
             note("type \(rest.count) characters")
         case "drag":
             drag(app, rest)
+        case "holddrag":
+            holdDrag(app, rest)
         default:
             fault("unknown step \"\(step)\"")
         }
@@ -179,6 +184,59 @@ final class CaptureRigUITests: XCTestCase {
             .press(forDuration: 0.05,
                    thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: n[2], dy: n[3])))
         note("drag \(rest)")
+    }
+
+    /// `holddrag <x1> <y1> <x2> <y2> <seconds> <name>` — the only step that photographs a
+    /// gesture in progress. Every other drag returns after touch-up, so a before/after pair
+    /// taken around one shows two identical end states and says nothing about what the
+    /// screen did under the finger, which for an interactive transition is the whole claim.
+    ///
+    /// The gesture stays on the test's own thread, where XCUITest expects it. The camera is
+    /// a block on another queue timed to fire part-way through the hold, while the gesture
+    /// call is still blocked with the touch down. It is given its own deadline, because a
+    /// shot that never comes back must read as a missed step rather than hold the runner
+    /// until the workflow's watchdog kills it.
+    private func holdDrag(_ app: XCUIApplication, _ rest: String) {
+        let parts = rest.split(separator: " ").map(String.init)
+        guard parts.count == 6,
+              let x1 = Double(parts[0]), let y1 = Double(parts[1]),
+              let x2 = Double(parts[2]), let y2 = Double(parts[3]),
+              let asked = Double(parts[4]) else {
+            fault("holddrag needs `x1 y1 x2 y2 seconds name`, got \"\(rest)\"")
+            return
+        }
+        let name = parts[5]
+        // The press and the travel are over inside 0.8 s — one screen width at the default
+        // 1000 pt/s — so the shot goes half-way through what is left, which is the hold. The
+        // floor keeps that arithmetic true however short a hold the script asked for.
+        let hold = max(2, asked)
+        let window = app.windows.firstMatch
+        let from = window.coordinate(withNormalizedOffset: CGVector(dx: x1, dy: y1))
+        let to = window.coordinate(withNormalizedOffset: CGVector(dx: x2, dy: y2))
+
+        let file = "\(tag)-\(name).png"
+        let url = URL(fileURLWithPath: shotDir).appendingPathComponent(file)
+        try? FileManager.default.createDirectory(atPath: shotDir, withIntermediateDirectories: true)
+        var trouble: String?
+        let shot = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.8 + hold / 2) {
+            do {
+                try XCUIScreen.main.screenshot().pngRepresentation.write(to: url)
+            } catch {
+                trouble = error.localizedDescription
+            }
+            shot.signal()
+        }
+        from.press(forDuration: 0.1, thenDragTo: to, withVelocity: .default, thenHoldForDuration: hold)
+
+        if shot.wait(timeout: .now() + 60) == .timedOut {
+            fault("holddrag \(rest): the shot never came back")
+        } else if let trouble {
+            fault("holddrag \(rest): could not write \(file): \(trouble)")
+        } else {
+            written.append(file)
+            note("holddrag \(rest) → \(file), taken with the finger still down")
+        }
     }
 
     @discardableResult

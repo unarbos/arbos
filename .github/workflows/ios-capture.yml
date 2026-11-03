@@ -15,6 +15,12 @@ name: iPhone capture
 #     -f launch_env='ARBOS_FIXTURE=1;ARBOS_NO_STORE=1;ARBOS_OPEN_PEOPLE=fx-group-launch' \
 #     -f script='wait chat-back:fx-group-launch;sleep 4;shot transcript'
 #
+# Each leg is also filmed (`film-base` / `film-head`), because a still cannot show a
+# transition. And `holddrag` is the step for a claim about what happens *during* a gesture:
+# it holds the finger down and shoots while it is still there, which is the only way a
+# before/after pair can separate a screen that follows the finger from one that jumps when
+# the finger is lifted. Both legs end up in the same place, so an end-state pair says nothing.
+#
 # ──────────────────────────────────────────────────────────────────────────────────────────────
 # READ THIS BEFORE YOU CHOOSE WHERE TO SHOOT
 # ──────────────────────────────────────────────────────────────────────────────────────────────
@@ -245,6 +251,7 @@ jobs:
       APP_DIR: apps/ios/Arbos
       SIM_NAME: Arbos Capture ${{ matrix.leg }} ${{ github.run_id }}
       SHOT_DIR: ${{ github.workspace }}/shots
+      VIDEO_DIR: ${{ github.workspace }}/film
     steps:
       - uses: actions/checkout@v4
         with:
@@ -393,6 +400,20 @@ jobs:
       # watchdog below stops it ~20 s after the log carries the verdict, which is the same trick
       # `scripts/feedback/ios-gate.sh` uses, and reads the verdict from the log rather than from
       # xcodebuild's exit code.
+      # A still cannot show a transition, and some claims are about movement rather than
+      # about a state — "the screen follows the finger" is one. `simctl io recordVideo`
+      # films the whole capture beside it, so the same dispatch hands back a pair of films
+      # as well as the pair of stills, and the stills stay the thing the pair job measures.
+      # Kept out of SHOT_DIR so that `pair-screenshots.py` still sees only PNGs.
+      - name: Film this leg
+        id: film
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          mkdir -p "$VIDEO_DIR"
+          xcrun simctl io "${{ steps.sim.outputs.udid }}" recordVideo --codec h264 --force \
+            "$VIDEO_DIR/${{ matrix.leg }}.mp4" > "$VIDEO_DIR/${{ matrix.leg }}.log" 2>&1 &
+          echo "pid=$!" >> "$GITHUB_OUTPUT"
       - name: Capture
         id: shoot
         env:
@@ -436,6 +457,29 @@ jobs:
             exit 1
           fi
           echo "${{ matrix.leg }}: ${#shots[@]} screenshot(s)"
+      # SIGINT is how `recordVideo` is asked to close the file properly; killing it outright
+      # leaves an mp4 with no moov atom, which no player will open.
+      - name: Stop filming
+        if: always() && steps.film.outputs.pid != ''
+        continue-on-error: true
+        run: |
+          pid="${{ steps.film.outputs.pid }}"
+          kill -INT "$pid" 2>/dev/null || true
+          for _ in $(seq 1 30); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 1
+          done
+          kill -9 "$pid" 2>/dev/null || true
+          ls -la "$VIDEO_DIR" || true
+      - name: Keep this leg's film
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: film-${{ matrix.leg }}
+          path: ${{ env.VIDEO_DIR }}
+          if-no-files-found: warn
+          retention-days: 14
       - name: Keep this leg's screenshots
         if: always()
         uses: actions/upload-artifact@v4
