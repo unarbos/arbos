@@ -14,13 +14,30 @@ use crate::agent::Agent;
 
 type S = Arc<Agent>;
 
-fn authed(agent: &Agent, headers: &HeaderMap) -> bool {
+/// `ARBOS_MCP_TOKEN` defaults to empty. A missing header read as `""` then equalled the configured
+/// `""`, so an unset token authenticated every caller rather than none — and `subagent_mcp_token()`
+/// is derived from it, so with it unset that value is a constant any caller can compute. A box
+/// always has a minted token (`relay::boxes` mints one per box), so failing closed here only
+/// affects an unconfigured daemon. `http::box_admin_authed` already guards the same way.
+fn token_ok(configured: &str, derived: &str, headers: &HeaderMap) -> bool {
+    if configured.is_empty() {
+        return false;
+    }
     let tok = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or("");
-    tok == agent.cfg.mcp_token || tok == agent.cfg.subagent_mcp_token()
+        .unwrap_or("")
+        .trim();
+    !tok.is_empty() && (tok == configured || tok == derived)
+}
+
+fn authed(agent: &Agent, headers: &HeaderMap) -> bool {
+    token_ok(
+        &agent.cfg.mcp_token,
+        &agent.cfg.subagent_mcp_token(),
+        headers,
+    )
 }
 
 fn ok() -> Response {
@@ -406,4 +423,73 @@ pub fn router(agent: Arc<Agent>) -> Router {
         .route("/hook/route-corrected", post(route_corrected))
         .route("/hook/tree-stats", axum::routing::get(tree_stats))
         .with_state(agent)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bearer(v: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {v}").parse().expect("header"),
+        );
+        h
+    }
+
+    /// Every hook route is behind `authed`, and `/hook/approval` decides whether a risky shell
+    /// command runs. An unset token must authenticate nobody; it used to authenticate everybody,
+    /// because a missing header and an unset token were both the empty string.
+    #[test]
+    fn an_unset_token_authenticates_nobody() {
+        // `subagent_mcp_token()` is `sub_` + the first 16 bytes of sha256("subagent:" + token), so
+        // with the token unset it is this constant: no secret in it, and any caller can compute it.
+        let derived_from_nothing = "sub_14dabdbbbef7fd4458133cfe393c201a";
+
+        assert!(
+            !token_ok("", derived_from_nothing, &HeaderMap::new()),
+            "no Authorization header must not pass while the token is unset"
+        );
+        assert!(
+            !token_ok("", derived_from_nothing, &bearer("")),
+            "an empty bearer must not pass"
+        );
+        assert!(
+            !token_ok("", derived_from_nothing, &bearer("   ")),
+            "a whitespace bearer must not pass"
+        );
+        assert!(
+            !token_ok("", derived_from_nothing, &bearer(derived_from_nothing)),
+            "the derived token must not pass while the token it derives from is unset"
+        );
+        assert!(
+            !token_ok("", derived_from_nothing, &bearer("anything")),
+            "nothing passes while the token is unset"
+        );
+    }
+
+    #[test]
+    fn a_configured_token_passes_and_a_wrong_one_does_not() {
+        assert!(token_ok("t0ken", "sub_abc", &bearer("t0ken")));
+        assert!(
+            token_ok("t0ken", "sub_abc", &bearer("sub_abc")),
+            "a subagent's derived token passes"
+        );
+        assert!(!token_ok("t0ken", "sub_abc", &bearer("nope")));
+        assert!(!token_ok("t0ken", "sub_abc", &bearer("")));
+        assert!(!token_ok("t0ken", "sub_abc", &HeaderMap::new()));
+    }
+
+    /// The constant above is really what the config derives, so the test is about the value an
+    /// attacker would send rather than an arbitrary string.
+    #[test]
+    fn the_derived_token_for_an_unset_token_is_that_constant() {
+        use sha2::Digest;
+        let d = sha2::Sha256::digest(b"subagent:");
+        assert_eq!(
+            format!("sub_{}", hex::encode(&d[..16])),
+            "sub_14dabdbbbef7fd4458133cfe393c201a"
+        );
+    }
 }
