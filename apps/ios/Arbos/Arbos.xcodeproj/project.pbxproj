@@ -113,6 +113,8 @@
 		A1D8800000000000000000C4 /* ServerStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D8800000000000000000C3 /* ServerStore.swift */; };
 		A1D8800000000000000000C6 /* ServerChannelsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D8800000000000000000C5 /* ServerChannelsView.swift */; };
 		A1DE700000000000000000A2 /* DevicesStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DE700000000000000000A1 /* DevicesStore.swift */; };
+		A1A1100000000000000000A2 /* AgentLinksStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1100000000000000000A1 /* AgentLinksStore.swift */; };
+		A1A1200000000000000000B2 /* AgentAccessLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1200000000000000000B1 /* AgentAccessLink.swift */; };
 		A1DE700000000000000000B2 /* MentionChips.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DE700000000000000000B1 /* MentionChips.swift */; };
 		A1F7B0000000000000000002 /* BlockedState.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F7B0000000000000000001 /* BlockedState.swift */; };
 		A1C0B10000000000000000A2 /* MessagePasteboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C0B10000000000000000A1 /* MessagePasteboard.swift */; };
@@ -378,6 +380,8 @@
 		A1D8800000000000000000C3 /* ServerStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerStore.swift; sourceTree = "<group>"; };
 		A1D8800000000000000000C5 /* ServerChannelsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerChannelsView.swift; sourceTree = "<group>"; };
 		A1DE700000000000000000A1 /* DevicesStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevicesStore.swift; sourceTree = "<group>"; };
+		A1A1100000000000000000A1 /* AgentLinksStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentLinksStore.swift; sourceTree = "<group>"; };
+		A1A1200000000000000000B1 /* AgentAccessLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentAccessLink.swift; sourceTree = "<group>"; };
 		A1DE700000000000000000B1 /* MentionChips.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MentionChips.swift; sourceTree = "<group>"; };
 		A1F7B0000000000000000001 /* BlockedState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlockedState.swift; sourceTree = "<group>"; };
 		A1C0B10000000000000000A1 /* MessagePasteboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessagePasteboard.swift; sourceTree = "<group>"; };
@@ -626,6 +630,7 @@
 				A1D8200000000000000000B1,
 				A1D8800000000000000000C3,
 				A1DE700000000000000000A1 /* DevicesStore.swift */,
+				A1A1100000000000000000A1 /* AgentLinksStore.swift */,
 				A1B5EA00000000000000A005 /* SearchStore.swift */,
 			);
 			path = Store;
@@ -649,6 +654,7 @@
 			isa = PBXGroup;
 			children = (
 				A1EE00000000000000000003 /* ErrorNote.swift */,
+				A1A1200000000000000000B1 /* AgentAccessLink.swift */,
 				A1F0A5440000000000000001 /* FunPicker.swift */,
 				A1BB00000000000000000001 /* BackSwipe.swift */,
 				A1AD0000000000000000B001 /* SheetHeader.swift */,
@@ -1035,6 +1041,8 @@
 				A1B5EA00000000000000A006 /* SearchStore.swift in Sources */,
 				A1D8800000000000000000C6 /* ServerChannelsView.swift in Sources */,
 				A1DE700000000000000000A2 /* DevicesStore.swift in Sources */,
+				A1A1100000000000000000A2 /* AgentLinksStore.swift in Sources */,
+				A1A1200000000000000000B2 /* AgentAccessLink.swift in Sources */,
 				A1DE700000000000000000B2 /* MentionChips.swift in Sources */,
 				A1F7B0000000000000000002 /* BlockedState.swift in Sources */,
 				A1C0B10000000000000000A2 /* MessagePasteboard.swift in Sources */,
