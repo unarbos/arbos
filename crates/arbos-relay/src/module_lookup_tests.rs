@@ -6,7 +6,9 @@
 //! Every route is asked the same question on two relays that differ in one fact: on the first,
 //! Victor owns an agent called `Lium`; on the second, nobody does. The answers must match.
 
-use axum::extract::{Path, State};
+use std::collections::HashMap;
+
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -463,6 +465,114 @@ async fn naming_someone_elses_agent_as_the_speaker_does_not_say_whose_name_is_ta
     assert_eq!(answers[0], answers[1], "taken and free names read alike");
 }
 
+/// The seventeen routes the sweep measured as one family, now answering a name they hide like a
+/// name nobody holds. One assertion per lookup is the right grain: the lookup, not the route, is
+/// what decides the answer. Each pins the refusal as well as the match, because an equality
+/// between two refusals says nothing on its own — two identical answers from a route that was
+/// never reached would pass just as happily.
+///
+/// What each lookup asks now:
+///
+///   `goals` (6 routes) and `routines` (7) — `api::resolve_project_id`, the helper the routes
+///   that already answered alike go through; both copies of `authorize` are gone.
+///   `inspect` rows and job (2) — `inspect::project_and_scope`, which keeps the way in for
+///   someone who shares a chat with the agent and hides every other caller.
+///   `images::avatar_generate` (1) — `api::project_owned_by`.
+///   `secrets::project_secrets` (1) — `secrets::visible_agent`, answering in that module's own
+///   noun: "no such agent" rather than "no such project".
+#[tokio::test]
+async fn the_modules_with_their_own_lookup_keep_the_same_silence() {
+    same!(
+        "goals (list)",
+        |s, p, id| async move {
+            crate::goals::list(State(s), p, Path(id))
+                .await
+                .unwrap_or_else(|e| e.into_response())
+        },
+        StatusCode::NOT_FOUND
+    );
+    same!(
+        "routines (list)",
+        |s, p, id| async move {
+            crate::routines::list(State(s), p, Path(id))
+                .await
+                .unwrap_or_else(|e| e.into_response())
+        },
+        StatusCode::NOT_FOUND
+    );
+    same!(
+        "inspect (rows)",
+        |s, p, id| async move {
+            crate::inspect::project_inspect(State(s), p, Path(id), Query(HashMap::new())).await
+        },
+        StatusCode::NOT_FOUND
+    );
+    same!(
+        "inspect (job)",
+        |s, p, id| async move {
+            crate::inspect::project_job(
+                State(s),
+                p,
+                Path((id, "j1".to_owned())),
+                Query(HashMap::new()),
+            )
+            .await
+        },
+        StatusCode::NOT_FOUND
+    );
+    same!(
+        "avatar (generate)",
+        |s, p, id| async move {
+            crate::images::avatar_generate(
+                State(s),
+                p,
+                Path(id),
+                Json(crate::images::AvatarGenerateBody {
+                    prompt: "a leaf".into(),
+                }),
+            )
+            .await
+        },
+        StatusCode::NOT_FOUND
+    );
+    same!(
+        "secrets (agent profile)",
+        |s, p, id| async move {
+            crate::secrets::project_secrets(State(s), p, Path(id))
+                .await
+                .unwrap_or_else(|e| e.into_response())
+        },
+        StatusCode::NOT_FOUND
+    );
+}
+
+/// A guest still reads the agent they were invited to, and its owner still reads their own. The
+/// uniform refusal above hides other people's agents; it must not start hiding the caller's.
+#[tokio::test]
+async fn the_people_inside_an_agent_still_read_it() {
+    let state = test_state(AuthMode::Github);
+    let (victor_user, victor) = person(&state, 9891);
+    let project = project_of(&state, &victor_user, GUESS);
+    let (guest_user, guest) = person(&state, 9892);
+    state
+        .db
+        .add_project_member(&project, &guest_user, &victor_user)
+        .expect("Victor invites a guest");
+
+    for (who, principal) in [("the owner", victor), ("a guest", guest)] {
+        crate::goals::list(
+            State(state.clone()),
+            principal.clone(),
+            Path(GUESS.to_owned()),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{who} reads the goals of their own agent: {e:?}"));
+        crate::secrets::project_secrets(State(state.clone()), principal, Path(GUESS.to_owned()))
+            .await
+            .unwrap_or_else(|e| panic!("{who} reads the secrets card of their own agent: {e:?}"));
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // What the sweep of 2026-11-02 found, and how firmly.
 //
@@ -472,33 +582,26 @@ async fn naming_someone_elses_agent_as_the_speaker_does_not_say_whose_name_is_ta
 //
 // -- MEASURED LEAK: nineteen routes, eight lookups ----------------------------------------------
 //
-// Not asserted here: the assertion belongs with the fix, and a red test in `main` helps nobody.
+// Eighteen of the nineteen are closed and asserted here now:
+// `the_modules_with_their_own_lookup_keep_the_same_silence` (seventeen routes, six lookups) and
+// `watching_a_browser_does_not_say_whose_name_is_taken` (one route, at the foot with the rest of
+// the socket work). What each lookup asks instead is in those two tests' own notes.
 //
-// Seventeen of the nineteen are one family — `403 not your project` for a name Victor holds,
-// `404 no such project` for one nobody holds — and come from six lookups:
+// The seventeen were one family — `403 not your project` for a name Victor holds, `404 no such
+// project` for one nobody holds — spread over six lookups: `goals::authorize` (6 routes),
+// `routines::authorize` (7), `inspect::project_inspect` (1), `inspect::project_job` (1),
+// `images::avatar_generate` (1), `secrets::project_secrets` (1, in that module's noun: 403 "not
+// your agent" against 404 "no such agent"). Every one of them was the same two statements in the
+// same order — a bare `state.db.project(caller_input)` that 404s on a miss, then a separate
+// refusal on a hit.
 //
-//   goals::authorize       — list, create, get, patch, delete, append_log      (6 routes)
-//   routines::authorize    — list, create, patch, delete, run_now, runs,
-//                            report_run                                        (7 routes)
-//   inspect::project_inspect                                                   (1 route)
-//   inspect::project_job                                                       (1 route)
-//   images::avatar_generate                                                    (1 route)
-//   secrets::project_secrets  (403 "not your agent" / 404 "no such agent")     (1 route)
+// The eighteenth was `GET /projects/{id}/browser/stream` (`browser::browser_stream`), measured
+// over a real socket by the harness at the foot of this file: `403` with an **empty body** for a
+// name Victor holds against `404 no such project` for one nobody holds. The empty body was a
+// bare `StatusCode::FORBIDDEN`, which the error layer leaves alone, so that route's refusal had
+// no JSON envelope and was alone in the API in that; it is settled in the same change.
 //
-// All six are the same two statements in the same order: a bare `state.db.project(caller_input)`
-// that 404s on a miss, then a separate refusal on a hit. `goals::authorize` and
-// `routines::authorize` are character-for-character the same function, so thirteen of those
-// seventeen routes are two edits.
-//
-// The remaining two routes are one each, and neither is quite that family:
-//
-// `GET /projects/{id}/browser/stream` (`browser::browser_stream`) joins them, measured over a
-// real socket by the harness at the foot of this file: `403` with an **empty body** for a name
-// Victor holds against `404 no such project` for one nobody holds. Two things for whoever takes
-// it. The empty body is a bare `StatusCode::FORBIDDEN`, which the error layer leaves alone, so
-// this route's refusal has no JSON envelope and is already inconsistent with the rest of the
-// API — worth settling in the same change. And the fix is the same reordering as the other six:
-// it asks `allows` one line too late.
+// The nineteenth is still open here, and wants a different remedy:
 //
 // `GET /projects/{file}/avatar.jpg` (`images::project_avatar`) is measured too, and wants a
 // different remedy. It takes no principal at all, and answers 404 "no picture" for a name
@@ -690,6 +793,38 @@ async fn opening_a_room_does_not_say_whose_name_is_taken() {
         answers[0].1.contains("not your project"),
         "the dial must have reached `ws_room`'s own refusal: {:?}",
         answers[0]
+    );
+    assert_eq!(answers[0], answers[1], "taken and free names read alike");
+}
+
+/// `GET /projects/{id}/browser/stream` asked `allows` one line after it looked the project up,
+/// which is the eighteenth route of this family and the only one that had to be measured over a
+/// socket: `403` with an empty body for a name Victor holds against `404 no such project` for
+/// one nobody holds. It now resolves through `api::project_for`, like the routes above.
+///
+/// The pin is on the free relay, not the taken one. A name nobody holds answered `no such
+/// project` before this change and answers it after, so it anchors the assertion; the taken
+/// side's answer is what the change moves. Without a pin the equality would be vacuous — a dial
+/// that stopped reaching the handler would have both relays agreeing on some other refusal.
+#[tokio::test]
+async fn watching_a_browser_does_not_say_whose_name_is_taken() {
+    let mut answers = Vec::new();
+    for victim in [true, false] {
+        let state = test_state(AuthMode::Github);
+        let (mallory_user, _) = person(&state, 9893);
+        project_of(&state, &mallory_user, "Mallory's agent");
+        if victim {
+            let (victor_user, _) = person(&state, 9894);
+            project_of(&state, &victor_user, GUESS);
+        }
+        let token = token_for(&state, &mallory_user);
+        let addr = serve(state).await;
+        answers.push(dial(addr, &format!("/projects/{GUESS}/browser/stream"), &token).await);
+    }
+    assert!(
+        answers[1].1.contains("no such project"),
+        "the dial must have reached the route's own refusal for a free name: {:?}",
+        answers[1]
     );
     assert_eq!(answers[0], answers[1], "taken and free names read alike");
 }
