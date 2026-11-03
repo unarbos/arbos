@@ -42,6 +42,10 @@ final class ChatSwipeTrackingUITests: XCTestCase {
     /// the two the assertion needs.
     private static let comesBack: CGFloat = 60
 
+    /// How a drag ends. Anything the trace holds after one of these is the transition
+    /// reporting on itself, not part of the drag.
+    private static let verdicts: Set<String> = ["finish", "cancel", "taken"]
+
     override func setUpWithError() throws {
         continueAfterFailure = false
     }
@@ -127,9 +131,14 @@ final class ChatSwipeTrackingUITests: XCTestCase {
                                              reaching: Double? = nil,
                                              file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertEqual(entries.first, "start", "the drag was read: \(entries)", file: file, line: line)
-        XCTAssertEqual(entries.last, ending, "the release is the last entry: \(entries)", file: file, line: line)
+        // The drag is the part up to the verdict. What follows it is the transition's own
+        // report of how it ended, which `whyNot` prints when a screen turns out to be dead.
+        let verdict = entries.firstIndex { Self.verdicts.contains($0) }
+        XCTAssertEqual(verdict.map { entries[$0] }, ending,
+                       "the release is the last thing the drag says: \(entries)", file: file, line: line)
 
-        let moves = travel(entries)
+        let drag = verdict.map { Array(entries[..<$0]) } ?? entries
+        let moves = travel(drag)
         XCTAssertGreaterThanOrEqual(moves.count, 2,
                                     "the chat moved more than once before the touch was lifted: \(entries)",
                                     file: file, line: line)
@@ -147,21 +156,41 @@ final class ChatSwipeTrackingUITests: XCTestCase {
                            "the chat came to rest under the finger and not short of it: \(entries)",
                            file: file, line: line)
         }
-        let between = Array(entries.dropFirst().dropLast()).filter { !$0.hasPrefix("track:") }
-        XCTAssertEqual(between, [], "nothing but movement happened while the finger was down: \(entries)",
+        let between = drag.dropFirst().filter { !$0.hasPrefix("track:") }
+        XCTAssertEqual(Array(between), [],
+                       "nothing but movement happened while the finger was down: \(entries)",
                        file: file, line: line)
     }
 
-    /// On screen is not the same as working, and this gesture can tell them apart the hard way.
-    /// An unfinished pop leaves the navigation controller's view with user interaction still
-    /// switched off, while every view sits at its finished position — because `UIView.animate`
-    /// writes the end state to the model layer at once. The screenshot is perfect and nothing
-    /// can be tapped. `exists` cannot see that; `isHittable` can.
-    private func assertUsable(_ element: XCUIElement,
+    /// On screen is not the same as working, and this gesture has produced the difference
+    /// twice: a pop that ends with every view at its finished position and nothing able to
+    /// take a touch. `exists` cannot see that, because `UIView.animate` writes the end state
+    /// to the model layer at once and the geometry is therefore correct either way.
+    ///
+    /// The wait is not padding. An interactive transition has a tail after the finger lifts —
+    /// `BackSwipeUITests.testAPartialEdgeSwipeReleasedCancelsCleanly` sleeps a second at this
+    /// same point for the same reason — and a bare `isHittable` reads one instant that may
+    /// land inside it.
+    private func assertUsable(_ element: XCUIElement, in app: XCUIApplication,
                               file: StaticString = #filePath, line: UInt = #line) {
-        XCTAssertTrue(element.isHittable,
-                      "the screen takes touches again once the pop has played out: \(element)",
-                      file: file, line: line)
+        let usable = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isHittable == true"),
+                                               object: element)
+        guard XCTWaiter().wait(for: [usable], timeout: settle) != .completed else { return }
+        XCTFail("the screen takes touches again once the pop has played out — \(whyNot(element, in: app))",
+                file: file, line: line)
+    }
+
+    /// Why an element that exists cannot be touched, in the two terms that tell the causes
+    /// apart: where it is (a screen left shifted leaves it outside the window) and what the
+    /// app said it left behind (`live:` — the pop's own report of whether interaction came
+    /// back on). Without this a failure here says only "false", which has cost two gate runs.
+    private func whyNot(_ element: XCUIElement, in app: XCUIApplication) -> String {
+        let window = app.windows.firstMatch.frame
+        let frame = element.frame
+        let readout = app.descendants(matching: .any)["back-swipe-trace"].firstMatch
+        let said = readout.exists ? ((readout.value as? String) ?? "") : "(gone with the chat)"
+        return "\(element.identifier) at \(frame); window \(window); "
+            + "inside it: \(window.contains(frame)); the app says: [\(said)]"
     }
 
     // MARK: The report
@@ -178,7 +207,7 @@ final class ChatSwipeTrackingUITests: XCTestCase {
 
         assertTrackedUnderTheFinger(trace(app), endingWith: "cancel", reaching: oneToOne(app, distance))
         XCTAssertTrue(back(app).exists, "the chat is still here: a drag this short does not go back")
-        assertUsable(back(app))
+        assertUsable(back(app), in: app)
     }
 
     /// The same, started on the diagonal — a thumb reaching across the phone goes down and
@@ -195,7 +224,7 @@ final class ChatSwipeTrackingUITests: XCTestCase {
         // The sideways part only: the chat does not follow the finger down the screen.
         assertTrackedUnderTheFinger(trace(app), endingWith: "cancel", reaching: oneToOne(app, distance))
         XCTAssertTrue(back(app).exists, "the chat is still here")
-        assertUsable(back(app))
+        assertUsable(back(app), in: app)
     }
 
     // MARK: What following the finger must not cost
@@ -225,7 +254,7 @@ final class ChatSwipeTrackingUITests: XCTestCase {
         XCTAssertTrue(row.waitForExistence(timeout: settle), "the group is in the list again")
         // Before the tap, because a Home that is drawn but takes no touches and a Home whose
         // tap does not push are two different faults and the tap reports them the same way.
-        assertUsable(row)
+        assertUsable(row, in: app)
         row.tap()
         XCTAssertTrue(back(app).waitForExistence(timeout: settle),
                       "Home pushed the chat back on: the stack and SwiftUI's path agree about what is on it")

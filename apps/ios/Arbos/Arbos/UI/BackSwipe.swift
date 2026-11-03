@@ -480,6 +480,19 @@ final class InteractiveBackPop: NSObject, UINavigationControllerDelegate {
     private func settle() {
         interaction = nil
         driving = false
+        #if DEBUG
+        // What the transition left behind. A pop that ends with the screen drawn correctly and
+        // dead to touch has happened here twice, and from the outside the two reasons for it —
+        // interaction never switched back on, or something left lying over the screen — look
+        // exactly alike. This says which, in the one place that can still see both.
+        if let nav {
+            let live = { (view: UIView?) in view.map { $0.isUserInteractionEnabled ? "1" : "0" } ?? "-" }
+            BackSwipeTrace.note("live:nav=\(live(nav.view))"
+                + ",win=\(live(nav.view.window))"
+                + ",top=\(live(nav.topViewController?.view))"
+                + ",kids=\(nav.view.subviews.count)")
+        }
+        #endif
     }
 
     func navigationController(_ navigationController: UINavigationController,
@@ -552,10 +565,27 @@ final class BackPopAnimator: NSObject, UIViewControllerAnimatedTransitioning {
             dim.alpha = 0
         } completion: { _ in
             dim.removeFromSuperview()
-            leavingView.transform = .identity
             arrivingView.transform = .identity
             (layer.shadowColor, layer.shadowOpacity, layer.shadowRadius, layer.shadowOffset) = shadow
-            context.completeTransition(!context.transitionWasCancelled)
+            let cancelled = context.transitionWasCancelled
+            if cancelled {
+                // This animator put the arriving view into the container, so this animator
+                // takes it out again when the pop does not happen. UIKit does not promise to.
+                arrivingView.removeFromSuperview()
+                // The leaving screen is staying, so it goes back where it was.
+                leavingView.transform = .identity
+            }
+            context.completeTransition(!cancelled)
+            if !cancelled {
+                // **After** the completion, and not before it. Until UIKit has taken this view
+                // out of the container it is still the screen the pop just removed, and putting
+                // it back at the origin lays a whole screen over the one that replaced it —
+                // invisible, because it has no content left, and solid to every touch.
+                leavingView.transform = .identity
+            }
+            #if DEBUG
+            BackSwipeTrace.note(cancelled ? "done:back" : "done:popped")
+            #endif
         }
     }
 }
