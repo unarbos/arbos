@@ -361,6 +361,7 @@ async fn main() -> anyhow::Result<()> {
         upgrading: Arc::new(Mutex::new(HashMap::new())),
         upgrade_refused: Arc::new(Mutex::new(HashMap::new())),
         refresh_grace: Arc::new(Mutex::new(HashMap::new())),
+        pair_failures: Arc::new(Mutex::new(std::collections::VecDeque::new())),
         push: Arc::new(push::Push::from_env(db.clone())),
         focus: Arc::new(Mutex::new(HashMap::new())),
         fallback_sent: Arc::new(Mutex::new(HashMap::new())),
