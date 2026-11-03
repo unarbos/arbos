@@ -2,6 +2,7 @@ mod admin;
 mod agent_link;
 mod agent_link_read;
 mod agent_link_stream;
+mod agent_link_write;
 mod agent_messages;
 mod api;
 mod api_error_layer;
@@ -654,7 +655,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/agent-link/chats/{id}", get(agent_link_read::chat))
         .route(
             "/agent-link/chats/{id}/messages",
-            get(agent_link_read::messages),
+            get(agent_link_read::messages).post(agent_link_write::send),
         )
         .route("/agent-link/agents", get(agent_link_read::agents))
         .route(
@@ -663,6 +664,16 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/agent-link/files/{slot}/{key}", get(agent_link_read::file))
         .route("/agent-link/stream", get(agent_link_stream::stream))
+        // PR 5: what a `reply` link may write. A `read` link is refused by the handler, and the
+        // refusal is in the owner's activity log.
+        .route(
+            "/agent-link/chats/{id}/reactions",
+            post(agent_link_write::react),
+        )
+        .route(
+            "/agent-link/chats/{id}/typing",
+            post(agent_link_write::typing),
+        )
         // Session log (spec §13.3): the sidecar uploads, the owner reads.
         .route("/asp/log", post(outside_log::upload))
         .route("/outside-agents/{id}/log", get(outside_log::read))
