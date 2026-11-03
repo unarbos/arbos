@@ -3857,7 +3857,7 @@ fn block_in_the_way(state: &AppState, user_id: &str, cm: &ChatWithMembers) -> Op
 /// May this person write into this chat at all? A DM partner's block either way, or an admin
 /// silence, says no. Shared by the room push and `/chats/{id}/notify` (#2012), so the
 /// announcement path is never looser than the row path.
-fn sender_allowed(
+pub(crate) fn sender_allowed(
     state: &AppState,
     user_id: &str,
     cm: &ChatWithMembers,
