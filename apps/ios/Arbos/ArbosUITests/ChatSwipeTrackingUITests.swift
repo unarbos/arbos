@@ -13,7 +13,7 @@ import XCTest
 /// afterwards: `start`, then `track:<fraction of the screen>` for every further 1% the chat
 /// moved while the finger was down, then `finish` or `cancel` for the release.
 ///
-/// Each case drags **short of the halfway line and lets go slowly**, so the swipe cancels and
+/// Each case drags **short of the line that commits** (`comesBack`), so the swipe cancels and
 /// the chat is still there to be read. That is the whole point: a drag that goes back proves
 /// nothing about when it started moving, while a drag that comes back has to have moved first.
 /// On the rule this replaces — one `fullScreenPops` reading taken at touch-up — these drags
@@ -27,6 +27,19 @@ final class ChatSwipeTrackingUITests: XCTestCase {
     private let settle: TimeInterval = 20
 
     private let chatId = "fx-group-launch"
+
+    /// A drag long enough to see the chat move and short enough that letting go puts it back.
+    ///
+    /// 70 pt is the ceiling, and the reason is a trap rather than a preference
+    /// (`internal/ios-profile-push-media-rig/gesture-velocity-traps.md`). These cases end with
+    /// `thenHoldForDuration`, which stops the finger before it lifts, so the release carries no
+    /// velocity at all. `BackSwipe.fullScreenPops` then reads `|vx| >= |vy|` as `0 >= 0` — true —
+    /// and goes back on distance alone, for any horizontal drag over 70 pt. Under 70 pt it
+    /// cannot, so the chat is still on screen to be read, which is the whole method here.
+    ///
+    /// 60 pt is still 15 % of a 393 pt screen: about fifteen entries in the trace, far more than
+    /// the two the assertion needs.
+    private static let comesBack: CGFloat = 60
 
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -89,7 +102,7 @@ final class ChatSwipeTrackingUITests: XCTestCase {
 
     /// How far out the chat was at each sample taken while the finger was down.
     private func travel(_ entries: [String]) -> [Double] {
-        entries.compactMap { $0.hasPrefix("track:") ? Double($0.dropFirst("track:".count)) : nil }
+        entries.compactMap { $0.hasPrefix("track:") ? Double(String($0.dropFirst("track:".count))) : nil }
     }
 
     /// Every case asks the same three things of a trace: the chat moved while the finger was
@@ -118,12 +131,11 @@ final class ChatSwipeTrackingUITests: XCTestCase {
 
     // MARK: The report
 
-    /// A slow drag, the case Jacob called finicky. 120 pt on a 393 pt screen is short of the
-    /// halfway line and the release is gentle, so the chat comes back — after having followed
-    /// the finger the whole way out.
+    /// A slow drag, the case Jacob called finicky. It comes back — after having followed the
+    /// finger the whole way out.
     func testASlowDragMovesTheChatBeforeTheFingerIsLifted() {
         let app = openGroup()
-        let distance: CGFloat = 120
+        let distance = Self.comesBack
         let start = startPoint(app, distance: distance)
 
         start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: distance, dy: 0)),
@@ -138,7 +150,7 @@ final class ChatSwipeTrackingUITests: XCTestCase {
     /// out at once. The chat tracks the sideways part from the first sample.
     func testADiagonalDragMovesTheChatBeforeTheFingerIsLifted() {
         let app = openGroup()
-        let distance: CGFloat = 120
+        let distance = Self.comesBack
         let start = startPoint(app, distance: distance)
 
         // About 30° below the horizontal: a diagonal, and inside the cone the swipe claims on.
