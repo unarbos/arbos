@@ -27,6 +27,10 @@ when you are done.
 The person who gave you this link never saw this key and cannot read it back
 to you. If you lose it, they make a new link; there is no way to recover it.
 
+This one key opens everything below. There is no second token to ask for and
+no signed URL to collect: every call in this page, including fetching a file,
+carries the same header.
+
 ## 1. Who you are and what you may do
 
   GET /agent-link/me
@@ -53,9 +57,144 @@ calls to find out — they answer 403 and spend your request budget.
 401. A link lives between one hour and thirty days, seven days by default:
 this is for one job, not a standing arrangement.
 
-## 2. Limits, and what to do when you hit one
+If `chats` is a list, it is the only conversations you may touch. Everything
+outside it answers 404, including chats that really exist.
+
+## 2. Find the chat you were asked about
+
+  GET /agent-link/chats
+
+  {"chats":[{"id":"01M6C…","kind":"agent","title":"Launch week",
+             "created_at":1793…,"agent":"01M6B…"},
+            {"id":"01M6D…","kind":"dm","title":"sam","created_at":1793…,
+             "agent":null}],
+   "count":2}
+
+`kind` is `agent` for a 1:1 with one of the person's own agents, or `dm` /
+`group` for a conversation with other people. `agent` carries the agent's id
+when the chat belongs to one, and is null otherwise.
+
+People usually name an agent rather than a chat id — "my conversation with
+codingarbos". Start from the agent:
+
+  GET /agent-link/agents
+
+  {"agents":[{"id":"01M6B…","handle":"codingarbos","name":"codingarbos",
+              "state":"running","last_active_at":1793…,
+              "chats":[{"id":"01M6C…","kind":"agent","title":"Launch week",
+                        "created_at":1793…,"agent":"01M6B…"}]}],
+   "count":1}
+
+That is one call to go from a name to the chat you need. You can also filter
+the chat list directly:
+
+  GET /agent-link/chats?agent=codingarbos
+
+For who is in a chat before you read it:
+
+  GET /agent-link/chats/{chat-id}
+
+  {"id":"01M6C…","kind":"agent","title":"Launch week","agent":"01M6B…",
+   "members":[{"kind":"user","id":"u_7f…","handle":"unarbos","name":"Jacob",
+               "role":"owner"},
+              {"kind":"agent","id":"01M6B…","handle":"codingarbos",
+               "name":"codingarbos","role":"agent"}]}
+
+## 3. Read the history
+
+  GET /agent-link/chats/{chat-id}/messages?before=&limit=&format=
+
+  {"chat":{"id":"01M6C…","kind":"agent","title":"Launch week",…},
+   "messages":[{"id":"01M6C…","at":1793…,
+                "sender":{"kind":"user","id":"u_7f…","handle":"unarbos",
+                          "name":"Jacob"},
+                "text":"did step 4 fail again?",
+                "attachments":[{"name":"log.txt","mime":"text/plain",
+                                "kind":"file",
+                                "path":"/agent-link/files/01M6B…/k_9f2…"}],
+                "reply_to":null}],
+   "has_more":true,
+   "before":"01M6C…"}
+
+  limit     1–200, 50 by default.
+  format    `json` by default, or `md` for the same page as Markdown.
+  before    a message id. The page ends just before it.
+
+**Paging runs backwards.** With no `before` you get the newest messages, in
+reading order, oldest-first inside the page. To go further back, pass the
+`before` value from the answer. When `has_more` is false you have reached the
+start of the conversation.
+
+That order is for your benefit: the end of a conversation is almost always
+the part you were asked about, so you do not have to read a year of history
+to reach it. Read backwards only as far as the question needs. Every message
+you are handed is counted against the budget in section 6.
+
+`sender.kind` is `user`, `agent` or `system`. An unfinished agent reply is
+not in the list: you only ever see messages that have settled.
+
+## 4. Open a picture or a file
+
+  GET /agent-link/files/{slot}/{key}
+
+Use the `path` from an attachment exactly as given — it already carries the
+slot and the key. Send your usual `Authorization` header; there is nothing
+else to sign and no URL to pre-mint.
+
+  GET /agent-link/files/{slot}/{key}?w=640
+
+`?w=` scales a picture down on the way out. Anything that is not a picture
+ignores it and you get the original bytes.
+
+You can only fetch files of the chats you may read. Anything else answers
+404.
+
+## 5. Read an agent's log, to debug it
+
+  GET /agent-link/agents/{agent}/log?since=&chat=&limit=&format=
+
+`{agent}` is the handle or the id from section 2. This is the same window the
+person sees in their own app: what the agent did, not just what it said.
+
+  {"project_id":"01M6B…","scope":"agent_link","since":1793…,
+   "next_cursor":1793…,"truncated":false,"count":37,
+   "box":{"reachable":true,"state":"running","state_since":1793…,
+          "agentd":{"version":"0.1.191",…}},
+   "identity":{"project_id":"01M6B…","name":"codingarbos",
+               "handle":"codingarbos","live":true},
+   "turn":{"running":false},
+   "events":[{"at":1793…,"kind":"turn","…":"…"},
+             {"at":1793…,"kind":"tool","…":"…"}],
+   "session_log":[{"id":41,"kind":"reply","at":1793…,
+                   "ms":{"event_to_reply":1203}}]}
+
+  since     Unix ms. Defaults to the last hour; seven days is the most you
+            can reach back.
+  chat      narrow the window to one conversation. It must be a chat you may
+            read.
+  limit     events per page.
+  format    `json` by default, or `md` for a readable transcript of the
+            window.
+
+`events` is the agent's own record: turns, tool calls, routing and
+mention-gate decisions, quick replies, approvals, warnings, and its audit
+tail. `box.reachable` false with `state` `stopped` is frequently the entire
+explanation for "it never answered" — check it before you theorise.
+
+Page with `since=next_cursor` while `truncated` is true. A page never splits
+a millisecond, so that cursor cannot skip an event.
+
+`session_log` is the agent's connector log: timings and errors, no message
+text. It is empty for an agent that has no connector.
+
+Reading a log does not spend your message budget, so you can debug freely
+without using up your ability to read the conversation.
+
+## 6. Limits, and what to do when you hit one
 
   120 requests a minute, every endpoint together
+  5,000 messages an hour handed to this link
+  10,000 messages an hour handed to every link of this account together
 
 Over a limit you get:
 
@@ -65,32 +204,42 @@ Over a limit you get:
 Wait that many seconds. Do not retry straight away and do not retry in a
 loop.
 
-## 3. When something goes wrong
+A message budget refusal returns no messages at all, so nothing is lost and
+nothing is half-read: wait, then continue from the same `before` cursor.
+`Retry-After` on that one is 3600, because the window is an hour and
+retrying sooner cannot help.
+
+## 7. When something goes wrong
 
   401 invalid_token      the link was revoked or has expired. Stop. Tell your
                          person; only the account owner can make a new one.
+  401 token_in_url       you sent the key in the query string. Use the
+                         Authorization header. That key is in somebody's logs
+                         now — ask for a new link.
   403 scope              you tried to write with a read-only link.
-  403 not_visible        that chat is not one this link may reach.
-  404 not_found          no such chat or message.
+  404 not_found          no such chat, agent, file or message — or one this
+                         link may not reach. The two are deliberately not
+                         distinguished.
   410 already_opened     this page was already fetched once. If you are
                          seeing this on your first try, somebody else opened
                          the link before you. Tell your person at once and
                          ask them to revoke it.
   410 open_expired       the link was made more than fifteen minutes before
                          anyone opened it. Ask your person for a new one.
-  429 rate_limited       see section 2.
+  429 rate_limited       see section 6.
 
 Never post an error into a chat and never retry a failed write in a loop.
 Fix it, or tell the person who gave you the link.
 
-## 4. What the owner can see
+## 8. What the owner can see
 
 Everything this link does is recorded against it — when it was opened, from
-what address, and every call that changes anything. The person who made it
-reads that list in Arbos, and can revoke the link at any moment. A revoked
-link stops working on its very next call.
+what address, every chat you read and how many messages you were handed, and
+every call that changes anything. The person who made it reads that list in
+Arbos, and can revoke the link at any moment. A revoked link stops working on
+its very next call.
 
-## 5. If you need this permanently
+## 9. If you need this permanently
 
 This link is for one job and expires on its own. If the person wants you in
 their chats as a standing member — with your own name, your own avatar and

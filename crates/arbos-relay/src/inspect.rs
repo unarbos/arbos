@@ -488,7 +488,7 @@ fn iso(ms: i64) -> String {
 }
 
 /// `format=md`: the shape the feedback rollout uses, for a bot's context window.
-fn render_markdown(body: &Value) -> String {
+pub(crate) fn render_markdown(body: &Value) -> String {
     let mut out = String::new();
     let ident = &body["identity"];
     out.push_str(&format!(
@@ -571,7 +571,32 @@ pub async fn project_inspect(
     if let Scope::Member { chat } = &scope {
         q.chat = Some(chat.clone());
     }
-    let box_result = box_page(&state, &project, &q).await;
+    let body = window(&state, &project, &scope, &q).await;
+    if q.markdown {
+        (
+            [(header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+            render_markdown(&body),
+        )
+            .into_response()
+    } else {
+        Json(body).into_response()
+    }
+}
+
+/// The agent's window itself, with authorisation already settled by the caller.
+///
+/// Split out of [`project_inspect`] so a caller that resolves its own authority can reuse the
+/// exact same window rather than assembling a second, drifting one. The agent access link is
+/// such a caller: it is not a [`Principal`], so it cannot go through `project_and_scope`, and a
+/// debugging view that disagreed with the owner's own would be worse than no view at all.
+/// Nothing here consults the caller's identity — `scope` is the whole of that decision.
+pub(crate) async fn window(
+    state: &AppState,
+    project: &Project,
+    scope: &Scope,
+    q: &InspectQuery,
+) -> Value {
+    let box_result = box_page(state, project, q).await;
     let box_ok = box_result.is_ok();
     let (bs, bs_since) = state.box_state(&project.user_id).await;
     let agentd = state.db.box_agentd(&project.user_id).ok().flatten();
@@ -616,13 +641,13 @@ pub async fn project_inspect(
             "handle": crate::people::agent_slug(&project.name), "live": false,
         });
     }
-    let mut relay = relay_events(&state, &project, &q, &scope, box_ok);
+    let mut relay = relay_events(state, project, q, scope, box_ok);
     // The box stopped at its own cursor: nothing newer from the relay may come first.
     if let Some(cut_at) = box_cursor {
         relay.retain(|e| e["at"].as_i64().unwrap_or(0) <= cut_at);
     }
     events.append(&mut relay);
-    if let Scope::Member { .. } = &scope {
+    if let Scope::Member { .. } = scope {
         events.retain(|e| MEMBER_KINDS.contains(&e["kind"].as_str().unwrap_or("")));
         if let Some(o) = identity.as_object_mut() {
             o.retain(|k, _| {
@@ -634,10 +659,10 @@ pub async fn project_inspect(
         }
         turn = json!({ "running": turn["running"] });
     }
-    let (events, next_cursor, truncated) = cut(events, &q);
-    let body = json!({
+    let (events, next_cursor, truncated) = cut(events, q);
+    json!({
         "project_id": project.id,
-        "scope": match &scope { Scope::Owner => "owner", Scope::Member { .. } => "member" },
+        "scope": match scope { Scope::Owner => "owner", Scope::Member { .. } => "member" },
         "chat": q.chat,
         "since": q.since,
         "next_cursor": next_cursor,
@@ -647,16 +672,7 @@ pub async fn project_inspect(
         "identity": identity,
         "turn": turn,
         "events": events,
-    });
-    if q.markdown {
-        (
-            [(header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
-            render_markdown(&body),
-        )
-            .into_response()
-    } else {
-        Json(body).into_response()
-    }
+    })
 }
 
 /// `GET /projects/{id}/jobs/{job_id}?after=<seq>[&chat=<id>]` — the rollout view's document for
