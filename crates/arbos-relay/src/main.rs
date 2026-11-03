@@ -50,6 +50,8 @@ mod local;
 mod matrix;
 mod migrate;
 mod moderation;
+#[cfg(test)]
+mod module_lookup_tests;
 mod notices;
 mod notify;
 mod outside;
@@ -61,8 +63,11 @@ mod perf;
 mod pins;
 #[cfg(test)]
 mod preview_token_tests;
+#[cfg(test)]
+mod project_lookup_tests;
 mod proxy;
 mod push;
+mod push_guard;
 mod releases;
 mod restart;
 mod room_health;
@@ -293,14 +298,7 @@ async fn main() -> anyhow::Result<()> {
         auth_mode,
         github_client_id,
         github_client_secret,
-        auth_redirects: env_nonempty("ARBOS_AUTH_REDIRECTS")
-            .map(|s| {
-                s.split(',')
-                    .map(|p| p.trim().to_owned())
-                    .filter(|p| !p.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default(),
+        auth_redirects: auth_redirects_from_env(),
         default_grant_usd: env_f64("ARBOS_DEFAULT_GRANT_USD", 100.0),
         default_daily_cap_usd: env_f64("ARBOS_DEFAULT_DAILY_CAP_USD", 20.0),
         global_daily_cap_usd: env_f64("ARBOS_GLOBAL_DAILY_CAP_USD", 500.0),
@@ -884,6 +882,10 @@ async fn main() -> anyhow::Result<()> {
             "/room/{project}/{chat}/checkpoint",
             get(rooms::get_checkpoint).post(rooms::post_checkpoint),
         )
+        .route(
+            "/room/{project}/{chat}/repair",
+            post(rooms::post_room_repair),
+        )
         .route("/room/{project}/{chat}/stats", get(rooms::room_stats))
         .route(
             "/room/{project}/{chat}/messages/{message_id}",
@@ -1100,6 +1102,31 @@ fn env_nonempty(name: &str) -> Option<String> {
         .ok()
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty())
+}
+
+/// `ARBOS_AUTH_REDIRECTS`: the extra origins `/auth/github/start` may send the browser to.
+///
+/// Each entry has to name an origin (`https://arbos.life`), because that is how the relay
+/// compares it — scheme, host and port, never the start of the redirect. An entry that is not a
+/// URL with an origin would simply never match, so say so at start instead of letting sign-in
+/// fail later with a bare 400.
+fn auth_redirects_from_env() -> Vec<String> {
+    let Some(raw) = env_nonempty("ARBOS_AUTH_REDIRECTS") else {
+        return Vec::new();
+    };
+    raw.split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .inspect(|entry| {
+            if signin::origin_of(entry).is_none() {
+                tracing::warn!(
+                    entry = %entry,
+                    "ARBOS_AUTH_REDIRECTS: not an origin (want scheme://host[:port]); this entry allows nothing"
+                );
+            }
+        })
+        .map(str::to_owned)
+        .collect()
 }
 
 fn env_f64(name: &str, default: f64) -> f64 {
