@@ -271,9 +271,9 @@ async fn a_skill_is_filed_under_the_callers_own_agent() {
 // The handler modules this file did not reach the first time (swept 2026-11-02).
 //
 // The sweep asked every route that takes a project id or name from the caller the same question
-// the tests above ask, on the same two relays. Routes whose answers already match are pinned
-// here. The ones that do not are listed at the foot of the file with the answers they gave; they
-// want a source change, which is not this file's to make.
+// the tests above ask, on the same two relays. Routes whose answers already matched are pinned
+// here; the ones that did not are pinned below, after the source change that made them match.
+// The two the harness could not reach at all are named at the foot of the file.
 // ---------------------------------------------------------------------------------------------
 
 /// The routes that settle access before they look a project up. A stranger is refused the same
@@ -573,6 +573,72 @@ async fn the_people_inside_an_agent_still_read_it() {
     }
 }
 
+/// `GET /projects/{file}/avatar.jpg` takes no principal at all, so whatever it answers it
+/// answers to anyone on the internet. Wording could not close this one: an agent that has a
+/// picture answered a guess at its name with the picture. Matching on the id only is what
+/// closes it, so the name in this test is nothing to this route whether Victor holds it or not
+/// — and whether his agent has a picture or not, which is why this test sets one.
+///
+/// The refusal is pinned as well as matched, because an equality between two refusals passes on
+/// its own even when neither is the route's. Both sides of this one move with the change — the
+/// taken side from the picture itself, the free side from "no such agent" — so the pin is on the
+/// single refusal the route is left with.
+///
+/// The id side of the route is unchanged and is covered by
+/// `api::agent_avatar_version_tests::foreign_viewer_reads_the_owner_set_picture`.
+#[tokio::test]
+async fn the_public_picture_route_says_nothing_about_a_name() {
+    let mut answers = Vec::new();
+    for victim in [true, false] {
+        let state = test_state(AuthMode::Github);
+        let (mallory_user, _) = person(&state, 9851);
+        project_of(&state, &mallory_user, "Mallory's agent");
+        if victim {
+            let (victor_user, victor) = person(&state, 9852);
+            let project = project_of(&state, &victor_user, GUESS);
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("image/png"),
+            );
+            let stored = crate::blobs::put(
+                State(state.clone()),
+                victor,
+                Path((project.clone(), "avatar-1.png".to_owned())),
+                headers,
+                axum::body::Bytes::from_static(crate::image_sniff::samples::PNG),
+            )
+            .await;
+            assert_eq!(stored.status(), StatusCode::NO_CONTENT);
+            state
+                .db
+                .set_project_image_key(&project, Some("avatar-1.png"))
+                .expect("Victor's agent has a picture");
+        }
+        let answer = crate::images::project_avatar(
+            State(state),
+            Path(format!("{GUESS}.jpg")),
+            Query(crate::avatar_image::SizeQuery::default()),
+        )
+        .await;
+        let status = answer.status();
+        let body = axum::body::to_bytes(answer.into_body(), 1 << 20)
+            .await
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_default();
+        answers.push((status, body));
+    }
+    assert!(
+        answers[1].1.contains("no picture"),
+        "the call must have reached the route's own refusal: {:?}",
+        answers[1]
+    );
+    assert_eq!(
+        answers[0], answers[1],
+        "a name someone holds must read like a name nobody holds, picture or no picture"
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // What the sweep of 2026-11-02 found, and how firmly.
 //
@@ -582,10 +648,11 @@ async fn the_people_inside_an_agent_still_read_it() {
 //
 // -- MEASURED LEAK: nineteen routes, eight lookups ----------------------------------------------
 //
-// Eighteen of the nineteen are closed and asserted here now:
-// `the_modules_with_their_own_lookup_keep_the_same_silence` (seventeen routes, six lookups) and
+// All nineteen are closed and asserted here now:
+// `the_modules_with_their_own_lookup_keep_the_same_silence` (seventeen routes, six lookups),
 // `watching_a_browser_does_not_say_whose_name_is_taken` (one route, at the foot with the rest of
-// the socket work). What each lookup asks instead is in those two tests' own notes.
+// the socket work), and `the_public_picture_route_says_nothing_about_a_name` (one route). What
+// each lookup asks instead is in those tests' own notes.
 //
 // The seventeen were one family — `403 not your project` for a name Victor holds, `404 no such
 // project` for one nobody holds — spread over six lookups: `goals::authorize` (6 routes),
@@ -601,15 +668,14 @@ async fn the_people_inside_an_agent_still_read_it() {
 // bare `StatusCode::FORBIDDEN`, which the error layer leaves alone, so that route's refusal had
 // no JSON envelope and was alone in the API in that; it is settled in the same change.
 //
-// The nineteenth is still open here, and wants a different remedy:
-//
-// `GET /projects/{file}/avatar.jpg` (`images::project_avatar`) is measured too, and wants a
-// different remedy. It takes no principal at all, and answers 404 "no picture" for a name
-// someone holds against 404 "no such agent" for one nobody does — so the oracle is open to
-// anyone on the internet, not just to a signed-in stranger, and it is invisible to any check
-// that compares statuses. Wording will not close it: an agent that has a picture answers with
-// the picture. What closes it is matching on the id only (`db::project_by_id`), which is what
-// that method's own comment already asks for. That is an API-shape change, not a message change.
+// The nineteenth wanted a different remedy, and got one in a change of its own:
+// `GET /projects/{file}/avatar.jpg` (`images::project_avatar`) takes no principal at all, and
+// answered 404 "no picture" for a name someone holds against 404 "no such agent" for one nobody
+// does — so the oracle was open to anyone on the internet, not just to a signed-in stranger, and
+// invisible to any check that compares statuses. Wording could not close it: an agent that has a
+// picture answers with the picture. Matching on the id only (`db::project_by_id`) closed it,
+// which is what that method's own comment already asks for. That is an API-shape change, not a
+// message change: the route no longer accepts a name.
 //
 // -- MEASURED, AND NOT ENUMERABLE ---------------------------------------------------------------
 //
