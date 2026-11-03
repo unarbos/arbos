@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 use arbos_core::api::{GoalDto, GoalsListDto};
 use arbos_core::ids::{now_ms, ulid};
 
+use crate::api::resolve_project_id;
 use crate::auth::Principal;
 use crate::db::{Goal, Routine};
 use crate::routines::{next_run_ms, Trigger};
@@ -30,22 +31,6 @@ fn bad(e: impl std::fmt::Display) -> (StatusCode, String) {
 
 const STATUSES: [&str; 5] = ["active", "blocked", "waiting", "paused", "done"];
 const AUTONOMIES: [&str; 3] = ["ask", "suggest", "act"];
-
-fn authorize(
-    state: &AppState,
-    principal: &Principal,
-    id_or_name: &str,
-) -> Result<String, (StatusCode, String)> {
-    let p = state
-        .db
-        .project(id_or_name)
-        .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !state.allows(principal, &p.id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
-    Ok(p.id)
-}
 
 fn load_goal(state: &AppState, project_id: &str, gid: &str) -> Result<Goal, (StatusCode, String)> {
     match state.db.goal(gid).map_err(internal)? {
@@ -267,7 +252,7 @@ pub async fn list(
     principal: Principal,
     Path(id): Path<String>,
 ) -> ApiResult {
-    let project_id = authorize(&state, &principal, &id)?;
+    let project_id = resolve_project_id(&state, &principal, &id)?;
     let name = state
         .db
         .project(&project_id)
@@ -314,7 +299,7 @@ pub async fn create(
     Path(id): Path<String>,
     Json(b): Json<CreateGoalBody>,
 ) -> ApiResult {
-    let project_id = authorize(&state, &principal, &id)?;
+    let project_id = resolve_project_id(&state, &principal, &id)?;
     let title = b.title.trim().to_owned();
     if title.is_empty() {
         return Err(bad("title required"));
@@ -386,7 +371,7 @@ pub async fn get(
     principal: Principal,
     Path((id, gid)): Path<(String, String)>,
 ) -> ApiResult {
-    let project_id = authorize(&state, &principal, &id)?;
+    let project_id = resolve_project_id(&state, &principal, &id)?;
     let g = load_goal(&state, &project_id, &gid)?;
     let name = state.db.project(&project_id).ok().flatten().map(|p| p.name);
     Ok(Json(goal_json(&g, name.as_deref())).into_response())
@@ -430,7 +415,7 @@ pub async fn patch(
     Path((id, gid)): Path<(String, String)>,
     Json(b): Json<PatchGoalBody>,
 ) -> ApiResult {
-    let project_id = authorize(&state, &principal, &id)?;
+    let project_id = resolve_project_id(&state, &principal, &id)?;
     let mut g = load_goal(&state, &project_id, &gid)?;
     if let Some(t) = b.title {
         let t = t.trim().to_owned();
@@ -494,7 +479,7 @@ pub async fn delete(
     principal: Principal,
     Path((id, gid)): Path<(String, String)>,
 ) -> ApiResult {
-    let project_id = authorize(&state, &principal, &id)?;
+    let project_id = resolve_project_id(&state, &principal, &id)?;
     let g = load_goal(&state, &project_id, &gid)?;
     if let Some(rid) = g.routine_id {
         let _ = state.db.delete_routine(&rid);
@@ -517,7 +502,7 @@ pub async fn append_log(
     Path((id, gid)): Path<(String, String)>,
     Json(b): Json<LogBody>,
 ) -> ApiResult {
-    let project_id = authorize(&state, &principal, &id)?;
+    let project_id = resolve_project_id(&state, &principal, &id)?;
     let mut g = load_goal(&state, &project_id, &gid)?;
     let text = b.text.trim().to_owned();
     if text.is_empty() {

@@ -610,12 +610,19 @@ pub async fn avatar_generate(
     axum::extract::Path(project_id): axum::extract::Path<String>,
     Json(body): Json<AvatarGenerateBody>,
 ) -> Response {
-    let Ok(Some(project)) = state.db.project(&project_id) else {
-        return avatar_error(StatusCode::NOT_FOUND, "no_such_project", "no such project");
+    // `project_owned_by` hides another owner's agent behind the answer a free name gets, so this
+    // route cannot be used to ask which agent names are taken (`api::no_such_project`, reported
+    // 2026-11-02); the 403 below it is only ever met by a guest, who can see the agent anyway.
+    let project = match crate::api::project_owned_by(&state, &principal, &project_id) {
+        Ok(p) => p,
+        Err((status, message)) => {
+            return avatar_error(
+                status,
+                crate::api_error_layer::type_for_status(status),
+                message,
+            )
+        }
     };
-    if !state.owns(&principal, &project.id) {
-        return avatar_error(StatusCode::FORBIDDEN, "forbidden", "not your project");
-    }
     let target = AvatarTarget {
         slot: project.id.clone(),
         payer: project.user_id.clone(),
