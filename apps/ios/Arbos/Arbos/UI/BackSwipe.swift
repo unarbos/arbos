@@ -11,10 +11,12 @@
 //    closed — the keyboard goes down as the pop begins). Nothing else reads a drag that
 //    starts in the edge zone.
 // 2. A swipe to the right anywhere else on the screen (header, transcript, empty space, the
-//    channel list) is also "back" (since 7d2d3797, 2026-10-16) — an animated pop, never from
-//    the composer bar (a drag there selects text or slides the mic) and never from the edge
-//    zone, which is the system's. `FullScreenBackHost`, a `DirectionalSwipeRecognizer` that
-//    fails at once on anything but a clear rightward pan.
+//    channel list) is also "back" (since 7d2d3797, 2026-10-16), and it is interactive in the
+//    same way the edge pop is: the screen starts moving on the first rightward millimetre and
+//    follows the finger 1:1 until it is let go (`InteractiveBackPop`). Never from the composer
+//    bar (a drag there selects text or slides the mic) and never from the edge zone, which is
+//    the system's. `FullScreenBackHost`, a `DirectionalSwipeRecognizer` that fails at once on
+//    anything but a clear rightward pan.
 // 3. A swipe to the left on the transcript peeks the message times (iMessage); the same
 //    recognizer class, on the scroll view, declines every rightward or vertical pan.
 //
@@ -32,6 +34,11 @@
 // begin: the finger-tracking pop was gone and "back" became a 40 pt threshold with an
 // animation that did not follow the finger (Jacob, 2026-10-28: "very buggy and not working").
 // The system pop had been on since 731cdec9 (2026-10-16) until #1985 removed its enabler.
+// #2530 and #2533 then widened where the swipe may start and what it pops, and left the rule
+// itself alone: outside the edge zone the drag still only ever resolved on touch-up (Jacob,
+// 2026-11-03: "i swipe and then it doesn't register until i let go … should register on first
+// touch and then as i slide my finger across the chat slides out with my finger"). The release
+// now only decides whether to finish or to put the screen back — the movement is the drag's.
 
 import SwiftUI
 import UIKit
@@ -68,6 +75,20 @@ enum BackSwipe {
         let absX = abs(dx), absY = abs(translation.height)
         guard dx > 0, absX > 70, absX > absY * 1.25 else { return false }
         return abs(velocity.width) >= abs(velocity.height) || absX > 120
+    }
+
+    /// What letting go of an interactive back drag does: finish the pop, or put the screen
+    /// back where it was. Past half the screen it finishes — that is the line the system's
+    /// edge pop draws, and by then the reader can see most of the page underneath — and short
+    /// of it a deliberate flick (`fullScreenPops`) finishes too.
+    ///
+    /// `fullScreenPops` is left exactly as it is, because it is also the direction guarantee:
+    /// it needs `dx > 0`, so a leftward drag can never go back. The guard here says the same
+    /// thing again for the halfway clause.
+    static func popFinishes(translation: CGSize, velocity: CGSize, width: CGFloat) -> Bool {
+        guard translation.width > 0 else { return false }
+        if width > 0, translation.width >= width / 2 { return true }
+        return fullScreenPops(translation: translation, velocity: velocity)
     }
 
     /// The keyboard goes down with the pop.
@@ -171,6 +192,51 @@ enum SwipeClaim: Equatable {
     case declined
 }
 
+/// A claimed back drag, as data: what the screen does at each touch sample. Unit-tested in
+/// `BackDragTests`, played by `BackSwipePlayer`.
+///
+/// Every sample while the finger is down answers `.track`, so the screen moves then; only the
+/// release answers `.finish` or `.cancel`. That order is the fix (Jacob, 2026-11-03: "i swipe
+/// and then it doesn't register until i let go … as i slide my finger across the chat slides
+/// out with my finger") — before it every sample but the last answered nothing at all, and a
+/// swipe was a threshold read once, at touch-up.
+struct BackDrag: Equatable {
+    /// The travel of a complete pop: the screen's width, so the page follows the finger 1:1.
+    var width: CGFloat
+
+    enum Step: Equatable {
+        /// Nothing to draw: the drag has not been claimed yet.
+        case idle
+        /// The screen sits `progress` (0…1) of the way out.
+        case track(progress: CGFloat)
+        /// Let go past the line (`BackSwipe.popFinishes`): run the pop out.
+        case finish
+        /// Let go short of it, or the touch was taken away: put the screen back.
+        case cancel
+    }
+
+    func step(for state: UIGestureRecognizer.State, translation: CGSize, velocity: CGSize) -> Step {
+        switch state {
+        case .began, .changed:
+            return .track(progress: Self.progress(dx: translation.width, width: width))
+        case .ended:
+            return BackSwipe.popFinishes(translation: translation, velocity: velocity, width: width) ? .finish : .cancel
+        case .cancelled, .failed:
+            return .cancel
+        case .possible:
+            return .idle
+        @unknown default:
+            return .idle
+        }
+    }
+
+    /// How far out the screen is: the finger's own travel, clamped to the screen.
+    static func progress(dx: CGFloat, width: CGFloat) -> CGFloat {
+        guard width > 0 else { return 0 }
+        return min(1, max(0, dx / width))
+    }
+}
+
 /// A pan that decides its direction on the first points and otherwise fails at once. Not a
 /// `UIPanGestureRecognizer`: that one begins at its own ~10 pt in any direction, before the
 /// direction is known. Exclusive with the scroll view's pan (no `require(toFail:)` either way):
@@ -261,6 +327,247 @@ final class DirectionalSwipeRecognizer: UIGestureRecognizer {
     }
 }
 
+// MARK: - The interactive pop (Jacob, 2026-11-03)
+
+extension UIView {
+    /// The navigation stack this view sits in, through the responder chain. A representable's
+    /// view usually has no view controller of its own, and SwiftUI's `background` hosts hang
+    /// off the screen's content rather than off its controller.
+    func enclosingNavigationStack() -> UINavigationController? {
+        var responder: UIResponder? = self
+        while let current = responder {
+            if let nav = current as? UINavigationController { return nav }
+            if let vc = current as? UIViewController, let nav = vc.navigationController { return nav }
+            responder = current.next
+        }
+        return nil
+    }
+}
+
+/// UIKit's own pop, scrubbed by the finger instead of played at a fixed speed: the screen
+/// slides out, the page underneath comes in from a third of the way back behind a dimming
+/// layer, and the whole thing runs forwards or backwards as the drag moves (Telegram's
+/// half-swipe, which is also what the system's edge pop does).
+///
+/// This is UIKit's standard interactive-transition machinery — a `UIPercentDrivenInteractiveTransition`
+/// handed to the navigation stack with an animator — and not the edge pop itself, which is a
+/// `UIScreenEdgePanGestureRecognizer` and cannot be asked to read a drag that started in the
+/// middle of the screen.
+///
+/// The stack's existing delegate is kept and everything but the two transition questions is
+/// forwarded to it, because that delegate is SwiftUI's: `NavigationStack` learns that a screen
+/// was popped through it, and replacing it outright would leave `path` holding a screen that
+/// is no longer on the stack.
+final class InteractiveBackPop: NSObject, UINavigationControllerDelegate {
+    /// One driver per stack, so two chat screens on the same stack cannot chain their
+    /// delegates into a loop. Weak keys: the entry goes when the stack does.
+    private static let drivers = NSMapTable<UINavigationController, InteractiveBackPop>.weakToStrongObjects()
+
+    /// Whether `view` is on a stack with something to pop to. The release-only fallback is
+    /// for a screen that is not — never for a second recognizer that reached a stack another
+    /// one is already driving, which would pop two levels for one swipe.
+    static func available(from view: UIView) -> Bool {
+        (view.enclosingNavigationStack()?.viewControllers.count ?? 0) > 1
+    }
+
+    /// Begin an interactive pop of the stack `view` is in, or nil when there is nothing to
+    /// pop to, the stack is already animating, or the view is not in a stack at all.
+    static func start(from view: UIView) -> InteractiveBackPop? {
+        guard let nav = view.enclosingNavigationStack(), nav.viewControllers.count > 1,
+              nav.transitionCoordinator == nil else { return nil }
+        let driver = drivers.object(forKey: nav) ?? {
+            let made = InteractiveBackPop(nav: nav)
+            drivers.setObject(made, forKey: nav)
+            return made
+        }()
+        return driver.begin() ? driver : nil
+    }
+
+    private weak var nav: UINavigationController?
+    /// SwiftUI's delegate, which keeps `NavigationStack.path` in step with the stack.
+    private weak var host: UINavigationControllerDelegate?
+    private var interaction: UIPercentDrivenInteractiveTransition?
+
+    /// How far the screen travels on a complete pop.
+    var width: CGFloat { nav?.view.bounds.width ?? 0 }
+
+    private init(nav: UINavigationController) {
+        self.nav = nav
+    }
+
+    private func begin() -> Bool {
+        guard let nav, interaction == nil else { return false }
+        if nav.delegate !== self {
+            host = nav.delegate
+            nav.delegate = self
+        }
+        let drive = UIPercentDrivenInteractiveTransition()
+        drive.completionCurve = .easeOut
+        interaction = drive
+        nav.popViewController(animated: true)
+        #if DEBUG
+        SwipeLog.event("interactive pop began depth=\(nav.viewControllers.count)")
+        #endif
+        return true
+    }
+
+    func update(_ progress: CGFloat) {
+        interaction?.update(progress)
+    }
+
+    func finish() {
+        // A drag let go at the far edge leaves almost no transition to play out, and UIKit
+        // plays that remainder at full speed as one hitched frame; just under 1 keeps it smooth.
+        interaction?.completionSpeed = 0.99
+        interaction?.finish()
+        interaction = nil
+    }
+
+    func cancel() {
+        interaction?.cancel()
+        interaction = nil
+    }
+
+    func navigationController(_ navigationController: UINavigationController,
+                              animationControllerFor operation: UINavigationController.Operation,
+                              from fromVC: UIViewController,
+                              to toVC: UIViewController) -> UIViewControllerAnimatedTransitioning? {
+        if interaction != nil, operation == .pop { return BackPopAnimator() }
+        return host?.navigationController?(navigationController, animationControllerFor: operation, from: fromVC, to: toVC)
+    }
+
+    func navigationController(_ navigationController: UINavigationController,
+                              interactionControllerFor animationController: UIViewControllerAnimatedTransitioning)
+        -> UIViewControllerInteractiveTransitioning? {
+        if let interaction { return interaction }
+        return host?.navigationController?(navigationController, interactionControllerFor: animationController)
+    }
+
+    override func responds(to aSelector: Selector!) -> Bool {
+        super.responds(to: aSelector) || (host?.responds(to: aSelector) ?? false)
+    }
+
+    override func forwardingTarget(for aSelector: Selector!) -> Any? {
+        host?.responds(to: aSelector) == true ? host : nil
+    }
+}
+
+/// The pop UIKit draws for a pushed screen, written out so an interactive transition can
+/// scrub it: the screen leaves to the right, the page underneath comes from `parallax` of a
+/// screen back, and a dimming layer over it clears as it arrives. Linear on purpose — a
+/// percent-driven transition sets the time itself, and any other curve fights the finger.
+final class BackPopAnimator: NSObject, UIViewControllerAnimatedTransitioning {
+    static let duration: TimeInterval = 0.35
+    /// How far behind the outgoing screen the page underneath starts, as a fraction of it.
+    static let parallax: CGFloat = 0.3
+
+    func transitionDuration(using transitionContext: UIViewControllerContextTransitioning?) -> TimeInterval {
+        Self.duration
+    }
+
+    func animateTransition(using context: UIViewControllerContextTransitioning) {
+        guard let leaving = context.viewController(forKey: .from),
+              let arriving = context.viewController(forKey: .to),
+              let leavingView = context.view(forKey: .from) ?? leaving.view,
+              let arrivingView = context.view(forKey: .to) ?? arriving.view else {
+            context.completeTransition(false)
+            return
+        }
+        let container = context.containerView
+        let width = container.bounds.width
+
+        arrivingView.frame = context.finalFrame(for: arriving)
+        container.insertSubview(arrivingView, at: 0)
+        arrivingView.transform = CGAffineTransform(translationX: -width * Self.parallax, y: 0)
+
+        let dim = UIView(frame: container.bounds)
+        dim.backgroundColor = .black
+        dim.alpha = 0.12
+        dim.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        container.insertSubview(dim, aboveSubview: arrivingView)
+
+        let layer = leavingView.layer
+        let shadow = (layer.shadowColor, layer.shadowOpacity, layer.shadowRadius, layer.shadowOffset)
+        layer.shadowColor = UIColor.black.cgColor
+        layer.shadowOpacity = 0.18
+        layer.shadowRadius = 8
+        layer.shadowOffset = CGSize(width: -3, height: 0)
+
+        UIView.animate(withDuration: transitionDuration(using: context), delay: 0, options: .curveLinear) {
+            leavingView.transform = CGAffineTransform(translationX: width, y: 0)
+            arrivingView.transform = .identity
+            dim.alpha = 0
+        } completion: { _ in
+            dim.removeFromSuperview()
+            leavingView.transform = .identity
+            arrivingView.transform = .identity
+            (layer.shadowColor, layer.shadowOpacity, layer.shadowRadius, layer.shadowOffset) = shadow
+            context.completeTransition(!context.transitionWasCancelled)
+        }
+    }
+}
+
+/// Plays one `DirectionalSwipeRecognizer`'s rightward drag as an interactive pop. Both back
+/// recognizers — the screen's and the transcript's — own one of these, and each call is one
+/// touch sample.
+///
+/// `fallback` is the old release-only behaviour and runs only when there is no stack to pop
+/// interactively (a chat put on screen some other way): nothing can follow the finger there,
+/// so letting go must still go back.
+final class BackSwipePlayer {
+    private var pop: InteractiveBackPop?
+    private var drag: BackDrag?
+    private var onAStack = false
+
+    func play(_ recognizer: DirectionalSwipeRecognizer, in view: UIView, fallback: () -> Void) {
+        // The first sample of a drag opens the transition; the width it travels is the
+        // stack's, not this view's, so a transcript inset from the screen edge still tracks 1:1.
+        if drag == nil, recognizer.state == .began || recognizer.state == .changed {
+            // The keyboard goes down as the pop begins, as it does under the edge pop.
+            BackSwipe.dismissKeyboard()
+            onAStack = InteractiveBackPop.available(from: view)
+            pop = InteractiveBackPop.start(from: view)
+            let stack = pop?.width ?? 0
+            drag = BackDrag(width: stack > 0 ? stack : (view.window?.bounds.width ?? view.bounds.width))
+            #if DEBUG
+            BackSwipeTrace.start()
+            #endif
+        }
+        guard let drag else { return }
+        switch drag.step(for: recognizer.state, translation: recognizer.translation, velocity: recognizer.velocity) {
+        case .idle:
+            break
+        case .track(let progress):
+            pop?.update(progress)
+            #if DEBUG
+            BackSwipeTrace.track(progress)
+            #endif
+        case .finish:
+            #if DEBUG
+            BackSwipeTrace.note("finish")
+            #endif
+            if let pop {
+                pop.finish()
+            } else if !onAStack {
+                fallback()
+            }
+            reset()
+        case .cancel:
+            #if DEBUG
+            BackSwipeTrace.note("cancel")
+            #endif
+            pop?.cancel()
+            reset()
+        }
+    }
+
+    private func reset() {
+        pop = nil
+        drag = nil
+        onAStack = false
+    }
+}
+
 /// What the transcript's swipe recognizer tells the chat screen.
 enum TranscriptSwipeEvent {
     /// The time peek follows the finger: `dx` is the translation (negative = left).
@@ -328,6 +635,7 @@ struct TranscriptSwipeHost: UIViewRepresentable {
         private var recognizer: DirectionalSwipeRecognizer?
         private enum Mode { case time, back }
         private var mode: Mode?
+        private let back = BackSwipePlayer()
 
         init(timePeek: Bool, backSwipe: Bool, onEvent: @escaping (TranscriptSwipeEvent) -> Void, onScrollPanBegan: @escaping () -> Void) {
             self.timePeek = timePeek
@@ -386,17 +694,18 @@ struct TranscriptSwipeHost: UIViewRepresentable {
             case (.time, .ended), (.time, .cancelled), (.time, .failed):
                 onEvent(.timeEnded)
                 self.mode = nil
-            case (.back, .ended):
-                if BackSwipe.fullScreenPops(translation: gr.translation, velocity: gr.velocity) {
+            case (.back, _):
+                // The screen follows the finger from the first sample; `onEvent(.back)` is
+                // only reached when there is no stack to pop interactively.
+                guard let scroll else { return }
+                back.play(gr, in: scroll) {
                     #if DEBUG
                     SwipeLog.event("transcript back dx=\(Int(gr.translation.width))")
                     #endif
                     onEvent(.back)
                 }
-                self.mode = nil
-            case (.back, .cancelled), (.back, .failed):
-                self.mode = nil
-            case (.back, .began), (.back, .changed), (_, .possible):
+                if gr.state == .ended || gr.state == .cancelled || gr.state == .failed { self.mode = nil }
+            case (_, .possible):
                 break
             @unknown default:
                 break
@@ -414,9 +723,10 @@ struct TranscriptSwipeHost: UIViewRepresentable {
 
 /// Hides the system bar and back button and owns the back gestures: the system's
 /// interactive edge pop (`NativePopEnabler`) and the swipe-right outside the transcript —
-/// header, empty space, the channel list (`FullScreenBackHost` → `dismiss()`; SwiftUI pops,
-/// so the stack's path stays the truth). Inside the transcript the swipe-right is the
-/// transcript recognizer's (`TranscriptSwipeHost`, `.back`).
+/// header, empty space, the channel list (`FullScreenBackHost`, which drives an
+/// `InteractiveBackPop` and falls back to `dismiss()` only off a navigation stack). Inside
+/// the transcript the swipe-right is the transcript recognizer's (`TranscriptSwipeHost`,
+/// `.back`), and it drives the same pop.
 private struct BackSwipeModifier: ViewModifier {
     @Environment(\.dismiss) private var dismiss
     /// Where the composer bar starts (nil: the whole screen counts).
@@ -434,6 +744,7 @@ private struct BackSwipeModifier: ViewModifier {
                     FullScreenBackHost(composerTop: composerTop, onBack: { dismiss() })
                 }
             }
+            .backSwipeTraceReadout()
     }
 }
 
@@ -577,6 +888,7 @@ private struct FullScreenBackHost: UIViewRepresentable {
         private weak var root: UIView?
         private weak var host: HostView?
         private var recognizer: DirectionalSwipeRecognizer?
+        private let back = BackSwipePlayer()
 
         init(onBack: @escaping () -> Void) {
             self.onBack = onBack
@@ -604,12 +916,14 @@ private struct FullScreenBackHost: UIViewRepresentable {
         }
 
         @objc private func handle(_ gr: DirectionalSwipeRecognizer) {
-            guard gr.state == .ended else { return }
-            if BackSwipe.fullScreenPops(translation: gr.translation, velocity: gr.velocity) {
+            guard let root else { return }
+            // The screen follows the finger from the first sample. `onBack()` — SwiftUI's
+            // `dismiss()`, which animates at its own speed — is left for the one case the
+            // interactive pop cannot serve: a screen that is not on a navigation stack.
+            back.play(gr, in: root) {
                 #if DEBUG
                 SwipeLog.event("full-screen back dx=\(Int(gr.translation.width))")
                 #endif
-                BackSwipe.dismissKeyboard()
                 onBack()
             }
         }
@@ -640,6 +954,91 @@ extension View {
             }
         )
     }
+}
+
+#if DEBUG
+/// Rig (`ARBOS_SWIPE_TRACE=1`): what a back drag did, in order, read off the
+/// `back-swipe-trace` element — `track:<progress>` once per touch sample the screen moved
+/// on, then `finish` or `cancel` for the release.
+///
+/// It exists because the two things this fix is between look identical once the finger is
+/// up: a screen that followed the finger the whole way, and a screen that jumped at
+/// touch-up. Only the order of the entries tells them apart, and a UI test cannot read the
+/// screen mid-drag — XCUITest's drag call does not return until the touch is lifted.
+///
+/// Off unless the variable is set, so no other run pays for it, and Debug-only.
+enum BackSwipeTrace {
+    static let on = ProcessInfo.processInfo.environment["ARBOS_SWIPE_TRACE"] == "1"
+    /// The label the rig reads. Weak: it belongs to whichever screen is on top.
+    static weak var readout: UILabel?
+    private(set) static var entries: [String] = []
+
+    static var text: String { entries.joined(separator: " ") }
+
+    static func start() {
+        guard on else { return }
+        entries = []
+        note("start")
+    }
+
+    static func track(_ progress: CGFloat) {
+        guard on else { return }
+        note("track:" + String(format: "%.3f", progress))
+    }
+
+    static func note(_ what: String) {
+        guard on else { return }
+        entries.append(what)
+        if let readout { write(to: readout) }
+    }
+
+    /// Both the text and the accessibility value, so the trace reaches the rig whichever of
+    /// the two XCUITest reports for this element.
+    static func write(to label: UILabel) {
+        label.text = text
+        label.accessibilityValue = text
+    }
+}
+
+/// The element `BackSwipeTrace` writes to: a 24 pt corner of the screen that holds the trace
+/// and nothing else. Drawn in nothing (`.clear`) — it is there to be read, not seen.
+private struct BackSwipeTraceReadout: UIViewRepresentable {
+    func makeUIView(context: Context) -> UILabel {
+        let label = UILabel()
+        label.isAccessibilityElement = true
+        label.accessibilityIdentifier = "back-swipe-trace"
+        label.accessibilityLabel = "back swipe trace"
+        label.textColor = .clear
+        label.backgroundColor = .clear
+        BackSwipeTrace.write(to: label)
+        BackSwipeTrace.readout = label
+        return label
+    }
+
+    func updateUIView(_ uiView: UILabel, context: Context) {
+        BackSwipeTrace.readout = uiView
+    }
+}
+#endif
+
+extension View {
+    /// `ARBOS_SWIPE_TRACE=1` puts the drag's trace on screen for the rig to read. Nothing at
+    /// all in Release, and nothing in a Debug run that did not ask for it: a `backSwipeToPop`
+    /// screen's view tree is the same shape it has always been.
+    #if DEBUG
+    @ViewBuilder
+    fileprivate func backSwipeTraceReadout() -> some View {
+        if BackSwipeTrace.on {
+            overlay(alignment: .topLeading) {
+                BackSwipeTraceReadout().frame(width: 24, height: 24).allowsHitTesting(false)
+            }
+        } else {
+            self
+        }
+    }
+    #else
+    fileprivate func backSwipeTraceReadout() -> some View { self }
+    #endif
 }
 
 #if DEBUG
