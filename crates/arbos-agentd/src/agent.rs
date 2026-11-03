@@ -1142,6 +1142,18 @@ pub enum TurnKind {
 }
 
 /// What one main-agent turn produced, for the caller's follow-ups (memory pass, hand-offs).
+/// How many of its own rows a box remembers ([`Agent::own_rows`]). A turn answers the row that
+/// started it, so only the newest matter; the bound is what keeps a long-lived box from growing
+/// this without end.
+pub(crate) const OWN_ROWS_MAX: usize = 512;
+
+/// The rows this box wrote itself, newest last.
+#[derive(Default)]
+struct OwnRows {
+    ids: HashSet<String>,
+    order: std::collections::VecDeque<String>,
+}
+
 pub struct TurnOutcome {
     pub assistant_msg_id: String,
     pub route_name: &'static str,
@@ -1449,7 +1461,7 @@ impl TurnState {
     /// `tree_pack` / `drive_turn`. `voice_cancel` and typed-send preempt need a real `TurnState`
     /// in that window — without it they no-op and the lock is held forever
     /// (feedback app-01M5CT92B0NPK1X09YW5RHNRN8, follow-up to app-01M5B5ZZNJP3W8770YVMGXPBKY).
-    fn claim(chat_id: &str, user_msg_id: &str, from_voice: bool) -> Self {
+    pub(crate) fn claim(chat_id: &str, user_msg_id: &str, from_voice: bool) -> Self {
         Self {
             chat_id: chat_id.to_owned(),
             user_msg_id: user_msg_id.to_owned(),
@@ -1547,6 +1559,15 @@ pub struct Agent {
     /// stand on (#1900, #2025: a timed-out gated call was upgraded to "the chat service
     /// confirmed it" 66 s later).
     pub posted_ledger: Mutex<HashMap<String, Vec<(String, i64)>>>,
+    /// Message ids of rows this box wrote itself as the ask for a turn: a routine firing, a
+    /// voice line, a bound channel's message. Bounded; see `OWN_ROWS_MAX`.
+    ///
+    /// The relay settles who is directing a turn against its own record of which principal
+    /// pushed the row, and these rows have no human author in it to find. So the box says so —
+    /// and it has to say so from what it did, never from a field on the row. `sender`,
+    /// `senderRole` and `deviceId` are all written into the chat document, which every member
+    /// of the chat can write, so any of them would hand the answer back to the attacker.
+    own_rows: std::sync::Mutex<OwnRows>,
     /// Group-chat bookkeeping (chat kinds from the registry, this box's "Projects ⇄" tab).
     pub groups: crate::groups::GroupState,
     pub people: crate::people::PeopleState,
@@ -1621,6 +1642,37 @@ impl Agent {
         &self.http
     }
 
+    /// Remember that this box wrote `message_id` itself as the ask for a turn (see
+    /// [`Agent::own_rows`]). Called at the three places that write such a row: a routine
+    /// firing, a voice line, a bound channel's message.
+    pub fn note_own_row(&self, message_id: &str) {
+        if message_id.is_empty() {
+            return;
+        }
+        let mut rows = self.own_rows.lock().expect("own_rows");
+        if !rows.ids.insert(message_id.to_owned()) {
+            return;
+        }
+        rows.order.push_back(message_id.to_owned());
+        while rows.order.len() > OWN_ROWS_MAX {
+            if let Some(old) = rows.order.pop_front() {
+                rows.ids.remove(&old);
+            }
+        }
+    }
+
+    /// Did this box write `message_id` itself? The answer comes from what this process did, so
+    /// a row in the chat document cannot claim it.
+    pub fn wrote_own_row(&self, message_id: &str) -> bool {
+        !message_id.is_empty()
+            && self
+                .own_rows
+                .lock()
+                .expect("own_rows")
+                .ids
+                .contains(message_id)
+    }
+
     /// Relay blob mirror slot for a chat (`PUT/GET /blob/{slot}/{key}`).
     /// People chats use `people:{chat_id}`; project chats use this project's id.
     pub fn blob_slot(&self, chat_id: &str) -> String {
@@ -1679,6 +1731,7 @@ impl Agent {
             approvals: crate::approval::Approvals::default(),
             subagent_msgs: Mutex::new(HashMap::new()),
             posted_ledger: Mutex::new(HashMap::new()),
+            own_rows: std::sync::Mutex::new(OwnRows::default()),
             groups: crate::groups::GroupState::default(),
             people: crate::people::PeopleState::default(),
             turn_images: std::sync::Mutex::new(Vec::new()),
