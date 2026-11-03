@@ -1,6 +1,7 @@
 //! Loopback hook API for `arbos-pi-ext` (sandbox-image.md §3.3): route validation,
 //! ask_user, handles, working set, scratchpad.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -60,6 +61,24 @@ fn role_name(role: SessionRole) -> &'static str {
         SessionRole::Main => "main",
         SessionRole::Subagent => "subagent",
     }
+}
+
+/// The file a handle names, resolved and confined to this workspace. agentd is root and the
+/// harness children are not (D70: each workspace is its own Unix user with a mode-700 folder),
+/// so a path taken as given would read any file on the box — another workspace's included —
+/// through this process. Resolved before the check, so a symlink cannot walk out, and refused
+/// rather than clamped, so the caller learns its path was wrong.
+fn confined_path(agent: &Agent, path: &str) -> Result<PathBuf, String> {
+    let root = std::fs::canonicalize(&agent.cfg.work_dir)
+        .map_err(|e| format!("workspace {}: {e}", agent.cfg.work_dir.display()))?;
+    let real = std::fs::canonicalize(path).map_err(|e| format!("{path}: {e}"))?;
+    if !real.starts_with(&root) {
+        return Err(format!(
+            "{path} is outside this workspace ({}); a handle names a file this session wrote",
+            root.display()
+        ));
+    }
+    Ok(real)
 }
 
 fn ok() -> Response {
@@ -297,6 +316,10 @@ async fn handle(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value>) ->
     if id.is_empty() || path.is_empty() {
         return err("handle needs id and path");
     }
+    let path = match confined_path(&a, &path) {
+        Ok(p) => p.display().to_string(),
+        Err(e) => return err(e),
+    };
     let blob_key = std::fs::read(&path)
         .ok()
         .map(|bytes| a.upload_blob(bytes, "text/plain"));
@@ -554,6 +577,10 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap_or(Value::Null)
     }
 
+    fn handle_call(id: &str, path: &str) -> Value {
+        json!({ "session_id": "s-hook-handle", "handle": { "id": id, "path": path, "kind": "bash output", "chars": 29, "lines": 1 } })
+    }
+
     /// Deriving the role must not hand one out for free. `ARBOS_MCP_TOKEN` defaults to empty, and
     /// an absent header reads as `""`, so before the guard an anonymous request matched the main
     /// arm and every hook route — `/hook/approval` among them — opened to it at the highest role.
@@ -700,6 +727,72 @@ mod tests {
         .await;
         assert_eq!(v["ok"], json!(true), "{v}");
         assert_eq!(relay_saw("hook-role-test: main"), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// D70 gives every workspace its own Unix user and a mode-700 folder so one workspace
+    /// cannot read another's, but agentd is root: a handle path taken as given has the root
+    /// process read the file and upload it to the caller's own blob store. Driven as a harness
+    /// child naming a sibling workspace's file, directly and through a symlink out of its own.
+    #[tokio::test]
+    async fn a_handle_path_cannot_leave_this_workspace() {
+        let (agent, root) = test_agent().await;
+        let other = root.join("01TESTOTHERWORKSPACE00000");
+        std::fs::create_dir_all(&other).unwrap();
+        let secret = other.join("box.token");
+        std::fs::write(&secret, "another workspace's box token").unwrap();
+        let escape = agent.cfg.work_dir.join("escape");
+        std::os::unix::fs::symlink(&secret, &escape).unwrap();
+        let child = bearer(&agent.cfg.subagent_mcp_token());
+
+        for (id, path) in [
+            ("h_outside", secret.display().to_string()),
+            ("h_symlink", escape.display().to_string()),
+        ] {
+            let v = body(
+                handle(
+                    State(agent.clone()),
+                    child.clone(),
+                    Json(handle_call(id, &path)),
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(v["ok"], json!(false), "{path} → {v}");
+            assert!(
+                v["error"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("outside this workspace"),
+                "{path} → {v}"
+            );
+            let stored = agent.store.handle(id).unwrap();
+            assert!(
+                stored.is_none(),
+                "{path} was read and recorded as {:?}",
+                stored.map(|h| h.path)
+            );
+        }
+
+        // A file this session wrote is still handed over, under its resolved path.
+        let blobs = agent.cfg.blobs_dir();
+        std::fs::create_dir_all(&blobs).unwrap();
+        let mine = blobs.join("f0f0f0");
+        std::fs::write(&mine, "my own tool output").unwrap();
+        let v = body(
+            handle(
+                State(agent.clone()),
+                child,
+                Json(handle_call("h_mine", &mine.display().to_string())),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["ok"], json!(true), "{v}");
+        assert_eq!(
+            agent.store.handle("h_mine").unwrap().unwrap().path,
+            mine.canonicalize().unwrap().display().to_string()
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }
