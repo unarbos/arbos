@@ -584,6 +584,15 @@ pending_boxes() {
   # owner (the CD rig, the code-mode eval) and must not hold the roll (2026-10-22: 0.1.56 held the agentd
   # slot 98 min on two such boxes, so 0.1.57 never built). Real users' errored boxes still count: they
   # are the point of the roll and the operator must see them.
+  # The same shape came back through the pin door (2026-11-03: 0.1.184 held the agentd slot the full
+  # 90-min ROLL_WAIT_S on test_01M56N391S4DWWAFH24WMKHZFF and test_01M62YD3JJ7TJXNAP5NYS6WTQN, both
+  # `users.snapshot = arbos-agent-0.1.184`, so the next image roll could not start for an hour). The
+  # relay resolves a box's target as `users.snapshot ?? default_snapshot` (upgrade.rs), so a box on its
+  # pin answers "already on the current snapshot" every pass and could never leave a pending set that
+  # compared the row against the ROLL's target alone. A satisfied pin is NOT pending: it is deliberate,
+  # so it never reaches roll_pass and never counts toward ROLL_MAX_CONSECUTIVE_FAILURES, and
+  # `pinned_boxes` names it so "pinned" reads apart from "missing". A pin the box has NOT reached yet
+  # stays pending: the roll drives it, and the relay takes it to the pin rather than to the target.
   admin_users | python3 -c '
 import sys, json
 target, tier = sys.argv[1], sys.argv[2]
@@ -596,6 +605,8 @@ for u in json.load(sys.stdin):
     if not m.get("sandbox_id"):
         continue
     if is_test and m.get("state") == "error":
+        continue
+    if m.get("pinned_snapshot") and m.get("snapshot") == m.get("pinned_snapshot"):
         continue
     if u["id"] in skipped:
         continue
@@ -637,6 +648,19 @@ for u in json.load(sys.stdin):
     m = u.get("machine") or {}
     if u["id"].startswith("test_") and m.get("sandbox_id") and m.get("state") == "error":
         print(u["id"])'
+}
+
+pinned_boxes() {
+  # Boxes skipped by pending_boxes because their `users.snapshot` pin is already satisfied — printed as
+  # `<uid> <pin>` so the roll log and `status` can say "pinned, deliberately not rolling" rather than
+  # leaving the box unaccounted for.
+  admin_users | python3 -c '
+import sys, json
+for u in json.load(sys.stdin):
+    m = u.get("machine") or {}
+    pin = m.get("pinned_snapshot")
+    if m.get("sandbox_id") and pin and m.get("snapshot") == pin:
+        print(u["id"], pin)'
 }
 
 real_min_sha() {
@@ -899,9 +923,11 @@ roll_boxes() {
   # roll_boxes <target> — passes every 2 min for up to ROLL_WAIT_S; 0 when no box is pending.
   local target="$1" t0
   t0=$(date +%s)
-  local errored
+  local errored pinned
   errored="$(errored_test_boxes | tr '\n' ' ')"
   [[ -n "$errored" ]] && log "agentd: skipping errored test boxes (needs their owner, not the roll): $errored"
+  pinned="$(pinned_boxes | sed 's/ /=/' | tr '\n' ' ')"
+  [[ -n "$pinned" ]] && log "agentd: skipping boxes already on their users.snapshot pin (deliberate, not a failure): $pinned"
   while (( $(date +%s) - t0 < ROLL_WAIT_S )); do
     if [[ -z "$(pending_boxes "$target" all || true)" ]]; then
       log "agentd: every box (real and test) is on $target"
@@ -1499,6 +1525,12 @@ status() {
     echo "skipped boxes (left on their image; 'unskip <uid>' after the fix):"
     while IFS='|' read -r u r w; do echo "  $u since $w: $r"; done < "$STATE/agentd.skip"
   fi
+  local pinned
+  pinned="$(pinned_boxes 2>/dev/null || true)"
+  if [[ -n "$pinned" ]]; then
+    echo "pinned boxes (on their users.snapshot pin, deliberately not rolling; clear the pin to roll them):"
+    while read -r u p; do [[ -n "$u" ]] && echo "  $u → $p"; done <<< "$pinned"
+  fi
   echo "agentd roll unit: $(systemctl show -p ActiveState --value arbos-deploy-agentd.service 2>/dev/null || true)"
   [[ -f "$STATE/agentd.rolling" ]] && echo "agentd roll pending: $(tr '\n' ' ' < "$STATE/agentd.rolling")"
   echo "events (last 5):"; tail -n 5 "$EVENTS" 2>/dev/null || true
@@ -1550,6 +1582,22 @@ selftest() {
   [[ "$(box_outcome gh_9 new 1000)" == "pending" ]] || { echo "selftest: box_outcome in progress must be pending" >&2; return 1; }
   local o; o="$(box_outcome gh_9 new 1000)"; o="${o#refused}"; o="${o#"${o%%[![:space:]]*}"}"
   [[ "$o" == "pending" ]] || { echo "selftest: reason strip" >&2; return 1; }
+  # pending_boxes and the users.snapshot pin (2026-11-03): a box already on its pin is deliberately not
+  # rolling and must leave the pending set, or it holds the lane for the whole ROLL_WAIT_S. A box whose
+  # pin it has NOT reached yet stays pending, and an unpinned box behind the target stays pending.
+  users='[{"id":"test_pinned","machine":{"state":"awake","sandbox_id":"s1","snapshot":"pin","pinned_snapshot":"pin","upgrade":{"in_progress":false}}},
+          {"id":"test_behind_pin","machine":{"state":"awake","sandbox_id":"s2","snapshot":"old","pinned_snapshot":"pin","upgrade":{"in_progress":false}}},
+          {"id":"gh_plain","machine":{"state":"awake","sandbox_id":"s3","snapshot":"old","pinned_snapshot":null,"upgrade":{"in_progress":false}}}]'
+  [[ "$(pending_boxes new all | tr '\n' ' ')" == "test_behind_pin gh_plain " ]] \
+    || { echo "selftest: pending_boxes with a satisfied pin ($(pending_boxes new all | tr '\n' ' '))" >&2; return 1; }
+  [[ "$(pending_boxes new test | tr '\n' ' ')" == "test_behind_pin " ]] \
+    || { echo "selftest: pending_boxes test tier ($(pending_boxes new test | tr '\n' ' '))" >&2; return 1; }
+  [[ "$(pending_boxes new real | tr '\n' ' ')" == "gh_plain " ]] \
+    || { echo "selftest: pending_boxes real tier ($(pending_boxes new real | tr '\n' ' '))" >&2; return 1; }
+  [[ "$(pinned_boxes | tr '\n' ' ')" == "test_pinned pin " ]] || { echo "selftest: pinned_boxes ($(pinned_boxes | tr '\n' ' '))" >&2; return 1; }
+  # A box on the roll target is not pending whether or not the pin names that same snapshot.
+  users='[{"id":"gh_8","machine":{"state":"awake","sandbox_id":"s4","snapshot":"new","pinned_snapshot":"new","upgrade":{"in_progress":false}}}]'
+  [[ -z "$(pending_boxes new all)" ]] || { echo "selftest: a box on the target must not be pending" >&2; return 1; }
   echo "selftest ok"
 }
 
