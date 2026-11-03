@@ -86,7 +86,7 @@ pub struct ChatView {
 
 impl ChatView {
     /// The blob slot a message's attachments live under.
-    fn slot(&self) -> String {
+    pub(crate) fn slot(&self) -> String {
         match &self.project {
             Some(pid) => pid.clone(),
             None => format!("{PEOPLE_ACL_PREFIX}{}", self.id),
