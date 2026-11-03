@@ -23,6 +23,7 @@ use crate::sync::user_error::{ErrorClass, UserError};
 use crate::sync::{ClientCommand, PictureSource};
 use crate::ui::avatar_picker;
 use crate::ui::avatars::{self, leaf, LeafPick};
+use crate::ui::back_swipe::{self, BackSwipe, BackTarget, Region};
 use crate::ui::blocked;
 use crate::ui::callview;
 use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
@@ -373,6 +374,12 @@ pub struct Shell {
     /// Sidebar: the "Hidden chats" list is showing instead of the chat list
     /// (Jacob 2026-10-23; the footer opens it, ‹ back returns).
     pub(crate) hidden_open: bool,
+    /// The two-finger back swipe (`ui::back_swipe`) and where it put the
+    /// page this frame (the sidebar reads it while drawing its list).
+    back_swipe: BackSwipe,
+    pub(crate) back_swipe_drawn: Option<back_swipe::Visual>,
+    /// Where the pointer was when the current trackpad gesture started.
+    back_swipe_at: Option<gpui::Point<Pixels>>,
     /// D88: the name/invite/channel field of the server sheets and the inline channel rename
     /// on the server page; `channel_rename` is the channel being renamed there.
     pub(crate) server_input: Entity<ComposerInput>,
@@ -1214,6 +1221,9 @@ impl Shell {
                 .map(|t| t.clamp(0.0, 1.0)),
             last_viewport_width: crate::ui::theme::NARROW_WINDOW,
             hidden_open: false,
+            back_swipe: BackSwipe::default(),
+            back_swipe_drawn: None,
+            back_swipe_at: None,
             server_input,
             channel_rename: None,
             invite_expires: false,
@@ -2535,6 +2545,192 @@ impl Shell {
                 .set_offset(gpui::point(px(0.0), px(-scroll)));
         }
         cx.notify();
+    }
+
+    /// What back would dismiss now, innermost first in Escape's order: a
+    /// pushed Settings page, then the right pane's page (popping a pushed
+    /// one, else closing the pane), then a server's channel list, then
+    /// Hidden chats — the last two only where the sidebar's list is drawn.
+    pub(crate) fn back_target(&self, cx: &App) -> Option<BackTarget> {
+        let s = self.state.read(cx);
+        if s.profile == Some(ProfilePage::Me) && self.settings_page != SettingsPage::Root {
+            return Some(BackTarget::SettingsPage);
+        }
+        if s.profile.is_some() {
+            return Some(if s.profile_stack.is_empty() {
+                BackTarget::ProfileClose
+            } else {
+                BackTarget::ProfilePage
+            });
+        }
+        let list_shown = if s.window_is_narrow(self.last_viewport_width) {
+            s.sidebar_overlay
+        } else {
+            !s.rail_collapsed
+        };
+        if list_shown && s.open_server.is_some() {
+            return Some(BackTarget::ServerChannels);
+        }
+        if list_shown && self.hidden_open {
+            return Some(BackTarget::HiddenChats);
+        }
+        None
+    }
+
+    /// Back from the trackpad swipe, the mouse's Back button or the
+    /// three-finger / Magic Mouse page swipe; `false` when there is nothing
+    /// to go back to.
+    pub(crate) fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(target) = self.back_target(cx) else {
+            return false;
+        };
+        self.back_swipe.reset();
+        self.run_back(target, window, cx);
+        true
+    }
+
+    fn run_back(&mut self, target: BackTarget, window: &mut Window, cx: &mut Context<Self>) {
+        match target {
+            BackTarget::SettingsPage => self.settings_back(cx),
+            BackTarget::ProfilePage => self.back_profile(cx),
+            BackTarget::ProfileClose => self.close_profile(window, cx),
+            BackTarget::ServerChannels => self.state.update(cx, |s, cx| s.close_server_pane(cx)),
+            BackTarget::HiddenChats => {
+                self.hidden_open = false;
+                cx.notify();
+            }
+        }
+    }
+
+    /// A swipe never reaches under a sheet, viewer or the palette.
+    fn back_swipe_allowed(&self, cx: &App) -> bool {
+        let s = self.state.read(cx);
+        !(self.palette.open
+            || self.avatar_picker.is_some()
+            || self.feedback.read(cx).is_open()
+            || s.pairing.is_some()
+            || s.media_viewer.is_some()
+            || s.chart_viewer.is_some()
+            || s.forward_message.is_some()
+            || s.new_chat_open
+            || s.server_sheet.is_some())
+    }
+
+    fn back_swipe_claim(&self, cx: &App) -> back_swipe::Claim {
+        let target = self.back_target(cx);
+        let s = self.state.read(cx);
+        let width = match target.map(BackTarget::region) {
+            Some(Region::Pane) => s
+                .profile
+                .as_ref()
+                .map_or(profiles::SHEET_WIDTH, |page| self.pane_width(page)),
+            Some(Region::Sidebar) => s.sidebar_width,
+            None => 0.0,
+        };
+        back_swipe::Claim { target, width }
+    }
+
+    /// The window's wheel events, capture phase; `true` = the swipe's own.
+    fn back_swipe_scroll(
+        &mut self,
+        event: &gpui::ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let now = back_swipe::now();
+        let consumed = match event.touch_phase {
+            gpui::TouchPhase::Started => {
+                let allowed = self.back_swipe_allowed(cx);
+                self.back_swipe.begin(back_swipe::system_prefs(), allowed);
+                self.back_swipe_at = Some(event.position);
+                false
+            }
+            gpui::TouchPhase::Moved => match event.delta {
+                gpui::ScrollDelta::Pixels(delta) => {
+                    let claim = self.back_swipe_claim(cx);
+                    let delta = gpui::point(f32::from(delta.x), f32::from(delta.y));
+                    self.back_swipe.moved(delta, now, || claim)
+                }
+                gpui::ScrollDelta::Lines(_) => false,
+            },
+            gpui::TouchPhase::Ended => self.back_swipe_end(now, window, cx),
+            gpui::TouchPhase::Cancelled => {
+                let swiping = self.back_swipe.target().is_some();
+                self.back_swipe.reset();
+                self.back_swipe_at = None;
+                swiping
+            }
+        };
+        if consumed {
+            cx.notify();
+        }
+        consumed
+    }
+
+    fn back_swipe_end(
+        &mut self,
+        now: std::time::Instant,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.back_swipe_at = None;
+        let (commit, consumed) = self.back_swipe.ended(now, cx.reduce_motion());
+        if let Some(target) = commit.filter(|t| self.back_target(cx) == Some(*t)) {
+            self.run_back(target, window, cx);
+        }
+        if consumed {
+            cx.notify();
+        }
+        consumed
+    }
+
+    /// The fork reads a cancelled touch as a move and sends no end: the
+    /// pointer moving again is the sign the fingers left the trackpad.
+    fn back_swipe_pointer(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(at) = self.back_swipe_at else {
+            return;
+        };
+        let moved = position - at;
+        if f32::from(moved.x).hypot(f32::from(moved.y)) > 8.0 {
+            self.back_swipe_end(back_swipe::now(), window, cx);
+        }
+    }
+
+    /// Registers the capture-phase wheel and pointer listeners for the frame.
+    fn back_swipe_listener(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let shell = cx.entity().downgrade();
+        gpui::canvas(
+            |_, _, _| {},
+            move |_, _, window, _| {
+                let wheel = shell.clone();
+                window.on_mouse_event(move |event: &gpui::ScrollWheelEvent, phase, window, cx| {
+                    if phase != gpui::DispatchPhase::Capture {
+                        return;
+                    }
+                    let consumed = wheel
+                        .update(cx, |this, cx| this.back_swipe_scroll(event, window, cx))
+                        .unwrap_or(false);
+                    if consumed {
+                        cx.stop_propagation();
+                    }
+                });
+                let pointer = shell;
+                window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, window, cx| {
+                    if phase == gpui::DispatchPhase::Capture {
+                        let _ = pointer.update(cx, |this, cx| {
+                            this.back_swipe_pointer(event.position, window, cx)
+                        });
+                    }
+                });
+            },
+        )
+        .absolute()
+        .size_full()
     }
 
     /// Close the New Message sheet (Cancel, click outside); drops an in-progress
@@ -4897,6 +5093,24 @@ impl Render for Shell {
         self.last_viewport_width = width;
         self.fullscreen = window.is_fullscreen() || self.rig_fullscreen;
         crate::ui::picture_fit::note_scale_factor(window.scale_factor());
+        // A committed swipe goes back in the frame its spring ends, before
+        // anything below reads the state, so the page never shows again.
+        let swipe_now = back_swipe::now();
+        if let Some(target) = self.back_swipe.finish(swipe_now) {
+            if self.back_target(cx) == Some(target) {
+                self.run_back(target, window, cx);
+            }
+        }
+        if let Some(Some(target)) = self.back_swipe.target() {
+            if self.back_target(cx) != Some(target) {
+                self.back_swipe.reset();
+            }
+        }
+        let swipe = self.back_swipe.visual(swipe_now);
+        self.back_swipe_drawn = swipe;
+        if swipe.is_some_and(|v| v.settling) {
+            window.request_animation_frame();
+        }
         let state = self.state.read(cx);
         let narrow = state.window_is_narrow(width);
         // The narrow band hides the sidebar (an overlay brings it back);
@@ -4923,6 +5137,7 @@ impl Render for Shell {
             .id("shell-root")
             .key_context("Shell")
             .track_focus(&self.focus_handle)
+            .child(self.back_swipe_listener(cx))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::prev_tab))
@@ -4939,8 +5154,15 @@ impl Render for Shell {
             .on_action(cx.listener(Self::paste_into_chat))
             .capture_any_mouse_down(cx.listener(
                 |this, event: &gpui::MouseDownEvent, window, cx| {
-                    if event.button == gpui::MouseButton::Left {
-                        this.click_outside(event.position, window, cx);
+                    this.back_swipe_end(back_swipe::now(), window, cx);
+                    match event.button {
+                        gpui::MouseButton::Left => this.click_outside(event.position, window, cx),
+                        gpui::MouseButton::Navigate(gpui::NavigationDirection::Back) => {
+                            this.go_back(window, cx);
+                        }
+                        gpui::MouseButton::Right
+                        | gpui::MouseButton::Middle
+                        | gpui::MouseButton::Navigate(gpui::NavigationDirection::Forward) => {}
                     }
                 },
             ))
@@ -5044,6 +5266,9 @@ impl Render for Shell {
             .active()
             .then(|| self.state.read(cx).sidebar_edge_drag.track())
             .flatten();
+        let pane_track = swipe
+            .filter(|v| v.target == Some(BackTarget::ProfileClose))
+            .map(|v| (pane_width - v.offset).clamp(0.0, pane_width));
         let frame = self.slides.step(
             slide::Want {
                 viewport_width: width,
@@ -5055,6 +5280,7 @@ impl Render for Shell {
                 pane_width,
                 reduce_motion: cx.reduce_motion(),
                 sidebar_track,
+                pane_track,
             },
             std::time::Instant::now(),
         );
@@ -5189,7 +5415,25 @@ impl Render for Shell {
                 (Some(pane), true) => {
                     root = root.child(slide::pane_clip(frame.pane_visible, pane));
                 }
-                (Some(pane), false) => root = root.child(pane),
+                (Some(pane), false) => {
+                    let popping = swipe.filter(|v| {
+                        matches!(
+                            v.target,
+                            Some(BackTarget::SettingsPage | BackTarget::ProfilePage)
+                        )
+                    });
+                    root = match popping {
+                        Some(v) => root.child(back_swipe::dismissing(
+                            pane_width,
+                            v.offset,
+                            theme.pane(),
+                            profiles::PANE_EDGE,
+                            theme.pane_edge,
+                            pane,
+                        )),
+                        None => root.child(pane),
+                    };
+                }
                 (None, true) => {
                     // The page's subject is gone mid-slide: an empty pane of
                     // the same width finishes the motion.
@@ -5215,6 +5459,9 @@ impl Render for Shell {
             if let Some(tip) = rail::render_tip(self, cx) {
                 root = root.child(tip);
             }
+        }
+        if let Some(v) = swipe.filter(|v| v.target.is_none() && v.offset > 0.0) {
+            root = root.child(back_swipe::hint(frame.sidebar_visible, v, &theme));
         }
         if let Some(menu) = sidebar::row_menu(self, cx) {
             root = root.child(menu);

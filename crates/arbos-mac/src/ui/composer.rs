@@ -3121,7 +3121,8 @@ impl Composer {
             .gap(px(STAGED_GAP))
             .overflow_x_scroll()
             .px(px(12.0))
-            .pt(px(12.0));
+            .pt(px(12.0))
+            .map(crate::ui::back_swipe::mark_sideways_scroller);
         for (i, staged) in self.attachments.iter().enumerate() {
             strip = strip.child(self.staged_tile(i, staged, theme, cx));
         }
