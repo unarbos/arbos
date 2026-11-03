@@ -128,6 +128,19 @@ fn caller_label(state: &AppState, token: Option<&str>) -> String {
     }
 }
 
+/// The span every request is handled under, and whose fields the formatter prints on each line
+/// logged inside it. Same shape as `tower_http`'s `DefaultMakeSpan`, except the URI is
+/// [`crate::auth::redacted_uri`]'s: a `?token=` dial or picture fetch must not leave its
+/// credential in the journal.
+pub(crate) fn request_span(req: &Request) -> tracing::Span {
+    tracing::debug_span!(
+        "request",
+        method = %req.method(),
+        uri = %crate::auth::redacted_uri(req.uri()),
+        version = ?req.version(),
+    )
+}
+
 /// Axum middleware: run the inner service, then maybe rewrite a plain-text error body. Every
 /// 5xx and every request over [`SLOW_REQUEST_MS`] gets one journal line with method, path,
 /// status, latency and caller — the relay keeps no access log, and a `/box/projects` 500 or
@@ -327,6 +340,57 @@ mod tests {
         let converted = through_layer("/healthz", ok).await;
         assert_eq!(converted.status(), StatusCode::OK);
         assert_eq!(body_text(converted).await, "hello plain");
+    }
+
+    /// A picture fetch authenticating with `?token=` (every shipped Mac and iPhone build, until
+    /// they move to the header) must leave no token in the journal: the span's URI is what every
+    /// line under it prints, and `w=`, the path and the parameter name all still have to be there
+    /// for the line to be worth reading.
+    #[test]
+    fn a_token_in_a_picture_url_never_reaches_a_logged_line() {
+        #[derive(Clone, Default)]
+        struct Buf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+            type Writer = Buf;
+            fn make_writer(&'a self) -> Buf {
+                self.clone()
+            }
+        }
+
+        let req = Request::builder()
+            .uri("/blob/people:01CHAT/pic-1.png?w=384&token=adv_decafbadsecret")
+            .body(Body::empty())
+            .expect("request");
+        let buf = Buf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_max_level(tracing::Level::DEBUG)
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let span = request_span(&req);
+            let _entered = span.enter();
+            tracing::error!(status = 500, "request failed");
+        });
+        let logged = String::from_utf8(buf.0.lock().unwrap().clone()).expect("utf8");
+        assert!(!logged.contains("adv_decafbadsecret"), "{logged}");
+        assert!(logged.contains("token=[redacted]"), "{logged}");
+        assert!(logged.contains("/blob/people:01CHAT/pic-1.png"), "{logged}");
+        assert!(logged.contains("w=384"), "{logged}");
+        // The relay still reads the token it refuses to log — shipped clients keep working.
+        assert_eq!(
+            crate::auth::token_from_parts_ref(&req).as_deref(),
+            Some("adv_decafbadsecret")
+        );
     }
 
     #[test]
