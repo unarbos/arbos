@@ -42,6 +42,13 @@
 // The drag is measured in the WINDOW and not in the recognizer's own view, because the pop
 // moves that view out from under the measurement on its very first frame; see
 // `DirectionalSwipeRecognizer.startInWindow`, which is the whole of that bug.
+//
+// Twice now a bug here has been invisible in a screenshot, and for one reason both times:
+// `UIView.animate` writes the end state to the model layer immediately and animates only the
+// presentation. So geometry that is being animated reads as already finished — to a gesture
+// measuring itself against it, and to a person looking at the screen. The second case is
+// `InteractiveBackPop.interaction`: a transition left unfinished still looks perfect and is
+// dead to touch. When this screen misbehaves, suspect the model layer before the pixels.
 
 import SwiftUI
 import UIKit
@@ -402,7 +409,25 @@ final class InteractiveBackPop: NSObject, UINavigationControllerDelegate {
     private weak var nav: UINavigationController?
     /// SwiftUI's delegate, which keeps `NavigationStack.path` in step with the stack.
     private weak var host: UINavigationControllerDelegate?
+    /// The running transition.
+    ///
+    /// **This is held until UIKit says the transition is over, and not until the finger comes
+    /// up.** Letting go of it at `finish()` or `cancel()` is the obvious thing to write and it
+    /// breaks the screen: UIKit does not own the interaction controller, the delegate does, so
+    /// releasing it mid-flight deallocates it while the remainder of the pop is still playing.
+    /// The animation then never reaches its completion, `completeTransition(_:)` is never
+    /// called, and the navigation controller never re-enables user interaction on its view —
+    /// which it turned off when the transition began.
+    ///
+    /// The damage is invisible in a screenshot, for the same reason the first bug in this file
+    /// was: `UIView.animate` writes the end state to the model layer immediately, so every view
+    /// is sitting at exactly the right place and the screen looks finished. It is simply dead
+    /// to touch.
     private var interaction: UIPercentDrivenInteractiveTransition?
+    /// Whether the transition UIKit is asking about is ours. Separate from `interaction`
+    /// because that now outlives the drag, and a later pop UIKit runs by itself — a back
+    /// button, a programmatic one — must still get SwiftUI's animation.
+    private var driving = false
 
     /// How far the screen travels on a complete pop.
     var width: CGFloat { nav?.view.bounds.width ?? 0 }
@@ -412,7 +437,7 @@ final class InteractiveBackPop: NSObject, UINavigationControllerDelegate {
     }
 
     private func begin() -> Bool {
-        guard let nav, interaction == nil else { return false }
+        guard let nav, !driving else { return false }
         if nav.delegate !== self {
             host = nav.delegate
             nav.delegate = self
@@ -420,7 +445,15 @@ final class InteractiveBackPop: NSObject, UINavigationControllerDelegate {
         let drive = UIPercentDrivenInteractiveTransition()
         drive.completionCurve = .easeOut
         interaction = drive
+        driving = true
         nav.popViewController(animated: true)
+        if let coordinator = nav.transitionCoordinator {
+            _ = coordinator.animate(alongsideTransition: nil) { [weak self] _ in self?.settle() }
+        } else {
+            // No transition started, so nothing will ever come back to say one ended. Letting
+            // `driving` stand here would wedge every later swipe.
+            settle()
+        }
         #if DEBUG
         SwipeLog.event("interactive pop began depth=\(nav.viewControllers.count)")
         #endif
@@ -436,26 +469,31 @@ final class InteractiveBackPop: NSObject, UINavigationControllerDelegate {
         // plays that remainder at full speed as one hitched frame; just under 1 keeps it smooth.
         interaction?.completionSpeed = 0.99
         interaction?.finish()
-        interaction = nil
     }
 
     func cancel() {
         interaction?.cancel()
+    }
+
+    /// UIKit has finished with the transition, whichever way it went: let the interaction
+    /// controller go and let the next drag start one.
+    private func settle() {
         interaction = nil
+        driving = false
     }
 
     func navigationController(_ navigationController: UINavigationController,
                               animationControllerFor operation: UINavigationController.Operation,
                               from fromVC: UIViewController,
                               to toVC: UIViewController) -> UIViewControllerAnimatedTransitioning? {
-        if interaction != nil, operation == .pop { return BackPopAnimator() }
+        if driving, operation == .pop { return BackPopAnimator() }
         return host?.navigationController?(navigationController, animationControllerFor: operation, from: fromVC, to: toVC)
     }
 
     func navigationController(_ navigationController: UINavigationController,
                               interactionControllerFor animationController: UIViewControllerAnimatedTransitioning)
         -> UIViewControllerInteractiveTransitioning? {
-        if let interaction { return interaction }
+        if driving, let interaction { return interaction }
         return host?.navigationController?(navigationController, interactionControllerFor: animationController)
     }
 

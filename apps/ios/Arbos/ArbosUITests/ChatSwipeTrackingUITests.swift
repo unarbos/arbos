@@ -152,6 +152,18 @@ final class ChatSwipeTrackingUITests: XCTestCase {
                        file: file, line: line)
     }
 
+    /// On screen is not the same as working, and this gesture can tell them apart the hard way.
+    /// An unfinished pop leaves the navigation controller's view with user interaction still
+    /// switched off, while every view sits at its finished position — because `UIView.animate`
+    /// writes the end state to the model layer at once. The screenshot is perfect and nothing
+    /// can be tapped. `exists` cannot see that; `isHittable` can.
+    private func assertUsable(_ element: XCUIElement,
+                              file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertTrue(element.isHittable,
+                      "the screen takes touches again once the pop has played out: \(element)",
+                      file: file, line: line)
+    }
+
     // MARK: The report
 
     /// A slow drag, the case Jacob called finicky. It comes back — after having followed the
@@ -166,7 +178,7 @@ final class ChatSwipeTrackingUITests: XCTestCase {
 
         assertTrackedUnderTheFinger(trace(app), endingWith: "cancel", reaching: oneToOne(app, distance))
         XCTAssertTrue(back(app).exists, "the chat is still here: a drag this short does not go back")
-        XCTAssertTrue(back(app).isHittable, "and it is usable again")
+        assertUsable(back(app))
     }
 
     /// The same, started on the diagonal — a thumb reaching across the phone goes down and
@@ -183,6 +195,7 @@ final class ChatSwipeTrackingUITests: XCTestCase {
         // The sideways part only: the chat does not follow the finger down the screen.
         assertTrackedUnderTheFinger(trace(app), endingWith: "cancel", reaching: oneToOne(app, distance))
         XCTAssertTrue(back(app).exists, "the chat is still here")
+        assertUsable(back(app))
     }
 
     // MARK: What following the finger must not cost
@@ -210,6 +223,9 @@ final class ChatSwipeTrackingUITests: XCTestCase {
         // Home opens on the All tab, which lists the group (`HomeFilterTabsUITests`).
         let row = app.descendants(matching: .any)["home-row:\(chatId)"].firstMatch
         XCTAssertTrue(row.waitForExistence(timeout: settle), "the group is in the list again")
+        // Before the tap, because a Home that is drawn but takes no touches and a Home whose
+        // tap does not push are two different faults and the tap reports them the same way.
+        assertUsable(row)
         row.tap()
         XCTAssertTrue(back(app).waitForExistence(timeout: settle),
                       "Home pushed the chat back on: the stack and SwiftUI's path agree about what is on it")
