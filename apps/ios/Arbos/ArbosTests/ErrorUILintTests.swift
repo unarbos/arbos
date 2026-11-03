@@ -98,6 +98,7 @@ final class ErrorUILintTests: XCTestCase {
         ("question-card-error", "QuestionCard.swift"),
         ("connector-error", "SettingsView.swift"),
         ("devices-error", "SettingsView.swift"),
+        ("agent-links-error", "AgentAccessLink.swift"),
         ("privacy-error", "SettingsView.swift"),
         ("profile-error", "SettingsView.swift"),
         ("secrets-sheet-error", "SecretsViews.swift"),
