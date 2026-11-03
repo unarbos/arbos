@@ -1996,6 +1996,7 @@ struct ChatSession: View {
                         .onTapGesture { openHeaderProfile() }
                         .accessibilityAddTraits(.isButton)
                         .accessibilityLabel(headerLabel)
+                        .accessibilityIdentifier("chat-header-pill")
                         .accessibilityHint("Opens the channel details")
                     } else if let people {
                         // One pill for every chat (2026-10-20): avatar + name,
@@ -2043,6 +2044,7 @@ struct ChatSession: View {
                         .onTapGesture { openHeaderProfile() }
                         .accessibilityAddTraits(.isButton)
                         .accessibilityLabel(headerLabel)
+                        .accessibilityIdentifier("chat-header-pill")
                         .accessibilityHint(people.isGroup ? "Opens group info" : "Opens the profile")
                     } else {
                         HStack(spacing: Theme.headerPillGap) {
@@ -2058,6 +2060,7 @@ struct ChatSession: View {
                         .onTapGesture { openHeaderProfile() }
                         .accessibilityAddTraits(.isButton)
                         .accessibilityLabel(headerLabel)
+                        .accessibilityIdentifier("chat-header-pill")
                         .accessibilityHint("Opens the agent profile")
                     }
                 }
