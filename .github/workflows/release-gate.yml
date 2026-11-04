@@ -1,7 +1,13 @@
 name: Release gate
 
-# One fix per release. A pull request that publishes something waits while main still owes that
-# same artifact, so release.yml never folds two fixes into one build.
+# What does merging this pull request publish, and what does main already owe a release for? The
+# answer goes in the log, the job summary and an annotation. It is never a refusal.
+#
+# This gate used to enforce one fix per release by holding the second pull request on a path while
+# the first was unbuilt. The owner withdrew that rule on 2026-11-04 — several fixes per Mac tag and
+# per TestFlight build are the expected cadence now — so the refusal is gone and the measurement
+# behind it stayed. Everything this file still refuses, it refuses with exit 2, because it could
+# not decide; read release-gate.py's "what this stopped doing" for where that line falls.
 #
 # The decision is scripts/release/release-gate.py; read its header for what the two sides mean and
 # why they are not symmetric. In short: the Mac side asks the repository's own predicates
@@ -113,7 +119,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install --quiet 'pyyaml==6.0.2'
-      - name: Does merging this collapse two fixes into one release?
+      - name: What does merging this publish, and what does main owe?
         env:
           GH_TOKEN: ${{ github.token }}
           GATE_BASE_REF: ${{ github.event.pull_request.base.ref }}
@@ -129,8 +135,8 @@ jobs:
           HEAD_SHA="$(sed -n 's/^head_sha=//p' <<< "$decided")"
           git fetch -q --tags --force origin "+refs/heads/main:refs/remotes/origin/main"
           # Only main publishes: release.yml tags from it, and ios.yml uploads to TestFlight only
-          # for a push to it. A pull request into any other branch has no release to wait for.
-          # This is a step, not an `if:`, so the job never concludes without having said something.
+          # for a push to it. A pull request into any other branch has no release to measure
+          # against. This is a step, not an `if:`, so the job never concludes without saying so.
           if [[ "$BASE_REF" != main ]]; then
             echo "Base branch is '$BASE_REF', not main: merging it publishes nothing." \
               | tee -a "$GITHUB_STEP_SUMMARY"
@@ -139,16 +145,19 @@ jobs:
           # The merge base, not main's head: a two-dot diff against the head would count whatever
           # main changed since this branch forked as part of the pull request.
           base="$(git merge-base origin/main "$HEAD_SHA")"
-          # Exit 1 is a refusal, exit 2 is the gate failing to decide. Both fail the job: a check
-          # that cannot tell must never read as a pass. Its output says which of the two it is.
+          # Exit 2 is the gate failing to decide, and it fails the job: a check that cannot tell
+          # must never read as a pass. There is no exit 1 — nothing about what main owes refuses
+          # a merge any more — so every red here is this gate's own problem, not the pull
+          # request's, and its output says what it could not read.
           python3 scripts/release/release-gate.py \
             --repo "$GITHUB_REPOSITORY" --main origin/main \
             --pr-base "$base" --pr-head "$HEAD_SHA"
 
   self-test:
-    # A gate nobody has watched refuse is not a tested guard. These cases replay states main has
-    # really been in and assert that the gate blocks on the ones it must, for the right artifact.
-    # They are offline and pinned to permanent commits, so they do not change answer as main moves.
+    # A gate that stopped refusing is trivially green and worth nothing, so these cases carry both
+    # halves: the shapes that used to be held now pass AND still name the debt, and every refusal
+    # the gate should still make is still made. They replay states main has really been in, and
+    # they are offline and pinned to permanent commits, so they do not change answer as main moves.
     name: Release gate refuses when it should
     runs-on: ubuntu-24.04
     timeout-minutes: 10
