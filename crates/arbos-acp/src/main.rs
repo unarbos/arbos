@@ -279,7 +279,10 @@ fn sender_verdict(
     let from = &ev["message"]["from"];
     let kind = from["kind"].as_str().unwrap_or_default();
     let id = from["id"].as_str().unwrap_or_default();
-    let handle = from["handle"].as_str().unwrap_or_default().to_ascii_lowercase();
+    let handle = from["handle"]
+        .as_str()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     let chat = ev["chat"]["id"].as_str().unwrap_or_default();
     if kind.is_empty() || id.is_empty() {
         return SenderVerdict::Refused(
@@ -799,10 +802,7 @@ impl Bridge {
                 // the owner to approve after this.
                 return Err(match last_error {
                     Some(e) => anyhow!("the owner was not reached in time ({e})"),
-                    None => anyhow!(
-                        "the owner did not answer within {}s",
-                        timeout.as_secs()
-                    ),
+                    None => anyhow!("the owner did not answer within {}s", timeout.as_secs()),
                 });
             }
             tokio::time::sleep(APPROVAL_POLL_EVERY).await;
@@ -1076,9 +1076,9 @@ fn card_answer(state: &str, reason: Option<String>) -> CardAnswer {
         "rejected" => {
             CardAnswer::Refused(reason.unwrap_or_else(|| "the owner rejected it".to_owned()))
         }
-        "expired" => CardAnswer::Refused(
-            reason.unwrap_or_else(|| "the card expired unanswered".to_owned()),
-        ),
+        "expired" => {
+            CardAnswer::Refused(reason.unwrap_or_else(|| "the card expired unanswered".to_owned()))
+        }
         _ => CardAnswer::Waiting(reason),
     }
 }
@@ -1314,7 +1314,10 @@ fn on_path(program: &str) -> bool {
 ///
 /// Takes the names to look for so a test does not have to touch the real environment to prove
 /// the filter works.
-fn ignored_env<'a>(names: impl Iterator<Item = &'a str>, set: &dyn Fn(&str) -> bool) -> Vec<&'a str> {
+fn ignored_env<'a>(
+    names: impl Iterator<Item = &'a str>,
+    set: &dyn Fn(&str) -> bool,
+) -> Vec<&'a str> {
     names
         .filter(|n| n.starts_with("ARBOS_ACP_") && set(n))
         .collect()
@@ -1376,11 +1379,14 @@ fn env_for_agent<'a>(vars: impl Iterator<Item = &'a str>) -> Vec<&'a str> {
 fn agent_command(args: &Args) -> Command {
     let (program, lead) = resolve_agent(args);
     let mut cmd = Command::new(&program);
-    cmd.args(lead.iter().chain(args.agent_args.iter().filter(|a| !a.is_empty())))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .kill_on_drop(true);
+    cmd.args(
+        lead.iter()
+            .chain(args.agent_args.iter().filter(|a| !a.is_empty())),
+    )
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::inherit())
+    .kill_on_drop(true);
     let names: Vec<String> = std::env::vars().map(|(k, _)| k).collect();
     for k in env_for_agent(names.iter().map(String::as_str)) {
         cmd.env_remove(k);
@@ -1709,7 +1715,12 @@ mod tests {
     fn a_retired_variable_is_named_rather_than_quietly_dropped() {
         let set = |n: &str| n == "ARBOS_ACP_PERMISSIONS" || n == "ARBOS_AGENT_KEY";
         let said = ignored_env(
-            ["ARBOS_ACP_PERMISSIONS", "ARBOS_AGENT_KEY", "ARBOS_RELAY_URL"].into_iter(),
+            [
+                "ARBOS_ACP_PERMISSIONS",
+                "ARBOS_AGENT_KEY",
+                "ARBOS_RELAY_URL",
+            ]
+            .into_iter(),
             &set,
         );
         assert_eq!(said, vec!["ARBOS_ACP_PERMISSIONS"]);
@@ -1844,29 +1855,62 @@ mod tests {
         // In a chat the agent is in: allowed by `chats`. This is the positive control for every
         // refusal below — the same shape of message does get through when a rule covers it.
         assert_eq!(
-            sender_verdict(&rules, Some("u-owner"), &chats, &msg("user", "u-mallory", "mallory", "c-known")),
+            sender_verdict(
+                &rules,
+                Some("u-owner"),
+                &chats,
+                &msg("user", "u-mallory", "mallory", "c-known")
+            ),
             SenderVerdict::Allowed("chats")
         );
         // A chat the agent is not in — a stale replayed event, or one for a chat it has left.
-        let v = sender_verdict(&rules, Some("u-owner"), &chats, &msg("user", "u-mallory", "mallory", "c-other"));
-        assert!(matches!(v, SenderVerdict::Refused(ref why) if why.contains("no --allow rule")), "{v:?}");
+        let v = sender_verdict(
+            &rules,
+            Some("u-owner"),
+            &chats,
+            &msg("user", "u-mallory", "mallory", "c-other"),
+        );
+        assert!(
+            matches!(v, SenderVerdict::Refused(ref why) if why.contains("no --allow rule")),
+            "{v:?}"
+        );
 
         // Narrowed to the owner alone: everyone else is refused wherever they write.
         let owner_only = vec![Allow::Owner];
         assert_eq!(
-            sender_verdict(&owner_only, Some("u-owner"), &chats, &msg("user", "u-owner", "affinity", "c-known")),
+            sender_verdict(
+                &owner_only,
+                Some("u-owner"),
+                &chats,
+                &msg("user", "u-owner", "affinity", "c-known")
+            ),
             SenderVerdict::Allowed("owner")
         );
-        let v = sender_verdict(&owner_only, Some("u-owner"), &chats, &msg("user", "u-mallory", "mallory", "c-known"));
+        let v = sender_verdict(
+            &owner_only,
+            Some("u-owner"),
+            &chats,
+            &msg("user", "u-mallory", "mallory", "c-known"),
+        );
         assert!(matches!(v, SenderVerdict::Refused(_)), "{v:?}");
 
         // Named by handle, case-insensitively, and nobody else.
         let by_handle = vec![Allow::Handle("mallory".into())];
         assert_eq!(
-            sender_verdict(&by_handle, Some("u-owner"), &chats, &msg("user", "u-mallory", "MALLORY", "c-known")),
+            sender_verdict(
+                &by_handle,
+                Some("u-owner"),
+                &chats,
+                &msg("user", "u-mallory", "MALLORY", "c-known")
+            ),
             SenderVerdict::Allowed("handle")
         );
-        let v = sender_verdict(&by_handle, Some("u-owner"), &chats, &msg("user", "u-x", "someone", "c-known"));
+        let v = sender_verdict(
+            &by_handle,
+            Some("u-owner"),
+            &chats,
+            &msg("user", "u-x", "someone", "c-known"),
+        );
         assert!(matches!(v, SenderVerdict::Refused(_)), "{v:?}");
     }
 
@@ -1889,7 +1933,12 @@ mod tests {
         // Positive control: the same chat and the same rules admit an attributed sender, so the
         // refusals above are about the missing attribution.
         assert_eq!(
-            sender_verdict(&rules, Some("u-owner"), &chats, &msg("user", "u-mallory", "mallory", "c-known")),
+            sender_verdict(
+                &rules,
+                Some("u-owner"),
+                &chats,
+                &msg("user", "u-mallory", "mallory", "c-known")
+            ),
             SenderVerdict::Allowed("chats")
         );
     }
@@ -1898,7 +1947,12 @@ mod tests {
     #[test]
     fn an_unnamed_owner_matches_nobody() {
         let chats = HashSet::new();
-        let v = sender_verdict(&[Allow::Owner], None, &chats, &msg("user", "u-owner", "affinity", "c"));
+        let v = sender_verdict(
+            &[Allow::Owner],
+            None,
+            &chats,
+            &msg("user", "u-owner", "affinity", "c"),
+        );
         assert!(matches!(v, SenderVerdict::Refused(_)), "{v:?}");
     }
 
@@ -2069,10 +2123,16 @@ mod tests {
         let args = Args::parse_from(["arbos-acp", "--key", "arbk_x"]);
         let (program, lead) = resolve_agent(&args);
         if on_path(DEFAULT_AGENT) {
-            assert_eq!((program.as_str(), lead.as_slice()), (DEFAULT_AGENT, &[][..]));
+            assert_eq!(
+                (program.as_str(), lead.as_slice()),
+                (DEFAULT_AGENT, &[][..])
+            );
         } else {
             assert_eq!(program, "npx");
-            assert_eq!(lead, vec!["--yes".to_owned(), DEFAULT_AGENT_PACKAGE.to_owned()]);
+            assert_eq!(
+                lead,
+                vec!["--yes".to_owned(), DEFAULT_AGENT_PACKAGE.to_owned()]
+            );
             assert!(
                 DEFAULT_AGENT_PACKAGE.contains('@') && !DEFAULT_AGENT_PACKAGE.ends_with("latest"),
                 "the fallback pins a version: {DEFAULT_AGENT_PACKAGE}"
