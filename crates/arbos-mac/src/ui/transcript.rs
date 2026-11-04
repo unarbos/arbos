@@ -11438,6 +11438,18 @@ mod presence_rows_tests {
             "no 'didn't answer' under an answer: {:?}",
             rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
         );
+        // The wordless row draws nothing at all — not a stock line, not a blank bubble, not a
+        // bare sender header. agentd leans on this: since 2026-11-04 it hides that row instead
+        // of deleting it, because the relay refuses a deletion it cannot attribute to the
+        // pusher and the refusal stalled the room link for 10 s. Hiding is only free if the
+        // row is invisible here.
+        assert!(
+            rows.iter().all(|r| r.message_id != "r2"),
+            "the wordless row drew something: {:?}",
+            rows.iter()
+                .map(|r| (r.message_id.as_str(), r.id.as_str()))
+                .collect::<Vec<_>>()
+        );
         let silent = [reply_row("r3", "u2", "done", "", now + 2)];
         let rows = rows_of(&silent);
         assert!(
