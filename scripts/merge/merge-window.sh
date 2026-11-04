@@ -87,6 +87,21 @@ ci_abort_state() {
   echo "UNTESTED CI $ci — run $id has $(printf '%s\n' "$steps" | grep -cx null) step(s) that never started and none that failed, so it aborted before testing this commit; re-run it, do not re-push${note:+ — }${note:0:160}"
 }
 
+# passed_over <sha> <commits the plans named>: the first named commit that CONTAINS <sha> without
+# being it, or empty. Non-empty means no future plan can name <sha>, because a plan names only the
+# newest green commit and one newer than this has already been named.
+#
+# An abbreviation that does not resolve locally makes `--is-ancestor` fail, which yields empty and
+# leaves the caller at WAIT. WAIT refuses, so an unreadable name costs a needless wait and never a
+# clearance — the direction to fail in.
+passed_over() {
+  local sha=$1 n
+  for n in $2; do
+    [ "$n" = "${sha:0:${#n}}" ] && continue
+    if git merge-base --is-ancestor "$sha" "$n" 2>/dev/null; then echo "$n"; return; fi
+  done
+}
+
 # publish_job <release-run-id>: the id of that run's "What to publish" job, empty when the run
 # planned nothing, rc=1 with the reason on stdout when the listing could not be read.
 #
@@ -171,7 +186,7 @@ verdict() {
   local window=">=$since"; [ -n "${MW_TEST_UNTIL:-}" ] && window="$since..$MW_TEST_UNTIL"
   # Every page: the list grows all day (one scheduled run per 15 min), so page 1 alone loses the run that
   # judged an older commit. The total is read first, so a run created mid-read cannot fake a shortfall.
-  local total list got runs scanned=0
+  local total list got runs scanned=0 namedlist=""
   total=$(rd "repos/$R/actions/workflows/release.yml/runs?created=$window&per_page=1" --jq '.total_count') || { echo "BLOCKED counting Release runs: ${total#BLOCKED:}"; return; }
   list=$(rd --paginate "repos/$R/actions/workflows/release.yml/runs?created=$window&per_page=100" \
       --jq '.workflow_runs[]|"\(.id) \(.event) \(.status) \(.head_sha)"') || { echo "BLOCKED listing Release runs: ${list#BLOCKED:}"; return; }
@@ -195,11 +210,35 @@ verdict() {
       "no Mac change since "*"newest green commit $s8"*) echo "NOMAC $(echo "$notes" | awk '{print $5}') (run $r) $notes"; return ;;
       *"already covers the newest green commit $s8"*) echo "COVERED $(echo "$notes" | awk '{print $2}') (run $r)"; return ;;
     esac
+    # Which commit this plan DID name. Collected for the NOPLAN test after the loop: a plan only
+    # ever names the newest green commit, so a plan naming a commit that contains this one is
+    # proof that this one has been passed over for good.
+    case "$notes" in
+      *"newest green commit "*) namedlist="$namedlist $(printf '%s' "${notes##*newest green commit }" | tr -cd '0-9a-f')" ;;
+    esac
   done
   for st in $ACTIVE; do
     n=$(gh run list -R $R --workflow release.yml --status $st --limit 5 --json databaseId --jq length 2>&1) || { echo "BLOCKED listing $st Release runs: $(echo "$n" | tr '\n' ' ' | cut -c1-160)"; return; }
     [ "${n:-0}" -gt 0 ] && { echo "WAIT Release run $st"; return; }
   done
+  # NOPLAN vs WAIT: whether the backstop can still reach this commit, or never will.
+  #
+  # A Release plan names exactly one commit — the newest green one at the moment it runs. So a
+  # commit that was green but was buried by newer green commits before any plan named it is never
+  # named by a later plan either: the backstop will keep naming the newest. Saying "the 15-min
+  # backstop judges it next" to that commit is worse than saying nothing, because it buys a wait
+  # instead of an action, and the wait never ends. On 2026-11-04 dd0d8db10 sat in exactly that
+  # state — four pushes inside six minutes buried it before a plan ran.
+  #
+  # The test is a measurement over the plans actually read, not an assumption about ordering: if
+  # any plan named a commit that CONTAINS this one, this one has been passed over for good. An
+  # abbreviation that does not resolve locally fails `--is-ancestor` and leaves the verdict at
+  # WAIT, which refuses — the safe direction.
+  local newer; newer=$(passed_over "$sha" "$namedlist")
+  if [ -n "$newer" ]; then
+    echo "NOPLAN no Release plan has judged ${s8}, and none ever will: read all $got Release runs created since $since (every page); the newest green commit they name is ${newer}, which contains ${s8}, and a plan only ever names the newest green commit"
+    return
+  fi
   echo "WAIT no Release plan has judged ${s8} yet: read all $got Release runs created since $since (every page), none of the $scanned completed non-push plans names it (the 15-min backstop judges it next)"
 }
 
@@ -334,9 +373,19 @@ check_published() {  # <tag> — appends to nogo
 # no answer this function can be asked for. It is kept because it states the
 # precondition where a reader looks for it, and because it makes a one-argument
 # call return 1 rather than die on an unbound variable under `set -u`.
+# THE TWO PRECONDITIONS, STATED IN THE SIGNATURE RATHER THAN ASSUMED.
+# <tag> is taken as an argument and not read from the caller's scope so that the anchor is
+# asserted and not assumed: a NOMAC anchored at v0.6.381 settles nothing about v0.6.382, and the
+# range below is what makes that structural instead of a convention the next edit can lose.
+# Ancestry is MEASURED along the first-parent line, not inferred from the order go() happens to
+# walk in. changes_since() is `--first-parent`, so every commit this is asked about is on that
+# line already; measuring it anyway costs nothing and removes the dependency on that staying true.
+# It is also strictly tighter than `merge-base --is-ancestor`, which would clear a commit reachable
+# only through a merge's second parent — never a commit go() offers, and not one to start clearing.
 nomac_covers() {
   [ -n "${2:-}" ] || return 1
-  git merge-base --is-ancestor "$1" "$2" 2>/dev/null
+  [ -n "${3:-}" ] || return 1
+  git rev-list --first-parent "$3..$2" 2>/dev/null | grep -qx "$1"
 }
 
 go() {
@@ -377,8 +426,21 @@ go() {
         case "$cls" in
           NOMAC)
             case "$v" in "NOMAC $tag"*) covering=${covering:-$sha}; continue ;; esac
-            if nomac_covers "$sha" "$covering"; then
+            if nomac_covers "$sha" "$covering" "$tag"; then
               echo "      ^ cleared: ${covering:0:9} is judged 'no Mac change since $tag' and ${sha:0:9} is an ancestor of it, so main owes no Mac release for it"
+              continue
+            fi ;;
+          # NOPLAN needs its OWN arm and must never reach the `*)` below, which clears
+          # unconditionally. The clearance here is the same inference NOMAC uses, and it is the
+          # whole reason this class exists: "a descendant's NOMAC settles the Mac-release question
+          # for everything it contains" does not consult the covered commit's verdict at all.
+          # NOMAC relative to $tag means no Mac path changed between $tag and the covering commit,
+          # so no commit on the first-parent path between them changed one either. Gating that on
+          # the covered commit's own class was a category error — it attached the condition to the
+          # wrong commit. Without a covering commit this still refuses, which is the point.
+          NOPLAN)
+            if nomac_covers "$sha" "$covering" "$tag"; then
+              echo "      ^ cleared: no plan will ever name ${sha:0:9}, but ${covering:0:9} is judged 'no Mac change since $tag' and contains it on main's first-parent line, so main owes no Mac release for it"
               continue
             fi ;;
           *) continue ;;
@@ -393,6 +455,10 @@ go() {
         UNTESTED) nogo+=("${sha:0:9} JUDGED, BUT NOTHING RAN since $tag — re-run the job, the commit is not implicated ($v)") ;;
         REDGATE)  nogo+=("${sha:0:9} has a required check with no successful run since $tag ($v)") ;;
         WAIT)     nogo+=("${sha:0:9} NOT JUDGED YET since $tag — still running ($v)") ;;
+        # Distinct from WAIT because waiting is the one thing that cannot help. No plan will
+        # name this commit, and no commit newer than it carries a '$tag' NOMAC containing it,
+        # so the only moves are a release that covers it or a plan run against it directly.
+        NOPLAN)   nogo+=("${sha:0:9} WILL NEVER BE JUDGED since $tag — do not wait for it; nothing newer on main carries a '$tag' no-Mac-change verdict that contains it ($v)") ;;
         BLOCKED)  nogo+=("${sha:0:9} COULD NOT BE READ since $tag, so nothing is inferred ($v)") ;;
         # Name both tags. This refusal used to print only the tag being released,
         # leaving the reader to find the other one inside the parenthetical and work
@@ -483,6 +549,10 @@ after() {
     # and print WAIT, which is this function telling the operator to sit and
     # wait for a run that has already finished and will never change.
     UNTESTED*) echo "VERDICT $(ts): STOP — main's CI at ${sha:0:9} aborted before it tested anything; re-run that job ($v)" ;;
+    # STOP and not WAIT, for the same reason UNTESTED is. after() judges one commit with no
+    # notion of a covering descendant, so it cannot do go()'s clearing; what it must not do is
+    # send the operator to wait for a plan that will never run.
+    NOPLAN*) echo "VERDICT $(ts): STOP — no Release plan will ever judge ${sha:0:9}; a GO can clear it only from a newer commit's no-Mac-change verdict ($v)" ;;
     BLOCKED*) echo "VERDICT $(ts): BLOCKED — cannot read what the verdict needs, so no verdict is inferred: ${v#BLOCKED }" ;;
     WAIT*) echo "VERDICT $(ts): WAIT — $v" ;;
     # Unrecognised. WAIT used to live here as the default, which meant any
