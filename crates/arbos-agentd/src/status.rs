@@ -70,6 +70,11 @@ impl SideKind {
 /// Output cap of the quick call: a few sentences (reasoning is off for the call, so the whole
 /// budget is visible text).
 pub const QUICK_MAX_TOKENS: u32 = 320;
+/// The same cap for an endpoint that will not turn reasoning off (Opus 5.5): the thinking shares
+/// the budget, so it has to hold both. A cap is not a target — a model that answers in one
+/// sentence still stops there — so the wider room costs no latency, and without it the quick
+/// answer comes back cut at the cap, which sends it to the slow path exactly as a failed call did.
+pub const QUICK_MAX_TOKENS_WITH_THINKING: u32 = 2048;
 /// Model calls per chat per minute before quick replies fall back to a silent queue.
 pub const QUICK_CALLS_PER_MINUTE: usize = 6;
 /// Characters of the user's message the quick call sees.
@@ -553,12 +558,19 @@ impl Agent {
             let system = quick_system_prompt(&self.name(), address.as_deref());
             let user = snap.render(&user_text);
             let llm = self.llm.with_purpose("quick-reply");
-            // No hidden reasoning on this call: with it on, the model's thinking counted
-            // against `max_tokens` and the visible sentence was cut at the cap (#1411).
-            let extra = json!({ "reasoning": { "enabled": false } });
+            // Reasoning off where the endpoint allows it (#1411: thinking counted against
+            // `max_tokens` and cut the visible sentence), and on the endpoints that refuse,
+            // the larger budget instead — either way one call, and the answer stays on this
+            // fast path rather than falling back to a full background job.
             match tokio::time::timeout(
                 quick_reply_timeout(),
-                llm.complete_full(&model, &system, &user, QUICK_MAX_TOKENS, Some(&extra)),
+                llm.complete_visible(
+                    &model,
+                    &system,
+                    &user,
+                    QUICK_MAX_TOKENS,
+                    QUICK_MAX_TOKENS_WITH_THINKING,
+                ),
             )
             .await
             {
@@ -895,9 +907,42 @@ pub(crate) mod tests {
     /// First visible reply within this many seconds, lock held or not.
     pub const FIRST_REPLY_GATE_SECS: u64 = 5;
 
-    async fn mock_quick(axum::Json(body): axum::Json<Value>) -> axum::Json<Value> {
+    /// Quick calls the Opus-5.5-shaped endpoint refused because reasoning was disabled, and the
+    /// ones it then served. A log, not a flag: the memo is proved by what stops arriving.
+    pub(crate) static REASONING_REFUSALS: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
+    pub(crate) static REASONING_SERVED: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
+
+    /// The user text that makes the stub answer like Opus 5.5: reasoning cannot be turned off.
+    pub(crate) const REASONING_MANDATORY_ASK: &str = "what is going on with the mandatory one?";
+
+    async fn mock_quick(axum::Json(body): axum::Json<Value>) -> axum::response::Response {
+        use axum::response::IntoResponse;
         tokio::time::sleep(Duration::from_millis(300)).await;
         let user = body["messages"][1]["content"].as_str().unwrap_or("");
+        // Opus 5.5 (Jacob, Test5, 2026-11-04): the endpoint rejects `reasoning {enabled:false}`
+        // outright, and serves the answer only when the flag is absent.
+        if user.contains(REASONING_MANDATORY_ASK) {
+            if body["reasoning"]["enabled"] == json!(false) {
+                *REASONING_REFUSALS.lock().unwrap() += 1;
+                return (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    axum::Json(json!({ "error": {
+                        "message": "Reasoning is mandatory for this endpoint and cannot be disabled.",
+                        "code": 400
+                    } })),
+                )
+                    .into_response();
+            }
+            *REASONING_SERVED.lock().unwrap() += 1;
+            return axum::Json(json!({
+                "choices": [{
+                    "message": { "role": "assistant", "content": "[status]\nThe benchmark is still running, about a minute in; nothing has failed." },
+                    "finish_reason": "stop"
+                }],
+                "usage": { "prompt_tokens": 400, "completion_tokens": 30 }
+            }))
+            .into_response();
+        }
         let (content, finish) = if user.contains("stop at 20, not 40") {
             // The b7 shape: a guide whose one line has no full stop.
             (
@@ -926,6 +971,7 @@ pub(crate) mod tests {
             "choices": [{ "message": { "role": "assistant", "content": content }, "finish_reason": finish }],
             "usage": { "prompt_tokens": 400, "completion_tokens": 30 }
         }))
+        .into_response()
     }
 
     /// Every activity text the stub relay received (`POST /projects/{id}/activity`), in order.
@@ -1056,6 +1102,61 @@ pub(crate) mod tests {
         let note = agent.take_side_notes(chat).expect("side note");
         assert!(note.contains("what is going on now?") && note.contains("benchmark"));
         assert!(agent.take_side_notes(chat).is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Jacob on Test5 (2026-11-04, agentd 0.1.191, chat 01M6M0G9257SCE4RRQDW2GXFS9): the quick
+    /// call sends `reasoning {enabled: false}`, and the Opus 5.5 endpoint answers HTTP 400
+    /// "Reasoning is mandatory for this endpoint and cannot be disabled". Every side-session
+    /// message during a busy turn spent ~3 s failing and then became a full background job —
+    /// "hey" took 10.1 s against 2.4 s idle, "what did I say here?" 16.8 s.
+    ///
+    /// The refusal now costs one retry, once per model: the answer comes back on the quick
+    /// path, and the model is remembered so later messages never make the attempt that cannot
+    /// work.
+    #[tokio::test]
+    async fn a_quick_reply_survives_an_endpoint_that_demands_reasoning() {
+        *REASONING_REFUSALS.lock().unwrap() = 0;
+        *REASONING_SERVED.lock().unwrap() = 0;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000018";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        let (msg_id, cmd) = send_cmd(&host, REASONING_MANDATORY_ASK);
+
+        let t0 = Instant::now();
+        agent.handle_command(chat, cmd).await.unwrap();
+        let elapsed = t0.elapsed();
+
+        let rows = reply_rows(&host, &msg_id);
+        assert_eq!(
+            rows.len(),
+            1,
+            "the refused flag must not send the answer down the background-job path"
+        );
+        let text = rows[0].text();
+        assert!(text.contains("benchmark is still running"), "{text}");
+        assert_eq!(rows[0].status, "done");
+        assert!(
+            elapsed < Duration::from_secs(FIRST_REPLY_GATE_SECS),
+            "quick reply took {elapsed:?} with the turn lock held"
+        );
+        assert_eq!(
+            (
+                *REASONING_REFUSALS.lock().unwrap(),
+                *REASONING_SERVED.lock().unwrap()
+            ),
+            (1, 1),
+            "one refused attempt, then the answer on the retry"
+        );
+        let model = agent
+            .model_for(crate::settings::ModelRole::QuickReply { env_override: None })
+            .await;
+        assert!(
+            agent.llm.reasoning_always_on(&model),
+            "the model is remembered, so the next quick reply skips the refused attempt"
+        );
+        assert!(agent.take_side_notes(chat).is_some());
         let _ = std::fs::remove_dir_all(&root);
     }
 
