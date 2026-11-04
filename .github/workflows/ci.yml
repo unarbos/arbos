@@ -81,21 +81,30 @@ jobs:
       - name: Make room on the short-disk fleet
         run: |
           set -euo pipefail
-          need=30720
+          # FLOOR is what the job was measured to consume; RECLAIM_BELOW adds margin so the
+          # reclaim fires before the disk is actually tight. Reclaiming unconditionally would
+          # change every job's environment to help the 2.5% that need it.
+          FLOOR=25600
+          RECLAIM_BELOW=30720
           avail=$(df -B1M --output=avail / | tail -1 | tr -d ' ')
-          if [ "$avail" -ge "$need" ]; then
-            echo "$avail MiB free on /; this job needs about 25000 MiB, so nothing is removed"
+          if [ "$avail" -ge "$RECLAIM_BELOW" ]; then
+            echo "$avail MiB free on /; this job needs about $FLOOR MiB, so nothing is removed"
             exit 0
           fi
-          echo "$avail MiB free on / — short for a ~25000 MiB job, reclaiming unused SDKs"
+          echo "$avail MiB free on / — short for a ~$FLOOR MiB job, reclaiming unused SDKs"
           for d in /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /usr/share/swift \
                    /usr/local/share/powershell /opt/hostedtoolcache/CodeQL /usr/share/miniconda; do
             if [ -e "$d" ]; then sudo rm -rf "$d"; fi
           done
           avail=$(df -B1M --output=avail / | tail -1 | tr -d ' ')
           echo "$avail MiB free on / now"
-          if [ "$avail" -lt "$need" ]; then
-            echo "::warning title=Short disk::Only $avail MiB free after reclaiming; if this job dies without reporting a step, it ran out of disk."
+          # The defect this step exists to stop was a failure that destroyed its own evidence.
+          # If the reclaim did not win back enough, say so here, where it is readable, rather
+          # than walking into another ENOSPC that kills the runner and leaves no log.
+          if [ "$avail" -lt "$FLOOR" ]; then
+            echo "::error title=Short disk::Reclaimed what the image allows and only $avail MiB is free on /, under the $FLOOR MiB this job needs. Failing here so the reason is visible; an ENOSPC later kills the runner's worker and leaves no log at all."
+            df -h /
+            exit 1
           fi
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

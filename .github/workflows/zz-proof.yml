@@ -16,6 +16,12 @@ name: zz proof
 # Same ballast, same steps, one difference. `shared-key: rust` makes the cache restore hit the
 # very entry ci.yml's rust job restores, so the step that fails in production is the step that
 # runs here.
+#
+# A third job covers the one path the other two cannot reach. The whole defect was a failure
+# that destroyed its own evidence, so the fix must not add a quiet path of its own: when the
+# reclaim cannot win back enough, the job has to say so where it can be read. That case needs
+# the reclaim to come up short, which cannot happen on the big fleet, so `loud` takes the
+# space away first and then checks that the step fails with a legible reason.
 
 on:
   workflow_dispatch:
@@ -84,21 +90,30 @@ jobs:
       - name: Make room on the short-disk fleet
         run: |
           set -euo pipefail
-          need=30720
+          # FLOOR is what the job was measured to consume; RECLAIM_BELOW adds margin so the
+          # reclaim fires before the disk is actually tight. Reclaiming unconditionally would
+          # change every job's environment to help the 2.5% that need it.
+          FLOOR=25600
+          RECLAIM_BELOW=30720
           avail=$(df -B1M --output=avail / | tail -1 | tr -d ' ')
-          if [ "$avail" -ge "$need" ]; then
-            echo "$avail MiB free on /; this job needs about 25000 MiB, so nothing is removed"
+          if [ "$avail" -ge "$RECLAIM_BELOW" ]; then
+            echo "$avail MiB free on /; this job needs about $FLOOR MiB, so nothing is removed"
             exit 0
           fi
-          echo "$avail MiB free on / — short for a ~25000 MiB job, reclaiming unused SDKs"
+          echo "$avail MiB free on / — short for a ~$FLOOR MiB job, reclaiming unused SDKs"
           for d in /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /usr/share/swift \
                    /usr/local/share/powershell /opt/hostedtoolcache/CodeQL /usr/share/miniconda; do
             if [ -e "$d" ]; then sudo rm -rf "$d"; fi
           done
           avail=$(df -B1M --output=avail / | tail -1 | tr -d ' ')
           echo "$avail MiB free on / now"
-          if [ "$avail" -lt "$need" ]; then
-            echo "::warning title=Short disk::Only $avail MiB free after reclaiming; if this job dies without reporting a step, it ran out of disk."
+          # The defect this step exists to stop was a failure that destroyed its own evidence.
+          # If the reclaim did not win back enough, say so here, where it is readable, rather
+          # than walking into another ENOSPC that kills the runner and leaves no log.
+          if [ "$avail" -lt "$FLOOR" ]; then
+            echo "::error title=Short disk::Reclaimed what the image allows and only $avail MiB is free on /, under the $FLOOR MiB this job needs. Failing here so the reason is visible; an ENOSPC later kills the runner's worker and leaves no log at all."
+            df -h /
+            exit 1
           fi
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -122,3 +137,56 @@ jobs:
       - name: How much was left
         if: always()
         run: df -h /
+
+  loud:
+    name: "Reclaim comes up short — the step must say so"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Leave the reclaim nothing worth reclaiming
+        run: |
+          set -euo pipefail
+          # Take the two biggest targets away, then ballast both the disk and the space they
+          # freed, so the reclaim step below can only win back about 11 GiB against a 25 GiB
+          # floor. This is the short fleet with an image the reclaim list no longer fits.
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet
+          for _ in 1 2; do
+            avail=$(df -B1M --output=avail / | tail -1 | tr -d ' ')
+            sudo fallocate -l "$(( avail - 500 ))M" "/ballast.$RANDOM.$_"
+          done
+          df -h /
+      - name: Make room on the short-disk fleet
+        run: |
+          set -euo pipefail
+          # FLOOR is what the job was measured to consume; RECLAIM_BELOW adds margin so the
+          # reclaim fires before the disk is actually tight. Reclaiming unconditionally would
+          # change every job's environment to help the 2.5% that need it.
+          FLOOR=25600
+          RECLAIM_BELOW=30720
+          avail=$(df -B1M --output=avail / | tail -1 | tr -d ' ')
+          if [ "$avail" -ge "$RECLAIM_BELOW" ]; then
+            echo "$avail MiB free on /; this job needs about $FLOOR MiB, so nothing is removed"
+            exit 0
+          fi
+          echo "$avail MiB free on / — short for a ~$FLOOR MiB job, reclaiming unused SDKs"
+          for d in /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /usr/share/swift \
+                   /usr/local/share/powershell /opt/hostedtoolcache/CodeQL /usr/share/miniconda; do
+            if [ -e "$d" ]; then sudo rm -rf "$d"; fi
+          done
+          avail=$(df -B1M --output=avail / | tail -1 | tr -d ' ')
+          echo "$avail MiB free on / now"
+          # The defect this step exists to stop was a failure that destroyed its own evidence.
+          # If the reclaim did not win back enough, say so here, where it is readable, rather
+          # than walking into another ENOSPC that kills the runner and leaves no log.
+          if [ "$avail" -lt "$FLOOR" ]; then
+            echo "::error title=Short disk::Reclaimed what the image allows and only $avail MiB is free on /, under the $FLOOR MiB this job needs. Failing here so the reason is visible; an ENOSPC later kills the runner's worker and leaves no log at all."
+            df -h /
+            exit 1
+          fi
+        continue-on-error: true
+        id: room
+      - name: It failed, and it said why
+        run: |
+          set -euo pipefail
+          test "${{ steps.room.outcome }}" = failure
+          echo "the reclaim step failed on free space with its own message, which is the point"
