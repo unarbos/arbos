@@ -2978,15 +2978,17 @@ impl Agent {
         }
         match job.kind.as_str() {
             "code" => match job_named_subfolder(&job.brief, project) {
-                // The folder's git is scoped to the folder even when no `.git` is there yet: the
-                // job that names `humanize/` is the job that clones into it, so the repo it is
-                // about to create is nobody else's. Waiting for a `.git` that the lock holder
-                // has not written yet means every clone job takes the project's whole git, which
-                // is what made T5 and T9 queue in Jacob's Test5 round 2 (bug I).
-                Some(dir) => vec![
-                    format!("path:{}", dir.display()),
-                    format!("git:{}", dir.display()),
-                ],
+                Some(dir) => {
+                    // Files are locked at the named folder, git at the repo that owns it. Only
+                    // the git key rises: two jobs in one repo take turns on that index, while
+                    // their file work in two folders still overlaps. Raising the path key too
+                    // would hand back the parallelism this default exists to win.
+                    let repo = owning_git_repo(&dir, project).unwrap_or_else(|| dir.clone());
+                    vec![
+                        format!("path:{}", dir.display()),
+                        format!("git:{}", repo.display()),
+                    ]
+                }
                 None => vec![format!("path:{}", project.display()), "git".to_owned()],
             },
             "ops" => vec!["routines".to_owned()],
@@ -9868,6 +9870,29 @@ fn lock_blocker(locks: &HashMap<String, String>, job_id: &str, keys: &[String]) 
             owner.as_str() != job_id && keys.iter().any(|mine| lock_conflicts(mine, k))
         })
         .map(|(_, owner)| owner.clone())
+}
+
+/// The repo whose index a job working in `dir` would touch: the nearest folder at or above `dir`
+/// with a `.git`, searching no higher than `project` because a lock is only ever a project's own.
+///
+/// A folder with its own `.git` is its own repo and answers itself, so a clone keeps a lock of its
+/// own. A folder inside a repo rooted above it answers that root, so two jobs in two folders of
+/// one repo take turns on its index rather than racing it — `git` writes `.git/index` and
+/// `.git/index.lock` whichever subfolder they are run from.
+///
+/// `None` when no repo is there yet, and the caller then scopes git to the named folder: the job
+/// that names `humanize/` is the job about to clone into it, so that repo is nobody else's.
+fn owning_git_repo(dir: &Path, project: &Path) -> Option<PathBuf> {
+    let mut at = dir;
+    loop {
+        if at.join(".git").exists() {
+            return Some(at.to_path_buf());
+        }
+        if at == project {
+            return None;
+        }
+        at = at.parent()?;
+    }
 }
 
 /// The project subfolder a code job's brief names, as the folder its default lock covers.

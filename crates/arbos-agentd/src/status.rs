@@ -2129,6 +2129,114 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Two code jobs in two folders of *one* repo take turns on that repo's index — `git` writes
+    /// `.git/index.lock` whichever subfolder it runs from — while their file work still overlaps.
+    /// Only the git key rises to the repo root; the path key stays on the named folder, which is
+    /// what keeps the parallelism this default exists to win.
+    #[tokio::test]
+    async fn one_repo_two_folders_take_turns_on_git_but_not_on_files() {
+        use crate::agent::JobSpec;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATONEREPOTWODIRS01";
+        let _host = agent.sync.open_room(chat).await.unwrap();
+        let project = agent.cfg.work_dir.clone();
+        // One repo at the project root, with the two folders a refactor would name.
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::create_dir_all(project.join("tests")).unwrap();
+        let code_job = |id: &str, title: &str, brief: &str| JobSpec {
+            id: id.into(),
+            title: title.into(),
+            kind: "code".into(),
+            brief: brief.into(),
+            touches: vec![],
+            attempt: 0,
+        };
+        let on_src = code_job(
+            "job-src",
+            "Refactoring the parser",
+            "Rework the parser in src/ and commit it.",
+        );
+        let on_tests = code_job(
+            "job-tests",
+            "Widening the suite",
+            "Add the missing cases in tests/ and commit them.",
+        );
+        // The git key is the repo root for both; the path keys stay on the two folders.
+        assert_eq!(
+            agent.job_lock_keys(&on_src),
+            vec![
+                format!("path:{}/src", project.display()),
+                format!("git:{}", project.display()),
+            ],
+            "only git rises to the repo root"
+        );
+        assert_eq!(
+            agent.job_lock_keys(&on_tests),
+            vec![
+                format!("path:{}/tests", project.display()),
+                format!("git:{}", project.display()),
+            ]
+        );
+        for j in [&on_src, &on_tests] {
+            agent
+                .store
+                .insert_job(
+                    &j.id, chat, "m-busy", &j.title, "code", &j.brief, &j.touches,
+                )
+                .unwrap();
+        }
+        agent.acquire_job_locks(&on_src).await;
+        // Half one: the second job's git work waits, because one index cannot take two.
+        let agent2 = agent.clone();
+        let waiter = tokio::spawn(async move { agent2.acquire_job_locks(&on_tests).await });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            !waiter.is_finished(),
+            "two jobs must not run git against one index at once"
+        );
+        // Half two: file work in the other folder is not held up — the path lock never rose, so
+        // `tests/` is free while `src/` is taken. A fix that locked the whole project would pass
+        // the assertion above and fail this one.
+        let files_only = JobSpec {
+            touches: vec!["path:tests".into()],
+            ..code_job("job-files", "Formatting the suite", "Run the formatter.")
+        };
+        agent
+            .store
+            .insert_job(
+                &files_only.id,
+                chat,
+                "m-busy",
+                &files_only.title,
+                "code",
+                &files_only.brief,
+                &files_only.touches,
+            )
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            agent.acquire_job_locks(&files_only),
+        )
+        .await
+        .expect("file work in another folder of the same repo still runs side by side");
+        agent.release_job_locks("job-files").await;
+        agent.release_job_locks("job-src").await;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), waiter)
+                .await
+                .unwrap()
+                .unwrap(),
+            vec![
+                format!("path:{}/tests", project.display()),
+                format!("git:{}", project.display()),
+            ],
+            "the waiting job takes its turn once the index is free"
+        );
+        agent.release_job_locks("job-tests").await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Bug I, measured against the round-2 traces. Each brief below carries the folder token its
     /// real brief carried (`t4`/`t5` and `t8`/`t9` in `test5/*.events.json`), and in the run T5
     /// waited 6.5 min behind T4 and T9 waited about 10 min behind T8. None of these folders
@@ -2144,6 +2252,11 @@ pub(crate) mod tests {
         // By the time T8 and T9 ran, `out/` was on disk: T4 and T5 had written into it hours
         // earlier. Their own folders — humanize, data, taxi_app — were still absent.
         std::fs::create_dir_all(project.join("out")).unwrap();
+        // The run's project folder was a plain workspace, not a repo: every git command in the
+        // dumps is run from a subfolder, and the only one at the root is `git clone`. So no repo
+        // root sits above these folders, and the four git keys below are each the folder itself.
+        // Were the repo lookup to resolve somewhere shared, these assertions would catch it.
+        assert!(!project.join(".git").exists());
         let code_job = |id: &str, title: &str, brief: &str| JobSpec {
             id: id.into(),
             title: title.into(),
@@ -2194,6 +2307,21 @@ pub(crate) mod tests {
                 format!("git:{}/humanize", project.display()),
             ],
             "T4 works in the folder it clones into"
+        );
+        assert_eq!(
+            agent.job_lock_keys(&t5),
+            vec![
+                format!("path:{}/data", project.display()),
+                format!("git:{}/data", project.display()),
+            ],
+            "T5 works in the folder it downloads into"
+        );
+        assert_eq!(
+            agent.job_lock_keys(&t8),
+            vec![
+                format!("path:{}/taxi_app", project.display()),
+                format!("git:{}/taxi_app", project.display()),
+            ]
         );
         assert_eq!(
             agent.job_lock_keys(&t9),
