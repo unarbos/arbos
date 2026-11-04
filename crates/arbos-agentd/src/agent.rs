@@ -1132,6 +1132,9 @@ pub enum TurnKind {
     SubagentResult {
         subagent_id: String,
         name: String,
+        /// Set when the worker ran a job: this turn is still that job, so a file the worker
+        /// already delivered is not delivered again (`media::deliver`).
+        job_id: Option<String>,
         /// The worker's return-contract status (`done` / `partial` / `blocked` / `needs_input`),
         /// or `failed` / `cancelled` from agentd: it picks the plain line agentd writes itself
         /// when the model cannot relay the result (cut short for a waiting user, tried to start
@@ -1146,11 +1149,28 @@ pub enum TurnKind {
     JobFallback { job_id: String, title: String },
 }
 
+impl TurnKind {
+    /// The job this turn belongs to, when it belongs to one.
+    fn job_id(&self) -> Option<String> {
+        match self {
+            TurnKind::SubagentResult { job_id, .. } => job_id.clone(),
+            TurnKind::JobFallback { job_id, .. } => Some(job_id.clone()),
+            TurnKind::User | TurnKind::ApprovalOutcome { .. } => None,
+        }
+    }
+}
+
 /// What one main-agent turn produced, for the caller's follow-ups (memory pass, hand-offs).
 /// How many of its own rows a box remembers ([`Agent::own_rows`]). A turn answers the row that
 /// started it, so only the newest matter; the bound is what keeps a long-lived box from growing
 /// this without end.
 pub(crate) const OWN_ROWS_MAX: usize = 512;
+
+/// How many job deliveries a box remembers ([`Agent::job_files`]). A job's workers and its
+/// result turn all deliver within minutes of each other, so the newest entries are the only
+/// ones a duplicate can match; the bound is what keeps a long-lived box from growing this
+/// without end.
+const JOB_FILES_MAX: usize = 256;
 
 /// The rows this box wrote itself, newest last.
 #[derive(Default)]
@@ -1342,6 +1362,10 @@ pub struct TurnState {
     /// A `TurnKind::JobFallback` turn: the job path already failed for this ask, so the work
     /// stays inline — no act→job conversion and `start_job` is refused.
     pub job_fallback: bool,
+    /// The job this turn is part of: the result turn that relays a job's answer, or the inline
+    /// fallback turn. It is what keeps the turn from posting a file the job's worker already
+    /// put in the chat (`media::deliver`).
+    pub job_id: Option<String>,
     /// In-turn retries after a transient model failure (`MODEL_CALL_RETRIES`); the second one
     /// runs on the fallback talking model.
     pub model_retries: u8,
@@ -1529,6 +1553,7 @@ impl TurnState {
             web_tool_used: false,
             act_to_job: false,
             job_fallback: false,
+            job_id: None,
             model_retries: 0,
             parts_continuation: false,
             attachments_posted: Vec::new(),
@@ -1577,6 +1602,12 @@ pub struct Agent {
     /// stand on (#1900, #2025: a timed-out gated call was upgraded to "the chat service
     /// confirmed it" 66 s later).
     pub posted_ledger: Mutex<HashMap<String, Vec<(String, i64)>>>,
+    /// Files a job already put in the chat, newest last: `(job id, content hash, message id)`.
+    /// One job delivers through several callers — its worker, the fresh worker a failed attempt
+    /// gets, and the result turn that relays the answer — and each of them posted the same bytes
+    /// again, so the user read one ask and got the same card two or three times. Bounded by
+    /// [`JOB_FILES_MAX`].
+    job_files: Mutex<Vec<(String, String, String)>>,
     /// Message ids of rows this box wrote itself as the ask for a turn: a routine firing, a
     /// voice line, a bound channel's message. Bounded; see `OWN_ROWS_MAX`.
     ///
@@ -1778,6 +1809,7 @@ impl Agent {
             approvals: crate::approval::Approvals::default(),
             subagent_msgs: Mutex::new(HashMap::new()),
             posted_ledger: Mutex::new(HashMap::new()),
+            job_files: Mutex::new(Vec::new()),
             own_rows: std::sync::Mutex::new(OwnRows::default()),
             groups: crate::groups::GroupState::default(),
             people: crate::people::PeopleState::default(),
@@ -4110,6 +4142,7 @@ impl Agent {
                 TurnKind::SubagentResult {
                     subagent_id,
                     name,
+                    job_id: _,
                     status: _,
                 } => {
                     // Same people-chat attribution as a normal reply: without
@@ -4356,6 +4389,7 @@ impl Agent {
             web_tool_used: false,
             act_to_job: false,
             job_fallback: matches!(kind, TurnKind::JobFallback { .. }),
+            job_id: kind.job_id(),
             model_retries: 0,
             parts_continuation: false,
             attachments_posted: Vec::new(),
@@ -4971,6 +5005,7 @@ impl Agent {
         let kind = TurnKind::SubagentResult {
             subagent_id: subagent_id.to_owned(),
             name: name.to_owned(),
+            job_id: job.map(|j| j.id.clone()),
             status: status.to_owned(),
         };
         let outcome = self
@@ -6780,6 +6815,32 @@ impl Agent {
             .await
             .get(chat_id)
             .is_some_and(|v| v.iter().any(|(_, at)| *at >= since_ms))
+    }
+
+    /// The newest row a file with content hash `key` landed on in `job_id`, if one did.
+    ///
+    /// The key is the content hash, not the path: a job that writes `report.csv` again with new
+    /// numbers and delivers it is a second, real delivery and must go through, while the same
+    /// bytes a second time is the duplicate card the user complained about.
+    pub(crate) async fn job_file_posted(&self, job_id: &str, key: &str) -> Option<String> {
+        self.job_files
+            .lock()
+            .await
+            .iter()
+            .rev()
+            .find(|(j, k, _)| j == job_id && k == key)
+            .map(|(_, _, msg_id)| msg_id.clone())
+    }
+
+    /// Record a file `job_id` delivered (called by `media::deliver` after the row was read back,
+    /// never before).
+    pub(crate) async fn note_job_file(&self, job_id: &str, key: &str, msg_id: &str) {
+        let mut l = self.job_files.lock().await;
+        l.push((job_id.to_owned(), key.to_owned(), msg_id.to_owned()));
+        if l.len() > JOB_FILES_MAX {
+            let drop = l.len() - JOB_FILES_MAX;
+            l.drain(..drop);
+        }
     }
 
     async fn row_has_words(host: &SharedHost, t: &TurnState) -> bool {
