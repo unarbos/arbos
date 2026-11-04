@@ -125,6 +125,23 @@ const BUTTON_INSET: f32 = (COMPOSER_HEIGHT - 2.0 - PLUS_BUTTON) / 2.0;
 /// The divisor is `#272727`'s channel value: the rim is a fraction of the
 /// distance from the fill to white, so a palette move carries it.
 const PLUS_RIM: f32 = 12.0 / (255.0 - 39.0);
+/// The `+` glyph's point size and weight, fitted rather than chosen.
+///
+/// Grok's plus is a 28 px box with a 4.2 px stroke at 2 px/pt, against the
+/// 23 px box and 3.2 px stroke the old 13.6 pt Medium rasterised. Every
+/// weight AppKit offers was swept against every half point from 10 to 26 and
+/// each raster measured the way the crops were; 16.5 pt Semibold came out at
+/// 28 x 28 px with a 4.15 px bar, missing Grok by 0.05 px. Semibold is the
+/// heaviest [`sf_symbols::Weight`] already carries, so nothing had to be
+/// added to it.
+///
+/// [`sf_symbols::glyph`] cannot express this: it fixes the weight at Medium
+/// and the point size at 0.85 of the slot, so the composer calls
+/// [`sf_symbols::symbol`] directly.
+const PLUS_GLYPH_POINTS: f32 = 16.5;
+/// The square the `+` is centred in. `plus` at [`PLUS_GLYPH_POINTS`] Semibold
+/// has a natural size of 18 x 16 pt, so the slot has to hold 18.
+const PLUS_GLYPH_SLOT: f32 = 18.0;
 /// How far the white disc's mark lifts off `on_primary` toward the disc.
 ///
 /// Grok's send arrow is `#121212` on an `#f5f5f5` disc where ours was pure
@@ -4023,7 +4040,13 @@ impl Render for Composer {
                 el.border(px(0.5))
                     .border_color(Theme::with_alpha(gpui::white(), PLUS_RIM))
             })
-            .child(sf_symbols::glyph("plus", 16.0, theme.text_muted))
+            .child(sf_symbols::symbol(
+                "plus",
+                PLUS_GLYPH_POINTS,
+                sf_symbols::Weight::Semibold,
+                PLUS_GLYPH_SLOT,
+                theme.text_muted,
+            ))
             // Option B (ARB-544): `+` opens the attach menu; "Photo or file…" is the
             // old file prompt, the second row the Emoji · Stickers · GIFs picker.
             .on_click(cx.listener(|this, _, _, cx| this.toggle_attach_menu(cx)));
