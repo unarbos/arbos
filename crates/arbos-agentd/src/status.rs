@@ -1068,9 +1068,16 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A pi child reads the system prompt by path while it starts, and every other writer of
-    /// that file is a detached task (the memory pass after a reply, a model change from the
-    /// project doc). A truncate-then-write would let a spawn meet half a file.
+    /// A pi child reads the system prompt by path while it starts, and the file has four writers,
+    /// three of them detached tasks: `start_pi`, `respawn_pi`, the memory pass 1.5 s after a
+    /// reply, and a model change arriving from the project doc. So the test runs TWO writers
+    /// against one reader, because that is the hazard the rename exists for — a single writer
+    /// would pass against both a correct implementation and a shared temporary name, and prove
+    /// nothing about either.
+    ///
+    /// The reader must only ever see a whole prompt, and no writer may fail: a shared temporary
+    /// gives one writer a short file to rename over the prompt and the other an ENOENT on a name
+    /// already renamed away.
     #[tokio::test]
     async fn the_system_prompt_is_never_half_written() {
         let (agent, root) = test_agent().await;
@@ -1079,19 +1086,24 @@ pub(crate) mod tests {
         let whole = std::fs::read_to_string(&path).unwrap();
         assert!(whole.contains("You are Doug, this user's agent in Arbos"));
 
-        let writer = {
-            let agent = agent.clone();
-            tokio::task::spawn_blocking(move || {
-                for _ in 0..400 {
-                    agent.write_system_prompt().unwrap();
-                }
+        const EACH: usize = 300;
+        let writers: Vec<_> = (0..2)
+            .map(|w| {
+                let agent = agent.clone();
+                tokio::task::spawn_blocking(move || {
+                    for i in 0..EACH {
+                        agent
+                            .write_system_prompt()
+                            .unwrap_or_else(|e| panic!("writer {w} failed on write {i}: {e}"));
+                    }
+                })
             })
-        };
+            .collect();
         let reads = {
             let path = path.clone();
             tokio::task::spawn_blocking(move || {
                 let mut n = 0usize;
-                while !path.exists() || n < 400 {
+                while n < EACH * 2 {
                     let got = std::fs::read_to_string(&path).expect("the file is always there");
                     assert_eq!(got, whole, "read {n} saw a partial prompt");
                     n += 1;
@@ -1099,8 +1111,18 @@ pub(crate) mod tests {
                 n
             })
         };
-        writer.await.unwrap();
-        assert!(reads.await.unwrap() >= 400);
+        for w in writers {
+            w.await.unwrap();
+        }
+        assert!(reads.await.unwrap() >= EACH * 2);
+        // Every writer renamed its own temporary away; none are left behind.
+        let strays: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .filter(|n| n.to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(strays.is_empty(), "{strays:?}");
         let _ = std::fs::remove_dir_all(root);
     }
 

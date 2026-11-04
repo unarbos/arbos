@@ -1887,13 +1887,27 @@ impl Agent {
         std::fs::create_dir_all(path.parent().unwrap())?;
         // Written through a temporary name in the same directory, then renamed over the old file.
         // A plain write truncates first, and a pi child reads this path while it starts: every
-        // other writer here is a detached task — the memory pass 1.5 s after a reply, a model
-        // change from the project doc — so a spawn could meet a truncated file and boot on half
-        // a system prompt. `rename` is atomic, so a reader sees the whole old file or the whole
-        // new one.
-        let tmp = path.with_extension("md.tmp");
+        // other writer here is a detached task — the memory pass 1.5 s after a reply, the one
+        // after a subagent, a model change from the project doc — so a spawn could meet a
+        // truncated file and boot on half a system prompt. `rename` is atomic, so a reader sees
+        // the whole old file or the whole new one.
+        //
+        // The temporary name is per writer, not a fixed `.tmp`. Those same concurrent writers are
+        // why this function needs the rename at all, so a shared temporary would only move the
+        // truncate one level down: two writers would interleave into it, one would rename a short
+        // file over the prompt, and the other would take an ENOENT on a name the first had
+        // already renamed away.
+        static NEXT_TMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let tmp = path.with_extension(format!(
+            "md.{}.{}.tmp",
+            std::process::id(),
+            NEXT_TMP.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::write(&tmp, s)?;
-        std::fs::rename(&tmp, &path)?;
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.into());
+        }
         Ok(())
     }
 
