@@ -20,10 +20,35 @@ on:
 permissions:
   contents: read
 
-# A newer push cancels an older run on a branch, but never on main: release.yml only runs after
-# a successful CI on main, and a cancelled run means no release.
+# Branches coalesce; main gets one group per commit. `cancel-in-progress` governs only the run that
+# is already RUNNING. A run still PENDING in a group is evicted the moment a newer run joins that
+# group, whatever the flag says, because GitHub keeps exactly one pending run per group —
+# release.yml and ios.yml both already state this. So `cancel-in-progress: false` never protected
+# main: it only made each push queue behind the last, and queueing is precisely what got it evicted.
+#
+# Measured on main 2026-11-04. Four pushes in 105 s — 54b199042 (15:51:19), f7763e33d (15:51:47),
+# b3d385c55 (15:52:25), ddb5ec06f (15:53:03) — all landed while dd0d8db10's run was still going.
+# Runs 41862032379, 41862100575 and 41862190973 ended `cancelled` holding ZERO jobs: they scheduled
+# nothing, so they tested nothing. Only the last push's run survived (41862282713), and it started
+# its first job at 15:54:39, three seconds after dd0d8db10's run finished — the group was
+# serialising, never protecting. Reproduced on a scratch workflow with an explicit
+# `cancel-in-progress: false` and a shared group: 41868187072 held the group, 41868295632 and
+# 41868354613 were cancelled with zero jobs, and 41868415687 stayed pending until the holder ended.
+#
+# The harm is three untested commits on main, not three lost runs. merge-window.sh reads a
+# zero-job cancellation as a CI refusal, so the faster main is drained the harder it stalls.
+# A per-commit group on main means no main commit can evict another's run. Its cost is concurrent
+# main runs: this workflow starts three jobs at once (Layout, rust, harness) and then one (image),
+# so the worst burst yet seen — four pushes inside one run — asks for 12 concurrent ubuntu-24.04
+# jobs, under the 20 even the smallest hosted allowance grants. Past that the runs QUEUE rather
+# than evict each other, which is the safe direction and the whole point of the change: a pending
+# run that is alone in its group waits, and then tests its commit.
+#
+# `cancel-in-progress` stays false on main. With a per-commit group the only way two main runs
+# share one is a workflow_dispatch on a sha whose push run is still going, and there the dispatch
+# should wait rather than kill a run that is testing that exact commit.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref == 'refs/heads/main' && format('main-{0}', github.sha) || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
