@@ -24,3 +24,23 @@ store (`docs/agent-eval.md`, `docs/agent-eval-runs/`).
 
 Rules: scratch test user only, approval cards are rejected never approved, no real outside
 messages, runner stops at `--budget-usd` (default 8), the test user's relay daily cap is $10.
+
+## Resourcefulness rubric (AF-792)
+
+`lib/resourcefulness.py` scores how far the agent is from a plain-shell comparison agent on eight
+items, 0–2 each: task success against the prompt's fact slots, self-directed investigation, retry of
+a transient error, no confabulated cause, committing to an answer, count integrity, paging instead
+of re-fetching, and nudges needed. `tasks/resourcefulness/` holds the prompts; `rs1` is in no
+scheduled subset, because like every task here it needs production relay writes.
+
+It scores a **bundle** — the ordered user messages, assistant bubbles and tool calls of one task —
+not a live box, so an old run, an agent-link export or a chat read by hand all score the same way
+and the scoring half never waits on relay clearance. `python3 -m lib.resourcefulness <bundle.json>`
+prints the per-item verdicts and the report block; `python3 -m unittest test_resourcefulness` is the
+offline check (no CI job runs Python in this repository).
+
+Two things it needs that the harness did not record before: `driver.session_metrics` now returns
+`tool_targets` and `tool_results` alongside `tool_names`, because a re-fetch and an escalation to a
+data endpoint are both invisible in a list of tool names. A run recorded before those fields existed
+scores the tool-call items `n/a` rather than as passes. An item it could not exercise leaves the
+denominator — a missing transcript must not read as a failing agent.

@@ -1,0 +1,25 @@
+{
+ "task": "rs2-santa-teresa-listings",
+ "agent": "Test3",
+ "image": "0.1.191",
+ "user_messages": [
+  "<exact prompt wording NOT RECOVERED \u2014 blocker>"
+ ],
+ "assistant_messages": [
+  "The chart tool call failed."
+ ],
+ "tool_calls": [],
+ "slots_filled": null,
+ "slots_total": null,
+ "asked_for_count": true,
+ "stated_count": 15,
+ "produced_count": 16,
+ "committed": null,
+ "nudge_labels": [],
+ "contradictions": [],
+ "notes": {
+  "agentd_log_only": true,
+  "evidence": "count 15-vs-16 and the claimed cause are reported in the brief; no transcript read",
+  "af782": "the reply_only guard leaves no record of an aborted call, so the agentd log cannot settle the cause"
+ }
+}
