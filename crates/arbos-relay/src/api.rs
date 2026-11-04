@@ -363,13 +363,19 @@ pub async fn create_project(
         }
     }
     crate::avatar::check_leaf_pick(b.avatar_leaf, b.avatar_leaf_color)?;
+    // The owner's box as it is right now, not "asleep". `set_box_state` mirrors the box onto
+    // every project of the user, but only when the state *moves*: a user whose box is already
+    // awake gets no further call, so a project born "hibernated_light" kept that word until the
+    // box next changed. The apps prefer this column over the live one, so the new agent showed
+    // Offline for as long as that took (Jacob, 2026-11-04: ~45 s).
+    let (owner_box, _) = state.box_state(&owner).await;
     let project = Project {
         id,
         name: name.clone(),
         icon: b.icon.unwrap_or_else(|| monogram(&name)),
         instructions: b.instructions.unwrap_or_default(),
         models: b.models.unwrap_or_else(default_models),
-        state: "hibernated_light".into(),
+        state: crate::state::project_state_word(owner_box).into(),
         created_at: now,
         last_active_at: now,
         // An owner without a user cap gets no project caps either (Jacob, 2026-10-26).
@@ -2496,6 +2502,69 @@ mod primary_chat_tests {
         assert_eq!(
             boxes::after_person_row(&state, &room, &chat, &agents).await,
             1
+        );
+    }
+
+    /// A new agent of an awake box is Online from its first listing, not ~45 s later (Jacob,
+    /// 2026-11-04). The apps read a project's own `state` column, which the relay mirrors from
+    /// the owner's box only when that box *changes* state — so a project born "hibernated_light"
+    /// under an already-awake box kept that word indefinitely.
+    #[tokio::test]
+    async fn a_new_agent_of_an_awake_box_is_not_born_offline() {
+        let state = test_state(AuthMode::Github);
+        let (alice, dev) = person(&state, 1);
+        state
+            .set_box_state(&alice, arbos_core::wire::BoxState::Awake, None)
+            .await;
+
+        let r = create_project(
+            State(state.clone()),
+            dev,
+            Json(CreateProjectBody {
+                name: "Hezbola".into(),
+                icon: None,
+                color: None,
+                instructions: None,
+                models: None,
+                provider: Some("process".into()),
+                avatar: None,
+                avatar_color: None,
+                description: None,
+                avatar_color_index: None,
+                avatar_leaf: None,
+                avatar_leaf_color: None,
+                source_project_id: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let project = v["project"]["id"].as_str().unwrap().to_owned();
+        assert_eq!(
+            v["project"]["state"], "awake",
+            "the create reply itself says awake"
+        );
+        assert_eq!(
+            state.db.project(&project).unwrap().unwrap().state,
+            "awake",
+            "and so does the stored row every later listing is built from"
+        );
+
+        // Repair: a row that already holds the stale word is corrected by the box's own 3 s
+        // poll, which is what `/box/projects` calls — no state change needed.
+        let stale = project_of(&state, &alice, "Stale");
+        assert_eq!(
+            state.db.project(&stale).unwrap().unwrap().state,
+            "hibernated_light"
+        );
+        boxes::box_seen_http(&state, &alice).await;
+        assert_eq!(state.db.project(&stale).unwrap().unwrap().state, "awake");
+        assert_eq!(
+            state.box_state(&alice).await.0,
+            arbos_core::wire::BoxState::Awake,
+            "the box was awake the whole time, so nothing broadcast"
         );
     }
 

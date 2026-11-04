@@ -1948,6 +1948,10 @@ impl Agent {
 
     pub async fn start_pi(self: &Arc<Self>, initial_chat: &str) -> Result<()> {
         self.write_system_prompt()?;
+        // pi reads the prompt at spawn, so a refresh scheduled before this line is already in the
+        // file it is about to read. Leaving it pending costs the new session a restart two
+        // seconds in — which is what made every new agent load its extension twice.
+        self.prompt_refresh_pending.store(false, Ordering::SeqCst);
         let session = self.session_file_for(initial_chat)?;
         let (talking_model, _) = self.live_models().await;
         let mut args = PiAdapter::common_args(
@@ -2031,7 +2035,6 @@ impl Agent {
                     }
                     // the respawn writes the current system prompt, so a refresh that came in
                     // while parked needs no second restart
-                    me.prompt_refresh_pending.store(false, Ordering::SeqCst);
                     let chat = me.current_chat.lock().await.clone().unwrap_or_default();
                     match me.respawn_pi(&chat).await {
                         Ok(()) => {
@@ -2148,6 +2151,9 @@ impl Agent {
         }
         // The code-mode flag is read again here (D86): toggling it needs a pi respawn, not a box restart.
         self.write_system_prompt()?;
+        // The new session reads the prompt as it is now, so any refresh asked for up to this
+        // point is served; a second restart for it would buy nothing.
+        self.prompt_refresh_pending.store(false, Ordering::SeqCst);
         let session = self.session_file_for(chat_id)?;
         let (talking_model, _) = self.live_models().await;
         let mut args = PiAdapter::common_args(

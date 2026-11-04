@@ -939,6 +939,19 @@ pub(crate) mod tests {
 
     /// Same, with extra mock-relay routes merged in (`/box/secrets/…` for the hand-off tests).
     pub(crate) async fn test_agent_with(extra: axum::Router) -> (Arc<Agent>, std::path::PathBuf) {
+        let (agent, root, _rx) = test_agent_parts(extra).await;
+        (agent, root)
+    }
+
+    /// Same again, handing back the agent's `Incoming` receiver instead of dropping it, for a
+    /// test that drives the command pump itself (`workspace::boot_tests`).
+    pub(crate) async fn test_agent_parts(
+        extra: axum::Router,
+    ) -> (
+        Arc<Agent>,
+        std::path::PathBuf,
+        tokio::sync::mpsc::Receiver<crate::sync::Incoming>,
+    ) {
         let app = axum::Router::new()
             .merge(extra)
             .route(
@@ -986,13 +999,13 @@ pub(crate) mod tests {
         std::fs::create_dir_all(cfg.state_dir.join("agentd")).unwrap();
         let store =
             crate::store::Store::open(&cfg.state_dir.join("agentd").join("agentd.db")).unwrap();
-        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
         let sync = crate::sync::SyncHub::new(cfg.clone(), store.clone(), tx);
         let agent = Agent::new(cfg, store, sync, Arc::new(tokio::sync::Semaphore::new(4)));
-        (agent, root)
+        (agent, root, rx)
     }
 
-    fn send_cmd(host: &SharedHost, text: &str) -> (String, CommandView) {
+    pub(crate) fn send_cmd(host: &SharedHost, text: &str) -> (String, CommandView) {
         let msg_id = ulid();
         let h = host.try_lock().expect("host free");
         h.doc
@@ -1014,7 +1027,10 @@ pub(crate) mod tests {
         (msg_id, cmd)
     }
 
-    fn reply_rows(host: &SharedHost, user_msg_id: &str) -> Vec<arbos_core::doc::MessageView> {
+    pub(crate) fn reply_rows(
+        host: &SharedHost,
+        user_msg_id: &str,
+    ) -> Vec<arbos_core::doc::MessageView> {
         let h = host.try_lock().expect("host free");
         h.doc
             .messages()

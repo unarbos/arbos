@@ -399,6 +399,18 @@ impl AppState {
     }
 }
 
+/// The word a project's `state` column carries for one box state. Every project of a user
+/// mirrors that user's box here, and the apps read this column in preference to the live
+/// `box_state` field, so a project must never be left holding a word its box has outgrown.
+pub fn project_state_word(st: BoxState) -> &'static str {
+    match st {
+        BoxState::Awake => "awake",
+        BoxState::Waking => "waking",
+        BoxState::Asleep => "hibernated_light",
+        BoxState::Error => "error",
+    }
+}
+
 /// The agent's current activity as the box last reported it.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct ProjectActivity {
@@ -559,21 +571,25 @@ impl AppState {
         if st == BoxState::Awake {
             self.wake_started.lock().await.remove(user_id);
         }
-        let arbos = match st {
-            BoxState::Awake => "awake",
-            BoxState::Waking => "waking",
-            BoxState::Asleep => "hibernated_light",
-            BoxState::Error => "error",
-        };
-        // The project state column mirrors the user's box for every project of that user.
-        for p in self.db.projects_of_user(user_id).unwrap_or_default() {
-            let _ = self.db.set_project_state(&p.id, arbos);
-            if st != BoxState::Awake {
-                let _ = self.db.set_workspace_state(&p.id, "stopped");
-            }
-        }
+        self.mirror_box_state_onto_projects(user_id, st);
         if changed {
             self.broadcast_status(user_id, st, detail).await;
+        }
+    }
+
+    /// Write the user's box state onto the `state` column of every project of that user, which is
+    /// where the apps read it from. Only rows that disagree are written, so this is safe to call
+    /// on a heartbeat: it also repairs a project whose column was never mirrored, such as one
+    /// created while the box was already awake.
+    pub fn mirror_box_state_onto_projects(&self, user_id: &str, st: BoxState) {
+        let arbos = project_state_word(st);
+        for p in self.db.projects_of_user(user_id).unwrap_or_default() {
+            if p.state != arbos {
+                let _ = self.db.set_project_state(&p.id, arbos);
+            }
+            if st != BoxState::Awake && p.workspace_state != "stopped" {
+                let _ = self.db.set_workspace_state(&p.id, "stopped");
+            }
         }
     }
 

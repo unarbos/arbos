@@ -70,6 +70,96 @@ pub(crate) async fn bounded_by<T>(
     }
 }
 
+/// Hand every open room's work to the agent. Rows reach the agent loop through this and
+/// nothing else, so it is started as soon as the channel exists — before the rooms open and
+/// before anything on the boot path that talks to the relay.
+///
+/// Jacob, 2026-11-04: a new agent's first message was ingested 29 s after it was stored, while
+/// the agent itself had been up since 2 s. The room was open and the `send` was sitting in this
+/// channel; the pump used to be the *last* thing a first boot started, so the message waited
+/// for the whole boot — six relay round trips with no time bound, plus the pi boot — instead of
+/// for the agent.
+fn spawn_command_pump(
+    agent: Arc<Agent>,
+    mut rx: mpsc::Receiver<Incoming>,
+) -> tokio::task::JoinHandle<()> {
+    // Each command runs on its own task: `send`/`answer` serialize on the agent's turn lock
+    // (FIFO), while `stop`/`steer` (Guide) and settings changes land at once, mid-turn.
+    tokio::spawn(async move {
+        while let Some(inc) = rx.recv().await {
+            match inc {
+                Incoming::Command { chat_id, cmd } => {
+                    let agent = agent.clone();
+                    tokio::spawn(async move {
+                        let _ = agent.handle_command(&chat_id, cmd).await;
+                    });
+                }
+                Incoming::CaughtUp { chat_id, head_seq } => {
+                    tracing::info!(chat_id, head_seq, "room caught up");
+                }
+                Incoming::Status { chat_id, state } => {
+                    tracing::debug!(chat_id, ?state, "relay status");
+                }
+                Incoming::ProjectDocChanged => {
+                    let agent = agent.clone();
+                    tokio::spawn(async move {
+                        agent.settings_from_doc().await;
+                    });
+                }
+            }
+        }
+    })
+}
+
+/// The tasks a starting workspace has spawned so far. A boot that fails part-way drops this,
+/// which aborts them: a half-built workspace must leave no command pump behind feeding an agent
+/// whose pi never started.
+struct StartedTasks(Vec<tokio::task::JoinHandle<()>>);
+
+impl StartedTasks {
+    fn push(&mut self, t: tokio::task::JoinHandle<()>) {
+        self.0.push(t);
+    }
+
+    /// The boot finished: the tasks belong to the `Workspace` now, not to this guard.
+    fn into_workspace(mut self) -> Vec<tokio::task::JoinHandle<()>> {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl Drop for StartedTasks {
+    fn drop(&mut self) {
+        for t in &self.0 {
+            t.abort();
+        }
+    }
+}
+
+/// Apply the listing's owner profile (address name, former names) to a workspace's agent.
+/// Returns whether it moved — only then does the system prompt need rewriting.
+fn apply_owner_profile(agent: &Arc<Agent>, owner: Option<&Value>) -> bool {
+    let Some(o) = owner else { return false };
+    let before = agent.people.owner_profile();
+    agent.people.set_owner_profile(o);
+    let names: Vec<String> = ["address_name", "name"]
+        .iter()
+        .filter_map(|k| o.get(*k).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .chain(
+            o.get("former_names")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_owned),
+        )
+        .collect();
+    agent.memory.set_owner_names(names);
+    agent.people.owner_profile() != before
+}
+
 /// One registry pass for a workspace the relay listed (#2127): the rooms of new chats are
 /// opened on their own task FIRST, then the refreshes run, each bounded, so no refresh — slow
 /// or stalled — can delay a new chat beyond the poll interval. `open_rooms` is what opens
@@ -147,12 +237,14 @@ impl Supervisor {
         Ok(())
     }
 
-    /// Create (or refresh) the workspace for one project as listed by the relay.
+    /// Create (or refresh) the workspace for one project as listed by the relay. `owner` is the
+    /// listing's owner profile, applied before the first system prompt is written.
     pub async fn ensure_workspace(
         self: &Arc<Self>,
         project: &Value,
         chats: &[Value],
         pushes: &[Value],
+        owner: Option<&Value>,
     ) -> Result<Arc<Workspace>> {
         let project_id = project
             .get("id")
@@ -217,6 +309,10 @@ impl Supervisor {
             sync.clone(),
             self.box_slots.clone(),
         );
+        // The pump before everything else: from here on, whatever lands in a room reaches the
+        // agent when it lands, not when the boot is over.
+        let mut tasks = StartedTasks(Vec::new());
+        tasks.push(spawn_command_pump(agent.clone(), rx));
 
         // Loopback servers first, so pi's extension can reach the hook API as soon as it loads.
         let hook_l = tokio::net::TcpListener::bind(("127.0.0.1", cfg.hook_port))
@@ -231,7 +327,6 @@ impl Supervisor {
         let sites_l = tokio::net::TcpListener::bind(("127.0.0.1", cfg.sites_port))
             .await
             .context("bind sites preview port")?;
-        let mut tasks = Vec::new();
         let (hook_app, mcp_app, stub_app) = (
             hooks::router(agent.clone()),
             mcp::router(agent.clone()),
@@ -286,9 +381,30 @@ impl Supervisor {
         for id in &known {
             sync.open_room(id).await?;
         }
+        // Everything the first system prompt is written from — who owns this agent, its name,
+        // its instructions, its skills — is applied before pi starts. It used to arrive in the
+        // seconds after, which scheduled a prompt refresh and restarted the session: every new
+        // agent loaded its extension twice (2026-11-04: at 2.0 s and 8.6 s) and threw its first
+        // ~2.5 s of warm session away.
+        if let Some(owner) = project.get("user_id").and_then(Value::as_str) {
+            agent.people.set_project_owner(owner);
+        }
+        apply_owner_profile(&agent, owner);
+        // Each of these is a relay round trip. On the boot path they are bounded like the ones
+        // in the registry pass (#2127): a slow or stalled relay must cost the new agent a
+        // second, not its first reply.
+        if let Some(Err(e)) = bounded(
+            "settings",
+            &project_id,
+            agent.settings_from_relay(project, chats),
+        )
+        .await
+        {
+            tracing::warn!(project = %project_id, error = %e, "settings from relay");
+        }
         // Skills index (F5) before the first turn; refreshed every 60 s, when `skills_rev` moves,
         // and on the `skills_changed` push.
-        agent.refresh_skills().await;
+        bounded("skills", &project_id, agent.refresh_skills()).await;
         agent.start_pi(&initial_chat).await?;
         let now = arbos_core::ids::now_ms();
         sync.write_status(&[
@@ -298,20 +414,18 @@ impl Supervisor {
             ("spendTodayUsd", json!(0.0)),
         ])
         .await;
-        if let Some(owner) = project.get("user_id").and_then(Value::as_str) {
-            agent.people.set_project_owner(owner);
-        }
-        if let Err(e) = agent.settings_from_relay(project, chats).await {
-            tracing::warn!(project = %project_id, error = %e, "settings from relay");
-        }
         // After a restart nothing is mid-flight: clear leftover `running` /
         // `queued` rows and close their streaming progress messages so the
         // working indicator and working-set text cannot stick forever.
         agent.reclaim_orphan_subagents(true).await;
         agent.write_threads_index().await;
-        let _ = agent
-            .post_timing("workspace_start_ms", t0.elapsed().as_millis() as i64, None)
-            .await;
+        let boot_ms = t0.elapsed().as_millis() as i64;
+        bounded(
+            "workspace timing",
+            &project_id,
+            agent.post_timing("workspace_start_ms", boot_ms, None),
+        )
+        .await;
         self.report_workspace_state(&project_id, "running").await;
         // Pushes queued while the box slept (routine runs, cross-project messages): dispatched once
         // the rooms are open and pi is up; later ones arrive through the push poller.
@@ -321,11 +435,20 @@ impl Supervisor {
         }
         agent.spawn_push_poller();
         agent.spawn_goals_poller();
-        if let Err(e) = crate::vault::refresh_all(&agent).await {
-            tracing::info!(project = %project_id, error = %e, "secrets: no grants yet");
-        }
-        if let Err(e) = agent.refresh_shell_grants().await {
-            tracing::info!(project = %project_id, error = %e, "shell grants: none yet");
+        // Standing secrets and shell grants: two more relay round trips, and on a brand-new
+        // agent there is nothing to fetch. They run beside the boot, not in front of it; the
+        // push poller already brings every later change.
+        {
+            let agent2 = agent.clone();
+            let project2 = project_id.clone();
+            tasks.push(tokio::spawn(async move {
+                if let Err(e) = crate::vault::refresh_all(&agent2).await {
+                    tracing::info!(project = %project2, error = %e, "secrets: no grants yet");
+                }
+                if let Err(e) = agent2.refresh_shell_grants().await {
+                    tracing::info!(project = %project2, error = %e, "shell grants: none yet");
+                }
+            }));
         }
         tasks.push(agent.spawn_tree_builder());
 
@@ -377,37 +500,6 @@ impl Supervisor {
                 }
             }));
         }
-        // Command loop. Each command runs on its own task: `send`/`answer` serialize on the
-        // agent's turn lock (FIFO), while `stop`/`steer` (Guide) and settings changes land at
-        // once, mid-turn.
-        {
-            let agent2 = agent.clone();
-            tasks.push(tokio::spawn(async move {
-                let mut rx = rx;
-                while let Some(inc) = rx.recv().await {
-                    match inc {
-                        Incoming::Command { chat_id, cmd } => {
-                            let agent = agent2.clone();
-                            tokio::spawn(async move {
-                                let _ = agent.handle_command(&chat_id, cmd).await;
-                            });
-                        }
-                        Incoming::CaughtUp { chat_id, head_seq } => {
-                            tracing::info!(chat_id, head_seq, "room caught up");
-                        }
-                        Incoming::Status { chat_id, state } => {
-                            tracing::debug!(chat_id, ?state, "relay status");
-                        }
-                        Incoming::ProjectDocChanged => {
-                            let agent = agent2.clone();
-                            tokio::spawn(async move {
-                                agent.settings_from_doc().await;
-                            });
-                        }
-                    }
-                }
-            }));
-        }
         let ws = Arc::new(Workspace {
             project_id: project_id.clone(),
             cfg,
@@ -415,7 +507,7 @@ impl Supervisor {
             sync,
             agent,
             started_at: now,
-            tasks,
+            tasks: tasks.into_workspace(),
             chats_syncing: std::sync::atomic::AtomicBool::new(false),
         });
         self.workspaces
@@ -518,39 +610,22 @@ impl Supervisor {
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
-            match self.ensure_workspace(project, &chats, &pushes).await {
+            let owner = e.get("owner").or_else(|| listing.get("owner"));
+            match self.ensure_workspace(project, &chats, &pushes, owner).await {
                 Ok(w) => {
                     // The owner's profile (address name) rides on every listing: the agent
-                    // addresses the owner from it, live, never from a row's `senderName`.
-                    if let Some(o) = e.get("owner").or_else(|| listing.get("owner")) {
-                        let before = w.agent.people.owner_profile();
-                        w.agent.people.set_owner_profile(o);
-                        if w.agent.people.owner_profile() != before {
-                            // The prompt's "Your owner" section follows the profile; the pi
-                            // session re-reads it (at once when idle, else after the turn).
-                            bounded(
-                                "owner profile",
-                                &w.project_id,
-                                w.agent.refresh_session_prompt("owner profile changed"),
-                            )
-                            .await;
-                        }
-                        let names: Vec<String> = ["address_name", "name"]
-                            .iter()
-                            .filter_map(|k| o.get(*k).and_then(Value::as_str))
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .map(str::to_owned)
-                            .chain(
-                                o.get("former_names")
-                                    .and_then(Value::as_array)
-                                    .into_iter()
-                                    .flatten()
-                                    .filter_map(Value::as_str)
-                                    .map(str::to_owned),
-                            )
-                            .collect();
-                        w.agent.memory.set_owner_names(names);
+                    // addresses the owner from it, live, never from a row's `senderName`. A
+                    // workspace that was just created already applied it before its first
+                    // system prompt, so nothing changes here and no session restarts.
+                    if apply_owner_profile(&w.agent, owner) {
+                        // The prompt's "Your owner" section follows the profile; the pi
+                        // session re-reads it (at once when idle, else after the turn).
+                        bounded(
+                            "owner profile",
+                            &w.project_id,
+                            w.agent.refresh_session_prompt("owner profile changed"),
+                        )
+                        .await;
                     }
                     bounded(
                         "people chats",
@@ -1344,5 +1419,80 @@ mod tests {
         assert_eq!(header["cwd"], json!("/work"));
         assert_eq!(lines[1], text.lines().nth(1).unwrap());
         assert_eq!(lines[2], text.lines().nth(2).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod boot_tests {
+    //! A message that lands while a brand-new agent is still booting.
+    //!
+    //! Jacob's box, 2026-11-04: the agent was up at 2.0 s and the room was open, but his first
+    //! message was not ingested until 33.6 s — it had been stored at 4.6 s. The row sat in the
+    //! `Incoming` channel with nobody reading it, because the command pump used to be the last
+    //! thing a first boot started.
+
+    use std::time::{Duration, Instant};
+
+    use crate::status::tests::{reply_rows, send_cmd, test_agent_parts, FIRST_REPLY_GATE_SECS};
+    use crate::sync::Incoming;
+
+    use super::spawn_command_pump;
+
+    /// The row is queued before the pump exists, and the boot then runs longer than the whole
+    /// reply gate. The answer must follow the pump, not the boot.
+    #[tokio::test]
+    async fn a_send_queued_during_the_boot_is_answered_within_the_gate() {
+        let (agent, root, rx) = test_agent_parts(axum::Router::new()).await;
+        let chat = "01TESTCHATBOOTINGESTION000";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        // The quick path answers, so the test needs no pi: `pi_bin` points at nothing, and a
+        // held turn is what sends the message there (same stand-in relay as the latency gate).
+        let _busy = agent.test_hold_turn(chat).await;
+        let (msg_id, cmd) = send_cmd(&host, "what is going on now?");
+
+        // What the room client does when the row arrives. It succeeds whether or not anything is
+        // reading: the channel holds 1024 rows.
+        agent
+            .sync
+            .incoming
+            .send(Incoming::Command {
+                chat_id: chat.to_owned(),
+                cmd,
+            })
+            .await
+            .unwrap();
+        let queued = Instant::now();
+
+        let pump = spawn_command_pump(agent.clone(), rx);
+        // The rest of a first boot, stood in for by a wait longer than the gate. Before this fix
+        // the pump started after this, so the queued row waited for all of it.
+        let boot = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(FIRST_REPLY_GATE_SECS + 5)).await;
+        });
+
+        let gate = Duration::from_secs(FIRST_REPLY_GATE_SECS);
+        let rows = loop {
+            let rows = reply_rows(&host, &msg_id);
+            if rows.iter().any(|r| r.status == "done") {
+                break rows;
+            }
+            assert!(
+                queued.elapsed() < gate,
+                "no answer {:?} after the row was queued",
+                queued.elapsed()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        let answered = queued.elapsed();
+        assert_eq!(rows.len(), 1, "one quick row");
+        let text = rows[0].text();
+        assert!(text.contains("benchmark is still running"), "{text}");
+        assert!(
+            !boot.is_finished(),
+            "answered in {answered:?}, while the boot was still going — which is the point"
+        );
+        pump.abort();
+        boot.abort();
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
