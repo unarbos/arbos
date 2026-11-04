@@ -277,10 +277,21 @@ jobs:
 
   # The one result to read. Skipped and cancelled are not failures to GitHub, so without this a commit
   # whose check never ran reads green.
+  #
+  # `!cancelled()`, not `always()`: always() also runs this on a cancelled run and fails it. On
+  # branches, cancel-in-progress cancels a superseded run after its jobs exist (926 of 936 cancelled
+  # branch runs had jobs, 2026-11-04), and push run 41177291801 on this branch shows the result: run
+  # `cancelled`, "Swift verdict" red. gate_state reads `cancelled` as RED already, so that red adds
+  # nothing. A run evicted while pending (263 of main's 264 cancelled runs) has no jobs to skip.
+  #
+  # Unlike `check`, this does not skip when `check` skips. That is what keeps the run fail-closed: it
+  # reaches this job whenever it is not cancelled, so no mix of skipped and succeeding jobs can conclude
+  # `success` without a pass here. A job added later must keep that true: do not let this job skip
+  # with `check`, and do not give it `continue-on-error`.
   verdict:
     name: Swift verdict
     needs: [route, push-run, check]
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
