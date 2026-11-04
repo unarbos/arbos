@@ -1883,8 +1883,17 @@ impl Agent {
             s.push_str("\n\n## Project memory\n\n");
             s.push_str(&core);
         }
-        std::fs::create_dir_all(self.system_prompt_path().parent().unwrap())?;
-        std::fs::write(self.system_prompt_path(), s)?;
+        let path = self.system_prompt_path();
+        std::fs::create_dir_all(path.parent().unwrap())?;
+        // Written through a temporary name in the same directory, then renamed over the old file.
+        // A plain write truncates first, and a pi child reads this path while it starts: every
+        // other writer here is a detached task — the memory pass 1.5 s after a reply, a model
+        // change from the project doc — so a spawn could meet a truncated file and boot on half
+        // a system prompt. `rename` is atomic, so a reader sees the whole old file or the whole
+        // new one.
+        let tmp = path.with_extension("md.tmp");
+        std::fs::write(&tmp, s)?;
+        std::fs::rename(&tmp, &path)?;
         Ok(())
     }
 

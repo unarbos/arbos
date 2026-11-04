@@ -1068,6 +1068,42 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A pi child reads the system prompt by path while it starts, and every other writer of
+    /// that file is a detached task (the memory pass after a reply, a model change from the
+    /// project doc). A truncate-then-write would let a spawn meet half a file.
+    #[tokio::test]
+    async fn the_system_prompt_is_never_half_written() {
+        let (agent, root) = test_agent().await;
+        agent.write_system_prompt().unwrap();
+        let path = agent.cfg.state_dir.join("pi").join("system-prompt.md");
+        let whole = std::fs::read_to_string(&path).unwrap();
+        assert!(whole.contains("You are Doug, this user's agent in Arbos"));
+
+        let writer = {
+            let agent = agent.clone();
+            tokio::task::spawn_blocking(move || {
+                for _ in 0..400 {
+                    agent.write_system_prompt().unwrap();
+                }
+            })
+        };
+        let reads = {
+            let path = path.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut n = 0usize;
+                while !path.exists() || n < 400 {
+                    let got = std::fs::read_to_string(&path).expect("the file is always there");
+                    assert_eq!(got, whole, "read {n} saw a partial prompt");
+                    n += 1;
+                }
+                n
+            })
+        };
+        writer.await.unwrap();
+        assert!(reads.await.unwrap() >= 400);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// #1431 (GigChadAgent): after the relay renames the project, the system prompt, the quick
     /// reply and the owner note speak the new name and never present the old one as current.
     #[tokio::test]
