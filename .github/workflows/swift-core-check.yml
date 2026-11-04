@@ -127,6 +127,12 @@ permissions:
 # runner-hour ceiling — 100%. On a REQUIRED gate that trades missing verdicts for multi-hour ones,
 # which is the worse failure.
 #
+# DO NOT READ THAT 100% AS "WE NEED MORE RUNNERS". Both of these are true and the order matters:
+# the cap is real and it is binding UNDER CURRENT CLUSTERING; but the same work spread evenly needs
+# only 1.4 to 3.6 of the 5 slots, so remove the clustering and it fits comfortably. The ask this
+# data supports is not more machines — it is that we stop standing on our own foot, 64.2% of the
+# arrivals being our own fleet against 4.8% from main.
+#
 # THE WAIT IS CLUSTERING, NOT INSUFFICIENT CAPACITY, and that is the cheapest lever here by far.
 # A day's work spread perfectly evenly would need only 1.4 to 3.6 concurrent jobs (its consumed
 # runner-hours over 24 h), so every measured day fits inside the cap of 5 with room to spare — the
