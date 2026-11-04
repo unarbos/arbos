@@ -21,6 +21,18 @@ import XCTest
 /// ran one `openProfile`, so the defect was activation surviving a pan rather than either door,
 /// and all four points are kept below as the regression case.
 ///
+/// **The row is resolved from the live layout, never pinned.** Gate
+/// [41828659420](https://github.com/unarbos/arbos/actions/runs/41828659420) read `bubble:g3` at
+/// y −421 to −337 — 679 pt above the top of the window — where
+/// [41812227199](https://github.com/unarbos/arbos/actions/runs/41812227199) read y 258 to 342, on
+/// the same device, the same iOS, the same Xcode and a byte-identical fixture. Where a transcript
+/// settles its opening scroll is a property of the tree, so no row id is a safe constant. Every
+/// aim here is derived from a measured frame, which means an off-screen frame yields off-screen
+/// aims, and not one of the aim checks could catch it: each asked whether the aim was inside the
+/// frame it was computed from, which is true by construction. The window is the frame that has to
+/// be asserted, and it now is, for every box and every aim. What the fix is about is the avatar
+/// column's x band, which is a property of the column rather than of any one row.
+///
 /// **This file fails on a result, and that is a change of policy from the diagnostic it replaces.**
 /// The sweep that produced the numbers above printed its outcomes and asserted almost nothing, so
 /// that a finding could never red a chain where an `apps/ios/**` merge cuts a TestFlight build.
@@ -31,9 +43,10 @@ final class AvatarColumnShortDragUITests: XCTestCase {
     private let appear: TimeInterval = 90
     private let settle: TimeInterval = 8
 
-    /// The chat the defect was reported in, and the row it was measured on.
+    /// The chat the defect was reported in, and the row it was measured on — the latter a
+    /// preference the resolver honours when that row is on screen, not a requirement.
     private static let group = "fx-group-launch"
-    private static let row = "g3"
+    private static let preferredRow = "g3"
 
     /// The reported drag, unchanged in every respect — including the velocity, since what makes
     /// this drag interesting is that it is neither a tap nor long enough to pop.
@@ -73,6 +86,13 @@ final class AvatarColumnShortDragUITests: XCTestCase {
             .firstMatch.exists
     }
 
+    /// The app's own bounds — the window every measured frame and every aim has to sit inside.
+    private func window(_ app: XCUIApplication) -> CGRect {
+        let frame = app.frame
+        XCTAssertFalse(frame.isEmpty, "the application reports a window to measure frames against")
+        return frame
+    }
+
     private func launchGroup() -> XCUIApplication {
         let app = XCUIApplication()
         app.launchEnvironment = ["ARBOS_FIXTURE": "1", "ARBOS_OPEN_PEOPLE": Self.group]
@@ -91,38 +111,58 @@ final class AvatarColumnShortDragUITests: XCTestCase {
     // swipe-direction PR, which is not merged, and editing it from here would put a conflict in
     // the file both branches touch.
 
-    /// The element published as `bubble:<id>`, resolved to one.
-    ///
-    /// A row that draws several accessibility elements publishes the identifier on each of them,
-    /// and the plain subscript raises "Multiple matching elements found" as soon as anything reads
-    /// a frame. `g3` is a line of text and matches one container, so this only has to be honest
-    /// about the count rather than clever about it.
-    private func bubbleElement(_ app: XCUIApplication, _ id: String) -> XCUIElement {
-        let containers = app.otherElements.matching(identifier: "bubble:\(id)")
-        let count = containers.count
-        if count > 1 { print("avatar-column-drag: bubble:\(id) matched \(count) containers — taking the first") }
-        return containers.firstMatch
+    /// A row to measure, together with everything the trials aim at.
+    private struct Target {
+        let id: String
+        let bubble: CGRect
+        let disc: CGRect
+        let name: CGRect?
     }
 
-    /// Wait until the row has stopped moving, then hand back its frame.
+    /// Wait until the transcript has stopped moving, then hand back every row's frame.
     ///
-    /// A chat opens by scrolling to its newest message, and the row exists before that scroll
-    /// ends. A frame read mid-scroll says where the row was, not where the finger will land —
+    /// A chat opens by scrolling to its newest message, and the rows exist before that scroll
+    /// ends. A frame read mid-scroll says where a row was, not where the finger will land —
     /// which is how a start meant for the avatar column ends up somewhere else entirely.
-    private func settledFrame(of element: XCUIElement, timeout: TimeInterval = 8,
-                              file: StaticString = #filePath, line: UInt = #line) -> CGRect {
-        XCTAssertTrue(element.waitForExistence(timeout: timeout), "bubble:\(Self.row) is on screen",
-                      file: file, line: line)
-        var previous = CGRect.null
-        let deadline = Date().addingTimeInterval(timeout)
+    private func settledRows(_ app: XCUIApplication, file: StaticString = #filePath,
+                             line: UInt = #line) -> [(id: String, frame: CGRect)] {
+        var previous: [(id: String, frame: CGRect)] = []
+        let deadline = Date().addingTimeInterval(settle)
         while Date() < deadline {
-            let current = element.frame
-            if !current.isEmpty, current == previous { return current }
+            let current = rowBoxes(app)
+            if !current.isEmpty, current.count == previous.count,
+               zip(current, previous).allSatisfy({ $0.0.id == $0.1.id && $0.0.frame == $0.1.frame }) {
+                return current
+            }
             previous = current
             Thread.sleep(forTimeInterval: 0.1)
         }
-        XCTFail("bubble:\(Self.row)'s frame never settled", file: file, line: line)
+        XCTFail("the transcript's row frames never settled in \(Int(settle)) s "
+                + "(last reading: \(previous.count) rows)", file: file, line: line)
         return previous
+    }
+
+    /// The row the trials use: on screen, with a sender's disc on screen, and — preferred, because
+    /// the 22 pt pair needs one — a `bubble-name` on screen as well.
+    ///
+    /// `g3` wins whenever it qualifies, since it is the row this file's numbers were measured on.
+    /// It cannot be required: see the note in this file's header about gate 41828659420, where it
+    /// settled 679 pt above the window.
+    private func onScreenTarget(_ app: XCUIApplication, in window: CGRect) -> Target? {
+        let discs = avatarBoxes(app).filter { window.contains($0) }
+        let candidates: [Target] = settledRows(app)
+            .filter { window.contains($0.frame) }
+            .compactMap { row -> Target? in
+                guard let disc = nearestDisc(discs, to: row.frame.midY) else { return nil }
+                let name = nameBox(app, in: row.frame)
+                    .flatMap { (rect: CGRect) -> CGRect? in window.contains(rect) ? rect : nil }
+                return Target(id: row.id, bubble: row.frame, disc: disc, name: name)
+            }
+        func rank(_ candidate: Target) -> Int {
+            (candidate.name == nil ? 2 : 0)
+                + (candidate.id == "bubble:\(Self.preferredRow)" ? 0 : 1)
+        }
+        return candidates.min { rank($0) < rank($1) }
     }
 
     /// A point in screen space, pinned to the frame this test measured — deliberately not
@@ -186,16 +226,19 @@ final class AvatarColumnShortDragUITests: XCTestCase {
     /// landed in either way.
     func testAShortRightDragFromTheAvatarColumnOrTheNameOpensNothing() {
         let app = launchGroup()
-        let bubble = settledFrame(of: bubbleElement(app, Self.row))
-        let discs = avatarBoxes(app)
-        let rows = rowBoxes(app)
-        let name = nameBox(app, in: bubble)
-        guard let disc = nearestDisc(discs, to: bubble.midY) else {
-            return XCTFail("the group transcript draws no sender avatar to aim at")
+        let screen = window(app)
+        guard let target = onScreenTarget(app, in: screen) else {
+            return XCTFail("no row of the group transcript is on screen with a sender avatar "
+                           + "beside it, so there is nothing here to drag from")
         }
+        let bubble = target.bubble
+        let disc = target.disc
+        let name = target.name
+        let rows = rowBoxes(app)
         let nameText = name == nil ? "none" : box(name!)
-        print("avatar-column-drag: bubble:\(Self.row)=\(box(bubble)) disc=\(box(disc)) "
-              + "bubble-name=\(nameText) discs=\(discs.count)")
+        print("avatar-column-drag: row \(target.id) (preferring bubble:\(Self.preferredRow)) "
+              + "=\(box(bubble)) disc=\(box(disc)) bubble-name=\(nameText) "
+              + "window=\(box(screen))")
 
         // The column at the row's middle (the reported aim) and the column at the disc's own
         // centre (the only aim whose touch-down is inside the avatar's frame).
@@ -221,11 +264,21 @@ final class AvatarColumnShortDragUITests: XCTestCase {
         } else {
             // Said out loud rather than skipped in silence: a pair that did not run is not a pair
             // that found nothing, and the name half of this case is half its point.
-            print("avatar-column-drag: no bubble-name on bubble:\(Self.row) — the 22 pt pair did not run")
+            print("avatar-column-drag: no bubble-name on \(target.id) — the 22 pt pair did not run")
         }
 
         for (label, point) in aims {
             XCTAssertTrue(chatIsFrontmost(app), "the chat is in front before \"\(label)\"")
+            // The assertion this case was missing. Every aim is arithmetic on a measured frame, so
+            // an off-window frame gives an off-window aim; the finger then touches nothing, nothing
+            // opens, and a vacuum reads exactly like a pass. Gate 41828659420 is that run.
+            XCTAssertTrue(screen.contains(point),
+                          "the aim for \"\(label)\" at (\(Int(point.x)), \(Int(point.y))) is inside "
+                          + "the window \(box(screen)); an aim outside it touches nothing, and a "
+                          + "trial that touches nothing opens nothing")
+            XCTAssertTrue(screen.contains(CGPoint(x: point.x + Self.distance, y: point.y)),
+                          "the end of the \(Int(Self.distance)) pt drag from \"\(label)\" is inside "
+                          + "the window \(box(screen)) as well")
             XCTAssertLessThan(point.x + Self.distance, bubble.maxX,
                               "the whole \(Int(Self.distance)) pt drag from \"\(label)\" stays on "
                               + "the row, so the drag measured is the one asked for and not a "
@@ -262,16 +315,19 @@ final class AvatarColumnShortDragUITests: XCTestCase {
     /// A tap at the measured centre of a disc still opens the sender's page.
     func testATapOnTheMeasuredDiscCentreStillOpensTheProfile() {
         let app = launchGroup()
-        let bubble = settledFrame(of: bubbleElement(app, Self.row))
-        let discs = avatarBoxes(app)
-        guard let disc = nearestDisc(discs, to: bubble.midY) else {
-            return XCTFail("the group transcript draws no sender avatar to tap")
+        let screen = window(app)
+        guard let target = onScreenTarget(app, in: screen) else {
+            return XCTFail("no row of the group transcript is on screen with a sender avatar to tap")
         }
+        let disc = target.disc
         let point = CGPoint(x: disc.midX, y: disc.midY)
-        // The aim is inside the thing it claims to be aiming at. Cheap, and it is the check whose
-        // absence let an earlier sweep report 22 trials of `avatar=false` without noticing that it
-        // had been aiming 6 pt above the disc the whole time.
-        XCTAssertTrue(disc.contains(point), "the tap point \(point) is inside the disc \(box(disc))")
+        // This was `disc.contains(point)`, which could not fail: the point is the disc's own
+        // centre, so containment held by construction and the check was decoration. What can fail
+        // is the disc sitting outside the window — gate 41828659420 read it at y −373 to −337 —
+        // and then the tap lands nowhere while the frame it came from still looks reasonable.
+        XCTAssertTrue(screen.contains(point),
+                      "the tap point (\(Int(point.x)), \(Int(point.y))) is inside the window "
+                      + "\(box(screen)); the disc read \(box(disc))")
         XCTAssertGreaterThan(point.x, 24,
                              "the disc's centre is clear of the 24 pt the system pop owns, so this "
                              + "is the app's own tap")
@@ -291,12 +347,21 @@ final class AvatarColumnShortDragUITests: XCTestCase {
     /// shows the name itself still answers.
     func testATapInsideTheMeasuredNameFrameStillOpensTheProfile() {
         let app = launchGroup()
-        let bubble = settledFrame(of: bubbleElement(app, Self.row))
-        guard let name = nameBox(app, in: bubble) else {
-            return XCTFail("bubble:\(Self.row) draws no bubble-name to tap")
+        let screen = window(app)
+        guard let target = onScreenTarget(app, in: screen) else {
+            return XCTFail("no row of the group transcript is on screen with a sender avatar "
+                           + "beside it, so no row's name can be tapped either")
+        }
+        guard let name = target.name else {
+            return XCTFail("\(target.id) is on screen but draws no bubble-name inside the window "
+                           + "\(box(screen)) to tap")
         }
         let point = CGPoint(x: name.midX, y: name.midY)
-        XCTAssertTrue(name.contains(point), "the tap point \(point) is inside the name \(box(name))")
+        // Same correction as the disc case: `name.contains(point)` was true by construction, and
+        // the window is the frame worth asserting.
+        XCTAssertTrue(screen.contains(point),
+                      "the tap point (\(Int(point.x)), \(Int(point.y))) is inside the window "
+                      + "\(box(screen)); the name read \(box(name))")
         XCTAssertGreaterThanOrEqual(point.x, Self.bubbleBodyX,
                                     "the name's centre is on the bubble body, so this tap is the "
                                     + "name's door and not the avatar column's")
