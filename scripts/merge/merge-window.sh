@@ -69,7 +69,13 @@ changes_since() { git log --format='%H %s' --first-parent "$1..${MW_TEST_HEAD:-o
 ci_abort_state() {
   local id=$1 ci=$2 steps note
   [ -n "$id" ] || { echo "RED CI $ci"; return; }
-  steps=$(rd "repos/$R/actions/runs/$id/jobs?per_page=100" --jq '.jobs[].steps[]?.conclusion') \
+  # "\(.conclusion)" and not a bare .conclusion: gh renders a JSON null as an
+  # EMPTY LINE, and a step that never started is exactly the null case. Every
+  # such step is at the end of the list, so both command substitutions below
+  # strip them and `steps` arrives holding only the steps that did run — the
+  # ones this function exists to look past. Interpolating makes null arrive as
+  # the four-character token, which survives the strip and is greppable.
+  steps=$(rd "repos/$R/actions/runs/$id/jobs?per_page=100" --jq '.jobs[].steps[]? | "\(.conclusion)"') \
     || { echo "RED CI $ci (and its steps could not be read, so it is reported as before: ${steps#BLOCKED:})"; return; }
   [ -n "$steps" ] || { echo "RED CI $ci (run $id lists no steps at all)"; return; }
   printf '%s\n' "$steps" | grep -qx failure && { echo "RED CI $ci"; return; }
@@ -280,14 +286,31 @@ go() {
   if [ -z "$ch" ]; then echo "  main $(git rev-parse --short=9 origin/main) is covered by $tag"
   else
     echo "  main has changes after $tag; each needs a Release plan verdict of 'no Mac change since $tag':"
+    local cls
     while read -r sha subj; do
       v=$(verdict "$sha" nogate); echo "    ${sha:0:9} ${subj:0:70} → $v"
+      cls=$(verdict_class "$v")
+      # Which classes may clear is verdict_clears_go()'s to say, so that the
+      # answer lives in one place and selftest.sh is pinning the real decision
+      # rather than a copy of it. This used to be a literal `case` here, which
+      # meant the kit had two lists that had to agree about refusal — the exact
+      # shape of bug the rest of this file is about.
+      #
+      # The tag check stays here, and must. verdict_clears_go() is deliberately
+      # ignorant of which tag is being released, so it answers for the class and
+      # not for this release: a NOMAC naming an OLDER tag says nothing about
+      # this one and has to fall through to the NO-GO below, as it always did.
+      if verdict_clears_go "$cls"; then
+        case "$cls" in
+          NOMAC) case "$v" in "NOMAC $tag"*) continue ;; esac ;;
+          *) continue ;;
+        esac
+      fi
       # One NO-GO either way; the words differ because the next action does.
       # "not judged" used to head every one of these, so a commit the kit HAD
       # judged, and judged failed, was reported as missing information with the
       # real verdict demoted into the parenthetical.
-      case "$v" in "NOMAC $tag"*|NOPATH*) continue ;; esac
-      case "$(verdict_class "$v")" in
+      case "$cls" in
         RED)      nogo+=("${sha:0:9} JUDGED AND FAILED CI since $tag — read the run ($v)") ;;
         UNTESTED) nogo+=("${sha:0:9} JUDGED, BUT NOTHING RAN since $tag — re-run the job, the commit is not implicated ($v)") ;;
         REDGATE)  nogo+=("${sha:0:9} has a required check with no successful run since $tag ($v)") ;;
