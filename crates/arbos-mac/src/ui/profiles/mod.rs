@@ -1237,7 +1237,9 @@ mod tab_tests {
                 // `debug_bounds` wants a `'static` selector; the leak is one
                 // short string per tab per render, inside a test.
                 let sel: &'static str = Box::leak(format!("tab-{name}").into_boxed_str());
-                let b = vcx.debug_bounds(sel).unwrap_or_else(|| panic!("tab {name}"));
+                let b = vcx
+                    .debug_bounds(sel)
+                    .unwrap_or_else(|| panic!("tab {name}"));
                 (b.origin.x.into(), b.size.width.into())
             })
             .collect()
@@ -1268,7 +1270,10 @@ mod tab_tests {
             }
             // Each tab is its label plus the capsule's padding, nothing else.
             for ((_, w), name) in first.iter().zip(tabs) {
-                assert!(*w > 2.0 * TAB_PAD_X, "{name}: {w} is narrower than its padding");
+                assert!(
+                    *w > 2.0 * TAB_PAD_X,
+                    "{name}: {w} is narrower than its padding"
+                );
             }
         }
     }
