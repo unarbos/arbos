@@ -124,3 +124,32 @@ jobs:
           path: apps/ios/Arbos/build/xcodebuild-*.log
           if-no-files-found: ignore
           retention-days: 14
+      # A crashed test host shows in the log only as one test "failed" in 0.000 s and the rest of the
+      # run moving to a new process (AddMembersActionTests, runs 41772820425 and 41761888167). The
+      # exception and backtrace are in the result bundle and in the host's crash reports, and the
+      # runner discards both with the job. The bundle goes as a tar so it unpacks whole for
+      # `xcrun xcresulttool` or Xcode.
+      - name: Collect the crash evidence
+        if: failure()
+        run: |
+          set -uo pipefail
+          dest="$RUNNER_TEMP/crash-evidence"
+          mkdir -p "$dest"
+          reports="$HOME/Library/Logs/DiagnosticReports"
+          if [[ -d "$reports" ]]; then
+            find "$reports" -type f \( -name '*.ips' -o -name '*.crash' \) -mmin -120 -exec cp {} "$dest/" \; || true
+          fi
+          for bundle in "$APP_DIR"/build/dd/Logs/Test/*.xcresult; do
+            if [[ -d "$bundle" ]]; then
+              tar -czf "$dest/$(basename "$bundle").tgz" -C "$(dirname "$bundle")" "$(basename "$bundle")" || true
+            fi
+          done
+          ls -la "$dest"
+      - name: Keep the crash evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: swift-core-check-crash-evidence-${{ github.sha }}
+          path: ${{ runner.temp }}/crash-evidence
+          if-no-files-found: ignore
+          retention-days: 14
