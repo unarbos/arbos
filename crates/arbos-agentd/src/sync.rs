@@ -48,14 +48,13 @@ pub struct DocHost {
     pub first_pending_seq: Option<i64>,
     acked_vv: VersionVector,
     inflight: Option<(String, VersionVector)>,
-    /// Refusals in a row carrying the same code and no batch id; reset by any ack or a
-    /// different code. See [`DocHost::on_unnamed_refusal`].
+    /// Consecutive refused pushes, and the instant `next_push` may export again. See
+    /// [`DocHost::on_refused`].
     refusals: u32,
     push_blocked_until: Option<std::time::Instant>,
     /// Consecutive exports too big for one frame and too small to cut. See
     /// [`DocHost::chunk_to_budget`].
     oversize_strikes: u32,
-    last_refusal_code: String,
     pub caught_up: bool,
     seen_commands: std::collections::HashSet<String>,
     recovered: bool,
@@ -97,9 +96,9 @@ const REDIAL_CONCURRENCY: usize = 16;
 /// A push the relay has not acked within this is a dead link, not a slow relay (the relay acks
 /// from its frame handler right after `append_row`).
 const PUSH_ACK_TIMEOUT: Duration = Duration::from_secs(10);
-/// Identical refusals in a row before the session is dropped and resynced. The backstop that
-/// stops a box grinding on an op the relay will never take. See [`DocHost::on_refused`].
-const PUSH_REFUSAL_STRIKES: u32 = 3;
+/// First wait after a refused push before the same ops are offered again; doubles per
+/// consecutive refusal up to `PUSH_ACK_TIMEOUT`. See [`DocHost::on_refused`].
+const PUSH_REFUSAL_BACKOFF: Duration = Duration::from_secs(1);
 /// Liveness probe cadence; two silent periods end the session (was one probe per 15 min).
 const PROBE_EVERY: Duration = Duration::from_secs(60);
 /// Backoff ceiling for a room whose session failed for any reason but a refusal.
@@ -132,6 +131,10 @@ impl DocHost {
     fn next_push(&mut self) -> Option<(String, Vec<u8>)> {
         if self.inflight.is_some() {
             return None;
+        }
+        match self.push_blocked_until {
+            Some(t) if std::time::Instant::now() < t => return None,
+            _ => self.push_blocked_until = None,
         }
         let vv = self.doc.oplog_vv();
         if vv == self.acked_vv {
@@ -240,54 +243,37 @@ impl DocHost {
                 self.acked_vv = vv.clone();
                 self.inflight = None;
                 self.refusals = 0;
+                self.push_blocked_until = None;
             }
         }
     }
 
-    /// The relay refused a push. Returns `true` once the session should be given up.
+    /// The relay refused this batch (`push_guard`). The link is alive — it answered — but the
+    /// batch will never be acked, so leaving it in flight spends `PUSH_ACK_TIMEOUT` and then
+    /// kills a healthy session (Jacob, Test5, 2026-11-04: `not_yours` at 14:04:46.870, "push
+    /// not acked in 10s" at 14:04:56.918). Clearing it ends that wait.
     ///
-    /// **`acked_vv` deliberately does not move, even when the relay names the batch.** Skipping
-    /// a batch is not an option Loro offers: a replica's ops must arrive gap-free and in causal
-    /// order, so a batch the relay never receives parks *every later batch from this box*,
-    /// permanently. Measured, not assumed — importing only the batch after a skipped one gives
-    /// `success: VersionRange({})` and `pending: Some(VersionRange({7: (15, 32)}))`, meaning
-    /// nothing applied. An earlier draft of this function advanced the mark; the regression
-    /// test below is what caught it.
+    /// `acked_vv` deliberately does not move. The relay took none of the batch, and a batch
+    /// carries every op since the last ack rather than only the offending one, so advancing the
+    /// mark would silently drop good ops with the refused one. The same ops therefore export
+    /// again — which is why this also sets a backoff. Without one, a push the relay refuses
+    /// every time would respin on the next tick, which is worse than the stall it replaces. The
+    /// wait doubles per consecutive refusal and is capped at `PUSH_ACK_TIMEOUT`, so a refused
+    /// batch is never retried more slowly than today's timeout already retries it.
     ///
-    /// So a refused op cannot be dropped out from under the ops behind it. What is fixed here
-    /// is the grinding. On Jacob's box on 2026-11-04 one unattributable delete was refused 231
-    /// times by 14:54, each attempt first spending the full `PUSH_ACK_TIMEOUT` waiting for an
-    /// ack that was never coming. Two changes:
-    ///
-    /// * A refusal naming its batch clears `inflight` at once, so a healthy link is no longer
-    ///   killed ten seconds later by a timeout for a push the relay already answered.
-    /// * The same refusal [`PUSH_REFUSAL_STRIKES`] times running ends the session instead of
-    ///   retrying forever. Reconnecting resyncs from the relay, which is the only thing that
-    ///   clears the local op the relay will never take.
-    ///
-    /// None of this delivers a message already queued behind the refused op — nothing on this
-    /// side can, for the causality reason above. That is what the `hidden`-instead-of-delete
-    /// and `agent:<project_id>` sender changes are for: they stop the refusable op being
-    /// written at all.
-    ///
-    /// A different code, or any ack, starts the count over. An error frame arriving with no
-    /// push in flight is not a refusal and is the caller's to log.
-    fn on_refused(&mut self, code: &str, batch_id: &str) -> bool {
+    /// `false` when the id names no batch of ours (a late frame for a batch already settled).
+    fn on_refused(&mut self, batch_id: &str) -> bool {
         match &self.inflight {
-            // Named, and ours: stop waiting out the ack timeout for it.
-            Some((b, _)) if b == batch_id => self.inflight = None,
-            // Named, but not the batch we are waiting on: a late frame, already settled.
-            Some(_) if !batch_id.is_empty() => return false,
-            // Unnamed, from a relay too old to say which. It can only be about our push.
-            Some(_) => self.inflight = None,
-            None => return false,
+            Some((b, _)) if b == batch_id => {}
+            _ => return false,
         }
-        if self.last_refusal_code != code {
-            self.last_refusal_code = code.to_owned();
-            self.refusals = 0;
-        }
+        self.inflight = None;
         self.refusals = self.refusals.saturating_add(1);
-        self.refusals >= PUSH_REFUSAL_STRIKES
+        let wait = PUSH_REFUSAL_BACKOFF
+            .saturating_mul(1u32 << (self.refusals - 1).min(4))
+            .min(PUSH_ACK_TIMEOUT);
+        self.push_blocked_until = Some(std::time::Instant::now() + wait);
+        true
     }
 
     fn clear_inflight(&mut self) {
@@ -561,7 +547,6 @@ impl SyncHub {
             oversize_strikes: 0,
             refusals: 0,
             push_blocked_until: None,
-            last_refusal_code: String::new(),
             caught_up: false,
             seen_commands: Default::default(),
             recovered: false,
@@ -954,22 +939,12 @@ impl SyncHub {
                                 let after = host.lock().await.cursor;
                                 let req = Frame::new(FrameType::RowsReq, serde_json::to_value(wire::RowsReq { after, exclude_own: false })?, Bytes::new());
                                 sink.send(Message::Binary(req.encode())).await?;
+                            } else if !refused_batch.is_empty() && host.lock().await.on_refused(refused_batch) {
+                                // The relay named the batch it would not take, so stop waiting
+                                // for an ack that is never coming: the link is fine.
+                                inflight_since = None;
+                                tracing::warn!(room = %room, header = %f.header, "relay refused a push; batch dropped, link kept");
                             } else {
-                                let mut h = host.lock().await;
-                                let give_up = h.on_refused(code, refused_batch);
-                                let settled = h.inflight.is_none();
-                                drop(h);
-                                if settled {
-                                    // The relay answered this push, so the link is healthy:
-                                    // stop the ack timeout killing it ten seconds from now.
-                                    inflight_since = None;
-                                }
-                                if give_up {
-                                    // The same refusal over and over: an op the relay will
-                                    // never take. Reconnecting resyncs, which is the only
-                                    // thing that clears it. See `DocHost::on_refused`.
-                                    anyhow::bail!("relay refused {PUSH_REFUSAL_STRIKES} pushes running with code {code:?}; dropping the session to resync");
-                                }
                                 tracing::warn!(room = %room, header = %f.header, "relay error frame");
                             }
                         }
@@ -1083,7 +1058,6 @@ mod tests {
             oversize_strikes: 0,
             refusals: 0,
             push_blocked_until: None,
-            last_refusal_code: String::new(),
             caught_up: true,
             seen_commands: Default::default(),
             recovered: false,
@@ -1519,54 +1493,8 @@ mod tests {
     /// agentd sat on the batch until `PUSH_ACK_TIMEOUT` declared the link dead at 14:04:56.918
     /// — a 10 s stall and a reconnect over a frame the relay had already answered. A refusal
     /// that names its batch drops that batch instead.
-    /// Pins the reason `on_refused` does not advance `acked_vv`, so nobody re-proposes batch
-    /// dropping on the strength of how obviously it would fix the jam.
-    ///
-    /// A replica's ops must reach the relay gap-free and in causal order. Skip one batch and
-    /// every later batch from this box parks instead of applying — which is strictly worse
-    /// than the stall it was meant to cure, because it is silent and permanent.
     #[test]
-    fn a_batch_the_relay_never_received_parks_everything_after_it() {
-        let doc = ChatDoc::new(Some(7), true);
-        doc.start_assistant_message("r1", "", "box");
-        doc.delete_message("r1").unwrap();
-        let first_mark = doc.oplog_vv();
-        let first = doc.export_updates_since(&VersionVector::default());
-        doc.append_user_message(
-            "m2",
-            "pong",
-            "mac",
-            &arbos_core::doc::UserMessageOpts::default(),
-        )
-        .unwrap();
-        let second = doc.export_updates_since(&first_mark);
-
-        let mut whole = ChatDoc::new(Some(99), true);
-        whole.import(&first).unwrap();
-        whole.import(&second).unwrap();
-        assert!(
-            whole.message("m2").is_some(),
-            "sanity: in order, the reply lands"
-        );
-
-        // What a relay that refused the first batch would see.
-        let mut gapped = ChatDoc::new(Some(98), true);
-        let status = gapped.import(&second).unwrap();
-        assert!(
-            gapped.message("m2").is_none(),
-            "a gap did not park the reply, so skipping a refused batch may be viable after all"
-        );
-        assert!(
-            status.pending.is_some(),
-            "the ops were parked pending their missing dependencies"
-        );
-    }
-
-    /// A refused push stops the ack timeout from killing a healthy link, and the same refusal
-    /// three times running ends the session rather than grinding on an op the relay will never
-    /// take. What it must *not* do is move the acked mark: see the test above.
-    #[test]
-    fn a_refused_push_is_bounded_but_never_skipped() {
+    fn a_refused_batch_is_dropped_and_backs_off_instead_of_stalling() {
         let doc = ChatDoc::new(Some(7), true);
         let mut host = host_with(doc);
         host.doc
@@ -1579,98 +1507,40 @@ mod tests {
             .unwrap();
         let (batch, bytes) = host.next_push().expect("first push");
 
-        // A refusal naming some other batch is a late frame for something already settled.
-        assert!(!host.on_refused("not_yours", "01SOMEOTHERBATCH"));
+        // A refusal naming some other batch is not ours to act on.
+        assert!(!host.on_refused("01SOMEOTHERBATCH"));
         assert!(host.inflight.is_some(), "still waiting on our own batch");
 
-        assert!(!host.on_refused("not_yours", &batch), "gave up on strike 1");
+        assert!(host.on_refused(&batch));
         assert!(
             host.inflight.is_none(),
-            "nothing in flight, so the ack timeout has nothing to kill a healthy link over"
+            "nothing in flight, so the ack timeout has nothing to kill the link over"
+        );
+        // Backed off: the same ops are not re-offered on the very next tick.
+        assert!(
+            host.next_push().is_none(),
+            "a refused push that respins at tick speed is worse than the stall it replaces"
         );
 
-        // The ops were not accepted, so the mark did not move and they are still owed.
+        // The ops were not accepted, so the mark did not move and they are still owed. A batch
+        // carries everything since the last ack, not only the op the relay objected to.
+        host.push_blocked_until = None;
         let (batch2, bytes2) = host.next_push().expect("the ops are still owed");
         assert_ne!(batch2, batch);
         assert_eq!(bytes2, bytes, "same ops, exported from the same acked mark");
 
-        assert!(
-            !host.on_refused("not_yours", &batch2),
-            "gave up on strike 2"
-        );
-        let (batch3, _) = host.next_push().expect("the ops are still owed");
-        assert!(
-            host.on_refused("not_yours", &batch3),
-            "three identical refusals and it is still trying"
-        );
-    }
+        // The wait grows while refusals continue, and never past the timeout it replaces.
+        assert!(host.on_refused(&batch2));
+        let second = host.push_blocked_until.expect("backed off again");
+        assert!(second <= std::time::Instant::now() + PUSH_ACK_TIMEOUT);
 
-    /// The cap counts *identical* refusals, and only ones answering a push of ours.
-    #[test]
-    fn a_different_code_or_an_unsolicited_error_does_not_count_toward_the_cap() {
-        let doc = ChatDoc::new(Some(8), true);
-        let mut host = host_with(doc);
-        host.doc
-            .append_user_message(
-                "m1",
-                "hi",
-                "mac",
-                &arbos_core::doc::UserMessageOpts::default(),
-            )
-            .unwrap();
-        for code in ["not_yours", "duplicate_id", "not_yours"] {
-            host.next_push().expect("re-offered");
-            assert!(!host.on_refused(code, ""), "{code} tripped the cap");
-        }
-
-        // An error frame arriving with no push in flight is not about a push of ours.
-        host.clear_inflight();
-        assert!(!host.on_refused("not_yours", ""));
-        assert!(!host.on_refused("not_yours", ""));
-        assert!(!host.on_refused("not_yours", ""));
-    }
-
-    /// The whole reason agentd may hide its trailing wordless row instead of deleting it is
-    /// that both apps skip a row carrying `hidden` — the Mac because such a row draws nothing,
-    /// the iPhone because its row builder skips it outright. Neither has a backstop if the
-    /// flag goes missing: the row comes back as a finished, wordless assistant row, which is
-    /// Jacob's 2026-10-25 "didn't answer" bug. So the flag has to survive the push, not only
-    /// the renderers. This takes the bytes `next_push` hands the relay and reads them back the
-    /// way a client does.
-    #[test]
-    fn the_hidden_flag_is_in_the_bytes_the_relay_receives() {
-        let doc = ChatDoc::new(Some(7), true);
-        let mut host = host_with(doc);
-        host.doc
-            .append_user_message(
-                "u1",
-                "run bubble sort",
-                "mac",
-                &arbos_core::doc::UserMessageOpts::default(),
-            )
-            .unwrap();
-        host.doc.start_assistant_message("r1", "u1", "box");
-        host.doc
-            .finish_message("r1", arbos_core::doc::MessageStatus::Done);
-        crate::agent::trim_wordless_result_row(&host.doc, "r1");
-
-        let (_batch, bytes) = host.next_push().expect("something to push");
-        let mut far_side = ChatDoc::new(Some(9), true);
-        far_side
-            .import(&bytes)
-            .expect("the relay applies the batch");
-
-        let m = far_side.message("r1").expect("the row crossed the wire");
-        assert_eq!(
-            m.rest.get("hidden").and_then(serde_json::Value::as_bool),
-            Some(true),
-            "the flag both apps rely on did not survive the push"
-        );
-        assert_eq!(
-            m.status.as_str(),
-            "done",
-            "and it arrives finished, so the phone's working line ignores it"
-        );
+        // An ack clears the backoff and the count, so one bad batch does not slow the next.
+        host.push_blocked_until = None;
+        let (batch3, _) = host.next_push().expect("retried");
+        host.on_ack(&batch3);
+        assert_eq!(host.refusals, 0);
+        assert!(host.push_blocked_until.is_none());
+        assert!(host.next_push().is_none(), "acked: nothing left to push");
     }
 
     #[test]
@@ -1909,6 +1779,92 @@ mod tests {
             status("theirs"),
             "streaming",
             "the other agent's live row is left alone"
+        );
+    }
+
+    /// Pins the reason a refused batch is re-offered rather than skipped, so nobody
+    /// re-proposes dropping it on the strength of how obviously that would clear the jam.
+    ///
+    /// A replica's ops must reach the relay gap-free and in causal order. Skip one batch and
+    /// every later batch from this box parks instead of applying — silently and permanently,
+    /// which is strictly worse than the stall it would be curing.
+    #[test]
+    fn a_batch_the_relay_never_received_parks_everything_after_it() {
+        let doc = ChatDoc::new(Some(7), true);
+        doc.start_assistant_message("r1", "", "box");
+        doc.delete_message("r1").unwrap();
+        let first_mark = doc.oplog_vv();
+        let first = doc.export_updates_since(&VersionVector::default());
+        doc.append_user_message(
+            "m2",
+            "pong",
+            "mac",
+            &arbos_core::doc::UserMessageOpts::default(),
+        )
+        .unwrap();
+        let second = doc.export_updates_since(&first_mark);
+
+        let mut whole = ChatDoc::new(Some(99), true);
+        whole.import(&first).unwrap();
+        whole.import(&second).unwrap();
+        assert!(
+            whole.message("m2").is_some(),
+            "sanity: in order, the reply lands"
+        );
+
+        // What a relay that refused the first batch would see.
+        let mut gapped = ChatDoc::new(Some(98), true);
+        let status = gapped.import(&second).unwrap();
+        assert!(
+            gapped.message("m2").is_none(),
+            "a gap did not park the reply, so skipping a refused batch may be viable after all"
+        );
+        assert!(
+            status.pending.is_some(),
+            "the ops were parked pending their missing dependencies"
+        );
+    }
+
+    /// The whole reason agentd may hide its trailing wordless row instead of deleting it is
+    /// that both apps skip a row carrying `hidden` — the Mac because such a row draws nothing,
+    /// the iPhone because its row builder skips it outright. Neither has a backstop if the
+    /// flag goes missing: the row comes back as a finished, wordless assistant row, which is
+    /// Jacob's 2026-10-25 "didn't answer" bug. So the flag has to survive the push, not only
+    /// the renderers. This takes the bytes `next_push` hands the relay and reads them back the
+    /// way a client does.
+    #[test]
+    fn the_hidden_flag_is_in_the_bytes_the_relay_receives() {
+        let doc = ChatDoc::new(Some(7), true);
+        let mut host = host_with(doc);
+        host.doc
+            .append_user_message(
+                "u1",
+                "run bubble sort",
+                "mac",
+                &arbos_core::doc::UserMessageOpts::default(),
+            )
+            .unwrap();
+        host.doc.start_assistant_message("r1", "u1", "box");
+        host.doc
+            .finish_message("r1", arbos_core::doc::MessageStatus::Done);
+        crate::agent::trim_wordless_result_row(&host.doc, "r1");
+
+        let (_batch, bytes) = host.next_push().expect("something to push");
+        let mut far_side = ChatDoc::new(Some(9), true);
+        far_side
+            .import(&bytes)
+            .expect("the relay applies the batch");
+
+        let m = far_side.message("r1").expect("the row crossed the wire");
+        assert_eq!(
+            m.rest.get("hidden").and_then(serde_json::Value::as_bool),
+            Some(true),
+            "the flag both apps rely on did not survive the push"
+        );
+        assert_eq!(
+            m.status.as_str(),
+            "done",
+            "and it arrives finished, so the phone's working line ignores it"
         );
     }
 }
