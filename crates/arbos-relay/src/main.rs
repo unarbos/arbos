@@ -631,6 +631,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/asp/socket", get(outside::socket))
         .route("/asp/files/{slot}/{key}", get(outside::file))
         .route("/asp/chats/{id}/messages", get(outside::history))
+        .route("/asp/approvals/{id}", get(outside::approval_read))
         .route("/asp/connect/{id}", get(outside::connect_page))
         // Sidecar support (#2189): members, and the public texts an agent is handed.
         .route("/asp/chats/{id}/members", get(outside_sidecar::members))
