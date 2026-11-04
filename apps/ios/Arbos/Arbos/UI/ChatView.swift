@@ -3650,10 +3650,21 @@ struct ChatSession: View {
     }
 
     /// The "+" before the field: photos and files. Channels send text only (C1), so none there.
+    ///
+    /// Grok's is a soft grey disc. `ControlSurface` would give it the field's own
+    /// near-black `#181818`, four steps over the `#141414` page, under the three white
+    /// `composerRimLayers` strokes — so the rim carries the shape and the control reads as
+    /// an outlined ring rather than a disc. The Mac draws the same `+` as a grey disc with
+    /// no rim (`composer.rs`, `theme.surface_2`), and `bubbleAssistant` is this palette's
+    /// member of that grey. On Glass the material *is* the disc, so that path is unchanged.
     private var attachButton: some View {
         Button { showAttach = true } label: {
             ZStack {
-                ControlSurface(shape: Circle())
+                if theme.isGlass {
+                    PillSurface(shape: Circle())
+                } else {
+                    Circle().fill(theme.bubbleAssistant)
+                }
                 Image(systemName: "plus")
                     .font(theme.font(Theme.plusGlyph, weight: .regular)) // control-size: exception plusGlyph
                     .foregroundStyle(theme.text)
@@ -4861,13 +4872,13 @@ private struct ComposerField: View {
         }
     }
 
-    /// Inside the white pill: the send arrow with text or a recording; idle, Grok's
+    /// Inside the white disc: the send arrow with text or a recording; idle, Grok's
     /// voice-wave bars — a tap starts a voice call (agent or people chat). Channels
     /// have no calls (C1): the arrow stays, dimmed until there is text.
     ///
     /// The two marks cross-fade rather than cut ([feedback
-    /// composer-send-crossfade-2026-10-30]). The pill underneath them never
-    /// fades: it is the same white capsule in both states, and two of them
+    /// composer-send-crossfade-2026-10-30]). The disc underneath them never
+    /// fades: it is the same white circle in both states, and two of them
     /// dissolving in one place would dip to half alpha and read as a flicker.
     @ViewBuilder
     private var actionGlyph: some View {
@@ -5002,12 +5013,16 @@ private struct ComposerField: View {
                     .animation(swap, value: micShown)
                 // While recording: tap send also finishes (same as release). Otherwise
                 // Grok keeps the composer usable while the bot works: text sends, an
-                // empty field starts a voice call with the agent (Grok's voice-wave pill).
+                // empty field starts a voice call with the agent (Grok's voice-wave glyph).
                 Button(action: onPrimary) {
-                    Capsule()
+                    Circle()
                         .fill(theme.primary)
-                        .frame(width: Theme.actionPillWidth, height: Theme.actionPillHeight)
+                        .frame(width: Theme.actionDiameter, height: Theme.actionDiameter)
                         .overlay(actionGlyph)
+                        // Trailing-aligned in the box so the circle keeps the measured
+                        // right inset while the box keeps the wider touch target.
+                        .frame(width: Theme.actionPillWidth, height: Theme.actionPillHeight,
+                               alignment: .trailing)
                         .frame(height: Theme.composerHeight)
                         .contentShape(Rectangle())
                 }

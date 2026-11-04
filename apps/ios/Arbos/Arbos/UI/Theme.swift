@@ -161,11 +161,22 @@ struct Theme: Equatable {
     static let composerTextInset: CGFloat = Controls.textInset
     /// One 22 pt body line centred in the 48 pt field.
     static let composerTextPadY: CGFloat = (composerHeight - 22) / 2
-    /// The white action is a 120 × 96 px capsule (was a 36 pt circle), 24 px from the
-    /// field's top and bottom and 26 px from its right edge.
+    /// The white action's **box**: 120 × 96 px, 24 px from the field's top and bottom and
+    /// 26 px from its right edge. It is the touch target and the width the trailing
+    /// cluster reserves, not the shape that is painted — see `actionDiameter`.
     static let actionPillWidth: CGFloat = 40
     static let actionPillHeight: CGFloat = 32
     static let actionPillTrailing: CGFloat = 26 / 3
+    /// The white action is a circle, like Grok's and like the Mac's 28 pt `SEND_BUTTON`;
+    /// the 120 × 96 px capsule read off Jacob's 2026-10-25 shot stretched it sideways.
+    ///
+    /// Its diameter is the box's own height, so the control keeps the 24 px it already
+    /// had above and below and loses only the sideways stretch. The box stays 40 wide:
+    /// the circle is trailing-aligned in it, which holds the measured 26 px right inset
+    /// *and* keeps the touch target wider than the circle. Narrowing the box instead
+    /// would move the text field, which is the one thing this cluster may not do
+    /// (`composerTrailingWidth`).
+    static let actionDiameter: CGFloat = actionPillHeight
     /// Mic glyph centre → action pill: 72 px (the glyph sits in a 44 pt hit frame, so
     /// 22 + `micPillGap`).
     static let micHitWidth: CGFloat = 44
@@ -700,8 +711,8 @@ struct MicGlyph: Shape {
     }
 }
 
-/// Grok's voice-mode glyph in the composer's white pill: five round-capped bars, 2 pt
-/// wide, 3.25 pt apart, 6.5 / 14.5 / 8.5 / 14.5 / 6.5 pt tall, centred in the pill.
+/// Grok's voice-mode glyph in the composer's white disc: five round-capped bars, 2 pt
+/// wide, 3.25 pt apart, 6.5 / 14.5 / 8.5 / 14.5 / 6.5 pt tall, centred in the disc.
 /// Arbos keeps its call semantics behind it (a tap starts a voice call).
 struct VoiceWaveGlyph: Shape {
     static let barWidth: CGFloat = 2

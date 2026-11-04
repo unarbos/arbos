@@ -43,11 +43,15 @@ final class ComposerMetricsTests: XCTestCase {
         XCTAssertEqual(MentionTextView.insets.top + 22 + MentionTextView.insets.bottom, Theme.composerHeight)
     }
 
-    func testActionIsAWhitePillNotACircle() {
-        // 120 × 96 px capsule, 24 px from the field's top and bottom, 26 px from its right edge.
+    func testActionIsAWhiteCircleInA120x96Box() {
+        // The box is unchanged: 120 × 96 px, 24 px from the field's top and bottom,
+        // 26 px from its right edge. The circle inside it is the box's own height, so
+        // the control loses the sideways stretch and keeps every other measurement.
         XCTAssertEqual(Theme.actionPillWidth, 40)
         XCTAssertEqual(Theme.actionPillHeight, 32)
-        XCTAssertEqual((Theme.composerHeight - Theme.actionPillHeight) / 2, 8)
+        XCTAssertEqual(Theme.actionDiameter, Theme.actionPillHeight)
+        XCTAssertLessThan(Theme.actionDiameter, Theme.actionPillWidth, "the box stays the wider touch target")
+        XCTAssertEqual((Theme.composerHeight - Theme.actionDiameter) / 2, 8)
         XCTAssertEqual(Theme.actionPillTrailing * 3, 26, accuracy: 0.001)
         assertOnPixel(Theme.actionPillTrailing, "actionPillTrailing")
     }
@@ -58,13 +62,17 @@ final class ComposerMetricsTests: XCTestCase {
         XCTAssertEqual(VoiceWaveGlyph.pitch, 3.25)
         XCTAssertEqual(VoiceWaveGlyph.heights, [6.5, 14.5, 8.5, 14.5, 6.5])
         XCTAssertEqual(VoiceWaveGlyph.heights, Array(VoiceWaveGlyph.heights.reversed()))
-        // The five bars span 15 pt and 14.5 pt — inside the 40 × 32 pill with room to spare.
+        // The five bars span 15 pt and 14.5 pt — inside the 32 pt circle with room to spare.
         let span = VoiceWaveGlyph.pitch * 4 + VoiceWaveGlyph.barWidth
         XCTAssertEqual(span, 15)
-        XCTAssertLessThan(span, Theme.actionPillWidth)
-        XCTAssertLessThan(VoiceWaveGlyph.heights.max()!, Theme.actionPillHeight)
+        XCTAssertLessThan(span, Theme.actionDiameter)
+        XCTAssertLessThan(VoiceWaveGlyph.heights.max()!, Theme.actionDiameter)
+        // Both corners of the bars' box clear the circle's edge, not just its box.
+        let tallest = VoiceWaveGlyph.heights.max()!
+        let halfDiagonal = (span * span + tallest * tallest).squareRoot() / 2
+        XCTAssertLessThan(halfDiagonal, Theme.actionDiameter / 2)
         // Drawn centred: the path's bounds sit on the rect's centre.
-        let rect = CGRect(x: 0, y: 0, width: Theme.actionPillWidth, height: Theme.actionPillHeight)
+        let rect = CGRect(x: 0, y: 0, width: Theme.actionDiameter, height: Theme.actionDiameter)
         let bounds = VoiceWaveGlyph().path(in: rect).boundingRect
         XCTAssertEqual(bounds.midX, rect.midX, accuracy: 0.01)
         XCTAssertEqual(bounds.midY, rect.midY, accuracy: 0.01)
@@ -223,7 +231,7 @@ final class ComposerMetricsTests: XCTestCase {
             ("plusFieldGap", Theme.plusFieldGap), ("composerInsetKeyboard", Theme.composerInsetKeyboard),
             ("composerTextInset", Theme.composerTextInset), ("composerTextPadY", Theme.composerTextPadY),
             ("actionPillWidth", Theme.actionPillWidth), ("actionPillHeight", Theme.actionPillHeight),
-            ("actionPillTrailing", Theme.actionPillTrailing),
+            ("actionDiameter", Theme.actionDiameter), ("actionPillTrailing", Theme.actionPillTrailing),
             ("composerTrailingWidth", Theme.composerTrailingWidth),
             ("micGlyphWidth", Theme.micGlyphWidth),
             ("micGlyphHeight", Theme.micGlyphHeight), ("composerBottomKeyboard", Theme.composerBottomKeyboard),
