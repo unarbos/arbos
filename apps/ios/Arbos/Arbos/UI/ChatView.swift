@@ -4872,13 +4872,13 @@ private struct ComposerField: View {
         }
     }
 
-    /// Inside the white disc: the send arrow with text or a recording; idle, Grok's
+    /// Inside the white pill: the send arrow with text or a recording; idle, Grok's
     /// voice-wave bars — a tap starts a voice call (agent or people chat). Channels
     /// have no calls (C1): the arrow stays, dimmed until there is text.
     ///
     /// The two marks cross-fade rather than cut ([feedback
-    /// composer-send-crossfade-2026-10-30]). The disc underneath them never
-    /// fades: it is the same white circle in both states, and two of them
+    /// composer-send-crossfade-2026-10-30]). The pill underneath them never
+    /// fades: it is the same white capsule in both states, and two of them
     /// dissolving in one place would dip to half alpha and read as a flicker.
     @ViewBuilder
     private var actionGlyph: some View {
@@ -5013,16 +5013,12 @@ private struct ComposerField: View {
                     .animation(swap, value: micShown)
                 // While recording: tap send also finishes (same as release). Otherwise
                 // Grok keeps the composer usable while the bot works: text sends, an
-                // empty field starts a voice call with the agent (Grok's voice-wave glyph).
+                // empty field starts a voice call with the agent (Grok's voice-wave pill).
                 Button(action: onPrimary) {
-                    Circle()
+                    Capsule()
                         .fill(theme.primary)
-                        .frame(width: Theme.actionDiameter, height: Theme.actionDiameter)
+                        .frame(width: Theme.actionPillWidth, height: Theme.actionPillHeight)
                         .overlay(actionGlyph)
-                        // Trailing-aligned in the box so the circle keeps the measured
-                        // right inset while the box keeps the wider touch target.
-                        .frame(width: Theme.actionPillWidth, height: Theme.actionPillHeight,
-                               alignment: .trailing)
                         .frame(height: Theme.composerHeight)
                         .contentShape(Rectangle())
                 }
