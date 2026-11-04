@@ -5,7 +5,8 @@
 //! while the lock is held used to wait, silent, until that turn ended. Now it gets its own row
 //! within milliseconds and a real answer within seconds: one small model call over a snapshot
 //! of the running work (what step is running, what it already said, which helpers are up, the
-//! recent turns), answered without the main session. The model tags its answer:
+//! open background jobs and the step each is on, the recent turns), answered without the main
+//! session. The model tags its answer:
 //!
 //! - `[status]` — a question the snapshot answers: the quick reply is the answer; the main
 //!   session is told about the exchange in its next prompt and never answers it again.
@@ -38,7 +39,8 @@ use crate::sync::SharedHost;
 /// What the quick-reply path did with a command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuickOutcome {
-    /// No turn holds the lock: the normal path answers (nothing was written).
+    /// Nothing is running — no turn on the lock, no message waiting for it, no open job: the
+    /// normal path answers (nothing was written).
     NotBusy,
     /// A status answer was written; the main session does not run for this message.
     Answered,
@@ -82,7 +84,8 @@ const USER_TEXT_MAX: usize = 1200;
 /// How long the agent may stay busy before a new message earns a status note. Short turns that
 /// free the lock inside this window never get a status row (#1448). Kept under the busy-reply
 /// gate (~5 s) so a real status question still answers within seconds. Task acks never become
-/// bubbles at all (#1479).
+/// bubbles at all (#1479). An open background job skips the wait: it is not a turn that might
+/// free, it is work the user was already told runs on its own.
 const BUSY_GRACE: Duration = Duration::from_secs(3);
 
 /// `ARBOS_QUICK_REPLY_TIMEOUT_MS` (default 8000): the call's budget before a silent queue.
@@ -175,6 +178,41 @@ pub fn settle_quick(kind: SideKind, text: &str, truncated: bool) -> (SideKind, O
     }
 }
 
+/// One open background job of this chat (`queued` or `running`), for the quick call. `step` is
+/// the job row's own `last_step` — the plain-words line the working row and `list_jobs` already
+/// show — so the quick lane reads the job's real progress and not the turn that started it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct JobLine {
+    pub title: String,
+    /// `queued` (waiting for a slot or a path lock) or `running`.
+    pub state: String,
+    /// Empty until the worker's first labelled step.
+    pub step: String,
+    pub elapsed_s: i64,
+    /// Seconds since `step` was recorded; `None` while there is no step yet.
+    pub step_age_s: Option<i64>,
+}
+
+impl JobLine {
+    fn line(&self) -> String {
+        let step = match (self.step.trim(), self.step_age_s) {
+            ("", _) => "no step yet".to_owned(),
+            (s, Some(age)) => format!("now: {s} ({age} s ago)"),
+            (s, None) => format!("now: {s}"),
+        };
+        format!(
+            "{} — {} for {} s — {step}",
+            self.title,
+            if self.state == "queued" {
+                "waiting to start"
+            } else {
+                "running"
+            },
+            self.elapsed_s
+        )
+    }
+}
+
 /// What the running work looks like, for the quick call.
 #[derive(Debug, Default, Clone)]
 pub struct BusySnapshot {
@@ -190,6 +228,8 @@ pub struct BusySnapshot {
     pub said: String,
     /// `name — status — last progress` per running helper.
     pub helpers: Vec<String>,
+    /// The open background jobs of this chat, the freshest step first.
+    pub jobs: Vec<JobLine>,
     /// `role: text` lines of this chat's recent turns.
     pub recent: Vec<String>,
     /// A user turn of this chat is running and can take a steer.
@@ -226,6 +266,14 @@ impl BusySnapshot {
                 "- What you already told the user in this step: {}\n",
                 self.said.trim()
             ));
+        }
+        if !self.jobs.is_empty() {
+            out.push_str(
+                "- Background tasks you started for this conversation (each answers on its own when it finishes):\n",
+            );
+            for j in &self.jobs {
+                out.push_str(&format!("    {}\n", j.line()));
+            }
         }
         if !self.helpers.is_empty() {
             out.push_str("- Background helpers running (their results arrive later):\n");
@@ -344,8 +392,39 @@ impl Agent {
         noted.insert(chat_id.to_owned(), started);
     }
 
-    /// The running work as the quick call sees it; `None` when nothing holds the lock and
-    /// nothing is waiting for it.
+    /// The open background jobs of `chat_id`, freshest step first. The step comes from the job
+    /// row (`jobs.last_step`, written on every labelled step of its worker), which is where the
+    /// user-facing progress of a job lives — the `subagents` row the helper lines are built from
+    /// carries the internal `step: …` label instead.
+    fn open_job_lines(&self, chat_id: &str) -> Vec<JobLine> {
+        let mut open: Vec<crate::store::JobRow> = self
+            .store
+            .jobs_for_chat(chat_id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|j| j.is_open())
+            .collect();
+        open.sort_by_key(|j| std::cmp::Reverse(j.last_step_at.unwrap_or(j.created_at)));
+        let now = arbos_core::ids::now_ms();
+        open.iter()
+            .take(5)
+            .map(|j| JobLine {
+                title: clip(&j.title, 120),
+                state: j.state.clone(),
+                step: clip(&crate::store::redact(&j.last_step), 160),
+                elapsed_s: j.elapsed_s(),
+                step_age_s: j.last_step_at.map(|t| (now - t).max(0) / 1000),
+            })
+            .collect()
+    }
+
+    /// The running work as the quick call sees it; `None` only when nothing is running at all.
+    ///
+    /// Three things count as running. A turn holds `turn_lock`; a user message waits for it; or
+    /// a background job of this chat is open. The third was missing (Jacob, Test5 T7): a job
+    /// runs on its own `tokio::spawn`, so the turn that called `start_job` has long dropped the
+    /// lock and `sends_waiting()` is 0 — the box did not read as busy, and a status question
+    /// asked during a job went to a full main-session turn instead of this lane.
     pub(crate) async fn busy_snapshot(
         &self,
         chat_id: &str,
@@ -353,7 +432,8 @@ impl Agent {
     ) -> Option<BusySnapshot> {
         let lock_busy = self.turn_lock_busy();
         let waiting = self.sends_waiting();
-        if !lock_busy && waiting == 0 {
+        let jobs = self.open_job_lines(chat_id);
+        if !lock_busy && waiting == 0 && jobs.is_empty() {
             return None;
         }
         let mut snap = BusySnapshot::default();
@@ -394,16 +474,28 @@ impl Agent {
                     snap.said = clip(&said, 700);
                     snap.steerable = snap.same_chat && !t.stopped && !t.reply_only;
                 }
+                // No turn on the lock. A job is then the running work, and its own step — not
+                // "getting ready" — is what the user is asking about.
                 None => {
                     snap.same_chat = true;
-                    snap.step = if waiting > 0 {
-                        format!("{waiting} earlier message(s) ahead of this one")
+                    let lead = jobs
+                        .iter()
+                        .find(|j| j.state == "running")
+                        .or_else(|| jobs.first());
+                    if waiting > 0 {
+                        snap.step = format!("{waiting} earlier message(s) ahead of this one");
+                    } else if let Some(j) = lead {
+                        snap.step = "a background task".to_owned();
+                        snap.elapsed_s = j.elapsed_s.max(0) as u64;
+                        snap.activity =
+                            (!j.step.trim().is_empty()).then(|| j.step.trim().to_owned());
                     } else {
-                        "getting ready".to_owned()
-                    };
+                        snap.step = "getting ready".to_owned();
+                    }
                 }
             }
         }
+        snap.jobs = jobs;
         // A pending approval card is not running work: never report the gated tool's label.
         let turn_chat = {
             let tl = self.turn.lock().await;
@@ -521,12 +613,14 @@ impl Agent {
         }
         // Wait out short turns: if the lock frees (or the queue drains) inside BUSY_GRACE the
         // user is not really waiting — no status note (#1448). Poll the snapshot so a free
-        // agent exits early instead of only watching the lock.
+        // agent exits early instead of only watching the lock. An open job ends the wait at
+        // once: there is no short turn to ride out, the work outlives the turn by construction
+        // and the user is already watching it on the working row.
         let t_wait = Instant::now();
         let snap = loop {
             match self.busy_snapshot(chat_id, host).await {
                 None => return QuickOutcome::NotBusy,
-                Some(s) if t_wait.elapsed() >= BUSY_GRACE => break s,
+                Some(s) if t_wait.elapsed() >= BUSY_GRACE || !s.jobs.is_empty() => break s,
                 Some(_) => tokio::time::sleep(Duration::from_millis(100)).await,
             }
         };
@@ -938,12 +1032,31 @@ pub(crate) mod tests {
                 "loop-2 — running — purpose: optimise — 20 s since its last step — latest: round 3"
                     .into(),
             ],
+            jobs: vec![
+                JobLine {
+                    title: "Searching for surf schools".into(),
+                    state: "running".into(),
+                    step: "Reading delsoulsurf.com".into(),
+                    elapsed_s: 72,
+                    step_age_s: Some(14),
+                },
+                JobLine {
+                    title: "Comparing hosting prices".into(),
+                    state: "queued".into(),
+                    elapsed_s: 5,
+                    ..JobLine::default()
+                },
+            ],
             recent: vec!["user: start the loop".into()],
             steerable: true,
         };
         let r = s.render("what is going on now?");
         assert!(r.contains("Current step: working on a request in this conversation, running for 30 s. Right now: Running a command…."));
         assert!(r.contains("sleep 100"));
+        assert!(r.contains(
+            "Searching for surf schools — running for 72 s — now: Reading delsoulsurf.com (14 s ago)"
+        ));
+        assert!(r.contains("Comparing hosting prices — waiting to start for 5 s — no step yet"));
         assert!(r.contains("The user's new message:\nwhat is going on now?"));
         let p = quick_system_prompt("Doug", Some("[The user is Arbos.]"));
         assert!(p.starts_with("You are Doug, this user's agent in Arbos."));
@@ -3227,6 +3340,85 @@ pub(crate) mod tests {
         assert_eq!(
             agent.quick_reply(chat, &host, &cmd).await,
             QuickOutcome::NotBusy
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Jacob, Test5 T7 (agentd 0.1.192): a research job ran for 5 min 04 s and the "ETA?" asked
+    /// 60 s in was answered by a full main-session turn. `busy_snapshot` read `turn_lock` and
+    /// the waiting-send counter only, and a job touches neither — `start_job` spawns its worker
+    /// and the turn drops the lock — so the box did not read as busy and the lane built for
+    /// "how is it going?" was skipped exactly while work was running.
+    ///
+    /// The property, not the wording: the question is taken by the quick lane, and the job's
+    /// own current step (`jobs.last_step`, the line the working row already shows) is in the
+    /// snapshot the quick call reads, so the lane has something true to answer with.
+    #[tokio::test]
+    async fn a_status_question_during_a_background_job_takes_the_quick_path() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000019";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        agent
+            .store
+            .insert_job(
+                "job-eta",
+                chat,
+                "m-ask",
+                "Searching for surf schools",
+                "research",
+                "Find the three best-reviewed surf schools near Santa Teresa.",
+                &[],
+            )
+            .unwrap();
+        agent
+            .store
+            .set_job_state("job-eta", "running", None)
+            .unwrap();
+        agent
+            .store
+            .set_job_step("job-eta", "Reading delsoulsurf.com")
+            .unwrap();
+
+        // Nothing holds the turn lock and nothing waits for it: the job is the only work.
+        assert!(!agent.turn_lock_busy());
+        assert_eq!(agent.sends_waiting(), 0);
+        let snap = agent
+            .busy_snapshot(chat, &host)
+            .await
+            .expect("a running background job reads as busy");
+        let job = snap
+            .jobs
+            .iter()
+            .find(|j| j.title == "Searching for surf schools")
+            .expect("the running job is in the snapshot");
+        assert_eq!(job.state, "running");
+        assert_eq!(
+            job.step, "Reading delsoulsurf.com",
+            "the job's real current step is not reachable from the quick lane"
+        );
+        assert!(snap.render("ETA?").contains("Reading delsoulsurf.com"));
+
+        let (msg_id, cmd) = send_cmd(&host, "what is going on now?");
+        let t0 = Instant::now();
+        assert_eq!(
+            agent.quick_reply(chat, &host, &cmd).await,
+            QuickOutcome::Answered,
+            "a status question asked while a background job runs must take the quick-reply lane"
+        );
+        let elapsed = t0.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(FIRST_REPLY_GATE_SECS),
+            "quick reply took {elapsed:?} with a job running"
+        );
+        let rows = reply_rows(&host, &msg_id);
+        assert_eq!(rows.len(), 1, "one quick row, no main-session row");
+        assert_eq!(
+            rows[0].rest.get("decision").and_then(Value::as_str),
+            Some("quick")
+        );
+        assert!(
+            agent.take_side_notes(chat).is_some(),
+            "the main session is told once and never answers it again"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
