@@ -5919,13 +5919,20 @@ final class AppModel: ObservableObject {
     }
 
     /// Author fields for a row in a project chat (API §3/§7, same as the Mac): always the
-    /// handle and display name, so the agent addresses the writer by name; `sender: user:<id>`
-    /// in a project someone shared with me, so a guest's words are never read as the owner's
-    /// (#1580). A solo project keeps the plain `user` the box expects.
+    /// handle and display name, so the agent addresses the writer by name, and always
+    /// `sender: user:<id>`, so a guest's words are never read as the owner's (#1580).
+    ///
+    /// The id used to be written only when this copy of the project said `shared`, and that
+    /// was the wrong place to decide it. Sharing is a property of the project that the phone
+    /// learns late and the relay reported as `false` to the owner's own list, so the owner's
+    /// rows in a shared agent's chat went out wearing the bare `user` marker. The relay reads
+    /// one row at a time and cannot place a bare marker, so it reported those rows as
+    /// `system` — Jacob's messages showing as the app rather than as him. Writing the id
+    /// unconditionally takes the guess out of the client: a row says who wrote it, whoever
+    /// else is in the chat.
     private func projectAuthor(projectId: Id) -> CoreChatDoc.Author? {
         guard let me = user else { return nil }
-        let shared = project(projectId)?.shared == true
-        return CoreChatDoc.Author(sender: shared ? "user:\(me.id)" : "user", handle: me.login, name: me.name, avatar: nil)
+        return CoreChatDoc.Author(sender: "user:\(me.id)", handle: me.login, name: me.name, avatar: nil)
     }
 
     /// A send typed before the optimistic new-chat's relay id landed.
@@ -5981,7 +5988,9 @@ final class AppModel: ObservableObject {
         }
         let messageId = newId()
         markUnacked(chatId: chatId, messageId: messageId)
-        var m = Message(id: messageId, chatId: chatId, role: .user, sender: "user", status: .done, turn: nil,
+        // The same marker `projectAuthor` will write when the real send lands, so the row does
+        // not change hands under the reader when the placeholder is replaced.
+        var m = Message(id: messageId, chatId: chatId, role: .user, sender: myUserId ?? "user", status: .done, turn: nil,
                         decision: nil, subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil,
                         createdAt: nowMs(), completedAt: nowMs(), pending: true,
                         parts: attachments.map { .attachment(id: newId(), attachment: $0) }
