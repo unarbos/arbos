@@ -250,5 +250,72 @@ else
 fi
 
 echo
+# 10. publish_job(): a skipped Release run and an unreadable job listing are
+# different answers and must never collapse into one. The skipped run is a FACT
+# — it planned nothing — and the scan has to walk past it to the run that holds
+# the answer. An unreadable listing is a failed read and must still refuse.
+#
+# The live failure this pins: a skipped run still lists its jobs, so the guard
+# that asks "is there a job?" does not catch it, and the 404 on the skipped
+# job's log read as BLOCKED. Because BLOCKED returns out of a newest-first scan,
+# one skipped run hid every older run behind it and shut the merge queue on
+# dd0d8db10 with no expiry.
+echo "publish_job — a skipped run is walked past, an unreadable listing still refuses:"
+# shellcheck disable=SC2034  # consumed by the eval'd publish_job below, which builds its URL from it
+R=unarbos/arbos
+pj_src=$(sed -n '/^publish_job()/,/^}/p' "$D/merge-window.sh")
+if [ -z "$pj_src" ]; then
+  bad "no publish_job() in merge-window.sh — it was renamed or removed, and case 10 is testing nothing"
+else
+  eval "$pj_src"
+fi
+pj() {  # <what rd returns, ';' for newline> <rd exit code> -> "<rc>|<stdout>"
+  local out rc
+  PJ_OUT=$1 PJ_RC=$2
+  # shellcheck disable=SC2317  # reached only through the eval'd publish_job
+  rd() { printf '%s' "$PJ_OUT" | tr ';' '\n'; return "$PJ_RC"; }
+  out=$(publish_job 99); rc=$?
+  unset -f rd
+  echo "$rc|$out"
+}
+pj_case() {  # <label> <rd output> <rd rc> <expected "rc|stdout">
+  local got; got=$(pj "$2" "$3")
+  if [ "$got" = "$4" ]; then ok "$1"; else bad "$1 — got '$got', expected '$4'"; fi
+}
+pj_case "a job that ran yields its id"                '126698636706 success' 0 '0|126698636706'
+pj_case "a skipped job yields nothing, rc 0 (walk on)" '126698636706 skipped' 0 '0|'
+pj_case "a run with no such job yields nothing, rc 0"  ''                     0 '0|'
+pj_case "an unreadable listing is rc 1 (refuse)"       'BLOCKED: HTTP 403'    1 '1|BLOCKED: HTTP 403'
+pj_case "a cancelled job is not a skipped one"         '126698636706 cancelled' 0 '0|126698636706'
+# Two jobs, so that the FIRST is the one taken. With one row every fixture above
+# passes just as well against `tail -1`, and the run's own job order is the only
+# thing distinguishing the job that planned from a later retry of it.
+pj_case "the first matching job is the one used"       '111 success;222 skipped' 0 '0|111'
+# The stub makes the jq invisible, so the field it selects has to be asserted on
+# the source. `.status` is `completed` on a skipped job too, so a mutant reading
+# it would never match ` skipped` and would restore the defect in full.
+if printf '%s\n' "$pj_src" | nocomment | grep -q '\.conclusion'; then
+  ok "publish_job asks for the job's .conclusion, not its .status"
+else
+  bad "publish_job no longer reads .conclusion — a skipped job's .status is 'completed', so the skip test cannot fire"
+fi
+# The pair, asserted on its own. A mutation that returned empty on ANY failure
+# would satisfy every row above that mentions `skipped` and would silently turn
+# an unreadable listing into "nothing to see here" — the fail-open direction.
+skipped=$(pj '126698636706 skipped' 0); unreadable=$(pj 'BLOCKED: HTTP 403' 1)
+if [ "$skipped" != "$unreadable" ]; then
+  ok "a skipped run and an unreadable listing give different answers ('$skipped' vs '$unreadable')"
+else
+  bad "a skipped run and an unreadable listing both give '$skipped' — a failed read is being reported as a fact"
+fi
+# And the call site must honour the empty return by CONTINUING, not by blocking.
+vbody=$(body verdict)
+if printf '%s\n' "$vbody" | grep -q 'j=$(publish_job "$r")' && printf '%s\n' "$vbody" | grep -q '\[ -n "$j" \] || continue'; then
+  ok "verdict() calls publish_job and continues on the empty answer"
+else
+  bad "verdict() no longer routes through publish_job and continues on empty — the distinction above is unwired"
+fi
+
+echo
 if [ "$fail" -eq 0 ]; then echo "selftest: PASS"; else echo "selftest: FAIL"; fi
 exit "$fail"

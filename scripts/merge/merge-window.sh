@@ -87,6 +87,34 @@ ci_abort_state() {
   echo "UNTESTED CI $ci — run $id has $(printf '%s\n' "$steps" | grep -cx null) step(s) that never started and none that failed, so it aborted before testing this commit; re-run it, do not re-push${note:+ — }${note:0:160}"
 }
 
+# publish_job <release-run-id>: the id of that run's "What to publish" job, empty when the run
+# planned nothing, rc=1 with the reason on stdout when the listing could not be read.
+#
+# A SKIPPED RUN'S MISSING LOG IS A FACT, NOT A FAILED READ, AND MUST NOT BLOCK.
+# A Release run that was skipped still LISTS its jobs, so an "is there a job?" test does not catch
+# it — the job is there, with conclusion `skipped`. What a skipped job has is no log, and GitHub
+# answers `BlobNotFound`/404 for it. That 404 is the expected consequence of something the caller
+# can already see (the run planned nothing, so it names no commit), not a failure to read.
+#
+# Blocking on it cost far more than the cause suggests. Runs are scanned newest-first and a BLOCKED
+# returns out of the scan, so ONE skipped run hid every older run behind it — including the run
+# carrying the answer. On 2026-11-04 three consecutive skipped plans sat at the top of the list and
+# dd0d8db10 read BLOCKED permanently, because a run created after a commit never leaves that
+# commit's `created>=` window. The whole merge queue was shut on it.
+#
+# The conclusion is read in the SAME call as the id, not a second one that could disagree with the
+# first. The empty return and the rc=1 return are deliberately different channels: a caller that
+# collapsed them would be back to treating a fact as a failure, or worse, the reverse.
+publish_job() {
+  local j
+  j=$(rd "repos/$R/actions/runs/$1/jobs" --jq '.jobs[]|select(.name=="What to publish")|"\(.id) \(.conclusion)"') \
+    || { echo "$j"; return 1; }
+  j=$(echo "$j" | head -1)
+  [ -n "$j" ] || return 0
+  case "$j" in *" skipped") return 0 ;; esac
+  echo "${j%% *}"
+}
+
 # verdict <sha> [nogate]: one line — TAG <vX> | NOMAC <vY> <reason> | COVERED <vY> | RED | UNTESTED | WAIT <why> | BLOCKED <unreadable>
 # "nogate" leaves the Swift gate out, for a caller that judges the gate itself (go, through range_gate).
 verdict() {
@@ -154,8 +182,9 @@ verdict() {
          printf '%s\n' "$list" | awk -v s="$sha" '$2!="push" && $3=="completed" && $4!=s {print $1}')
   for r in $runs; do
     scanned=$((scanned + 1))
-    j=$(rd "repos/$R/actions/runs/$r/jobs" --jq '.jobs[]|select(.name=="What to publish")|.id') || { echo "BLOCKED listing jobs of Release run $r: ${j#BLOCKED:}"; return; }
-    j=$(echo "$j" | head -1)
+    # Empty means "this run planned nothing, so it names no commit" — skip it. A failure to READ
+    # still BLOCKs, below and unchanged. publish_job() is where those two are told apart.
+    j=$(publish_job "$r") || { echo "BLOCKED listing jobs of Release run $r: ${j#BLOCKED:}"; return; }
     [ -n "$j" ] || continue
     log=$(rd --allow-escape-sequences "repos/$R/actions/jobs/$j/logs") || { echo "BLOCKED reading the 'What to publish' log of Release run $r: ${log#BLOCKED:}"; return; }
     log=$(printf '%s' "$log" | sed 's/\x1b\[[0-9;]*m//g')
