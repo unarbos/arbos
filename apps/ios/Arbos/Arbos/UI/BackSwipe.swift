@@ -43,12 +43,17 @@
 // moves that view out from under the measurement on its very first frame; see
 // `DirectionalSwipeRecognizer.startInWindow`, which is the whole of that bug.
 //
-// Twice now a bug here has been invisible in a screenshot, and for one reason both times:
-// `UIView.animate` writes the end state to the model layer immediately and animates only the
-// presentation. So geometry that is being animated reads as already finished — to a gesture
-// measuring itself against it, and to a person looking at the screen. The second case is
-// `InteractiveBackPop.interaction`: a transition left unfinished still looks perfect and is
-// dead to touch. When this screen misbehaves, suspect the model layer before the pixels.
+// More than once a bug here has been invisible in a screenshot, and for the same reason each
+// time: `UIView.animate` writes the end state to the model layer immediately and animates
+// only the presentation. So geometry that is being animated reads as already finished — to a
+// gesture measuring itself against it, and to a person looking at the screen. When this
+// screen misbehaves, suspect the model layer before the pixels.
+//
+// And then measure it rather than reason about it. Every wrong answer this file has had came
+// from a confident account of what UIKit does, and every right one came from a number:
+// `BackSwipeTrace.probe` prints the model transform, the presentation transform, the
+// animation count and the layer speed side by side for exactly that reason. An assertion here
+// that can only report pass or fail will cost an hour of gate time and teach nothing.
 
 import SwiftUI
 import UIKit
@@ -564,6 +569,11 @@ final class BackPopAnimator: NSObject, UIViewControllerAnimatedTransitioning {
             arrivingView.transform = .identity
             dim.alpha = 0
         } completion: { _ in
+            #if DEBUG
+            // Before this block touches anything, so the state the transition left behind is
+            // on the record whether or not the cleanup below turns out to be right.
+            BackSwipeTrace.probe("left", leavingView)
+            #endif
             dim.removeFromSuperview()
             arrivingView.transform = .identity
             (layer.shadowColor, layer.shadowOpacity, layer.shadowRadius, layer.shadowOffset) = shadow
@@ -578,18 +588,32 @@ final class BackPopAnimator: NSObject, UIViewControllerAnimatedTransitioning {
                 leavingView.removeFromSuperview()
             }
             context.completeTransition(!cancelled)
-            // Last, and after the completion in both cases.
+            // The animation comes off before the transform goes back. An interactive
+            // transition scrubs by pausing the layer and setting its time by hand, and
+            // `UIView.animate` wrote the end state to the model layer when it was called —
+            // so a `.identity` written into the model under an animation still attached to a
+            // layer nobody resumes is a write nothing draws.
             //
-            // On a cancel it has to be after: an identity written before `completeTransition`
-            // does not survive UIKit's own cancel handling. Gate run 41737758724 measured the
-            // cost — the chat came to rest a whole screen width right of where it belonged,
-            // `chat-back` at x 418 in a 402 pt window, having been set to identity moments
-            // earlier. On a pop the view is out of the container by now, so putting it back
-            // at the origin cannot cover the screen that replaced it, and leaves it clean for
-            // whenever SwiftUI shows that screen again.
+            // Whether that is what ails this screen is still being measured. What is known is
+            // that moving this write is not: runs 41737758724 and 41747877523 put `chat-back`
+            // at the same x 418 in a 402 pt window, once with the write before
+            // `completeTransition` and once after.
+            leavingView.layer.removeAllAnimations()
             leavingView.transform = .identity
             #if DEBUG
+            BackSwipeTrace.probe("rest", leavingView)
             BackSwipeTrace.note(cancelled ? "done:back" : "done:popped")
+            // And once more after UIKit, SwiftUI and the navigation controller have all had
+            // their turn, because the question is what the screen settles at, not what this
+            // block leaves. The hit test names whatever is on top at the middle of the
+            // window, which is where the chat list's rows are.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak leavingView] in
+                BackSwipeTrace.probe("settled", leavingView)
+                if let window = BackSwipeTrace.window {
+                    BackSwipeTrace.hitTest("mid", CGPoint(x: window.bounds.midX,
+                                                          y: window.bounds.midY))
+                }
+            }
             #endif
         }
     }
@@ -835,7 +859,6 @@ private struct BackSwipeModifier: ViewModifier {
                     FullScreenBackHost(composerTop: composerTop, onBack: { dismiss() })
                 }
             }
-            .backSwipeTraceReadout()
     }
 }
 
@@ -1060,9 +1083,21 @@ extension View {
 /// Off unless the variable is set, so no other run pays for it, and Debug-only.
 enum BackSwipeTrace {
     static let on = ProcessInfo.processInfo.environment["ARBOS_SWIPE_TRACE"] == "1"
-    /// The label the rig reads. Weak: it belongs to whichever screen is on top.
-    static weak var readout: UILabel?
+    /// The label the rig reads, held on the WINDOW rather than on a screen. It used to belong
+    /// to whichever screen was on top, which failed at the one question worth asking: gate run
+    /// 41747877523 asked what was covering Home after the chat popped, and the readout had
+    /// popped with the chat. A witness that leaves with the suspect is no witness.
+    private static var readout: UILabel?
     private(set) static var entries: [String] = []
+
+    /// Whatever window the app is actually showing. Key first, because an alert or a rig
+    /// overlay can add another one.
+    static var window: UIWindow? {
+        let windows = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows)
+        return windows.first(where: \.isKeyWindow) ?? windows.first
+    }
 
     /// How much the screen must move before the drag is worth another entry. A drag at
     /// `XCUIGestureVelocity.slow` is under the finger for ten seconds or more and is sampled
@@ -1094,7 +1129,57 @@ enum BackSwipeTrace {
     static func note(_ what: String) {
         guard on else { return }
         entries.append(what)
-        if let readout { write(to: readout) }
+        if let label = onWindow() { write(to: label) }
+    }
+
+    /// The readout, put back on the current window if it is not on one. Re-parented rather
+    /// than rebuilt, so the trace survives every screen change in a run.
+    private static func onWindow() -> UILabel? {
+        guard let window else { return readout }
+        let label = readout ?? UILabel()
+        label.isAccessibilityElement = true
+        label.accessibilityIdentifier = "back-swipe-trace"
+        label.accessibilityLabel = "back swipe trace"
+        label.textColor = .clear
+        label.backgroundColor = .clear
+        label.isUserInteractionEnabled = false
+        // A 24 pt corner, so it cannot sit over anything a test reaches for.
+        label.frame = CGRect(x: 0, y: 0, width: 24, height: 24)
+        if label.superview !== window { window.addSubview(label) }
+        readout = label
+        return label
+    }
+
+    /// What a view is doing, as numbers. Five reasoned answers about this screen have each
+    /// cost an hour of gate time and all five were wrong, so this reports rather than judges.
+    ///
+    /// `tx` is the model transform and `ptx` the presentation one. When they disagree the
+    /// model write landed and something is still drawing over it, and `anim` and `spd` say
+    /// what: a percent-driven transition pauses the layer it scrubs, and a layer left at
+    /// speed 0 with an animation still attached presents its end state for ever.
+    static func probe(_ what: String, _ view: UIView?) {
+        guard on else { return }
+        guard let view else { return note("\(what):gone") }
+        let model = Int(view.transform.tx)
+        var presented = "-"
+        if let shown = view.layer.presentation()?.transform.m41 { presented = String(Int(shown)) }
+        let animations = view.layer.animationKeys()?.count ?? 0
+        let speed = String(format: "%.1f", view.layer.speed)
+        let parented = view.superview == nil ? 0 : 1
+        note("\(what):tx=\(model),ptx=\(presented),anim=\(animations),spd=\(speed),sup=\(parented)")
+    }
+
+    /// Who takes a touch at a point, named rather than guessed at. "Not hittable" is a
+    /// verdict; this is the reason behind it.
+    static func hitTest(_ what: String, _ point: CGPoint) {
+        guard on, let window else { return }
+        var kind = "nobody"
+        var named = "-"
+        if let hit = window.hitTest(point, with: nil) {
+            kind = String(describing: type(of: hit))
+            named = hit.accessibilityIdentifier ?? "-"
+        }
+        note("\(what):\(kind)/\(named)")
     }
 
     /// Both the text and the accessibility value, so the trace reaches the rig whichever of
@@ -1105,46 +1190,7 @@ enum BackSwipeTrace {
     }
 }
 
-/// The element `BackSwipeTrace` writes to: a 24 pt corner of the screen that holds the trace
-/// and nothing else. Drawn in nothing (`.clear`) — it is there to be read, not seen.
-private struct BackSwipeTraceReadout: UIViewRepresentable {
-    func makeUIView(context: Context) -> UILabel {
-        let label = UILabel()
-        label.isAccessibilityElement = true
-        label.accessibilityIdentifier = "back-swipe-trace"
-        label.accessibilityLabel = "back swipe trace"
-        label.textColor = .clear
-        label.backgroundColor = .clear
-        BackSwipeTrace.write(to: label)
-        BackSwipeTrace.readout = label
-        return label
-    }
-
-    func updateUIView(_ uiView: UILabel, context: Context) {
-        BackSwipeTrace.readout = uiView
-    }
-}
 #endif
-
-extension View {
-    /// `ARBOS_SWIPE_TRACE=1` puts the drag's trace on screen for the rig to read. Nothing at
-    /// all in Release, and nothing in a Debug run that did not ask for it: a `backSwipeToPop`
-    /// screen's view tree is the same shape it has always been.
-    #if DEBUG
-    @ViewBuilder
-    fileprivate func backSwipeTraceReadout() -> some View {
-        if BackSwipeTrace.on {
-            overlay(alignment: .topLeading) {
-                BackSwipeTraceReadout().frame(width: 24, height: 24).allowsHitTesting(false)
-            }
-        } else {
-            self
-        }
-    }
-    #else
-    fileprivate func backSwipeTraceReadout() -> some View { self }
-    #endif
-}
 
 #if DEBUG
 /// Rig log for the back gestures (`ARBOS_SWIPE_LOG=1`, category `swipe`): the system pop's
