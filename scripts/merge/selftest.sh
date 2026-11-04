@@ -154,6 +154,101 @@ else
   bad "the completed* glob now precedes 'completed success' (lines $globline then $sucline), so every green run is classified UNTESTED"
 fi
 
+# 8. nomac_covers(): when a commit judged against an OLDER tag may be cleared by
+#    a newer commit judged against the current one.
+#
+#    The danger in this change is not that it refuses too much, it is that it
+#    clears too much, so the cases are written around the two ways it could:
+#    clearing a commit that is NOT contained by the covering one, and clearing
+#    anything at all when no current-tag verdict was ever recorded. The second is
+#    the real-debt path — genuine unshipped Mac work never produces a current-tag
+#    NOMAC, so nothing sets `covering` — and it is asserted on its own below.
+#
+#    Real commits in a scratch repository, because the function's whole job is an
+#    ancestry question and a stub would be asserting my idea of git's answer.
+echo "nomac_covers — an ancestor is covered, anything else is not:"
+# The SHIPPED function, lifted out and evaluated — not retyped. merge-window.sh
+# ends in a top-level `case` dispatch so it cannot be sourced, which is the same
+# bind auto-stable-selftest.sh is in with is_hotfix, and this is its answer.
+#
+# A copy here would be worse than no case at all: every mutation of the real
+# function would leave the copy untouched, so the whole of case 8 would pass
+# against a broken merge-window.sh. That is not hypothetical — this file carried
+# such a copy while it was being written, and three of six mutations survived it.
+nomac_covers_src=$(sed -n '/^nomac_covers()/,/^}/p' "$D/merge-window.sh")
+if [ -z "$nomac_covers_src" ]; then
+  bad "no nomac_covers() in merge-window.sh — it was renamed or removed, and case 8 is testing nothing"
+else
+  eval "$nomac_covers_src"
+fi
+repo=$(mktemp -d) || exit 1
+trap 'rm -rf "$repo"' EXIT
+cd "$repo" || exit 1
+git init -q .; git config user.email t@example.com; git config user.name test
+git commit -q --allow-empty -m older
+git commit -q --allow-empty -m middle
+git commit -q --allow-empty -m tip
+# `git init` names the first branch master or main depending on the host's
+# config, and a failed `rev-parse main~2` prints its own argument on stdout
+# before exiting non-zero — so a `main || master` fallback yields two lines,
+# not a sha, and every ancestry answer below would be about a bad revision.
+git branch -M trunk
+git checkout -q -b sibling trunk~2
+git commit -q --allow-empty -m "off the first-parent line"
+old=$(git rev-parse trunk~2); mid=$(git rev-parse trunk~1)
+tip=$(git rev-parse trunk);   sib=$(git rev-parse sibling)
+for r in old mid tip sib; do
+  case "${!r}" in *[!0-9a-f]* | "") bad "scratch repo: $r is not a sha ('${!r}'), so case 8 would prove nothing"; esac
+done
+
+# Values, not variable names. Driving this through ${!var} is what shellcheck
+# cannot follow, and a fixture it reads as unused is the shape of a case that
+# proves nothing.
+covers_is() {  # <clears|refuses> <sha> <covering-sha> <what>
+  local got=refuses; nomac_covers "$2" "$3" && got=clears
+  if [ "$got" = "$1" ]; then ok "$4"; else bad "$4 — got '$got', wanted '$1'"; fi
+}
+covers_is clears  "$old" "$tip" "an ancestor of the covering commit is cleared"
+covers_is clears  "$mid" "$tip" "the commit just below the covering one is cleared"
+covers_is clears  "$tip" "$tip" "the covering commit covers itself"
+covers_is refuses "$sib" "$tip" "a commit that is NOT an ancestor is refused"
+covers_is refuses "$tip" "$old" "a commit NEWER than the covering one is refused"
+# The real-debt path, named on its own because it is the one that must never
+# clear: no current-tag NOMAC anywhere means `covering` is empty.
+empty=""
+if nomac_covers "$old" "$empty"; then
+  bad "with no current-tag verdict recorded at all, a commit was still cleared — this is the real-debt path and it must refuse"
+else
+  ok "with no current-tag verdict recorded, nothing is cleared"
+fi
+cd "$D" || exit 1
+
+# 9. The guards in go() that keep case 8 honest. nomac_covers is only safe
+#    because of WHERE it is called and WHAT sets its second argument; tested
+#    alone it would pass just as well in a go() that had lost either.
+echo "go() reaches nomac_covers only from a current-tag NOMAC:"
+gobody=$(body go)
+if printf '%s\n' "$gobody" | grep -q 'nomac_covers "\$sha" "\$covering"'; then
+  ok "the clearing branch calls nomac_covers"
+else
+  bad "go() no longer calls nomac_covers, so an older-tag NOMAC either refuses always or clears unchecked"
+fi
+# `covering` must be assigned on the exact-match arm and nowhere else. An
+# assignment anywhere looser is the whole defect back again, wearing the new
+# function as cover.
+assigns=$(printf '%s\n' "$gobody" | grep -c 'covering=')
+exact=$(printf '%s\n' "$gobody" | grep -c '"NOMAC \$tag"\*) covering=')
+if [ "$exact" -eq 1 ] && [ "$assigns" -eq 2 ]; then
+  ok "covering is set on the exact \"NOMAC \$tag\" match and nowhere else (one init, one assignment)"
+else
+  bad "covering is assigned $assigns time(s), $exact of them on the exact tag match — any other source lets a weaker verdict clear the window"
+fi
+if printf '%s\n' "$gobody" | grep -q 'NOMAC).*not since \$tag\|NOT since \$tag'; then
+  ok "the refusal names the tag the commit WAS judged against as well as the one being released"
+else
+  bad "the NOMAC refusal does not name both tags, so the reader must infer the mismatch from the parenthetical"
+fi
+
 echo
 if [ "$fail" -eq 0 ]; then echo "selftest: PASS"; else echo "selftest: FAIL"; fi
 exit "$fail"
