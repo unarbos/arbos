@@ -189,7 +189,9 @@ mutate() {  # mutate <description> <sed-program> <case-fn> <case-name> [install-
   local m="$work/mutant.$mutations"
   mutations=$((mutations + 1))
   make_install "$m" "$mode"
-  sed -i "$prog" "$m/xcrun" "$m/simctl"
+  # Not `sed -i`: BSD sed wants an argument for it and this suite also runs on the Mac it protects.
+  local f
+  for f in "$m/xcrun" "$m/simctl"; do sed "$prog" "$f" > "$f.m" && mv "$f.m" "$f" && chmod 755 "$f"; done
   if cmp -s "$m/xcrun" "$inst/xcrun"; then
     survivors=$((survivors + 1))
     printf 'NO-OP %s — the mutation changed nothing; the sed program no longer matches the guard\n' "$desc"
