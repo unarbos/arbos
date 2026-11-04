@@ -4,21 +4,21 @@ name: Swift core check
 # signing, no TestFlight upload). Covers the shared client core surface the
 # phone embeds as ArbosFFI.
 
+# The push trigger filters nothing, and that is the whole correctness argument of this workflow.
+#
+# A `paths:` filter here is evaluated on the pushed commit's two-dot diff, while whether this gate
+# APPLIES is judged on the pull request's three-dot diff — scripts/merge/checks.sh's gate_applies,
+# because the three-dot diff is what the merge would bring. A branch that touches a gated path
+# early and then lands a final push outside those paths therefore ended up with a head the gate
+# applies to and no run that could ever answer it, presenting as all-green with nothing red. See
+# scripts/release/swift-gate-applies.sh for the measured case (#2751 at f4f010268).
+#
+# So every push starts a run, and the `decide` job below works out on the same three-dot diff
+# whether the macOS job is needed. The pull_request list stays: checks.sh reads the quoted patterns
+# under this `on:` block to learn the gate's scope and BLOCKS on a block it can read but finds
+# empty, so this is the one declaration of what the gate covers.
 on:
   push:
-    paths:
-      - "crates/arbos-core/**"
-      - "crates/arbos-client/**"
-      - "crates/arbos-ffi/**"
-      - "crates/arbos-matrix/**"
-      - "scripts/build-xcframework.sh"
-      - "packages/ArbosFFI/**"
-      - "assets/avatars/leaves/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - "apps/ios/Arbos/**"
-      - ".github/workflows/swift-core-check.yml"
   pull_request:
     paths:
       - "crates/arbos-core/**"
@@ -37,17 +37,48 @@ on:
 permissions:
   contents: read
 
+# Unfiltered pushes also repair this group. A push that created no run joined no group and so
+# displaced nothing: run 41918138101 was still building c187a9c00 forty-five minutes after that sha
+# stopped being the branch tip, holding a runner to judge superseded content.
 concurrency:
   group: swift-core-check-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  decide:
+    name: Swift core check applies?
+    runs-on: ubuntu-24.04
+    outputs:
+      applies: ${{ steps.applies.outputs.applies }}
+    steps:
+      # The three-dot diff needs the merge base, which a shallow clone does not have.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: The screen's own invariants
+        run: ./scripts/release/swift-gate-applies.sh selftest
+      - name: Does the gate apply to this commit?
+        id: applies
+        run: ./scripts/release/swift-gate-applies.sh decide
+
   check:
     name: build-xcframework + fastlane test
-    # A branch in this repo already gets the push run; its pull_request run is the same commit again on
-    # GitHub's macOS pool, which allows this repo five jobs at once (2026-10-30: 33 queued, ~4 h wait).
-    # Pull requests from forks have no push run here, so they keep theirs.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    needs: decide
+    # Two conditions, and they are not the same one.
+    #
+    # The first is this gate's scope, decided on the three-dot diff rather than on what the trigger
+    # happened to fire for. A head the gate applies to always reaches the job below.
+    #
+    # The second is deduplication. A branch in this repo gets the push run, so its pull_request run
+    # would be the same commit again on GitHub's macOS pool, which allows this repo five jobs at
+    # once (2026-10-30: 33 queued, ~4 h wait; 2026-11-04: 2 h 25 min from queue to first job).
+    # Pull requests from forks have no push run here, so they keep theirs. That deferral is only
+    # sound because the push trigger above filters nothing — when it filtered paths, the push run it
+    # defers to did not always exist, and this line is what turned that into a missing verdict.
+    if: >-
+      needs.decide.outputs.applies == 'true' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name != github.repository)
     runs-on: macos-15
     # 46-63 min measured on identical content, the spread being runner draw not diff. The old 60
     # killed runs mid-bundle, which is no verdict rather than a red one; this change took 63.4.
