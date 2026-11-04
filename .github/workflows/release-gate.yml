@@ -119,9 +119,16 @@ jobs:
           base="$(git merge-base origin/main "$HEAD_SHA")"
           # Exit 1 is a refusal, exit 2 is the gate failing to decide. Both fail the job: a check
           # that cannot tell must never read as a pass. Its output says which of the two it is.
+          # TEMPORARY, REVERTED IN THE NEXT COMMIT. Crafted release-path-while-unreleased case,
+          # so that this gate's refusal is observed as a real failing conclusion on a real run
+          # rather than only inside the self-test. main is pinned to 83c2b5ebf with v0.6.379 as
+          # the last stable release, which leaves #2645's Mac fix unreleased on it, and the pull
+          # request under judgement is that same Mac fix.
+          echo "proof run: judging a crafted dirty main, not this pull request ($base..$HEAD_SHA)"
           python3 scripts/release/release-gate.py \
-            --repo "$GITHUB_REPOSITORY" --main origin/main \
-            --pr-base "$base" --pr-head "$HEAD_SHA"
+            --repo "$GITHUB_REPOSITORY" --main 83c2b5ebf \
+            --mac-released-sha 2402ff996 --ios-released-sha 83c2b5ebf \
+            --pr-base 49608e2e8 --pr-head 83c2b5ebf
 
   self-test:
     # A gate nobody has watched refuse is not a tested guard. These cases replay states main has
