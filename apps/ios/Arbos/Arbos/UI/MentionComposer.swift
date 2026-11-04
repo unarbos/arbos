@@ -321,10 +321,6 @@ struct MentionTextView: UIViewRepresentable {
         view.textContainer.lineFragmentPadding = 0
         view.keyboardDismissMode = .interactive
         view.adjustsFontForContentSizeCategory = false
-        // A `UITextView` is a scroll view, and a scroll view holds a touch that landed in
-        // its content back until it knows the finger is not a scroll. The press flash is
-        // an answer to the finger, so it cannot wait that out: deliver at once.
-        view.delaysContentTouches = false
         view.accessibilityIdentifier = "composer-field"
         view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         view.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -644,10 +640,11 @@ final class MentionUITextView: UITextView {
     /// first responder.
     var onFirstTouchDown: (() -> Void)?
 
-    /// Read the touch, never take it: the field's own recognisers still place the caret
-    /// and raise the keyboard exactly as they did. `touchesBegan` is the earliest the
-    /// field hears about a finger — well before `becomeFirstResponder`, which is what
-    /// makes the flash read as an answer to the touch rather than to the keyboard.
+    /// Read the touch, never take it, and change nothing about how it is delivered: the
+    /// field's own recognisers still place the caret and raise the keyboard exactly as they
+    /// did. `touchesBegan` is the earliest this field hears about a finger — before
+    /// `becomeFirstResponder`, which is what makes the flash read as an answer to the touch
+    /// rather than to the keyboard.
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         if !isFirstResponder { onFirstTouchDown?() }
         super.touchesBegan(touches, with: event)
