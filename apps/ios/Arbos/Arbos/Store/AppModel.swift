@@ -1132,6 +1132,11 @@ final class AppModel: ObservableObject {
         } else {
             pendingOpen = (chatId, projectId)
         }
+        // A "message from another project" banner announced an agent-to-agent exchange,
+        // which the transcript leaves out by default (Jacob, 2026-11-04). The tap is what
+        // opens it. `retryPendingOpen` comes back through here once the docs have loaded,
+        // so a deferred open gets the same answer off the messages it can see by then.
+        crossRevealedChat = messages(of: chatId).contains(where: \.isAgentCrossMessage) ? chatId : nil
     }
 
     /// What the chat header's connection pill says for `chatId`, or nil when the
