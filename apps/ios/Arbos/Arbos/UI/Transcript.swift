@@ -1581,11 +1581,10 @@ struct RowView: View, Equatable {
         }
         // Quote tap: brief accent wash. Search hit: a softer persistent wash so
         // keyword matches read as a slightly different colour while searching.
-        .background(
-            RoundedRectangle(cornerRadius: Theme.bubbleRadius + 4, style: .continuous)
-                .fill(theme.accent.opacity(highlighted ? 0.14 : (searchHit ? 0.10 : 0)))
-                .padding(-4)
-        )
+        // The wash is drawn by each bubble's own box (`bubbleBox`), not here: this
+        // row runs the full width of the screen, so a background on it washed the
+        // avatar lane and the empty half of the row along with the message.
+        .environment(\.revealWash, theme.accent.opacity(highlighted ? 0.14 : (searchHit ? 0.10 : 0)))
         .animation(.easeInOut(duration: 0.35), value: highlighted)
         .animation(.easeOut(duration: 0.18), value: searchHit)
         // iMessage: drag left → times.
@@ -1654,7 +1653,7 @@ struct RowView: View, Equatable {
                 .padding(.vertical, linkOnly ? LinkPreviewCard.bubbleInset : Theme.bubbleVPad)
                 .background(Theme.bubbleShape.fill(theme.bubbleUser))
                 .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: true) }
-                .bubbleMenuPreview()
+                .bubbleBox()
                 .frame(maxWidth: maxBubble, alignment: .trailing)
                 .opacity(delivery.opacity)
                 .accessibilityIdentifier("own-bubble-\(delivery)")
@@ -1705,7 +1704,7 @@ struct RowView: View, Equatable {
                 .background(Theme.bubbleShape.fill(theme.bubbleAssistant))
                 .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: false) }
                 .modifier(LiveSenderBar(url: avatar, seed: model.personId(handle: handle) ?? handle))
-                .bubbleMenuPreview()
+                .bubbleBox()
                 .frame(maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset), alignment: .leading)
                 Spacer(minLength: 0)
             }
@@ -1773,7 +1772,7 @@ struct RowView: View, Equatable {
                 .padding(.vertical, Theme.bubbleVPad)
                 .background(Theme.bubbleShape.fill(theme.bubbleAssistant))
                 .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: false) }
-                .bubbleMenuPreview()
+                .bubbleBox()
                 .background {
                     // D82: while the first-login terminal morphs into this bubble it
                     // needs the bubble's exact frame; only the greeting row reports.
@@ -1837,7 +1836,7 @@ struct RowView: View, Equatable {
             .padding(.vertical, Theme.bubbleVPad)
             .background(Theme.bubbleShape.fill(theme.card))
             .overlay(Theme.bubbleShape.strokeBorder(theme.separator, lineWidth: 1))
-            .bubbleMenuPreview()
+            .bubbleBox()
             .accessibilityLabel("\(lead)\(name)")
             .accessibilityIdentifier("secret-ghost")
             if mine {
@@ -2200,14 +2199,14 @@ struct RowView: View, Equatable {
                 .padding(.vertical, Theme.bubbleVPad)
                 .background(Theme.bubbleShape.fill(theme.bubbleAssistant))
                 .senderBar(LeafArt.accent(agent, dark: theme.isDark))
-                .bubbleMenuPreview()
+                .bubbleBox()
         } else {
             content
                 .padding(.horizontal, Theme.bubbleHPad)
                 .padding(.vertical, Theme.bubbleVPad)
                 .background(Theme.bubbleShape.fill(theme.bubbleAssistant))
                 .modifier(LiveSenderBar(url: nil, seed: agent.id, override: agent.effectiveAvatarColorIndex))
-                .bubbleMenuPreview()
+                .bubbleBox()
         }
     }
 
@@ -3298,7 +3297,7 @@ struct ImageBubble: View {
         }
         .background(fill)
         .clipShape(Theme.bubbleShape)
-        .bubbleMenuPreview()
+        .bubbleBox()
         .accessibilityIdentifier("photo-bubble")
         .task(id: item.cacheKey) { await load() }
         .onAppear { animate = stillFrame != nil }
@@ -3773,7 +3772,7 @@ struct FileCard: View {
             }
         }
         .background(Theme.bubbleShape.fill(fromUser ? theme.bubbleUser : theme.bubbleAssistant))
-        .bubbleMenuPreview()
+        .bubbleBox()
         .fullScreenCover(item: $viewer) { v in
             MediaViewer(album: v.items, index: v.index, onClose: { viewer = nil })
                 .environmentObject(model)
@@ -3835,7 +3834,7 @@ struct VoiceMemoBubble: View {
             .background(Theme.bubbleShape.fill(fromUser ? theme.bubbleUser : theme.bubbleAssistant))
         }
         .buttonStyle(.plain)
-        .bubbleMenuPreview()
+        .bubbleBox()
         .disabled(blobRef == nil)
         .onAppear {
             if let ref = blobRef, let url = model.blobURL(projectId: projectId, key: ref) {

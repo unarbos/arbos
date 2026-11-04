@@ -385,15 +385,47 @@ final class EmojiTextField: UITextField {
     override var textInputContextIdentifier: String? { "arbos.reaction.emoji" }
 }
 
+/// What a revealed message washes its bubble with — a quote tap, a Search-in-chat hit,
+/// a home-search result — and `.clear` on every other row. `RowView` hands it down
+/// instead of passing it in, so the media bubbles (`ImageBubble`, `FileCard`,
+/// `VoiceMemoBubble`) pick it up without being threaded through one by one.
+private struct RevealWashKey: EnvironmentKey {
+    static let defaultValue: Color = .clear
+}
+
+extension EnvironmentValues {
+    var revealWash: Color {
+        get { self[RevealWashKey.self] }
+        set { self[RevealWashKey.self] = newValue }
+    }
+}
+
+/// Everything the transcript hangs on a bubble's **own box** rather than on the
+/// full-width row that carries it.
+///
+/// The preview shape is what the system lifts the bubble with when
+/// `messageRowGestures` falls to the plain `.contextMenu` — in a channel, or on a row
+/// whose message is not in `messageById`. Without it the preview takes the whole row as
+/// a square-cornered platter, a hard grey panel behind a rounded bubble running out past
+/// the avatar to the screen edge.
+///
+/// The wash is the reveal's, and it sits behind the bubble's own fill, so only the
+/// `Theme.revealInset` halo around the bubble shows. Both shapes come from
+/// `Theme.bubbleRadius`, the value the bubble fills and clips itself with.
+private struct BubbleBox: ViewModifier {
+    @Environment(\.revealWash) private var wash
+
+    func body(content: Content) -> some View {
+        content
+            .contentShape(.contextMenuPreview, Theme.bubbleShape)
+            .background(Theme.revealShape.fill(wash).padding(-Theme.revealInset))
+    }
+}
+
 extension View {
-    /// The shape the system lifts this bubble with when `messageRowGestures` falls to the
-    /// plain `.contextMenu` — in a channel, or on a row whose message is not in
-    /// `messageById`. Without it the preview takes the whole full-width row as a
-    /// square-cornered platter, which reads as a hard grey panel behind a rounded bubble
-    /// running out past the avatar to the screen edge. `Theme.bubbleShape` is the same
-    /// value the bubble fills and clips itself with, so the two cannot drift.
-    func bubbleMenuPreview() -> some View {
-        contentShape(.contextMenuPreview, Theme.bubbleShape)
+    /// Mark this view as a message bubble's own box (`BubbleBox`).
+    func bubbleBox() -> some View {
+        modifier(BubbleBox())
     }
 
     /// A message bubble: long-press → actions overlay; double-tap → ❤️ reaction.
