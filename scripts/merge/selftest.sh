@@ -154,6 +154,92 @@ else
   bad "the completed* glob now precedes 'completed success' (lines $globline then $sucline), so every green run is classified UNTESTED"
 fi
 
+# 8. A gate run that died before judging must be BLOCKED, and one that judged
+#    and refused must be RED. Both are asserted, and the pairing is the case:
+#    a change that answered BLOCKED for everything would satisfy the 127 half
+#    on its own while quietly letting a real refusal clear as "the gate's
+#    fault, not the pull request's". That is the fail-open direction, so the
+#    RED half is the one load-bearing against this change's own worst outcome.
+#
+#    gate_state is network code, so `rd` is replaced here with the two runs
+#    this was measured on. The bodies are GitHub's, trimmed to the fields the
+#    classifier reads: 41846184562 is #2713's head, which exits 127 at
+#    `Can this run decide anything?`, and 41845315633 is #2717's head, refused
+#    on main's real outstanding TestFlight build.
+echo "gate_state — an instrument failure is BLOCKED and a real refusal is RED:"
+jobs_127='{"jobs":[
+  {"name":"Release gate","conclusion":"failure","steps":[
+    {"name":"Set up job","conclusion":"success"},
+    {"name":"Run actions/checkout@v4","conclusion":"success"},
+    {"name":"Can this run decide anything?","conclusion":"failure"},
+    {"name":"Run actions/setup-python@v5","conclusion":"skipped"},
+    {"name":"Does merging this collapse two fixes into one release?","conclusion":"skipped"},
+    {"name":"Post Run actions/checkout@v4","conclusion":"success"},
+    {"name":"Complete job","conclusion":"success"}]},
+  {"name":"Release gate refuses when it should","conclusion":"success","steps":[
+    {"name":"Run scripts/release/release-gate-selftest.sh","conclusion":"success"}]}]}'
+jobs_refused='{"jobs":[
+  {"name":"Release gate","conclusion":"failure","steps":[
+    {"name":"Set up job","conclusion":"success"},
+    {"name":"Run actions/checkout@v4","conclusion":"success"},
+    {"name":"Can this run decide anything?","conclusion":"success"},
+    {"name":"Run actions/setup-python@v5","conclusion":"success"},
+    {"name":"Does merging this collapse two fixes into one release?","conclusion":"failure"},
+    {"name":"Post Run actions/setup-python@v5","conclusion":"skipped"},
+    {"name":"Complete job","conclusion":"success"}]},
+  {"name":"Release gate refuses when it should","conclusion":"success","steps":[
+    {"name":"Run scripts/release/release-gate-selftest.sh","conclusion":"success"}]}]}'
+jobs_startup='{"jobs":[{"name":"Release gate","conclusion":"failure","steps":[]}]}'
+
+R=unarbos/arbos
+gate_state_with() {  # <jobs-body> — one red run on the head, whose jobs are <jobs-body>
+  local body=$1
+  # Dispatch on the field each call asks for, never on per_page: `per_page=1`
+  # is a prefix of `per_page=100`, so a glob on it answers the run listing
+  # with the count and every case below reads PENDING instead of its verdict.
+  rd() {
+    case "$*" in
+      *total_count*)   printf '1' ;;
+      *workflow_runs*) printf '%s' "41846184562 pull_request completed failure" ;;
+      */jobs*)         printf '%s' "$body" ;;
+      *)               printf '' ;;
+    esac
+  }
+  gate_state .github/workflows/release-gate.yml 0123456789012345678901234567890123456789
+  unset -f rd
+}
+for case_name in 127:jobs_127:BLOCKED refusal:jobs_refused:RED startup:jobs_startup:BLOCKED; do
+  label=${case_name%%:*}; rest=${case_name#*:}; var=${rest%%:*}; want=${rest##*:}
+  got=$(gate_state_with "${!var}")
+  if [ "${got%% *}" = "$want" ]; then ok "$label reads $want"
+  else bad "$label reads '${got%% *}', expected $want — full line: $got"; fi
+done
+# Named on its own, because it is the case this change could break and the
+# table above would still look healthy if the classifier collapsed to one
+# answer: the two live runs must not land on the same word.
+a=$(gate_state_with "$jobs_127"); b=$(gate_state_with "$jobs_refused")
+if [ "${a%% *}" != "${b%% *}" ]; then
+  ok "the 127 run and the refused run are distinguishable"
+else
+  bad "both runs now read '${a%% *}', so gate_state has collapsed back to one answer for three different things"
+fi
+
+# 9. The summary line go() adds for a pull request must keep require_gates'
+#    three answers apart. A BLOCKED gate summarised as "no passing run" sends
+#    the reader to change the branch, which is the same mistake as case 8 and
+#    is the one the operator actually reads.
+echo "go() summarises a pull request's gates by which of the three answers it got:"
+if printf '%s\n' "$code" | grep -q 'require_gates "\$phead" "\$pfiles"; local prc=\$?'; then
+  ok "the return code is captured rather than collapsed with ||"
+else
+  bad "go() no longer captures require_gates' return code, so BLOCKED, PENDING and RED share one summary again"
+fi
+if printf '%s\n' "$code" | grep -q 'could not be read on \$phead'; then
+  ok "a gate that could not be read has its own summary"
+else
+  bad "go() has no distinct summary for an unreadable gate, so an instrument failure reads as the pull request's failure"
+fi
+
 echo
 if [ "$fail" -eq 0 ]; then echo "selftest: PASS"; else echo "selftest: FAIL"; fi
 exit "$fail"
