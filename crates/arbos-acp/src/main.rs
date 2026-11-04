@@ -39,9 +39,16 @@
 //!   card could not be raised, the relay could not be reached, the owner did not answer in
 //!   time. A refusal carries the reason it refused, so "the owner said no" and "the owner was
 //!   never asked" are never the same answer. There is no path from an unreachable owner to yes.
-//! * **A sender allowlist**, `--allow`, defaulting to the owner plus the chats this agent was
-//!   added to. A message from outside it is kept as context and never prompts the agent.
-//!   `--answer-all` widens the relay's wake flag and cannot widen this.
+//! * **A sender allowlist**, `--allow`, defaulting to the owner alone. A message from outside
+//!   it is kept as context and never prompts the agent. `--answer-all` widens the relay's wake
+//!   flag and cannot widen this.
+//!
+//!   The default is the owner and not the owner's chats because a chat's membership grows
+//!   without the owner doing anything: any member can `member_add` somebody, and any member can
+//!   mint an invite link that admits anyone who holds it, neither of which passes the owner.
+//!   So `owner, chats` would be a default that widens itself over time with nobody deciding to
+//!   widen it. `--allow chats` is one word and is the owner saying yes to that; it is not
+//!   something they should have to say no to. See [`Allow::rules`].
 //! * **The bypass is refused, not warned about.** Every session is opened with
 //!   `allowDangerouslySkipPermissions: false`, which the adapter documents as removing
 //!   `bypassPermissions` from the session — so the owner's `~/.claude/settings.json` needs no
@@ -170,8 +177,9 @@ struct Args {
     permissions: Permissions,
     /// Who may make this agent act, repeatable. `owner` = the person who owns the agent;
     /// `chats` = anyone in a chat it was added to; `@handle` = one person; `chat:<id>` = one
-    /// chat. Default: `owner` and `chats`. A message from outside the list is kept as context
-    /// and never prompts the agent.
+    /// chat. Default: `owner` only — a chat's membership can grow without you, so `chats` is
+    /// something you opt into. A message from outside the list is kept as context and never
+    /// prompts the agent.
     ///
     /// Command line only. See [`ENV_READ`].
     #[arg(long = "allow", value_delimiter = ',')]
@@ -236,9 +244,15 @@ impl Allow {
     }
 
     /// The rules in force: what the owner asked for, or the default.
+    ///
+    /// The default is the owner and nobody else. `Chats` is deliberately not in it: group
+    /// membership is not a set the owner controls, because any member can add a person or mint
+    /// an invite link without asking them, so including it would make the default widen itself
+    /// as the chat grows. A safe default that has to be opted into is not a safe default, so
+    /// the opt-in is on the wide setting instead.
     fn rules(args: &Args) -> Result<Vec<Allow>> {
         if args.allow.is_empty() {
-            return Ok(vec![Allow::Owner, Allow::Chats]);
+            return Ok(vec![Allow::Owner]);
         }
         args.allow.iter().map(|s| Allow::parse(s)).collect()
     }
@@ -359,8 +373,10 @@ async fn main() -> Result<()> {
         })
         .unwrap_or_default();
     let rules = Allow::rules(&args)?;
-    // An `owner` rule the relay cannot fill is a rule that allows nobody. Say so at startup
-    // rather than letting every message be refused for a reason nobody reads.
+    // An `owner` rule the relay cannot fill is a rule that allows nobody, and since `owner` is
+    // the whole of the default, that is now the ordinary configuration rather than an unusual
+    // one. Refuse to start and say which key to rotate, rather than running an agent that
+    // silently declines every message for a reason nobody reads.
     if rules.contains(&Allow::Owner) && owner_id.is_none() {
         bail!(
             "the relay did not name this agent's owner, so `--allow owner` can never match. \
@@ -1803,9 +1819,18 @@ mod tests {
     }
 
     #[test]
-    fn allow_rules_parse_and_default_to_the_owner_and_its_chats() {
+    fn allow_rules_parse_and_default_to_the_owner_alone() {
         use clap::Parser;
         let args = Args::parse_from(["arbos-acp", "--key", "arbk_x"]);
+        assert_eq!(
+            Allow::rules(&args).unwrap(),
+            vec![Allow::Owner],
+            "the default is the owner and nobody else; `chats` is opted into because chat \
+             membership grows without the owner"
+        );
+        // `chats` is still reachable, in one word. A default nobody can widen is a different
+        // bug from a default that widens itself, and this is the control that the opt-in works.
+        let args = Args::parse_from(["arbos-acp", "--key", "arbk_x", "--allow", "owner,chats"]);
         assert_eq!(
             Allow::rules(&args).unwrap(),
             vec![Allow::Owner, Allow::Chats]
@@ -1843,6 +1868,49 @@ mod tests {
                          "from": { "kind": kind, "id": id, "name": "Mallory", "handle": handle } },
             "wake": true,
         })
+    }
+
+    /// The default allowlist, read through [`sender_verdict`] rather than through its own
+    /// constant, so a change to either one has to survive this. A chat peer is the whole point:
+    /// a group's membership is not the owner's to control, so somebody added to a chat the
+    /// agent is in — or admitted by an invite link the owner never saw — must not be able to
+    /// make it act. A regression to `owner, chats` restores the reported vulnerability for
+    /// everyone who did not pass `--allow`, which is everyone following the instructions.
+    #[test]
+    fn the_default_allowlist_refuses_a_chat_peer_and_admits_only_the_owner() {
+        use clap::Parser;
+        let rules = Allow::rules(&Args::parse_from(["arbos-acp", "--key", "arbk_x"])).unwrap();
+        let chats: HashSet<String> = ["c-known".to_owned()].into_iter().collect();
+
+        // Positive control: the owner, in that same chat, with that same message shape, is
+        // allowed. Without this the refusal below could be any blanket "no" at all.
+        assert_eq!(
+            sender_verdict(
+                &rules,
+                Some("u-owner"),
+                &chats,
+                &msg("user", "u-owner", "jacob", "c-known")
+            ),
+            SenderVerdict::Allowed("owner")
+        );
+
+        // A member of a chat the agent is in, which the old default admitted.
+        let v = sender_verdict(
+            &rules,
+            Some("u-owner"),
+            &chats,
+            &msg("user", "u-mallory", "mallory", "c-known"),
+        );
+        match v {
+            SenderVerdict::Refused(why) => assert!(
+                why.contains("no --allow rule") && why.contains("owner"),
+                "the refusal has to name the rules in force so the owner can see what to widen, \
+                 got: {why}"
+            ),
+            SenderVerdict::Allowed(rule) => {
+                panic!("a chat peer was allowed by `{rule}` under the default rules")
+            }
+        }
     }
 
     /// What happens to a message from outside the allowlist: it is refused, with the reason,
