@@ -52,6 +52,9 @@ pub struct DocHost {
     /// [`DocHost::on_refused`].
     refusals: u32,
     push_blocked_until: Option<std::time::Instant>,
+    /// Consecutive exports too big for one frame and too small to cut. See
+    /// [`DocHost::chunk_to_budget`].
+    oversize_strikes: u32,
     pub caught_up: bool,
     seen_commands: std::collections::HashSet<String>,
     recovered: bool,
@@ -100,6 +103,17 @@ const PUSH_REFUSAL_BACKOFF: Duration = Duration::from_secs(1);
 const PROBE_EVERY: Duration = Duration::from_secs(60);
 /// Backoff ceiling for a room whose session failed for any reason but a refusal.
 const ROOM_BACKOFF_MAX: Duration = Duration::from_secs(4);
+/// Largest push payload this box will put on the wire. The relay refuses a payload over
+/// `wire::ROW_MAX` from its frame handler, and its socket drops a whole message over
+/// `ROW_MAX + 8192` with no close frame at all — which a client can only see as
+/// "Connection reset without closing handshake" (Jacob, Test5 round 3, 2026-11-04: a research
+/// job's backlog crossed it and the room reset about once a second for 20 minutes, silent in
+/// both directions). Staying under `ROW_MAX` satisfies both checks; the margin covers the frame
+/// header and leaves the relay's own limit the one that is authoritative.
+const PUSH_BUDGET: usize = wire::ROW_MAX - 8192;
+/// Consecutive oversized exports on one room before its pushes are parked. A chunk that cannot
+/// be cut small enough is not going to get smaller by being offered again.
+const OVERSIZE_STRIKES: u32 = 3;
 
 fn redial_gate() -> &'static tokio::sync::Semaphore {
     static GATE: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
@@ -131,9 +145,96 @@ impl DocHost {
             self.acked_vv = vv;
             return None;
         }
+        let (bytes, target) = if bytes.len() <= PUSH_BUDGET {
+            (bytes, vv)
+        } else {
+            self.chunk_to_budget(&vv, bytes.len())?
+        };
         let batch = ulid();
-        self.inflight = Some((batch.clone(), vv));
+        self.inflight = Some((batch.clone(), target));
         Some((batch, bytes))
+    }
+
+    /// A backlog too big for one frame, cut down to one the relay will take.
+    ///
+    /// The cut is a prefix of this box's own ops plus every other peer's ops in full. That
+    /// ordering is what makes a chunk safe to apply on arrival rather than park as pending: an
+    /// op of ours depends only on our earlier ops and on the ops we already held when we wrote
+    /// it, and both are inside the chunk. A cut that split some other peer's range could strand
+    /// the remainder behind a gap, which is the failure this whole file exists to avoid.
+    ///
+    /// `None` when there is nothing left to cut — the overflow is all other peers' ops, or even
+    /// a single op of ours exceeds the budget. Those park rather than loop.
+    fn chunk_to_budget(
+        &mut self,
+        head: &VersionVector,
+        full_len: usize,
+    ) -> Option<(Vec<u8>, VersionVector)> {
+        let me = self.doc.doc.peer_id();
+        let from = self.acked_vv.get(&me).copied().unwrap_or(0);
+        let to = head.get(&me).copied().unwrap_or(0);
+        // Largest prefix of our own ops that still fits. The export is not linear in the op
+        // count, so the length is measured rather than predicted.
+        let mut lo = 0i32;
+        let mut hi = to - from;
+        let mut best: Option<(Vec<u8>, VersionVector)> = None;
+        while lo <= hi {
+            let take = lo + (hi - lo) / 2;
+            let (bytes, target) = self.export_prefix(head, me, from + take);
+            if !bytes.is_empty() && bytes.len() <= PUSH_BUDGET {
+                best = Some((bytes, target));
+                lo = take + 1;
+            } else {
+                hi = take - 1;
+            }
+        }
+        if best.is_none() {
+            self.oversize_strikes = self.oversize_strikes.saturating_add(1);
+            if self.oversize_strikes == OVERSIZE_STRIKES {
+                tracing::warn!(
+                    room = %self.room,
+                    backlog_bytes = full_len,
+                    budget = PUSH_BUDGET,
+                    "room parked: its backlog does not fit one push and cannot be cut smaller; \
+                     inbound still flows, outbound is held"
+                );
+            }
+        } else {
+            self.oversize_strikes = 0;
+        }
+        best
+    }
+
+    /// Export every other peer's ops in full, and our own up to `own_end`. Returns the bytes
+    /// and the version they carry the room to, which is what an ack for them may advance.
+    fn export_prefix(
+        &self,
+        head: &VersionVector,
+        me: u64,
+        own_end: i32,
+    ) -> (Vec<u8>, VersionVector) {
+        let mut spans = Vec::new();
+        let mut target = self.acked_vv.clone();
+        for (peer, counter) in head.iter() {
+            let from = self.acked_vv.get(peer).copied().unwrap_or(0);
+            let to = if *peer == me { own_end } else { *counter };
+            if to <= from {
+                continue;
+            }
+            spans.push(loro::IdSpan::new(*peer, from, to));
+            target.insert(*peer, to);
+        }
+        if spans.is_empty() {
+            return (Vec::new(), target);
+        }
+        let bytes = self
+            .doc
+            .doc
+            .export(loro::ExportMode::UpdatesInRange {
+                spans: std::borrow::Cow::Owned(spans),
+            })
+            .unwrap_or_default();
+        (bytes, target)
     }
 
     fn on_ack(&mut self, batch_id: &str) {
@@ -439,6 +540,7 @@ impl SyncHub {
             first_pending_seq: None,
             acked_vv,
             inflight: None,
+            oversize_strikes: 0,
             refusals: 0,
             push_blocked_until: None,
             caught_up: false,
@@ -949,6 +1051,7 @@ mod tests {
             first_pending_seq: None,
             acked_vv: VersionVector::default(),
             inflight: None,
+            oversize_strikes: 0,
             refusals: 0,
             push_blocked_until: None,
             caught_up: true,
@@ -961,6 +1064,184 @@ mod tests {
             joined_at_ms: 0,
             link: LinkState::default(),
         }
+    }
+
+    /// Build one hidden research row the size of the job that jammed Test5: enough tool-call
+    /// parts that a single export of the lot does not fit a room frame.
+    fn a_research_backlog() -> ChatDoc {
+        let doc = ChatDoc::new(Some(7), false);
+        doc.init_meta("c", "p", 1);
+        doc.start_assistant_message("m_job", "", "agent");
+        for i in 0..389 {
+            doc.add_part_from_json(
+                "m_job",
+                &serde_json::json!({
+                    "kind": "tool",
+                    "name": "web_search",
+                    "args": { "query": format!("source {i}") },
+                    "result": "x".repeat(2560),
+                }),
+            );
+        }
+        let part = doc.add_text_part("m_job", "text").unwrap();
+        for _ in 0..3 {
+            doc.append_text("m_job", &part, &"y".repeat(8192));
+        }
+        for i in 0..7 {
+            doc.add_attachment_part(
+                "m_job",
+                &serde_json::json!({ "kind": "file", "name": format!("f{i}.md"), "size": 4096 }),
+            );
+        }
+        doc.set_message_fields("m_job", &[("status", serde_json::json!("done"))]);
+        doc
+    }
+
+    /// Jacob, Test5 round 3, 2026-11-04: a 389-call research job's backlog went out as one
+    /// frame, the relay's socket dropped it without a close frame, and the room reset about
+    /// once a second for twenty minutes — silent in both directions, because the same oversized
+    /// bytes were re-exported after every reconnect.
+    ///
+    /// Every frame this offers must fit, and the frames together must carry the whole backlog
+    /// into a replica that applied each one on arrival. A chunk that only parks as pending
+    /// would pass a size assertion while delivering nothing, so the receiver is checked too.
+    #[test]
+    fn a_backlog_too_big_for_one_frame_goes_out_in_frames_that_fit() {
+        let mut host = host_with(a_research_backlog());
+        let whole = host.doc.export_updates_since(&VersionVector::default());
+        assert!(
+            whole.len() > wire::ROW_MAX,
+            "fixture must exceed one frame, got {}",
+            whole.len()
+        );
+
+        let mut relay = ChatDoc::new(Some(9), false);
+        let mut frames = 0;
+        while let Some((batch, bytes)) = host.next_push() {
+            assert!(
+                bytes.len() <= PUSH_BUDGET,
+                "frame {frames} is {} bytes, over the {PUSH_BUDGET} the relay will take",
+                bytes.len()
+            );
+            let status = relay.import(&bytes).expect("the relay takes the chunk");
+            assert!(
+                status.pending.is_none(),
+                "frame {frames} parked as pending instead of applying: {status:?}"
+            );
+            host.on_ack(&batch);
+            frames += 1;
+            assert!(frames < 50, "chunking did not terminate");
+        }
+        assert!(frames > 1, "a backlog this size needs more than one frame");
+        assert_eq!(
+            relay.message("m_job").map(|m| m.parts.len()),
+            host.doc.message("m_job").map(|m| m.parts.len()),
+            "the replica is missing part of the job"
+        );
+    }
+
+    /// The cut is a prefix of our own ops with every other peer's in full, so a chunk never
+    /// strands another peer's range behind a gap. Here the backlog holds both.
+    #[test]
+    fn a_chunk_carries_other_peers_whole_and_never_splits_them() {
+        let doc = a_research_backlog();
+        let other = ChatDoc::new(Some(11), false);
+        other.init_meta("c", "p", 1);
+        other
+            .append_user_message(
+                "m_them",
+                "and a word from someone else",
+                "dev:phone",
+                &Default::default(),
+            )
+            .unwrap();
+        let mut doc = doc;
+        doc.import(&other.export_updates_since(&VersionVector::default()))
+            .expect("import the other peer");
+        let mut host = host_with(doc);
+
+        let mut relay = ChatDoc::new(Some(13), false);
+        let mut frames = 0;
+        while let Some((batch, bytes)) = host.next_push() {
+            assert!(bytes.len() <= PUSH_BUDGET, "frame {frames} does not fit");
+            let status = relay.import(&bytes).expect("import");
+            assert!(status.pending.is_none(), "a chunk parked: {status:?}");
+            host.on_ack(&batch);
+            frames += 1;
+        }
+        assert!(
+            frames > 1,
+            "this backlog needs cutting, so the cut is what is under test"
+        );
+        assert!(
+            relay.message("m_them").is_some(),
+            "the other peer's row never arrived"
+        );
+    }
+
+    /// The cut only moves our own peer's end, so a backlog that is all someone else's ops has
+    /// nothing to give. That parks rather than offering the same oversized frame forever —
+    /// `next_push` returning `None` is what keeps the socket up, which is the difference
+    /// between a chat that is behind and a chat that is deaf.
+    #[test]
+    fn a_backlog_that_cannot_be_cut_parks_instead_of_looping() {
+        let theirs = a_research_backlog();
+        let mut doc = ChatDoc::new(Some(21), false);
+        doc.import(&theirs.export_updates_since(&VersionVector::default()))
+            .expect("import a backlog we did not write");
+        let mut host = host_with(doc);
+        for _ in 0..OVERSIZE_STRIKES + 2 {
+            assert!(
+                host.next_push().is_none(),
+                "an uncuttable backlog must be parked, not put on the wire"
+            );
+        }
+    }
+
+    /// The path every box stranded by this bug will take, and the only one nobody can watch.
+    ///
+    /// A box already in the reset loop restarts into it: `open_room` restores the persisted
+    /// `acked_vv`, which is stale by the whole backlog, and the 120 ms tick calls `next_push`
+    /// with no catch-up gate. So the rescue has to happen on the first tick, before any
+    /// `RowsDone` — the force-advance that would otherwise clear the backlog is downstream of
+    /// a `RowsDone` the oversized frame prevents from ever arriving.
+    ///
+    /// This goes through the real store round trip rather than a hand-built host, because the
+    /// stale `acked_vv` surviving the restart is the whole reason the loop is permanent.
+    #[test]
+    fn a_box_restarting_into_the_loop_is_rescued_on_its_first_tick() {
+        let dir = std::env::temp_dir().join(format!("arbos-boot-{}", now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("agentd.db")).unwrap();
+        let room = "p1/c1";
+
+        // Before the restart: a jammed box, writing on while nothing is acked.
+        let before = a_research_backlog();
+        let acked = VersionVector::default();
+        store
+            .save_room_doc(room, 0, &before.snapshot(), &encode_vv(&acked))
+            .unwrap();
+
+        // The restart, exactly as `open_room` does it.
+        let (cursor, snapshot, acked) = store.room_doc(room).unwrap().unwrap();
+        let doc = ChatDoc::from_snapshot(Some(7), true, &snapshot.unwrap()).unwrap();
+        let mut host = host_with(doc);
+        host.acked_vv = acked.as_deref().and_then(decode_vv).unwrap_or_default();
+        host.cursor = cursor;
+        // Nothing has been caught up yet: this is the first tick after boot.
+        host.caught_up = false;
+        host.ever_caught_up = false;
+
+        assert!(
+            host.doc.export_updates_since(&host.acked_vv).len() > wire::ROW_MAX,
+            "the restored backlog must be the oversized kind this rescues"
+        );
+        let (_, first) = host.next_push().expect("the first tick offers something");
+        assert!(
+            first.len() <= PUSH_BUDGET,
+            "the first frame after boot is {} bytes and kills the socket again",
+            first.len()
+        );
     }
 
     /// #1440: GigChadAgent was removed and re-added to a group; the fresh host replayed ~40
