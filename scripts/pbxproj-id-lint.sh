@@ -14,6 +14,16 @@
 # buried in xcodebuild's output. That is how AvatarBackSwipeUITests.swift dropped
 # TranscriptSpacingUITests.swift out of ArbosUITests for three days.
 #
+# What this checks, and what it does not. This reads the PROJECT FILE and catches the *cause*:
+# an identifier declared twice. It does not read the built bundle, so it cannot tell you which
+# file lost its target membership as a result. A bundle-side count of the test classes that
+# actually shipped catches the *effect*, and the two are complementary rather than redundant —
+# do not drop the count because this exists. The argument for keeping both is that xcodebuild's
+# own warning names only the file whose reference is duplicated, never the file that was
+# dropped, and then adds "(but membership in targets will be unaffected)", which is precisely
+# the damage that did occur. This lint names BOTH files on every duplicate, which is the part
+# the build output cannot give you; only a count of what shipped sees the hole itself.
+#
 # Exit status, and the three outcomes are deliberately distinct:
 #   0  every identifier is defined once          ("OK" line per file, on stdout)
 #   1  an identifier is defined more than once   (the duplicates are listed, on stderr)
