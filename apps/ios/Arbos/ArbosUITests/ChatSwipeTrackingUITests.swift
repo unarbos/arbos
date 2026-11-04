@@ -237,7 +237,13 @@ final class ChatSwipeTrackingUITests: XCTestCase {
         // Home opens on the All tab, which lists the group (`HomeFilterTabsUITests`).
         let row = app.descendants(matching: .any)["home-row:\(chatId)"].firstMatch
         XCTAssertTrue(row.waitForExistence(timeout: settle), "the group is in the list again")
-        row.tap()
+        // By coordinate, as `TranscriptFirstFrameUITests` already does, because the empty toast
+        // container stays in the accessibility tree spanning the whole content area, so XCUITest
+        // computes no hit point for any row while UIKit delivers the touch normally (filed
+        // against `ErrorNote.swift`; measured with no pop at all, so it is not this fix's). The
+        // old `row.tap()` here never synthesised an event, so it asserted nothing — the open
+        // below is what says the touch landed.
+        row.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         XCTAssertTrue(back(app).waitForExistence(timeout: settle),
                       "Home pushed the chat back on: the stack and SwiftUI's path agree about what is on it")
     }
