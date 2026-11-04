@@ -235,6 +235,16 @@ final class SwipeDirectionsUITests: XCTestCase {
     /// below `edgeZoneWidth`, so the app sees a drag from here and decides it on its own terms.
     private static let appOwnedStartX: CGFloat = 80
 
+    /// Inside the lane an incoming row draws its sender avatar in, x ∈ [12, 48].
+    ///
+    /// This used to be where *every* right swipe started, and that was load-bearing by
+    /// accident: the avatar is a SwiftUI `Button`, a `Button` prevents an exclusive pan, and
+    /// before [#2530](https://github.com/unarbos/arbos/pull/2530) a back swipe begun here did
+    /// not go back. Moving the suite's default start to `appOwnedStartX` would have dropped
+    /// that coverage without a single test turning red, so it is kept deliberately below
+    /// instead of as a side effect of a helper's default.
+    private static let avatarLaneStartX: CGFloat = 40
+
     /// The row's frame, read immediately before a drag and confirmed by two agreeing reads.
     ///
     /// `revealBubble` already settles a row before handing it back, so this is not the same
@@ -299,11 +309,15 @@ final class SwipeDirectionsUITests: XCTestCase {
     /// Swipe right across `bubble`, starting at `appOwnedStartX` or just inside the row's
     /// leading edge, whichever is further in, so a long rightward drag stays on screen and the
     /// app's own back rule — not the system pop — is what answers it.
+    ///
+    /// `from` overrides that start. Only `testSwipeRightStartingOnTheSenderAvatarGoesBack`
+    /// passes it, and the reason it exists is written there.
     private func swipeRight(on bubble: XCUIElement, _ app: XCUIApplication, want: CGFloat = 180,
-                           file: StaticString = #filePath, line: UInt = #line) {
+                            from: CGFloat? = nil,
+                            file: StaticString = #filePath, line: UInt = #line) {
         let window = app.windows.firstMatch.frame
         let frame = stableFrame(of: bubble, file: file, line: line)
-        let startX = max(frame.minX + 8, Self.appOwnedStartX)
+        let startX = from ?? max(frame.minX + 8, Self.appOwnedStartX)
         assertClearOfSystemEdge(startX, "the right swipe", file: file, line: line)
         let distance = min(want, window.maxX - 8 - startX)
         XCTAssertGreaterThan(distance, 80, "the bubble has room for a right swipe", file: file, line: line)
@@ -425,6 +439,26 @@ final class SwipeDirectionsUITests: XCTestCase {
         swipeRight(on: revealBubble(app, "g8"), app)
         assertWentBack(app)
         XCTAssertFalse(replyPreview(app).exists, "a right swipe never replies")
+    }
+
+    /// A right swipe begun **on the sender's avatar** still goes back — the canary for
+    /// [#2530](https://github.com/unarbos/arbos/pull/2530).
+    ///
+    /// Every avatar beside an incoming bubble is a SwiftUI `Button`, whose press recogniser
+    /// enters `.began` on touch-down, and UIKit lets an already-begun recogniser prevent a
+    /// later one that does not share the touch. So the back swipe was prevented before it had
+    /// decided anything, and a drag that started over a face did nothing. A measured sweep of
+    /// the start x put the boundary at the avatar's right edge rather than at the edge zone:
+    /// in this chat 28 pt and 40 pt did not go back, 52 pt did.
+    ///
+    /// [#2530](https://github.com/unarbos/arbos/pull/2530) fixed it by making the back
+    /// recognisers simultaneous with presses. Nothing in this file holds that any more now
+    /// that the other right swipes start at `appOwnedStartX`, clear of the avatar — so this
+    /// case does, by name, where a reader can see what it is for.
+    func testSwipeRightStartingOnTheSenderAvatarGoesBack() {
+        let app = launchGroup()
+        swipeRight(on: revealBubble(app, "g3"), app, from: Self.avatarLaneStartX)
+        assertWentBack(app)
     }
 
     /// The tall portrait screenshot with a caption, which is the largest row in the fixture and
