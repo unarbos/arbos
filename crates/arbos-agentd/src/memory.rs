@@ -12,7 +12,7 @@ use arbos_core::ids::now_ms;
 use crate::config::Config;
 use crate::llm::Llm;
 use crate::settings::{LiveModels, ModelRole};
-use crate::store::{MemoryRow, Store};
+use crate::store::{MemoryRow, Store, T3Row};
 
 pub const COMPACTION_TURNS: i64 = 20;
 pub const COMPACTION_TOKENS: usize = 24_000;
@@ -119,6 +119,37 @@ pub(crate) fn is_user_name_fact(text: &str) -> bool {
         "call me ",
     ];
     PATTERNS.iter().any(|p| t.contains(p))
+}
+
+/// One compaction request: the summary so far, then the turns being folded into it verbatim.
+/// A long tool output is clipped head-and-tail so one of them cannot fill the request.
+fn compaction_body(previous_summary: Option<&str>, leaving: &[T3Row]) -> String {
+    let mut body = String::new();
+    body.push_str("## Previous summary\n");
+    body.push_str(previous_summary.unwrap_or("(none)"));
+    body.push_str("\n\n## Turns leaving the window\n");
+    for t in leaving {
+        let text: String = if t.kind == "tool_output" {
+            let s = &t.text;
+            if s.len() > TOOL_OUTPUT_CAP_FOR_SUMMARISER {
+                format!(
+                    "{}…{}",
+                    &s[..1500.min(s.len())],
+                    &s[s.len().saturating_sub(500)..]
+                )
+            } else {
+                s.clone()
+            }
+        } else {
+            t.text.clone()
+        };
+        body.push_str(&format!(
+            "[{}] {}\n",
+            t.role.as_deref().unwrap_or(&t.kind),
+            text
+        ));
+    }
+    body
 }
 
 impl Memory {
@@ -402,6 +433,24 @@ impl Memory {
 
     /// Compaction trigger (design §6.6): 20 turns past `compacted_through` or > 24k tokens in summary + window.
     pub async fn maybe_compact(&self, chat_id: &str) -> Result<()> {
+        self.maybe_compact_with(chat_id, |body| async move {
+            // Summarising a chat is the agent's own reading of it, so it runs on the agent's model.
+            let model = self.models.resolve(ModelRole::Talking).await;
+            self.llm
+                .complete_json(&model, COMPACTION_SYSTEM, &body, 2500)
+                .await
+                .map(|(v, _ms)| v)
+        })
+        .await
+    }
+
+    /// `maybe_compact` with the summariser call handed in, so the pass can be driven without a
+    /// provider: `summarise` takes one request body and answers with the summariser's JSON.
+    async fn maybe_compact_with<F, Fut>(&self, chat_id: &str, summarise: F) -> Result<()>
+    where
+        F: Fn(String) -> Fut,
+        Fut: std::future::Future<Output = Result<Value>>,
+    {
         let Some(chat) = self.store.chat(chat_id)? else {
             return Ok(());
         };
@@ -427,37 +476,8 @@ impl Memory {
         }
         let leaving = &turns[..turns.len() - VERBATIM_TURNS];
         let through = leaving.last().map(|t| t.id.clone()).unwrap_or_default();
-        let mut body = String::new();
-        body.push_str("## Previous summary\n");
-        body.push_str(chat.compaction_summary.as_deref().unwrap_or("(none)"));
-        body.push_str("\n\n## Turns leaving the window\n");
-        for t in leaving {
-            let text: String = if t.kind == "tool_output" {
-                let s = &t.text;
-                if s.len() > TOOL_OUTPUT_CAP_FOR_SUMMARISER {
-                    format!(
-                        "{}…{}",
-                        &s[..1500.min(s.len())],
-                        &s[s.len().saturating_sub(500)..]
-                    )
-                } else {
-                    s.clone()
-                }
-            } else {
-                t.text.clone()
-            };
-            body.push_str(&format!(
-                "[{}] {}\n",
-                t.role.as_deref().unwrap_or(&t.kind),
-                text
-            ));
-        }
-        // Summarising a chat is the agent's own reading of it, so it runs on the agent's model.
-        let compaction_model = self.models.resolve(ModelRole::Talking).await;
-        let (v, _ms) = self
-            .llm
-            .complete_json(&compaction_model, COMPACTION_SYSTEM, &body, 2500)
-            .await?;
+        let body = compaction_body(chat.compaction_summary.as_deref(), leaving);
+        let v = summarise(body).await?;
         let summary = v
             .get("summary")
             .and_then(Value::as_str)
