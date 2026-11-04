@@ -310,7 +310,14 @@ pub async fn ws_room(
         }
     }
     let room_name = wire::room_name(&project_id, &chat_id);
-    ws.max_message_size(wire::ROW_MAX + 8192)
+    // Headroom above the limit the frame handler enforces, so an oversized push is answered
+    // rather than dropped. At `ROW_MAX + 8192` anything past the cap died inside tungstenite,
+    // which cannot send a close frame for it — the client saw only "Connection reset without
+    // closing handshake" and could not tell a frame it must split from a link that had gone
+    // (Jacob, Test5 round 3, 2026-11-04: twenty minutes of once-a-second resets, no diagnosis
+    // on either side). The headroom is bounded: a client that ignores `too_large` and keeps
+    // growing still loses the socket, it just has to work much harder to get there.
+    ws.max_message_size(wire::ROW_MAX * 2)
         .on_upgrade(move |socket| run(socket, state, principal, project_id, room_name))
 }
 
@@ -683,8 +690,23 @@ async fn handle_frame(
         FrameType::Push => {
             let p: wire::PushHeader = serde_json::from_value(f.header)?;
             if f.payload.len() > wire::ROW_MAX {
-                sink.send(error_frame("too_large", "row exceeds 1 MiB"))
-                    .await?;
+                // Named, sized, and attributed to its batch. Without the `batchId` the pusher
+                // cannot tell which push was refused, so it leaves the batch in flight and
+                // kills a healthy session on the ack timeout ten seconds later.
+                tracing::warn!(
+                    %room_name, %device, bytes = f.payload.len(), limit = wire::ROW_MAX,
+                    "push refused: too large for one frame"
+                );
+                sink.send(room_push_refused_frame(
+                    "too_large",
+                    &format!(
+                        "push is {} bytes; one frame holds {}. Split it and send the parts in order.",
+                        f.payload.len(),
+                        wire::ROW_MAX
+                    ),
+                    &p.batch_id,
+                ))
+                .await?;
                 return Ok(());
             }
             if p.heal {
@@ -3102,6 +3124,189 @@ mod revoked_socket_tests {
                     "a signed-out device read a post made after the sign-out"
                 );
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod oversized_push_tests {
+    //! A push too big for one frame has to come back as a refusal the pusher can act on.
+    //!
+    //! Jacob, Test5 round 3, 2026-11-04: a research job's backlog crossed the socket's own
+    //! limit, tungstenite dropped the connection without a close frame, and the room reset
+    //! about once a second for twenty minutes while the same bytes were re-sent after every
+    //! reconnect. Nothing on either side said "too big" — the client could only see a reset,
+    //! which is what a dead link looks like too.
+
+    use axum::routing::get;
+    use axum::Router;
+    use futures::{SinkExt, StreamExt};
+    use serde_json::json;
+    use std::net::SocketAddr;
+    use std::time::Duration;
+    use tokio_tungstenite::tungstenite::Message as TMsg;
+
+    use arbos_core::ids::{now_ms, ulid};
+    use arbos_core::wire::{self, Frame, FrameType};
+
+    use crate::db::Chat;
+    use crate::people::tests_support::{person, project_of};
+    use crate::state::test_support::test_state;
+    use crate::state::{AppState, AuthMode};
+
+    async fn serve(state: AppState) -> SocketAddr {
+        let app = Router::new()
+            .route("/room/{project}/{chat}", get(super::ws_room))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        addr
+    }
+
+    fn device_token(state: &AppState, user: &str) -> String {
+        let token = format!("adv_{}", ulid().to_ascii_lowercase());
+        state
+            .db
+            .insert_device(
+                &ulid(),
+                "t",
+                &arbos_core::auth::hash(&token),
+                user,
+                "paircode",
+            )
+            .unwrap();
+        token
+    }
+
+    fn new_chat(state: &AppState, project: &str) -> String {
+        let chat = ulid();
+        state
+            .db
+            .insert_chat(&Chat {
+                id: chat.clone(),
+                project_id: project.to_owned(),
+                title: "t".into(),
+                is_pinned: false,
+                position: 0,
+                created_at: now_ms(),
+                doc_epoch: 1,
+                kind: "chat".into(),
+                participants: Vec::new(),
+                forked_from: None,
+            })
+            .unwrap();
+        chat
+    }
+
+    /// Push `payload_len` bytes and report what came back: the answer frame, or the transport
+    /// error the client saw if the socket died instead.
+    async fn push_of(payload_len: usize) -> Result<(Frame, String), String> {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let project = project_of(&state, &alice, "Oversize");
+        let chat = new_chat(&state, &project);
+        let room = format!("{project}/{chat}");
+        let token = device_token(&state, &alice);
+        let addr = serve(state.clone()).await;
+        let url = format!("ws://{addr}/room/{room}?token={token}");
+        let (ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+        let (mut sink, mut stream) = ws.split();
+        sink.send(TMsg::Binary(
+            Frame::new(
+                FrameType::Hello,
+                json!({ "cursor": 0, "device": "dev:probe", "room": room, "proto": arbos_core::PROTO_VERSION }),
+                bytes::Bytes::new(),
+            )
+            .encode(),
+        ))
+        .await
+        .unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let decode = |m: TMsg| match m {
+            TMsg::Binary(b) => Frame::decode(b).ok().flatten(),
+            _ => None,
+        };
+        loop {
+            let m = tokio::time::timeout_at(deadline, stream.next())
+                .await
+                .expect("relay answers")
+                .unwrap()
+                .unwrap();
+            if decode(m).is_some_and(|f| matches!(f.ty, FrameType::State)) {
+                break;
+            }
+        }
+        let batch = ulid();
+        sink.send(TMsg::Binary(
+            Frame::new(
+                FrameType::Push,
+                json!({ "batchId": batch }),
+                bytes::Bytes::from(vec![7u8; payload_len]),
+            )
+            .encode(),
+        ))
+        .await
+        .map_err(|e| e.to_string())?;
+        loop {
+            match tokio::time::timeout_at(deadline, stream.next()).await {
+                Err(_) => return Err("no answer at all".into()),
+                Ok(None) => return Err("socket closed silently".into()),
+                Ok(Some(Err(e))) => return Err(e.to_string()),
+                Ok(Some(Ok(m))) => {
+                    if let Some(f) = decode(m) {
+                        if matches!(f.ty, FrameType::Error | FrameType::Ack) {
+                            return Ok((f, batch));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The refusal must name the batch. Without it agentd cannot match the error to the push
+    /// it is waiting on, so it leaves the batch in flight and tears down a working session ten
+    /// seconds later on "push not acked" — the same defect #2749 fixed for every other room
+    /// refusal, which this one was missed out of.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_oversized_push_is_refused_by_name_and_keeps_the_socket() {
+        let (f, batch) = push_of(wire::ROW_MAX + 1)
+            .await
+            .expect("the relay answers rather than dropping the link");
+        assert_eq!(f.ty, FrameType::Error, "expected a refusal, got {:?}", f.ty);
+        assert_eq!(
+            f.header.get("code").and_then(|v| v.as_str()),
+            Some("too_large")
+        );
+        assert_eq!(
+            f.header.get("batchId").and_then(|v| v.as_str()),
+            Some(batch.as_str()),
+            "the refusal does not say which batch it refused: {}",
+            f.header
+        );
+        assert!(
+            f.header
+                .get("message")
+                .and_then(|v| v.as_str())
+                .is_some_and(|m| m.contains(&(wire::ROW_MAX + 1).to_string())),
+            "the refusal does not say how big the push was: {}",
+            f.header
+        );
+    }
+
+    /// The size that used to kill the socket in silence. It is still too big to store, but now
+    /// it comes back as a refusal instead of a reset the client cannot tell from a dead link.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_size_that_reset_test5_now_gets_an_answer() {
+        let was_fatal = wire::ROW_MAX + 8192 + 1;
+        match push_of(was_fatal).await {
+            Ok((f, _)) => assert_eq!(
+                f.header.get("code").and_then(|v| v.as_str()),
+                Some("too_large"),
+                "unexpected answer: {}",
+                f.header
+            ),
+            Err(e) => panic!("the link died instead of answering: {e}"),
         }
     }
 }
