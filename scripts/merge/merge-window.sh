@@ -375,7 +375,16 @@ after() {
     # wait for a run that has already finished and will never change.
     UNTESTED*) echo "VERDICT $(ts): STOP — main's CI at ${sha:0:9} aborted before it tested anything; re-run that job ($v)" ;;
     BLOCKED*) echo "VERDICT $(ts): BLOCKED — cannot read what the verdict needs, so no verdict is inferred: ${v#BLOCKED }" ;;
-    *) echo "VERDICT $(ts): WAIT — $v" ;;
+    WAIT*) echo "VERDICT $(ts): WAIT — $v" ;;
+    # Unrecognised. WAIT used to live here as the default, which meant any
+    # verdict word nobody had taught this function became an instruction to
+    # sit and wait. That is the wrong direction to fail in: the words that
+    # reach here describe states this function has never been shown, and a
+    # state nobody has reasoned about is not a state to proceed from. Every
+    # string verdict() can produce today has an arm above, so this arm is
+    # reachable only by a word added without reading this case — exactly the
+    # case that must not be allowed to read as progress.
+    *) echo "VERDICT $(ts): STOP — unrecognised verdict, so nothing is inferred from it: $v" ;;
   esac
 }
 

@@ -76,7 +76,27 @@ for fn in go after; do
   done
 done
 
-# 5. verdict() must actually route a non-success run through the classifier;
+# 5. after()'s default arm. Every verdict() string has an arm of its own, so
+#    this arm is reached only by a word somebody added without reading the
+#    case — which is precisely when it must not read as progress. It printed
+#    WAIT until 2026-11-04.
+echo "after()'s default arm refuses rather than shrugs:"
+after_src=$(sed -n '/^after() {/,/^}/p' "$D/merge-window.sh")
+default_arm=$(printf '%s\n' "$after_src" | grep -E '^\s+\*\)')
+if [ -z "$default_arm" ]; then
+  bad "after() has no default arm at all, so an unrecognised verdict prints nothing"
+elif printf '%s\n' "$default_arm" | grep -q 'WAIT'; then
+  bad "after()'s default arm says WAIT. An unrecognised verdict is a state nobody has reasoned about; telling the operator to wait for it is treating an unknown as progress."
+else
+  ok "the default arm does not say WAIT"
+fi
+if printf '%s\n' "$after_src" | grep -qE '^\s+WAIT\*\)'; then
+  ok "WAIT has an explicit arm, so moving the default did not silence it"
+else
+  bad "WAIT has no explicit arm in after(), so a genuinely-still-running verdict now falls to the default"
+fi
+
+# 6. verdict() must actually route a non-success run through the classifier;
 #    without this the two functions above are correct and unreached.
 echo "verdict() routes a terminal non-success run through ci_abort_state:"
 if grep -q 'completed\*) ci_abort_state' "$D/merge-window.sh"; then

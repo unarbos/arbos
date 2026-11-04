@@ -234,10 +234,19 @@ require_gates() {
 # default arm, which prints WAIT. WAIT is not a refusal. A new word intended to
 # describe a *failure* would have quietly started permitting one.
 #
-# So the word list lives here, once, and both callers read it. These two are
-# pure — no network, no git — which is also why they are in this file rather
-# than beside verdict(): merge-window.sh runs its dispatcher when sourced, so
-# selftest.sh cannot reach anything defined in it.
+# So the word list lives here, once. go() reads it directly. after() does not,
+# and that is on purpose rather than an oversight: its arms are not a
+# classification but five different pieces of prose, and TAG's arm does real
+# work. It also leans on prefix order — `RED GATE ...` is meant to reach its
+# `RED*` arm — so folding it onto these classes would send REDGATE somewhere
+# it has no arm, which is the very bug this comment is about. after() is held
+# to the same contract a different way: its default arm now STOPs instead of
+# printing WAIT, and selftest.sh asserts both that it has an arm per refusing
+# word and that the default is not a shrug.
+#
+# These two are pure — no network, no git — which is also why they are in this
+# file rather than beside verdict(): merge-window.sh runs its dispatcher when
+# sourced, so selftest.sh cannot reach anything defined in it.
 #
 # UNKNOWN is the important row. An unrecognised verdict refuses, so forgetting
 # to register a new word costs a false refusal and never a false pass.
