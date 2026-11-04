@@ -7322,9 +7322,13 @@ impl Agent {
         match promised_next_step(&words) {
             Some(promise) if !ran_to_completion => {
                 tracing::info!(chat_id, promise = %promise, "turn ended owing a stated next step; carried to the next turn");
-                let _ = self
-                    .store
-                    .meta_set(&Self::promise_key(chat_id), promise.trim());
+                // D19 backstop: `t3_append` redacts on the way in, `meta_set` does not, and
+                // `ack_text` / `route_reply_text` reach here as raw model prose. Scrub never
+                // reads `meta`, so an unredacted value stored here would outlive the scrub.
+                let _ = self.store.meta_set(
+                    &Self::promise_key(chat_id),
+                    &crate::store::redact(promise.trim()),
+                );
                 let _ = self.store.t3_append(
                     chat_id,
                     None,
