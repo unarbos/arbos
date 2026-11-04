@@ -6037,12 +6037,19 @@ impl Agent {
             || t.routine_turn
             || t.from_voice
             || !matches!(t.route, Some(ValidRoute::Act { .. }))
-            // The turn already answered: a `send_message` bubble is out, so this is a turn
-            // finishing, not long work to hand off. Converting here buys a second worker and a
-            // result turn that contradict a reply the user has already read (Jacob, Test5,
-            // 2026-11-04, T2: the answer went out at 13:45:29.439, the job started 1.6 s later,
-            // and a redundant "the answer I sent you stands" followed).
-            || t.progress_texts.iter().any(|p| !p.trim().is_empty())
+            // The turn already answered, so it is finishing rather than long work to hand off.
+            // Converting here buys a second worker and a result turn that contradict a reply
+            // the user has already read (Jacob, Test5, 2026-11-04, T2: the answer went out at
+            // 13:45:29.439, the job started 1.6 s later, and a redundant "the answer I sent
+            // you stands" followed).
+            //
+            // `posted_result` and not just `progress_texts`: a turn whose answer *is* a file
+            // has an empty `progress_texts` and has still answered (round 2, 2026-11-04). It
+            // also counts streamed prose, which is the looser of the three — narration can be
+            // mid-flight rather than a finished answer — so an act turn that has started
+            // writing stays inline. That is the accepted trade: a turn that has put words in
+            // front of the user must not be contradicted by a job.
+            || Self::posted_result(t)
         {
             return false;
         }
