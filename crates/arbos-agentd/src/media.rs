@@ -513,7 +513,7 @@ pub async fn deliver(
             .finish_message(&msg_id, arbos_core::doc::MessageStatus::Done);
         // Read it back: the row must hold the attachment, or this was not a delivery.
         if !row_holds_blob(&h, &msg_id, &key) {
-            let _ = h.doc.delete_message(&msg_id);
+            crate::agent::retire_row(&h.doc, &msg_id);
             anyhow::bail!("the attachment row did not read back from the chat doc");
         }
     }
