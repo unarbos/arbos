@@ -191,11 +191,11 @@ verdict() {
 #
 # Returns 0 satisfied (or no gate applies since <from>), 1 refused, 2 blocked, 3 wait.
 range_gate() {
-  local ch wf name rc=0 g sha subj files why state decided
+  local ch wf name rc=0 g sha subj files why state decided unasked
   ch=$(changes_since "$1")
   while IFS='|' read -r wf name; do
     [ -n "$wf" ] || continue
-    g=0; decided=""
+    g=0; decided=""; unasked=""
     while read -r sha subj; do
       [ -n "$sha" ] || continue
       if ! files=$(commit_files "$sha"); then why="BLOCKED — cannot read the files it changed: ${files#BLOCKED:}"
@@ -209,7 +209,13 @@ range_gate() {
         else echo "    '$name' on ${sha:0:9} (older, a finding, not a refusal): $why"; fi
         continue
       fi
-      state=$(gate_state "$wf" "$sha")
+      # landed_gate_state, not gate_state: these commits are already on main, so a pull_request-only
+      # gate's run sits on the merge commit's second parent, and a squash has none at all. See its
+      # header in checks.sh. NOTASKED is a finding — it does not decide the gate and does not refuse.
+      state=$(landed_gate_state "$wf" "$sha")
+      case "$state" in
+        NOTASKED*) echo "    '$name' on ${sha:0:9}: ${state#NOTASKED }"; unasked=$sha; continue ;;
+      esac
       if [ -z "$decided" ]; then
         decided=$sha
         case "$state" in
@@ -226,7 +232,13 @@ range_gate() {
         esac
       fi
     done <<< "$ch"
-    [ -n "$decided" ] || echo "    '$name': applies to no commit since $1"
+    # "applies to no commit" and "applies to commits it cannot be asked about" are different facts,
+    # and printing the first for the second is the same substitution this gate's own fix is about.
+    if [ -z "$decided" ] && [ -n "$unasked" ]; then
+      echo "    '$name': every commit since $1 that it applies to is one it cannot be asked about, named above"
+    elif [ -z "$decided" ]; then
+      echo "    '$name': applies to no commit since $1"
+    fi
     case $g in
       2) rc=2 ;;
       1) [ $rc -eq 2 ] || rc=1 ;;

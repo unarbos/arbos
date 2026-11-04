@@ -145,6 +145,67 @@ files_capped() {
   [ "$(printf '%s\n' "$1" | grep -c .)" -ge 300 ]
 }
 
+# gate_push_triggered <workflow> <ref>: can that workflow produce a run for a commit sitting on a
+# branch at all? Status 0 yes, 1 no, 2 could not tell. The reason is on stdout for 1 and 2.
+#
+# WHY A GATE CAN BE REQUIRED AND YET UNANSWERABLE ON main, which is what this is for.
+#
+# range_gate asks each gate for a verdict on a commit that is already on main. For a gate that runs
+# on `push` that question has an answer. For a gate that runs only on `pull_request` it has none and
+# never will: GitHub starts no run for a push, so the commit carries total_count 0 for ever.
+# range_gate read that as "a required check has no successful run on the commit that decides it" and
+# refused — pointing the operator at a remedy that does not exist, since nothing anyone can do makes
+# that run appear. It is the same mistake as gate_run_class above, one door along: there the gate
+# died before judging and was called a refusal, here the gate cannot be asked and is called a
+# missing pass. Both refuse. Neither is true.
+#
+# Measured, and it deadlocked the window: .github/workflows/release-gate.yml is `pull_request` only
+# and deliberately lists ITSELF in its own `paths:`, so #2727 — which changed that workflow — landed
+# on main as 54b199042 and became a commit the gate applies to and can never judge. No new tag
+# would clear it either, because the range only ends at a tag and mac-change.sh was rc=0, so
+# release.yml had nothing to publish. Every merge was refused, permanently, with the window open.
+#
+# WHY SKIPPING IT OPENS NO HOLE. The gate's real coverage is before the merge, not after. merge.sh
+# runs require_gates on the pull request's own head and takes no argument that waives it — accept-red
+# names a run whose result is ignored, and a gate with no result has no run to name. So the verdict
+# this would re-ask for has already been obtained, on the same content: for 54b199042 the three files
+# on main are byte-identical blobs to #2727's head 3a41016c3, which run 41859964806 passed on both
+# jobs. The only case not covered is a direct push to main, which carries no pull request and so has
+# no verdict by either route — and merge-window.sh's header already concedes that an unprotected main
+# permits a push no check can see. This narrows nothing that was ever actually checked.
+#
+# Reading `on:` rather than taking a list: a hardcoded "release-gate.yml is pull_request only" goes
+# stale silently the day someone adds a trigger, in the permissive direction. Anything this cannot
+# classify is status 2, and the caller keeps refusing, because an unanswerable question is BLOCKED
+# and not an answer — the same rule the rest of this file follows.
+gate_push_triggered() {
+  local body
+  if ! body=$(rd "repos/$R/contents/$1?ref=$2" --jq '.content' 2>/dev/null); then
+    echo "cannot read $1 at $2, so whether it can run on a commit there is unknown"; return 2
+  fi
+  local verdict
+  verdict=$(printf '%s' "$body" | base64 -d 2>/dev/null | awk '
+    /^on:[[:space:]]*$/          { inon = 1; seen = 1; next }
+    /^on:[[:space:]]*[^[:space:]]/ { seen = 1; inline = $0; next }
+    /^[^[:space:]]/              { inon = 0 }
+    inon && /^  push:/           { push = 1 }
+    END {
+      if (!seen) { print "UNKNOWN"; exit }
+      if (inline != "") {
+        # `on: push`, `on: [push, pull_request]`. Anything else is not classified.
+        if (inline ~ /^on:[[:space:]]*push[[:space:]]*$/) { print "PUSH"; exit }
+        if (inline ~ /^on:[[:space:]]*\[/) { print (inline ~ /[[,][[:space:]]*push[[:space:]]*[],]/) ? "PUSH" : "NOPUSH"; exit }
+        print "UNKNOWN"; exit
+      }
+      print (push ? "PUSH" : "NOPUSH")
+    }')
+  case "$verdict" in
+    PUSH)   return 0 ;;
+    NOPUSH) echo "$1 has no \`push:\` trigger at $2, so no commit on $2 can carry a run of it — its verdict is taken before the merge, on the pull request's own head, where merge.sh requires it and waives nothing"; return 1 ;;
+    *)      echo "the \`on:\` block of $1 at $2 is not in a shape this can classify, so whether it can run on a commit there is unknown"; return 2 ;;
+  esac
+}
+
 # gate_state <workflow> <sha>: one line — PASS <detail> | RED <detail> | NOVERDICT <detail> |
 # PENDING <detail> | NONE | BLOCKED <what could not be read>.
 #
@@ -235,6 +296,43 @@ gate_applies() {
     1) echo "not required — this diff touches none of its $(printf '%s\n' "$pats" | grep -c .) filtered paths"; return 1 ;;
     *) echo "BLOCKED — $wf has a path pattern this cannot evaluate"; return 2 ;;
   esac
+}
+
+# landed_gate_state <workflow> <sha>: gate_state for a commit that is ALREADY on main, which is a
+# different question from gate_state's and needs two things gate_state must not do.
+#
+# Prints what gate_state prints, plus one more word it can return: NOTASKED <why>. The caller treats
+# that as a finding and not a refusal.
+#
+# 1. A PULL-REQUEST RUN LANDS ON THE SECOND PARENT, NOT ON THE MERGE COMMIT. A `pull_request` run is
+#    recorded against the pull request's head sha. When that pull request lands as a merge commit,
+#    that very sha becomes the merge commit's second parent and is an ancestor of main, so the run
+#    is still reachable and the audit still works. Asking only about the merge commit throws it
+#    away. Measured on main's own history: dd0d8db10^2 is 92337f833, #2726's head.
+#
+# 2. A SQUASH HAS NO SECOND PARENT, AND NEITHER DOES A DIRECT PUSH. Of the five commits on main
+#    after v0.6.382 on 2026-11-04, four were squash-merged by hand and carry one parent each; only
+#    dd0d8db10, merged through this kit, has a second. So route 1 is the precise answer and not a
+#    complete one, and the rule below is what the remainder falls to.
+#
+# Only a gate with NO RUN AT ALL reaches that rule. A run that exists and failed is a verdict on
+# this commit and still refuses — the point here is the difference between a question answered badly
+# and a question that was never asked, which is this file's whole subject.
+landed_gate_state() {
+  local wf=$1 sha=$2 state p2 s2 why prc
+  state=$(gate_state "$wf" "$sha")
+  case "$state" in PASS*) echo "$state"; return ;; esac
+  p2=$(git rev-parse -q --verify "$sha^2" 2>/dev/null)
+  if [ -n "$p2" ]; then
+    s2=$(gate_state "$wf" "$p2")
+    case "$s2" in PASS*) echo "PASS on ${p2:0:9}, the pull request head this commit merged — ${s2#PASS }"; return ;; esac
+  fi
+  if [ "$state" = NONE ]; then
+    why=$(gate_push_triggered "$wf" "${GATE_BASE:-main}"); prc=$?
+    [ $prc -eq 1 ] && { echo "NOTASKED not required on a commit already on ${GATE_BASE:-main} — $why"; return; }
+    [ $prc -eq 2 ] && { echo "BLOCKED no run of ${wf##*/} exists for ${sha:0:9}, and $why"; return; }
+  fi
+  echo "$state"
 }
 
 # require_gates <sha> <files>: print one indented finding per gate and return 0 only when every gate
