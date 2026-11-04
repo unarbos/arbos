@@ -25,6 +25,7 @@ pub fn tool_specs() -> Vec<Value> {
     let chart_schema: Value = serde_json::from_str(chart::SCHEMA_JSON).expect("chart schema");
     vec![json!({
         "name": TOOL_NAME,
+        "delivery": true,
         "description": "Post a chart into THIS chat as a real message (1:1, group, channel or DM alike): line, area, bar, scatter or pie, drawn natively on Mac and iPhone — the user can hover or touch for values, expand it, save it as a PNG and copy the data; older apps and notifications get a picture. Send the data, not an image: series with points ([x, y]; x a number or an ISO date) or categories + values, axis labels and units. Keep it small: at most 8 series, 500 points per series, 2 000 in total, 100 categories (pie: 12 slices, one series) and 32 KB — bigger data is a CSV through deliver_file. Returns posted: true with the message id; an error means the chart was NOT posted — then say so plainly instead of claiming it was.",
         "inputSchema": {
             "type": "object",

@@ -31,7 +31,61 @@ const MAX_HITS: i64 = 20;
 const PAGE_TOKENS_CHARS: usize = 32_000; // ≈ 8k tokens
 const DRAFT_CHANNELS: &[&str] = &["email", "slack", "telegram", "whatsapp", "sms"];
 
+/// `mcp__arbos__post_chart` and `post_chart` name the same tool: pi prefixes every MCP tool with
+/// its server. Every name check here takes the bare one.
+pub fn bare_tool_name(tool_name: &str) -> &str {
+    tool_name.strip_prefix("mcp__arbos__").unwrap_or(tool_name)
+}
+
+/// A **delivery tool** hands the user the thing a turn promised — a file, a picture, a chart — as
+/// its own row in the chat, and then returns. Each spec declares `"delivery": true` beside its
+/// own name, so this set is read off the tools themselves and cannot drift from a list kept
+/// somewhere else; a new delivery tool is reachable everywhere the moment it declares itself.
+/// The marker is internal: [`tools`] strips it, so it never reaches the model.
+pub fn is_delivery_tool(tool_name: &str) -> bool {
+    delivery_tools().contains(bare_tool_name(tool_name))
+}
+
+/// Every tool that declares itself a delivery tool, in spec order. The extension gets this list
+/// as `ARBOS_DELIVERY_TOOLS` so it refuses a relay turn's other calls in band, from the same
+/// source of truth as the guard in `agent.rs`.
+pub fn delivery_tools() -> &'static std::collections::BTreeSet<String> {
+    static NAMES: std::sync::OnceLock<std::collections::BTreeSet<String>> =
+        std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        declared_tools()
+            .as_array()
+            .map(|specs| {
+                specs
+                    .iter()
+                    .filter(|t| t.get("delivery").and_then(Value::as_bool) == Some(true))
+                    .filter_map(|t| t.get("name").and_then(Value::as_str))
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+}
+
+/// The tool list as the model sees it: the declared specs without Arbos's own markers.
 fn tools() -> Value {
+    let mut list = declared_tools();
+    if let Some(specs) = list.as_array_mut() {
+        for t in specs.iter_mut() {
+            if let Some(o) = t.as_object_mut() {
+                o.remove("delivery");
+            }
+        }
+    }
+    list
+}
+
+#[cfg(test)]
+pub(crate) fn tools_for_test() -> Value {
+    tools()
+}
+
+fn declared_tools() -> Value {
     let mut list = json!([
         { "name": "context_search", "description": "Search this agent's memory tree: raw events (every past message, tool call and result) plus index cards of episodes and threads. Returns ids for context_open / context_around. Scoped to what this chat may see.",
           "inputSchema": { "type": "object", "properties": { "query": { "type": "string" }, "limit": { "type": "integer" } }, "required": ["query"] } },

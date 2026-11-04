@@ -10,7 +10,7 @@ process.env.ARBOS_STATE_DIR = mkdtempSync(join(tmpdir(), "arbos-pi-ext-test-"));
 process.env.ARBOS_HOOK_URL = "";
 process.env.ARBOS_SESSION_ROLE = "main";
 
-const { default: arbosPiExt, promisesMore, detachedShell } = await import("./index.ts");
+const { default: arbosPiExt, promisesMore, detachedShell, relayTurnTool } = await import("./index.ts");
 
 type Handler = (event: any) => Promise<any> | any;
 
@@ -133,4 +133,50 @@ test("a detached script in the main turn is refused with the start_job hint (#17
   assert.match(verdict.reason, /start_job/);
   const fg = await emit("tool_call", { toolCallId: "b2", toolName: "bash", input: { command: "seq 1 10 > step1.txt" }, parentToolCallId: null });
   assert.equal(fg, undefined);
+});
+
+// AF-782: a result turn said "I'll post the table and the price chart now", posted the table,
+// then reached for the chart through a `codemode` script. agentd killed the call and the turn,
+// and the chart was never attempted again. The script is still refused — a relay turn does not
+// work — but in band, so the model reads why and can deliver in the same turn.
+test("a relay turn may deliver what it promised, and is told so when it reaches for a script", async () => {
+  const relay = async () => {
+    const { emit } = fakePi();
+    const input = await emit("input", { text: "[Arbos relay turn]\n[Arbos] Job \"Searching\" (j1) finished · status done · 100 s.", source: "rpc" });
+    await emit("before_agent_start", { messageType: "user", prompt: input.text, systemPromptOptions: { sections: {} } });
+    await emit("tool_call", { toolCallId: "s", toolName: "send_message", input: { text: "Here they are." }, parentToolCallId: null });
+    return emit;
+  };
+
+  // Jacob's call: refused, but answered — and the refusal names the tool that does work.
+  const script = await (await relay())("tool_call", {
+    toolCallId: "c1", toolName: "codemode",
+    input: { code: 'const t = await searchTools("post_chart"); return t;' },
+    parentToolCallId: null,
+  });
+  assert.equal(script?.block, true);
+  assert.match(script.reason, /post_chart/);
+  assert.match(script.reason, /deliver/i);
+
+  // The chart itself goes through, by either name pi may use for it.
+  for (const name of ["post_chart", "mcp__arbos__post_chart", "deliver_file", "mcp__arbos__generate_image"]) {
+    const verdict = await (await relay())("tool_call", { toolCallId: `d-${name}`, toolName: name, input: {}, parentToolCallId: null });
+    assert.equal(verdict, undefined, `${name} was blocked in a relay turn: ${JSON.stringify(verdict)}`);
+  }
+
+  // Work is still refused, nested calls included: Jacob's chart died inside a script.
+  const nested = await (await relay())("tool_call", { toolCallId: "n1", toolName: "bash", input: { command: "ls" }, parentToolCallId: "c1" });
+  assert.equal(nested?.block, true);
+
+  // A user turn is untouched: it may do all of this.
+  const { emit, tools } = fakePi();
+  const input = await emit("input", { text: "Count the listings.", source: "rpc" });
+  await emit("before_agent_start", { messageType: "user", prompt: input.text, systemPromptOptions: { sections: {} } });
+  await tools.get("route").execute("r", { action: "act", ack: "Counting." });
+  assert.equal(await emit("tool_call", { toolCallId: "u1", toolName: "bash", input: { command: "ls" }, parentToolCallId: null }), undefined);
+
+  assert.equal(relayTurnTool("post_chart"), true);
+  assert.equal(relayTurnTool("mcp__arbos__ask_user"), true);
+  assert.equal(relayTurnTool("codemode"), false);
+  assert.equal(relayTurnTool("web_search"), false);
 });

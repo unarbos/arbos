@@ -608,6 +608,17 @@ impl PiAdapter {
                 "ARBOS_STABLE_PREFIX".into(),
                 if cfg.stable_prefix() { "on" } else { "off" }.into(),
             ),
+            // AF-782: the tools a relay turn may call to hand over what it promised. Declared on
+            // the tool specs themselves, so the extension and `agent::relay_turn_tool` cannot
+            // disagree about what counts as delivery.
+            (
+                "ARBOS_DELIVERY_TOOLS".into(),
+                crate::mcp::delivery_tools()
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
         ]);
         // Approved vault grants (F8): placeholders only, usable through the egress tool.
         envs.extend(crate::vault::shell_envs(cfg));
