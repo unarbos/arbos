@@ -1624,7 +1624,8 @@ pub struct Agent {
     /// while a retry deliberately holds the session on the fallback model
     /// (`switch_talking_model`) — in both cases the turn boundary leaves the model alone. pi
     /// owns its model between spawns, so this is what lets a turn tell "pi already has the
-    /// agent's model" from "the one push that would have given it to pi was lost".
+    /// agent's model" from "the one push that would have given it to pi was lost"; see
+    /// [`Agent::sync_pi_model`].
     pub(crate) pi_model: Mutex<Option<String>>,
     /// D91 soft-compaction hysteresis per chat: `None` right after a compaction (the floor is
     /// not known yet), then the window observed on the first turn after it.
@@ -5235,6 +5236,10 @@ impl Agent {
         host: &SharedHost,
         prompt_text: &str,
     ) -> Result<()> {
+        // Every other lane resolves its model on the call it is about to make; the main session
+        // resolves its own here, so a model change the one push in `apply_models` never landed
+        // still reaches this call (`Agent::sync_pi_model`).
+        self.sync_pi_model().await;
         let pi = self.pi().await?;
         let mut events = pi.subscribe();
         // Whatever ends this call, pi is either settled (we saw `agent_settled`) or running a
