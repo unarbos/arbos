@@ -243,8 +243,7 @@ extension AppModel {
     /// My owned agents as the Settings rows need them: the open chat's agent
     /// first, then by activity ([feedback search-settings-ios-2026-10-26]).
     func searchAgentRows() -> [GlobalSearch.AgentRow] {
-        var current: Id?
-        if case .chat(_, let pid)? = path.last { current = pid }
+        let current = openChat?.projectId
         let owned = projects.filter { !$0.shared && !isArchived($0.id) }
         let activity: (Project) -> Int64 = { p in self.chats(of: p.id).map(\.lastMessageAt).max() ?? 0 }
         let ordered = owned.sorted { a, b in
