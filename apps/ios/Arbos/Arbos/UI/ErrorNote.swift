@@ -255,6 +255,14 @@ struct ToastHost: View {
         .allowsHitTesting(!model.toasts.isEmpty)
         .animation(.easeOut(duration: 0.2), value: model.toasts)
         .accessibilityIdentifier("toast-slot")
+        // An empty slot is still a full-screen view, and a container with no children has no
+        // child frames to union, so SwiftUI publishes it at its own layout box: one element
+        // covering the whole content area, sitting over every row underneath. VoiceOver reads
+        // that, and XCUITest computes hit points from the same tree — which is why a Home row
+        // with a perfectly good frame reports no hit point while UIKit delivers the touch
+        // normally. Hidden while empty, and only while empty: with a toast up the slot has to
+        // stay in the tree so the note, its × and its Try again can be reached.
+        .accessibilityHidden(model.toasts.isEmpty)
     }
 }
 
