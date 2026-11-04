@@ -65,6 +65,8 @@ pub(crate) const HERO_SUBTITLE: f32 = 12.0;
 pub(crate) const TAB_HEIGHT: f32 = 26.0;
 pub(crate) const TAB_PAD_X: f32 = 9.0;
 pub(crate) const TAB_GAP: f32 = 2.0;
+/// One weight for every tab, selected or not ([feedback grok-tab-bold-2026-11-03]).
+pub(crate) const TAB_WEIGHT: FontWeight = FontWeight::NORMAL;
 
 /// The open page, if any — rendered as the right pane.
 pub fn pane(page: &ProfilePage, shell: &Shell, cx: &mut Context<Shell>) -> Option<Stateful<Div>> {
@@ -445,6 +447,30 @@ pub(super) fn card(theme: &Theme) -> Div {
     kit::card(theme)
 }
 
+/// One tab's drawn capsule — everything that decides how wide the tab is.
+/// Split out of [`tab_bar`] so a headless render can measure a tab in both
+/// states without a [`Shell`]; [`tab_bar`] adds only the id, the pill wash and
+/// the click.
+pub(super) fn tab_face(name: &str, on: bool, theme: &Theme) -> Div {
+    div()
+        .h(px(TAB_HEIGHT))
+        .px(px(TAB_PAD_X))
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(TEXT_SMALL))
+        // Grok's tabs keep one weight across the row: the selected tab reads
+        // as selected from the capsule behind it and the brighter label, never
+        // from bold ([feedback grok-tab-bold-2026-11-03] — Jacob: "on grok
+        // these items dont bold when you click on them"). Weight is also what
+        // made the row reflow, because bold text is wider than regular: with
+        // one weight every tab keeps its width whichever one is selected.
+        .font_weight(TAB_WEIGHT)
+        .text_color(if on { theme.text } else { theme.label_muted() })
+        .child(name.to_string())
+}
+
 /// Segmented tab bar; `tabs[i]` is selected when `i == current`.
 pub(super) fn tab_bar(
     tabs: &[&'static str],
@@ -465,27 +491,13 @@ pub(super) fn tab_bar(
     for (i, name) in tabs.iter().enumerate() {
         let on = i == current;
         bar = bar.child(
-            div()
+            tab_face(name, on, theme)
                 .id(ElementId::Name(SharedString::from(format!(
                     "profile-tab-{name}"
                 ))))
                 .debug_selector(move || format!("profile-tab-{name}"))
-                .h(px(TAB_HEIGHT))
-                .px(px(TAB_PAD_X))
-                .rounded_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(TEXT_SMALL))
-                .font_weight(if on {
-                    FontWeight::SEMIBOLD
-                } else {
-                    FontWeight::NORMAL
-                })
-                .text_color(if on { theme.text } else { theme.label_muted() })
                 .cursor_pointer()
-                .map(|el| highlight::segment(el, on, theme.control_fill(), theme))
-                .child(name.to_string())
+                .map(|el| highlight::segment(el, on, theme.tab_on_fill(), theme))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.state.update(cx, |s, cx| s.set_profile_tab(i, cx));
                 })),
@@ -1142,5 +1154,143 @@ mod chrome_tests {
             kit::SECTION_TITLE_TOP + kit::SECTION_TITLE_BOTTOM + kit::SECTION_TITLE_LINE,
             "label box is its padding + one 16 pt line"
         );
+    }
+}
+
+/// The segmented tab bar's geometry ([feedback grok-tab-bold-2026-11-03]).
+/// Jacob: "on grok these items dont bold when you click on them." The
+/// selected tab used to draw [`gpui::FontWeight::SEMIBOLD`], so it was wider
+/// than the same tab unselected, and moving the selection slid every tab
+/// after it sideways. These tests render the real [`tab_face`] and measure it.
+///
+/// **What this cannot prove.** GPUI's headless shaper measures every weight
+/// the same — a probe that lays the row out at `SEMIBOLD` and at `NORMAL`
+/// returns boxes that match to 0 pt. So the render tests here pin the box
+/// rule (padding, gap, height, and that none of them reads the selection);
+/// the text metric itself is proved on the iPhone, where `PaneTabsLayoutTests`
+/// measures real CoreText, and on the Linux Xvfb shots, which shape with the
+/// real Inter faces.
+#[cfg(test)]
+mod tab_tests {
+    use gpui::{div, prelude::*, px, FontWeight, TestAppContext};
+
+    use super::{tab_face, TAB_GAP, TAB_HEIGHT, TAB_PAD_X, TAB_WEIGHT};
+    use crate::ui::theme::{AppearancePref, Surface, Theme};
+
+    /// The widest set the control carries, plus the two-tab pages.
+    const ROWS: [&[&str]; 4] = [
+        &["Details", "Library", "Computer"],
+        &["Profile", "Settings"],
+        &["Links", "Groups"],
+        &["All", "Agents", "People", "Servers"],
+    ];
+
+    /// One tab row with `selected` on the capsule, drawn by the shipping
+    /// [`tab_face`]; `weight` is spliced in so the old rule can be measured
+    /// against the new one.
+    struct Row {
+        tabs: &'static [&'static str],
+        selected: usize,
+        weight: Option<FontWeight>,
+    }
+
+    impl gpui::Render for Row {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            let mut bar = div()
+                .flex()
+                .justify_center()
+                .gap(px(TAB_GAP))
+                .debug_selector(|| "tab-row".into());
+            for (i, name) in self.tabs.iter().enumerate() {
+                let on = i == self.selected;
+                let weight = self.weight;
+                bar = bar.child(
+                    tab_face(name, on, &theme)
+                        .when_some(weight, |el, w| el.font_weight(w))
+                        .debug_selector(move || format!("tab-{name}")),
+                );
+            }
+            div().w(px(340.0)).h(px(80.0)).child(bar)
+        }
+    }
+
+    /// Every tab's box, left to right, for one selection.
+    fn boxes(
+        cx: &mut TestAppContext,
+        tabs: &'static [&'static str],
+        selected: usize,
+        weight: Option<FontWeight>,
+    ) -> Vec<(f32, f32)> {
+        let (_view, vcx) = cx.add_window_view(|_, _| Row {
+            tabs,
+            selected,
+            weight,
+        });
+        vcx.run_until_parked();
+        tabs.iter()
+            .map(|name| {
+                // `debug_bounds` wants a `'static` selector; the leak is one
+                // short string per tab per render, inside a test.
+                let sel: &'static str = Box::leak(format!("tab-{name}").into_boxed_str());
+                let b = vcx
+                    .debug_bounds(sel)
+                    .unwrap_or_else(|| panic!("tab {name}"));
+                (b.origin.x.into(), b.size.width.into())
+            })
+            .collect()
+    }
+
+    fn set_theme(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let theme = Theme::for_pref(AppearancePref::Dark, Surface::Matte, cx);
+            cx.set_global(theme);
+        });
+    }
+
+    /// The fix. Whichever tab is selected, every tab in the row keeps the
+    /// same origin and the same width — the row does not reflow, and nothing
+    /// under the pointer moves out from under it when a tab is clicked.
+    #[gpui::test]
+    fn moving_the_selection_moves_no_tab(cx: &mut TestAppContext) {
+        set_theme(cx);
+        for tabs in ROWS {
+            let first = boxes(cx, tabs, 0, None);
+            for selected in 1..tabs.len() {
+                assert_eq!(
+                    boxes(cx, tabs, selected, None),
+                    first,
+                    "{tabs:?}: selecting {} moved the row",
+                    tabs[selected]
+                );
+            }
+            // Each tab is its label plus the capsule's padding, nothing else.
+            for ((_, w), name) in first.iter().zip(tabs) {
+                assert!(
+                    *w > 2.0 * TAB_PAD_X,
+                    "{name}: {w} is narrower than its padding"
+                );
+            }
+        }
+    }
+
+    /// One weight across the row, and it is the unselected one: the capsule
+    /// and the brighter label are the whole selected signal, as Grok's are.
+    #[gpui::test]
+    fn the_selected_tab_is_the_same_weight_as_the_rest(cx: &mut TestAppContext) {
+        set_theme(cx);
+        assert_eq!(TAB_WEIGHT, FontWeight::NORMAL);
+        let theme = cx.update(|cx| Theme::of(cx).clone());
+        // The capsule is the one thing selection changes besides the colour.
+        assert_ne!(
+            theme.tab_on_fill(),
+            theme.bg,
+            "the selected capsule must still be visible against the page"
+        );
+        assert_eq!(TAB_HEIGHT, 26.0);
     }
 }

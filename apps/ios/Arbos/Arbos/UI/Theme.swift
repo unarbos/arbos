@@ -405,6 +405,16 @@ struct Theme: Equatable {
         return isDark ? Color.white.opacity(PaneCardGlass.rimAlphaDark) : Color.black.opacity(PaneCardGlass.rimAlphaLight)
     }
 
+    /// The selected capsule of a segmented tab row (`PaneTabs`: Details · Library ·
+    /// Computer, Profile · Settings, Home's All · Agents · People · Servers): grey 27 in
+    /// dark, Grok's (Jacob, 2026-11-03, [feedback grok-tab-bold-2026-11-03] — he measured
+    /// ours at 50 against Grok's 27; ours was the assistant-bubble grey, 32). Seven shades
+    /// over the page under it, so the capsule is a whisper. With the label brightening to
+    /// `text` it is the whole selected signal now that the tab no longer goes bold.
+    /// Light keeps the assistant-bubble grey: one number sampled in dark does not carry to
+    /// a white page. The Mac's `Theme::tab_on_fill` is the same token.
+    var tabOnFill: Color { isDark ? Color(hex: "#1B1B1B")! : bubbleAssistant }
+
     /// Grok's bot palette; a project's hex colour snaps to the nearest one.
     static let palette: [Color] = [
         Color(hex: "#1084FE")!, Color(hex: "#10B981")!, Color(hex: "#FF7A00")!, Color(hex: "#FF3B5C")!,
