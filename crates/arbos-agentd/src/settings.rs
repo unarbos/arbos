@@ -235,6 +235,9 @@ pub enum ModelRole<'a> {
         job_kind: Option<&'a str>,
         research: Option<&'a str>,
     },
+    /// The quick reply a busy agent gives. `env_override` is `ARBOS_QUICK_REPLY_MODEL`: a
+    /// cheaper lane for an agent on the box default, ignored for an agent with a model of its own.
+    QuickReply { env_override: Option<&'a str> },
     /// Memory write/read decisions and memory-tree cards (the `decision_model` slot).
     Decision,
 }
@@ -300,29 +303,33 @@ impl LiveModels {
     ///
     /// A slot that differs from its box default was chosen for this agent, and a chosen model
     /// wins over every cheaper lane: the user who picks Opus gets Opus for the reading and the
-    /// writing, not only for the sentence that answers (Jacob, 2026-11-04: "why did it use Haiku? the model is opus"). An agent left on the box default
-    /// keeps the lanes as they were, so no default moves and nothing costs more than today.
+    /// writing, not only for the sentence that answers (Jacob, 2026-11-04: "why did it use
+    /// Haiku? the model is opus"). An agent left on the box default keeps the lanes as they
+    /// were, so no default moves and nothing costs more than today.
+    ///
+    /// Every role answers from one read of the slots. The registry poll queues a writer here
+    /// every 3 s and `tokio`'s lock is fair, so two reads around one decision are two chances to
+    /// straddle that write and answer from two different settings.
     pub async fn resolve(&self, role: ModelRole<'_>) -> String {
         let m = self.read().await;
+        let chose_talking = m.talking.id != self.box_default_talking;
         match role {
             ModelRole::Talking => m.talking.id.clone(),
             ModelRole::Decision => m.decision.id.clone(),
+            ModelRole::QuickReply { env_override } => match env_override {
+                Some(cheap) if !chose_talking => cheap.to_owned(),
+                _ => m.talking.id.clone(),
+            },
             ModelRole::Worker { job_kind, research } => {
                 if m.subagent.id != self.box_default_subagent {
                     return m.subagent.id.clone();
                 }
-                if m.talking.id != self.box_default_talking {
+                if chose_talking {
                     return m.talking.id.clone();
                 }
                 crate::config::worker_model_for(job_kind.unwrap_or(""), research, &m.subagent.id)
             }
         }
-    }
-
-    /// Someone picked this agent's talking model; it is not the box default. A cheap fast path
-    /// (the research-worker lane, `ARBOS_QUICK_REPLY_MODEL`) must yield to it.
-    pub async fn talking_is_chosen(&self) -> bool {
-        self.read().await.talking.id != self.box_default_talking
     }
 }
 

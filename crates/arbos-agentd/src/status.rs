@@ -538,15 +538,15 @@ impl Agent {
         // A cheaper quick-reply lane is allowed, but never over the agent's head: with a model
         // picked for this agent, the box override is ignored and the quick reply speaks on that
         // model like the rest of the turn (Jacob, 2026-11-04).
-        let talking_model = self.model_for(crate::settings::ModelRole::Talking).await;
-        let model = match std::env::var("ARBOS_QUICK_REPLY_MODEL")
+        let cheap = std::env::var("ARBOS_QUICK_REPLY_MODEL")
             .ok()
             .map(|m| m.trim().to_owned())
-            .filter(|m| !m.is_empty())
-        {
-            Some(m) if !self.settings.models.talking_is_chosen().await => m,
-            _ => talking_model,
-        };
+            .filter(|m| !m.is_empty());
+        let model = self
+            .model_for(crate::settings::ModelRole::QuickReply {
+                env_override: cheap.as_deref(),
+            })
+            .await;
         let mut used_model = false;
         let (kind, text) = if self.quick_call_allowed(chat_id) {
             used_model = true;
