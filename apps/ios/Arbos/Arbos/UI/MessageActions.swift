@@ -386,6 +386,16 @@ final class EmojiTextField: UITextField {
 }
 
 extension View {
+    /// The shape the system lifts this bubble with when `messageRowGestures` falls to the
+    /// plain `.contextMenu` — in a channel, or on a row whose message is not in
+    /// `messageById`. Without it the preview takes the whole full-width row as a
+    /// square-cornered platter, which reads as a hard grey panel behind a rounded bubble
+    /// running out past the avatar to the screen edge. `Theme.bubbleShape` is the same
+    /// value the bubble fills and clips itself with, so the two cannot drift.
+    func bubbleMenuPreview() -> some View {
+        contentShape(.contextMenuPreview, Theme.bubbleShape)
+    }
+
     /// A message bubble: long-press → actions overlay; double-tap → ❤️ reaction.
     /// Any other row (date / system / channel line) keeps a plain Copy context menu.
     @ViewBuilder
