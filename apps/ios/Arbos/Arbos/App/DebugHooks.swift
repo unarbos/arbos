@@ -67,6 +67,16 @@ enum DebugHooks {
     /// `ARBOS_FIXTURE_MACHINE=near-limit`: the box report says disk 92 % and memory 88 % used
     /// (Settings › Machine's warning state on the rig).
     static var fixtureMachineNearLimit: Bool { value("ARBOS_FIXTURE_MACHINE") == "near-limit" }
+    /// `ARBOS_FIXTURE_MACHINE=waking`: the box starts waking and reaches awake 3 s in, so the
+    /// transcript's "Waking your machine…" banner is there when a chat opens and leaves while
+    /// it is on screen — the one thing a real launch does and the fixture's always-awake box
+    /// never did ([feedback iphone-blank-chat-on-open-2026-11-03]).
+    static var fixtureMachineWaking: Bool { value("ARBOS_FIXTURE_MACHINE") == "waking" }
+    /// `ARBOS_FIXTURE_ROWS_DELAY=<ms>`: every fixture chat starts with no rows and gets them
+    /// that many ms after launch. A chat opened inside that window is on screen when its rows
+    /// land — the shape of a real open over a slow link, and the one the always-ready fixture
+    /// could never make ([feedback iphone-blank-chat-on-open-2026-11-03]).
+    static var fixtureRowsDelayMs: Int? { value("ARBOS_FIXTURE_ROWS_DELAY").flatMap { Int($0) } }
     /// Tasks-chip rig (duplex §2.4): the first n of three background jobs open in the opened
     /// agent chat — 1 running with a step, 2 running with no step yet, 3 queued behind a lock.
     static var fixtureJobs: Int { min(3, value("ARBOS_FIXTURE_JOBS").flatMap { Int($0) } ?? 0) }

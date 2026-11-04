@@ -1,4 +1,8 @@
 mod admin;
+mod agent_link;
+mod agent_link_read;
+mod agent_link_stream;
+mod agent_link_write;
 mod agent_messages;
 mod api;
 mod api_error_layer;
@@ -50,6 +54,8 @@ mod local;
 mod matrix;
 mod migrate;
 mod moderation;
+#[cfg(test)]
+mod module_lookup_tests;
 mod notices;
 mod notify;
 mod outside;
@@ -61,8 +67,11 @@ mod perf;
 mod pins;
 #[cfg(test)]
 mod preview_token_tests;
+#[cfg(test)]
+mod project_lookup_tests;
 mod proxy;
 mod push;
+mod push_guard;
 mod releases;
 mod restart;
 mod room_health;
@@ -372,12 +381,14 @@ async fn main() -> anyhow::Result<()> {
         default_snapshot: Arc::new(std::sync::RwLock::new(String::new())),
         started_at: std::time::Instant::now(),
         restart: Arc::new(crate::state::RestartSignal::default()),
+        revocations: Arc::new(tokio::sync::watch::Sender::new(0)),
         voice_dispatched: Arc::new(Mutex::new(HashMap::new())),
         voice_worker: Arc::new(Mutex::new(None)),
         voice_inbox: crate::voice::VoiceInbox::default(),
         image_health: Arc::new(Mutex::new(None)),
         client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
         matrix: matrix::Matrix::new(matrix::Config::from_env()?),
+        link_hub: Arc::new(agent_link_stream::LinkHub::load(&db)),
     };
     tracing::info!(auth_mode = auth_mode.as_str(), public_url = %state.cfg.public_url, "sign-in");
     people::rename_agents_that_shadow_people(&state);
@@ -438,6 +449,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/auth/token", post(signin::token))
         .route("/auth/refresh", post(signin::refresh))
         .route("/auth/logout", post(signin::logout))
+        .route(
+            "/auth/sign-out-everywhere",
+            post(signin::sign_out_everywhere),
+        )
         .route(
             "/auth/devices",
             get(signin::devices_list).post(export::mint_reader),
@@ -616,12 +631,51 @@ async fn main() -> anyhow::Result<()> {
         .route("/asp/socket", get(outside::socket))
         .route("/asp/files/{slot}/{key}", get(outside::file))
         .route("/asp/chats/{id}/messages", get(outside::history))
+        .route("/asp/approvals/{id}", get(outside::approval_read))
         .route("/asp/connect/{id}", get(outside::connect_page))
         // Sidecar support (#2189): members, and the public texts an agent is handed.
         .route("/asp/chats/{id}/members", get(outside_sidecar::members))
         .route("/llms.txt", get(outside_sidecar::llms_txt))
         .route("/agents/llms.txt", get(outside_sidecar::llms_txt))
         .route("/sidecar/install.sh", get(outside_sidecar::install_sh))
+        .route("/acp/install.sh", get(outside_sidecar::acp_install_sh))
+        // Agent access links. The owner side takes an ordinary device bearer; the
+        // `/agent-link/*` routes take a `LinkPrincipal` and are the only routes an `arbl_`
+        // token can reach, because Axum will not call a handler whose extractor does not
+        // resolve. Default-deny by construction rather than by allowlist.
+        .route(
+            "/me/agent-links",
+            get(agent_link::list).post(agent_link::mint),
+        )
+        .route("/me/agent-links/{id}", delete(agent_link::revoke))
+        .route("/me/agent-links/{id}/activity", get(agent_link::activity))
+        .route("/agent-link/open/{secret}", get(agent_link::open_sheet))
+        .route("/agent-link/me", get(agent_link::me))
+        // PR 3: what a link may read. Every one takes a `LinkPrincipal`, so an `arbl_` bearer
+        // reaches these and nothing else in the relay.
+        .route("/agent-link/chats", get(agent_link_read::chats))
+        .route("/agent-link/chats/{id}", get(agent_link_read::chat))
+        .route(
+            "/agent-link/chats/{id}/messages",
+            get(agent_link_read::messages).post(agent_link_write::send),
+        )
+        .route("/agent-link/agents", get(agent_link_read::agents))
+        .route(
+            "/agent-link/agents/{id}/log",
+            get(agent_link_read::agent_log),
+        )
+        .route("/agent-link/files/{slot}/{key}", get(agent_link_read::file))
+        .route("/agent-link/stream", get(agent_link_stream::stream))
+        // PR 5: what a `reply` link may write. A `read` link is refused by the handler, and the
+        // refusal is in the owner's activity log.
+        .route(
+            "/agent-link/chats/{id}/reactions",
+            post(agent_link_write::react),
+        )
+        .route(
+            "/agent-link/chats/{id}/typing",
+            post(agent_link_write::typing),
+        )
         // Session log (spec §13.3): the sidecar uploads, the owner reads.
         .route("/asp/log", post(outside_log::upload))
         .route("/outside-agents/{id}/log", get(outside_log::read))
@@ -876,6 +930,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/room/{project}/{chat}/checkpoint",
             get(rooms::get_checkpoint).post(rooms::post_checkpoint),
+        )
+        .route(
+            "/room/{project}/{chat}/repair",
+            post(rooms::post_room_repair),
         )
         .route("/room/{project}/{chat}/stats", get(rooms::room_stats))
         .route(

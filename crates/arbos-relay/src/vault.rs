@@ -201,6 +201,13 @@ pub struct EgressBody {
     /// Human directing this turn (`user_id`). Absent = owner / unknown.
     #[serde(default, alias = "askedBy")]
     pub asked_by: Option<String>,
+    /// The chat row `asked_by` was read out of, so the relay can check the claim against the
+    /// attested author of that row instead of believing it.
+    #[serde(default, alias = "askedByMessageId")]
+    pub asked_by_message_id: Option<String>,
+    /// The box asserting that this turn came from its own work and not from a chat document.
+    #[serde(default, alias = "askedByOwnWork")]
+    pub asked_by_own_work: bool,
 }
 
 /// `POST /egress` (box): perform an HTTP request on the box's behalf with placeholders swapped for
@@ -271,6 +278,7 @@ pub async fn egress(
         &host,
         chat_id,
         asked_by,
+        secrets::TurnAuthor::offered(b.asked_by_message_id.as_deref(), b.asked_by_own_work),
         &texts,
     )?;
     // Connected vaults: `op://…` references resolve on the relay too (Phase 2).
@@ -633,7 +641,11 @@ pub async fn create_request(
         use_kind: Some(b.use_kind),
         host: None,
         chat_id: b.chat_id,
+        // The F8 shape has no asker field, so there is no claim on anyone's authority here and
+        // nothing to check against the author record.
         asked_by: None,
+        asked_by_message_id: None,
+        asked_by_own_work: true,
     };
     let resp = secrets::box_request(State(state), principal, headers, Json(body)).await?;
     let v = response_json(resp).await?;

@@ -21,6 +21,7 @@ use arbos_core::api::{FireRoutineResponseDto, RoutineDto, RoutineRunDto};
 use arbos_core::ids::{now_ms, ulid};
 use arbos_core::wire::BoxState;
 
+use crate::api::resolve_project_id;
 use crate::auth::Principal;
 use crate::boxes;
 use crate::db::{Routine, RoutineRun};
@@ -379,22 +380,6 @@ pub(crate) fn routine_run_dto(run: &RoutineRun) -> RoutineRunDto {
     }
 }
 
-fn authorize(
-    state: &AppState,
-    principal: &Principal,
-    id_or_name: &str,
-) -> Result<String, (StatusCode, String)> {
-    let p = state
-        .db
-        .project(id_or_name)
-        .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !state.allows(principal, &p.id) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
-    Ok(p.id)
-}
-
 fn load_routine(
     state: &AppState,
     project_id: &str,
@@ -411,7 +396,7 @@ pub async fn list(
     principal: Principal,
     Path(id): Path<String>,
 ) -> ApiResult {
-    let project_id = authorize(&state, &principal, &id)?;
+    let project_id = resolve_project_id(&state, &principal, &id)?;
     let out: Vec<RoutineDto> = state
         .db
         .list_routines(&project_id)
@@ -443,7 +428,7 @@ pub async fn create(
     Path(id): Path<String>,
     Json(b): Json<CreateRoutineBody>,
 ) -> ApiResult {
-    let project_id = authorize(&state, &principal, &id)?;
+    let project_id = resolve_project_id(&state, &principal, &id)?;
     let name = b.name.trim().to_owned();
     if name.is_empty() {
         return Err(bad("name required"));
@@ -506,7 +491,7 @@ pub async fn patch(
     Path((id, rid)): Path<(String, String)>,
     Json(b): Json<PatchRoutineBody>,
 ) -> ApiResult {
-    let project_id = authorize(&state, &principal, &id)?;
+    let project_id = resolve_project_id(&state, &principal, &id)?;
     let rt = load_routine(&state, &project_id, &rid)?;
     let trigger_json = b.trigger.clone().unwrap_or_else(|| rt.trigger.clone());
     let trigger = Trigger::parse(&trigger_json).map_err(bad)?;
@@ -548,7 +533,7 @@ pub async fn delete(
     principal: Principal,
     Path((id, rid)): Path<(String, String)>,
 ) -> ApiResult {
-    let project_id = authorize(&state, &principal, &id)?;
+    let project_id = resolve_project_id(&state, &principal, &id)?;
     load_routine(&state, &project_id, &rid)?;
     state.db.delete_routine(&rid).map_err(internal)?;
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -560,7 +545,7 @@ pub async fn run_now(
     principal: Principal,
     Path((id, rid)): Path<(String, String)>,
 ) -> ApiResult {
-    let project_id = authorize(&state, &principal, &id)?;
+    let project_id = resolve_project_id(&state, &principal, &id)?;
     let rt = load_routine(&state, &project_id, &rid)?;
     let _ = state
         .db
@@ -581,7 +566,7 @@ pub async fn runs(
     Path((id, rid)): Path<(String, String)>,
     Query(q): Query<RunsQuery>,
 ) -> ApiResult {
-    let project_id = authorize(&state, &principal, &id)?;
+    let project_id = resolve_project_id(&state, &principal, &id)?;
     load_routine(&state, &project_id, &rid)?;
     let limit = q.limit.unwrap_or(RUN_HISTORY_LIMIT).clamp(1, 200);
     let runs: Vec<RoutineRunDto> = state
@@ -610,7 +595,7 @@ pub async fn report_run(
     Path((id, rid, run_id)): Path<(String, String, String)>,
     Json(b): Json<RunReportBody>,
 ) -> ApiResult {
-    let project_id = authorize(&state, &principal, &id)?;
+    let project_id = resolve_project_id(&state, &principal, &id)?;
     load_routine(&state, &project_id, &rid)?;
     if !matches!(
         b.status.as_str(),
