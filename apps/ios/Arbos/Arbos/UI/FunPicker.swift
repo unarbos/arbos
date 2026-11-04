@@ -202,7 +202,8 @@ enum StarterPack {
 /// A picker sticker in the thread: the picture alone, fixed square, no bubble (Mac 128 pt,
 /// iPhone 160 pt). Tap opens the viewer like any picture.
 struct StickerBubble: View {
-    @EnvironmentObject private var model: AppModel
+    /// Not observed: a row-level view must not re-run on every model publish (see `RowView.model`).
+    let model: AppModel
     @Environment(\.theme) private var theme
     let item: MediaItem
     let chatId: Id
