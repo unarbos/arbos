@@ -249,6 +249,98 @@ else
   bad "the NOMAC refusal does not name both tags, so the reader must infer the mismatch from the parenthetical"
 fi
 
+# 10. gate_push_triggered() reads the REAL workflows in this tree, not a fixture.
+#     A fixture here would be the defect it guards against: the whole claim is
+#     "this workflow cannot run on a push", and a hand-written `on:` block proves
+#     that about the fixture. Add `push:` to release-gate.yml and case 10a must
+#     go red, because the skip it authorises stops being true that moment.
+echo "gate_push_triggered reads each gate's own \`on:\` block out of this tree:"
+push_says() {  # <workflow path> <expected: PUSH|NOPUSH> <label>
+  local f=$1 want=$2 got
+  [ -f "$D/../../$f" ] || { bad "$3 — $f is not in this tree, so this case is testing nothing"; return; }
+  # The only stub is the fetch. The classifier under test reads the real bytes.
+  rd() { base64 -w0 < "$D/../../$f"; }
+  if gate_push_triggered "$f" main >/dev/null 2>&1; then got=PUSH; else
+    case $? in 1) got=NOPUSH ;; *) got=UNKNOWN ;; esac
+  fi
+  unset -f rd
+  if [ "$got" = "$want" ]; then ok "$3 reads $got"
+  else bad "$3 reads $got, expected $want"; fi
+}
+push_says .github/workflows/release-gate.yml     NOPUSH "release-gate.yml (pull_request only)"
+push_says .github/workflows/swift-core-check.yml PUSH   "swift-core-check.yml (has push:)"
+push_says .github/workflows/ci.yml               PUSH   "ci.yml (has push:)"
+
+# 11. The fail-open direction, which is the one this change could create. The
+#     skip is authorised ONLY by "no run exists". A run that exists and failed is
+#     a verdict about this commit and must still refuse, or a pull_request-only
+#     gate's real refusal would be skipped along with its absences.
+echo "landed_gate_state skips only an ABSENT run, never a verdict:"
+landed_with() {  # <gate_state answer> <has second parent: yes|no>
+  local answer=$1 p2=$2
+  gate_state() { printf '%s' "$answer"; }
+  git() { case "$*" in *"rev-parse -q --verify"*) [ "$p2" = yes ] && printf '%s' 0123456789012345678901234567890123456789 ;; *) command git "$@" ;; esac; }
+  gate_push_triggered() { echo "it has no push: trigger"; return 1; }
+  landed_gate_state .github/workflows/release-gate.yml deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+  unset -f gate_state git gate_push_triggered
+}
+for pair in 'NONE|NOTASKED|an absent run on a pull_request-only gate is skipped' \
+            'RED 1 run(s) on this head, none successful|RED|a RED verdict still refuses' \
+            'PENDING 1 run(s)|PENDING|a PENDING run still waits' \
+            'BLOCKED could not read|BLOCKED|an unreadable gate still blocks'; do
+  IFS='|' read -r answer want label <<< "$pair"
+  got=$(landed_with "$answer" no)
+  if [ "${got%% *}" = "$want" ]; then ok "$label"
+  else bad "$label — got '${got%% *}', expected $want (full line: $got)"; fi
+done
+
+# 12. The second-parent route, which is what keeps the audit alive for a merge
+#     commit instead of switching it off. Without it, case 11's skip would be the
+#     only answer and a verdict that genuinely exists would go unread.
+echo "landed_gate_state reads the pull request head a merge commit merged:"
+got=$(gate_state() { case "$2" in deadbeef*) printf 'NONE' ;; *) printf 'PASS run 1 (pull_request)' ;; esac; }
+      git() { case "$*" in *"rev-parse -q --verify"*) printf '%s' 0123456789012345678901234567890123456789 ;; *) command git "$@" ;; esac; }
+      gate_push_triggered() { echo "no push trigger"; return 1; }
+      landed_gate_state .github/workflows/release-gate.yml deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+      unset -f gate_state git gate_push_triggered)
+case "$got" in
+  PASS*"the pull request head this commit merged"*) ok "a merge commit's second parent supplies the verdict" ;;
+  *) bad "the second-parent route is gone: got '$got' — the audit is switched off for merge commits instead of narrowed" ;;
+esac
+# ...and it must be reached BEFORE the skip, or the skip answers first and the
+# route above is dead code that still passes its own case.
+if printf '%s\n' "$(sed -n '/^landed_gate_state()/,/^}/p' "$D/checks.sh")" \
+   | awk '/rev-parse -q --verify/{p=NR} /gate_push_triggered/{g=NR} END{exit !(p && g && p < g)}'; then
+  ok "the second-parent lookup is ordered ahead of the not-asked skip"
+else
+  bad "the not-asked skip now precedes the second-parent lookup, so a merge commit whose head has a real verdict is skipped instead of read"
+fi
+
+# 13. The wiring, which cases 10-12 cannot see. They test landed_gate_state in
+#     isolation, and it is only worth anything if range_gate actually calls it
+#     and actually treats NOTASKED as a finding. Both of those were SURVIVING
+#     mutants until this case existed: the suite stayed green with range_gate
+#     calling gate_state directly, and green again with the NOTASKED arm
+#     unreachable. Same shape as case 9 for nomac_covers.
+echo "range_gate reaches the landed-commit logic and lets NOTASKED through:"
+rgbody=$(body range_gate)
+if printf '%s\n' "$rgbody" | grep -q 'state=\$(landed_gate_state "\$wf" "\$sha")'; then
+  ok "range_gate asks landed_gate_state, not gate_state"
+else
+  bad "range_gate no longer calls landed_gate_state, so a commit already on main is judged as if it were a pull request head again"
+fi
+if printf '%s\n' "$rgbody" | grep -q 'gate_state "\$wf" "\$sha")' && \
+   ! printf '%s\n' "$rgbody" | grep -q 'landed_gate_state "\$wf" "\$sha")'; then
+  bad "range_gate calls gate_state directly, which skips both the second-parent route and the not-asked rule"
+else
+  ok "no bare gate_state call remains in range_gate"
+fi
+if printf '%s\n' "$rgbody" | grep -qE 'NOTASKED\*\).*continue'; then
+  ok "NOTASKED is a finding that continues, not a verdict that decides the gate"
+else
+  bad "range_gate has no NOTASKED arm that continues, so a gate that cannot be asked refuses the merge again — the defect this change removes"
+fi
+
 echo
 if [ "$fail" -eq 0 ]; then echo "selftest: PASS"; else echo "selftest: FAIL"; fi
 exit "$fail"
