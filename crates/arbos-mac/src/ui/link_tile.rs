@@ -388,9 +388,22 @@ pub enum Icon<'a> {
 /// would vanish on it.
 pub fn fill(icon: &Icon<'_>, theme: &Theme) -> Hsla {
     match icon {
-        Icon::Picture(_, Tone::DarkMark) if !theme.is_light() => light_fill(),
-        Icon::Picture(_, Tone::LightMark) if theme.is_light() => dark_fill(),
+        Icon::Picture(_, tone) => flip_fill(*tone, theme).unwrap_or(theme.surface_2),
         _ => theme.surface_2,
+    }
+}
+
+/// The fill a transparent mark needs so it does not vanish on this theme, or `None` when the
+/// picture is fine on whatever it already sits on.
+///
+/// Split out of [`fill`] for the bubbles' inline icon, which has no tile under it: it takes a
+/// fill only in these two cases, so an icon that was already legible is left alone and the
+/// inline site never has to answer what a tile would be against a user bubble.
+pub fn flip_fill(tone: Tone, theme: &Theme) -> Option<Hsla> {
+    match tone {
+        Tone::DarkMark if !theme.is_light() => Some(light_fill()),
+        Tone::LightMark if theme.is_light() => Some(dark_fill()),
+        _ => None,
     }
 }
 

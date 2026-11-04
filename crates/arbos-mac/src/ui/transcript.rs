@@ -28,6 +28,7 @@ use crate::ui::frost::edge_faded;
 use crate::ui::glass::WindowDragPress;
 use crate::ui::highlight;
 use crate::ui::identity;
+use crate::ui::link_tile;
 use crate::ui::markdown::{
     self, inline_plain, inline_spans, polish_assistant_prose, split_blocks, Block,
 };
@@ -1518,9 +1519,22 @@ impl Transcript {
     pub fn sync(&mut self, cx: &mut Context<Self>) {
         let theme = Theme::of(cx).clone();
         self.mentions = Mentions::from_state(&self.state, &theme, cx);
-        self.link_icons = Rc::new(LinkIcons {
-            by_host: self.state.read(cx).link_icons.clone(),
-        });
+        // The tone the decoder measured per host travels with the pictures: a transparent
+        // mark that would vanish on the bubble gets the flipped chip the tile already gives
+        // it everywhere else ([feedback link-icons-mac-tile-2026-10-27]).
+        let (by_host, fills) = {
+            let s = self.state.read(cx);
+            let fills = s
+                .link_icons
+                .keys()
+                .filter_map(|host| {
+                    let tone = s.link_icon_tones.get(host).copied().unwrap_or_default();
+                    link_tile::flip_fill(tone, &theme).map(|fill| (host.clone(), fill))
+                })
+                .collect();
+            (s.link_icons.clone(), fills)
+        };
+        self.link_icons = Rc::new(LinkIcons { by_host, fills });
         let state = self.state.read(cx);
         let chat_id = state.active_chat_id();
         let chat_changed = chat_id != self.chat_id;
@@ -9636,6 +9650,7 @@ mod link_icon_tests {
             (
                 Rc::new(LinkIcons {
                     by_host: HashMap::from([("nypost.com".to_string(), Some(picture.clone()))]),
+                    fills: HashMap::new(),
                 }),
                 "pictures",
             ),
