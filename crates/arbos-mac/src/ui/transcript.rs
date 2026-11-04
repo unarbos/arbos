@@ -862,6 +862,9 @@ pub struct Transcript {
     /// rebuilds one message, not the whole transcript — keeps scrolling and
     /// reply/menu gestures responsive after send (Mac has no swipe-to-reply).
     row_cache: MessageRowCache,
+    /// Whether the last sync drew the agent-to-agent exchange (a live reveal request for
+    /// one of its rows). It changes how the rows around it group, so the cache goes with it.
+    reveal_cross: bool,
     /// Who `@handle` resolves to in this chat's bubbles (mention chips),
     /// rebuilt with the rows.
     mentions: Rc<Mentions>,
@@ -976,6 +979,7 @@ impl Transcript {
             list,
             rows: Vec::new(),
             row_cache: MessageRowCache::default(),
+            reveal_cross: false,
             mentions: Mentions::empty(),
             link_icons: LinkIcons::empty(),
             pane_open: false,
@@ -1563,15 +1567,29 @@ impl Transcript {
         // An agent-to-agent exchange — the words another agent sent into this chat and the
         // answer that went back to it — is not what the chat shows by default (Jacob,
         // 2026-11-04): it is between the two agents, not addressed to the owner reading
-        // here. The messages themselves are untouched; only what the transcript draws
-        // changes.
-        let messages: Vec<Message> = all
-            .into_iter()
-            .filter(|m| !m.is_agent_cross_message())
-            .collect();
-        if chat_changed {
+        // here. It is drawn only when something asked for one of its rows by id: its own
+        // cross-project notification, a search hit, a quote click. That is the app's one
+        // reveal path (`AppState::reveal_message` → `reveal_hit`), and the request stands
+        // until the next chat selection clears it. The messages are untouched either way.
+        let reveal_cross = state.reveal_message.as_ref().is_some_and(|(chat, msg)| {
+            Some(chat.as_str()) == chat_id.as_deref()
+                && all
+                    .iter()
+                    .any(|m| &m.id == msg && m.is_agent_cross_message())
+        });
+        let messages: Vec<Message> = if reveal_cross {
+            all
+        } else {
+            all.into_iter()
+                .filter(|m| !m.is_agent_cross_message())
+                .collect()
+        };
+        // Rows next to the exchange group differently with it than without it, so a change
+        // of mind empties the row cache the way a chat change does.
+        if chat_changed || reveal_cross != self.reveal_cross {
             self.row_cache.clear();
         }
+        self.reveal_cross = reveal_cross;
         self.chat_id = chat_id;
         // Clone the Rc so the row-cache mut borrow does not conflict.
         let mentions = Rc::clone(&self.mentions);
