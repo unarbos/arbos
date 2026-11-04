@@ -93,6 +93,25 @@ self_test() {
   printf '\t\tAA00000000000000000000FF /* One.swift */ = {isa = PBXFileReference; };\n\t\tAA00000000000000000000FF /* Two.swift */ = {isa = PBXFileReference; };\n' > "$dir/duplicated.pbxproj"
   : > "$dir/empty.pbxproj"
 
+  # The control nobody writes, and the one that decides whether the lint survives contact with a
+  # real project: an identifier is *referenced* many times — in a fileRef, in a group's children,
+  # in a build phase's files — and every one of those is legitimate. Only the declaration counts.
+  # A lint that fires here gets switched off by the first person it inconveniences.
+  {
+    printf '\t\tAA00000000000000000000FF /* One.swift */ = {isa = PBXFileReference; };\n'
+    printf '\t\tAA0000000000000000000100 /* One.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA00000000000000000000FF /* One.swift */; };\n'
+    printf '\t\tAA0000000000000000000101 /* Sources */ = {\n\t\t\tisa = PBXGroup;\n\t\t\tchildren = (\n\t\t\t\tAA00000000000000000000FF /* One.swift */,\n\t\t\t);\n\t\t};\n'
+    printf '\t\tAA0000000000000000000102 /* Sources */ = {\n\t\t\tisa = PBXSourcesBuildPhase;\n\t\t\tfiles = (\n\t\t\t\tAA0000000000000000000100 /* One.swift in Sources */,\n\t\t\t);\n\t\t};\n'
+  } > "$dir/referenced.pbxproj"
+
+  # A multi-line object carries its `isa` on the *next* line, so a scan keyed on `isa = ` lines
+  # cannot see these at all. Two PBXGroups sharing an identifier is a real collision and must fire.
+  printf '\t\tAA0000000000000000000201 /* A */ = {\n\t\t\tisa = PBXGroup;\n\t\t};\n\t\tAA0000000000000000000201 /* B */ = {\n\t\t\tisa = PBXGroup;\n\t\t};\n' > "$dir/multiline-duplicated.pbxproj"
+
+  # Xcode indents with tabs. If that ever stops being true the lint must say it cannot tell,
+  # never that the file is clean — this fixture holds a duplicate the tab anchor cannot reach.
+  printf '        AA00000000000000000000FF /* One.swift */ = {isa = PBXFileReference; };\n        AA00000000000000000000FF /* Two.swift */ = {isa = PBXFileReference; };\n' > "$dir/space-indented.pbxproj"
+
   expect() {
     local want=$1 label=$2 got=0
     shift 2
@@ -106,15 +125,18 @@ self_test() {
   }
 
   expect 0 "a clean file passes" "$self" "$dir/clean.pbxproj"
+  expect 0 "an identifier referenced many times but declared once passes" "$self" "$dir/referenced.pbxproj"
   expect 1 "a duplicated identifier fails" "$self" "$dir/duplicated.pbxproj"
+  expect 1 "a duplicated multi-line object fails" "$self" "$dir/multiline-duplicated.pbxproj"
+  expect 2 "a space-indented file cannot be decided" "$self" "$dir/space-indented.pbxproj"
   expect 2 "a file with no definition lines cannot be decided" "$self" "$dir/empty.pbxproj"
   expect 2 "an absent file cannot be decided" "$self" "$dir/not-here.pbxproj"
 
   if [[ $failures -gt 0 ]]; then
-    echo "pbxproj-id-lint self-test: $failures of 4 controls wrong; the lint cannot be trusted." >&2
+    echo "pbxproj-id-lint self-test: $failures of 7 controls wrong; the lint cannot be trusted." >&2
     return 1
   fi
-  echo "pbxproj-id-lint self-test: all 4 controls behaved."
+  echo "pbxproj-id-lint self-test: all 7 controls behaved."
 }
 
 if [[ ${1:-} == --self-test ]]; then
