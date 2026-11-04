@@ -249,6 +249,218 @@ else
   bad "the NOMAC refusal does not name both tags, so the reader must infer the mismatch from the parenthetical"
 fi
 
+# 10. The two states behind "no run exists", which need different words because
+#     they need different actions.
+#
+#     A gate that is required by path and has no run is one sentence in the old
+#     kit and two situations in reality. If the workflow was not in the tree a
+#     run would have started from, GitHub created nothing and nothing will ever
+#     appear while the head sits still — the remedy is to move the head. If the
+#     workflow WAS in that tree, a run should exist, and its absence is more
+#     likely to be a bad query or a deleted run than a fact about the head.
+#
+#     The trap this block is written around is a branch that can only ever reach
+#     the first answer. Such a branch turns every broken query into a soothing
+#     "just rebase", which is the same defect as the sentence it replaces,
+#     wearing better prose. So the MISSING case is asserted on its own, and
+#     every case also asserts the phrases of its neighbour are ABSENT from it.
+#
+#     Driven through the REAL require_gates, gate_applies, gate_state and
+#     no_run_state. Only `rd` — the one function in checks.sh that touches the
+#     network — is replaced, and it answers per URL so each case is driven by
+#     the world it describes rather than by one blanket reply. It also records
+#     every URL it was asked for, which is how the last two cases can assert
+#     that a read was never made at all.
+echo "require_gates separates an absent workflow from a genuinely missing run:"
+
+R=unarbos/arbos
+GATE_BASE=main
+HEAD40=1111111111111111111111111111111111111111
+MB40=2222222222222222222222222222222222222222
+FIXFILES="apps/ios/Arbos/App.swift"
+# A workflow whose filter the fixture diff touches, so gate_applies says "applies"
+# and every case below reaches the part being tested.
+FIXWF=$(printf 'name: X\non:\n  pull_request:\n    paths:\n      - "apps/ios/**"\n' | base64 | tr -d '\n')
+
+# FIX_TREES   refs whose tree contains the workflow; any other ref 404s.
+# FIX_RUNS    the runs listing for the head; empty means total_count 0.
+# FIX_NOCMP   non-empty makes the compare read fail, as a 403 would.
+# FIX_LOG     every URL asked for, one per line.
+rd() {
+  local url="" a
+  for a in "$@"; do case "$a" in repos/*) url=$a ;; esac; done
+  printf '%s\n' "$url" >> "$FIX_LOG"
+  case "$url" in
+    */compare/*)
+      [ -z "$FIX_NOCMP" ] || { echo "BLOCKED:HTTP 403: Forbidden"; return 1; }
+      printf '%s' "$MB40" ;;
+    */contents/*)
+      local ref=${url##*ref=}
+      case " $FIX_TREES " in
+        *" $ref "*) printf '%s' "$FIXWF" ;;
+        *) echo "BLOCKED:HTTP 404: Not Found"; return 1 ;;
+      esac ;;
+    # Longest first: `per_page=1` is a prefix of `per_page=100`, so the count arm
+    # would otherwise answer the listing call with a count. It did, once.
+    *per_page=100*) printf '%s' "$FIX_RUNS" ;;
+    *per_page=1*)   printf '%s' "$(printf '%s\n' "$FIX_RUNS" | grep -c .)" ;;
+    *) echo "BLOCKED:the fixture was asked for an URL no case describes: $url"; return 1 ;;
+  esac
+}
+
+# gates_is <name> <want rc> <phrases that must appear> <phrases that must NOT>
+#
+# The must-not list is the half that stops this block testing one branch twice.
+# Each "no run" case names its neighbour's wording, so a no_run_state collapsed
+# back to a single sentence fails whichever case it does not happen to match —
+# and a require_gates that printed both would fail both.
+gates_is() {
+  local name=$1 want=$2 why=$3 whynot=$4 out got=0 p miss=""
+  : > "$FIX_LOG"
+  out=$(require_gates "$HEAD40" "$FIXFILES") || got=$?
+  CASE_OUT=$out
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    case "$out" in *"$p"*) ;; *) miss="$miss
+      wanted and did not find: $p" ;; esac
+  done <<< "$why"
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    case "$out" in *"$p"*) miss="$miss
+      found and must not have: $p" ;; esac
+  done <<< "$whynot"
+  if [ "$got" = "$want" ] && [ -z "$miss" ]; then ok "$name (rc $got)"
+  else bad "$name: wanted rc $want, got $got$miss
+      output: $out"; fi
+}
+
+FIX_LOG=$(mktemp); FIX_NOCMP=""; FIX_RUNS=""
+RECORD=$(mktemp)
+trap 'rm -f "$FIX_LOG" "$RECORD"' EXIT
+# One gate at a time, so each case's output is about the gate it names. GATES is
+# restored at the end of the block.
+REAL_GATES=$GATES
+GATES='.github/workflows/release-gate.yml|Release gate'
+
+# #2695's state, in the shape the kit sees it. main carries the workflow; the
+# head and its merge base forked before it landed; no run exists and none can.
+#
+# What could contradict this: if GitHub did start runs from main's current tree
+# rather than the base's, #2695 would have a run and this whole state would be
+# unreachable. The control is the next case, where the only thing that changes
+# is whether the merge base carries the file — and the answer changes with it.
+FIX_TREES="main"
+gates_is "a head whose base predates the workflow says so, and says to move the head" 1 \
+"NO VERDICT — required by path, and the workflow did not exist in this head's base
+merge base 222222222
+Move the head
+unrun, not failing" \
+"did exist in this head's base
+BLOCKED"
+printf '%s\n' "$CASE_OUT" >> "$RECORD"
+
+# The control, and the case the user asked for by name: same head, same empty
+# run list, the ONE difference being that the merge base does carry the
+# workflow. A branch that could only say "absent" passes the case above and
+# fails here, which is the only reason that case is worth running.
+FIX_TREES="main $MB40 $HEAD40"
+gates_is "a head whose base DID carry the workflow blocks on the missing run instead" 2 \
+"BLOCKED — required by path, the workflow did exist in this head's base, and no run exists for this head
+Rule the query out before reading it as a missing verdict
+merge base 222222222" \
+"the workflow did not exist in this head's base
+Move the head
+NO VERDICT"
+printf '%s\n' "$CASE_OUT" >> "$RECORD"
+
+# The merge base itself unreadable. Neither answer is available, so neither may
+# be given: a compare that 403s must not be rounded to "absent" just because
+# absent is the common case.
+FIX_TREES="main"; FIX_NOCMP=1
+gates_is "an unreadable merge base is blocked, not rounded to absent" 2 \
+"BLOCKED
+cannot read 11111111's merge base with main
+HTTP 403" \
+"the workflow did not exist in this head's base
+did exist in this head's base
+Move the head"
+printf '%s\n' "$CASE_OUT" >> "$RECORD"
+FIX_NOCMP=""
+
+# A head with a passing run must not reach any of this. Asserted on the fixture
+# log rather than on the words: a case that only checked for the absence of a
+# phrase would pass against a no_run_state that ran and then said nothing.
+FIX_TREES="main $MB40 $HEAD40"; FIX_RUNS="99 pull_request completed success"
+gates_is "a passing run is still a pass" 0 "PASS run 99" \
+"no run exists
+merge base"
+printf '%s\n' "$CASE_OUT" >> "$RECORD"
+if grep -q '/compare/' "$FIX_LOG"; then
+  bad "a head with a passing run still paid for a merge-base compare, so every commit verdict() walks now costs one"
+else
+  ok "a passing run asks for no merge base at all"
+fi
+
+# A gate the diff does not touch must not be investigated either. The fixture
+# diff is replaced with a file outside the filter, so gate_applies answers
+# first and nothing downstream runs.
+FIXFILES="README.md"
+gates_is "a gate the diff does not touch stays not-required" 0 "not required" \
+"no run exists
+merge base
+Move the head"
+if grep -qE '/compare/|/runs' "$FIX_LOG"; then
+  bad "a gate that does not apply still read runs or a merge base"
+else
+  ok "a gate that does not apply reads neither runs nor a merge base"
+fi
+FIXFILES="apps/ios/Arbos/App.swift"; FIX_RUNS=""
+
+# The same audit the release gate's cases get: a phrase that also matches a
+# neighbour's output cannot tell its own case from that neighbour, so the case
+# is evidence about the pair and not about either one.
+echo "each 'no run' case's output is distinguishable from the others:"
+dupes=$(sort "$RECORD" | uniq -d | grep -c . )
+if [ "$dupes" -eq 0 ]; then
+  ok "all $(grep -c . "$RECORD") recorded outputs differ from one another"
+else
+  bad "$dupes recorded case output(s) are identical to another case's, so those cases cannot be told apart"
+fi
+
+GATES=$REAL_GATES
+unset -f rd
+
+# 11. The second caller. range_gate() in merge-window.sh had its own copy of the
+#     old one-sentence NONE message, and this file's header is about two case
+#     statements that must agree and did not. A distinction kept in two places
+#     is one that drifts, so the arm must route through no_run_state rather
+#     than grow a second pair of words.
+#
+#     Read from the source with comments stripped, for the reason nocomment()
+#     exists: the comment beside the call names the function, so a raw grep
+#     would match the explanation of a call somebody deleted.
+echo "range_gate() splits the two states through checks.sh and not a second copy:"
+rg_src=$(body range_gate)
+if [ -z "$rg_src" ]; then
+  bad "cannot find range_gate() in merge-window.sh, so case 11 is testing nothing"
+else
+  if printf '%s\n' "$rg_src" | grep -q 'no_run_state'; then
+    ok "range_gate() calls no_run_state"
+  else
+    bad "range_gate() no longer calls no_run_state, so its NONE arm has gone back to one sentence for two states"
+  fi
+  if printf '%s\n' "$rg_src" | grep -q 'ABSENT\*)' && printf '%s\n' "$rg_src" | grep -q 'MISSING\*)'; then
+    ok "range_gate() has an arm for each state"
+  else
+    bad "range_gate() is missing an arm for ABSENT or MISSING, so one of them falls through to the other's words"
+  fi
+  if printf '%s\n' "$rg_src" | grep -q 'no run of \$wf exists for this sha at all'; then
+    bad "range_gate() still carries the old single sentence, which is the wording this change exists to split"
+  else
+    ok "the old single sentence is gone from range_gate()"
+  fi
+fi
+
 echo
 if [ "$fail" -eq 0 ]; then echo "selftest: PASS"; else echo "selftest: FAIL"; fi
 exit "$fail"

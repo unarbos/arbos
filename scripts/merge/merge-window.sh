@@ -216,12 +216,22 @@ range_gate() {
           PASS*)    echo "    '$name' DECIDED on ${sha:0:9} (the newest commit it applies to): $state" ;;
           PENDING*) echo "    '$name' DECIDED on ${sha:0:9} (the newest commit it applies to): NO VERDICT YET — $state"; g=3 ;;
           BLOCKED*) echo "    '$name' DECIDED on ${sha:0:9} (the newest commit it applies to): $state"; g=2 ;;
-          NONE)     echo "    '$name' DECIDED on ${sha:0:9} (the newest commit it applies to): NO VERDICT — no run of $wf exists for this sha at all"; g=1 ;;
+          # Split by checks.sh's no_run_state, not by a second copy of the words here. This arm and
+          # require_gates' both printed the same one sentence for two states with opposite remedies;
+          # two copies of a distinction is how one of them drifts back into the other.
+          NONE)
+            state=$(no_run_state "$wf" "$sha")
+            case "$state" in
+              ABSENT*)  echo "    '$name' DECIDED on ${sha:0:9} (the newest commit it applies to): NO VERDICT — the workflow did not exist in this commit's base: ${state#ABSENT }"; g=1 ;;
+              MISSING*) echo "    '$name' DECIDED on ${sha:0:9} (the newest commit it applies to): BLOCKED — the workflow did exist in this commit's base, and no run exists for it: ${state#MISSING }"; g=2 ;;
+              *)        echo "    '$name' DECIDED on ${sha:0:9} (the newest commit it applies to): BLOCKED — $state"; g=2 ;;
+            esac ;;
           *)        echo "    '$name' DECIDED on ${sha:0:9} (the newest commit it applies to): NO VERDICT — $state"; g=1 ;;
         esac
       else
         case "$state" in
           PASS*) echo "    '$name' on ${sha:0:9} (older): $state" ;;
+          NONE)  echo "    '$name' on ${sha:0:9} (older, a finding, not a refusal): $(no_run_state "$wf" "$sha")" ;;
           *)     echo "    '$name' on ${sha:0:9} (older, a finding, not a refusal): $state" ;;
         esac
       fi
