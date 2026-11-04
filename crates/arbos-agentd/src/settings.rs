@@ -654,6 +654,7 @@ impl Agent {
                     })
                     .await?;
                 if r.success {
+                    *self.pi_model.lock().await = Some(m.talking.id.clone());
                     switched = true;
                 } else {
                     // pi's in-session catalog may not list the new id yet; respawn
@@ -693,6 +694,71 @@ impl Agent {
             "models applied"
         );
         Ok(())
+    }
+
+    /// Put the live pi session on the agent's chosen talking model, if it is not on it already.
+    ///
+    /// Every lane but one resolves its model on the call it is about to make, straight from the
+    /// live slots ([`LiveModels::resolve`]): quick replies, workers, memory passes. The main
+    /// session cannot, because pi owns its model between spawns — so [`Agent::apply_models`]
+    /// pushes a change to it with a single `set_model`, once, when the change is first seen.
+    ///
+    /// That one push is not guaranteed to land. The registry pass carrying it is bounded at
+    /// `REGISTRY_CALL_TIMEOUT` (10 s) and dropped when it overruns, while `Agent::pi` may wait
+    /// 20 s for a parked or respawning child and `RpcChild::call` 60 s for the answer; the call
+    /// can also simply fail. And nothing retries it: `settings_from_relay` compares the registry
+    /// against the live slots, which `apply_models` moves *before* it pushes, so every later
+    /// poll sees them equal and tries nothing. The main session then speaks on the old model
+    /// until the box restarts, while every other lane speaks on the new one — exactly the split
+    /// seen on 2026-11-04, quick replies on Opus 5.5 and the main turn still on Haiku.
+    ///
+    /// Re-asserting at the turn boundary gives the main session the same property as the rest:
+    /// the model is resolved at the point of use, and a lost push costs one turn, not the life
+    /// of the box.
+    pub(crate) async fn sync_pi_model(self: &Arc<Self>) {
+        let want = self.live_models().await.0;
+        match self.pi_model.lock().await.as_deref() {
+            // A retry deliberately holds the session on the fallback model.
+            None => return,
+            Some(on) if on == want => return,
+            Some(_) => {}
+        }
+        // No live child: the next `start_pi` / `respawn_pi` reads `live_models()` itself.
+        let Ok(pi) = self.pi_child().await else {
+            return;
+        };
+        let refused = match pi
+            .call_timeout(
+                RpcCommand::SetModel {
+                    id: pi.next_id("sm"),
+                    provider: self.cfg.pi_provider(),
+                    model_id: want.clone(),
+                },
+                Duration::from_secs(10),
+            )
+            .await
+        {
+            Ok(r) if r.success => {
+                *self.pi_model.lock().await = Some(want.clone());
+                tracing::info!(model = %want, "main session put back on the agent's model");
+                false
+            }
+            Ok(r) => {
+                tracing::warn!(model = %want, error = ?r.error, "set_model refused at the turn boundary");
+                true
+            }
+            Err(e) => {
+                tracing::warn!(model = %want, error = %e, "set_model failed at the turn boundary");
+                true
+            }
+        };
+        // Same recovery `apply_models` uses: a respawn boots on `live_models()`, so the prompt
+        // that follows goes out on the agent's model rather than on the stale one.
+        if refused {
+            if let Err(e) = self.respawn_pi_current().await {
+                tracing::warn!(error = %e, "pi respawn after a refused turn-boundary set_model");
+            }
+        }
     }
 
     /// Mirror the registry settings into the project doc (`settings` map, crdt-sync §6.3).
