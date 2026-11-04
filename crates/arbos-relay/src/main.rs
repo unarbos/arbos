@@ -638,6 +638,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/llms.txt", get(outside_sidecar::llms_txt))
         .route("/agents/llms.txt", get(outside_sidecar::llms_txt))
         .route("/sidecar/install.sh", get(outside_sidecar::install_sh))
+        .route("/acp/install.sh", get(outside_sidecar::acp_install_sh))
         // Agent access links. The owner side takes an ordinary device bearer; the
         // `/agent-link/*` routes take a `LinkPrincipal` and are the only routes an `arbl_`
         // token can reach, because Axum will not call a handler whose extractor does not
