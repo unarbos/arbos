@@ -960,6 +960,10 @@ pub fn seed_state(cfg: &Config) -> Result<()> {
     write_models_json(cfg, &cfg.talking_model, &cfg.subagent_model)?;
     let settings = json!({
         "defaultProvider": cfg.pi_provider(), "defaultModel": cfg.talking_model, "defaultThinkingLevel": "off",
+        // Plain names *replace* pi's DEFAULT_TOOL_NAMES (read, bash, edit, write) rather than
+        // adding to them, so this list must name every tool the agent gets. `grep`, `find` and
+        // `ls` ship with pi but are not defaults, so they are off here; their schemas cost
+        // ~575 prefix tokens per call, which is a default-cost decision and Jacob's to make.
         "defaultTools": ["read", "bash", "edit", "write", "codemode"],
         "compaction": { "enabled": true, "reserveTokens": COMPACTION_RESERVE_TOKENS, "keepRecentTokens": KEEP_RECENT_TOKENS },
         "hideThinkingBlock": true
