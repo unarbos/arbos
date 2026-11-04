@@ -46,6 +46,13 @@ const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(1);
 /// searches out in parallel and they all spend the same quota, so a burst is what provokes the
 /// limit; during one, they go one at a time.
 const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(60);
+/// The longest one `web_search` may spend waiting to be let through before it gives up and takes
+/// the HTML fallback. The lane needs a ceiling or it becomes the failure it replaced: one
+/// rejection serialises every search for a minute, and a codemode fan-out of ten would have its
+/// last search wait out nine turns of retries and sleeps — minutes — for an answer the first
+/// search already proved was not coming. Every search in a fan-out starts its own budget at the
+/// same moment, so the whole fan-out settles inside one of these rather than N of them.
+const RATE_LIMIT_BUDGET: Duration = Duration::from_secs(8);
 
 pub fn tool_specs() -> Vec<Value> {
     vec![
@@ -132,9 +139,50 @@ fn pacer() -> &'static Pacer {
     P.get_or_init(Pacer::default)
 }
 
+/// Time left before `deadline`, or `None` once it has passed.
+fn remaining(deadline: Instant) -> Option<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|d| !d.is_zero())
+}
+
+/// Holds this search until the lane and the hold-off let it through. `false` when that would
+/// take longer than `deadline` leaves: the caller then stops retrying and the HTML fallback
+/// runs, so a queued search returns a weaker answer instead of holding the turn open.
+///
+/// Nothing is locked and nothing sleeps while the endpoint is answering, so searches still fan
+/// out in parallel until a rejection is seen. A search that cannot get the lane in time does
+/// not go out unpaced either — an unpaced burst is the thing the lane exists to prevent.
+async fn hold<'a>(
+    p: &'a Pacer,
+    lane: &mut Option<tokio::sync::MutexGuard<'a, ()>>,
+    deadline: Instant,
+) -> bool {
+    if lane.is_none() && p.serializing() {
+        let Some(left) = remaining(deadline) else {
+            return false;
+        };
+        match tokio::time::timeout(left, p.lane.lock()).await {
+            Ok(g) => *lane = Some(g),
+            Err(_) => return false,
+        }
+    }
+    match p.wait() {
+        None => true,
+        Some(d) => match remaining(deadline) {
+            Some(left) if d <= left => {
+                tokio::time::sleep(d).await;
+                true
+            }
+            _ => false,
+        },
+    }
+}
+
 /// The primary search, paced. A rate limit costs a short wait and a retry instead of dropping
 /// straight to the HTML fallback, which parses DuckDuckGo with regexes and is weaker than the
-/// answer the retry gets. Only a rejection is retried; any other error returns at once.
+/// answer the retry gets. Only a rejection is retried; any other error returns at once, and all
+/// the waiting a rejection buys fits inside `RATE_LIMIT_BUDGET`.
 async fn paced_search(
     agent: &Arc<Agent>,
     query: &str,
@@ -142,14 +190,12 @@ async fn paced_search(
     limit: u64,
 ) -> Result<String, String> {
     let p = pacer();
+    let deadline = Instant::now() + RATE_LIMIT_BUDGET;
     let mut lane = None;
     let mut limited = String::new();
     for attempt in 0..=RATE_LIMIT_RETRIES {
-        if lane.is_none() && p.serializing() {
-            lane = Some(p.lane.lock().await);
-        }
-        if let Some(d) = p.wait() {
-            tokio::time::sleep(d).await;
+        if !hold(p, &mut lane, deadline).await {
+            break;
         }
         match mcp_call(
             agent,
@@ -178,7 +224,14 @@ async fn paced_search(
             Err(e) => return Err(e),
         }
     }
-    Err(limited)
+    // Empty when the budget went on queueing and this search never reached the endpoint, which
+    // `web_search` would otherwise log as a blank reason.
+    Err(if limited.is_empty() {
+        "search endpoint is rate-limiting and the queue is longer than this search can wait"
+            .to_owned()
+    } else {
+        limited
+    })
 }
 
 /// The text content of one MCP `tools/call` answer, from a JSON body or an SSE stream.
@@ -743,6 +796,44 @@ mod tests {
         assert!(p.wait().is_none());
         // The lane stays, though — that answer may be *because* the burst was queued.
         assert!(p.serializing());
+    }
+
+    /// A queued search gives up rather than holding the turn open. Without a ceiling the lane is
+    /// itself the failure: one rejection serialises every search for a minute, so the last search
+    /// of a codemode fan-out would wait out every search ahead of it — and all of them end in the
+    /// same fallback anyway. Past the budget, pacing stops and the weaker answer is taken.
+    #[tokio::test]
+    async fn a_queued_search_stops_waiting_at_its_budget() {
+        let p = Pacer::default();
+        p.note_limited(0);
+        assert!(p.serializing());
+        assert!(p.wait().is_some(), "there is a hold-off to wait out");
+
+        // Budget already spent: the hold-off is not waited out and the lane is not even taken.
+        let mut spent = None;
+        assert!(!hold(&p, &mut spent, Instant::now()).await);
+        assert!(spent.is_none());
+
+        // With budget, the same hold-off is waited out and the search goes on.
+        let mut first = None;
+        assert!(hold(&p, &mut first, Instant::now() + RATE_LIMIT_BUDGET).await);
+        assert!(
+            first.is_some(),
+            "a serialising burst queues behind the lane"
+        );
+        assert!(p.wait().is_none(), "the hold-off was waited out");
+
+        // A second search cannot have the lane while the first holds it, and it stops waiting at
+        // its own deadline instead of queueing behind the whole cooldown.
+        let mut second = None;
+        let t = Instant::now();
+        assert!(!hold(&p, &mut second, Instant::now() + Duration::from_millis(50)).await);
+        assert!(second.is_none());
+        assert!(
+            t.elapsed() < RATE_LIMIT_COOLDOWN,
+            "waited {:?}, which is the stall this budget exists to stop",
+            t.elapsed()
+        );
     }
 
     /// Only a rate limit is worth retrying; every other failure still goes straight on.
