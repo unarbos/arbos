@@ -1935,6 +1935,138 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Jacob, Test5, 2026-11-04, T2 (agentd 0.1.192): an act turn searched the web, posted the
+    /// whole answer with `send_message` at 13:45:29.439, and ended 1.5 s later — and 67 ms after
+    /// that a job started on the same ask. The job's worker re-read the page and the result turn
+    /// said "the answer I sent you stands", which cost a second Opus run and told the user
+    /// nothing. A turn that has already answered is finishing, not long work to hand off.
+    #[tokio::test]
+    async fn an_act_turn_that_already_answered_is_not_converted_to_a_job() {
+        use crate::config::SendTool;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000013";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.ack_text.clear();
+            t.activity = None;
+            t.send_tool = SendTool::On;
+            t.act_transcript.clear();
+            agent.test_open_row(&host, t).await;
+        }
+        agent
+            .hook_route(&json!({ "action": "act", "ack": "Checking the python.org downloads page now.", "plan": "open the release page and read the version" }))
+            .await
+            .unwrap();
+        // The web tool runs, so the conversion is armed exactly as it was in T2.
+        agent
+            .test_fold(
+                chat,
+                &host,
+                &arbos_core::rpc::Event::ToolExecutionStart {
+                    tool_call_id: "c1".into(),
+                    tool_name: "mcp__arbos__web_fetch".into(),
+                    args: json!({ "url": "https://www.python.org/downloads/" }),
+                    parent_tool_call_id: None,
+                },
+            )
+            .await;
+        // …and then the turn answers.
+        agent
+            .hook_send_message(
+                "The newest Python is 3.15.2, released on 28 October 2026.",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        {
+            let tl = agent.turn.lock().await;
+            let t = tl.as_ref().unwrap();
+            assert!(t.web_tool_used, "the conversion trigger is armed");
+            assert!(
+                t.progress_texts.iter().any(|p| p.contains("3.15.2")),
+                "the answer is out: {:?}",
+                t.progress_texts
+            );
+        }
+        assert!(
+            !agent
+                .maybe_convert_act_to_job(&host, Duration::from_secs(13))
+                .await,
+            "the answer is already in the chat; a job would only contradict it"
+        );
+        {
+            let tl = agent.turn.lock().await;
+            assert!(!tl.as_ref().unwrap().act_to_job);
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Round 2 of the same stress run: the answer to "make me the CSV" is the CSV. That turn
+    /// posts a file and never calls `send_message`, so `progress_texts` is empty while the
+    /// user plainly has their answer — and it was still being handed to a job. Whatever shape
+    /// the answer took, a turn that delivered one is finishing.
+    #[tokio::test]
+    async fn an_act_turn_that_delivered_a_file_is_not_converted_to_a_job() {
+        use crate::config::SendTool;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000017";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.ack_text.clear();
+            t.activity = None;
+            t.send_tool = SendTool::On;
+            t.act_transcript.clear();
+            agent.test_open_row(&host, t).await;
+        }
+        agent
+            .hook_route(&json!({ "action": "act", "ack": "Pulling the release dates into a CSV now.", "plan": "read the release pages, build the table, post it" }))
+            .await
+            .unwrap();
+        agent
+            .test_fold(
+                chat,
+                &host,
+                &arbos_core::rpc::Event::ToolExecutionStart {
+                    tool_call_id: "c1".into(),
+                    tool_name: "mcp__arbos__web_search".into(),
+                    args: json!({ "query": "python release dates" }),
+                    parent_tool_call_id: None,
+                },
+            )
+            .await;
+        // The file goes into the chat, and that is the whole answer: no bubble follows it.
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.attachments_posted
+                .push("01POSTEDCSVROW000000000000".to_owned());
+            assert!(t.web_tool_used, "the conversion trigger is armed");
+            assert!(
+                t.progress_texts.iter().all(|p| p.trim().is_empty()),
+                "nothing was said: the file is the answer, which is the case the earlier \
+                 progress-text guard missed"
+            );
+        }
+        assert!(
+            !agent
+                .maybe_convert_act_to_job(&host, Duration::from_secs(13))
+                .await,
+            "the file is already in the chat; a job would only duplicate it"
+        );
+        {
+            let tl = agent.turn.lock().await;
+            assert!(!tl.as_ref().unwrap().act_to_job);
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// #1776 (run 6 on 0.1.131: x3, c6, m9, c7, l1, g5): the act ack had been promoted to a
     /// bubble, the model then wrote its answer as prose without `send_message`, and the fallback
     /// stayed quiet because the ack counted as "posted" — the user kept only "Reading the README
