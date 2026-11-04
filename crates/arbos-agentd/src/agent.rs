@@ -5890,8 +5890,11 @@ impl Agent {
             (None, false) => return,
         };
         // Drop planning / routing thoughts and trailing tool-narration; keep only the
-        // user-facing sentence(s), with glued ".Word" spacing fixed.
-        let cleaned = ProseFilter::clean_prose(t.ack_text.trim());
+        // user-facing sentence(s), with glued ".Word" spacing fixed. Redacted here, the one
+        // point every ack surface reads from (D19, as `hook_send_message` does it): the bubble,
+        // the working row's activity — which `post_activity` also sends to the relay — the act
+        // job's title, and the promoted bubble all derive from `cleaned`.
+        let cleaned = crate::store::redact(&ProseFilter::clean_prose(t.ack_text.trim()));
         let Some(bubble) = ack_bubble(&cleaned, &action, t.routine_turn) else {
             // `act`: the sentence is status — it goes on the working row (activity), the one
             // row of the turn stays open and becomes the result. Else: nothing to show.

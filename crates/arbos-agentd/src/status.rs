@@ -1679,6 +1679,124 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A vault value the model repeats back in its ack reaches none of the ack's surfaces. The
+    /// backstop `write_text` and the media caption already apply was missing here, so the one
+    /// sentence a turn opens with was the only model prose shown to the user unredacted — and
+    /// `post_activity` sends the act ack on to the relay as well.
+    #[tokio::test]
+    async fn an_ack_that_repeats_a_vault_value_is_redacted_on_every_surface_it_reaches() {
+        use crate::config::SendTool;
+        const SECRET: &str = "hunter2-wolfpack-maintenance-key";
+        crate::store::redact_live_value(SECRET);
+        std::env::set_var("ARBOS_ACT_ACK_BUBBLE_SECS", "1");
+        let (agent, root) = test_agent().await;
+
+        // A `reply` ack streams into `ack_text` and becomes its own bubble when `route` returns.
+        {
+            let chat = "01TESTCHATQUICKREPLY000031";
+            let host = agent.sync.open_room(chat).await.unwrap();
+            let _busy = agent.test_hold_turn(chat).await;
+            {
+                let mut tl = agent.turn.lock().await;
+                let t = tl.as_mut().unwrap();
+                t.ack_text.clear();
+                t.activity = None;
+                t.send_tool = SendTool::On;
+                agent.test_open_row(&host, t).await;
+            }
+            agent
+                .hook_route(&json!({ "action": "reply" }))
+                .await
+                .unwrap();
+            {
+                let mut tl = agent.turn.lock().await;
+                let t = tl.as_mut().unwrap();
+                t.ack_split = false;
+                t.ack_text = format!("The key in that config is {SECRET}, so I can answer now.");
+            }
+            agent
+                .test_fold(
+                    chat,
+                    &host,
+                    &arbos_core::rpc::Event::ToolExecutionEnd {
+                        tool_call_id: "r1".into(),
+                        tool_name: "route".into(),
+                        result: json!({}),
+                        is_error: false,
+                        duration_ms: None,
+                        parent_tool_call_id: None,
+                    },
+                )
+                .await;
+            let shown = reply_rows(&host, "m-busy")
+                .iter()
+                .map(|r| r.text())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                !shown.contains(SECRET),
+                "the ack bubble leaked the vault value: {shown:?}"
+            );
+            assert!(
+                shown.contains("[REDACTED:vault]"),
+                "the ack bubble was posted, redacted: {shown:?}"
+            );
+        }
+
+        // An `act` ack is the working row's activity, which `post_activity` also sends on, and
+        // becomes a bubble of its own once the turn runs long.
+        {
+            let chat = "01TESTCHATQUICKREPLY000032";
+            let host = agent.sync.open_room(chat).await.unwrap();
+            let _busy = agent.test_hold_turn(chat).await;
+            {
+                let mut tl = agent.turn.lock().await;
+                let t = tl.as_mut().unwrap();
+                t.ack_text.clear();
+                t.activity = None;
+                t.send_tool = SendTool::On;
+                agent.test_open_row(&host, t).await;
+            }
+            agent
+                .hook_route(&json!({
+                    "action": "act",
+                    "ack": format!("Rotating {SECRET} across the boxes now."),
+                    "plan": "read, rotate, verify",
+                }))
+                .await
+                .unwrap();
+            {
+                let tl = agent.turn.lock().await;
+                let activity = tl.as_ref().unwrap().activity.clone().unwrap_or_default();
+                assert!(
+                    !activity.contains(SECRET),
+                    "the working row's activity leaked the vault value: {activity:?}"
+                );
+                assert!(
+                    activity.contains("[REDACTED:vault]"),
+                    "the activity is the ack, redacted: {activity:?}"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(1600)).await;
+            let promoted = reply_rows(&host, "m-busy")
+                .iter()
+                .map(|r| r.text())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                !promoted.contains(SECRET),
+                "the promoted ack bubble leaked the vault value: {promoted:?}"
+            );
+            assert!(
+                promoted.contains("[REDACTED:vault]"),
+                "the ack was promoted, redacted: {promoted:?}"
+            );
+        }
+
+        std::env::remove_var("ARBOS_ACT_ACK_BUBBLE_SECS");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Duplex step 4: an act turn that has run a web tool and is still going at the threshold
     /// posts its ack and is marked for conversion; the kill switch keeps the old behaviour; a
     /// quick local act (no web tool, few calls) is never converted; the converted turn's
