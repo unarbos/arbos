@@ -1,0 +1,40 @@
+{
+ "task": "rs1-affine-read-website",
+ "agent": "Test3",
+ "image": "0.1.191",
+ "user_messages": [
+  "https://affine.io/ read this website",
+  "<nudge 1: wording not in evidence>",
+  "<nudge 2: wording not in evidence>",
+  "<nudge 3: wording not in evidence>"
+ ],
+ "assistant_messages": [
+  "Submissions are closed (`accepting_submissions: false`)."
+ ],
+ "tool_calls": [
+  {
+   "name": "mcp__arbos__web_fetch",
+   "target": "https://affine.io/",
+   "error": null,
+   "output_empty": true
+  }
+ ],
+ "slots_filled": 0,
+ "slots_total": 12,
+ "asked_for_count": false,
+ "stated_count": null,
+ "produced_count": null,
+ "committed": false,
+ "nudge_labels": [
+  "nudge",
+  "nudge",
+  "nudge"
+ ],
+ "contradictions": [
+  "'Submissions are closed (accepting_submissions: false)' against queue.enabled true and the 8 valid queue batches the comparison agent read from the same site"
+ ],
+ "notes": {
+  "evidence": "nudge count and tool set in evidence; bubble wording is the one quoted claim only",
+  "unverified": "the single quoted claim is from the umbrella brief, not from a transcript this worker read"
+ }
+}

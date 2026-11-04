@@ -216,8 +216,41 @@ def send_turn(project, chat_id, prompt, timeout_s, reject_approvals=True, on_row
 # ---- metrics from evidence ---------------------------------------------------------------------
 
 
+#: Argument that says what a tool call addressed, in the order a call is likely to carry one. The
+#: resourcefulness rubric needs the target, not only the name: a re-fetch and an escalation to a
+#: data endpoint are both invisible in a list of tool names.
+TARGET_KEYS = ("url", "path", "file_path", "handle", "command", "query", "to", "pattern")
+
+
+def _result_text(m):
+    """The words of a pi `toolResult` message, whose content is a string or typed blocks — not the
+    `parts` shape `text_of` reads."""
+    c = m.get("content")
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        return "\n".join(x.get("text", "") for x in c if isinstance(x, dict) and x.get("text"))
+    return ""
+
+
+def call_target(args):
+    """The one argument of a tool call worth recording as its target, clipped."""
+    if not isinstance(args, dict):
+        return None
+    for k in TARGET_KEYS:
+        v = args.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()[:300]
+    return None
+
+
 def session_metrics(entries, prompt):
-    """Main-agent model calls, tool calls and errors after the user message carrying `prompt`."""
+    """Main-agent model calls, tool calls and errors after the user message carrying `prompt`.
+
+    `tool_names` and `tool_targets` are index-aligned, and `tool_results` carries each call's error
+    text (None when it succeeded) in the same order, so a reader can tell a transient failure from a
+    refusal without the session file.
+    """
     start = None
     for i, e in enumerate(entries):
         if e.get("type") == "message" and e["message"].get("role") == "user":
@@ -226,10 +259,11 @@ def session_metrics(entries, prompt):
             if prompt[:200] in txt:
                 start = i
     if start is None:
-        return {"found": False, "model_calls": 0, "tool_calls": 0, "tool_errors": 0, "tool_names": [], "compactions": 0, "usage": {}}
+        return {"found": False, "model_calls": 0, "tool_calls": 0, "tool_errors": 0, "tool_names": [], "tool_targets": [], "tool_results": [], "compactions": 0, "usage": {}}
     calls = 0
     usage = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": 0.0}
-    tool_names, tool_errors, compactions = [], 0, 0
+    tool_names, tool_targets, tool_results, tool_errors, compactions = [], [], [], 0, 0
+    call_ids = []
     for e in entries[start + 1 :]:
         if e.get("type") == "compaction":
             compactions += 1
@@ -245,9 +279,19 @@ def session_metrics(entries, prompt):
             for blk in m.get("content", []) if isinstance(m.get("content"), list) else []:
                 if blk.get("type") == "toolCall":
                     tool_names.append(blk.get("name"))
+                    tool_targets.append(call_target(blk.get("input") or blk.get("arguments") or blk.get("args")))
+                    tool_results.append(None)
+                    call_ids.append(blk.get("id") or blk.get("toolCallId"))
         elif m.get("role") == "toolResult":
             if m.get("isError"):
                 tool_errors += 1
+                err = _result_text(m) or "error"
+                cid = m.get("toolCallId") or m.get("id")
+                # align to the call it answers; an unmatched result falls to the newest open call
+                i = call_ids.index(cid) if cid in call_ids else next(
+                    (j for j in range(len(tool_results) - 1, -1, -1) if tool_results[j] is None), None)
+                if i is not None:
+                    tool_results[i] = err[:300]
         elif m.get("role") == "user":
             break
     total_in = usage["input"] + usage["cacheRead"] + usage["cacheWrite"]
@@ -256,6 +300,8 @@ def session_metrics(entries, prompt):
         "model_calls": calls,
         "tool_calls": len(tool_names),
         "tool_names": tool_names,
+        "tool_targets": tool_targets,
+        "tool_results": tool_results,
         "tool_errors": tool_errors,
         "compactions": compactions,
         "usage": usage,
