@@ -10134,6 +10134,66 @@ mod tests {
         assert!(p.ends_with("Hi"));
     }
 
+    /// Jacob, Test5 round 2 (fix F): a provider refusal threw the whole turn away. The user read
+    /// "I couldn't answer that … ask me again in a moment" — which is wrong twice, because a
+    /// refusal does not clear on its own and because nothing said what to do instead — and the
+    /// turn's own remedy was to rotate the pi session, dropping the conversation the user was
+    /// mid-way through. A refusal is about the request, not about the window.
+    #[test]
+    fn a_provider_refusal_keeps_the_turn() {
+        let refused = json!({
+            "role": "assistant", "stopReason": "error", "rawStopReason": "refusal",
+            "errorMessage": "I can't help with that request."
+        });
+        let m = ModelError::from_message(&refused).unwrap();
+        assert!(m.refusal);
+
+        // What the user reads: the part that was declined, and the way out of it. Never an
+        // invitation to send the same request again, which is refused again.
+        let line = m.chat_line_for("Jacob");
+        assert!(
+            line.contains("declined"),
+            "the refusal line must say the request was declined: {line}"
+        );
+        assert!(
+            line.contains("part"),
+            "the refusal line must say it was part of the request, not the whole turn: {line}"
+        );
+        assert!(
+            line.contains("split") || line.contains("on its own"),
+            "the refusal line must tell the user that splitting the request works: {line}"
+        );
+        assert!(
+            !line.contains("Ask me again in a moment"),
+            "a refusal does not clear by itself; resending it as is refuses again: {line}"
+        );
+        // The same line serves the ack path, so an ack bubble reads as one message with it.
+        assert_eq!(m.chat_line_after_ack("Jacob"), line);
+
+        // The turn is mid-conversation and the provider declined this request: rotating the pi
+        // session would throw that conversation away and change nothing about the refusal.
+        let mut t = TurnState::claim("chat", "user-msg", false);
+        t.model_error = Some(m);
+        assert_eq!(
+            empty_turn_retry_reason_for(&t),
+            None,
+            "a refusal must not rotate the session"
+        );
+        // Belt and braces: a refusal that also missed its `route` call must not reach the
+        // `route_missing` rotation through the back door.
+        t.metrics.route_missing = true;
+        assert_eq!(
+            empty_turn_retry_reason_for(&t),
+            None,
+            "a refusal must not rotate the session through route_missing"
+        );
+        // An empty turn that was not refused still rotates once: this is the refusal route
+        // leaving the session alone, not the rotation being switched off.
+        let mut plain = TurnState::claim("chat", "user-msg", false);
+        plain.metrics.route_missing = true;
+        assert_eq!(empty_turn_retry_reason_for(&plain), Some("route_missing"));
+    }
+
     /// A codemode script that only searches the web is research, not an edit (the converted
     /// job was filed as `code`: folder lock, no auto-restart).
     #[test]
