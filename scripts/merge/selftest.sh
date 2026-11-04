@@ -208,12 +208,14 @@ gate_state_with() {  # <jobs-body> — one red run on the head, whose jobs are <
   gate_state .github/workflows/release-gate.yml 0123456789012345678901234567890123456789
   unset -f rd
 }
-for case_name in 127:jobs_127:BLOCKED refusal:jobs_refused:RED startup:jobs_startup:BLOCKED; do
-  label=${case_name%%:*}; rest=${case_name#*:}; var=${rest%%:*}; want=${rest##*:}
-  got=$(gate_state_with "${!var}")
-  if [ "${got%% *}" = "$want" ]; then ok "$label reads $want"
-  else bad "$label reads '${got%% *}', expected $want — full line: $got"; fi
-done
+reads_as() {  # <label> <expected word> <jobs-body>
+  local got; got=$(gate_state_with "$3")
+  if [ "${got%% *}" = "$2" ]; then ok "$1 reads $2"
+  else bad "$1 reads '${got%% *}', expected $2 — full line: $got"; fi
+}
+reads_as 127     BLOCKED "$jobs_127"
+reads_as refusal RED     "$jobs_refused"
+reads_as startup BLOCKED "$jobs_startup"
 # Named on its own, because it is the case this change could break and the
 # table above would still look healthy if the classifier collapsed to one
 # answer: the two live runs must not land on the same word.
