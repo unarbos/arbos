@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, Mutex, Semaphore};
 
 use arbos_core::approval::ApprovalOutcome;
-use arbos_core::doc::{CommandStatus, CommandView, MessageStatus, MessageView};
+use arbos_core::doc::{ChatDoc, CommandStatus, CommandView, MessageStatus, MessageView};
 use arbos_core::ids::{now_ms, ulid};
 use arbos_core::route::{pick_harness, validate, Harness, ValidRoute};
 use arbos_core::rpc::{AssistantEvent, Command as RpcCommand, Event, StreamingBehavior};
@@ -1082,6 +1082,24 @@ pub struct JobSpec {
     pub attempt: u8,
 }
 
+/// What a finished job or hand-off gives its relay turn.
+#[derive(Clone, Copy)]
+pub(crate) struct ResultDelivery<'a> {
+    pub subagent_id: &'a str,
+    /// The worker's label, for the people-chat attribution on the relay row.
+    pub name: &'a str,
+    pub status: &'a str,
+    pub total_ms: i64,
+    /// Everything the worker produced, for the model's prompt only.
+    pub raw: &'a str,
+    /// The worker's own answer: its return-contract summary when it wrote one, else its final
+    /// text. Unlike `raw` this is shown to the user — it is what the notice agentd writes itself
+    /// carries when the model cannot relay the result (bug M).
+    pub result: &'a str,
+    pub error: Option<&'a str>,
+    pub job: Option<&'a JobSpec>,
+}
+
 /// How many fresh workers a job gets after its first one fails (Jacob, 2026-10-25: a job that
 /// fails retries once, then falls back to the main agent doing the work inline — the user is
 /// never asked "should I try again?" on a first failure).
@@ -1146,6 +1164,14 @@ pub enum TurnKind {
         /// when the model cannot relay the result (cut short for a waiting user, tried to start
         /// work).
         status: String,
+        /// What to call this work in that plain line: a job's own title, else the worker's
+        /// label. The line used to name nothing at all, so a user with two jobs in flight could
+        /// not tell which one had finished (Jacob, Test5 round 3, bug M).
+        title: String,
+        /// The worker's own answer, for that same line: its return-contract summary when it
+        /// wrote one, else its final text. Cut to a row's worth with a marker, never silently
+        /// (`truncate::clip_for_chat`).
+        result: String,
     },
     /// An approval card was decided after its turn ended (feature `approve`): the main agent
     /// dispatches or acknowledges, in prose.
@@ -1701,6 +1727,12 @@ pub struct Agent {
     /// User messages waiting for `turn_lock` right now. Relay turns and the soft compaction
     /// yield to them (see `status.rs`).
     pub(crate) pending_sends: std::sync::atomic::AtomicUsize,
+    /// User `send` / `answer` commands this box is handling right now, from the moment
+    /// [`Agent::handle_command`] takes one until it is done with it. A relay turn never opens
+    /// its row while this is non-zero: that row would be ordered between the user's message and
+    /// that message's first assistant row (bug M). Counted here rather than at the turn lock
+    /// because the gap the notice landed in is the one *before* the lock is asked for.
+    sends_in_flight: std::sync::atomic::AtomicUsize,
     /// Per chat: questions a quick reply answered while the agent was busy, for the main
     /// session's next prompt so it does not answer them again.
     pub(crate) side_notes: std::sync::Mutex<HashMap<String, Vec<String>>>,
@@ -1863,6 +1895,7 @@ impl Agent {
             compaction_floor: std::sync::Mutex::new(HashMap::new()),
             compaction_strikes: std::sync::Mutex::new(HashMap::new()),
             pending_sends: std::sync::atomic::AtomicUsize::new(0),
+            sends_in_flight: std::sync::atomic::AtomicUsize::new(0),
             side_notes: std::sync::Mutex::new(HashMap::new()),
             quick_calls: std::sync::Mutex::new(HashMap::new()),
             jobs_running: std::sync::atomic::AtomicUsize::new(0),
@@ -1880,6 +1913,49 @@ impl Agent {
         let t0 = Instant::now();
         while self.sends_waiting() > 0 && t0.elapsed() < Duration::from_secs(60) {
             tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    /// Marks a user `send` / `answer` as being handled for as long as the guard lives, so no
+    /// relay turn opens a row in front of that message's first assistant row.
+    fn claim_send_in_flight(&self) -> SendInFlight<'_> {
+        self.sends_in_flight.fetch_add(1, Ordering::SeqCst);
+        SendInFlight(&self.sends_in_flight)
+    }
+
+    /// Why a relay turn's row may not be opened at this point in the row order, for the log;
+    /// `None` when it may.
+    ///
+    /// Two signals, because neither alone covers the hand-over. `sends_in_flight` is exact for a
+    /// command this box has taken and clears when the handler returns, however long the turn
+    /// runs. A command that has reached the doc but not yet the handler shows up in neither the
+    /// counter nor the turn lock, so a fresh `pending` send with no assistant row counts too.
+    fn relay_row_blocker(&self, doc: &ChatDoc) -> Option<String> {
+        let in_flight = self.sends_in_flight.load(Ordering::SeqCst);
+        if in_flight > 0 {
+            return Some(format!("{in_flight} user send(s) being handled"));
+        }
+        fresh_unanswered_send(doc).map(|id| format!("user message {id} has no assistant row yet"))
+    }
+
+    /// `turn_lock` for a relay turn (a job notice, an approval follow-up), taken at a point in
+    /// the row order where no user message is owed its first assistant row.
+    ///
+    /// The wait happens with no lock held, because the turn that writes that row needs the same
+    /// one. The check is repeated under the doc lock in [`Agent::drive_turn`], immediately
+    /// before the row is created; that second check is what makes this an ordering guarantee
+    /// rather than a preference, since a send can arrive while this turn queues for the lock.
+    async fn relay_slot(&self, host: &SharedHost) -> tokio::sync::MutexGuard<'_, ()> {
+        loop {
+            let blocker = {
+                let h = host.lock().await;
+                self.relay_row_blocker(&h.doc)
+            };
+            let Some(why) = blocker else {
+                return self.turn_lock.lock().await;
+            };
+            tracing::debug!(why = %why, "relay turn waits for the user's message to be answered");
+            tokio::time::sleep(RELAY_SLOT_POLL).await;
         }
     }
 
@@ -2396,6 +2472,10 @@ impl Agent {
     /// Mark-before-execute, then `done`/`failed` in the doc. The result is also returned for
     /// callers that report it elsewhere (routine runs, channel replies); the command loop ignores it.
     pub async fn handle_command(self: &Arc<Self>, chat_id: &str, cmd: CommandView) -> Result<()> {
+        // Claimed before anything else can await: from here on a relay turn knows this message
+        // is owed an answer and will not write a row in front of it (bug M).
+        let _in_flight =
+            matches!(cmd.kind.as_str(), "send" | "answer").then(|| self.claim_send_in_flight());
         let Some(host) = self.sync.host(chat_id).await else {
             return Err(anyhow!("no room for chat {chat_id}"));
         };
@@ -3784,13 +3864,16 @@ impl Agent {
                         &chat,
                         &host2,
                         &user_msg,
-                        existing.as_deref().unwrap_or(""),
-                        &label,
-                        "failed",
-                        0,
-                        "(the subagent did not start)",
-                        Some(&e.to_string()),
-                        None,
+                        &ResultDelivery {
+                            subagent_id: existing.as_deref().unwrap_or(""),
+                            name: &label,
+                            status: "failed",
+                            total_ms: 0,
+                            raw: "(the subagent did not start)",
+                            result: "",
+                            error: Some(&e.to_string()),
+                            job: None,
+                        },
                     )
                     .await
                 {
@@ -4212,6 +4295,92 @@ impl Agent {
             .unwrap_or_else(|| self.cfg.work_dir.clone())
     }
 
+    /// The row a turn writes into, created under the one doc lock that also decides whether it
+    /// may be created at all. `None` when it may not: a relay turn's row must never be ordered
+    /// between a user message and that message's first assistant row (bug M), and the two
+    /// questions share a lock precisely so no row can arrive between them.
+    ///
+    /// [`Agent::relay_slot`] already waited for that slot before the turn lock was taken; this
+    /// is the check that makes it a guarantee, because a send can arrive while a relay turn
+    /// queues for the lock. Returns the id of the row's first text part.
+    async fn open_turn_row(
+        &self,
+        chat_id: &str,
+        host: &SharedHost,
+        user_msg_id: &str,
+        assistant_msg_id: &str,
+        kind: &TurnKind,
+        relay_turn: bool,
+    ) -> Option<String> {
+        let h = host.lock().await;
+        if let Some(why) = self.relay_row_blocker(&h.doc).filter(|_| relay_turn) {
+            tracing::info!(chat_id, why = %why, "relay turn gives up its slot");
+            return None;
+        }
+        let pid = h
+            .doc
+            .start_assistant_message(assistant_msg_id, user_msg_id, &self.cfg.device_id);
+        match kind {
+            TurnKind::User => {
+                h.doc
+                    .add_status_part(assistant_msg_id, "working", "Working…");
+                // The platform reply (quote header) on the row this answers: always
+                // where attribution matters (groups, channels, people chats, a row
+                // another agent sent), in a 1:1 only when the answer is to an earlier
+                // message than the latest (#1521).
+                if self.reply_to_wanted_for(&h.doc, chat_id, user_msg_id) {
+                    h.doc
+                        .set_message_fields(assistant_msg_id, &[("replyTo", json!(user_msg_id))]);
+                }
+            }
+            TurnKind::SubagentResult {
+                subagent_id, name, ..
+            } => {
+                // Same people-chat attribution as a normal reply: without
+                // `agent:<id>` + askedByHandle the Mac / iPhone draw a flush-left
+                // bubble with no disc (#1604), while every other participant sits
+                // on the avatar column.
+                h.doc
+                    .add_status_part(assistant_msg_id, "working", "Working…");
+                h.doc.set_message_fields(
+                    assistant_msg_id,
+                    &[
+                        ("subagentId", json!(subagent_id)),
+                        ("subagentName", json!(name)),
+                    ],
+                );
+            }
+            TurnKind::JobFallback { job_id, title } => {
+                // The agent picks the job's work up itself; the row threads under the
+                // ask and names the job for the Details drawer.
+                h.doc.add_status_part(assistant_msg_id, "working", title);
+                h.doc.set_message_fields(
+                    assistant_msg_id,
+                    &[
+                        ("replyTo", json!(user_msg_id)),
+                        ("jobFallback", json!(job_id)),
+                    ],
+                );
+            }
+            TurnKind::ApprovalOutcome { approval_id, title } => {
+                h.doc.add_status_part(
+                    assistant_msg_id,
+                    "working",
+                    &format!("Following up on “{title}”…"),
+                );
+                h.doc
+                    .set_message_fields(assistant_msg_id, &[("approvalId", json!(approval_id))]);
+            }
+        }
+        // Every assistant row in a people chat — user reply, subagent result,
+        // approval follow-up — carries the agent's sender / avatar / asker so
+        // clients put it on the same lane as the other participants (#1604).
+        if let Some(attr) = self.people_reply_fields(chat_id) {
+            h.doc.set_message_fields(assistant_msg_id, &attr.fields);
+        }
+        Some(pid)
+    }
+
     /// One prompt to the main pi session, folded into a new assistant message. The caller holds
     /// `turn_lock`. Finalizes the message (decision, usage, status), T3, and turn metrics.
     ///
@@ -4231,78 +4400,23 @@ impl Agent {
             let _ = self.turn.lock().await.take();
             return Err(anyhow!("turn stopped before prompt"));
         }
+        // A relay turn relays; it does not answer a message of its own: its row must never be
+        // ordered between a user message and that message's first assistant row (bug M), which
+        // is what `open_turn_row` refuses to do.
+        let relay_turn = !matches!(kind, TurnKind::User | TurnKind::JobFallback { .. });
         let assistant_msg_id = ulid();
-        let text_part_id = {
-            let h = host.lock().await;
-            let pid =
-                h.doc
-                    .start_assistant_message(&assistant_msg_id, user_msg_id, &self.cfg.device_id);
-            match &kind {
-                TurnKind::User => {
-                    h.doc
-                        .add_status_part(&assistant_msg_id, "working", "Working…");
-                    // The platform reply (quote header) on the row this answers: always
-                    // where attribution matters (groups, channels, people chats, a row
-                    // another agent sent), in a 1:1 only when the answer is to an earlier
-                    // message than the latest (#1521).
-                    if self.reply_to_wanted_for(&h.doc, chat_id, user_msg_id) {
-                        h.doc.set_message_fields(
-                            &assistant_msg_id,
-                            &[("replyTo", json!(user_msg_id))],
-                        );
-                    }
-                }
-                TurnKind::SubagentResult {
-                    subagent_id,
-                    name,
-                    job_id: _,
-                    status: _,
-                } => {
-                    // Same people-chat attribution as a normal reply: without
-                    // `agent:<id>` + askedByHandle the Mac / iPhone draw a flush-left
-                    // bubble with no disc (#1604), while every other participant sits
-                    // on the avatar column.
-                    h.doc
-                        .add_status_part(&assistant_msg_id, "working", "Working…");
-                    h.doc.set_message_fields(
-                        &assistant_msg_id,
-                        &[
-                            ("subagentId", json!(subagent_id)),
-                            ("subagentName", json!(name)),
-                        ],
-                    );
-                }
-                TurnKind::JobFallback { job_id, title } => {
-                    // The agent picks the job's work up itself; the row threads under the
-                    // ask and names the job for the Details drawer.
-                    h.doc.add_status_part(&assistant_msg_id, "working", title);
-                    h.doc.set_message_fields(
-                        &assistant_msg_id,
-                        &[
-                            ("replyTo", json!(user_msg_id)),
-                            ("jobFallback", json!(job_id)),
-                        ],
-                    );
-                }
-                TurnKind::ApprovalOutcome { approval_id, title } => {
-                    h.doc.add_status_part(
-                        &assistant_msg_id,
-                        "working",
-                        &format!("Following up on “{title}”…"),
-                    );
-                    h.doc.set_message_fields(
-                        &assistant_msg_id,
-                        &[("approvalId", json!(approval_id))],
-                    );
-                }
-            }
-            // Every assistant row in a people chat — user reply, subagent result,
-            // approval follow-up — carries the agent's sender / avatar / asker so
-            // clients put it on the same lane as the other participants (#1604).
-            if let Some(attr) = self.people_reply_fields(chat_id) {
-                h.doc.set_message_fields(&assistant_msg_id, &attr.fields);
-            }
-            pid
+        let Some(text_part_id) = self
+            .open_turn_row(
+                chat_id,
+                host,
+                user_msg_id,
+                &assistant_msg_id,
+                &kind,
+                relay_turn,
+            )
+            .await
+        else {
+            return Err(anyhow!(RELAY_SLOT_LOST));
         };
 
         // Disk headroom (#1641): decide before pi touches its session files. A full disk is
@@ -4485,7 +4599,7 @@ impl Agent {
             model_error: None,
             session_rotated: false,
             refusal_retried: false,
-            reply_only: !matches!(kind, TurnKind::User | TurnKind::JobFallback { .. }),
+            reply_only: relay_turn,
             relay_tool_tolerated: false,
             preempted: false,
             notices: Vec::new(),
@@ -5027,25 +5141,92 @@ impl Agent {
         })
     }
 
+    /// [`Agent::drive_turn`] for a relay turn (a job or hand-off result, an approval follow-up),
+    /// on a slot where its row cannot land between a user message and that message's first
+    /// assistant row (bug M).
+    ///
+    /// `relay_slot` waits for that slot without the turn lock; `drive_turn` checks it again under
+    /// the doc lock that creates the row and refuses with [`RELAY_SLOT_LOST`] if a send got there
+    /// first. A refusal costs this turn nothing — no row, no model call — and is retried, never
+    /// dropped: the only way out of this loop is a row the user will read in the right place.
+    ///
+    /// `relay_row` is an agent reply pinned on a hand-off row (#1780): one a user turn already
+    /// told the user is skipped (`Ok(None)`), and the rest are marked relayed before the turn
+    /// runs so a user send arriving now does not tell it a second time.
+    async fn drive_relay_turn(
+        self: &Arc<Self>,
+        chat_id: &str,
+        host: &SharedHost,
+        in_reply_to: &str,
+        prompt: &str,
+        kind: TurnKind,
+        relay_row: Option<&str>,
+    ) -> Result<Option<TurnOutcome>> {
+        let mut marked_relayed = false;
+        let mut attempt = 0usize;
+        loop {
+            attempt += 1;
+            let _guard = self.relay_slot(host).await;
+            if let Some(id) = relay_row {
+                let h = host.lock().await;
+                let relayed = h
+                    .doc
+                    .message(id)
+                    .and_then(|m| m.rest.get("agentReply").cloned())
+                    .and_then(|r| r.get("relayed").and_then(Value::as_bool))
+                    == Some(true);
+                // Our own mark from a lost attempt is not a user turn having told it.
+                if relayed && !marked_relayed {
+                    tracing::info!(
+                        chat_id,
+                        "agent reply already told by a user turn; notice turn skipped"
+                    );
+                    return Ok(None);
+                }
+                crate::agent_messages::mark_agent_reply_relayed(&h.doc, id);
+                marked_relayed = true;
+            }
+            let r = self
+                .drive_turn(
+                    chat_id,
+                    host,
+                    in_reply_to,
+                    prompt,
+                    kind.clone(),
+                    PendingMemory::none(),
+                )
+                .await;
+            match r {
+                Err(e) if e.to_string() == RELAY_SLOT_LOST => {
+                    if attempt > 2 {
+                        tracing::warn!(chat_id, attempt, "relay turn lost its slot again");
+                    }
+                }
+                other => return other.map(Some),
+            }
+        }
+    }
+
     /// A finished subagent never speaks to the user directly: its raw output stays hidden and the
     /// main agent writes the update in prose, as a follow-up turn in the same chat (demo review
-    /// item 1). Waits for `turn_lock`, so it lands after whatever the user is doing right now.
-    #[allow(clippy::too_many_arguments)]
+    /// item 1). Runs on a relay slot, so it lands after whatever the user is doing right now.
     async fn run_result_turn(
         self: &Arc<Self>,
         chat_id: &str,
         host: &SharedHost,
         user_msg_id: &str,
-        subagent_id: &str,
-        name: &str,
-        status: &str,
-        total_ms: i64,
-        raw: &str,
-        error: Option<&str>,
-        job: Option<&JobSpec>,
+        d: &ResultDelivery<'_>,
     ) -> Result<()> {
-        self.let_user_sends_go_first().await;
-        let _guard = self.turn_lock.lock().await;
+        let ResultDelivery {
+            subagent_id,
+            name,
+            status,
+            total_ms,
+            raw,
+            result,
+            error,
+            job,
+        } = *d;
         let ask = {
             let h = host.lock().await;
             h.doc
@@ -5120,17 +5301,15 @@ impl Agent {
             name: name.to_owned(),
             job_id: job.map(|j| j.id.clone()),
             status: status.to_owned(),
+            title: job.map_or_else(|| name.to_owned(), |j| j.title.clone()),
+            result: result.to_owned(),
         };
-        let outcome = self
-            .drive_turn(
-                chat_id,
-                host,
-                user_msg_id,
-                &prompt,
-                kind,
-                PendingMemory::none(),
-            )
-            .await?;
+        let Some(outcome) = self
+            .drive_relay_turn(chat_id, host, user_msg_id, &prompt, kind, None)
+            .await?
+        else {
+            return Ok(());
+        };
         // A result turn relays; it does not start further work. Any other route is logged only.
         if !matches!(outcome.turn.route, Some(ValidRoute::Reply { .. }) | None) {
             tracing::warn!(
@@ -5243,35 +5422,12 @@ impl Agent {
         kind: TurnKind,
         relay_row: Option<&str>,
     ) -> Result<()> {
-        self.let_user_sends_go_first().await;
-        let _guard = self.turn_lock.lock().await;
-        if let Some(id) = relay_row {
-            let h = host.lock().await;
-            let relayed = h
-                .doc
-                .message(id)
-                .and_then(|m| m.rest.get("agentReply").cloned())
-                .and_then(|r| r.get("relayed").and_then(Value::as_bool))
-                == Some(true);
-            if relayed {
-                tracing::info!(
-                    chat_id,
-                    "agent reply already told by a user turn; notice turn skipped"
-                );
-                return Ok(());
-            }
-            crate::agent_messages::mark_agent_reply_relayed(&h.doc, id);
-        }
-        let outcome = self
-            .drive_turn(
-                chat_id,
-                host,
-                in_reply_to,
-                prompt,
-                kind,
-                PendingMemory::none(),
-            )
-            .await?;
+        let Some(outcome) = self
+            .drive_relay_turn(chat_id, host, in_reply_to, prompt, kind, relay_row)
+            .await?
+        else {
+            return Ok(());
+        };
         self.spawn_memory_pass(
             chat_id,
             &outcome.assistant_msg_id,
@@ -8711,6 +8867,17 @@ impl Agent {
             Some(c) => format!("{text}\n\nParsed return contract:\n{c}"),
             None => text.clone(),
         };
+        // The worker's answer in its own words, for the notice agentd writes when the model
+        // cannot relay the result itself: the return contract's summary when it wrote one — that
+        // is the worker's own précis of the work — else its final text. Never `result_text`: the
+        // parsed contract is machinery, and the user is not reading JSON (bug M).
+        let notice_result = contract
+            .as_ref()
+            .and_then(|c| c.get("summary"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map_or_else(|| text.clone(), str::to_owned);
         // A job (an ask run beside the main turn, `start_job_for_send`) must not wait for the
         // main session's lock to be relayed — that would land its answer only after the long
         // turn. Its prose comes from a direct model call and is written as the one bubble.
@@ -8757,13 +8924,16 @@ impl Agent {
                 chat_id,
                 host,
                 in_reply_to,
-                &subagent_id,
-                &sub_name,
-                &status,
-                total_ms,
-                &result_text,
-                done_err.as_deref(),
-                job.as_ref(),
+                &ResultDelivery {
+                    subagent_id: &subagent_id,
+                    name: &sub_name,
+                    status: &status,
+                    total_ms,
+                    raw: &result_text,
+                    result: &notice_result,
+                    error: done_err.as_deref(),
+                    job: job.as_ref(),
+                },
             )
             .await;
         if let Some(j) = &job {
@@ -9878,6 +10048,61 @@ pub(crate) fn relay_turn_deadline_secs() -> u64 {
 /// How long a relay turn may keep a waiting user message behind it before it is cut short.
 pub(crate) const RELAY_TURN_YIELD_SECS: u64 = 15;
 
+/// How often a relay turn re-asks whether it may open its row (`Agent::relay_slot`).
+const RELAY_SLOT_POLL: Duration = Duration::from_millis(100);
+
+/// How long a `send` command may sit in the doc before [`Agent::handle_command`] has it. The
+/// hand-over is a channel send and a task spawn, so this is orders of magnitude of slack; it is
+/// bounded at all because in a people chat a send addressed to another agent stays `pending` in
+/// this replica for good, and must not park this chat's job notices.
+const SEND_HANDOVER_MS: i64 = 5_000;
+
+/// A relay turn gave its slot up because a user message was owed its first assistant row. It is
+/// retried, not dropped — see [`Agent::drive_relay_turn`].
+pub(crate) const RELAY_SLOT_LOST: &str =
+    "relay slot lost: a user message is owed its first assistant row";
+
+/// A user message whose first assistant row this box still owes, and whose `send` command only
+/// just reached the doc. Returns the message id.
+///
+/// A command row reaches the doc before agentd can act on it, which is the gap bug M's notice
+/// landed in: the message was there, nothing had claimed it yet, and the relay turn read the
+/// chat as quiet. Only fresh `pending` commands count — once one is claimed,
+/// `Agent::sends_in_flight` covers it for as long as its turn runs.
+fn fresh_unanswered_send(doc: &ChatDoc) -> Option<String> {
+    let answered: HashSet<String> = doc
+        .messages()
+        .into_iter()
+        .filter(|m| m.role == "assistant")
+        .filter_map(|m| {
+            m.rest
+                .get("inReplyTo")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    let now = now_ms();
+    doc.commands().into_iter().find_map(|c| {
+        if !matches!(c.kind.as_str(), "send" | "answer") || c.status != "pending" {
+            return None;
+        }
+        if now.saturating_sub(c.issued_at) >= SEND_HANDOVER_MS {
+            return None;
+        }
+        let id = c.payload.get("messageId").and_then(Value::as_str)?;
+        (!answered.contains(id)).then(|| id.to_owned())
+    })
+}
+
+/// Holds [`Agent::sends_in_flight`] up while a user `send` is being handled.
+pub(crate) struct SendInFlight<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl Drop for SendInFlight<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// Does this act-transcript line change anything (files, shell, git)? A `codemode` script that
 /// only calls the web tools is research (Hezbola, 2026-10-25: a `web_search` through codemode
 /// filed the converted job as `code`, with the folder lock and no auto-restart).
@@ -10370,15 +10595,12 @@ pub(crate) fn relay_turn_tool_allowed(tool_name: &str) -> bool {
 pub(crate) fn relay_fallback_line(kind: &TurnKind) -> String {
     match kind {
         TurnKind::User => String::new(),
-        TurnKind::SubagentResult { status, .. } => match status.as_str() {
-            // `partial` is a finished return contract, not a failure: the worker got results and
-            // says plainly which parts it could not reach (Jacob, Test5, 2026-11-04: a research
-            // job whose CSV was written and whose 45-row table was ready read as "did not finish"
-            // because six sites answered 403).
-            "done" | "partial" => "The background work I started has finished. Ask me for the details whenever you like.".to_owned(),
-            "cancelled" => "The background work I started was stopped before it finished.".to_owned(),
-            _ => "The background work I started did not finish: it failed or timed out. Tell me if you want me to try again.".to_owned(),
-        },
+        TurnKind::SubagentResult {
+            status,
+            title,
+            result,
+            ..
+        } => job_notice_line(title, status, result),
         TurnKind::ApprovalOutcome { title, .. } => {
             format!("Noted your decision on “{title}”.")
         }
@@ -10386,6 +10608,46 @@ pub(crate) fn relay_fallback_line(kind: &TurnKind) -> String {
         // user-turn fallback.
         TurnKind::JobFallback { .. } => String::new(),
     }
+}
+
+/// The notice agentd writes itself when a job or hand-off finished and the model could not
+/// relay the result: it names the work and carries the work's own answer.
+///
+/// Jacob, Test5 round 3 (2026-11-04, bug M): the line read "The background work I started has
+/// finished. Ask me for the details whenever you like." Two jobs were in flight, so it named
+/// neither and gave nothing of either one's result.
+///
+/// `partial` is a finished return contract, not a failure: the worker got results and says
+/// plainly which parts it could not reach (Jacob, Test5, 2026-11-04: a research job whose CSV
+/// was written and whose 45-row table was ready read as "did not finish" because six sites
+/// answered 403).
+pub(crate) fn job_notice_line(title: &str, status: &str, result: &str) -> String {
+    let what = match title.trim() {
+        "" => "The background work I started".to_owned(),
+        t => format!("“{t}”"),
+    };
+    let head = match status {
+        "done" | "partial" => format!("{what} is finished."),
+        "cancelled" => format!("{what} was stopped before it finished."),
+        _ => format!(
+            "{what} did not finish: it failed or timed out. Tell me if you want me to try again."
+        ),
+    };
+    let body = crate::truncate::clip_for_chat(result.trim(), crate::truncate::CHAT_NOTICE_CHARS);
+    if body.is_empty() {
+        return match status {
+            "done" | "partial" => format!(
+                "{head} It left no result I can quote here; ask me and I'll go through what it did."
+            ),
+            _ => head,
+        };
+    }
+    let label = match status {
+        "done" => "Here is what it produced:",
+        "partial" => "Here is what it produced, with the parts it could not reach named in it:",
+        _ => "Here is what it had produced before it stopped:",
+    };
+    format!("{head}\n\n{label}\n\n{body}")
 }
 
 /// A failed `codemode` script (D86): the sandbox's own limits — the script deadline, the 256 MB VM
@@ -10557,6 +10819,32 @@ impl Agent {
         reason: &str,
     ) {
         self.cut_relay_turn_short_locked(host, t, reason).await;
+    }
+
+    /// Test seam: hold a user send in flight the way `handle_command` does.
+    pub(crate) fn test_send_in_flight(&self) -> SendInFlight<'_> {
+        self.claim_send_in_flight()
+    }
+
+    /// Test seam: one turn through `drive_turn`, so the relay-row gate is exercised exactly
+    /// where production applies it. With no pi to answer, the turn fails at its first model
+    /// call — which is past the row the gate decides on, so the rows it left are the evidence.
+    pub(crate) async fn test_drive_turn(
+        self: &Arc<Self>,
+        chat_id: &str,
+        host: &SharedHost,
+        user_msg_id: &str,
+        kind: TurnKind,
+    ) -> Result<TurnOutcome> {
+        self.drive_turn(
+            chat_id,
+            host,
+            user_msg_id,
+            "[Arbos] test prompt",
+            kind,
+            PendingMemory::none(),
+        )
+        .await
     }
 
     /// Test seam: fold one pi event into the held turn.
