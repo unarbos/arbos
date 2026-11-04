@@ -2292,6 +2292,104 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Jacob on Test5 (2026-11-04, agentd 0.1.191, chat 01M6M0G9257SCE4RRQDW2GXFS9): a relay
+    /// turn delivered its answer as `send_message` parts, was then cut short, and the user read
+    /// "The background work I started did not finish" under the answer it had just been given.
+    /// The cut only looked at streamed text, which is the one place a relay turn's words are
+    /// not.
+    ///
+    /// Same family as the `partial` bug above — both announce a failure that did not happen —
+    /// but a different question: that one asks whether the work finished, this one asks whether
+    /// anything reached the user.
+    #[tokio::test]
+    async fn a_relay_turn_that_already_answered_is_cut_short_without_a_failure_line() {
+        use crate::agent::{relay_fallback_line, TurnKind};
+        use crate::config::SendTool;
+
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000019";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        {
+            let h = host.lock().await;
+            h.doc
+                .append_user_message(
+                    "m-busy",
+                    "how did the migration go?",
+                    "dev-mac",
+                    &arbos_core::doc::UserMessageOpts::default(),
+                )
+                .unwrap();
+        }
+        let _busy = agent.test_hold_turn(chat).await;
+
+        // A relay turn whose fallback line is the failure one: the worker really did fail, so
+        // the line is the right one to hold ready — it just must not be written over an answer.
+        let kind = TurnKind::SubagentResult {
+            subagent_id: "01TESTSUBAGENT000000000002".into(),
+            name: "job:migration".into(),
+            status: "failed".into(),
+        };
+        let fallback = relay_fallback_line(&kind);
+        assert!(fallback.contains("did not finish"), "{fallback}");
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.ack_text.clear();
+            t.activity = None;
+            t.send_tool = SendTool::On;
+            t.reply_only = true;
+            t.relay_fallback = fallback;
+            agent.test_open_row(&host, t).await;
+        }
+
+        // The answer goes out as separate messages, never as streamed text.
+        agent
+            .hook_route(&json!({ "action": "reply", "reply": "" }))
+            .await
+            .unwrap();
+        agent
+            .hook_send_message("The migration finished: 45 rows moved.", None, None)
+            .await
+            .unwrap();
+        agent
+            .hook_send_message("Want me to run the row-count check next?", None, None)
+            .await
+            .unwrap();
+        {
+            let tl = agent.turn.lock().await;
+            let t = tl.as_ref().unwrap();
+            assert!(
+                t.streamed_text.trim().is_empty(),
+                "the answer is in the parts, not in streamed text — that is the whole trap"
+            );
+        }
+
+        // Now the turn is cut short (a user message waiting, the deadline, a tool call).
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            agent
+                .test_cut_relay_turn_short(&host, t, "user waiting")
+                .await;
+            assert!(t.stopped);
+        }
+
+        let said: Vec<String> = reply_rows(&host, "m-busy")
+            .iter()
+            .map(|r| r.text().trim().to_owned())
+            .filter(|t| !t.is_empty())
+            .collect();
+        assert_eq!(
+            said,
+            vec![
+                "The migration finished: 45 rows moved.".to_owned(),
+                "Want me to run the row-count check next?".to_owned()
+            ],
+            "the answer stands alone: no failure line under it"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// #1355: an act turn that closes with a second `route reply {reply: …}` must show that text
     /// in its result row (the streamed path only follows the first route of a turn). #1373: a
     /// plain reply turn whose text already streamed must not get it a second time — the hook may

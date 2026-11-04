@@ -1288,8 +1288,9 @@ pub struct TurnState {
     /// Fresh-session retry after a refusal already happened this turn (at most one).
     pub session_rotated: bool,
     /// Relay turns (a subagent's result, an approval outcome) only speak: `route` must be
-    /// `reply`, a tool call ends the turn, and a waiting user message preempts it. Doug,
-    /// 2026-10-22: a result turn routed `act`, ran tools for 13 minutes and held every chat.
+    /// `reply`, a tool call outside [`relay_turn_tool_allowed`] ends the turn, and a waiting
+    /// user message preempts it. Doug, 2026-10-22: a result turn routed `act`, ran tools for
+    /// 13 minutes and held every chat.
     pub reply_only: bool,
     /// A relay turn already let one tool call through so the model's first `route` kept its
     /// retry; a second such call ends the turn.
@@ -5417,8 +5418,8 @@ impl Agent {
         );
     }
 
-    /// End a relay turn now: the plain fallback line when the model wrote nothing yet, the turn
-    /// marked stopped and preempted (no hand-off follows), the pi turn aborted.
+    /// End a relay turn now: the plain fallback line when nothing has reached the user yet, the
+    /// turn marked stopped and preempted (no hand-off follows), the pi turn aborted.
     async fn cut_relay_turn_short(&self, host: &SharedHost, pi: &Arc<RpcChild>, reason: &str) {
         {
             let mut tl = self.turn.lock().await;
@@ -5450,7 +5451,11 @@ impl Agent {
         t.stopped = true;
         t.preempted = true;
         t.escalate = false;
-        if t.streamed_text.trim().is_empty() && !t.relay_fallback.is_empty() {
+        // Only when nothing at all reached the user. `streamed_text` alone misses the two ways
+        // a relay turn normally answers — `send_message` bubbles and a posted file — so a turn
+        // that had already delivered the answer still announced a failure (Jacob, Test5,
+        // 2026-11-04, chat 01M6M0G9257SCE4RRQDW2GXFS9).
+        if !Self::posted_result(t) && !t.relay_fallback.is_empty() {
             let line = t.relay_fallback.clone();
             self.write_notice(host, t, &line).await;
         }
@@ -9833,6 +9838,16 @@ impl Agent {
         self.flush_staged_text(host, t).await;
         self.write_route_reply_if_missing(host, t).await;
         self.post_fallback_if_silent(host, t).await;
+    }
+
+    /// Test seam: end a relay turn the way a waiting user, the deadline or a tool call does.
+    pub(crate) async fn test_cut_relay_turn_short(
+        &self,
+        host: &SharedHost,
+        t: &mut TurnState,
+        reason: &str,
+    ) {
+        self.cut_relay_turn_short_locked(host, t, reason).await;
     }
 
     /// Test seam: fold one pi event into the held turn.
