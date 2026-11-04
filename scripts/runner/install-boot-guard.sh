@@ -91,7 +91,16 @@ if [ "$check_only" -eq 0 ]; then
   [ -f "$guard" ] || { echo "no guard at $guard" >&2; exit 2; }
   install_shim "$LOCALBIN" xcrun  || note "could not install $LOCALBIN/xcrun"
   install_shim "$AXBIN"    xcrun  || note "could not install $AXBIN/xcrun"
-  [ -f "$slot_sh" ] && install -m 755 "$slot_sh" "$LOCALBIN/arbos-heavy-slot.sh" 2>/dev/null
+  # The slot script and this checker go in together and must stay siblings: `acquire` refuses to hand out a
+  # slot unless it can run `install-boot-guard.sh --check` from its own directory. Installing them as a pair
+  # is what makes that fail-closed rule safe — a copy of the slot script that has the check can only have
+  # arrived here through this installer, which has just closed the guard.
+  # Repairing has to be possible from the installed copy too, so the guard source goes with them.
+  [ -f "$slot_sh" ] && [ "$here" != "$LOCALBIN" ] && install -m 755 "$slot_sh" "$LOCALBIN/arbos-heavy-slot.sh" 2>/dev/null
+  if [ "$here" != "$LOCALBIN" ]; then
+    install -m 755 "${BASH_SOURCE[0]}" "$LOCALBIN/install-boot-guard.sh" 2>/dev/null
+    install -m 755 "$guard" "$LOCALBIN/xcrun-slot-guard.sh" 2>/dev/null
+  fi
   install_simctl_guard || note "could not close the developer-directory route"
   note ""
 fi

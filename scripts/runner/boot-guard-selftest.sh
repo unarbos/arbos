@@ -340,6 +340,64 @@ inst_case "installing twice does not bury the real simctl"                   i_i
 inst_case "an Xcode update that restores its own simctl is reported open"    i_xcode_update_is_visible
 inst_case "re-installing repairs it and keeps Xcode's newer binary"          i_reinstall_repairs
 
+# ── the slot refuses to exist on an unguarded box ───────────────────────────────────────────────
+# A slot is a promise that heavy work is capped, and it is worth nothing while a lane that never asks
+# for one can boot anyway. So `acquire` runs --check and fails closed. That is what turns an Xcode
+# update — which silently restores Xcode's simctl and reopens the route — into a refusal at the one
+# moment somebody is looking, instead of a regression nobody sees until the box is at load 548.
+echo
+echo "── acquiring a slot on an unguarded box ───────────────────────────────────────────────────"
+aslots="$work/acquire-slots"
+SLOT_OVERRIDE=""   # set by mutate_slot so the cases rebuild the kit around a broken slot script
+make_slot_install() {  # make_slot_install <dir> — the trio the installer deploys as siblings
+  local d=$1; rm -rf "$d"; mkdir -p "$d"
+  cp "${SLOT_OVERRIDE:-$slot_sh}" "$d/arbos-heavy-slot.sh"
+  cp "$here/install-boot-guard.sh" "$d/install-boot-guard.sh"
+  cp "$guard" "$d/xcrun-slot-guard.sh"
+  chmod 755 "$d"/*.sh
+}
+acquire_env=(ARBOS_DEVELOPER_DIR="$dev" ARBOS_LOCALBIN="$work/acq-localbin"
+             ARBOS_AXBIN="$work/acq-axbin" ARBOS_HEAVY_SLOTS_DIR="$aslots")
+try_acquire() {  # try_acquire <dir>
+  rm -rf "$aslots"; mkdir -p "$aslots"
+  OUT=$("${clean_env[@]}" "${acquire_env[@]}" ${ENVV[@]+"${ENVV[@]}"} \
+        "$1/arbos-heavy-slot.sh" acquire test-rig --pid $$ --no-wait 2>&1); RC=$?
+  ENVV=()
+}
+sdir="$work/slotkit"
+
+a_refused_while_route_open() {
+  make_slot_install "$sdir"; reset_devdir; try_acquire "$sdir"
+  [ "$RC" = 75 ] && [[ "$OUT" == *"a slot caps nothing (AF-853)"* ]] && [[ "$OUT" != *.slot* ]]
+}
+a_refusal_ignores_ci() {   # the lesson from this suite's own blindness, as a case
+  make_slot_install "$sdir"; reset_devdir; ENVV=("GITHUB_ACTIONS=true"); try_acquire "$sdir"
+  [ "$RC" = 75 ] && [[ "$OUT" == *"a slot caps nothing (AF-853)"* ]]
+}
+a_granted_once_guarded() {
+  make_slot_install "$sdir"; reset_devdir
+  "${clean_env[@]}" "${acquire_env[@]}" "$sdir/install-boot-guard.sh" >/dev/null 2>&1
+  try_acquire "$sdir"
+  [ "$RC" = 0 ] && [[ "$OUT" == *.slot* ]]
+}
+a_missing_checker_refuses() {   # fail closed: unverified is not the same as fine
+  make_slot_install "$sdir"; reset_devdir; rm -f "$sdir/install-boot-guard.sh"; try_acquire "$sdir"
+  [ "$RC" = 75 ] && [[ "$OUT" == *"cannot confirm the simulator boot guard is installed"* ]]
+}
+a_bind_is_not_gated() {   # the boot guard calls bind; gating it would be a circle
+  make_slot_install "$sdir"; reset_devdir
+  rm -rf "$aslots"; mkdir -p "$aslots/x.slot"
+  "${clean_env[@]}" "${acquire_env[@]}" "$sdir/arbos-heavy-slot.sh" bind "$aslots/x.slot" "$UDID" >/dev/null 2>&1
+  RC=$?; OUT=$(cat "$aslots/x.slot/udid" 2>/dev/null || echo "")
+  [ "$OUT" = "$UDID" ]
+}
+
+inst_case "a slot is refused while the developer-directory route is open" a_refused_while_route_open
+inst_case "the refusal does not yield to a CI environment"               a_refusal_ignores_ci
+inst_case "a slot is granted once the guard is installed"                a_granted_once_guarded
+inst_case "a checker that is missing refuses rather than assuming"       a_missing_checker_refuses
+inst_case "bind is not gated, so the guard can still record a udid"      a_bind_is_not_gated
+
 #  …and the installer gets the same treatment, because it is the half of the fix that does the
 #  closing. A guard that refuses correctly and is never put on the route protects nothing.
 echo
@@ -377,6 +435,38 @@ mutate_installer "--check calls the developer-directory route closed whatever is
 mutate_installer "the installer moves the guard on top of the real binary on a second run" \
   's/^  if is_guard "\$target"; then/  if false; then/' \
   i_install_is_idempotent "installing twice does not bury the real simctl"
+
+mutate_slot() {  # mutate_slot <description> <sed-program> <case-fn> <case-name>
+  local desc=$1 prog=$2 fn=$3 cname=$4
+  local m="$work/mutant-slot.$mutations.sh"
+  mutations=$((mutations + 1))
+  sed "$prog" "$slot_sh" > "$m"; chmod 755 "$m"
+  if cmp -s "$m" "$slot_sh"; then
+    survivors=$((survivors + 1))
+    printf 'NO-OP %s — the mutation changed nothing; the sed program no longer matches\n' "$desc"
+    return
+  fi
+  SLOT_OVERRIDE="$m"
+  if "$fn"; then
+    survivors=$((survivors + 1))
+    printf 'SURVIVED  %s\n          "%s" still passed. Mutant: exit %s\n' "$desc" "$cname" "$RC"
+  else
+    printf 'caught    %s\n          by "%s" (mutant: exit %s)\n' "$desc" "$cname" "$RC"
+  fi
+  SLOT_OVERRIDE=""
+}
+
+mutate_slot "acquire never asks whether the guard is closed" \
+  '/^  if ! why=\$(boot_guard_closed); then$/,/^  fi$/d' \
+  a_refused_while_route_open "a slot is refused while the developer-directory route is open"
+
+mutate_slot "a missing checker is treated as nothing to worry about" \
+  's|^    return 1$|    return 0|' \
+  a_missing_checker_refuses "a checker that is missing refuses rather than assuming"
+
+mutate_slot "the guard check takes GITHUB_ACTIONS as proof, like the guard itself does" \
+  's|^boot_guard_closed() {.*|boot_guard_closed() { [ -n "${GITHUB_ACTIONS:-}" ] \&\& return 0|' \
+  a_refusal_ignores_ci "the refusal does not yield to a CI environment"
 
 echo
 echo "$mutations mutations run, $survivors survived."
