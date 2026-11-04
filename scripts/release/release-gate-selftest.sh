@@ -7,6 +7,12 @@
 # A guard nobody has watched refuse is not a tested guard. A run of the gate on a clean main
 # proves only that it says yes; these cases make it say no, and say it for the right artifact.
 #
+# Every case here asserts the gate's own words, not only its exit code — see case_is. An exit code
+# is one of three values shared by twenty-three cases, so on its own it cannot tell a case from the
+# case beside it, and a case that cannot do that would pass for a reason its name does not claim.
+# scripts/release/release-gate-selftest-audit.sh checks that property mechanically: each case's
+# phrases must match that case's output and no other case's.
+#
 # Every commit below is on main's first-parent line and permanent. A merge commit paired with its
 # first parent is the same difference as the pull request that produced it, which is what the gate
 # reads. Both "already released" values are passed in, so no case reaches the network and no case
@@ -31,41 +37,79 @@ QUIET=(--main 41847d26b --mac-released-sha 0c7489b91 --ios-released-sha 41847d26
 
 # case <name> <expected exit> <gate arguments...>
 #
-# Set WHY to a phrase the gate's own message must contain. An exit code alone says the case
-# refused, not that it refused for the reason the case is named after, and a refusal that arrives
-# by accident is a case that would still pass with the guard it tests removed.
+# Set WHY to the phrases the gate's own message must contain, one per line, all required. An exit
+# code alone says the case refused, not that it refused for the reason the case is named after,
+# and a refusal that arrives by accident is a case that would still pass with the guard it tests
+# removed.
+#
+# One phrase is often not enough either. Four of the cases below come in two pairs that block on
+# the same outstanding artifact and print an identical `::error` line; what separates them is what
+# the pull request itself publishes, which is a different line of the same output. A phrase that
+# also matches a neighbour cannot tell its case from that neighbour, so each of those four names
+# both facts.
+has_all() {  # <output> <phrases, one per line>
+  local out=$1 p
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    [[ "$out" == *"$p"* ]] || return 1
+  done <<< "$2"
+}
+
+# release-gate-selftest-audit.sh sets this to a file and reads back what every case actually
+# produced, so it can check that no case's phrases match another case's output. It runs the real
+# file rather than a copy: a copy of a self-test is one more thing that can drift away from the
+# thing it is supposed to describe.
+record() {  # <name> <phrases> <output>
+  [ -n "${RELEASE_GATE_SELFTEST_RECORD:-}" ] || return 0
+  printf '<<<CASE %s\n<<<WHY\n%s\n<<<OUT\n%s\n<<<END\n' "$1" "$2" "$3" >> "$RELEASE_GATE_SELFTEST_RECORD"
+}
+
 case_is() {
   local name=$1 want=$2 got=0 out why=${WHY:-}
   shift 2
   out="$(python3 "$gate" "$@" 2>&1)" || got=$?
-  if [[ "$got" == "$want" && ( -z "$why" || "$out" == *"$why"* ) ]]; then
+  record "$name" "$why" "$out"
+  if [[ "$got" == "$want" ]] && has_all "$out" "$why"; then
     printf 'ok    %s (exit %s)\n' "$name" "$got"
   else
     failures=$((failures + 1))
     printf 'FAIL  %s: wanted exit %s%s, got %s\n%s\n\n' \
-      "$name" "$want" "${why:+ saying \"$why\"}" "$got" "$out"
+      "$name" "$want" "${why:+ saying $(tr '\n' '/' <<< "$why")}" "$got" "$out"
   fi
 }
 
 # ── main owes a Mac release ─────────────────────────────────────────────────────────────────────
 # main is 83c2b5ebf, the last stable release is v0.6.379, and #2645's Mac fix sits between them.
 
-case_is "a Mac fix is refused while main owes a Mac release" 1 \
+WHY="main owes a stable Mac release; 83c2b5ebf
+publishes a TestFlight build: no" \
+  case_is "a Mac fix is refused while main owes a Mac release" 1 \
   --main 83c2b5ebf --mac-released-sha 2402ff996 --ios-released-sha 83c2b5ebf \
   --pr-base 49608e2e8 --pr-head 83c2b5ebf
 
-case_is "a relay-only fix merges while main owes a Mac release" 0 \
+# A pass needs its phrases as much as a refusal does. Exit 0 says the gate let this through, not
+# that it let it through for the reason the case is named after: a gate that had decided this pull
+# request publishes nothing at all would pass every case below while testing none of them.
+WHY="publishes a stable Mac release: no — no Mac path changed
+publishes a TestFlight build: no" \
+  case_is "a relay-only fix merges while main owes a Mac release" 0 \
   --main 83c2b5ebf --mac-released-sha 2402ff996 --ios-released-sha 83c2b5ebf \
   --pr-base 0c9e04ede --pr-head f13ab025a
 
 # The trap this gate exists to avoid. v0.6.380's bump commit touches Cargo.lock, which IS a Mac
 # path, so a plain path diff calls it a Mac change and this case would wrongly refuse. mac-change.sh
-# reads the lockfile and correctly reports no Mac change, so the gate lets it through.
-case_is "a release version bump is not a Mac change" 0 \
+# reads the lockfile and correctly reports no Mac change, so the gate lets it through. The phrase is
+# that reason, because a pass arriving any other way is not this case.
+WHY="publishes a stable Mac release: no — Cargo.lock moved only our own crates' version numbers" \
+  case_is "a release version bump is not a Mac change" 0 \
   --main 83c2b5ebf --mac-released-sha 2402ff996 --ios-released-sha 83c2b5ebf \
   --pr-base 83c2b5ebf --pr-head 6f70123be
 
-case_is "a Mac fix merges once the Mac release has published" 0 \
+# This and "a Mac fix merges while main owes only a TestFlight build" run the same pull request to
+# the same pass. The published Mac build is what differs, so each names it.
+WHY="publishes a stable Mac release: YES — Mac sources changed: crates/arbos-mac
+last published: 83c2b5eb" \
+  case_is "a Mac fix merges once the Mac release has published" 0 \
   --main e445f70ad --mac-released-sha 83c2b5ebf --ios-released-sha e445f70ad \
   --pr-base 49608e2e8 --pr-head 83c2b5ebf
 
@@ -73,15 +117,23 @@ case_is "a Mac fix merges once the Mac release has published" 0 \
 # main is 41847d26b and the last build testers saw was made from 0c7489b91, with #2533's iPhone
 # fix between them. The Mac side is clear across that same span, so only the phone blocks.
 
-case_is "an iPhone fix is refused while main owes a TestFlight build" 1 \
+WHY="main owes a TestFlight build; 41847d26b
+publishes a stable Mac release: no" \
+  case_is "an iPhone fix is refused while main owes a TestFlight build" 1 \
   --main 41847d26b --mac-released-sha 0c7489b91 --ios-released-sha 0c7489b91 \
   --pr-base 0c7489b91 --pr-head 41847d26b
 
-case_is "an iPhone fix merges once the TestFlight build has published" 0 \
+WHY="publishes a stable Mac release: no
+publishes a TestFlight build: YES — matches ios.yml's trigger paths: apps/ios/
+last published: 41847d26" \
+  case_is "an iPhone fix merges once the TestFlight build has published" 0 \
   --main 41847d26b --mac-released-sha 0c7489b91 --ios-released-sha 41847d26b \
   --pr-base 0c7489b91 --pr-head 41847d26b
 
-case_is "a Mac fix merges while main owes only a TestFlight build" 0 \
+WHY="publishes a stable Mac release: YES — Mac sources changed: crates/arbos-mac
+last published: 0c7489b9
+publishes a TestFlight build: no" \
+  case_is "a Mac fix merges while main owes only a TestFlight build" 0 \
   --main 41847d26b --mac-released-sha 0c7489b91 --ios-released-sha 0c7489b91 \
   --pr-base 49608e2e8 --pr-head 83c2b5ebf
 
@@ -89,32 +141,52 @@ case_is "a Mac fix merges while main owes only a TestFlight build" 0 \
 # crates/arbos-core is in MAC_PATHS and in ios.yml's filter, so #2604 publishes both artifacts and
 # waits for either one that is outstanding.
 
-case_is "a dual-artifact fix is refused for the phone alone" 1 \
+# Each of these blocks on the same artifact as one of the single-path cases above, and prints the
+# same `::error` line for it. "Dual" is the part the error line does not carry: it lives in the
+# other publish line, which says YES here and `no` there. Both phrases are needed.
+WHY="main owes a TestFlight build; 41847d26b
+publishes a stable Mac release: YES" \
+  case_is "a dual-artifact fix is refused for the phone alone" 1 \
   --main 41847d26b --mac-released-sha 0c7489b91 --ios-released-sha 0c7489b91 \
   --pr-base 9b62b7fcb --pr-head 15d11e89a
 
-case_is "a dual-artifact fix is refused for the Mac alone" 1 \
+WHY="main owes a stable Mac release; 83c2b5ebf
+publishes a TestFlight build: YES" \
+  case_is "a dual-artifact fix is refused for the Mac alone" 1 \
   --main 83c2b5ebf --mac-released-sha 2402ff996 --ios-released-sha 83c2b5ebf \
   --pr-base 9b62b7fcb --pr-head 15d11e89a
 
-case_is "a dual-artifact fix merges when both artifacts are out" 0 \
+# The same pull request as the two refusals above, so the two publish lines are word for word
+# theirs. What makes this case the one it is named after is both artifacts reading clear, so the
+# phrases have to reach the lines that say so.
+WHY="publishes a stable Mac release: YES — Mac sources changed: crates/arbos-core
+clear — no Mac path changed
+publishes a TestFlight build: YES — matches ios.yml's trigger paths: crates/arbos-core
+clear — nothing on ios.yml's paths has changed since that build" \
+  case_is "a dual-artifact fix merges when both artifacts are out" 0 \
   --main 41847d26b --mac-released-sha 0c7489b91 --ios-released-sha 41847d26b \
   --pr-base 9b62b7fcb --pr-head 15d11e89a
 
 # ── a question the gate cannot answer is not an answer ──────────────────────────────────────────
 # Exit 2, never 0: "I could not tell" must never read as "nothing is wrong".
 
-case_is "an unreadable published build fails closed, not open" 2 \
+# The gate's message names the sha it could not resolve but not which input carried it, so these
+# two cases use different unresolvable shas. With one shared placeholder their messages would be
+# identical, and each case would pass for the other's reason.
+WHY="\`git rev-parse --verify 0000000000000000000000000000000000000000^{commit}\` failed" \
+  case_is "an unreadable published build fails closed, not open" 2 \
   --main 41847d26b --mac-released-sha 0c7489b91 \
   --ios-released-sha 0000000000000000000000000000000000000000 \
   --pr-base 0c7489b91 --pr-head 41847d26b
 
-case_is "an unreadable pull request head fails closed, not open" 2 \
+WHY="\`git rev-parse --verify ffffffffffffffffffffffffffffffffffffffff^{commit}\` failed" \
+  case_is "an unreadable pull request head fails closed, not open" 2 \
   --main 41847d26b --mac-released-sha 0c7489b91 --ios-released-sha 41847d26b \
-  --pr-base 0c7489b91 --pr-head 0000000000000000000000000000000000000000
+  --pr-base 0c7489b91 --pr-head ffffffffffffffffffffffffffffffffffffffff
 
 # A build whose commit is on no branch this checkout has says the two disagree about what main is.
-case_is "a published build that is not on main fails closed, not open" 2 \
+WHY="made from e445f70a, which is not an ancestor of 41847d26" \
+  case_is "a published build that is not on main fails closed, not open" 2 \
   --main 41847d26b --mac-released-sha 0c7489b91 --ios-released-sha e445f70ad \
   --pr-base 0c7489b91 --pr-head 41847d26b
 
@@ -223,22 +295,36 @@ gate="$here/release-gate.py"
 # `workflow_dispatch` supplied neither value, and the fallback that filled them in is what turned
 # a run that judged nothing into a success on a real head.
 
+# screen_is <name> <expected exit> <required phrases, one per line> <env assignments...>
+#
+# Same contract as WHY on case_is, except the phrases are not optional. All three refusals exit 2
+# and print the same sentence about the same two variables; the only thing separating them is the
+# values quoted back, so an exit code on its own would let any of them stand in for any other.
 screen_is() {
-  local name=$1 want=$2 got=0
-  shift 2
-  env "$@" "$here/gate-can-decide.sh" >/dev/null 2>&1 || got=$?
-  if [[ "$got" == "$want" ]]; then
+  local name=$1 want=$2 why=$3 got=0 out
+  shift 3
+  out="$(env "$@" "$here/gate-can-decide.sh" 2>&1)" || got=$?
+  record "$name" "$why" "$out"
+  if [[ "$got" == "$want" ]] && has_all "$out" "$why"; then
     printf 'ok    %s (exit %s)\n' "$name" "$got"
   else
     failures=$((failures + 1))
-    printf 'FAIL  %s: wanted exit %s, got %s\n' "$name" "$want" "$got"
+    printf 'FAIL  %s: wanted exit %s saying %s, got %s\n%s\n\n' \
+      "$name" "$want" "$(tr '\n' '/' <<< "$why")" "$got" "$out"
   fi
 }
 
-screen_is "an event carrying no pull request cannot decide" 2 GATE_BASE_REF= GATE_HEAD_SHA=
-screen_is "a base ref with no head sha cannot decide" 2 GATE_BASE_REF=main GATE_HEAD_SHA=
-screen_is "a head sha with no base ref cannot decide" 2 GATE_BASE_REF= GATE_HEAD_SHA=41847d26b
-screen_is "a pull request can decide" 0 GATE_BASE_REF=main GATE_HEAD_SHA=41847d26b
+screen_is "an event carrying no pull request cannot decide" 2 \
+  "base ref is '<empty>' and head sha is '<empty>'" GATE_BASE_REF= GATE_HEAD_SHA=
+screen_is "a base ref with no head sha cannot decide" 2 \
+  "base ref is 'main' and head sha is '<empty>'" GATE_BASE_REF=main GATE_HEAD_SHA=
+screen_is "a head sha with no base ref cannot decide" 2 \
+  "base ref is '<empty>' and head sha is '41847d26b'" GATE_BASE_REF= GATE_HEAD_SHA=41847d26b
+# The pass case needs both lines. A screen that exits 0 having printed one of them, or neither,
+# hands the gate step an empty BASE_REF or HEAD_SHA, which is the hole this whole change closes.
+screen_is "a pull request can decide" 0 \
+  "base_ref=main
+head_sha=41847d26b" GATE_BASE_REF=main GATE_HEAD_SHA=41847d26b
 
 if (( failures > 0 )); then
   echo

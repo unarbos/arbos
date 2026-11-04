@@ -170,3 +170,7 @@ jobs:
           python-version: "3.12"
       - run: pip install --quiet 'pyyaml==6.0.2'
       - run: scripts/release/release-gate-selftest.sh
+      # The cases above all pass on an exit code. This asks whether any of them could have passed
+      # on the case beside it, which an exit code cannot answer and a green self-test does not
+      # rule out.
+      - run: scripts/release/release-gate-selftest-audit.sh
