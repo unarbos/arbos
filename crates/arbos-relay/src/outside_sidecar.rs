@@ -336,6 +336,18 @@ mod tests {
         // genuinely contains, so three clean answers mean the needles were looked for.
         assert!(ACP_INSTALL_SH.contains("--dry-run"));
 
+        // `--ref` exists so a change can be tried before it merges, which is the only way a
+        // real Claude Code can review this branch's bridge rather than the default branch's.
+        // It has to force the build: a stale binary on the machine would otherwise answer for
+        // the branch under test and the run would prove nothing about it.
+        assert!(ACP_INSTALL_SH.contains("--branch \"$GIT_REF\""));
+        assert!(
+            ACP_INSTALL_SH.contains("--force --git \"$REPO\" --branch"),
+            "--ref must rebuild rather than accept whatever is already installed"
+        );
+        // A dry run that builds first is not a dry run.
+        assert!(ACP_INSTALL_SH.contains("Would build arbos-acp from"));
+
         // The two things the old four-step setup made people do, and this does not.
         assert!(!ACP_INSTALL_SH.contains("npm install -g"));
         assert!(

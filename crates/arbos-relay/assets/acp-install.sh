@@ -10,6 +10,8 @@
 # Options (all optional):
 #   --cwd DIR     the project the agent works in (default: the current directory)
 #   --relay URL   relay to talk to (default https://relay.arbos.life)
+#   --ref BRANCH  build the bridge from this git branch instead of the default one, ignoring
+#                 any arbos-acp already on this machine. For trying a change before it merges.
 #   --key-stdin   read the key from stdin instead of the terminal (for scripts)
 #   --dry-run     print what would run, and exit without starting anything
 #   --            everything after this goes to arbos-acp, e.g.  -- --permissions reject
@@ -18,6 +20,7 @@ set -eu
 RELAY="https://relay.arbos.life"
 REPO="https://github.com/unarbos/arbos"
 CWD="$PWD"
+GIT_REF=""
 KEY_STDIN=0
 DRY_RUN=0
 
@@ -27,6 +30,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --cwd) CWD="$2"; shift 2 ;;
     --relay) RELAY="$2"; shift 2 ;;
+    --ref) GIT_REF="$2"; shift 2 ;;
     --key-stdin) KEY_STDIN=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --) shift; break ;;
@@ -62,29 +66,46 @@ BIN_DIR="$HOME/.local/bin"
 mkdir -p "$BIN_DIR"
 bin=""
 
-# 1. A binary you already have wins, so running this again does not rebuild anything.
-for cand in "$(command -v arbos-acp 2>/dev/null || true)" "$HOME/.cargo/bin/arbos-acp" "$BIN_DIR/arbos-acp"; do
-  if [ -n "$cand" ] && [ -x "$cand" ]; then bin="$cand"; break; fi
-done
+# --ref means "this exact code", so the two tiers that would hand back some other build are
+# skipped rather than preferred. A binary already on the machine is the wrong one by definition
+# when somebody is asking for a named branch.
+if [ -z "$GIT_REF" ]; then
+  # 1. A binary you already have wins, so running this again does not rebuild anything.
+  for cand in "$(command -v arbos-acp 2>/dev/null || true)" "$HOME/.cargo/bin/arbos-acp" "$BIN_DIR/arbos-acp"; do
+    if [ -n "$cand" ] && [ -x "$cand" ]; then bin="$cand"; break; fi
+  done
 
-# 2. A prebuilt binary from the newest release, when one exists for this machine.
-if [ -z "$bin" ]; then
-  asset="arbos-acp-${target_os}-${target_arch}"
-  if curl -fsSL -o "$BIN_DIR/arbos-acp.tmp" "$REPO/releases/latest/download/$asset" 2>/dev/null; then
-    chmod 755 "$BIN_DIR/arbos-acp.tmp"
-    mv "$BIN_DIR/arbos-acp.tmp" "$BIN_DIR/arbos-acp"
-    bin="$BIN_DIR/arbos-acp"
-    say "Arbos: downloaded $asset to $bin"
-  else
-    rm -f "$BIN_DIR/arbos-acp.tmp"
+  # 2. A prebuilt binary from the newest release, when one exists for this machine.
+  if [ -z "$bin" ]; then
+    asset="arbos-acp-${target_os}-${target_arch}"
+    if curl -fsSL -o "$BIN_DIR/arbos-acp.tmp" "$REPO/releases/latest/download/$asset" 2>/dev/null; then
+      chmod 755 "$BIN_DIR/arbos-acp.tmp"
+      mv "$BIN_DIR/arbos-acp.tmp" "$BIN_DIR/arbos-acp"
+      bin="$BIN_DIR/arbos-acp"
+      say "Arbos: downloaded $asset to $bin"
+    else
+      rm -f "$BIN_DIR/arbos-acp.tmp"
+    fi
   fi
+fi
+
+# A dry run must not build anything, or it is not dry.
+if [ -z "$bin" ] && [ "$DRY_RUN" = 1 ]; then
+  say "Would build arbos-acp from ${GIT_REF:-the default branch} with cargo, then start it with:"
+  say "  --relay $RELAY --cwd $CWD $*"
+  exit 0
 fi
 
 # 3. Build from source. The Rust toolchain is never installed for you.
 if [ -z "$bin" ]; then
   if command -v cargo >/dev/null 2>&1; then
-    say "Arbos: building arbos-acp from source with cargo. A few minutes, once."
-    cargo install --quiet --git "$REPO" arbos-acp
+    if [ -n "$GIT_REF" ]; then
+      say "Arbos: building arbos-acp from branch $GIT_REF with cargo. A few minutes."
+      cargo install --quiet --force --git "$REPO" --branch "$GIT_REF" arbos-acp
+    else
+      say "Arbos: building arbos-acp from source with cargo. A few minutes, once."
+      cargo install --quiet --git "$REPO" arbos-acp
+    fi
     bin="$HOME/.cargo/bin/arbos-acp"
   else
     say "Arbos: there is no prebuilt arbos-acp for $target_os/$target_arch and no cargo here."
@@ -132,6 +153,9 @@ esac
 say ""
 say "Arbos: starting the bridge."
 say "  bridge:   $bin"
+if [ -n "$GIT_REF" ]; then
+  say "  built:    from branch $GIT_REF"
+fi
 say "  relay:    $RELAY"
 say "  project:  $CWD"
 say "  asks you: every tool call raises an approval card in your own chat with the agent,"
