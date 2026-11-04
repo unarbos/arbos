@@ -1226,9 +1226,10 @@ mod tab_tests {
         vcx.run_until_parked();
         tabs.iter()
             .map(|name| {
-                let b = vcx
-                    .debug_bounds(&format!("tab-{name}"))
-                    .unwrap_or_else(|| panic!("tab {name}"));
+                // `debug_bounds` wants a `'static` selector; the leak is one
+                // short string per tab per render, inside a test.
+                let sel: &'static str = Box::leak(format!("tab-{name}").into_boxed_str());
+                let b = vcx.debug_bounds(sel).unwrap_or_else(|| panic!("tab {name}"));
                 (b.origin.x.into(), b.size.width.into())
             })
             .collect()

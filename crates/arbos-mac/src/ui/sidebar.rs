@@ -1363,7 +1363,11 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
                 .mb(px(8.0))
                 .p(px(12.0))
                 .rounded(px(14.0))
-                .bg(theme.bubble_assistant)
+                // The sidebar's raised grey, not the assistant bubble's. Same
+                // value today; the card borrowed the bubble token and would
+                // have dropped to +2/255 over the sidebar when the bubble
+                // moves ([feedback grok-tab-bold-2026-11-03]).
+                .bg(theme.sidebar_raised())
                 .child(
                     div()
                         .size(px(32.0))

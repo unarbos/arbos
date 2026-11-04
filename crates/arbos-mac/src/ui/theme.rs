@@ -1190,27 +1190,35 @@ impl Theme {
         (self.is_frost() && !self.is_light()).then(|| self.popup())
     }
 
-    /// The sidebar filter's selected capsule ("All" · Agents · People ·
-    /// Servers): grey 35 on dark Matte, 237 on light; on Glass the
-    /// round-button family's wash ([`Self::control_fill`]), so the one opaque
-    /// chip left on the frosted sidebar goes glass with the discs beside it
-    /// (Jacob, 2026-10-28 18:17).
+    /// A raised patch on the sidebar: the selected filter capsule and the D89
+    /// waitlist card. Grey 35 on dark, 237 on light — nine shades off the
+    /// sidebar's own 26 / 246, in whichever direction reads.
     ///
-    /// The values are pinned here, not read from `bubble_assistant`. The
-    /// capsule only ever borrowed that token because the numbers matched; it
-    /// is not an assistant bubble. Moving the assistant bubble to 28 would
-    /// drag this capsule to one shade off the sidebar's own 26 — a 1.02:1
-    /// step, which is no capsule at all — and with the tab row no longer
-    /// going bold ([feedback grok-tab-bold-2026-11-03]) a filter would have
-    /// had nothing left to show it was selected.
-    pub fn filter_on_fill(&self) -> Hsla {
-        if self.is_frost() {
-            return self.control_fill();
-        }
+    /// Pinned here, not read from `bubble_assistant`. Both of these only ever
+    /// borrowed that token because the numbers happened to match; neither is
+    /// an assistant bubble. Moving the bubble to 28 would drag the capsule to
+    /// one shade off the sidebar (a 1.02:1 step, no capsule at all) and the
+    /// card to two — and with the tab rows no longer going bold ([feedback
+    /// grok-tab-bold-2026-11-03]) a selected filter would have had nothing
+    /// left to show for it. `pane_card` is not the answer either: it is 242
+    /// on light, four shades off the light sidebar.
+    pub fn sidebar_raised(&self) -> Hsla {
         match self.appearance {
             Appearance::Dark => hex(0x232323),
             Appearance::Light => hex(0xededed),
         }
+    }
+
+    /// The sidebar filter's selected capsule ("All" · Agents · People ·
+    /// Servers): [`Self::sidebar_raised`] on Matte; on Glass the round-button
+    /// family's wash ([`Self::control_fill`]), so the one opaque chip left on
+    /// the frosted sidebar goes glass with the discs beside it (Jacob,
+    /// 2026-10-28 18:17).
+    pub fn filter_on_fill(&self) -> Hsla {
+        if self.is_frost() {
+            return self.control_fill();
+        }
+        self.sidebar_raised()
     }
 
     /// A text field inside the pane (the description editor, a secret's
@@ -1778,10 +1786,12 @@ mod glass_contrast_tests {
     /// selected — the rows no longer go bold — so a capsule that sinks into
     /// its own background deletes the selected state outright.
     ///
-    /// This is the test that catches a bubble token moving under a capsule
-    /// that merely borrowed its value: the pane tab capsule and the sidebar
-    /// filter capsule own their numbers now, and this says so in ratios
-    /// rather than in a comment. The tightest is the pane tab capsule,
+    /// This is the test that catches a bubble token moving under a patch of
+    /// colour that merely borrowed its value: the pane tab capsule and the
+    /// sidebar filter capsule own their numbers now, and this says so in
+    /// ratios rather than in a comment. The D89 waitlist card rides along —
+    /// it is a card, not a selected state, but it sits on the same sidebar
+    /// and failed the same way. The tightest is the pane tab capsule,
     /// 7/255 over the page on dark.
     #[test]
     fn every_selected_capsule_still_steps_over_its_own_surface() {
@@ -1796,6 +1806,11 @@ mod glass_contrast_tests {
                     theme.sidebar,
                 ),
                 ("settings segment", theme.segment_on_fill(), theme.pane_card),
+                (
+                    "sidebar raised patch (filter capsule, D89 card)",
+                    theme.sidebar_raised(),
+                    theme.sidebar,
+                ),
             ] {
                 let step = (fill.to_rgb().r - under.to_rgb().r).abs() * 255.0;
                 assert!(
@@ -1815,11 +1830,12 @@ mod glass_contrast_tests {
             assert_eq!(theme.pane_card_fill(), theme.pane_card);
             assert_eq!(theme.pane_card_rim(), gpui::transparent_black());
             assert_eq!(theme.control_fill(), theme.surface_2);
-            // Pinned, not `bubble_assistant`: see `filter_on_fill`. Today the
-            // two still match; the assertion is that moving the bubble does
-            // not move the capsule.
+            // Pinned, not `bubble_assistant`: see `sidebar_raised`. Today the
+            // two still match; the assertion is that moving the bubble moves
+            // neither the capsule nor the D89 card.
+            assert_eq!(theme.filter_on_fill(), theme.sidebar_raised());
             assert_eq!(
-                theme.filter_on_fill(),
+                theme.sidebar_raised(),
                 match appearance {
                     Appearance::Dark => hex(0x232323),
                     Appearance::Light => hex(0xededed),
