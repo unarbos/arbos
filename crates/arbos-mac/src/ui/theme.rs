@@ -1259,10 +1259,16 @@ impl Theme {
     }
 
     /// The selected segment of an On/Off or Dark/Light choice
-    /// ([`glass::segment`]): its own grey on Matte; on Glass white 16 % (dark) /
+    /// ([`glass::segment`]): its own grey on Matte; on Glass white 14 % (dark) /
     /// black 72 % (light) — its text stays `bubble_text` (white) in both.
-    /// 16 %, not more: over a white desktop the dark card already sits near
+    ///
+    /// 14 %, not more: over a white desktop the dark card already sits near
     /// `#4d4d4d`, and the white label must keep 4.5:1 on the segment there.
+    /// This read 16 % while the guard composited the chip straight onto the
+    /// card — but the track is between them, and on Glass that track is another
+    /// white wash, so the chip on screen was lighter than the chip measured.
+    /// Stacked as painted it came to `#797979` and 4.32:1, under the floor this
+    /// comment asks for. 14 % gives 4.56:1 in that worst case.
     ///
     /// Matte dark is `#5C5C5C`, the grey the user bubble used to be. The chip is
     /// read against the segment track it sits in ([`Self::segment_track_fill`]),
@@ -1281,7 +1287,7 @@ impl Theme {
         if self.is_light() {
             hex_a(0x000000, 0.72)
         } else {
-            hex_a(0xffffff, 0.16)
+            hex_a(0xffffff, 0.14)
         }
     }
 
@@ -1755,7 +1761,13 @@ mod glass_contrast_tests {
                                 under.to_rgb()
                             );
                         }
-                        let segment = composite(theme.segment_on_fill(), card);
+                        // The chip is not on the card: the track is between
+                        // them, and on Glass that track is another white wash,
+                        // so a chip measured straight onto the card comes out
+                        // darker than the one on screen — and white-on-darker
+                        // flatters the ratio. Stack it as it is painted.
+                        let seg_track = composite(theme.segment_track_fill(), card);
+                        let segment = composite(theme.segment_on_fill(), seg_track);
                         let seg_text = text_contrast(theme.bubble_text(), segment);
                         assert!(
                             seg_text >= 4.5,
@@ -1847,17 +1859,24 @@ mod glass_contrast_tests {
                     theme.sidebar,
                 ),
                 // The Settings segment sits in a track, not straight on the
-                // card: `me.rs` `seg_row` wraps the pills in a `field_fill`
-                // capsule with a `field_border` rim. Measured off a shot of
-                // the Appearance page: card 35, rim 36, track 24, pill 92.
-                // Whoever repaints that `seg_row` must repoint this with it —
-                // a surface that no longer paints the track leaves the floor
-                // measuring a pair that is not on screen, and it goes on
-                // passing while it does.
+                // card: `me.rs` `seg_row` wraps the pills in a
+                // `segment_track_fill` capsule with a `field_border` rim.
+                // Measured off a shot of the Appearance page: card 35, rim 36,
+                // track 24, pill 92. Whoever repaints that `seg_row` must
+                // repoint this with it — a surface that no longer paints the
+                // track leaves the floor measuring a pair that is not on
+                // screen, and it goes on passing while it does.
+                //
+                // That happened here. The track read `field_fill` when this was
+                // written, which is `field` on Matte; Grok parity moved `field`
+                // 24 → 31 and repointed the track to its own pinned token in the
+                // same breath. Measuring against `field_fill` would have put
+                // pill 92 on 31 while the screen showed 92 on 24 — 61/255
+                // against a 6/255 floor, green and guarding nothing.
                 (
                     "settings segment",
                     theme.segment_on_fill(),
-                    theme.field_fill(),
+                    theme.segment_track_fill(),
                 ),
                 (
                     "sidebar raised patch (filter capsule, D89 card)",
