@@ -1691,20 +1691,42 @@ impl Agent {
     ) -> Arc<Self> {
         let cfg_for_settings = cfg.clone();
         let llm = Arc::new(Llm::new(&cfg));
-        let memory = Arc::new(Memory::new(cfg.clone(), store.clone(), llm.clone()));
-        let tree = Arc::new(crate::tree::Tree::new(&cfg, store.clone(), llm.clone()));
+        // One handle for the agent's live model slots, shared by every component that makes a
+        // model call: the main session, jobs and subagents, quick replies, memory and the tree.
+        // A model change in the app lands here once and the next call of each of them uses it.
+        let models = crate::settings::LiveModels::new(&cfg);
+        let memory = Arc::new(Memory::new(
+            cfg.clone(),
+            store.clone(),
+            llm.clone(),
+            models.clone(),
+        ));
+        let tree = Arc::new(crate::tree::Tree::new(
+            &cfg,
+            store.clone(),
+            llm.clone(),
+            models.clone(),
+        ));
         let mut adapters: HashMap<Harness, Arc<dyn HarnessAdapter>> = HashMap::new();
         adapters.insert(
             Harness::Prime,
-            Arc::new(PrimeAdapter::new(cfg.clone(), store.clone())),
+            Arc::new(PrimeAdapter::new(
+                cfg.clone(),
+                store.clone(),
+                models.clone(),
+            )),
         );
         adapters.insert(
             Harness::Pi,
-            Arc::new(PiAdapter::new(cfg.clone(), store.clone())),
+            Arc::new(PiAdapter::new(cfg.clone(), store.clone(), models.clone())),
         );
         adapters.insert(
             Harness::ClaudeCode,
-            Arc::new(ClaudeCodeAdapter::new(cfg.clone(), store.clone())),
+            Arc::new(ClaudeCodeAdapter::new(
+                cfg.clone(),
+                store.clone(),
+                models.clone(),
+            )),
         );
         Arc::new(Self {
             cfg,
@@ -1726,7 +1748,7 @@ impl Agent {
             subagent_slots: Arc::new(Semaphore::new(SUBAGENT_MAX_CONCURRENT)),
             box_slots,
             http: reqwest::Client::new(),
-            settings: crate::settings::Settings::new(&cfg_for_settings),
+            settings: crate::settings::Settings::new(&cfg_for_settings, models),
             skills: SkillsIndex::new(),
             approvals: crate::approval::Approvals::default(),
             subagent_msgs: Mutex::new(HashMap::new()),
@@ -1826,6 +1848,12 @@ impl Agent {
     pub(crate) async fn live_models(&self) -> (String, String) {
         let m = self.settings.models.read().await;
         (m.talking.id.clone(), m.subagent.id.clone())
+    }
+
+    /// The model one piece of this agent's work runs on. The one place a model is chosen for
+    /// work the agent does; see [`crate::settings::LiveModels::resolve`].
+    pub(crate) async fn model_for(&self, role: crate::settings::ModelRole<'_>) -> String {
+        self.settings.models.resolve(role).await
     }
 
     pub fn adapter(&self, h: Harness) -> Arc<dyn HarnessAdapter> {
@@ -3735,11 +3763,7 @@ impl Agent {
 
     /// The tree mode for this Project (`decision_model.memory_tree`, else the box env).
     pub fn tree_mode(&self) -> crate::tree::TreeMode {
-        self.settings
-            .models
-            .try_read()
-            .map(|m| m.decision_cfg.memory_tree)
-            .unwrap_or(self.cfg.decision_cfg.memory_tree)
+        self.settings.models.tree_mode()
     }
 
     /// Whether `chat_id` sees only its own subtree (people and group chats, D72/D69).
@@ -7391,17 +7415,20 @@ impl Agent {
     // ---- subagents ----------------------------------------------------------------------------
 
     /// Context pack v0 (design §6.7 sections 1–4, 9, 10).
-    fn build_pack(&self, name: &str, purpose: &str, brief: &str, data_heavy: bool) -> String {
+    async fn build_pack(&self, name: &str, purpose: &str, brief: &str, data_heavy: bool) -> String {
         let mut s = String::new();
         s.push_str(&format!("# Task: {name}\n\n{purpose}\n\n{brief}\n\n"));
         s.push_str(&format!(
             "## Project folder\n\n`{}` (your working directory). Keep every file of this project there; other folders under `/work` belong to other projects.\n\n",
             self.cfg.work_dir.display()
         ));
-        if !self.cfg.instructions.trim().is_empty() {
+        // The instructions the relay has now, not the ones the box booted with: a worker spawned
+        // after the user edited them must work to the new text.
+        let instructions = self.settings.state.read().await.instructions.clone();
+        if !instructions.trim().is_empty() {
             s.push_str(&format!(
                 "## Project instructions\n\n{}\n\n",
-                self.cfg.instructions.trim()
+                instructions.trim()
             ));
         }
         let core = self.memory.core_memory_text();
@@ -7639,17 +7666,17 @@ impl Agent {
                 _ => None,
             })
             .unwrap_or(Harness::Prime);
-        let (_, subagent_model) = self.live_models().await;
-        // Cost knob 1 (Jacob 2026-10-26): research jobs run on the research worker model (Haiku
-        // 5.5 by default); code and every other kind keep the subagent model.
-        let subagent_model = match &job {
-            Some(j) => crate::config::worker_model_for(
-                &j.kind,
-                self.cfg.research_worker_model().as_deref(),
-                &subagent_model,
-            ),
-            None => subagent_model,
-        };
+        // The worker runs on the model this agent was given, whatever the work is (Jacob, 2026-11-04): a job,
+        // a continuation job, a plain subagent. Cost knob 1 (Jacob 2026-10-26) still sends a
+        // `research` job to the research-worker lane, but only for an agent left on the box
+        // default model — a model picked for this agent wins over the lane.
+        let research = self.cfg.research_worker_model();
+        let subagent_model = self
+            .model_for(crate::settings::ModelRole::Worker {
+                job_kind: job.as_ref().map(|j| j.kind.as_str()),
+                research: research.as_deref(),
+            })
+            .await;
         let (subagent_id, harness, is_new) = match existing {
             Some(id) => {
                 let row = match self.store.subagent(&id)? {
@@ -7811,7 +7838,7 @@ impl Agent {
             .insert(subagent_id.clone(), (chat_id.to_owned(), msg_id.clone()));
         let _ = self.store.set_subagent_last_status(&subagent_id, "working");
         let t0 = Instant::now();
-        let mut pack = self.build_pack(&sub_name, purpose, brief, data_heavy);
+        let mut pack = self.build_pack(&sub_name, purpose, brief, data_heavy).await;
         if let Some(memory_block) = self
             .tree_pack(
                 chat_id,
@@ -8492,10 +8519,11 @@ impl Agent {
         let (talking_model, _) = self.live_models().await;
         let system = format!(
             "{} You answer a message the user sent while you were busy with something else; the work for it is done (notes below). Write the answer the user should read, like a colleague in chat: what they asked for, what came out, what is open. First person; short when the answer is short; a plain GitHub-flavoured markdown table (header row, `| --- |` separator row, rows starting and ending with `|`, no code fence) with `[Name](https://…)` links when it compares several items, and then one line offering a concrete next step. Never mention a side task, helper, subagent, tool, command, model or that you were busy. If the notes hold no answer, say plainly what you could not do.{}",
-            if self.cfg.project_name.trim().is_empty() {
-                "You are this user's agent in Arbos.".to_owned()
-            } else {
-                format!("You are {}, this user's agent in Arbos.", self.cfg.project_name.trim())
+            // The agent's live name (#1431), not the one the box booted with: a renamed agent
+            // must introduce itself as its new self in this bubble too.
+            match self.name().trim() {
+                "" => "You are this user's agent in Arbos.".to_owned(),
+                name => format!("You are {name}, this user's agent in Arbos."),
             },
             address.map(|n| format!("\n{}", n.trim())).unwrap_or_default()
         );

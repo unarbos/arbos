@@ -803,12 +803,11 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
                 .map(|c| String::from_utf8_lossy(c).into_owned())
                 .collect();
             let mut parts = Vec::new();
+            // `sub_llm` is the agent reading something for itself, so it reads on the agent's
+            // own model, not on the id the box booted with (Jacob, 2026-11-04).
+            let model = a.model_for(crate::settings::ModelRole::Talking).await;
             for (i, c) in chunks.iter().enumerate().take(32) {
-                match a
-                    .llm
-                    .complete(&a.cfg.talking_model, &instruction, c, 1500)
-                    .await
-                {
+                match a.llm.complete(&model, &instruction, c, 1500).await {
                     Ok((t, _)) => parts.push(format!("[chunk {}]\n{t}", i + 1)),
                     Err(e) => return err_result(e),
                 }
@@ -818,7 +817,7 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
                 if let Ok((t, _)) = a
                     .llm
                     .complete(
-                        &a.cfg.talking_model,
+                        &model,
                         &format!(
                             "Reduce these per-chunk results into one answer for: {instruction}"
                         ),
