@@ -9,7 +9,7 @@
 //! never travel through these tools: anything that needs a secret goes through `egress`.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -36,6 +36,23 @@ const OFFLOAD_CHARS: usize = 4_000;
 const MAX_BODY_BYTES: usize = 3_000_000;
 /// An HTML page that reduces to less text than this is probably a bot wall or a JS-only shell.
 const THIN_PAGE_CHARS: usize = 300;
+/// Retries of a rate-limited search before the HTML fallback. The keyless endpoint rejects a
+/// burst in 150–230 ms, so the old code reached the weaker fallback long before the quota could
+/// refill (Jacob, Test5, 2026-11-04, T5 13:51:04, twice).
+const RATE_LIMIT_RETRIES: u32 = 2;
+/// Wait before retrying a rate-limited search; doubles per retry (so 1 s, then 2 s).
+const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(1);
+/// How long after a rejection every search on this box queues behind one lane. Codemode fans
+/// searches out in parallel and they all spend the same quota, so a burst is what provokes the
+/// limit; during one, they go one at a time.
+const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(60);
+/// The longest one `web_search` may spend waiting to be let through before it gives up and takes
+/// the HTML fallback. The lane needs a ceiling or it becomes the failure it replaced: one
+/// rejection serialises every search for a minute, and a codemode fan-out of ten would have its
+/// last search wait out nine turns of retries and sleeps — minutes — for an answer the first
+/// search already proved was not coming. Every search in a fan-out starts its own budget at the
+/// same moment, so the whole fan-out settles inside one of these rather than N of them.
+const RATE_LIMIT_BUDGET: Duration = Duration::from_secs(8);
 
 pub fn tool_specs() -> Vec<Value> {
     vec![
@@ -58,6 +75,163 @@ fn search_mcp_url() -> String {
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_SEARCH_MCP_URL.to_owned())
+}
+
+/// `mcp_call`'s own wording for a rejected search. That `format!` is a few lines up and is the
+/// only thing that produces this string, so matching it here does not reach across a boundary.
+fn rate_limited(err: &str) -> bool {
+    err.starts_with("search endpoint answered 429")
+}
+
+/// Paces `web_search` against an endpoint that rate-limits.
+///
+/// Two separate jobs, which is why there are two locks. `lane` makes concurrent searches take
+/// turns while the endpoint is rejecting: codemode fans them out in parallel, they all draw on
+/// the same quota, and the burst is what provokes the limit in the first place. `state` holds
+/// how long to wait before the next attempt. Idle, neither costs anything — the lane is only
+/// taken once a rejection has been seen, so searches still fan out when nothing is limiting.
+#[derive(Default)]
+struct Pacer {
+    lane: tokio::sync::Mutex<()>,
+    state: std::sync::Mutex<PacerState>,
+}
+
+#[derive(Default)]
+struct PacerState {
+    /// No search goes out before this.
+    next_allowed: Option<Instant>,
+    /// Searches share the lane until this passes.
+    serialize_until: Option<Instant>,
+}
+
+impl Pacer {
+    /// Is a burst still queueing?
+    fn serializing(&self) -> bool {
+        let s = self.state.lock().expect("pacer");
+        s.serialize_until.is_some_and(|t| Instant::now() < t)
+    }
+
+    /// How long this attempt must hold off, if at all.
+    fn wait(&self) -> Option<Duration> {
+        let s = self.state.lock().expect("pacer");
+        s.next_allowed
+            .and_then(|t| t.checked_duration_since(Instant::now()))
+            .filter(|d| !d.is_zero())
+    }
+
+    /// The endpoint rejected attempt `attempt` (0-based).
+    fn note_limited(&self, attempt: u32) {
+        let now = Instant::now();
+        let mut s = self.state.lock().expect("pacer");
+        s.next_allowed = Some(now + RATE_LIMIT_BACKOFF.saturating_mul(1 << attempt.min(4)));
+        s.serialize_until = Some(now + RATE_LIMIT_COOLDOWN);
+    }
+
+    /// A search got through. The hold-off goes, but the lane stays until the cooldown runs out:
+    /// one answer may be *because* the burst was queued, so it is not proof the quota is back.
+    fn note_ok(&self) {
+        self.state.lock().expect("pacer").next_allowed = None;
+    }
+}
+
+fn pacer() -> &'static Pacer {
+    static P: std::sync::OnceLock<Pacer> = std::sync::OnceLock::new();
+    P.get_or_init(Pacer::default)
+}
+
+/// Time left before `deadline`, or `None` once it has passed.
+fn remaining(deadline: Instant) -> Option<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|d| !d.is_zero())
+}
+
+/// Holds this search until the lane and the hold-off let it through. `false` when that would
+/// take longer than `deadline` leaves: the caller then stops retrying and the HTML fallback
+/// runs, so a queued search returns a weaker answer instead of holding the turn open.
+///
+/// Nothing is locked and nothing sleeps while the endpoint is answering, so searches still fan
+/// out in parallel until a rejection is seen. A search that cannot get the lane in time does
+/// not go out unpaced either — an unpaced burst is the thing the lane exists to prevent.
+async fn hold<'a>(
+    p: &'a Pacer,
+    lane: &mut Option<tokio::sync::MutexGuard<'a, ()>>,
+    deadline: Instant,
+) -> bool {
+    if lane.is_none() && p.serializing() {
+        let Some(left) = remaining(deadline) else {
+            return false;
+        };
+        match tokio::time::timeout(left, p.lane.lock()).await {
+            Ok(g) => *lane = Some(g),
+            Err(_) => return false,
+        }
+    }
+    match p.wait() {
+        None => true,
+        Some(d) => match remaining(deadline) {
+            Some(left) if d <= left => {
+                tokio::time::sleep(d).await;
+                true
+            }
+            _ => false,
+        },
+    }
+}
+
+/// The primary search, paced. A rate limit costs a short wait and a retry instead of dropping
+/// straight to the HTML fallback, which parses DuckDuckGo with regexes and is weaker than the
+/// answer the retry gets. Only a rejection is retried; any other error returns at once, and all
+/// the waiting a rejection buys fits inside `RATE_LIMIT_BUDGET`.
+async fn paced_search(
+    agent: &Arc<Agent>,
+    query: &str,
+    objective: &str,
+    limit: u64,
+) -> Result<String, String> {
+    let p = pacer();
+    let deadline = Instant::now() + RATE_LIMIT_BUDGET;
+    let mut lane = None;
+    let mut limited = String::new();
+    for attempt in 0..=RATE_LIMIT_RETRIES {
+        if !hold(p, &mut lane, deadline).await {
+            break;
+        }
+        match mcp_call(
+            agent,
+            SEARCH_TOOL,
+            json!({ "query": query, "objective": objective, "numResults": limit }),
+            SEARCH_TIMEOUT,
+        )
+        .await
+        {
+            Err(e) if rate_limited(&e) => {
+                tracing::info!(
+                    attempt,
+                    "web_search: the search endpoint is rate-limiting; backing off and queueing searches behind one lane"
+                );
+                limited = e;
+                p.note_limited(attempt);
+            }
+            Ok(text) if text.trim().is_empty() => {
+                p.note_ok();
+                return Err("no results".to_owned());
+            }
+            Ok(text) => {
+                p.note_ok();
+                return Ok(text);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    // Empty when the budget went on queueing and this search never reached the endpoint, which
+    // `web_search` would otherwise log as a blank reason.
+    Err(if limited.is_empty() {
+        "search endpoint is rate-limiting and the queue is longer than this search can wait"
+            .to_owned()
+    } else {
+        limited
+    })
 }
 
 /// The text content of one MCP `tools/call` answer, from a JSON body or an SSE stream.
@@ -149,19 +323,7 @@ pub async fn web_search(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> Valu
         .unwrap_or(DEFAULT_RESULTS)
         .clamp(1, MAX_RESULTS);
     record(agent, chat_id, "web_search", &query);
-    let primary = mcp_call(
-        agent,
-        SEARCH_TOOL,
-        json!({ "query": query, "objective": objective, "numResults": limit }),
-        SEARCH_TIMEOUT,
-    )
-    .await;
-    let out = match primary {
-        Ok(text) if !text.trim().is_empty() => Ok(text),
-        Ok(_) => Err("no results".to_owned()),
-        Err(e) => Err(e),
-    };
-    match out {
+    match paced_search(agent, &query, &objective, limit).await {
         Ok(text) => text_result(crate::store::redact(&text)),
         Err(primary_err) => {
             tracing::warn!(error = %primary_err, "web_search: primary endpoint failed; HTML fallback");
@@ -603,6 +765,150 @@ mod tests {
         assert!(text.contains("GET | /nodes"));
         assert!(!text.contains("x()"));
         assert!(!text.contains("hidden"));
+    }
+
+    /// Jacob, Test5, 2026-11-04, T5 13:51:04 (twice): `web_search: primary endpoint failed;
+    /// HTML fallback`, because the keyless endpoint answered `429 Too Many Requests … You've
+    /// hit Exa's free MCP rate limit`. A rejection took 150–230 ms, so the search was handed to
+    /// a DuckDuckGo regex parse almost instantly. A rejection now buys a wait and a retry.
+    #[test]
+    fn a_rejection_backs_off_and_queues_the_burst() {
+        let p = Pacer::default();
+        // Nothing has been refused, so nothing waits and searches still fan out in parallel.
+        assert!(!p.serializing());
+        assert!(p.wait().is_none());
+
+        p.note_limited(0);
+        assert!(
+            p.serializing(),
+            "a burst spends one quota, so it queues behind one lane while the limit holds"
+        );
+        let first = p.wait().expect("the next attempt holds off");
+        assert!(first <= RATE_LIMIT_BACKOFF && first > Duration::ZERO);
+
+        // The wait doubles while rejections continue.
+        p.note_limited(1);
+        let second = p.wait().expect("still holding off");
+        assert!(second > first, "{second:?} should exceed {first:?}");
+
+        // A search got through: the hold-off goes so the next one is not delayed for nothing.
+        p.note_ok();
+        assert!(p.wait().is_none());
+        // The lane stays, though — that answer may be *because* the burst was queued.
+        assert!(p.serializing());
+    }
+
+    /// A queued search gives up rather than holding the turn open. Without a ceiling the lane is
+    /// itself the failure: one rejection serialises every search for a minute, so the last search
+    /// of a codemode fan-out would wait out every search ahead of it — and all of them end in the
+    /// same fallback anyway. Past the budget, pacing stops and the weaker answer is taken.
+    #[tokio::test]
+    async fn a_queued_search_stops_waiting_at_its_budget() {
+        let p = Pacer::default();
+        p.note_limited(0);
+        assert!(p.serializing());
+        assert!(p.wait().is_some(), "there is a hold-off to wait out");
+
+        // Budget already spent: the hold-off is not waited out and the lane is not even taken.
+        let mut spent = None;
+        assert!(!hold(&p, &mut spent, Instant::now()).await);
+        assert!(spent.is_none());
+
+        // With budget, the same hold-off is waited out and the search goes on.
+        let mut first = None;
+        assert!(hold(&p, &mut first, Instant::now() + RATE_LIMIT_BUDGET).await);
+        assert!(
+            first.is_some(),
+            "a serialising burst queues behind the lane"
+        );
+        assert!(p.wait().is_none(), "the hold-off was waited out");
+
+        // A second search cannot have the lane while the first holds it, and it stops waiting at
+        // its own deadline instead of queueing behind the whole cooldown.
+        let mut second = None;
+        let t = Instant::now();
+        assert!(!hold(&p, &mut second, Instant::now() + Duration::from_millis(50)).await);
+        assert!(second.is_none());
+        assert!(
+            t.elapsed() < RATE_LIMIT_COOLDOWN,
+            "waited {:?}, which is the stall this budget exists to stop",
+            t.elapsed()
+        );
+    }
+
+    /// Only a rate limit is worth retrying; every other failure still goes straight on.
+    #[test]
+    fn only_a_rejection_counts_as_rate_limited() {
+        assert!(rate_limited(
+            "search endpoint answered 429 Too Many Requests: You've hit Exa's free MCP rate limit"
+        ));
+        assert!(!rate_limited(
+            "search endpoint answered 500 Internal Server Error: nope"
+        ));
+        assert!(!rate_limited(
+            "search endpoint unreachable: connection refused"
+        ));
+        assert!(!rate_limited("no results"));
+    }
+
+    /// End to end against an endpoint that behaves like Exa's free MCP: it rejects the first
+    /// call and serves the second. The answer must come from the retry, not from the HTML
+    /// fallback — which is the whole point, since the fallback is a regex parse of a results
+    /// page and is weaker than what the retry gets.
+    #[tokio::test]
+    async fn a_rate_limited_search_retries_instead_of_falling_back() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        CALLS.store(0, Ordering::SeqCst);
+
+        let app = axum::Router::new().route(
+            "/mcp",
+            axum::routing::post(|| async {
+                use axum::response::IntoResponse;
+                if CALLS.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return (
+                        axum::http::StatusCode::TOO_MANY_REQUESTS,
+                        "You've hit Exa's free MCP rate limit. Please try again later.",
+                    )
+                        .into_response();
+                }
+                axum::Json(json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "result": { "content": [{ "type": "text",
+                        "text": "Python 3.15.2 — https://www.python.org/downloads/" }] }
+                }))
+                .into_response()
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+
+        let (agent, _root) = crate::status::tests::test_agent().await;
+        std::env::set_var(
+            "ARBOS_WEB_SEARCH_MCP_URL",
+            format!("http://127.0.0.1:{port}/mcp"),
+        );
+        let out = web_search(
+            &agent,
+            &json!({ "query": "latest python release" }),
+            "c-test",
+        )
+        .await;
+        std::env::remove_var("ARBOS_WEB_SEARCH_MCP_URL");
+
+        // The call count first: it is the assertion that does not depend on what any network
+        // the test happens to have would answer.
+        assert_eq!(
+            CALLS.load(Ordering::SeqCst),
+            2,
+            "the rejection is retried once, not handed to DuckDuckGo"
+        );
+        let text = serde_json::to_string(&out).unwrap();
+        assert!(
+            text.contains("Python 3.15.2"),
+            "the retry's answer is the result: {text}"
+        );
     }
 
     #[test]
