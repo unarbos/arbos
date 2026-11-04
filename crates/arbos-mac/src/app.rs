@@ -8238,21 +8238,29 @@ impl AppState {
             return;
         }
         let index = index.min(items.len() - 1);
-        // The slot the chat's blobs live in: its project, or the people chat
-        // itself (`space_of_chat`); a channel row falls back to the selected space.
+        // The slot the chat's blobs live in: its project, or `people:{chat}` for a
+        // people chat (same prefix uploads and iOS use); a channel row falls back
+        // to the selected space.
         let slot = {
             let chat_id = &items[index].chat_id;
             let known = self
                 .chats
                 .values()
                 .any(|tabs| tabs.iter().any(|c| &c.id == chat_id));
-            if known {
+            let space = if known {
                 self.space_of_chat(chat_id)
             } else {
                 match self.selected_project.clone() {
                     Some(p) => p,
                     None => return,
                 }
+            };
+            if space.starts_with("people:") {
+                space
+            } else if self.project(&space).is_some_and(|p| p.is_people()) {
+                format!("people:{space}")
+            } else {
+                space
             }
         };
         self.media_viewer = Some(MediaViewer {
@@ -11245,13 +11253,25 @@ impl AppState {
         // upsert (or a chat not yet in the map) hits the wrong blob slot → HTTP 404
         // and a weekly `mac:thumbnail:* http 404` diagnostic. Snapshot / open retries
         // once the chat is listed.
-        let Some(project_id) = self
+        //
+        // People chats store blobs under `people:{id}` (same as iOS). Pass that slot
+        // here so the sync layer does not depend on its people-id set being seeded
+        // yet — a bare chat id is not a project and the relay answers 403
+        // (`mac:thumbnail:* http 403`).
+        let Some(space_id) = self
             .chats
             .iter()
             .find(|(_, tabs)| tabs.iter().any(|c| &c.id == chat_id))
             .map(|(pid, _)| pid.clone())
         else {
             return;
+        };
+        let project_id = if space_id.starts_with("people:") {
+            space_id
+        } else if self.project(&space_id).is_some_and(|p| p.is_people()) {
+            format!("people:{space_id}")
+        } else {
+            space_id
         };
         for message in messages {
             for part in &message.parts {

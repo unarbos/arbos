@@ -4425,20 +4425,24 @@ fn blob_request_url(shared: &Shared, id: &str, key: &str) -> String {
     format!("{}/blob/{}/{}", shared.http_url, shared.blob_slot(id), key)
 }
 
-/// `GET /blob/{slot}/{key}` → (mime, bytes); `id` is a project id or a people chat id.
-async fn fetch_blob_bytes(shared: &Arc<Shared>, id: &str, key: &str) -> Result<(String, Vec<u8>)> {
-    // Same refresh-once path as `get_json`: an expired access token must not leave
-    // thumbnails / downloads stuck on "No preview" and a weekly `mac:thumbnail:* http 401`
-    // diagnostic while the JSON APIs quietly rotate and succeed.
+/// `true` when `err` is a relay HTTP 403 (access refused for the blob slot).
+fn blob_forbidden(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<RelayError>()
+        .is_some_and(|e| e.status == 403)
+}
+
+/// A bare id that `blob_slot` did not already map to `people:{id}` may still be a people
+/// chat whose set was not seeded yet — worth one retry under the people prefix.
+fn should_retry_people_slot(id: &str, primary_slot: &str) -> bool {
+    !id.is_empty() && !id.contains(':') && !primary_slot.starts_with(PEOPLE_BLOB_PREFIX)
+}
+
+/// `GET` one blob URL → (mime, bytes). Refreshes once on `token_expired` 401.
+async fn fetch_blob_bytes_at(shared: &Arc<Shared>, url: &str) -> Result<(String, Vec<u8>)> {
     let mut refreshed = false;
     loop {
         let token = shared.token();
-        let r = shared
-            .http
-            .get(blob_request_url(shared, id, key))
-            .bearer_auth(&token)
-            .send()
-            .await?;
+        let r = shared.http.get(url).bearer_auth(&token).send().await?;
         if !r.status().is_success() {
             let status = r.status();
             let body = r.text().await.unwrap_or_default();
@@ -4457,6 +4461,36 @@ async fn fetch_blob_bytes(shared: &Arc<Shared>, id: &str, key: &str) -> Result<(
             .unwrap_or("application/octet-stream")
             .to_string();
         return Ok((mime, r.bytes().await?.to_vec()));
+    }
+}
+
+/// `GET /blob/{slot}/{key}` → (mime, bytes); `id` is a project id or a people chat id.
+async fn fetch_blob_bytes(shared: &Arc<Shared>, id: &str, key: &str) -> Result<(String, Vec<u8>)> {
+    // Same refresh-once path as `get_json`: an expired access token must not leave
+    // thumbnails / downloads stuck on "No preview" and a weekly `mac:thumbnail:* http 401`
+    // diagnostic while the JSON APIs quietly rotate and succeed.
+    //
+    // GIF / sticker keys are not chat blobs — one URL, no people-slot fallback.
+    if key.starts_with(URL_KEY_PREFIX) || key.starts_with(STICKER_KEY_PREFIX) {
+        return fetch_blob_bytes_at(shared, &blob_request_url(shared, id, key)).await;
+    }
+
+    // Chat blobs. `blob_slot` usually picks the right place; when Shared.people / project
+    // kind lags the UI's first thumbnail request, a bare people-chat id is not a project
+    // the relay knows and answers empty-body 403 — the weekly `mac:thumbnail:* http 403`
+    // signature. Retry once under `people:{id}` (the slot uploads already use).
+    let primary = shared.blob_slot(id);
+    let primary_url = format!("{}/blob/{}/{}", shared.http_url, primary, key);
+    match fetch_blob_bytes_at(shared, &primary_url).await {
+        Ok(ok) => Ok(ok),
+        Err(err) if blob_forbidden(&err) && should_retry_people_slot(id, &primary) => {
+            let people_url = format!(
+                "{}/blob/{PEOPLE_BLOB_PREFIX}{}/{}",
+                shared.http_url, id, key
+            );
+            fetch_blob_bytes_at(shared, &people_url).await
+        }
+        Err(err) => Err(err),
     }
 }
 
@@ -8081,11 +8115,13 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     }
                     Err(err) => {
                         // Nobody asked for this fetch: no toast, no bubble. The card shows
-                        // "No preview". A missing blob (deleted, never uploaded, stale ref)
-                        // is not a Mac bug — same quiet 404 treatment as routines / voices.
-                        // Other failures still go to the silent weekly report.
+                        // "No preview". A missing blob (404) or a slot the caller may not
+                        // read (403 — left the chat, stale ref, membership gone) is not a
+                        // Mac bug — same quiet treatment as routines / voices. Other
+                        // failures still go to the silent weekly report.
                         let detail = format!("{key}: {err:#}");
-                        if detail.to_ascii_lowercase().contains("http 404") {
+                        let d = detail.to_ascii_lowercase();
+                        if d.contains("http 404") || d.contains("http 403") {
                             log::warn!(target: "arbos_mac::diagnostic", "thumbnail: {detail}");
                         } else {
                             shared.diagnostic("thumbnail", detail);
