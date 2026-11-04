@@ -20,13 +20,15 @@ pub async fn browser_stream(
     principal: Principal,
     Path(id): Path<String>,
 ) -> Response {
-    let project = match state.db.project(&id) {
-        Ok(Some(p)) => p,
-        _ => return (StatusCode::NOT_FOUND, "no such project").into_response(),
+    // `project_for` asks who is calling while it resolves, so an agent this device may not watch
+    // reads exactly like a name nobody holds (`api::no_such_project`, reported 2026-11-02). The
+    // refusal it hands back is plain text, which is what the error layer rewrites into the JSON
+    // envelope every other refusal in the API carries; the bare `FORBIDDEN` this replaces had no
+    // body for the layer to rewrite, and so no envelope.
+    let project = match crate::api::project_for(&state, &principal, &id) {
+        Ok(p) => p,
+        Err(refusal) => return refusal.into_response(),
     };
-    if !state.allows(&principal, &project.id) {
-        return StatusCode::FORBIDDEN.into_response();
-    }
     let sb = match state.db.user_box(&project.user_id) {
         Ok(Some(s)) => s,
         _ => return (StatusCode::NOT_FOUND, "no sandbox").into_response(),

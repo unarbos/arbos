@@ -11,6 +11,7 @@ use arbos_core::ids::now_ms;
 
 use crate::config::Config;
 use crate::llm::Llm;
+use crate::settings::{LiveModels, ModelRole};
 use crate::store::{MemoryRow, Store};
 
 pub const COMPACTION_TURNS: i64 = 20;
@@ -38,6 +39,9 @@ pub struct Memory {
     pub cfg: Arc<Config>,
     pub store: Store,
     pub llm: Arc<Llm>,
+    /// The agent's live model slots. `cfg` holds only the ids the box booted with, so a model
+    /// the user picks later would never reach these passes through it (Jacob, 2026-11-04).
+    pub models: LiveModels,
     /// The owner's current and former display names as the relay reports them, for
     /// `owner_by_role`: memory refers to the owner as "the owner", never by a name that may
     /// change (Hezbola 2026-10-26: old records said Arbos, the profile said Jacob).
@@ -118,11 +122,12 @@ pub(crate) fn is_user_name_fact(text: &str) -> bool {
 }
 
 impl Memory {
-    pub fn new(cfg: Arc<Config>, store: Store, llm: Arc<Llm>) -> Self {
+    pub fn new(cfg: Arc<Config>, store: Store, llm: Arc<Llm>, models: LiveModels) -> Self {
         Self {
             cfg,
             store,
             llm,
+            models,
             owner_names: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -230,9 +235,10 @@ impl Memory {
             "similar": similar_json,
         })
         .to_string();
+        let model = self.models.resolve(ModelRole::Decision).await;
         let (v, ms) = match self
             .llm
-            .complete_json(&self.cfg.decision_model, WRITE_SYSTEM, &user, 1500)
+            .complete_json(&model, WRITE_SYSTEM, &user, 1500)
             .await
         {
             Ok(x) => x,
@@ -246,7 +252,7 @@ impl Memory {
                     &[],
                     Some("decision model failed"),
                     None,
-                    Some(&self.cfg.decision_model),
+                    Some(&model),
                     None,
                 );
                 return Ok(());
@@ -266,7 +272,7 @@ impl Memory {
                 &[],
                 Some("gate: not store-worthy"),
                 gate.get("confidence").and_then(Value::as_f64),
-                Some(&self.cfg.decision_model),
+                Some(&model),
                 Some(ms),
             )?;
             return Ok(());
@@ -387,7 +393,7 @@ impl Memory {
                 &touched,
                 reason,
                 Some(conf),
-                Some(&self.cfg.decision_model),
+                Some(&model),
                 Some(ms),
             )?;
         }
@@ -446,9 +452,11 @@ impl Memory {
                 text
             ));
         }
+        // Summarising a chat is the agent's own reading of it, so it runs on the agent's model.
+        let compaction_model = self.models.resolve(ModelRole::Talking).await;
         let (v, _ms) = self
             .llm
-            .complete_json(&self.cfg.talking_model, COMPACTION_SYSTEM, &body, 2500)
+            .complete_json(&compaction_model, COMPACTION_SYSTEM, &body, 2500)
             .await?;
         let summary = v
             .get("summary")
@@ -569,7 +577,8 @@ mod tests {
         };
         let cfg = Arc::new(bx.workspace(&json!({ "id": "01MPROJ", "name": "Doug" }), 0));
         let llm = Arc::new(Llm::new(&cfg));
-        let memory = Memory::new(cfg, store.clone(), llm);
+        let models = LiveModels::new(&cfg);
+        let memory = Memory::new(cfg, store.clone(), llm, models);
         let name_id = store
             .memory_add(
                 "T1",

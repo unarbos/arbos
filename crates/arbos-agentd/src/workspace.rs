@@ -862,7 +862,7 @@ fn clone_forked_workspace(
 }
 
 /// First-boot seeding of one workspace (sandbox-image.md §4 step 5): pi seed → state dir,
-/// AGENTS.md, mcp.json, the model stub as pi/Prime provider.
+/// mcp.json, the model stub as pi/Prime provider.
 pub fn seed_state(cfg: &Config) -> Result<()> {
     std::fs::create_dir_all(&cfg.state_dir)?;
     std::fs::create_dir_all(cfg.pi_dir())?;
@@ -885,6 +885,10 @@ pub fn seed_state(cfg: &Config) -> Result<()> {
     write_models_json(cfg, &cfg.talking_model, &cfg.subagent_model)?;
     let settings = json!({
         "defaultProvider": cfg.pi_provider(), "defaultModel": cfg.talking_model, "defaultThinkingLevel": "off",
+        // Plain names *replace* pi's DEFAULT_TOOL_NAMES (read, bash, edit, write) rather than
+        // adding to them, so this list must name every tool the agent gets. `grep`, `find` and
+        // `ls` ship with pi but are not defaults, so they are off here; their schemas cost
+        // ~575 prefix tokens per call, which is a default-cost decision and Jacob's to make.
         "defaultTools": ["read", "bash", "edit", "write", "codemode"],
         "compaction": { "enabled": true, "reserveTokens": COMPACTION_RESERVE_TOKENS, "keepRecentTokens": KEEP_RECENT_TOKENS },
         "hideThinkingBlock": true
@@ -911,15 +915,7 @@ pub fn seed_state(cfg: &Config) -> Result<()> {
         &prime_settings_path,
         serde_json::to_string_pretty(&prime_settings)?,
     )?;
-    let agents_md = cfg.work_dir.join("AGENTS.md");
-    if !agents_md.exists() {
-        let src = std::path::Path::new("/etc/arbos/AGENTS.md");
-        if src.exists() {
-            std::fs::copy(src, &agents_md)?;
-        } else {
-            std::fs::write(&agents_md, include_str!("../../../image/AGENTS.md"))?;
-        }
-    }
+    retire_seeded_agents_md(&cfg.work_dir);
     if !cfg.work_dir.join(".git").exists() {
         let _ = std::process::Command::new("git")
             .args(["init", "-q"])
@@ -1097,6 +1093,80 @@ fn seed_file_differs(seed: &std::path::Path, target: &std::path::Path) -> bool {
     match (std::fs::read(seed), std::fs::read(target)) {
         (Ok(a), Ok(b)) => a != b,
         _ => true,
+    }
+}
+
+/// SHA-256 of every `AGENTS.md` Arbos ever seeded into a project folder, newest last. The list
+/// is closed: since the text moved to `image/pi-seed/AGENTS.md` nothing writes that path again,
+/// so no version can be added to what is already on disk out there.
+///
+/// Read from `main`'s history of `image/AGENTS.md`, one entry per distinct content:
+/// `git log --follow --format=%H origin/main -- image/AGENTS.md`, then
+/// `git show <sha>:image/AGENTS.md | sha256sum`. Deliberately a literal list rather than
+/// something derived at runtime: deleting a file in the user's folder should rest on a constant
+/// a reviewer can read, not on a computation they have to trust.
+const SEEDED_AGENTS_MD_SHA256: &[&str] = &[
+    "e92b893bc7176ba3d4edd649e533d1859680e61ff94c382b9612e95d19434845", // 2026-10-14 scaffold
+    "f334df7a6971d4d2e339c229680946739e8180527d9956edba698debc11843cd", // 2026-10-15 M1 backend
+    "808058c89d3ef2b1b03816c0ee4d549dbe4f8961d3c05812a4eeae42f7d787f1", // 2026-10-15 D70 work dir
+    "6e07ab799fee34dd6e82e41bbe29796ef640b8089d820f6a691a9b08945bcb10", // 2026-10-15 deliver_file
+    "71b05ae34c2541b175a9d457cd7d13ae2ac079fb5487b2baf7795fc23db3a9a9", // 2026-10-18 research first
+    "96402152e56dcf8fb3830af9b4729f946fc9d4eec8fd30582ca27288545edc39", // 2026-10-18 secret notes
+    "f0a5567f2eed790e6a6f732702da4ee7b8ff8564076905344e62c528b1446aa1", // 2026-10-18 act caps
+    "96b979740643c91151e7bc19e426d5ba683b14cc28c0390bc4809e45471fb047", // 2026-10-19 submit_feedback
+    "07789c29ded1916f085100066eea389c418720add22fe3add5ae4fa03ef1f356", // 2026-10-23 self-reference
+    "8fec4491974e97ffc4046b01e1913db45fa66894b82d179fa44b00401a36af98", // 2026-10-23 read-only rootfs
+    "c2999e4047f97f0c024f4a558f7e73cd6d2e152259ba172281dc1ad3ea2b5a44", // 2026-10-23 vague filing
+    "3c9bd6df649f2e9c82ae0dae7da2b651739d672fb36e3789c70a77019582107d", // 2026-10-23 cite paths
+    "5d134af724ead6fd08dd527dee6f902be98a5b327af3106489253d7133280e11", // 2026-10-26 post_chart
+    "6c518710d3a8fa1d7db127ebb2ba2f3c43083ea40b159503355384dbf20c34e3", // 2026-10-27 publish_site
+];
+
+/// Remove the `AGENTS.md` Arbos used to seed into the project folder, and only that.
+///
+/// The text it held is Arbos's own — the box boundary, the toolset, memory search, the browser,
+/// `submit_feedback`, `publish_site`, the secret-note policy — but it was written to a path the
+/// user and the agent may edit, under `if !exists`, so it was written once per project and never
+/// updated. It now ships as `image/pi-seed/AGENTS.md` into pi's agent directory, which agentd
+/// re-seeds from the image on every start; pi loads that file *in addition to* a project one
+/// (`loadProjectContextFiles` reads the agent dir first, and a project file cannot suppress it),
+/// so leaving the old copy in place would load two versions of the same guidance at once.
+///
+/// **This deletes a file inside the user's project folder**, so it does so only when the bytes
+/// match a version Arbos shipped: that is proof the file is still exactly as seeded and nobody
+/// edited it. Anything else — edited, partly edited, or a version not on the list — is left
+/// alone and the duplication is tolerated. A stale extra context file is a quality problem;
+/// deleting something the user wrote is a trust problem, and the second is much worse than the
+/// first.
+///
+/// Never fatal: a project that keeps its old copy still boots.
+fn retire_seeded_agents_md(work_dir: &std::path::Path) {
+    retire_seeded_agents_md_against(work_dir, SEEDED_AGENTS_MD_SHA256);
+}
+
+fn retire_seeded_agents_md_against(work_dir: &std::path::Path, known: &[&str]) {
+    use sha2::Digest;
+    let path = work_dir.join("AGENTS.md");
+    let Ok(bytes) = std::fs::read(&path) else {
+        return;
+    };
+    let sha = hex::encode(sha2::Sha256::digest(&bytes));
+    if !known.contains(&sha.as_str()) {
+        tracing::info!(
+            path = %path.display(),
+            %sha,
+            "AGENTS.md in the project folder is not one Arbos seeded; leaving it alone"
+        );
+        return;
+    }
+    match std::fs::remove_file(&path) {
+        Ok(()) => tracing::info!(
+            path = %path.display(),
+            "removed the seeded AGENTS.md; the text now comes from pi's agent directory"
+        ),
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "could not remove the seeded AGENTS.md")
+        }
     }
 }
 
@@ -1290,6 +1360,75 @@ mod tests {
             &dst.join("deny.ts")
         ));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The text Arbos seeded into the project folder moved to pi's agent directory, so the old
+    /// copy has to go or pi loads both. It may only go when it is untouched: a byte match against
+    /// a version Arbos shipped is the proof, and anything else is the user's file. The list is
+    /// injected here so the test says what it means and does not drift when the shipped text is
+    /// edited again.
+    #[test]
+    fn the_seeded_agents_md_is_retired_and_an_edited_one_is_not() {
+        use sha2::Digest;
+        let root = std::env::temp_dir().join(format!("arbos-agentsmd-{}", std::process::id()));
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let path = work.join("AGENTS.md");
+        let shipped = "# Arbos project box\n\nThe standard toolset is yours.\n";
+        let known = [hex::encode(sha2::Sha256::digest(shipped.as_bytes()))];
+        let known: Vec<&str> = known.iter().map(String::as_str).collect();
+
+        // Nothing there: a no-op, not an error.
+        super::retire_seeded_agents_md_against(&work, &known);
+        assert!(!path.exists());
+
+        // Exactly as Arbos seeded it: nobody touched it, so it goes.
+        std::fs::write(&path, shipped).unwrap();
+        super::retire_seeded_agents_md_against(&work, &known);
+        assert!(!path.exists(), "an untouched seeded copy is removed");
+
+        // The same file with one line of the user's own on the end is theirs now.
+        let edited = format!("{shipped}Run `make check` before you push.\n");
+        std::fs::write(&path, &edited).unwrap();
+        super::retire_seeded_agents_md_against(&work, &known);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            edited,
+            "an edited AGENTS.md is never deleted"
+        );
+
+        // So is a file that was never ours.
+        std::fs::write(&path, "# my project\n").unwrap();
+        super::retire_seeded_agents_md_against(&work, &known);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# my project\n");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The list must keep holding the last text that reached a project folder, or every project
+    /// seeded before the move keeps a second, stale copy of this guidance for good. That version
+    /// is `image/AGENTS.md` as it stood at the move — pinned here by hash, not read from the
+    /// tree, because the file it moved to is free to change afterwards and this boundary is not.
+    #[test]
+    fn the_last_seeded_agents_md_stays_on_the_retire_list() {
+        const LAST_SEEDED: &str =
+            "6c518710d3a8fa1d7db127ebb2ba2f3c43083ea40b159503355384dbf20c34e3";
+        assert_eq!(
+            super::SEEDED_AGENTS_MD_SHA256.last(),
+            Some(&LAST_SEEDED),
+            "the newest entry must stay the last version seeded into project folders"
+        );
+        let mut sorted = super::SEEDED_AGENTS_MD_SHA256.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            super::SEEDED_AGENTS_MD_SHA256.len(),
+            "no duplicates"
+        );
+        assert!(super::SEEDED_AGENTS_MD_SHA256
+            .iter()
+            .all(|h| h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit())));
     }
 
     /// #1257: a session fork copies the transcript under the new chat id, leaves nothing for

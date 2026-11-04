@@ -103,6 +103,45 @@ pub enum SessionRole {
     Subagent,
 }
 
+/// The bearer a request presented, trimmed; `""` when it presented none.
+fn bearer(headers: &HeaderMap) -> &str {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("")
+        .trim()
+}
+
+/// Which role a bearer token earns here, or `None` for no role at all.
+///
+/// The same check the hook server makes (`hooks::role_for_token`), which this one must not drift
+/// from: both verifiers answer one question from one pair of tokens, so a session either admits
+/// to both or to neither.
+///
+/// Both guards fail closed before any comparison. `ARBOS_MCP_TOKEN` defaults to empty
+/// (`config.rs`) and an absent header reads as `""`, so the bare comparison this replaced matched
+/// the main arm for a request carrying no credential — the highest role, granted anonymously. The
+/// subagent arm was no safer, because `subagent_mcp_token()` hashes the configured value and so is
+/// a constant anyone can compute offline once that value is empty. A workspace that was given a
+/// token refuses nothing it used to accept.
+fn role_for_token(configured: &str, derived: &str, headers: &HeaderMap) -> Option<SessionRole> {
+    if configured.trim().is_empty() {
+        return None;
+    }
+    let tok = bearer(headers);
+    if tok.is_empty() {
+        return None;
+    }
+    if tok == configured {
+        Some(SessionRole::Main)
+    } else if tok == derived {
+        Some(SessionRole::Subagent)
+    } else {
+        None
+    }
+}
+
 /// Tools only the main agent may use: anything that talks to another agent (D69 — subagents
 /// never reach the cross-project surface). `group_send` / `projects_send` are the old names,
 /// still accepted from older sessions.
@@ -126,12 +165,25 @@ pub(crate) fn err_result(msg: impl std::fmt::Display) -> Value {
     json!({ "content": [{ "type": "text", "text": format!("error: {msg}") }], "isError": true })
 }
 
+/// Head of `s`, counted in characters, like the `clip` in `local.rs` and `connectors.rs`.
+///
+/// Counting bytes here cut inside multi-byte characters and panicked, which `peek` could reach
+/// with any slice over 16,000 bytes of non-ASCII text — one curly apostrophe across the cut is
+/// enough. Characters are also what `peek` slices by and what the suffix below claims to count.
 fn clip(s: &str, max: usize) -> String {
+    // A string never holds more characters than bytes, so this fast path is exact.
     if s.len() <= max {
-        s.to_owned()
-    } else {
-        format!("{}…[{} more chars]", &s[..max], s.len() - max)
+        return s.to_owned();
     }
+    let chars = s.chars().count();
+    if chars <= max {
+        return s.to_owned();
+    }
+    format!(
+        "{}…[{} more chars]",
+        s.chars().take(max).collect::<String>(),
+        chars - max
+    )
 }
 
 async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
@@ -558,12 +610,11 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
                 .map(|c| String::from_utf8_lossy(c).into_owned())
                 .collect();
             let mut parts = Vec::new();
+            // `sub_llm` is the agent reading something for itself, so it reads on the agent's
+            // own model, not on the id the box booted with (Jacob, 2026-11-04).
+            let model = a.model_for(crate::settings::ModelRole::Talking).await;
             for (i, c) in chunks.iter().enumerate().take(32) {
-                match a
-                    .llm
-                    .complete(&a.cfg.talking_model, &instruction, c, 1500)
-                    .await
-                {
+                match a.llm.complete(&model, &instruction, c, 1500).await {
                     Ok((t, _)) => parts.push(format!("[chunk {}]\n{t}", i + 1)),
                     Err(e) => return err_result(e),
                 }
@@ -573,7 +624,7 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
                 if let Ok((t, _)) = a
                     .llm
                     .complete(
-                        &a.cfg.talking_model,
+                        &model,
                         &format!(
                             "Reduce these per-chunk results into one answer for: {instruction}"
                         ),
@@ -882,17 +933,8 @@ pub(crate) fn materialize_handle(a: &Agent, chat_id: &str, note: &str, text: &st
 }
 
 async fn mcp(State(a): State<S>, headers: HeaderMap, Json(req): Json<Value>) -> Response {
-    let tok = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or("");
-    let role = if tok == a.cfg.mcp_token {
-        SessionRole::Main
-    } else if tok == a.cfg.subagent_mcp_token() {
-        SessionRole::Subagent
-    } else {
-        tracing::warn!(got = %tok.chars().take(8).collect::<String>(), "mcp: bad token");
+    let Some(role) = role_for_token(&a.cfg.mcp_token, &a.cfg.subagent_mcp_token(), &headers) else {
+        tracing::warn!(got = %bearer(&headers).chars().take(8).collect::<String>(), "mcp: bad token");
         return (StatusCode::UNAUTHORIZED, "bad token").into_response();
     };
     let id = req.get("id").cloned().unwrap_or(Value::Null);
@@ -927,6 +969,54 @@ pub fn router(agent: Arc<Agent>) -> Router {
 mod tests {
     use super::*;
 
+    /// `clip` used to slice by byte, so a cut landing inside a multi-byte character panicked.
+    /// Every offset below is one a caller really passes: the approval-card summary 160, the
+    /// per-call argument log 200, search snippets 300, `sub_llm` 2,000, `history_read` and
+    /// `page_rows` 8,000, `peek` 16,000.
+    #[test]
+    fn clip_cuts_between_characters_never_inside_one() {
+        for max in [160, 200, 300, 2_000, 8_000, 16_000] {
+            // Three bytes per character, so no multiple of a byte offset is a boundary.
+            let cjk = "日".repeat(max);
+            let out = clip(&cjk, max / 2);
+            assert_eq!(out.chars().filter(|c| *c == '日').count(), max / 2);
+            assert!(out.ends_with(&format!("…[{} more chars]", max - max / 2)));
+
+            // The realistic case: ordinary prose with one curly apostrophe across the cut.
+            let mut prose = "a".repeat(max - 1);
+            prose.push('\u{2019}');
+            prose.push_str(&"b".repeat(max));
+            assert!(clip(&prose, max).ends_with(&format!("…[{max} more chars]")));
+        }
+    }
+
+    /// The suffix says "chars", so it must count characters. It used to print `s.len() - max`,
+    /// a byte delta, which overstated the remainder by the multi-byte overhead.
+    #[test]
+    fn clip_reports_the_remainder_in_characters() {
+        assert_eq!(clip("日日日日", 1), "日…[3 more chars]");
+        assert_eq!(clip("abcd", 2), "ab…[2 more chars]");
+    }
+
+    /// The quiet half, on its own. The cut here lands on a character boundary, so the old
+    /// byte-slicing `clip` did not panic and returned this exact head — it just called the
+    /// three remaining characters nine. A correct slice with a lying count is still wrong.
+    #[test]
+    fn clip_counted_the_remainder_in_bytes_even_when_it_did_not_panic() {
+        let s = "aaaa日日日";
+        assert!(s.is_char_boundary(4), "the old byte cut was legal here");
+        assert_eq!(s.len() - 4, 9, "the old count would have said nine");
+        assert_eq!(clip(s, 4), "aaaa…[3 more chars]");
+    }
+
+    /// Text that fits comes back untouched, including text whose byte length exceeds `max`.
+    #[test]
+    fn clip_leaves_short_text_alone() {
+        assert_eq!(clip("abc", 8), "abc");
+        assert_eq!(clip("日日", 8), "日日");
+        assert_eq!(clip("日日", 2), "日日");
+    }
+
     /// D69: a subagent-role session may not speak for the Project to other Projects.
     #[test]
     fn subagent_cannot_reach_other_projects() {
@@ -937,5 +1027,87 @@ mod tests {
         assert!(refusal_for(SessionRole::Main, "send_message").is_none());
         assert!(refusal_for(SessionRole::Main, "group_send").is_none());
         assert!(refusal_for(SessionRole::Main, "projects_send").is_none());
+    }
+
+    fn auth(value: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(
+            axum::http::header::AUTHORIZATION,
+            value.parse().expect("header value"),
+        );
+        h
+    }
+
+    /// `sub_` + sha256("subagent:" + token), as `Config::subagent_mcp_token` derives it.
+    fn derive(token: &str) -> String {
+        use sha2::Digest;
+        let digest = sha2::Sha256::digest(format!("subagent:{token}").as_bytes());
+        format!("sub_{}", hex::encode(&digest[..16]))
+    }
+
+    /// An unconfigured daemon authenticates nobody. `ARBOS_MCP_TOKEN` defaults to empty and an
+    /// absent header reads as `""` too, so the bare comparison this guard replaced handed the
+    /// main role to a request carrying no credential at all. The subagent arm was no safer: it
+    /// hashes the configured value, so with nothing configured it is a constant computable
+    /// offline — asserted here with that very constant, not with a placeholder.
+    #[test]
+    fn an_unset_token_authenticates_nobody() {
+        let computable = derive("");
+        assert_eq!(role_for_token("", &computable, &HeaderMap::new()), None);
+        assert_eq!(role_for_token("", &computable, &auth("Bearer ")), None);
+        assert_eq!(
+            role_for_token("", &computable, &auth(&format!("Bearer {computable}"))),
+            None,
+        );
+        assert_eq!(
+            role_for_token("   ", &computable, &auth("Bearer    ")),
+            None
+        );
+    }
+
+    /// A configured workspace still refuses a request that brings no token.
+    #[test]
+    fn a_request_without_a_token_earns_no_role() {
+        let main = "mcp_0123456789abcdef";
+        assert_eq!(role_for_token(main, &derive(main), &HeaderMap::new()), None,);
+        assert_eq!(role_for_token(main, &derive(main), &auth("Bearer ")), None);
+        assert_eq!(
+            role_for_token(main, &derive(main), &auth("Basic xyz")),
+            None
+        );
+    }
+
+    /// One workspace's token is not another's. Since #2630 each workspace derives its own
+    /// `mcp_…` value, and this is the comparison that has to hold the line: a sibling's token,
+    /// and the sibling's subagent token, earn no role here.
+    #[test]
+    fn one_workspaces_token_is_not_anothers() {
+        let (mine, sibling) = ("mcp_aaaaaaaaaaaaaaaa", "mcp_bbbbbbbbbbbbbbbb");
+
+        assert_eq!(
+            role_for_token(mine, &derive(mine), &auth(&format!("Bearer {mine}"))),
+            Some(SessionRole::Main),
+        );
+        assert_eq!(
+            role_for_token(
+                mine,
+                &derive(mine),
+                &auth(&format!("Bearer {}", derive(mine))),
+            ),
+            Some(SessionRole::Subagent),
+        );
+
+        assert_eq!(
+            role_for_token(mine, &derive(mine), &auth(&format!("Bearer {sibling}"))),
+            None,
+        );
+        assert_eq!(
+            role_for_token(
+                mine,
+                &derive(mine),
+                &auth(&format!("Bearer {}", derive(sibling))),
+            ),
+            None,
+        );
     }
 }

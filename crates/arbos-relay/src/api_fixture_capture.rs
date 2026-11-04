@@ -550,7 +550,13 @@ async fn me_and_machine_unread_fixtures() {
     for mid in ["m1", "m2"] {
         state
             .db
-            .insert_chat_event("people_dm", None, mid, Some(&alice))
+            .insert_chat_event(
+                "people_dm",
+                None,
+                mid,
+                Some(&alice),
+                &format!("user:{alice}"),
+            )
             .unwrap();
     }
     let unread =
