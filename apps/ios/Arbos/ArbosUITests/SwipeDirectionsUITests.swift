@@ -218,7 +218,7 @@ final class SwipeDirectionsUITests: XCTestCase {
     /// has to start outside it — and has to know that it did.
     private static let systemEdgeZone: CGFloat = 24
 
-    /// Where a drag starts when the test's claim is that the app does *nothing*.
+    /// Where a rightward drag starts so that the app is the only thing that can answer it.
     ///
     /// `BackSwipe.edgeZoneWidth` is also 24, but that constant is where *this app* chooses to
     /// stand aside. It says nothing about how wide UIKit's own `interactivePopGestureRecognizer`
@@ -226,9 +226,14 @@ final class SwipeDirectionsUITests: XCTestCase {
     /// at x = 40: impossible through `fullScreenPops`, whose `absX > 70` guard 50 pt cannot
     /// clear, so the system recognizer had taken the touch and the app never saw it.
     ///
-    /// Tests that assert the app *does* something are not exposed this way — a pop from either
-    /// owner satisfies them — which is why only the short-swipe case starts this far in.
-    private static let deliberateStartX: CGFloat = 80
+    /// Every right-swipe test starts here, not only the short one. A pop satisfies the long
+    /// tests whichever recognizer produced it, so starting them at 40 pt left them able to pass
+    /// on the system gesture while the app's own full-screen back rule — the thing this file
+    /// exists to hold — went unexercised. Passing for the wrong reason is not passing.
+    ///
+    /// 80 pt is still inside the app's rule rather than past it: `fullScreenLock` declines only
+    /// below `edgeZoneWidth`, so the app sees a drag from here and decides it on its own terms.
+    private static let appOwnedStartX: CGFloat = 80
 
     /// The row's frame, read immediately before a drag and confirmed by two agreeing reads.
     ///
@@ -291,13 +296,14 @@ final class SwipeDirectionsUITests: XCTestCase {
         return distance
     }
 
-    /// Swipe right across `bubble`, starting near its leading edge (but clear of the edge zone,
-    /// which belongs to the system pop) so a long rightward drag stays on screen.
+    /// Swipe right across `bubble`, starting at `appOwnedStartX` or just inside the row's
+    /// leading edge, whichever is further in, so a long rightward drag stays on screen and the
+    /// app's own back rule — not the system pop — is what answers it.
     private func swipeRight(on bubble: XCUIElement, _ app: XCUIApplication, want: CGFloat = 180,
                            file: StaticString = #filePath, line: UInt = #line) {
         let window = app.windows.firstMatch.frame
         let frame = stableFrame(of: bubble, file: file, line: line)
-        let startX = max(frame.minX + 8, 40)
+        let startX = max(frame.minX + 8, Self.appOwnedStartX)
         assertClearOfSystemEdge(startX, "the right swipe", file: file, line: line)
         let distance = min(want, window.maxX - 8 - startX)
         XCTAssertGreaterThan(distance, 80, "the bubble has room for a right swipe", file: file, line: line)
@@ -434,15 +440,15 @@ final class SwipeDirectionsUITests: XCTestCase {
     /// stays. On `7bbfaf425` this armed a reply (the arrow fired at 39 pt) — the test is here to
     /// catch a threshold quietly dropping back to that build's 40 pt.
     ///
-    /// Started at `deliberateStartX`, not at the 40 pt the other right-swipe helpers use. This
-    /// is the one test whose claim is that a drag does *nothing*, so it is the one test that a
-    /// system pop can satisfy falsely: gate 41759504677 popped the chat on 50 pt, which
-    /// `BackSwipe.fullScreenPops` cannot do at all, since 50 is not over its 70 pt guard.
+    /// Started at `appOwnedStartX`, like every other right swipe here, and for the sharpest
+    /// version of the same reason: this test's claim is that a drag does *nothing*, so a system
+    /// pop does not merely flatter it, it fails it. Gate 41759504677 popped the chat on 50 pt,
+    /// which `BackSwipe.fullScreenPops` cannot do at all, since 50 is not over its 70 pt guard.
     func testAShortRightSwipeOnABubbleNeitherGoesBackNorReplies() {
         let app = launchGroup()
         let bubble = revealBubble(app, "g3")
         let frame = stableFrame(of: bubble)
-        let startX = max(frame.minX + 8, Self.deliberateStartX)
+        let startX = max(frame.minX + 8, Self.appOwnedStartX)
         assertClearOfSystemEdge(startX, "the short right swipe")
         XCTAssertLessThan(startX + 50, frame.maxX, "the whole 50 pt drag stays on the bubble")
         let start = screenPoint(app, x: startX, y: frame.midY)
