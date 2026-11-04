@@ -414,6 +414,12 @@ impl Agent {
                 &[
                     ("routineName", json!(name)),
                     ("routineRunId", json!(run_id)),
+                    // A routine is not somebody speaking. The row has to exist — it is what
+                    // the turn replies to — but the prompt Jacob saved once, at the time he
+                    // saved it, is not news every minute, and posting it visibly made a
+                    // one-line routine read as a conversation with itself. Only the result
+                    // is for the reader (Jacob's Test3 chat, 2026-11-04).
+                    ("hidden", json!(true)),
                 ],
             );
             h.mark_seen(&cmd_id);
