@@ -152,12 +152,24 @@ platform :ios do
   # `./scripts/build-xcframework.sh` under packages/ArbosFFI/.
   # Same project, scheme, and simulator destination as `sim`; only the Test
   # action builds ArbosTests (not Run / Archive). Links the ArbosFFI package.
+  #
+  # `-parallel-testing-enabled NO` is what docs/process-rules.md already requires of every
+  # `xcodebuild test` here, and what scripts/feedback/ios-gate.sh and scripts/ios-perf/perf-rig.sh
+  # already pass. This lane was the one place that did not, and the scheme marks ArbosTests
+  # parallelizable, so the hosted gate cloned the simulator ("Clone 1/2 of iPhone 17") and ran the
+  # unit bundle beside the UI bundle. The UI bundle's *first* app launch then had to finish
+  # XCUITest's fixed handshake waits (60 s requesting launch progress, ~90 s acquiring the
+  # background assertion) on a freshly booted clone while 530 unit tests saturated the other one.
+  # Measured over 248 gate attempts, that first launch took a median 72 s and overran the budget on
+  # 11 of them — always at UI case #1, never later. Serial, the unit bundle warms the one simulator
+  # first and the first UI launch costs 13-21 s. It is also ~29 min cheaper per run.
   desc "Run ArbosTests on the iOS simulator (no signing); requires packages/ArbosFFI"
   lane :test do
     require_xcframework!
     xcodebuild_logged("test",
       "cd .. && xcodebuild test -project #{PROJECT} -scheme #{SCHEME} -configuration Debug " \
-      "-destination 'platform=iOS Simulator,name=#{sim_name}' -derivedDataPath '#{out_dir}/dd' #{spm_flags}" \
+      "-destination 'platform=iOS Simulator,name=#{sim_name}' -derivedDataPath '#{out_dir}/dd' " \
+      "-parallel-testing-enabled NO #{spm_flags}" \
       "CODE_SIGNING_ALLOWED=NO")
   end
 
