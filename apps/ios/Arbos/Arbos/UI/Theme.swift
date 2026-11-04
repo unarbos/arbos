@@ -105,6 +105,13 @@ struct Theme: Equatable {
     /// The bubble's outline — its fill, its clip and the shape the long-press menu
     /// previews it with, from one value so they cannot drift apart.
     static var bubbleShape: RoundedRectangle { RoundedRectangle(cornerRadius: bubbleRadius, style: .continuous) }
+    /// How far a reveal's wash stands off the bubble it lands on (Mac `highlight::INSET`).
+    static let revealInset: CGFloat = 4
+    /// The reveal wash's outline: the bubble's, grown by `revealInset` on every side so
+    /// its corners stay concentric with the bubble's.
+    static var revealShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: bubbleRadius + revealInset, style: .continuous)
+    }
     static let bubbleHPad: CGFloat = 14
     static let bubbleVPad: CGFloat = 11
     /// 17 pt SF Pro renders a 20.3 pt line in SwiftUI; Grok shows UIKit's 22 pt body pitch.
