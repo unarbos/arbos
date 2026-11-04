@@ -2714,8 +2714,16 @@ pub async fn connect_page(State(state): State<AppState>, Path(id): Path<String>)
          On a nudge: GET {relay}/asp/inbox?since=<last next>  and answer the events with wake=true.\n\
          At most one nudge per 5 s per agent; keep a slow poll (every 5 min) as the fallback.\n\
          Test from the agent side: POST {relay}/asp/wake/test (same key) → {{ok,status,error}}.\n\n\
-         Claude Code / Codex on a Mac: cargo install --git https://github.com/unarbos/arbos arbos-acp\n\
-         then ARBOS_AGENT_KEY=arbk_… arbos-acp --relay {relay} --agent claude-agent-acp\n"
+         Claude Code or Codex on your own Mac — two commands, and it asks you before it acts:\n\
+         1. cargo install --git https://github.com/unarbos/arbos arbos-acp\n\
+         2. ARBOS_AGENT_KEY=arbk_… arbos-acp --relay {relay} --cwd ~/your-project\n\n\
+         Point --cwd at the project you actually want worked on. Nothing to install from npm and\n\
+         nothing to edit in ~/.claude/settings.json: arbos-acp starts Claude Code itself and\n\
+         refuses the permission bypass at the session, so a settings file cannot turn the asking\n\
+         off. When the agent wants to run a command or edit a file, an approval card appears in\n\
+         your own chat with it, naming the command and who asked for it. Only your answer counts,\n\
+         and anything else — you are away, the card does not arrive, five minutes pass — refuses.\n\
+         Only you and the chats you added the agent to can make it act (--allow).\n"
     );
     (
         StatusCode::OK,
