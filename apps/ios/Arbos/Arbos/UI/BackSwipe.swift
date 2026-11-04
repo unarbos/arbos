@@ -1143,7 +1143,7 @@ enum BackSwipeTrace {
     /// than rebuilt, so the trace survives every screen change in a run.
     private static func onWindow() -> UILabel? {
         guard let window else { return readout }
-        let label = readout ?? UILabel()
+        let label = readout ?? BackSwipeTraceLabel()
         label.isAccessibilityElement = true
         label.accessibilityIdentifier = "back-swipe-trace"
         label.accessibilityLabel = "back swipe trace"
@@ -1176,33 +1176,78 @@ enum BackSwipeTrace {
         note("\(what):tx=\(model),ptx=\(presented),anim=\(animations),spd=\(speed),sup=\(parented)")
     }
 
-    /// Every view that is not where it belongs, **named**. Run 41765917913 showed the chat's
-    /// contents a screen width to the right while the view this code transforms read clean at
-    /// the origin, which says the restore has been going to the wrong object all along. An
-    /// inferred object has been wrong five times; this one is read off the hierarchy.
-    ///
-    /// It separates the two ways a view moves sideways, because they need different fixes: a
-    /// transform (`:tx`) or its own frame (`:frame`). Capped at both ends — the first few
-    /// offenders are the answer, and the transcript alone is eight thousand points tall.
+    /// A survey written into the trace as the transition ends, kept alongside the one the
+    /// readout takes when it is read. Two samples of the same instrument at known times beat
+    /// one sample and an inference about the other.
     static func displaced(_ what: String, from root: UIView?) {
         guard on else { return }
-        guard let root else { return note("\(what):gone") }
+        note("\(what):" + survey(from: root))
+    }
+
+    /// How many views a survey will look at before it gives up. Named and printed, never
+    /// implied.
+    private static let surveyCap = 6000
+
+    /// What the window holds, and **how much was looked at to find it**.
+    ///
+    /// The second half is not decoration. Three probes in this file have now reported a
+    /// conclusion where a count belonged — `kids=2`, a one-trial sweep, and a walk that could
+    /// not tell "found nothing" from "stopped early" — and each cost a round. So every survey
+    /// prints what it examined: how many views, out of what cap, whether it hit that cap, and
+    /// how deep it got. A probe that cannot distinguish an empty result from a truncated one
+    /// is not an instrument, however carefully it is read.
+    ///
+    /// It also reports the first scroll view's own box and transform, so "the container is at
+    /// the origin while its contents are a screen width right" is one measurement rather than
+    /// two taken twenty seconds apart.
+    static func survey(from root: UIView?) -> String {
+        guard let root else { return "gone" }
         let edge = root.bounds.width / 2
         var found: [String] = []
-        var stack = [root]
+        var scroll = "-"
+        var stack = [(view: root, depth: 0)]
         var visited = 0
-        while let view = stack.popLast(), found.count < 8, visited < 3000 {
+        var deepest = 0
+        // The walk continues past the eighth offender on purpose: stopping there would make
+        // the count meaningless, and the count is the point.
+        while let item = stack.popLast(), visited < surveyCap {
+            let view = item.view
             visited += 1
-            stack.append(contentsOf: view.subviews)
-            let shifted = view.transform.tx != 0
+            deepest = max(deepest, item.depth)
+            stack.append(contentsOf: view.subviews.map { (view: $0, depth: item.depth + 1) })
             let box = view.convert(view.bounds, to: nil)
-            guard shifted || box.minX >= edge else { continue }
+            if scroll == "-", view is UIScrollView {
+                scroll = String(describing: type(of: view))
+                    + "@\(Int(box.minX)),\(Int(box.minY)),\(Int(box.width)),\(Int(box.height))"
+                    + ":tx\(Int(view.transform.tx))"
+            }
+            let shifted = view.transform.tx != 0
+            guard shifted || box.minX >= edge, found.count < 8 else { continue }
             found.append(String(describing: type(of: view))
                 + "/" + (view.accessibilityIdentifier ?? "-")
                 + "@\(Int(box.minX))"
                 + (shifted ? ":tx\(Int(view.transform.tx))" : ":frame"))
         }
-        note("\(what):" + (found.isEmpty ? "none" : found.joined(separator: " ")))
+        return "seen=\(visited)/\(surveyCap)\(visited >= surveyCap ? ":HITCAP" : ":complete")"
+            + ",deep=\(deepest),scroll=\(scroll)"
+            + ",off=\(found.isEmpty ? "none" : found.joined(separator: "|"))"
+    }
+
+    private static var lastReading: (at: TimeInterval, text: String)?
+
+    /// A survey taken now, briefly cached. XCUITest reads this element many times in one pass
+    /// — `debugDescription` alone walks the whole tree — and a full survey per read would cost
+    /// more than the answer is worth.
+    static func reading() -> String {
+        // Accessibility does not promise to ask on the main thread, and a view hierarchy is
+        // not safe to walk anywhere else. Saying so beats risking the run: an answer of
+        // `offthread` is a result about the instrument, not a silent wrong number.
+        guard Thread.isMainThread else { return lastReading?.text ?? "offthread" }
+        let now = Date().timeIntervalSinceReferenceDate
+        if let last = lastReading, now - last.at < 0.25 { return last.text }
+        let text = survey(from: window)
+        lastReading = (now, text)
+        return text
     }
 
     /// Who takes a touch at a point, named rather than guessed at. "Not hittable" is a
@@ -1218,11 +1263,26 @@ enum BackSwipeTrace {
         note("\(what):\(kind)/\(named)")
     }
 
-    /// Both the text and the accessibility value, so the trace reaches the rig whichever of
-    /// the two XCUITest reports for this element.
+    /// The history. The live reading is on the label itself, computed when it is read.
     static func write(to label: UILabel) {
         label.text = text
-        label.accessibilityValue = text
+    }
+}
+
+/// The readout, which surveys the hierarchy **when it is read** rather than when the
+/// transition ends.
+///
+/// This is the whole point of the head it arrives in. Every previous reading of this bug
+/// compared an app measurement taken half a second after the transition against an XCUITest
+/// measurement taken twenty seconds later, and that gap is what left every result with two
+/// explanations. Asking the app at the instant the test asks removes the gap: if the survey
+/// is clean in the same breath that XCUITest reports the chat a screen width away, then no
+/// later displacement can be hiding in between, and the accessibility tree is the suspect by
+/// elimination.
+private final class BackSwipeTraceLabel: UILabel {
+    override var accessibilityValue: String? {
+        get { BackSwipeTrace.text + " now:" + BackSwipeTrace.reading() }
+        set { super.accessibilityValue = newValue }
     }
 }
 
