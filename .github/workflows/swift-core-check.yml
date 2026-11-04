@@ -151,26 +151,38 @@ jobs:
   # that is the invariant anyone adding a third job has to preserve. Do not give this job
   # `continue-on-error: true`, and do not add a job that always succeeds.
   #
-  # Its condition is `check`'s condition, copied verbatim rather than relaxed, so it runs exactly
-  # when `check` was meant to run and skips alongside it otherwise. An in-repo pull request still
-  # skips both and still concludes `skipped`, so nothing that reads this gate today reads
-  # differently and no pull request turns red for the deliberate mirror skip.
+  # TWO NARROWINGS from the `if: always()` checks.sh describes. Both only ever withhold a failure,
+  # never add a pass, so the invariant above survives them — but they are narrowings, and a third
+  # job added later has to respect what they leave open. See the requirement at the end.
   #
-  # That guard is this job's one divergence from the `if: always()` checks.sh describes, and it is
-  # deliberate. Bare always() without #2448's `push-run` mirror would fail every in-repo pull
-  # request run, where `check` skips by design because the push twin covers it. The divergence can
-  # only withhold a false failure, never produce a false pass: this job succeeds on exactly one
-  # condition, that `check` succeeded.
+  # `!cancelled()` rather than `always()`. On main, 264 of this workflow's 428 runs concluded
+  # `cancelled` against 87 failed and 77 passed, because a queued run in a concurrency group is
+  # evicted when the next is created — documented at scripts/merge/merge-window.sh:182-184 as "260
+  # of 264 cancelled runs, median gap one second", and the reason range_gate treats an intermediate
+  # red as a finding rather than a refusal. With always(), this job would run on each of those and
+  # fail it, turning 264 known-benign evictions on main into red. gate_state already reads
+  # `cancelled` as RED, so nothing is gained for the cost of quadrupling main's failure count, and
+  # an alarm that fires routinely is an alarm that gets reclassified.
+  #
+  # `check`'s own condition, copied verbatim. Bare always() would fail every in-repo pull request
+  # run, where `check` skips by design because the push twin covers it; #2448 can afford always()
+  # only because its `push-run` mirror supplies the twin's verdict in that case. So this job runs
+  # exactly when `check` was meant to run, and skips alongside it otherwise.
+  #
+  # REQUIREMENT ON ANY THIRD JOB. Because this job skips when `check` skips, a third job that
+  # succeeds while both are skipped would make the run conclude `success` with nothing tested —
+  # the fail-open, back again. So a third job must either skip whenever `check` skips, or fail
+  # closed itself. #2448's version does not need that caveat, which is one more reason it should
+  # replace this wholesale rather than be merged with it.
   #
   # #2448 carries the full version, with a `route` job and a `push-run` mirror that waits for the
-  # twin's verdict, and that is the one checks.sh's comments describe. It supersedes this on
-  # landing — replace this job with that one wholesale rather than merging them. This is the same
-  # guarantee reduced to main's current single-job shape, because the branch checks.sh tells its
-  # reader is unreachable is in fact reachable, and fires today.
+  # twin's verdict, and that is the one checks.sh's comments describe. This is the same guarantee
+  # reduced to main's current single-job shape, because the branch checks.sh tells its reader is
+  # unreachable is in fact reachable, and fires today.
   verdict:
     name: Swift verdict
     needs: check
-    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
