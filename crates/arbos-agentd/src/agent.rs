@@ -9779,10 +9779,11 @@ pub const ROUTER_PROMPT: &str = include_str!("../prompts/router.md");
 /// link format rule of [feedback markdown-tables-agentd-2026-10-25]; 29.1 KB on 2026-10-27
 /// with the `post_chart` clause of [feedback chart-post-tool-agentd-2026-10-26] on top of the
 /// secrets rewrite of [feedback secret-handoff-agentd-2026-10-26] — measured together at
-/// 29 062 bytes, set once). The unit test fails when a prompt edit crosses it, so growth is a
-/// decision, not drift.
+/// 29 062 bytes, set once; 29.3 KB on 2026-11-04 for the 160-byte "never promise a time" rule
+/// of Jacob's Test5 T7, measured at 29 260). The unit test fails when a prompt edit crosses it,
+/// so growth is a decision, not drift.
 #[cfg(test)]
-pub const BASE_PROMPT_MAX_BYTES: usize = 29_100;
+pub const BASE_PROMPT_MAX_BYTES: usize = 29_300;
 
 /// The byte-stable part of the main agent's system prompt: core, then routing, then code mode
 /// when it is on. Everything per project (folder, model, instructions, memory) comes after it.
@@ -10488,6 +10489,35 @@ mod tests {
             WORK_RULES_SECTION.len() <= 800,
             "pack work rules are {} bytes, budget 800",
             WORK_RULES_SECTION.len()
+        );
+    }
+
+    /// Jacob, Test5, 2026-11-04, T7 Q2 (agentd 0.1.192): "how far along are you, and roughly how
+    /// long until it's done?" was answered by a normal reply turn with "5–10 minutes". The work
+    /// landed 34 s later. The quick-reply lane has forbidden promising a time since it was
+    /// written, because the snapshot cannot support one; a main turn cannot support one either,
+    /// and had no such rule. Both prompts now say it.
+    #[test]
+    fn neither_prompt_lets_the_agent_promise_a_time() {
+        let main = base_system_prompt(false);
+        let core = &main[..main
+            .find("## How each message is handled")
+            .expect("router follows core")];
+        assert!(
+            core.contains("Never promise a time"),
+            "the core prompt lets a main turn invent an ETA"
+        );
+        // Not a bare prohibition: it has to say what to answer instead, or the turn goes silent
+        // on a fair question.
+        assert!(core.contains("say what is done and what is left"));
+        // The quick lane's rule, unchanged, so the two lanes cannot drift apart.
+        let quick = crate::status::quick_system_prompt("Doug", None);
+        assert!(quick.contains("Never promise a time"));
+        // The rule costs bytes on every main call; the shared budget still holds.
+        assert!(
+            main.len() <= BASE_PROMPT_MAX_BYTES,
+            "base prompt is {} bytes, budget {BASE_PROMPT_MAX_BYTES}",
+            main.len()
         );
     }
 
