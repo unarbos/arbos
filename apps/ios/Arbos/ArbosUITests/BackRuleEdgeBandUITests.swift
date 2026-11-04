@@ -46,6 +46,45 @@ import XCTest
 /// it read only `chat-back`'s absence; the delivered drag may have exceeded 50 pt; or it may be
 /// intermittent below the rate this file can see.
 ///
+/// ## What the coarse pass found, and what this pass is for (AF-859)
+///
+/// The coarse pass reproduced it: the chat left the front on 19 of 19 trials at x = 16, 28, 40
+/// and 48, and on 0 of 3 at x = 80. Every one of those 19 also showed a `profile-` page, so it is
+/// a **cover and not a pop** — the sender's profile opening and being read as the chat leaving.
+///
+/// Reading the source killed three candidates at no cost. `sender-avatar-slot` is `Color.clear`,
+/// 1 pt tall and `accessibilityHidden`, with no action, and it only renders when
+/// `row.showsAvatar` is false, which this row is not (`Fixture.swift:243` gives `g3` a different
+/// sender from the message before it, so `Transcript.swift:818` puts a disc on its run). A hit
+/// region wider than the disc is out: `PersonAvatar` is `frame(width: size, height: size)` under
+/// a `.plain` `Button` with no `contentShape`. And a row-level tap is out: the only row-level
+/// `toggleProfile` is inside an `OpenURLAction` (`ChatView.swift:1197`), needing a link or
+/// mention-chip URL.
+///
+/// What the read turned up instead is a second door nobody had listed. Two views call the same
+/// `openProfile(personTarget)`: the avatar `Button` in the column, and **`bubble-name`** inside
+/// the bubble (`Transcript.swift:1701`). And every drag that opened a page *ended* on the bubble
+/// — 16→66, 28→78, 40→90, 48→98 — while the control that opened nothing both started and ended
+/// there. So "starts in the column" and "ends on the bubble" fit the coarse table equally well,
+/// and nothing measured so far can separate them:
+///
+/// - **The avatar button** requires touch-down inside the disc, which `avatar=false` on 22 of 22
+///   contradicts.
+/// - **The name button** requires a `Button` to fire from a touch that began outside it, which
+///   SwiftUI does not do.
+///
+/// Each survivor is contradicted by something, so one of the *readings* is wrong rather than one
+/// of the mechanisms — and the suspect is nominated: `avatar=false` is a single
+/// `frame.contains` against a disc whose vertical position was inferred from
+/// `HStack(alignment: .bottom)` and never measured.
+///
+/// So this pass measures instead of inferring. It prints the frames, maps every touch to the row
+/// it lands in, sweeps x in 4 pt steps across the column boundary, and adds the two controls that
+/// can each reach one survivor: a drag from the measured centre of the disc, and a drag that ends
+/// inside the measured `bubble-name`. It also carries a **positive control for the avatar
+/// detector itself**, because `avatar=false` on 22 of 22 is otherwise indistinguishable from a
+/// detector that cannot fire, and that reading is what contradicts one of the two survivors.
+///
 /// **It never fails on a result.** iOS gates cut a public TestFlight build and land one at a
 /// time, so a diagnostic that reds the chain delays releases. This file asserts only the things
 /// that would make its own numbers meaningless — the chat opened, the row resolved, the frame
@@ -62,6 +101,11 @@ final class BackRuleEdgeBandUITests: XCTestCase {
     /// The observed drag, unchanged in every respect.
     private static let distance: CGFloat = 50
 
+    /// Where the bubble body begins, from `Theme.memberAvatar`'s own comment: the disc spans
+    /// 12–48 pt from the screen and the body starts at 52. Used only to keep the name control
+    /// clear of the avatar column, never as a measurement.
+    private static let bubbleBodyX: CGFloat = 52
+
     /// Wall clock to millisecond resolution, so a line here can be placed against anything else
     /// timestamped on the same machine — the device log included, if a run ever captures it.
     private static let stamp: DateFormatter = {
@@ -70,24 +114,23 @@ final class BackRuleEdgeBandUITests: XCTestCase {
         return f
     }()
 
-    /// Start points, in screen points from the leading edge.
+    /// Start points, in screen points from the leading edge: 8 to 60 in 4 pt steps.
     ///
-    /// 40 is the observed failure's own start and carries most of the trials. 16, 28 and 48 are
-    /// inside the avatar lane (x ∈ [12, 48]) — 28 is also the lone datum from the recorded hand
-    /// sweep that this investigation spent a long time arguing about. 80 is
-    /// `SwipeDirectionsUITests.appOwnedStartX`, off the avatar, the control.
-    private static let observed: CGFloat = 40
-    private static let starts: [CGFloat] = [16, 28, observed, 48, 80]
+    /// The coarse pass has already run (16, 28, 40 and 48 took the chat off the front on 19 of 19
+    /// trials; 80 did not on 3 of 3), so the open question is no longer reproduction but where
+    /// the boundary sits. It brackets the measured avatar column, 12–48 pt, and the bubble body's
+    /// leading edge at 52 — `Theme.memberAvatar`'s own documented geometry.
+    private static let sweep: [CGFloat] = Array(stride(from: CGFloat(8), through: 60, by: 4))
 
-    /// Trials at the observed start point, and at each of the others.
+    /// One trial per sweep point, and three per control.
     ///
-    /// Weighted rather than even, because the question is reproduction at one known point and
-    /// not the shape of a boundary. Ten at x = 40 is worth stating as a bound: the original
-    /// popped on two of three gates, and if a rate near that were real, ten trials would miss it
-    /// with probability about 0.0015 %. Zero pops in ten would bound the rate below 25.9 % —
-    /// which is the honest reading, rather than "it does not happen".
-    private static let observedTrials = 10
-    private static let otherTrials = 3
+    /// Even rather than weighted, and thin on purpose: the coarse pass was 19/19 and 0/3, so the
+    /// effect is deterministic at this resolution and a boundary needs points rather than
+    /// repeats. The controls carry three each because they are the trials the verdict rests on.
+    /// A single `stayed` still only bounds a rate, and the boundary in the table is read as the
+    /// step between a fired point and a neighbouring one that did not, never as proof of zero.
+    private static let sweepTrials = 1
+    private static let controlTrials = 3
 
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -267,22 +310,151 @@ final class BackRuleEdgeBandUITests: XCTestCase {
             .firstMatch.exists
     }
 
+    // MARK: Geometry
+    //
+    // The sweep's x-axis was read against a disc whose vertical position was inferred from
+    // `HStack(alignment: .bottom)` and never measured, and `Transcript.swift:818` puts the disc on
+    // the *last* avatar-bearing row of a run's first message, which need not be this row. So the
+    // frames are measured and printed, and each touch is mapped to the row it actually lands in.
+
+    private struct RowBox {
+        let id: String
+        let frame: CGRect
+    }
+
+    private struct AvatarBox {
+        let row: String
+        let frame: CGRect
+    }
+
+    private struct Geometry {
+        let bubble: CGRect
+        let rows: [RowBox]
+        let avatars: [AvatarBox]
+        /// `bubble-name`, the other door to the same `openProfile(personTarget)`.
+        let name: CGRect?
+        /// The disc on the row under test, when the run put one there.
+        let ownAvatar: CGRect?
+    }
+
+    private func box(_ r: CGRect) -> String {
+        "(x \(Int(r.minX))–\(Int(r.maxX)), y \(Int(r.minY))–\(Int(r.maxY)))"
+    }
+
+    private func rowBoxes(_ app: XCUIApplication) -> [RowBox] {
+        app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "bubble:"))
+            .allElementsBoundByIndex
+            .map { RowBox(id: $0.identifier, frame: $0.frame) }
+            .filter { !$0.frame.isEmpty }
+    }
+
+    /// The row a point lands in: the smallest container holding it, since a row's elements nest.
+    private func rowContaining(_ point: CGPoint, _ rows: [RowBox]) -> String {
+        rows.filter { $0.frame.contains(point) }
+            .min { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }?
+            .id ?? "none"
+    }
+
+    private func measure(_ app: XCUIApplication, bubble: CGRect) -> Geometry {
+        let rows = rowBoxes(app)
+        let avatars = app.descendants(matching: .any).matching(identifier: "sender-avatar")
+            .allElementsBoundByIndex
+            .map(\.frame)
+            .filter { !$0.isEmpty }
+            .map { AvatarBox(row: rowContaining(CGPoint(x: $0.midX, y: $0.midY), rows), frame: $0) }
+        let name = app.descendants(matching: .any).matching(identifier: "bubble-name")
+            .allElementsBoundByIndex
+            .map(\.frame)
+            .first { !$0.isEmpty && bubble.intersects($0) }
+        return Geometry(bubble: bubble, rows: rows, avatars: avatars, name: name,
+                        ownAvatar: avatars.first { $0.row == "bubble:\(Self.row)" }?.frame)
+    }
+
+    private func printGeometry(_ g: Geometry, _ tag: String) {
+        print("short-right-swipe geometry [\(tag)]: bubble:\(Self.row)=\(box(g.bubble)) "
+              + "bubble-name=\(g.name.map { box($0) } ?? "none") "
+              + "own-row-disc=\(g.ownAvatar.map { box($0) } ?? "none") discs=\(g.avatars.count)")
+        for a in g.avatars {
+            print("short-right-swipe geometry [\(tag)]: disc \(box(a.frame)) sits in row \(a.row)")
+        }
+    }
+
+    /// The disc nearest `y`, for the detector control when the row under test carries none.
+    private func nearestDisc(_ g: Geometry, to y: CGFloat) -> CGRect? {
+        g.ownAvatar ?? g.avatars.map(\.frame).min { abs($0.midY - y) < abs($1.midY - y) }
+    }
+
+    // MARK: Aiming
+
+    /// Where a trial puts its finger down. The three aims exist to separate the two surviving
+    /// explanations for the profile page, which the earlier table could not tell apart because
+    /// every one of its drags both started in the avatar column and ended on the bubble.
+    private enum Aim {
+        /// A start x at the row's vertical middle: the observed failure's own aim, and the sweep.
+        case atRowMiddle(CGFloat)
+        /// The measured centre of the disc — the only aim that puts touch-down inside the avatar
+        /// `Button`, which is what the avatar explanation requires.
+        case atDiscCentre
+        /// Start on the bubble body so the drag *ends* inside `bubble-name`, which is what the
+        /// name-button explanation requires. Nothing has tested it: `bubble-name` sits at the
+        /// bubble's top and every earlier drag ran at the row's middle, so they missed it
+        /// vertically however far right they went.
+        case endingInTheName
+    }
+
     private struct Trial {
-        let outcome: Outcome
+        /// `nil` when the trial could not be aimed. Never scored as a result — a trial that did
+        /// not happen is not a trial that found nothing.
+        let outcome: Outcome?
         let onAvatar: Bool
     }
 
-    private func trial(startX: CGFloat) -> Trial {
+    private func trial(_ aim: Aim, _ label: String) -> Trial {
         let app = launchGroup()
         let bubble = revealRow(app, Self.row)
         let frame = stableFrame(of: bubble)
-        let y = frame.midY
-        let point = CGPoint(x: startX, y: y)
+        let g = measure(app, bubble: frame)
+        let point: CGPoint
+        switch aim {
+        case .atRowMiddle(let x):
+            point = CGPoint(x: x, y: frame.midY)
+        case .atDiscCentre:
+            guard let disc = nearestDisc(g, to: frame.midY) else {
+                printGeometry(g, label)
+                print("short-right-swipe repro: [\(label)] no disc on screen to aim at — not a trial")
+                return Trial(outcome: nil, onAvatar: false)
+            }
+            point = CGPoint(x: disc.midX, y: disc.midY)
+        case .endingInTheName:
+            guard let name = g.name else {
+                printGeometry(g, label)
+                print("short-right-swipe repro: [\(label)] no bubble-name in the row — not a trial")
+                return Trial(outcome: nil, onAvatar: false)
+            }
+            // Clamped to the bubble body: a control that also started in the avatar column would
+            // reproduce the ambiguity it exists to remove.
+            point = CGPoint(x: max(Self.bubbleBodyX, name.midX - Self.distance), y: name.midY)
+        }
         let onAvatar = onSenderAvatar(app, point)
-        XCTAssertLessThan(startX + Self.distance, frame.maxX,
+        let rowAtPoint = rowContaining(point, g.rows)
+        let endPoint = CGPoint(x: point.x + Self.distance, y: point.y)
+        let endsInName = g.name.map { $0.contains(endPoint) } ?? false
+        XCTAssertLessThan(point.x + Self.distance, frame.maxX,
                           "the whole \(Int(Self.distance)) pt drag stays on the row, so the drag "
                           + "measured is the one asked for and not a clamped one")
-        let start = screenPoint(app, x: startX, y: y)
+        if case .endingInTheName = aim {
+            // Both conditions are what make this a control rather than another ambiguous trial:
+            // it has to begin clear of the avatar column and actually finish inside the name.
+            XCTAssertGreaterThanOrEqual(point.x, Self.bubbleBodyX,
+                                        "the name control starts on the bubble body, not in the "
+                                        + "avatar column it exists to rule out")
+            XCTAssertTrue(endsInName,
+                          "the name control's drag finishes inside bubble-name \(box(g.name ?? .zero)); "
+                          + "a drag that misses it tests nothing and must not be read as the name "
+                          + "button standing down")
+        }
+        let start = screenPoint(app, x: point.x, y: point.y)
         // Absolute timestamps either side of the drag. The runner's own `t = …s` lines are
         // relative to the test, and a reading taken 1 s after the press cannot be placed against
         // anything the app did without a shared clock.
@@ -303,14 +475,57 @@ final class BackRuleEdgeBandUITests: XCTestCase {
         let readAt = Date()
         // Every discriminator printed, so a cover, a pop and a profile page are read off the
         // line rather than worked out from it.
-        print("short-right-swipe repro: x=\(Int(startX)) y=\(Int(y)) row=\(Self.row) "
-              + "avatar=\(onAvatar) chat-back=\(backThere) frontmost=\(frontmost) "
+        print("short-right-swipe repro: [\(label)] x=\(Int(point.x)) y=\(Int(point.y)) "
+              + "end-x=\(Int(endPoint.x)) row-at-point=\(rowAtPoint) "
+              + "avatar=\(onAvatar) ends-in-name=\(endsInName) "
+              + "chat-back=\(backThere) frontmost=\(frontmost) "
               + "profile=\(profile) -> \(outcome.rawValue) "
               + "| pressed=\(Self.stamp.string(from: pressedAt)) "
               + "released=\(Self.stamp.string(from: releasedAt)) "
               + "read=\(Self.stamp.string(from: readAt)) "
               + "drag=\(String(format: "%.3f", releasedAt.timeIntervalSince(pressedAt)))s")
         return Trial(outcome: outcome, onAvatar: onAvatar)
+    }
+
+    /// A positive control for the avatar detector, which is load-bearing and was never proven.
+    ///
+    /// `avatar=false` on 22 of 22 trials is indistinguishable from a detector that cannot fire,
+    /// and it is the one reading that contradicts the avatar-button explanation — so it is exactly
+    /// the shape this project files as "no instrument distinguishes *not happening* from *not
+    /// observed*". The control removes the ambiguity: aim a plain tap at the measured centre of a
+    /// disc, and the detector must say `true` while the tap opens the page.
+    ///
+    /// This one asserts, unlike the sweep. A detector that cannot fire does not weaken the
+    /// sweep's x-axis, it voids it, and the file's rule is to assert the things that would make
+    /// its own numbers meaningless.
+    func testTheAvatarDetectorFiresAtTheMeasuredCentreOfADisc() {
+        let app = launchGroup()
+        let bubble = revealRow(app, Self.row)
+        let g = measure(app, bubble: stableFrame(of: bubble))
+        printGeometry(g, "detector-control")
+        guard let disc = nearestDisc(g, to: g.bubble.midY) else {
+            return XCTFail("a sender disc is on screen to aim the detector control at")
+        }
+        let centre = CGPoint(x: disc.midX, y: disc.midY)
+        let onAvatar = onSenderAvatar(app, centre)
+        print("short-right-swipe detector control: disc=\(box(disc)) "
+              + "centre=(\(Int(centre.x)), \(Int(centre.y))) "
+              + "row-at-point=\(rowContaining(centre, g.rows)) "
+              + "on-row-under-test=\(g.ownAvatar != nil) avatar=\(onAvatar)")
+        XCTAssertTrue(onAvatar,
+                      "the detector fires at the centre of the disc it has just measured. If this "
+                      + "fails, `avatar=false` in the sweep is a reading about the detector and "
+                      + "not about the geometry, and the sweep's x-axis means nothing")
+
+        screenPoint(app, x: centre.x, y: centre.y).tap()
+        let page = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "profile-")).firstMatch
+        let appeared = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true"),
+                                                 object: page)
+        XCTAssertEqual(XCTWaiter().wait(for: [appeared], timeout: 20), .completed,
+                       "a plain tap at the disc's centre opens the sender's page, so the tap path "
+                       + "and the cover marker both work and a silent profile is not the reason a "
+                       + "trial reads as stayed")
     }
 
     /// Sweep the start point in the chat and on the row where the pop was observed, and print
@@ -329,37 +544,87 @@ final class BackRuleEdgeBandUITests: XCTestCase {
     /// sender-avatar column, which only a group draws, so the same sweep in a DM returns `stayed`
     /// at every start point and says nothing at all.
     func testWhatAFiftyPointRightSwipeDoesWhereOneWasObservedToPop() {
-        var rows: [(x: CGFloat, pops: Int, covers: Int, avatar: Int, trials: Int)] = []
-        for x in Self.starts {
-            let count = x == Self.observed ? Self.observedTrials : Self.otherTrials
-            var pops = 0, covers = 0, avatar = 0
-            for _ in 1...count {
-                let result = trial(startX: x)
-                if result.outcome == .popped { pops += 1 }
-                if result.outcome == .covered { covers += 1 }
+        // The geometry first, so the x-axis below is read against measured frames rather than
+        // against a column position inferred from a layout alignment.
+        let opening = launchGroup()
+        let openingRow = revealRow(opening, Self.row)
+        let g0 = measure(opening, bubble: stableFrame(of: openingRow))
+        printGeometry(g0, "sweep")
+        // `bubble-name`'s box against the drag end points. If it contains none of them, the
+        // name-button explanation is refuted by arithmetic before a finger moves.
+        let ends = Self.sweep.map { CGPoint(x: $0 + Self.distance, y: g0.bubble.midY) }
+        let reachable = g0.name.map { nameBox in ends.filter { nameBox.contains($0) } } ?? []
+        print("short-right-swipe geometry [sweep]: of \(ends.count) sweep end points at the row's "
+              + "middle, \(reachable.count) land inside bubble-name — "
+              + (g0.name == nil ? "no name box measured"
+                 : (reachable.isEmpty
+                    ? "so the name button cannot be what any row-middle drag reached"
+                    : "so the name button is reachable from the row's middle")))
+
+        var rows: [(x: CGFloat, fired: Int, covers: Int, avatar: Int, trials: Int)] = []
+        for x in Self.sweep {
+            var fired = 0, covers = 0, avatar = 0, ran = 0
+            for _ in 1...Self.sweepTrials {
+                let result = trial(.atRowMiddle(x), "sweep")
+                guard let outcome = result.outcome else { continue }
+                ran += 1
+                if outcome != .stayed { fired += 1 }
+                if outcome == .covered { covers += 1 }
                 if result.onAvatar { avatar += 1 }
             }
-            rows.append((x, pops, covers, avatar, count))
-            print("short-right-swipe repro: x=\(Int(x)) popped \(pops)/\(count) "
-                  + "covered \(covers)/\(count) on-avatar \(avatar)/\(count)")
+            rows.append((x, fired, covers, avatar, ran))
+            print("short-right-swipe repro: x=\(Int(x)) fired \(fired)/\(ran) "
+                  + "covered \(covers)/\(ran) on-avatar \(avatar)/\(ran)")
         }
 
         let table = rows.map {
-            "\(Int($0.x)):pop\($0.pops)/\($0.trials),cov\($0.covers),av\($0.avatar)"
+            "\(Int($0.x)):fired\($0.fired)/\($0.trials),cov\($0.covers),av\($0.avatar)"
         }.joined(separator: " ")
         print("short-right-swipe repro table: \(table)")
+        let fired = rows.filter { $0.fired > 0 }.map { Int($0.x) }
+        print("short-right-swipe repro: the drag took the chat off the front at x = \(fired), "
+              + "and did not at x = \(rows.filter { $0.fired == 0 }.map { Int($0.x) })")
 
-        let reproduced = rows.filter { $0.pops > 0 || $0.covers > 0 }.map { Int($0.x) }
-        if reproduced.isEmpty {
-            print("short-right-swipe repro: not reproduced at any start point. Every trial "
-                  + "stayed, so each point's rate is bounded and none is shown to be zero.")
-        } else {
-            print("short-right-swipe repro: REPRODUCED at x = \(reproduced) — a \(Int(Self.distance)) pt "
-                  + "drag took the chat off the front. Read the per-trial lines for which way: "
-                  + "`profile=true` names a page pushed over the chat, and that is a cover, not a "
-                  + "pop. This test cannot tell a pop from a cover on `chat-back` alone — that is a "
-                  + "navigation-bar item and a push swaps the bar out — so a popped reading without "
-                  + "a cover marker is the only one that implicates the back rule.")
+        // MARK: The two controls that separate the explanations
+
+        let discControl = (1...Self.controlTrials).map { _ in trial(.atDiscCentre, "disc-centre") }
+        let nameControl = (1...Self.controlTrials).map { _ in trial(.endingInTheName, "ends-in-name") }
+        let discRan = discControl.compactMap(\.outcome)
+        let nameRan = nameControl.compactMap(\.outcome)
+        XCTAssertFalse(discRan.isEmpty, "the disc-centre control was aimed at least once; it is "
+                       + "the control that can reach the avatar-button explanation at all")
+        XCTAssertFalse(nameRan.isEmpty, "the ends-in-name control was aimed at least once; without "
+                       + "it the name-button explanation stays untested rather than refuted")
+        let discFired = discRan.filter { $0 != .stayed }.count
+        let nameFired = nameRan.filter { $0 != .stayed }.count
+        let discOnAvatar = discControl.filter(\.onAvatar).count
+        print("short-right-swipe controls: disc-centre fired \(discFired)/\(discRan.count) "
+              + "(detector said on-avatar \(discOnAvatar)/\(discControl.count)); "
+              + "ends-in-name fired \(nameFired)/\(nameRan.count)")
+
+        // A verdict, not a ranking. Each explanation has a control that can reach it, so each
+        // one's own control decides it.
+        switch (discFired > 0, nameFired > 0) {
+        case (true, false):
+            print("short-right-swipe verdict: the AVATAR BUTTON is the mechanism. Touch-down on "
+                  + "the measured disc opens the page and a drag ending in bubble-name does not, "
+                  + "so the x band in the table is the avatar column and the row-middle trials "
+                  + "were landing on the button after all — read the printed disc frame against "
+                  + "`avatar=false` to see where the earlier geometry reading went wrong.")
+        case (false, true):
+            print("short-right-swipe verdict: the NAME BUTTON is the mechanism. A drag ending in "
+                  + "bubble-name opens the page and touch-down on the disc does not, so the x band "
+                  + "in the table is where the drags ENDED and not where they began — the avatar "
+                  + "column was a coincidence of a 50 pt drag starting left of the bubble.")
+        case (true, true):
+            print("short-right-swipe verdict: BOTH doors open the page, which is consistent with "
+                  + "them sharing one openProfile(personTarget). The table alone cannot apportion "
+                  + "the row-middle trials between them; the fix has to answer for both.")
+        case (false, false):
+            print("short-right-swipe verdict: NEITHER control fired while the sweep did, so the "
+                  + "mechanism is a third thing and both surviving explanations are refuted. Read "
+                  + "the row-at-point column: the sweep's touches are landing somewhere neither "
+                  + "control aimed at.")
         }
     }
 }
