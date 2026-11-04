@@ -44,6 +44,12 @@ const IDENTITY_FIELDS: [&str; 2] = ["sender", "role"];
 /// the distinction.
 pub const SYSTEM_SENDER: &str = "system";
 
+/// What an agent's own reply is marked with in its own project chat. `ChatDoc` writes it on
+/// every assistant row (`start_assistant_message`) and does not repeat the project id, because
+/// inside that chat there is one agent and the clients draw it from the chat. The push names
+/// the project, so the relay can supply what the row leaves out.
+pub const AGENT_SENDER: &str = "agent";
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum PushCheck {
     Allow {
@@ -104,14 +110,33 @@ impl Pusher {
     }
 
     /// The author to record for a row this socket introduced, where the relay can name one.
-    fn attribution(&self, state: &AppState, sender: Option<&str>) -> Option<String> {
+    ///
+    /// `project_id` is the project whose room this push is for, and it is what lets a box's own
+    /// reply be recorded. An assistant row in an agent's own chat is marked with the bare
+    /// [`AGENT_SENDER`] and carries no project id, so this used to resolve to nothing: the row
+    /// went in with no author, and when the box deleted its own interim line a moment later the
+    /// delete check found no author to match and refused it as somebody else's message — which
+    /// then went unacked and took the room link down with it (Jacob's Test3 chat, 2026-11-04).
+    fn attribution(
+        &self,
+        state: &AppState,
+        project_id: &str,
+        sender: Option<&str>,
+    ) -> Option<String> {
         match self {
             // A person's row is that person's, named on the row or not.
             Self::Person(me) => Some(me.clone()),
             // A box writes for whichever of its owner's agents the row names. With no name on
             // the row there is nothing to resolve — `Principal::Box` is the owner, not one
             // agent — and a guess in this record is worse than a gap in it.
-            Self::BoxOf(_) => sender.filter(|s| self.owns(state, s)).map(str::to_owned),
+            Self::BoxOf(_) => {
+                let named = sender.filter(|s| self.owns(state, s)).map(str::to_owned);
+                if named.is_some() {
+                    return named;
+                }
+                let agent = format!("agent:{project_id}");
+                (sender == Some(AGENT_SENDER) && self.owns(state, &agent)).then_some(agent)
+            }
         }
     }
 }
@@ -220,7 +245,7 @@ pub fn check_push(
     let mut attributed = Vec::new();
     for (id, sender) in &changes.inserted {
         let mut attest = || {
-            if let Some(who) = me.attribution(state, sender.as_deref()) {
+            if let Some(who) = me.attribution(state, project_id, sender.as_deref()) {
                 attributed.push((id.clone(), who));
             }
         };
@@ -253,6 +278,14 @@ pub fn check_push(
                 carries_new_message = true;
                 attest();
             }
+            // The agent's own reply in the agent's own chat, which wears the bare marker and
+            // no project id. Only the box of the project's owner can get here — `attribution`
+            // checks that before it names anything — and the record has to hold the row, or the
+            // agent cannot delete the interim line it just wrote.
+            (None, Some(AGENT_SENDER)) => {
+                carries_new_message = !claims_heal;
+                attest();
+            }
             // A system line. Every app writes these for call lines through
             // `ChatDoc::append_system_line`, which hard-codes `sender: "system"`, so refusing
             // them here would break Mac, iOS and agentd. Forged system lines are a separate
@@ -276,9 +309,7 @@ pub fn check_push(
             (None, Some(_)) => {
                 if !claims_heal {
                     carries_new_message = true;
-                    if let Some(who) = me.attribution(state, None) {
-                        attributed.push((id.clone(), who));
-                    }
+                    attest();
                 }
             }
         }
@@ -812,6 +843,66 @@ mod tests {
             );
             assert!(attributed.is_empty(), "nothing readable, nothing attested");
         }
+    }
+
+    /// An agent's own reply in its own chat. `ChatDoc::start_assistant_message` marks the row
+    /// with the bare `agent` and no project id, so the record used to get no author for it —
+    /// and the delete that follows a moment later, when the agent clears the interim line it
+    /// just wrote, found nothing to match and was refused as somebody else's message. The
+    /// refusal is answered with an error frame and no ack, so agentd's inflight push timed out
+    /// and tore the room link down (Jacob's Test3 chat, 2026-11-04).
+    #[test]
+    fn an_agent_owns_the_reply_it_pushed_into_its_own_chat() {
+        let state = test_state(AuthMode::Github);
+        let (jacob, _jacob_dev) = person(&state, 301);
+        let project = crate::people::tests_support::project_of(&state, &jacob, "Test3");
+        let chat = format!("c_{project}");
+        let box_of_jacob = Principal::Box {
+            user_id: jacob.clone(),
+        };
+
+        let mut c = changes();
+        c.inserted = vec![("m_interim".to_owned(), Some(AGENT_SENDER.to_owned()))];
+        let PushCheck::Allow { attributed, .. } =
+            check_push(&state, &box_of_jacob, &project, &chat, false, &c)
+        else {
+            panic!("the agent's own reply is the agent's to push");
+        };
+        assert_eq!(
+            attributed,
+            [("m_interim".to_owned(), format!("agent:{project}"))],
+            "the push names the project the bare marker leaves out"
+        );
+        for (id, who) in &attributed {
+            state.db.record_message_author(&chat, id, who).unwrap();
+        }
+
+        let mut c = changes();
+        c.removed = vec!["m_interim".to_owned()];
+        assert!(
+            !refused(&check_push(
+                &state,
+                &box_of_jacob,
+                &project,
+                &chat,
+                false,
+                &c
+            )),
+            "an agent must be able to delete the interim line it just wrote"
+        );
+
+        // Another person's box does not become this agent just by pushing into its room.
+        let (mallory, _mallory_dev) = person(&state, 302);
+        let mut c = changes();
+        c.removed = vec!["m_interim".to_owned()];
+        assert!(refused(&check_push(
+            &state,
+            &Principal::Box { user_id: mallory },
+            &project,
+            &chat,
+            false,
+            &c
+        )));
     }
 
     /// A push that touches no message at all — a reaction, a command, a part edit — is not a
