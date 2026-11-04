@@ -4827,6 +4827,13 @@ private struct ComposerField: View {
     /// Pictures / files pasted into the field ([feedback copy-image-messages-ios-2026-10-27]).
     var onPasteMedia: (([AppModel.PendingAttachment]) -> Void)? = nil
 
+    /// Raised by the touch that opens the keyboard and lowered one beat later, so the
+    /// bar brightens under the finger before the keyboard is up (Grok's composer, Jacob
+    /// 2026-11-04). `flashedAt` restarts the pulse: a second touch during the fall
+    /// cancels it and brightens again rather than finishing the first one's fade.
+    @State private var flashing = false
+    @State private var flashedAt: Date?
+
     private var canSend: Bool {
         !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasPending
     }
@@ -4981,7 +4988,8 @@ private struct ComposerField: View {
                                 agentProject: { model.agent(member: $0, chatId: chatId) },
                                 onPasteMedia: onPasteMedia,
                                 onDeleteBackwardEmpty: onDeleteBackwardEmpty,
-                                onPasteImage: onPasteImage)
+                                onPasteImage: onPasteImage,
+                                onFirstTouchDown: { flashedAt = Date() })
                     .fixedSize(horizontal: false, vertical: true)
             }
             // Grok's trailing cluster: mic glyph centre 24 pt before the pill, the pill
@@ -5029,8 +5037,26 @@ private struct ComposerField: View {
         // The family's field: solid on Matte; on Glass the clear system glass and nothing of
         // ours on it, so the transcript reads through the pill ([feedback
         // iphone-composer-glass-2026-10-28]). Rim below.
-        .background(PillSurface(shape: fieldShape)) // control-size: source (the family's field, rim below)
+        // The flash sits in the background, over the surface: a wash in front of the
+        // field would dim the words it is meant to acknowledge, and would have to be
+        // taken out of hit testing to let the touch through at all.
+        .background {
+            ZStack {
+                PillSurface(shape: fieldShape) // control-size: source (the family's field, rim below)
+                ComposerPressFlash(shape: fieldShape, on: flashing || DebugHooks.composerFlashHeld)
+            }
+        }
         .overlay(ComposerRim(shape: fieldShape, tint: rimTint))
+        .task(id: flashedAt) {
+            guard flashedAt != nil else { return }
+            withAnimation(.easeOut(duration: Theme.composerFlashRise)) { flashing = true }
+            try? await Task.sleep(nanoseconds: UInt64(Theme.composerFlashRise * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeIn(duration: Theme.composerFlashFall)) { flashing = false }
+            // Back to rest, so a later appearance of the bar cannot replay the pulse
+            // (`LeafAvatar`'s gust does the same with `gustStart`).
+            flashedAt = nil
+        }
         .alert("Microphone access is off", isPresented: $recorder.permissionDenied) {
             Button("OK", role: .cancel) { }
         } message: {
