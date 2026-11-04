@@ -971,11 +971,12 @@ mod tests {
     use super::*;
 
     /// `clip` used to slice by byte, so a cut landing inside a multi-byte character panicked.
-    /// Every offset below is one a caller really passes: `peek` 16,000, `history_read` and
-    /// `page_rows` 8,000, `sub_llm` 2,000, the audit lines 200 and 300.
+    /// Every offset below is one a caller really passes: the approval-card summary 160, the
+    /// per-call argument log 200, search snippets 300, `sub_llm` 2,000, `history_read` and
+    /// `page_rows` 8,000, `peek` 16,000.
     #[test]
     fn clip_cuts_between_characters_never_inside_one() {
-        for max in [200, 300, 2_000, 8_000, 16_000] {
+        for max in [160, 200, 300, 2_000, 8_000, 16_000] {
             // Three bytes per character, so no multiple of a byte offset is a boundary.
             let cjk = "日".repeat(max);
             let out = clip(&cjk, max / 2);
@@ -990,11 +991,23 @@ mod tests {
         }
     }
 
-    /// The suffix says "chars", so it must count characters. It used to report a byte delta.
+    /// The suffix says "chars", so it must count characters. It used to print `s.len() - max`,
+    /// a byte delta, which overstated the remainder by the multi-byte overhead.
     #[test]
     fn clip_reports_the_remainder_in_characters() {
         assert_eq!(clip("日日日日", 1), "日…[3 more chars]");
         assert_eq!(clip("abcd", 2), "ab…[2 more chars]");
+    }
+
+    /// The quiet half, on its own. The cut here lands on a character boundary, so the old
+    /// byte-slicing `clip` did not panic and returned this exact head — it just called the
+    /// three remaining characters nine. A correct slice with a lying count is still wrong.
+    #[test]
+    fn clip_counted_the_remainder_in_bytes_even_when_it_did_not_panic() {
+        let s = "aaaa日日日";
+        assert!(s.is_char_boundary(4), "the old byte cut was legal here");
+        assert_eq!(s.len() - 4, 9, "the old count would have said nine");
+        assert_eq!(clip(s, 4), "aaaa…[3 more chars]");
     }
 
     /// Text that fits comes back untouched, including text whose byte length exceeds `max`.
