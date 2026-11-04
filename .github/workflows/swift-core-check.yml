@@ -139,24 +139,34 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-  # The one row to read, and the reason scripts/merge/checks.sh is allowed to read this gate at the
-  # run level at all. GitHub concludes a run `success` when every job is success-or-skipped, so a
-  # run whose check skipped or was killed must carry a job that failed, or the run itself reports a
-  # pass for work nobody did. Until now that held only by accident: one job meant a skipped check
-  # produced a `skipped` run, which gate_state does not read as a pass. Adding any second job that
-  # can succeed while `check` did not is what turns the accident into a fail-open — so the second
-  # job added here is the one that cannot.
+  # CONSTRAINT — this is the "matching constraint comment on the workflow side" that
+  # scripts/merge/checks.sh's gate_state header points at, and which was missing from this file.
   #
-  # Its condition is `check`'s condition, deliberately copied rather than relaxed: this job runs
-  # exactly when `check` was meant to run, and skips with it otherwise. An in-repo pull request
-  # still skips both and still concludes `skipped`, so nothing that reads today reads differently
-  # and no pull request turns red for the deliberate mirror skip.
+  # gate_state reads this gate's RUN conclusion rather than a named check row, and GitHub concludes
+  # a run `success` when every job is success-or-skipped. So a run conclusion equals a real verdict
+  # only while no job here can succeed without testing. Until now that held by accident of
+  # arithmetic: one job meant a skipped check produced a `skipped` run, which gate_state does not
+  # read as a pass. The accident becomes a fail-open the moment this file gains a second job that
+  # can succeed while `check` did not — so the second job added here is the one that cannot, and
+  # that is the invariant anyone adding a third job has to preserve. Do not give this job
+  # `continue-on-error: true`, and do not add a job that always succeeds.
   #
-  # #2448 carries the full version of this job, with a `route` job and a `push-run` mirror that
-  # waits for the twin's verdict. That is the one checks.sh's comments describe and it supersedes
-  # this on landing — replace this job with that one wholesale rather than merging them. This is
-  # the same guarantee reduced to main's current single-job shape, because the alarm checks.sh
-  # tells its reader to treat as impossible is firing routinely today.
+  # Its condition is `check`'s condition, copied verbatim rather than relaxed, so it runs exactly
+  # when `check` was meant to run and skips alongside it otherwise. An in-repo pull request still
+  # skips both and still concludes `skipped`, so nothing that reads this gate today reads
+  # differently and no pull request turns red for the deliberate mirror skip.
+  #
+  # That guard is this job's one divergence from the `if: always()` checks.sh describes, and it is
+  # deliberate. Bare always() without #2448's `push-run` mirror would fail every in-repo pull
+  # request run, where `check` skips by design because the push twin covers it. The divergence can
+  # only withhold a false failure, never produce a false pass: this job succeeds on exactly one
+  # condition, that `check` succeeded.
+  #
+  # #2448 carries the full version, with a `route` job and a `push-run` mirror that waits for the
+  # twin's verdict, and that is the one checks.sh's comments describe. It supersedes this on
+  # landing — replace this job with that one wholesale rather than merging them. This is the same
+  # guarantee reduced to main's current single-job shape, because the branch checks.sh tells its
+  # reader is unreachable is in fact reachable, and fires today.
   verdict:
     name: Swift verdict
     needs: check
