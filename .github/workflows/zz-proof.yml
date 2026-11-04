@@ -1,0 +1,124 @@
+name: zz proof
+
+# TEMPORARY. Deleted before this branch's pull request.
+#
+# The rust gate dies of ENOSPC on about one run in twenty-five, which is too rare to iterate
+# against. A fleet probe found why: one hosted `ubuntu-24.04` fleet (AWS us-west-2, image
+# 20261018.96.1) hands out a 72 GB disk with 13460 MiB free, against 86 GiB on the Azure fleet,
+# and this job needs about 25 GiB. So both jobs below ballast the disk down to exactly that
+# measured 13460 MiB and then run the rust gate's own steps.
+#
+#   before — the steps as they stand on main. Expected to die the production death: no step
+#            output, no log, and a `System.IO.IOException: No space left on device` annotation
+#            against the runner's own worker.
+#   after  — the same steps with the reclaim step this branch adds to ci.yml. Expected green.
+#
+# Same ballast, same steps, one difference. `shared-key: rust` makes the cache restore hit the
+# very entry ci.yml's rust job restores, so the step that fails in production is the step that
+# runs here.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["cursor/rust-gate-disk-exhaustion-b608"]
+    paths: [".github/workflows/zz-proof.yml"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  before:
+    name: "13460 MiB free — rust gate as it stands"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Ballast the disk down to the short fleet's headroom
+        run: |
+          set -euo pipefail
+          avail=$(df -B1M --output=avail / | tail -1 | tr -d ' ')
+          sudo fallocate -l "$(( avail - 13460 ))M" /ballast
+          now=$(df -B1M --output=avail / | tail -1 | tr -d ' ')
+          echo "was $avail MiB free, now $now MiB free" | tee -a "$GITHUB_STEP_SUMMARY"
+          df -h /
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust
+          save-if: "false"
+      - name: Linux libraries for arbos-mac (GPUI)
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb-xkb-dev libasound2-dev libssl-dev libgl1-mesa-dev libfontconfig-dev libstdc++-14-dev libglib2.0-dev
+      - name: clang 21 for webrtc-sys
+        run: |
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          sudo bash /tmp/llvm.sh 21 >/dev/null
+          echo "CC=/usr/lib/llvm-21/bin/clang" >> "$GITHUB_ENV"
+          echo "CXX=/usr/lib/llvm-21/bin/clang++" >> "$GITHUB_ENV"
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+      - name: Survived
+        if: always()
+        run: df -h /
+
+  after:
+    name: "13460 MiB free — rust gate with the reclaim step"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Ballast the disk down to the short fleet's headroom
+        run: |
+          set -euo pipefail
+          avail=$(df -B1M --output=avail / | tail -1 | tr -d ' ')
+          sudo fallocate -l "$(( avail - 13460 ))M" /ballast
+          now=$(df -B1M --output=avail / | tail -1 | tr -d ' ')
+          echo "was $avail MiB free, now $now MiB free" | tee -a "$GITHUB_STEP_SUMMARY"
+          df -h /
+      # Byte-identical to the step this branch adds to ci.yml's rust job.
+      - name: Make room on the short-disk fleet
+        run: |
+          set -euo pipefail
+          need=30720
+          avail=$(df -B1M --output=avail / | tail -1 | tr -d ' ')
+          if [ "$avail" -ge "$need" ]; then
+            echo "$avail MiB free on /; this job needs about 25000 MiB, so nothing is removed"
+            exit 0
+          fi
+          echo "$avail MiB free on / — short for a ~25000 MiB job, reclaiming unused SDKs"
+          for d in /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /usr/share/swift \
+                   /usr/local/share/powershell /opt/hostedtoolcache/CodeQL /usr/share/miniconda; do
+            if [ -e "$d" ]; then sudo rm -rf "$d"; fi
+          done
+          avail=$(df -B1M --output=avail / | tail -1 | tr -d ' ')
+          echo "$avail MiB free on / now"
+          if [ "$avail" -lt "$need" ]; then
+            echo "::warning title=Short disk::Only $avail MiB free after reclaiming; if this job dies without reporting a step, it ran out of disk."
+          fi
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust
+          save-if: "false"
+      - name: Linux libraries for arbos-mac (GPUI)
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb-xkb-dev libasound2-dev libssl-dev libgl1-mesa-dev libfontconfig-dev libstdc++-14-dev libglib2.0-dev
+      - name: clang 21 for webrtc-sys
+        run: |
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          sudo bash /tmp/llvm.sh 21 >/dev/null
+          echo "CC=/usr/lib/llvm-21/bin/clang" >> "$GITHUB_ENV"
+          echo "CXX=/usr/lib/llvm-21/bin/clang++" >> "$GITHUB_ENV"
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+      - name: How much was left
+        if: always()
+        run: df -h /

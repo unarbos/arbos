@@ -70,6 +70,33 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
+      # `ubuntu-24.04` is two fleets, and one of them cannot hold this job. Measured over 40
+      # runners: 39 were Azure (`/dev/root`, 145 GB, 86 GiB free) and 1 was AWS us-west-2
+      # (`/dev/mapper/cow-root`, 72 GB, 13.1 GiB free) on the older 20261018 image. clippy plus
+      # the test build need ~19 GiB and the cache adds a few more, so on the small fleet the
+      # disk runs out during the first heavy write — the cache restore. The ENOSPC lands on the
+      # runner's own `_diag` log and kills its worker, so the job dies with no step output and
+      # no log, which is why this kept being read as a rust-cache flake. Reclaiming the image's
+      # unused SDKs costs about a minute, so only pay it when the headroom is actually short.
+      - name: Make room on the short-disk fleet
+        run: |
+          set -euo pipefail
+          need=30720
+          avail=$(df -B1M --output=avail / | tail -1 | tr -d ' ')
+          if [ "$avail" -ge "$need" ]; then
+            echo "$avail MiB free on /; this job needs about 25000 MiB, so nothing is removed"
+            exit 0
+          fi
+          echo "$avail MiB free on / — short for a ~25000 MiB job, reclaiming unused SDKs"
+          for d in /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /usr/share/swift \
+                   /usr/local/share/powershell /opt/hostedtoolcache/CodeQL /usr/share/miniconda; do
+            if [ -e "$d" ]; then sudo rm -rf "$d"; fi
+          done
+          avail=$(df -B1M --output=avail / | tail -1 | tr -d ' ')
+          echo "$avail MiB free on / now"
+          if [ "$avail" -lt "$need" ]; then
+            echo "::warning title=Short disk::Only $avail MiB free after reclaiming; if this job dies without reporting a step, it ran out of disk."
+          fi
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
