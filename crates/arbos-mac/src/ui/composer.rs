@@ -212,17 +212,17 @@ pub(crate) fn pasted_images_dir() -> PathBuf {
 // across thirteen files, so sizing the composer from them would turn one
 // measured control into an app-wide change.
 //
-// Line height is Grok's, measured: its composer sets a 42 px line pitch
-// against our 40 px, on a reference crop whose scale is pinned at 1.905 px/pt
-// by our own 21.0 showing as 40.0 px. 42 / 1.905 = 22.05, so 22.0.
+// Line height is Grok's, measured: its composer sets a 40.0 px line pitch
+// against our 42.0 px, on a reference crop pinned at 2.000 px/pt by three
+// 28.0 pt discs and by our own 21.0 showing as 41.997 px. So Grok is 20.0 pt
+// and we were 21.0.
 //
-// The font size is deliberately NOT moved. The brief asked for a smaller
-// composer font and every instrument says Grok's is larger, so the only
-// measured quantity here is the pitch; a size would have to be invented. The
-// crop cannot supply one either, because the x-height reading it would come
-// from is corrupted by digit density (lining figures are drawn to cap height,
-// so a digit-heavy line measures tall).
-const INPUT_LINE_HEIGHT: f32 = 22.0;
+// The font size is deliberately NOT moved. The pitch is the only composer
+// quantity the crop measures safely; a size would have to be invented,
+// because the x-height reading it would come from is corrupted by digit
+// density (lining figures are drawn to cap height, so a digit-heavy line
+// measures tall).
+const INPUT_LINE_HEIGHT: f32 = 20.0;
 const INPUT_FONT_SIZE: f32 = 15.0;
 
 #[derive(Clone, Debug)]
