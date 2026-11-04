@@ -2231,19 +2231,13 @@ pub(crate) async fn apply_event(state: &AppState, me: &AgentPrincipal, e: &Value
             let device = device_of(&pid);
             let (m, d) = (msg_id.clone(), device.clone());
             let a = approval_id.clone();
-            crate::notices::write_doc_as(
-                state,
-                Some(&pid),
-                &card_chat.id,
-                &device,
-                move |doc| {
-                    doc.start_assistant_message(&m, "", &d);
-                    doc.add_approval_part(&m, &a, &req, expires_at)
-                        .ok_or_else(|| anyhow::anyhow!("the card could not be written"))?;
-                    doc.finish_message(&m, MessageStatus::Done);
-                    Ok(())
-                },
-            )
+            crate::notices::write_doc_as(state, Some(&pid), &card_chat.id, &device, move |doc| {
+                doc.start_assistant_message(&m, "", &d);
+                doc.add_approval_part(&m, &a, &req, expires_at)
+                    .ok_or_else(|| anyhow::anyhow!("the card could not be written"))?;
+                doc.finish_message(&m, MessageStatus::Done);
+                Ok(())
+            })
             .await
             .map_err(|e| ("write_failed", e.to_string()))?;
             // The owner has to be reachable for a card to mean anything, so it is announced
@@ -2370,7 +2364,10 @@ pub async fn approval_read(
         None => ApprovalVerdict {
             state: ApprovalState::Pending,
             reason: if unattributed {
-                Some("a decision from a device this relay cannot identify was not counted".to_owned())
+                Some(
+                    "a decision from a device this relay cannot identify was not counted"
+                        .to_owned(),
+                )
             } else if !refused.is_empty() {
                 Some("only the agent's owner can answer this card".to_owned())
             } else {
@@ -4041,18 +4038,27 @@ mod approval_card_tests {
         /// Tap Approve or Reject as one device, exactly as the Mac and the phone write it.
         async fn tap(&self, device: &str, approve: bool, approval_id: &str) {
             let (d, a) = (device.to_owned(), approval_id.to_owned());
-            crate::notices::write_doc(&self.state, Some(&self.me.project.id), &self.owner_chat, move |doc| {
-                doc.append_approval_command(approve, &a, None, &d);
-                Ok(())
-            })
+            crate::notices::write_doc(
+                &self.state,
+                Some(&self.me.project.id),
+                &self.owner_chat,
+                move |doc| {
+                    doc.append_approval_command(approve, &a, None, &d);
+                    Ok(())
+                },
+            )
             .await
             .unwrap();
         }
 
         fn card(&self, approval_id: &str) -> Option<Value> {
-            crate::matrix::backfill::load_doc(&self.state, &self.owner_chat, Some(&self.me.project.id))
-                .unwrap()?
-                .approval(approval_id)
+            crate::matrix::backfill::load_doc(
+                &self.state,
+                &self.owner_chat,
+                Some(&self.me.project.id),
+            )
+            .unwrap()?
+            .approval(approval_id)
         }
     }
 
@@ -4101,7 +4107,9 @@ mod approval_card_tests {
     async fn the_owners_tap_decides_the_card() {
         let f = fixture(9311);
         let r = f
-            .ask(json!({ "type": "approval.request", "chat": f.group_chat, "title": "Edit a file" }))
+            .ask(
+                json!({ "type": "approval.request", "chat": f.group_chat, "title": "Edit a file" }),
+            )
             .await
             .unwrap();
         let id = r["approval"].as_str().unwrap().to_owned();
@@ -4141,9 +4149,10 @@ mod approval_card_tests {
             "the refusal states its own reason: {v}"
         );
         assert_eq!(f.card(&id).unwrap()["state"], "pending");
-        let doc = crate::matrix::backfill::load_doc(&f.state, &f.owner_chat, Some(&f.me.project.id))
-            .unwrap()
-            .unwrap();
+        let doc =
+            crate::matrix::backfill::load_doc(&f.state, &f.owner_chat, Some(&f.me.project.id))
+                .unwrap()
+                .unwrap();
         let mallorys = doc
             .commands()
             .into_iter()
@@ -4198,7 +4207,10 @@ mod approval_card_tests {
             r["expires_at"].as_i64().unwrap() - now_ms() >= APPROVAL_WINDOW_MIN_MS - 1_000,
             "a one-millisecond window is clamped up, not honoured: {r}"
         );
-        assert_eq!(f.read(r["approval"].as_str().unwrap()).await["state"], "pending");
+        assert_eq!(
+            f.read(r["approval"].as_str().unwrap()).await["state"],
+            "pending"
+        );
     }
 
     /// Nobody answered and the window closed: the card expires with a reason, so a bridge
@@ -4212,22 +4224,27 @@ mod approval_card_tests {
         let id = ulid();
         let (a, msg) = (id.clone(), ulid());
         let stale = now_ms() - 1_000;
-        crate::notices::write_doc(&f.state, Some(&f.me.project.id), &f.owner_chat, move |doc| {
-            doc.start_assistant_message(&msg, "", "dev:test");
-            doc.add_approval_part(
-                &msg,
-                &a,
-                &ApprovalRequest {
-                    title: "Run a command".into(),
-                    summary: String::new(),
-                    risk: Risk::Computer,
-                    payload: json!({}),
-                },
-                stale,
-            )
-            .expect("the card is written");
-            Ok(())
-        })
+        crate::notices::write_doc(
+            &f.state,
+            Some(&f.me.project.id),
+            &f.owner_chat,
+            move |doc| {
+                doc.start_assistant_message(&msg, "", "dev:test");
+                doc.add_approval_part(
+                    &msg,
+                    &a,
+                    &ApprovalRequest {
+                        title: "Run a command".into(),
+                        summary: String::new(),
+                        risk: Risk::Computer,
+                        payload: json!({}),
+                    },
+                    stale,
+                )
+                .expect("the card is written");
+                Ok(())
+            },
+        )
         .await
         .unwrap();
 
@@ -4244,22 +4261,27 @@ mod approval_card_tests {
         let fresh = ulid();
         let (b, msg2) = (fresh.clone(), ulid());
         let ahead = now_ms() + 60_000;
-        crate::notices::write_doc(&f.state, Some(&f.me.project.id), &f.owner_chat, move |doc| {
-            doc.start_assistant_message(&msg2, "", "dev:test");
-            doc.add_approval_part(
-                &msg2,
-                &b,
-                &ApprovalRequest {
-                    title: "Run a command".into(),
-                    summary: String::new(),
-                    risk: Risk::Computer,
-                    payload: json!({}),
-                },
-                ahead,
-            )
-            .expect("the card is written");
-            Ok(())
-        })
+        crate::notices::write_doc(
+            &f.state,
+            Some(&f.me.project.id),
+            &f.owner_chat,
+            move |doc| {
+                doc.start_assistant_message(&msg2, "", "dev:test");
+                doc.add_approval_part(
+                    &msg2,
+                    &b,
+                    &ApprovalRequest {
+                        title: "Run a command".into(),
+                        summary: String::new(),
+                        risk: Risk::Computer,
+                        payload: json!({}),
+                    },
+                    ahead,
+                )
+                .expect("the card is written");
+                Ok(())
+            },
+        )
         .await
         .unwrap();
         assert_eq!(f.read(&fresh).await["state"], "pending");
