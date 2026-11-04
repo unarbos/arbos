@@ -36,6 +36,23 @@ check() { # check <expected yes|no> <sha> <what>
   fi
 }
 
+# A case expecting `no` is only evidence if its fixture really carries the marker where it claims
+# to. An empty or mistyped body would make such a case pass for the wrong reason -- green whether
+# or not the predicate still reads `%b`. So the premise gets asserted alongside the conclusion.
+body_carries() { # body_carries <sha> <regex> <what>
+  if ! git log -1 --format='%b' "$1" | grep -qiE "$2"; then
+    echo "FAIL fixture for '$3': its body does not match $2, so the case proves nothing"
+    fails=$((fails + 1))
+  fi
+}
+
+merged_commits_carry() { # merged_commits_carry <merge sha> <regex> <what>
+  if ! git log --format='%s' "$1^1..$1" | grep -qiE "$2"; then
+    echo "FAIL fixture for '$3': the merge brings in no subject matching $2, so the case proves nothing"
+    fails=$((fails + 1))
+  fi
+}
+
 commit "chore: base"
 base=$(git rev-parse HEAD)
 
@@ -47,23 +64,42 @@ git checkout -q master 2>/dev/null || git checkout -q main
 git merge -q --no-ff contrib \
   -m "Merge pull request #2448 from unarbos/cursor/revert-the-probe" \
   -m "test(ios): drop the transcript-bottom-inset probe"
+merged_commits_carry "$(git rev-parse HEAD)" '^revert\b' "a revert in the merged branch"
 check no "$(git rev-parse HEAD)" "a revert in the merged branch does not expedite"
 
-# The same merge, but with the author's PR title itself a revert: GitHub puts it in the merge body.
+# The same merge, but the marker is in the author's own PR title: GitHub puts the PR TITLE in the
+# merge body, so `%b` is author-controlled and must not be read.
+#
+# The revert-prefix half and the `[hotfix]` half are separate cases on purpose. They are independent
+# sources, so one failure now names which one came back; a single fixture carrying both markers does
+# detect either regression, but reports only that something did. It also invites the wrong repair:
+# the obvious way to quiet a combined failure is to trim the marker that looks redundant out of the
+# fixture, which reopens that half of the hole while the case goes green again. Hence `body_carries`
+# below -- each case states the premise it depends on, so trimming it fails loudly instead.
 git checkout -q -b contrib2 "$base"
 commit "chore: ordinary work"
 git checkout -q master 2>/dev/null || git checkout -q main
 git merge -q --no-ff contrib2 \
-  -m "Merge pull request #2449 from unarbos/cursor/hotfix-please" \
-  -m 'Revert "the thing" [hotfix]'
-check no "$(git rev-parse HEAD)" "a PR title in the merge body does not expedite"
+  -m "Merge pull request #2449 from unarbos/cursor/revert-the-thing" \
+  -m 'Revert "the thing that broke the relay"'
+body_carries "$(git rev-parse HEAD)" '^revert\b' "a revert-prefixed PR title in the merge body"
+check no "$(git rev-parse HEAD)" "a revert-prefixed PR title in the merge body does not expedite"
+
+git checkout -q -b contrib3 "$base"
+commit "chore: more ordinary work"
+git checkout -q master 2>/dev/null || git checkout -q main
+git merge -q --no-ff contrib3 \
+  -m "Merge pull request #2450 from unarbos/cursor/hotfix-please" \
+  -m 'fix: the relay refuses every room [hotfix]'
+body_carries "$(git rev-parse HEAD)" '\[hotfix\]' "a [hotfix] marker in the merge body"
+check no "$(git rev-parse HEAD)" "a [hotfix] marker in the merge body does not expedite"
 
 # The operator's own paths still work: a direct push to main, and a marked merge subject.
 commit "hotfix: the relay refuses every room"
 check yes "$(git rev-parse HEAD)" "an operator's direct hotfix commit expedites"
 commit 'Revert "the change that broke sign-in"'
 check yes "$(git rev-parse HEAD)" "an operator's direct revert expedites"
-commit "Merge pull request #2450 from unarbos/fix [hotfix]"
+commit "Merge pull request #2451 from unarbos/fix [hotfix]"
 check yes "$(git rev-parse HEAD)" "an operator's marked merge subject expedites"
 commit "feat: ordinary change"
 check no "$(git rev-parse HEAD)" "an ordinary commit does not expedite"
