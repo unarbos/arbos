@@ -183,6 +183,8 @@ pub struct BusySnapshot {
     pub helpers: Vec<String>,
     /// `role: text` lines of this chat's recent turns.
     pub recent: Vec<String>,
+    /// Results already in this chat (finished jobs, other agents' replies), told or not (#2303).
+    pub landed: Vec<String>,
     /// A user turn of this chat is running and can take a steer.
     pub steerable: bool,
 }
@@ -228,6 +230,14 @@ impl BusySnapshot {
             out.push_str("- Recent turns in this conversation:\n");
             for r in &self.recent {
                 out.push_str(&format!("    {r}\n"));
+            }
+        }
+        if !self.landed.is_empty() {
+            out.push_str(
+                "- Results already in this conversation (true now, whatever the turns above said):\n",
+            );
+            for l in &self.landed {
+                out.push_str(&format!("    {l}\n"));
             }
         }
         out.push_str(&format!(
@@ -471,6 +481,42 @@ impl Agent {
                 )
             })
             .collect();
+        {
+            let h = host.lock().await;
+            let rows = h.doc.messages();
+            for (j, out) in self.finished_job_results(chat_id, &rows, false) {
+                snap.landed.push(format!(
+                    "job \"{}\" finished: {}",
+                    clip(&j.title, 80),
+                    if out.trim().is_empty() {
+                        "(no output was written)".to_owned()
+                    } else {
+                        clip(&crate::store::redact(&out), 400)
+                    }
+                ));
+            }
+            let recent_rows = &rows[rows.len().saturating_sub(40)..];
+            for (_, from, status, original, text) in
+                crate::agent_messages::agent_replies(recent_rows, false)
+            {
+                snap.landed.push(match status.as_str() {
+                    "done" => format!(
+                        "{from} replied to \"{}\": {}",
+                        clip(&original, 120),
+                        clip(&text, 400)
+                    ),
+                    "empty" => format!(
+                        "{from} received \"{}\" and wrote nothing back",
+                        clip(&original, 120)
+                    ),
+                    _ => format!(
+                        "{from} could not answer \"{}\" (its turn failed)",
+                        clip(&original, 120)
+                    ),
+                });
+            }
+            snap.landed.truncate(6);
+        }
         Some(snap)
     }
 
@@ -863,6 +909,7 @@ pub(crate) mod tests {
                     .into(),
             ],
             recent: vec!["user: start the loop".into()],
+            landed: vec![],
             steerable: true,
         };
         let r = s.render("what is going on now?");
@@ -1464,6 +1511,50 @@ pub(crate) mod tests {
         assert_eq!(row.len(), 3);
         assert_eq!(row[0].kind, "research");
         assert_eq!(row[0].ask_message_id, "m-busy");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #2303: a status answer while the agent is busy came from running work and recent turns
+    /// only, so "Is it still running?" / "What did lane-b say?" got "still running" / "no reply
+    /// yet" with the result already in the chat. The snapshot names what already came back.
+    #[tokio::test]
+    async fn busy_snapshot_names_results_already_in_the_chat() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000020";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        let (ask, _) = send_cmd(&host, "Start a background job: count the digests.");
+        agent
+            .test_finished_job(&host, chat, "job-q", &ask, "The count written is 11797.")
+            .await;
+        {
+            let h = host.lock().await;
+            h.doc.start_assistant_message("h1", &ask, "box:test");
+            h.doc.set_message_fields(
+                "h1",
+                &[(
+                    "agentReply",
+                    json!({ "from": "lane-b", "status": "done", "original": "How is your day going?", "text": "Good, thanks.", "relayed": true }),
+                )],
+            );
+            h.doc.finish_message("h1", MessageStatus::Done);
+        }
+        let snap = agent.busy_snapshot(chat, &host).await.expect("busy");
+        let r = snap.render("Is it still running?");
+        assert!(
+            r.contains(
+                "- Results already in this conversation (true now, whatever the turns above said):"
+            ),
+            "{r}"
+        );
+        assert!(
+            r.contains("job \"Counting SHA-256 zeros\" finished: The count written is 11797."),
+            "{r}"
+        );
+        assert!(
+            r.contains("lane-b replied to \"How is your day going?\": Good, thanks."),
+            "{r}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

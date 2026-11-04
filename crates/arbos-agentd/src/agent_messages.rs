@@ -8,6 +8,7 @@
 //! and the sender relays the answer to its user in prose, unasked (Grok's Chief of Staff).
 //! Nothing here joins anyone to a room (#1436).
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -47,10 +48,18 @@ pub(crate) fn agent_reply_prompt(
 pub(crate) fn pending_agent_replies(
     rows: &[arbos_core::doc::MessageView],
 ) -> Vec<(String, String, String, String, String)> {
+    agent_replies(rows, true)
+}
+
+/// Every reply pinned on a hand-off row in `rows` (`untold_only`: not yet told to the user).
+pub(crate) fn agent_replies(
+    rows: &[arbos_core::doc::MessageView],
+    untold_only: bool,
+) -> Vec<(String, String, String, String, String)> {
     rows.iter()
         .filter_map(|m| {
             let r = m.rest.get("agentReply")?;
-            if r.get("relayed").and_then(Value::as_bool) == Some(true) {
+            if untold_only && r.get("relayed").and_then(Value::as_bool) == Some(true) {
                 return None;
             }
             Some((
@@ -577,10 +586,13 @@ impl Agent {
         }
         let prompt = agent_reply_prompt(&from_name, &status, &original, &text);
         // A user turn is running in this chat: steer it with the reply instead of answering
-        // after it (the user may be asking about this very reply).
+        // after it (the user may be asking about this very reply). Only while its pi run is on
+        // (#2303): before it, the turn's prompt folds the reply in; after it, a steer would wait
+        // in pi for some later prompt while the mark below hides it from the next turn.
         let running_user_turn_here = {
             let tl = self.turn.lock().await;
             matches!(tl.as_ref(), Some(t) if t.chat_id == chat_id && !t.reply_only && !t.stopped)
+                && self.turn_running.load(Ordering::SeqCst)
         };
         if running_user_turn_here {
             if let Ok(pi) = self.pi_child().await {
