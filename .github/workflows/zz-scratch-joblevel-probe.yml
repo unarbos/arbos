@@ -1,0 +1,42 @@
+name: Scratch job-level probe
+
+# TEMPORARY. Measures what a JOB-level concurrency group does to a pending job: whether the
+# eviction cancels only that job and lets an always() verdict job report the loss, or whether it
+# takes the whole run down and leaves nothing to read. Removed before this branch's PR opens.
+#
+# No top-level concurrency on purpose: every push must get a run that actually starts.
+
+on:
+  push:
+    branches: ["cursor/swift-gate-concurrency-measure-6121"]
+
+permissions:
+  contents: read
+
+jobs:
+  heavy:
+    name: heavy (the coalesced one)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    concurrency:
+      group: scratch-joblevel-heavy
+      cancel-in-progress: false
+    steps:
+      - name: Occupy the group
+        run: sleep 300
+
+  verdict:
+    name: verdict (fail-closed, as #2736 adds)
+    needs: heavy
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - env:
+          HEAVY: ${{ needs.heavy.result }}
+        run: |
+          set -euo pipefail
+          echo "heavy result: ${HEAVY:-none}"
+          if [[ "$HEAVY" == success ]]; then exit 0; fi
+          echo "::error title=No verdict::heavy did not pass on ${GITHUB_SHA:0:9} (result: ${HEAVY:-none})"
+          exit 1
