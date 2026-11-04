@@ -310,19 +310,26 @@ final class PaneTabsLayoutTests: XCTestCase {
     }
 
     /// Grok's capsule is grey 27 ([feedback grok-tab-bold-2026-11-03]); ours was the
-    /// assistant-bubble grey, 32. It is its own token now, so moving the assistant bubble
-    /// (Jacob's separate 35 → 28 on the Mac) cannot drag the capsule with it.
-    func testTheSelectedCapsuleIsItsOwnGrey27() {
+    /// assistant-bubble grey, 32. It owns both its shades now, so moving the assistant
+    /// bubble cannot drag it in either appearance. Light keeps the 242 it has always had,
+    /// which means light's two values are still equal and equality cannot tell an alias
+    /// from a pin — the pinned number is the assertion instead. When the bubble moves,
+    /// this stays.
+    func testTheSelectedCapsuleIsItsOwnGrey() {
         XCTAssertEqual(grey(Theme.dark.tabOnFill), 27)
         XCTAssertNotEqual(Theme.dark.tabOnFill, Theme.dark.bubbleAssistant, "the capsule owns its grey")
-        XCTAssertEqual(Theme.light.tabOnFill, Theme.light.bubbleAssistant, "light is unmeasured, so unchanged")
+        XCTAssertEqual(grey(Theme.light.tabOnFill), 242, "light is unmeasured, so unchanged — but pinned")
     }
 
     /// The capsule and the label colour are the only selected signals left now that the tab
-    /// does not go bold, so the capsule must still step off the page it sits on.
+    /// does not go bold, so the capsule must still step off the page it sits on. Every
+    /// `PaneTabs` call site puts the row straight on `bg` — Home, the profile pane's pinned
+    /// block and the FunPicker sheet all paint it — so `bg` is the surface to measure.
     func testTheSelectedCapsuleStillStepsOverThePage() {
-        let step = abs(grey(Theme.dark.tabOnFill) - grey(Theme.dark.bg))
-        XCTAssertGreaterThanOrEqual(step, 6, "capsule \(grey(Theme.dark.tabOnFill)) on page \(grey(Theme.dark.bg)) is invisible")
+        for theme in [Theme.dark, Theme.light] {
+            let step = abs(grey(theme.tabOnFill) - grey(theme.bg))
+            XCTAssertGreaterThanOrEqual(step, 6, "capsule \(grey(theme.tabOnFill)) on page \(grey(theme.bg)) is invisible")
+        }
     }
 
     /// A grey token's 0–255 channel value, the way Jacob reads these colours.
