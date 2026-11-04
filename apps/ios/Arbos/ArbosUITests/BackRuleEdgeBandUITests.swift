@@ -62,6 +62,14 @@ final class BackRuleEdgeBandUITests: XCTestCase {
     /// The observed drag, unchanged in every respect.
     private static let distance: CGFloat = 50
 
+    /// Wall clock to millisecond resolution, so a line here can be placed against anything else
+    /// timestamped on the same machine — the device log included, if a run ever captures it.
+    private static let stamp: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss.SSS"
+        return f
+    }()
+
     /// Start points, in screen points from the leading edge.
     ///
     /// 40 is the observed failure's own start and carries most of the trials. 16, 28 and 48 are
@@ -238,6 +246,18 @@ final class BackRuleEdgeBandUITests: XCTestCase {
         return avatars.allElementsBoundByIndex.map(\.frame).contains { $0.contains(point) }
     }
 
+    /// Whether a person's page is on screen.
+    ///
+    /// A cover has to **name itself** rather than be inferred from the chat not being frontmost.
+    /// The sender avatar is a `Button` wired to `toggleProfile`, so the cover this run is most
+    /// likely to see is that page, and `profile-` prefixed identifiers are how
+    /// `ChatSearchResultJumpUITests` already recognises one.
+    private func profilePageShowing(_ app: XCUIApplication) -> Bool {
+        app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "profile-"))
+            .firstMatch.exists
+    }
+
     private struct Trial {
         let outcome: Outcome
         let onAvatar: Bool
@@ -254,18 +274,28 @@ final class BackRuleEdgeBandUITests: XCTestCase {
                           "the whole \(Int(Self.distance)) pt drag stays on the row, so the drag "
                           + "measured is the one asked for and not a clamped one")
         let start = screenPoint(app, x: startX, y: y)
+        // Absolute timestamps either side of the drag. The runner's own `t = …s` lines are
+        // relative to the test, and a reading taken 1 s after the press cannot be placed against
+        // anything the app did without a shared clock.
+        let pressedAt = Date()
         start.press(forDuration: 0.05,
                     thenDragTo: start.withOffset(CGVector(dx: Self.distance, dy: 0)),
                     withVelocity: .slow, thenHoldForDuration: 0.5)
+        let releasedAt = Date()
         sleep(1)
-        let outcome: Outcome
-        if !chatBack(app).exists {
-            outcome = .popped
-        } else {
-            outcome = chatIsFrontmost(app) ? .stayed : .covered
-        }
+        let backThere = chatBack(app).exists
+        let frontmost = backThere && chatIsFrontmost(app)
+        let outcome: Outcome = !backThere ? .popped : (frontmost ? .stayed : .covered)
+        let readAt = Date()
+        // Every discriminator printed, so a cover, a pop and a profile page are read off the
+        // line rather than worked out from it.
         print("short-right-swipe repro: x=\(Int(startX)) y=\(Int(y)) row=\(Self.row) "
-              + "avatar=\(onAvatar) -> \(outcome.rawValue)")
+              + "avatar=\(onAvatar) chat-back=\(backThere) frontmost=\(frontmost) "
+              + "profile=\(profilePageShowing(app)) -> \(outcome.rawValue) "
+              + "| pressed=\(Self.stamp.string(from: pressedAt)) "
+              + "released=\(Self.stamp.string(from: releasedAt)) "
+              + "read=\(Self.stamp.string(from: readAt)) "
+              + "drag=\(String(format: "%.3f", releasedAt.timeIntervalSince(pressedAt)))s")
         return Trial(outcome: outcome, onAvatar: onAvatar)
     }
 
