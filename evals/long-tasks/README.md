@@ -22,5 +22,10 @@ store (`docs/agent-eval.md`, `docs/agent-eval-runs/`).
   and registers it with the loop (`LT_COMMIT=0` to skip). Partial re-runs fold in with `merge.py`;
   `rejudge.py` re-runs the rubric for turns the judge skipped.
 
+- `test_run.py` — relay-free checks of the runner itself (`python3 -m pytest evals/long-tasks/test_run.py`;
+  no CI job runs it). Today it pins the lane names: `ensure_project` matches a lane on its name, so a
+  rename a task never puts back costs the box a second idle agent for that lane at every later boot.
+
 Rules: scratch test user only, approval cards are rejected never approved, no real outside
-messages, runner stops at `--budget-usd` (default 8), the test user's relay daily cap is $10.
+messages, runner stops at `--budget-usd` (default 8), the test user's relay daily cap is $10, and the
+run leaves the lane projects named as it found them — its own leftovers become the box's idle load.
