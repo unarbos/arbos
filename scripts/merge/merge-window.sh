@@ -77,7 +77,26 @@ ci_abort_state() {
   # the four-character token, which survives the strip and is greppable.
   steps=$(rd "repos/$R/actions/runs/$id/jobs?per_page=100" --jq '.jobs[].steps[]? | "\(.conclusion)"') \
     || { echo "RED CI $ci (and its steps could not be read, so it is reported as before: ${steps#BLOCKED:})"; return; }
-  [ -n "$steps" ] || { echo "RED CI $ci (run $id lists no steps at all)"; return; }
+  # NO STEPS AT ALL IS THE LIMIT OF "NEVER STARTED", NOT A VERDICT. This arm used to print RED,
+  # which is the very substitution the rest of this header is about, at its most extreme: a run
+  # in which literally nothing executed was reported as "JUDGED AND FAILED CI — read the run",
+  # and there is no run to read. Measured on 2026-11-04: run 41862032379 on 54b199042 was
+  # cancelled with zero jobs and held every merge behind a remedy that does not exist.
+  #
+  # The distinction that matters is zero jobs versus jobs-without-readable-steps. Zero jobs is a
+  # fact — nothing ran. Jobs present but no steps read is this function failing to read, and that
+  # keeps the old RED, because the rule here is that an unanswerable question refuses as it did
+  # before rather than gaining a softer word. The job count is asked for separately rather than
+  # inferred from the empty step list, so "the read returned nothing" cannot pass itself off as
+  # "there was nothing to read" — item 2 of checks.sh's own header, one file over.
+  if [ -z "$steps" ]; then
+    local njobs; njobs=$(rd "repos/$R/actions/runs/$id/jobs?per_page=100" --jq '.total_count')
+    case "$njobs" in
+      0) echo "UNTESTED CI $ci — run $id has no jobs at all, so nothing in it ran and it tested this commit in no way; re-run it, do not re-push"; return ;;
+      ''|*[!0-9]*) echo "RED CI $ci (run $id lists no steps, and its job count could not be read, so it is reported as before: ${njobs#BLOCKED:})"; return ;;
+      *) echo "RED CI $ci (run $id reports $njobs job(s) but no readable steps, so why it ended cannot be told and it is reported as before)"; return ;;
+    esac
+  fi
   printf '%s\n' "$steps" | grep -qx failure && { echo "RED CI $ci"; return; }
   # Nothing failed and it is not a success, so it stopped. The annotation is
   # usually the only place the host's own error appears.

@@ -341,6 +341,52 @@ else
   bad "range_gate has no NOTASKED arm that continues, so a gate that cannot be asked refuses the merge again — the defect this change removes"
 fi
 
+# 14. ci_abort_state on a run with NO jobs. This is the extreme of the case the
+#     function was written for, and it was the one case that still printed RED:
+#     a run in which nothing executed, reported as a verdict about the commit.
+#     The three rows are the whole decision — zero jobs is a fact and reads
+#     UNTESTED, while anything this cannot read keeps the RED it printed before,
+#     because a softer word for an unanswerable question is how this family of
+#     bug starts.
+echo "ci_abort_state tells a run that did nothing from a run it cannot read:"
+# The SHIPPED function, lifted out of merge-window.sh — not a copy. A copy here
+# would pass while the real one rotted, which is the defect this suite caught on
+# an earlier change and the reason case 8 lifts nomac_covers the same way.
+abort_src=$(sed -n '/^ci_abort_state()/,/^}/p' "$D/merge-window.sh")
+if [ -z "$abort_src" ]; then
+  bad "no ci_abort_state() in merge-window.sh — it was renamed or removed, and case 14 is testing nothing"
+else
+  eval "$abort_src"
+fi
+abort_with() {  # <steps, ';' for newline> <total_count answer>
+  local st tc=$2
+  st=$(printf '%s' "$1" | tr ';' '\n')
+  rd() { case "$*" in *total_count*) printf '%s' "$tc" ;; *) printf '%s' "$st" ;; esac; }
+  ci_abort_state 41862032379 "completed cancelled"
+  unset -f rd
+}
+while IFS='|' read -r want steps tc label; do
+  [ -n "$want" ] || continue
+  got=$(abort_with "$steps" "$tc")
+  if [ "${got%% *}" = "$want" ]; then ok "$label reads $want"
+  else bad "$label reads '${got%% *}', expected $want — full line: $got"; fi
+done <<'CASES'
+UNTESTED||0|a run with no jobs at all
+RED||4|a run reporting jobs but no readable steps
+RED||BLOCKED: HTTP 403|a run whose job count cannot be read
+RED|success;failure|1|a run with a step that really failed
+UNTESTED|success;null|1|a run whose later steps never started
+CASES
+# Named on its own: the zero-job row is the one this change creates, and the
+# failure row is the one it could break. If a mutation made every empty read
+# UNTESTED, the table above would still look healthy without this pairing.
+a=$(abort_with "" 0); b=$(abort_with "" 4)
+if [ "${a%% *}" = UNTESTED ] && [ "${b%% *}" = RED ]; then
+  ok "zero jobs and an unreadable job list do not collapse to one answer"
+else
+  bad "zero jobs reads '${a%% *}' and an unreadable job list reads '${b%% *}' — one of them is wrong, and if they match the read failure has been given the softer word"
+fi
+
 echo
 if [ "$fail" -eq 0 ]; then echo "selftest: PASS"; else echo "selftest: FAIL"; fi
 exit "$fail"
