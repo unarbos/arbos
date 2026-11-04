@@ -495,7 +495,15 @@ final class InteractiveBackPop: NSObject, UINavigationControllerDelegate {
             BackSwipeTrace.note("live:nav=\(live(nav.view))"
                 + ",win=\(live(nav.view.window))"
                 + ",top=\(live(nav.topViewController?.view))"
-                + ",kids=\(nav.view.subviews.count)")
+                + ",stack=\(nav.viewControllers.count)")
+            // Named, not counted. "kids=2" was true on every red run and said nothing: a
+            // navigation controller holds one content view, so the question has always been
+            // what the other one is, and a number cannot answer that.
+            let kids = nav.view.subviews.map { child in
+                String(describing: type(of: child)) + "@" + String(Int(child.transform.tx))
+                    + (child.isHidden ? ":hidden" : "")
+            }
+            BackSwipeTrace.note("kids:" + kids.joined(separator: ","))
         }
         #endif
     }
@@ -588,17 +596,12 @@ final class BackPopAnimator: NSObject, UIViewControllerAnimatedTransitioning {
                 leavingView.removeFromSuperview()
             }
             context.completeTransition(!cancelled)
-            // The animation comes off before the transform goes back. An interactive
-            // transition scrubs by pausing the layer and setting its time by hand, and
-            // `UIView.animate` wrote the end state to the model layer when it was called —
-            // so a `.identity` written into the model under an animation still attached to a
-            // layer nobody resumes is a write nothing draws.
-            //
-            // Whether that is what ails this screen is still being measured. What is known is
-            // that moving this write is not: runs 41737758724 and 41747877523 put `chat-back`
-            // at the same x 418 in a 402 pt window, once with the write before
-            // `completeTransition` and once after.
-            leavingView.layer.removeAllAnimations()
+            // Defensive only, and known to be so. Run 41756275132 probed this view on both
+            // paths: on a cancel it is already back at the origin by the time this block runs
+            // (`left:tx=0,ptx=0,anim=0,spd=1.0`), because UIKit undoes a cancelled transition
+            // itself, and on a pop it is out of the container and on its way to being freed.
+            // There is no stuck animation here and never was — three separate attempts to fix
+            // this screen by rewriting this line all measured the same thing afterwards.
             leavingView.transform = .identity
             #if DEBUG
             BackSwipeTrace.probe("rest", leavingView)

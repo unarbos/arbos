@@ -189,8 +189,18 @@ final class ChatSwipeTrackingUITests: XCTestCase {
         let frame = element.frame
         let readout = app.descendants(matching: .any)["back-swipe-trace"].firstMatch
         let said = readout.exists ? ((readout.value as? String) ?? "") : "(gone with the chat)"
+        // The app's own account and XCUITest's are different accounts, and run 41756275132 is
+        // where they parted: the app measured this chat at the origin on every probe while
+        // XCUITest read it a screen width to the right. Only the second one decides whether a
+        // test passes, so when they disagree the tree XCUITest is reading has to be on the
+        // record too — how many elements carry this identifier, and what lies over the one it
+        // picked. Trimmed because the whole tree is thousands of lines in a CI log.
+        let seen = app.descendants(matching: .any).matching(identifier: element.identifier)
+        let tree = app.debugDescription
         return "\(element.identifier) at \(frame); window \(window); "
-            + "inside it: \(window.contains(frame)); the app says: [\(said)]"
+            + "inside it: \(window.contains(frame)); "
+            + "elements with this identifier: \(seen.count); "
+            + "the app says: [\(said)]; XCUITest sees:\n\(tree.prefix(6000))"
     }
 
     // MARK: The report
