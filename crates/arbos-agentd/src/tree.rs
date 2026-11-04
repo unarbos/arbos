@@ -136,6 +136,24 @@ impl TreeMode {
             Self::Off => "off",
         }
     }
+
+    /// The mode as one byte, so the live value can be mirrored in an atomic and read from sync
+    /// code without the async settings lock (`LiveModels::tree_mode`).
+    pub fn code(self) -> u8 {
+        match self {
+            Self::On => 0,
+            Self::Log => 1,
+            Self::Off => 2,
+        }
+    }
+
+    pub fn from_code(c: u8) -> Self {
+        match c {
+            1 => Self::Log,
+            2 => Self::Off,
+            _ => Self::On,
+        }
+    }
 }
 
 /// Content kind of a thread; picks the walk thresholds and the pack clip (chat vs tool history).

@@ -3763,11 +3763,7 @@ impl Agent {
 
     /// The tree mode for this Project (`decision_model.memory_tree`, else the box env).
     pub fn tree_mode(&self) -> crate::tree::TreeMode {
-        self.settings
-            .models
-            .try_read()
-            .map(|m| m.decision_cfg.memory_tree)
-            .unwrap_or(self.cfg.decision_cfg.memory_tree)
+        self.settings.models.tree_mode()
     }
 
     /// Whether `chat_id` sees only its own subtree (people and group chats, D72/D69).
@@ -7419,17 +7415,20 @@ impl Agent {
     // ---- subagents ----------------------------------------------------------------------------
 
     /// Context pack v0 (design §6.7 sections 1–4, 9, 10).
-    fn build_pack(&self, name: &str, purpose: &str, brief: &str, data_heavy: bool) -> String {
+    async fn build_pack(&self, name: &str, purpose: &str, brief: &str, data_heavy: bool) -> String {
         let mut s = String::new();
         s.push_str(&format!("# Task: {name}\n\n{purpose}\n\n{brief}\n\n"));
         s.push_str(&format!(
             "## Project folder\n\n`{}` (your working directory). Keep every file of this project there; other folders under `/work` belong to other projects.\n\n",
             self.cfg.work_dir.display()
         ));
-        if !self.cfg.instructions.trim().is_empty() {
+        // The instructions the relay has now, not the ones the box booted with: a worker spawned
+        // after the user edited them must work to the new text.
+        let instructions = self.settings.state.read().await.instructions.clone();
+        if !instructions.trim().is_empty() {
             s.push_str(&format!(
                 "## Project instructions\n\n{}\n\n",
-                self.cfg.instructions.trim()
+                instructions.trim()
             ));
         }
         let core = self.memory.core_memory_text();
@@ -7839,7 +7838,7 @@ impl Agent {
             .insert(subagent_id.clone(), (chat_id.to_owned(), msg_id.clone()));
         let _ = self.store.set_subagent_last_status(&subagent_id, "working");
         let t0 = Instant::now();
-        let mut pack = self.build_pack(&sub_name, purpose, brief, data_heavy);
+        let mut pack = self.build_pack(&sub_name, purpose, brief, data_heavy).await;
         if let Some(memory_block) = self
             .tree_pack(
                 chat_id,
@@ -8520,10 +8519,11 @@ impl Agent {
         let (talking_model, _) = self.live_models().await;
         let system = format!(
             "{} You answer a message the user sent while you were busy with something else; the work for it is done (notes below). Write the answer the user should read, like a colleague in chat: what they asked for, what came out, what is open. First person; short when the answer is short; a plain GitHub-flavoured markdown table (header row, `| --- |` separator row, rows starting and ending with `|`, no code fence) with `[Name](https://…)` links when it compares several items, and then one line offering a concrete next step. Never mention a side task, helper, subagent, tool, command, model or that you were busy. If the notes hold no answer, say plainly what you could not do.{}",
-            if self.cfg.project_name.trim().is_empty() {
-                "You are this user's agent in Arbos.".to_owned()
-            } else {
-                format!("You are {}, this user's agent in Arbos.", self.cfg.project_name.trim())
+            // The agent's live name (#1431), not the one the box booted with: a renamed agent
+            // must introduce itself as its new self in this bubble too.
+            match self.name().trim() {
+                "" => "You are this user's agent in Arbos.".to_owned(),
+                name => format!("You are {name}, this user's agent in Arbos."),
             },
             address.map(|n| format!("\n{}", n.trim())).unwrap_or_default()
         );
