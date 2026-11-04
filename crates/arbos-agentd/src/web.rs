@@ -14,7 +14,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use crate::agent::Agent;
-use crate::mcp::{err_result, text_result};
+use crate::mcp::{err_result, materialize_handle, text_result};
 
 const DEFAULT_SEARCH_MCP_URL: &str = "https://mcp.exa.ai/mcp";
 const SEARCH_TOOL: &str = "web_search_exa";
@@ -28,6 +28,10 @@ const DEFAULT_RESULTS: u64 = 8;
 const MAX_RESULTS: u64 = 10;
 const DEFAULT_FETCH_CHARS: usize = 20_000;
 const MAX_FETCH_CHARS: usize = 60_000;
+/// Text longer than this becomes a `peek` handle holding the whole page, so the part past
+/// `max_chars` is readable without a second fetch. Matches `OFFLOAD_CHARS` in the pi extension
+/// (`harness/arbos-pi-ext/index.ts`) and the 4,000-character rule stated in `prompts/router.md`.
+const OFFLOAD_CHARS: usize = 4_000;
 /// Bytes read from one page before giving up on it.
 const MAX_BODY_BYTES: usize = 3_000_000;
 /// An HTML page that reduces to less text than this is probably a bot wall or a JS-only shell.
@@ -44,7 +48,7 @@ pub fn tool_specs() -> Vec<Value> {
         json!({ "name": "web_fetch", "description": "Read a public URL as text: documentation pages, OpenAPI/Swagger JSON or YAML, README files, llms.txt, raw source on GitHub, release notes. HTML is reduced to readable text with links kept; JSON, YAML and plain text come back verbatim. No credentials: a request that needs a key goes through egress instead.",
                 "inputSchema": { "type": "object", "properties": {
                     "url": { "type": "string" },
-                    "max_chars": { "type": "integer", "minimum": 1000, "maximum": 60000, "description": "Cut the text here (default 20000, max 60000). Text past the cut is discarded and there is no handle to page: when a page is truncated, re-read it once at a higher max_chars rather than walking it in small steps." } },
+                    "max_chars": { "type": "integer", "minimum": 1000, "maximum": 60000, "description": "Cut the inline text here (default 20000). The whole page is kept in a peek handle, so read past the cut with peek(handle, {chars:[from,to]}) or peek(handle, {grep:\"...\"}) instead of fetching the URL again." } },
                   "required": ["url"] } }),
     ]
 }
@@ -256,7 +260,7 @@ pub async fn web_fetch(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> Value
         .unwrap_or(DEFAULT_FETCH_CHARS)
         .clamp(1_000, MAX_FETCH_CHARS);
     record(agent, chat_id, "web_fetch", &url);
-    let direct = direct_fetch(agent, &url, max_chars).await;
+    let direct = direct_fetch(agent, &url).await;
     let fallback_reason = match &direct {
         Ok(page) if page.thin => {
             Some("the page has almost no readable text (bot wall or JavaScript-only)".to_owned())
@@ -266,38 +270,80 @@ pub async fn web_fetch(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> Value
     };
     if let Some(reason) = fallback_reason {
         tracing::info!(url, reason, "web_fetch: trying the reader endpoint");
+        // Ask the endpoint for everything it will give, not for `max_chars`: the extra text goes
+        // into the handle so this branch can be paged like the direct one.
         if let Ok(text) = mcp_call(
             agent,
             FETCH_TOOL,
-            json!({ "urls": [url], "maxCharacters": max_chars }),
+            json!({ "urls": [url], "maxCharacters": MAX_FETCH_CHARS }),
             FETCH_TIMEOUT,
         )
         .await
         {
             if text.trim().len() > THIN_PAGE_CHARS {
+                let body = offload(agent, chat_id, &url, &text, max_chars);
                 return text_result(crate::store::redact(&format!(
-                    "URL: {url}\nSource: reader endpoint ({reason})\n\n{text}"
+                    "URL: {url}\nSource: reader endpoint ({reason})\n\n{body}"
                 )));
             }
         }
     }
     match direct {
-        Ok(page) => text_result(crate::store::redact(&format!(
-            "URL: {url}\nStatus: {}\nContent-Type: {}\n\n{}",
-            page.status, page.content_type, page.text
-        ))),
+        Ok(page) => {
+            let body = offload(agent, chat_id, &url, &page.text, max_chars);
+            text_result(crate::store::redact(&format!(
+                "URL: {url}\nStatus: {}\nContent-Type: {}\n\n{body}",
+                page.status, page.content_type
+            )))
+        }
         Err(e) => err_result(format!("web_fetch failed: {e}")),
     }
+}
+
+/// The inline body for one fetched page: the head, capped at `max_chars`, plus — for anything
+/// over `OFFLOAD_CHARS` — a handle holding the **whole** text.
+///
+/// Character offsets into the handle line up with the inline head, so
+/// `peek(handle, {chars:[max_chars, …]})` continues exactly where the head stops. Without this
+/// the remainder was dropped inside `direct_fetch` and re-fetching at a higher `max_chars` was
+/// the only way to reach it — impossible at all past `MAX_FETCH_CHARS`.
+fn offload(agent: &Arc<Agent>, chat_id: &str, url: &str, text: &str, max_chars: usize) -> String {
+    let chars = text.chars().count();
+    if chars <= OFFLOAD_CHARS {
+        return clip_chars(text, max_chars);
+    }
+    // Redact before the blob is written: `peek` reads the file back verbatim, so an unredacted
+    // handle would hand out what the inline text is careful not to show.
+    let text = crate::store::redact(text);
+    let chars = text.chars().count();
+    let handle = materialize_handle(agent, chat_id, &format!("web_fetch {url}"), &text);
+    let banner = format!(
+        "[handle {handle}: web_fetch {url}, {chars} chars, {} lines]",
+        text.lines().count()
+    );
+    if chars <= max_chars {
+        return format!("{banner}\n{text}");
+    }
+    let head: String = text.chars().take(max_chars).collect();
+    // `peek` clips its own answer at 16,000 bytes, so suggest a window it returns whole.
+    let to = chars.min(max_chars + 8_000);
+    format!(
+        "{banner}\n{head}\n…[cut at {max_chars} of {chars} chars. The rest is in the handle: \
+         peek(\"{handle}\", {{chars:[{max_chars},{to}]}}) reads on from here and \
+         peek(\"{handle}\", {{grep:\"pattern\"}}) searches the whole page. Do not fetch this URL again.]"
+    )
 }
 
 struct Page {
     status: u16,
     content_type: String,
+    /// The whole page, not the inline head: the caller offloads it to a handle and clips its own
+    /// copy. Bounded by `MAX_BODY_BYTES`, which is read off the wire.
     text: String,
     thin: bool,
 }
 
-async fn direct_fetch(agent: &Arc<Agent>, url: &str, max_chars: usize) -> Result<Page, String> {
+async fn direct_fetch(agent: &Arc<Agent>, url: &str) -> Result<Page, String> {
     let resp = agent
         .http_client()
         .get(url)
@@ -341,7 +387,7 @@ async fn direct_fetch(agent: &Arc<Agent>, url: &str, max_chars: usize) -> Result
         } else {
             content_type
         },
-        text: clip_chars(&text, max_chars),
+        text,
         thin,
     })
 }
@@ -605,5 +651,135 @@ mod tests {
             decode_entities("a &amp; b &lt;c&gt; &#65;&#x42; &quot;q&quot;"),
             "a & b <c> AB \"q\""
         );
+    }
+
+    /// `peek`'s `chars` slice (`mcp.rs`), so the test reads a handle the way the agent does.
+    fn peek_chars(agent: &Arc<Agent>, handle: &str, from: usize, to: usize) -> String {
+        let h = agent
+            .store
+            .handle(handle)
+            .expect("handle lookup")
+            .expect("handle is registered");
+        let full = std::fs::read_to_string(&h.path).expect("blob on disk");
+        full.chars().skip(from).take(to - from).collect()
+    }
+
+    /// The regression: text past `max_chars` used to be dropped inside `direct_fetch`, so no
+    /// sequence of calls could reach it. It now lives in the handle, at the offsets the inline
+    /// body advertises.
+    #[tokio::test]
+    async fn a_cut_page_can_be_read_on_past_the_cut() {
+        let (agent, _root) = crate::status::tests::test_agent().await;
+        let page: String = (0..5_000).map(|i| format!("line {i}\n")).collect();
+        let max_chars = 4_500;
+        let body = offload(
+            &agent,
+            "c-test",
+            "https://docs.example.com/big",
+            &page,
+            max_chars,
+        );
+
+        let handle = body
+            .split_once("[handle ")
+            .and_then(|(_, r)| r.split_once(':'))
+            .map(|(id, _)| id.to_owned())
+            .expect("the body names a handle");
+        let past_the_cut: String = page.chars().skip(max_chars).take(200).collect();
+        assert!(
+            !body.contains(&past_the_cut),
+            "the inline body stops at the cut"
+        );
+        assert_eq!(
+            peek_chars(&agent, &handle, max_chars, max_chars + 200),
+            past_the_cut
+        );
+        assert_eq!(
+            peek_chars(&agent, &handle, 0, page.chars().count()),
+            page,
+            "the handle holds the whole page, not the head"
+        );
+    }
+
+    /// The inline half of the same call: capped at `max_chars` and pointing at the handle.
+    #[tokio::test]
+    async fn a_cut_page_says_how_to_read_on() {
+        let (agent, _root) = crate::status::tests::test_agent().await;
+        let page = "Z".repeat(50_000);
+        let body = offload(
+            &agent,
+            "c-test",
+            "https://docs.example.com/big",
+            &page,
+            20_000,
+        );
+        assert_eq!(
+            body.matches('Z').count(),
+            20_000,
+            "inline text honours max_chars"
+        );
+        assert!(body.contains("[handle h_"));
+        assert!(body.contains("chars:[20000,28000]"));
+        assert!(body.contains("Do not fetch this URL again."));
+    }
+
+    /// Under the threshold nothing is offloaded and the body is exactly the page, as before.
+    #[tokio::test]
+    async fn a_small_page_is_unchanged_and_mints_no_handle() {
+        let (agent, _root) = crate::status::tests::test_agent().await;
+        let page = "short page\nwith two lines";
+        assert_eq!(
+            offload(
+                &agent,
+                "c-test",
+                "https://docs.example.com/small",
+                page,
+                20_000
+            ),
+            page
+        );
+    }
+
+    /// Offloading happens at `OFFLOAD_CHARS`, which is what makes `prompts/router.md`'s
+    /// "outputs over 4,000 characters become handles" true for `web_fetch`.
+    #[tokio::test]
+    async fn a_page_over_four_thousand_chars_becomes_a_handle_even_when_nothing_is_cut() {
+        let (agent, _root) = crate::status::tests::test_agent().await;
+        assert_eq!(OFFLOAD_CHARS, 4_000);
+        let page = "y".repeat(OFFLOAD_CHARS + 1);
+        let body = offload(
+            &agent,
+            "c-test",
+            "https://docs.example.com/mid",
+            &page,
+            20_000,
+        );
+        assert!(body.contains("[handle h_"));
+        assert!(
+            body.ends_with(&page),
+            "nothing was cut, so the whole page is inline"
+        );
+    }
+
+    /// A secret in the page must not survive into the blob: `peek` reads that file back verbatim.
+    #[tokio::test]
+    async fn an_offloaded_page_is_redacted_before_it_reaches_the_blob() {
+        let (agent, _root) = crate::status::tests::test_agent().await;
+        let secret = "sk-liveSecretValueForRedactionTest000000";
+        crate::store::redact_live_value(secret);
+        let page = format!("{}\n{secret}\n", "pad\n".repeat(2_000));
+        let body = offload(
+            &agent,
+            "c-test",
+            "https://docs.example.com/leak",
+            &page,
+            1_000,
+        );
+        let handle = body
+            .split_once("[handle ")
+            .and_then(|(_, r)| r.split_once(':'))
+            .map(|(id, _)| id.to_owned())
+            .expect("the body names a handle");
+        assert!(!peek_chars(&agent, &handle, 0, page.chars().count()).contains(secret));
     }
 }
