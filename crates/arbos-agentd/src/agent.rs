@@ -1839,14 +1839,16 @@ impl Agent {
     }
 
     /// Core + router prompt (byte-stable, first) + project instructions + T0/T1 (design §6.9 layout).
-    pub fn write_system_prompt(&self) -> Result<()> {
+    ///
+    /// The live slots are awaited rather than probed with `try_read`. A probe that loses the
+    /// lock — `apply_models` holds the write side for the length of a model change, which is
+    /// exactly when this runs — fell back to the boot default silently, so the prompt could
+    /// name a model the project had already moved off. The agent then reported that stale id
+    /// as its own and contradicted the picker (Jacob, 2026-11-04: "haiku-5.5", then "opus-5.5
+    /// via OpenRouter, project settings say Haiku"). No caller holds either lock here.
+    pub async fn write_system_prompt(&self) -> Result<()> {
         let mut s = base_system_prompt_with(self.cfg.code_mode(), self.cfg.jobs());
-        let talking = self
-            .settings
-            .models
-            .try_read()
-            .map(|m| m.talking.id.clone())
-            .unwrap_or_else(|_| self.cfg.talking_model.clone());
+        let talking = self.settings.models.read().await.talking.id.clone();
         // One box, many workspaces (D70): the project's files live in its own folder, not /work.
         // Identity and instructions are the relay's current ones (#1431), not the boot config.
         s.push_str(&crate::identity::project_section(
@@ -1861,12 +1863,7 @@ impl Agent {
         s.push('\n');
         s.push_str(&crate::media::prompt_section(&self.cfg));
         s.push_str(&crate::chart::prompt_section());
-        let instructions = self
-            .settings
-            .state
-            .try_read()
-            .map(|st| st.instructions.clone())
-            .unwrap_or_else(|_| self.cfg.instructions.clone());
+        let instructions = self.settings.state.read().await.instructions.clone();
         if !instructions.trim().is_empty() {
             s.push_str("\n\n## Project instructions\n\n");
             s.push_str(instructions.trim());
@@ -1947,7 +1944,7 @@ impl Agent {
     }
 
     pub async fn start_pi(self: &Arc<Self>, initial_chat: &str) -> Result<()> {
-        self.write_system_prompt()?;
+        self.write_system_prompt().await?;
         let session = self.session_file_for(initial_chat)?;
         let (talking_model, _) = self.live_models().await;
         let mut args = PiAdapter::common_args(
@@ -2147,7 +2144,7 @@ impl Agent {
             old.shutdown().await;
         }
         // The code-mode flag is read again here (D86): toggling it needs a pi respawn, not a box restart.
-        self.write_system_prompt()?;
+        self.write_system_prompt().await?;
         let session = self.session_file_for(chat_id)?;
         let (talking_model, _) = self.live_models().await;
         let mut args = PiAdapter::common_args(
@@ -3724,7 +3721,7 @@ impl Agent {
             if let Err(e) = me.memory.maybe_compact(&chat).await {
                 tracing::debug!(error = %e, "compaction");
             }
-            let _ = me.write_system_prompt();
+            let _ = me.write_system_prompt().await;
             if me.tree_mode() != crate::tree::TreeMode::Off {
                 if let Err(e) = me.tree.build_pass().await {
                     tracing::debug!(error = %e, "memory tree build pass");
@@ -8303,7 +8300,7 @@ impl Agent {
                     )
                     .await;
                 let _ = me.memory.maybe_compact(&chat).await;
-                let _ = me.write_system_prompt();
+                let _ = me.write_system_prompt().await;
             });
         }
         drop(_box_slot);
