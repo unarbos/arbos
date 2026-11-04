@@ -1807,6 +1807,10 @@ struct GroupProfileView: View {
             )
         }
         .buttonStyle(.borderless)
+        // The shot rig taps the row by name, and the chat behind this page carries the same
+        // sender names in its transcript; an identifier is what makes the tap land here (the
+        // Mac's `profile-member-<handle>` debug selector).
+        .accessibilityIdentifier("profile-member-\(r.agent?.id ?? r.person.handle)")
         // Long-press: View profile, Send private message, Mute (with duration) /
         // Unmute, owner admin rights, Remove, Ban.
         .contextMenu {
