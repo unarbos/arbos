@@ -69,6 +69,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 IOS_WORKFLOW = ".github/workflows/ios.yml"
 GATE_WORKFLOW = ".github/workflows/release-gate.yml"
+SCREEN = "gate-can-decide.sh"
 PROBE = "__release_gate_coverage_probe__"
 
 ALLOW, BLOCK, UNDETERMINED = 0, 1, 2
@@ -254,6 +255,57 @@ def assert_trigger_covers_both_predicates() -> None:
             f"{GATE_WORKFLOW}'s own `paths:` trigger does not cover what the release predicates "
             f"watch, so a pull request touching {'; '.join(gaps)} would never start this gate. "
             "Add those paths to the trigger."
+        )
+
+
+def assert_every_job_refuses_an_undecidable_event() -> None:
+    """No job in this workflow may report success on a run that judged nothing.
+
+    checks.sh reads this workflow's run conclusion, and GitHub concludes a run `success` when
+    every job is success-or-skipped. So one job that passes without deciding clears the gate on a
+    head nobody looked at, and nothing in checks.sh can tell that success from a verdict.
+
+    That is not hypothetical. This workflow offered `workflow_dispatch`, where
+    `github.event.pull_request` is null; the gate step's base-ref fallback landed on
+    `github.ref_name`, found a branch rather than main, and exited 0. The self-test job, being
+    offline and pinned, passed on any ref. Two jobs, one run concluding `success`, no verdict in
+    it. The fix is a screen on every job, and this is what keeps the screen on every job: it is
+    read out of the file on each run, so a job added, reordered or loosened later fails the gate
+    instead of quietly widening it.
+    """
+    try:
+        doc = yaml.safe_load((ROOT / GATE_WORKFLOW).read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as err:
+        raise Undetermined(f"{GATE_WORKFLOW} is not readable: {err}") from err
+    jobs = doc.get("jobs") if isinstance(doc, dict) else None
+    if not isinstance(jobs, dict) or not jobs:
+        raise Undetermined(f"{GATE_WORKFLOW} has no `jobs:` map to check")
+
+    faults: list[str] = []
+    for name, job in jobs.items():
+        if not isinstance(job, dict):
+            faults.append(f"{name} is not a job map")
+            continue
+        if "if" in job:
+            faults.append(f"{name} has an `if:`, so it can be skipped, and a skip is not a pass")
+        steps = job.get("steps")
+        if not isinstance(steps, list) or not steps:
+            faults.append(f"{name} has no steps")
+            continue
+        if any(isinstance(s, dict) and s.get("continue-on-error") for s in steps):
+            faults.append(f"{name} has a step with `continue-on-error`, which hides its verdict")
+        runs_screen = [i for i, s in enumerate(steps) if SCREEN in str(s.get("run", ""))]
+        if not runs_screen:
+            faults.append(f"{name} never runs {SCREEN}, so it can pass on a run that decided nothing")
+            continue
+        # Only checkout may come first, because the screen is a file in the tree.
+        earlier = steps[: runs_screen[0]]
+        if any("checkout" not in str(s.get("uses", "")) for s in earlier):
+            faults.append(f"{name} does work before {SCREEN} has said whether the run can decide")
+    if faults:
+        raise Undetermined(
+            f"{GATE_WORKFLOW} has job(s) that could report success without deciding: "
+            f"{'; '.join(faults)}."
         )
 
 
@@ -551,6 +603,7 @@ def main(argv: list[str]) -> int:
     try:
         assert_mac_paths_is_the_binary_closure()
         assert_trigger_covers_both_predicates()
+        assert_every_job_refuses_an_undecidable_event()
         pr_base, pr_head, main_sha = (
             commit(args.pr_base),
             commit(args.pr_head),

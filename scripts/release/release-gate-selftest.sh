@@ -30,15 +30,20 @@ QUIET=(--main 41847d26b --mac-released-sha 0c7489b91 --ios-released-sha 41847d26
        --pr-base 0c7489b91 --pr-head 41847d26b)
 
 # case <name> <expected exit> <gate arguments...>
+#
+# Set WHY to a phrase the gate's own message must contain. An exit code alone says the case
+# refused, not that it refused for the reason the case is named after, and a refusal that arrives
+# by accident is a case that would still pass with the guard it tests removed.
 case_is() {
-  local name=$1 want=$2 got=0 out
+  local name=$1 want=$2 got=0 out why=${WHY:-}
   shift 2
   out="$(python3 "$gate" "$@" 2>&1)" || got=$?
-  if [[ "$got" == "$want" ]]; then
+  if [[ "$got" == "$want" && ( -z "$why" || "$out" == *"$why"* ) ]]; then
     printf 'ok    %s (exit %s)\n' "$name" "$got"
   else
     failures=$((failures + 1))
-    printf 'FAIL  %s: wanted exit %s, got %s\n%s\n\n' "$name" "$want" "$got" "$out"
+    printf 'FAIL  %s: wanted exit %s%s, got %s\n%s\n\n' \
+      "$name" "$want" "${why:+ saying \"$why\"}" "$got" "$out"
   fi
 }
 
@@ -120,22 +125,99 @@ case_is "a published build that is not on main fails closed, not open" 2 \
 # Exactly the state this change fixed: arbos-client and arbos-matrix are linked into Arbos.app and
 # were missing from the Mac path list, so a fix in either shipped with no release cut for it.
 ARBOS_MAC_PATHS="crates/arbos-mac crates/arbos-core crates/arbos-update Cargo.lock scripts/bundle-mac.sh site/assets/logo" \
+  WHY="the Mac binary links arbos-client, arbos-matrix" \
   case_is "a Mac path list that is not the binary's closure fails closed" 2 "${QUIET[@]}"
 
-# A trigger list that has fallen behind a predicate, in a throwaway tree so the real one is never
-# edited. crates is linked rather than copied: the closure is read from the manifests.
-drift="$(mktemp -d)"
-trap 'rm -rf "$drift"' EXIT
+# The two cases below each break one thing in a throwaway tree, so the real one is never edited.
+#
+# Directories are linked rather than copied, and that detail is load-bearing: the coverage check
+# asks the filesystem whether a watched path is a directory, so a tree missing `site` invents a
+# `site/assets/logo` gap that has nothing to do with the drift on trial. Both cases would then
+# have passed with the guard they test removed. WHY is what caught it, and is why these cases
+# assert the message rather than the exit code alone.
 root="$(cd "$here/../.." && pwd)"
-mkdir -p "$drift/scripts/release" "$drift/.github/workflows"
-cp "$here"/*.py "$here"/*.sh "$drift/scripts/release/"
-ln -s "$root/crates" "$drift/crates"
-cp "$root/.github/workflows/ios.yml" "$drift/.github/workflows/"
+throwaways=()
+trap 'rm -rf "${throwaways[@]}"' EXIT
+
+throwaway() {
+  local d
+  d="$(mktemp -d)"
+  throwaways+=("$d")
+  mkdir -p "$d/scripts/release" "$d/.github/workflows"
+  cp "$here"/*.py "$here"/*.sh "$d/scripts/release/"
+  ln -s "$root/crates" "$d/crates"
+  ln -s "$root/site" "$d/site"
+  cp "$root/.github/workflows/ios.yml" "$d/.github/workflows/"
+  echo "$d"
+}
+
+# A trigger list that has fallen behind a predicate: the gate would never start for an iOS-only
+# pull request, which is a miss rather than a wrong answer, and silent.
+drift="$(throwaway)"
 grep -v '"apps/ios/\*\*"' "$root/.github/workflows/release-gate.yml" \
   > "$drift/.github/workflows/release-gate.yml"
 gate="$drift/scripts/release/release-gate.py"
-case_is "a trigger list that misses a predicate's path fails closed" 2 "${QUIET[@]}"
+WHY="touching apps/ios/** (from .github/workflows/ios.yml) would never start this gate" \
+  case_is "a trigger list that misses a predicate's path fails closed" 2 "${QUIET[@]}"
 gate="$here/release-gate.py"
+
+# A job that has lost the screen. GitHub concludes a run `success` when every job is
+# success-or-skipped, so one such job clears the gate on a head nobody judged — which is exactly
+# what `workflow_dispatch` used to do here.
+shape="$(throwaway)"
+python3 - "$root/.github/workflows/release-gate.yml" \
+         "$shape/.github/workflows/release-gate.yml" <<'PY'
+import re, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+# Drop the self-test job's screen, leaving the gate job's in place: one unscreened job is enough.
+head, _, tail = text.partition("\n  self-test:")
+tail = re.sub(r"      - name: Can this run decide anything\?\n(?:        .*\n)+", "", tail, count=1)
+open(sys.argv[2], "w", encoding="utf-8").write(head + "\n  self-test:" + tail)
+PY
+gate="$shape/scripts/release/release-gate.py"
+WHY="self-test never runs gate-can-decide.sh" \
+  case_is "a job that could pass without deciding fails closed" 2 "${QUIET[@]}"
+gate="$here/release-gate.py"
+
+# The other two shapes the same assertion watches for: a job that can be skipped, and a step whose
+# failure is swallowed. Both end as a run GitHub calls `success` with no verdict inside it.
+skippable="$(throwaway)"
+sed 's|^  self-test:|  self-test:\n    if: github.event_name == '"'"'pull_request'"'"'|' \
+  "$root/.github/workflows/release-gate.yml" > "$skippable/.github/workflows/release-gate.yml"
+gate="$skippable/scripts/release/release-gate.py"
+WHY="self-test has an \`if:\`" \
+  case_is "a job that can be skipped fails closed" 2 "${QUIET[@]}"
+gate="$here/release-gate.py"
+
+swallowed="$(throwaway)"
+sed 's|^      - run: scripts/release/release-gate-selftest.sh|      - run: scripts/release/release-gate-selftest.sh\n        continue-on-error: true|' \
+  "$root/.github/workflows/release-gate.yml" > "$swallowed/.github/workflows/release-gate.yml"
+gate="$swallowed/scripts/release/release-gate.py"
+WHY="self-test has a step with \`continue-on-error\`" \
+  case_is "a step whose failure is swallowed fails closed" 2 "${QUIET[@]}"
+gate="$here/release-gate.py"
+
+# ── the screen itself ───────────────────────────────────────────────────────────────────────────
+# Every job's first step. An event that hands the gate no pull request must exit 2, never 0:
+# `workflow_dispatch` supplied neither value, and the fallback that filled them in is what turned
+# a run that judged nothing into a success on a real head.
+
+screen_is() {
+  local name=$1 want=$2 got=0
+  shift 2
+  env "$@" "$here/gate-can-decide.sh" >/dev/null 2>&1 || got=$?
+  if [[ "$got" == "$want" ]]; then
+    printf 'ok    %s (exit %s)\n' "$name" "$got"
+  else
+    failures=$((failures + 1))
+    printf 'FAIL  %s: wanted exit %s, got %s\n' "$name" "$want" "$got"
+  fi
+}
+
+screen_is "an event carrying no pull request cannot decide" 2 GATE_BASE_REF= GATE_HEAD_SHA=
+screen_is "a base ref with no head sha cannot decide" 2 GATE_BASE_REF=main GATE_HEAD_SHA=
+screen_is "a head sha with no base ref cannot decide" 2 GATE_BASE_REF= GATE_HEAD_SHA=41847d26b
+screen_is "a pull request can decide" 0 GATE_BASE_REF=main GATE_HEAD_SHA=41847d26b
 
 if (( failures > 0 )); then
   echo
