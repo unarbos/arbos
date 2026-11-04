@@ -213,16 +213,67 @@ final class SwipeDirectionsUITests: XCTestCase {
         return bubbleElement(app, id)
     }
 
+    /// The leading strip the system's interactive pop owns. A drag that starts inside it is the
+    /// system's whatever the app does, so a test that means to exercise the app's own gesture
+    /// has to start outside it — and has to know that it did.
+    private static let systemEdgeZone: CGFloat = 24
+
+    /// The row's frame, read immediately before a drag and confirmed by two agreeing reads.
+    ///
+    /// `revealBubble` already settles a row before handing it back, so this is not the same
+    /// wait: it closes the window between that settle and the press. Every drag helper used to
+    /// read `bubble.frame` afresh to do its arithmetic, and `XCUIElement.coordinate` resolves
+    /// the element *again* when the event is synthesized — three reads, three chances to
+    /// disagree. The arithmetic could be done against one frame and the finger put down
+    /// against another.
+    ///
+    /// That gap is how a start meant to sit 40 pt from the left edge ends up inside the 24 pt
+    /// the system pop owns, where a 50 pt drag is a pop: gate 41749001603 failed
+    /// `testAShortRightSwipeOnABubbleNeitherGoesBackNorReplies` with "50 pt is not a back
+    /// swipe" against gesture code byte-identical to the run that passed it.
+    private func stableFrame(of bubble: XCUIElement, timeout: TimeInterval = 4,
+                             file: StaticString = #filePath, line: UInt = #line) -> CGRect {
+        XCTAssertTrue(bubble.exists, "the row is still on screen to swipe", file: file, line: line)
+        var previous = CGRect.null
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let current = bubble.frame
+            if !current.isEmpty, current == previous { return current }
+            previous = current
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        XCTFail("\(bubble.identifier) frame never settled for the drag", file: file, line: line)
+        return previous
+    }
+
+    /// A point in screen space, pinned to the frame this test measured.
+    ///
+    /// Deliberately not `XCUIElement.coordinate`, which re-resolves the row when the event is
+    /// synthesized and so can land the finger somewhere the surrounding arithmetic never saw.
+    private func screenPoint(_ app: XCUIApplication, x: CGFloat, y: CGFloat) -> XCUICoordinate {
+        app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: x, dy: y))
+    }
+
+    /// Fail loudly rather than hand the drag to the system pop and blame the app for what
+    /// follows.
+    private func assertClearOfSystemEdge(_ x: CGFloat, _ what: String,
+                                         file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertGreaterThan(x, Self.systemEdgeZone, "\(what) starts clear of the system edge zone",
+                             file: file, line: line)
+    }
+
     /// Swipe left across `bubble`, starting near its trailing edge so the finger has room to
     /// travel without leaving the screen. Returns the distance actually swiped.
     @discardableResult
     private func swipeLeft(on bubble: XCUIElement, _ app: XCUIApplication, want: CGFloat = 110,
                            file: StaticString = #filePath, line: UInt = #line) -> CGFloat {
-        let start = bubble.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5))
+        let frame = stableFrame(of: bubble, file: file, line: line)
+        let startX = frame.minX + frame.width * 0.9
+        assertClearOfSystemEdge(startX, "the left swipe", file: file, line: line)
         // Keep 32 pt clear of the left screen edge: the first 24 pt are the system pop's.
-        let room = bubble.frame.minX + bubble.frame.width * 0.9 - 32
-        let distance = min(want, room)
+        let distance = min(want, startX - 32)
         XCTAssertGreaterThan(distance, 60, "the bubble has room for a left swipe", file: file, line: line)
+        let start = screenPoint(app, x: startX, y: frame.midY)
         start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: -distance, dy: 0)),
                     withVelocity: .fast, thenHoldForDuration: 0.05)
         return distance
@@ -233,9 +284,9 @@ final class SwipeDirectionsUITests: XCTestCase {
     private func swipeRight(on bubble: XCUIElement, _ app: XCUIApplication, want: CGFloat = 180,
                            file: StaticString = #filePath, line: UInt = #line) {
         let window = app.windows.firstMatch.frame
-        let startX = max(bubble.frame.minX + 8, 40)
-        let start = bubble.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0.5))
-            .withOffset(CGVector(dx: startX - bubble.frame.minX, dy: 0))
+        let frame = stableFrame(of: bubble, file: file, line: line)
+        let startX = max(frame.minX + 8, 40)
+        assertClearOfSystemEdge(startX, "the right swipe", file: file, line: line)
         let distance = min(want, window.maxX - 8 - startX)
         XCTAssertGreaterThan(distance, 80, "the bubble has room for a right swipe", file: file, line: line)
         // Print what the app is actually given. XCUITest clamps a destination to the screen in
@@ -245,6 +296,7 @@ final class SwipeDirectionsUITests: XCTestCase {
         // from the log instead of re-deriving it from a frame.
         print("swipe right on \(bubble.identifier): x \(Int(startX)) → \(Int(startX + distance)) " +
               "of \(Int(window.maxX)), distance \(Int(distance))")
+        let start = screenPoint(app, x: startX, y: frame.midY)
         start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: distance, dy: 0)),
                     withVelocity: .fast, thenHoldForDuration: 0.05)
     }
@@ -372,8 +424,10 @@ final class SwipeDirectionsUITests: XCTestCase {
     func testAShortRightSwipeOnABubbleNeitherGoesBackNorReplies() {
         let app = launchGroup()
         let bubble = revealBubble(app, "g3")
-        let start = bubble.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0.5))
-            .withOffset(CGVector(dx: max(8, 40 - bubble.frame.minX), dy: 0))
+        let frame = stableFrame(of: bubble)
+        let startX = max(frame.minX + 8, 40)
+        assertClearOfSystemEdge(startX, "the short right swipe")
+        let start = screenPoint(app, x: startX, y: frame.midY)
         start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 50, dy: 0)),
                     withVelocity: .slow, thenHoldForDuration: 0.5)
         sleep(1)
