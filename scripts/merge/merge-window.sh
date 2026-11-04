@@ -35,7 +35,59 @@ changes_since() { git log --format='%H %s' --first-parent "$1..${MW_TEST_HEAD:-o
 
 # rd() lives in checks.sh, which both this file and merge.sh source.
 
-# verdict <sha> [nogate]: one line — TAG <vX> | NOMAC <vY> <reason> | COVERED <vY> | RED | WAIT <why> | BLOCKED <unreadable>
+# ci_abort_state <run-id> <"status conclusion">: RED or UNTESTED, for a ci.yml run
+# that reached a terminal state other than success.
+#
+# Why this exists. Every non-success conclusion used to print the one sentence
+# "RED CI <status> <conclusion>", so a job that tested the commit and found it
+# broken and a job that died before testing anything were the same word. On
+# 2026-11-04 the whole merge kit was held for about eight and a half hours on
+# e445f70ad because of that: run 41761774906 ran 86 seconds, died at step 4 of
+# 24 inside Swatinem/rust-cache@v2 with "No space left on device", and cargo
+# fmt, clippy and test never executed. The tree was fine — #2704, whose base is
+# that very commit, passed the same job twice the same morning — but the kit
+# said "main is red at e445f70ad", which points at the commit rather than at a
+# re-run button. Failing closed was right; the reason was wrong, and a wrong
+# reason sends the reader to the wrong remedy.
+#
+# The discriminator is the step list, and it needs no workflow knowledge: a run
+# that genuinely failed has at least one STEP whose conclusion is "failure". A
+# run killed by its host has none — its steps are `null`, because they never
+# started. So "no step concluded failure" is the signal, not the names of the
+# steps, which keeps this true for workflows nobody has written yet.
+#
+# BOTH ANSWERS STILL REFUSE, and that is not an oversight to be tidied up
+# later. A run that tested nothing is the definition of ungated, so it is
+# precisely the state a gate must not pass. The tempting follow-up — an
+# accept-infra= override, or an automatic pass when the steps are null — would
+# rebuild the bug checks.sh was written to end, approaching from the other
+# side. The remedy for an aborted run is to re-run it, which costs minutes and
+# produces a real verdict. This function changes the sentence, never the gate.
+#
+# Unreadable steps fall back to RED: when the new read fails, the output is
+# what it was before this function existed.
+ci_abort_state() {
+  local id=$1 ci=$2 steps note
+  [ -n "$id" ] || { echo "RED CI $ci"; return; }
+  # "\(.conclusion)" and not a bare .conclusion: gh renders a JSON null as an
+  # EMPTY LINE, and a step that never started is exactly the null case. Every
+  # such step is at the end of the list, so both command substitutions below
+  # strip them and `steps` arrives holding only the steps that did run — the
+  # ones this function exists to look past. Interpolating makes null arrive as
+  # the four-character token, which survives the strip and is greppable.
+  steps=$(rd "repos/$R/actions/runs/$id/jobs?per_page=100" --jq '.jobs[].steps[]? | "\(.conclusion)"') \
+    || { echo "RED CI $ci (and its steps could not be read, so it is reported as before: ${steps#BLOCKED:})"; return; }
+  [ -n "$steps" ] || { echo "RED CI $ci (run $id lists no steps at all)"; return; }
+  printf '%s\n' "$steps" | grep -qx failure && { echo "RED CI $ci"; return; }
+  # Nothing failed and it is not a success, so it stopped. The annotation is
+  # usually the only place the host's own error appears.
+  note=$(rd "repos/$R/actions/runs/$id/jobs?per_page=100" --jq '[.jobs[]|select(.conclusion!="success")][0].id' 2>/dev/null)
+  case "$note" in ''|null|BLOCKED*) note="" ;; *) note=$(rd "repos/$R/check-runs/$note/annotations" --jq '.[0].message' 2>/dev/null) ;; esac
+  case "$note" in BLOCKED*|null) note="" ;; esac
+  echo "UNTESTED CI $ci — run $id has $(printf '%s\n' "$steps" | grep -cx null) step(s) that never started and none that failed, so it aborted before testing this commit; re-run it, do not re-push${note:+ — }${note:0:160}"
+}
+
+# verdict <sha> [nogate]: one line — TAG <vX> | NOMAC <vY> <reason> | COVERED <vY> | RED | UNTESTED | WAIT <why> | BLOCKED <unreadable>
 # "nogate" leaves the Swift gate out, for a caller that judges the gate itself (go, through range_gate).
 verdict() {
   local sha=$1 s8=${1:0:8} since ci tag
@@ -63,7 +115,11 @@ verdict() {
       3) echo "WAIT $gout"; return ;;
     esac
   fi
-  ci=$(rd "repos/$R/actions/workflows/ci.yml/runs?head_sha=$sha&per_page=5" --jq '[.workflow_runs[]|select(.event=="push")][0]|"\(.status) \(.conclusion)"') || { echo "BLOCKED reading CI runs for $s8: ${ci#BLOCKED:}"; return; }
+  local cirun
+  ci=$(rd "repos/$R/actions/workflows/ci.yml/runs?head_sha=$sha&per_page=5" --jq '[.workflow_runs[]|select(.event=="push")][0]|"\(.id) \(.status) \(.conclusion)"') || { echo "BLOCKED reading CI runs for $s8: ${ci#BLOCKED:}"; return; }
+  # The id is only needed to look inside a non-success run; strip it back off so
+  # every string below reads exactly as it did before.
+  case "$ci" in ""|null*) cirun="" ;; *) cirun=${ci%% *}; ci=${ci#* } ;; esac
   case "$ci" in
     ""|null*)
       # ci.yml's push trigger has paths-ignore (apps/ios/**): such a commit gets no CI and so no Release
@@ -79,7 +135,7 @@ verdict() {
   esac
   case "$ci" in
     "completed success") ;;
-    completed*) echo "RED CI $ci"; return ;;
+    completed*) ci_abort_state "$cirun" "$ci"; return ;;
     ""|null*) echo "WAIT no CI run yet"; return ;;
     *) echo "WAIT CI $ci"; return ;;
   esac
@@ -215,6 +271,45 @@ check_published() {  # <tag> — appends to nogo
   echo "$out" | grep -q '^feed (mirror, arbos.life): lists' || echo "    (mirror behind or unreachable: soft, not a NO-GO)"
 }
 
+# nomac_covers <sha> <covering-sha>: 0 when <covering-sha> has already been judged
+# "no Mac change since the tag being released" AND <sha> is an ancestor of it.
+#
+# WHY AN ANCESTOR MAY BE CLEARED BY A DESCENDANT'S VERDICT. The question this
+# window asks is whether main still OWES a Mac release. mac-change.sh answers it
+# by diffing the tag against a commit, so "no Mac change since <tag>" on commit T
+# means the Mac paths at T are identical to the Mac paths at <tag>. If that holds
+# at T, it holds for everything main would ship from T: a release cut there would
+# rebuild a byte-identical Mac app. An ancestor of T that touched a Mac path and
+# had it reverted before T is a transient that no release ever needed to carry,
+# and the debt is about what main owes now, not about what it briefly held.
+#
+# WHY THIS IS NOT A LOOSENING. <covering-sha> is only ever set from a verdict that
+# matched "NOMAC <the current tag>" exactly — a real Release run's recorded answer,
+# against the tag being released, not an inference. If genuine debt exists then
+# mac-change.sh returns 1 for the tip, so the tip's plan says "Mac sources changed"
+# and cuts a tag or waits; it never records NOMAC, nothing ever sets <covering-sha>,
+# and every refusal below fires exactly as it did before. The clearing path cannot
+# be reached without a current-tag NOMAC somewhere newer on main's first-parent line.
+#
+# THE DEFECT THIS REPAIRS. The check used to demand that EVERY commit since the tag
+# carry a verdict naming THAT tag. A verdict is recorded when its Release run
+# finishes, so a commit judged minutes before the next tag publishes is stamped with
+# the older tag and can never be re-stamped: nothing re-judges a commit already on
+# main, no new commit can land while the window is shut, and the tag cannot move
+# without a release that nothing needs. On 2026-11-04 that deadlocked the whole queue
+# on 562dc0cd0, whose run finished at 13:35Z carrying "NOMAC v0.6.381" while v0.6.382
+# published at 14:00Z — with zero Mac paths changed across the entire range.
+#
+# The explicit empty check below is belt-and-braces and survives mutation on
+# purpose: git already rejects an empty revision, so deleting the line changes
+# no answer this function can be asked for. It is kept because it states the
+# precondition where a reader looks for it, and because it makes a one-argument
+# call return 1 rather than die on an unbound variable under `set -u`.
+nomac_covers() {
+  [ -n "${2:-}" ] || return 1
+  git merge-base --is-ancestor "$1" "$2" 2>/dev/null
+}
+
 go() {
   echo "== merge-window GO check $(ts)"
   git fetch -q origin main --tags 2>/dev/null
@@ -230,9 +325,52 @@ go() {
   if [ -z "$ch" ]; then echo "  main $(git rev-parse --short=9 origin/main) is covered by $tag"
   else
     echo "  main has changes after $tag; each needs a Release plan verdict of 'no Mac change since $tag':"
+    local cls covering=""
     while read -r sha subj; do
       v=$(verdict "$sha" nogate); echo "    ${sha:0:9} ${subj:0:70} → $v"
-      case "$v" in "NOMAC $tag"*|NOPATH*) ;; *) nogo+=("${sha:0:9} not judged no-Mac-change since $tag ($v)") ;; esac
+      cls=$(verdict_class "$v")
+      # Which classes may clear is verdict_clears_go()'s to say, so that the
+      # answer lives in one place and selftest.sh is pinning the real decision
+      # rather than a copy of it. This used to be a literal `case` here, which
+      # meant the kit had two lists that had to agree about refusal — the exact
+      # shape of bug the rest of this file is about.
+      #
+      # The tag check stays here, and must. verdict_clears_go() is deliberately
+      # ignorant of which tag is being released, so it answers for the class and
+      # not for this release: a NOMAC naming an OLDER tag says nothing about
+      # this one ON ITS OWN, and still falls through to the NO-GO below unless a
+      # newer commit that contains it carries a verdict naming THIS tag.
+      #
+      # changes_since() lists newest first, so `covering` is set by the time any
+      # older commit is read. It is assigned here and nowhere else, from the exact
+      # "NOMAC $tag" match and from nothing weaker — see nomac_covers() above.
+      if verdict_clears_go "$cls"; then
+        case "$cls" in
+          NOMAC)
+            case "$v" in "NOMAC $tag"*) covering=${covering:-$sha}; continue ;; esac
+            if nomac_covers "$sha" "$covering"; then
+              echo "      ^ cleared: ${covering:0:9} is judged 'no Mac change since $tag' and ${sha:0:9} is an ancestor of it, so main owes no Mac release for it"
+              continue
+            fi ;;
+          *) continue ;;
+        esac
+      fi
+      # One NO-GO either way; the words differ because the next action does.
+      # "not judged" used to head every one of these, so a commit the kit HAD
+      # judged, and judged failed, was reported as missing information with the
+      # real verdict demoted into the parenthetical.
+      case "$cls" in
+        RED)      nogo+=("${sha:0:9} JUDGED AND FAILED CI since $tag — read the run ($v)") ;;
+        UNTESTED) nogo+=("${sha:0:9} JUDGED, BUT NOTHING RAN since $tag — re-run the job, the commit is not implicated ($v)") ;;
+        REDGATE)  nogo+=("${sha:0:9} has a required check with no successful run since $tag ($v)") ;;
+        WAIT)     nogo+=("${sha:0:9} NOT JUDGED YET since $tag — still running ($v)") ;;
+        BLOCKED)  nogo+=("${sha:0:9} COULD NOT BE READ since $tag, so nothing is inferred ($v)") ;;
+        # Name both tags. This refusal used to print only the tag being released,
+        # leaving the reader to find the other one inside the parenthetical and work
+        # out for themselves that the two differed.
+        NOMAC)    nogo+=("${sha:0:9} was judged 'no Mac change since $(echo "$v" | awk '{print $2}')', NOT since $tag, and no commit newer than it on main carries a '$tag' verdict that contains it — so whether main owes a Mac release for ${sha:0:9} is unanswered ($v)") ;;
+        *)        nogo+=("${sha:0:9} not judged no-Mac-change since $tag ($v)") ;;
+      esac
     done <<< "$ch"
     echo "  required checks since $tag, decided on the newest commit each applies to (older results are findings):"
     range_gate "$tag"
@@ -292,6 +430,10 @@ after() {
   if [ "$n" -ne 1 ]; then echo "VERDICT $(ts): STOP — $n changes since $prev, FOLDED"; return; fi
   read -r sha subj <<< "$ch"
   v=$(verdict "$sha"); echo "Release plan verdict for ${sha:0:9}: $v"
+  # Do not fold this onto verdict_class(): `RED GATE ...` reaches RED* by prefix
+  # and there is no REDGATE arm here, so classifying first would drop it into the
+  # default — the refusal-becomes-a-shrug this case was hardened against.
+  # Prerequisite for the fold: add a REDGATE arm, and a selftest case for it, first.
   case "$v" in
     TAG*)
       tag=$(echo "$v" | awk '{print $2}')
@@ -307,8 +449,22 @@ after() {
       echo "VERDICT $(ts): NO-TAG — ${sha:0:9} changes ${v#NOPATH }. Next GO may run (next 'after ${sha:0:9}')" ;;
     COVERED*) echo "VERDICT $(ts): STOP — plan says an existing tag already covers ${sha:0:9}; look before the next merge" ;;
     RED*) echo "VERDICT $(ts): STOP — main is red at ${sha:0:9} ($v)" ;;
+    # STOP, exactly as RED is, and said separately because the remedy is not
+    # the same one. Without this arm UNTESTED would fall to the default below
+    # and print WAIT, which is this function telling the operator to sit and
+    # wait for a run that has already finished and will never change.
+    UNTESTED*) echo "VERDICT $(ts): STOP — main's CI at ${sha:0:9} aborted before it tested anything; re-run that job ($v)" ;;
     BLOCKED*) echo "VERDICT $(ts): BLOCKED — cannot read what the verdict needs, so no verdict is inferred: ${v#BLOCKED }" ;;
-    *) echo "VERDICT $(ts): WAIT — $v" ;;
+    WAIT*) echo "VERDICT $(ts): WAIT — $v" ;;
+    # Unrecognised. WAIT used to live here as the default, which meant any
+    # verdict word nobody had taught this function became an instruction to
+    # sit and wait. That is the wrong direction to fail in: the words that
+    # reach here describe states this function has never been shown, and a
+    # state nobody has reasoned about is not a state to proceed from. Every
+    # string verdict() can produce today has an arm above, so this arm is
+    # reachable only by a word added without reading this case — exactly the
+    # case that must not be allowed to read as progress.
+    *) echo "VERDICT $(ts): STOP — unrecognised verdict, so nothing is inferred from it: $v" ;;
   esac
 }
 

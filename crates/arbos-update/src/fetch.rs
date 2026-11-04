@@ -165,6 +165,36 @@ impl fmt::Display for DownloadFailed {
 
 impl std::error::Error for DownloadFailed {}
 
+/// Whether another try a few seconds later could do better.
+///
+/// True for the connection: a name that did not resolve, a socket that did not open, a
+/// transfer that stalled or dropped. On macOS `getaddrinfo` answers `nodename nor servname
+/// provided, or not known` for a few seconds after the Mac wakes or joins a network, before
+/// the system resolver has its configuration — a real host, momentarily unknown.
+///
+/// False for an answer: a 404, a 500, or a body that is not a feed. Those are the server's
+/// verdict and will read the same on the next try, so the other feed URL is the only hope.
+pub fn worth_retrying(err: &anyhow::Error) -> bool {
+    if let Some(re) = err.downcast_ref::<reqwest::Error>() {
+        // Every other kind reqwest reports is about the connection or the transfer, so it is
+        // worth another try; these two are a verdict on the request itself.
+        return !(re.is_status() || re.is_builder());
+    }
+    let text = format!("{err:#}").to_ascii_lowercase();
+    [
+        "dns",
+        "lookup",
+        "resolve",
+        "timed out",
+        "timeout",
+        "refused",
+        "reset",
+        "unreachable",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+}
+
 /// One plain phrase for a transport error.
 pub fn describe(err: &anyhow::Error) -> String {
     if let Some(re) = err.downcast_ref::<reqwest::Error>() {
