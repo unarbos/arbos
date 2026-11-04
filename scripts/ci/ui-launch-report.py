@@ -17,6 +17,10 @@ import sys
 
 CLONE = re.compile(r"Clone \d+ of ")
 FIRST_UI = re.compile(r"Test Case '-\[(ArbosUITests)\.(\w+) (\w+)\]' started")
+# The activity trace, which is where the handshake is readable. Case duration is not a usable
+# stand-in: most of a slow first case is the suite's own `Waiting 90.0s for ... to exist`, which
+# moves for reasons unrelated to the launch. The budget is spent between these two events.
+TRACE = re.compile(r"^\s+t = +([\d.]+)s +(.*)$", re.M)
 # XCUITest's three harness-handshake timeouts, as observed across 248 gate attempts. All three
 # are "a harness operation timed out", which is what distinguishes them from an app that will not
 # start: `Failed to launch <app>: <anything else>` is a real failure and is deliberately not here.
@@ -29,6 +33,20 @@ def case_result(log, cls, meth):
     m = re.search(r"Test Case '-\[ArbosUITests\.%s %s\]' (passed|failed) \((\d+\.\d+) seconds\)"
                   % (re.escape(cls), re.escape(meth)), log)
     return (m.group(1), float(m.group(2))) if m else (None, None)
+
+
+def handshake(block):
+    """Seconds from `Launch com.unarbos…` to `Setting up automation session`, or None if the
+    case never got there — which is what a wedged launch looks like."""
+    launch = None
+    for m in TRACE.finditer(block):
+        t, label = float(m.group(1)), m.group(2)
+        if launch is None:
+            if label.startswith("Launch com.unarbos"):
+                launch = t
+        elif "Setting up automation session" in label:
+            return round(t - launch, 2)
+    return None
 
 
 def main(path):
@@ -45,14 +63,22 @@ def main(path):
     result, secs = case_result(log, cls, meth)
     clones = sorted(set(CLONE.findall(log)))
     timeouts = HANDSHAKE_TIMEOUT.findall(log)
+    nxt = FIRST_UI.search(log, first.end())
+    shake = handshake(log[first.start():nxt.start() if nxt else len(log)])
 
     lines = [f"First UI case: `{cls}.{meth}` — {result or 'no verdict'}"
              + (f", {secs:.1f} s" if secs else ""),
+             f"First-case launch handshake: "
+             + (f"{shake:.2f} s" if shake is not None else "never completed"),
              f"Simulator clones in the log: {len(clones)}",
              f"Launch-handshake timeouts: {len(timeouts)}"]
-    if secs and secs > 30:
-        lines.append(f"Note: the first UI launch cost {secs:.1f} s. Serial runs measure 13-21 s; "
-                     "above ~60 s it starts to overrun XCUITest's fixed handshake waits.")
+    # Measured over 1,622 UI cases: the handshake is 1.08-3.31 s on the first case of a serial
+    # run and 2.14 s median on every later case, against 37.25 s median and a 99.26 s maximum on
+    # the first case of a cloned run. The background-assertion budget is about 90 s.
+    if shake is not None and shake > 5:
+        lines.append(f"Note: the first-case handshake took {shake:.2f} s against a ~90 s budget. "
+                     "Serial runs measure 1-4 s; a cloned run medians 37 s and has been seen at "
+                     "99 s, past the budget.")
     for t in timeouts:
         lines.append(f"  {t.strip()}")
 
