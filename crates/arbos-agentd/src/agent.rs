@@ -4705,6 +4705,11 @@ impl Agent {
                 Some(&voice_text),
             );
         }
+        self.carry_promise_past_this_turn(
+            chat_id,
+            &turn,
+            matches!(final_status, MessageStatus::Done),
+        );
         if !turn.ack_text.trim().is_empty() {
             let _ = self.store.t3_append(
                 chat_id,
@@ -7272,10 +7277,80 @@ impl Agent {
         }
     }
 
-    /// Working-set section (design §6.6 item 2b): running subagents + compaction summary +
-    /// handles + notes, ≤ 40 lines.
+    /// Where this chat's outstanding promise is kept. `meta` is agentd's own table: unlike the
+    /// `remember` notes in `scratch`, the model cannot overwrite it.
+    fn promise_key(chat_id: &str) -> String {
+        format!("promise:{chat_id}")
+    }
+
+    /// What this chat's agent said it would do next and did not get to, if anything.
+    pub(crate) fn outstanding_promise(&self, chat_id: &str) -> Option<String> {
+        self.store
+            .meta_get(&Self::promise_key(chat_id))
+            .ok()
+            .flatten()
+            .filter(|p| !p.trim().is_empty())
+    }
+
+    /// A turn that stated a next step and did not run to completion still owes it, so the
+    /// promise is written to the store and carried into the next turn's working set.
+    ///
+    /// The conversation is the wrong place to keep it. pi's compaction rewrites the window
+    /// between turns, and in AF-782 it did so 12 s after the turn that owed Jacob a bar chart
+    /// was cut short — after which the promise existed nowhere but in the words compaction had
+    /// just summarised. The working set is rebuilt from the store every turn, which is why a
+    /// running job survives a compaction and the promise did not.
+    ///
+    /// Exactly one turn carries it: a later turn that runs to completion has been shown the
+    /// promise and either kept it or answered it, so it clears. This is a hand-over, not a
+    /// reminder that nags for ever.
+    pub(crate) fn carry_promise_past_this_turn(
+        &self,
+        chat_id: &str,
+        turn: &TurnState,
+        completed: bool,
+    ) {
+        let ran_to_completion = completed && !turn.stopped;
+        let words = turn
+            .progress_texts
+            .iter()
+            .map(String::as_str)
+            .chain([turn.streamed_text.as_str(), turn.ack_text.as_str()])
+            .chain(turn.route_reply_text.as_deref())
+            .collect::<Vec<_>>()
+            .join("\n");
+        match promised_next_step(&words) {
+            Some(promise) if !ran_to_completion => {
+                tracing::info!(chat_id, promise = %promise, "turn ended owing a stated next step; carried to the next turn");
+                let _ = self
+                    .store
+                    .meta_set(&Self::promise_key(chat_id), promise.trim());
+                let _ = self.store.t3_append(
+                    chat_id,
+                    None,
+                    Some(chat_id),
+                    "promise",
+                    Some("system"),
+                    promise.trim(),
+                    Some(&json!({ "outstanding": true })),
+                );
+            }
+            _ if ran_to_completion && self.outstanding_promise(chat_id).is_some() => {
+                let _ = self.store.meta_set(&Self::promise_key(chat_id), "");
+            }
+            _ => {}
+        }
+    }
+
+    /// Working-set section (design §6.6 item 2b): running subagents + an outstanding promise +
+    /// compaction summary + handles + notes, ≤ 40 lines.
     pub fn working_set_text(&self, chat_id: &str) -> String {
         let mut lines = Vec::new();
+        if let Some(promise) = self.outstanding_promise(chat_id) {
+            lines.push(format!(
+                "You told the user \"{promise}\" and the turn ended before you did it. Do it now, as your first step, or say in one line why you are not going to."
+            ));
+        }
         // Prefer the live task map when available so a zombie `running` row
         // (task gone, status never cleared) does not keep the agent thinking
         // work is still in flight. Queued waiters are not in the map yet.
@@ -9509,6 +9584,76 @@ pub(crate) fn promises_parts(text: &str) -> bool {
     }
     let end = t.trim_end_matches(['.', ':', '!', ' ']);
     end.ends_with("below") || end.ends_with("follows") || end.ends_with("in parts")
+}
+
+/// The sentence in which a turn says what it will do next — "I'll post the table and the price
+/// chart now", "sending the summary next". Not what it has done ([`claims_posted`]) and not an
+/// announcement of parts in this same turn ([`promises_parts`]): this is work the turn still
+/// owes when it ends, and work a turn owes must outlive the turn (AF-782).
+///
+/// Deliberately narrow. A promise needs the agent to put itself in the future ("I'll", "let me",
+/// "I'm going to", or a bare "posting …") **and** to say it is imminent ("now", "next", "in a
+/// moment"). A plan, a refusal and a question are none of those, and a sentence that is already
+/// a claim of having done it is handled elsewhere.
+pub(crate) fn promised_next_step(text: &str) -> Option<String> {
+    const FUTURE: [&str; 8] = [
+        "i'll ",
+        "i will ",
+        "i am going to ",
+        "i'm going to ",
+        "i am about to ",
+        "i'm about to ",
+        "let me ",
+        "going to ",
+    ];
+    const IMMINENT: [&str; 9] = [
+        " now",
+        " next",
+        " right away",
+        " in a moment",
+        " in a second",
+        " shortly",
+        " straight away",
+        " first",
+        " then ",
+    ];
+    // "Posting the chart now" — the same promise with the subject dropped.
+    const GERUND: [&str; 8] = [
+        "posting ",
+        "sending ",
+        "putting ",
+        "attaching ",
+        "sharing ",
+        "delivering ",
+        "pulling ",
+        "writing ",
+    ];
+    const NOT_A_PROMISE: [&str; 8] = [
+        "i won't",
+        "i will not",
+        "i can't",
+        "i cannot",
+        "i couldn't",
+        "i could not",
+        "do you want",
+        "would you like",
+    ];
+    for raw in text.split_inclusive(['.', '!', '\n']) {
+        let sentence = raw.trim();
+        if sentence.is_empty() || sentence.chars().count() > 240 || sentence.contains('?') {
+            continue;
+        }
+        let lower = sentence.to_ascii_lowercase();
+        if NOT_A_PROMISE.iter().any(|n| lower.contains(n)) || claims_posted(sentence) {
+            continue;
+        }
+        let future =
+            FUTURE.iter().any(|f| lower.contains(f)) || GERUND.iter().any(|g| lower.starts_with(g));
+        if future && IMMINENT.iter().any(|i| lower.contains(i)) {
+            return Some(sentence.chars().take(160).collect());
+        }
+    }
+    None
 }
 
 /// pi's wording for a request agentd cancelled (`AbortController` / MCP cancel), never a
