@@ -35,7 +35,53 @@ changes_since() { git log --format='%H %s' --first-parent "$1..${MW_TEST_HEAD:-o
 
 # rd() lives in checks.sh, which both this file and merge.sh source.
 
-# verdict <sha> [nogate]: one line — TAG <vX> | NOMAC <vY> <reason> | COVERED <vY> | RED | WAIT <why> | BLOCKED <unreadable>
+# ci_abort_state <run-id> <"status conclusion">: RED or UNTESTED, for a ci.yml run
+# that reached a terminal state other than success.
+#
+# Why this exists. Every non-success conclusion used to print the one sentence
+# "RED CI <status> <conclusion>", so a job that tested the commit and found it
+# broken and a job that died before testing anything were the same word. On
+# 2026-11-04 the whole merge kit was held for about eight and a half hours on
+# e445f70ad because of that: run 41761774906 ran 86 seconds, died at step 4 of
+# 24 inside Swatinem/rust-cache@v2 with "No space left on device", and cargo
+# fmt, clippy and test never executed. The tree was fine — #2704, whose base is
+# that very commit, passed the same job twice the same morning — but the kit
+# said "main is red at e445f70ad", which points at the commit rather than at a
+# re-run button. Failing closed was right; the reason was wrong, and a wrong
+# reason sends the reader to the wrong remedy.
+#
+# The discriminator is the step list, and it needs no workflow knowledge: a run
+# that genuinely failed has at least one STEP whose conclusion is "failure". A
+# run killed by its host has none — its steps are `null`, because they never
+# started. So "no step concluded failure" is the signal, not the names of the
+# steps, which keeps this true for workflows nobody has written yet.
+#
+# BOTH ANSWERS STILL REFUSE, and that is not an oversight to be tidied up
+# later. A run that tested nothing is the definition of ungated, so it is
+# precisely the state a gate must not pass. The tempting follow-up — an
+# accept-infra= override, or an automatic pass when the steps are null — would
+# rebuild the bug checks.sh was written to end, approaching from the other
+# side. The remedy for an aborted run is to re-run it, which costs minutes and
+# produces a real verdict. This function changes the sentence, never the gate.
+#
+# Unreadable steps fall back to RED: when the new read fails, the output is
+# what it was before this function existed.
+ci_abort_state() {
+  local id=$1 ci=$2 steps note
+  [ -n "$id" ] || { echo "RED CI $ci"; return; }
+  steps=$(rd "repos/$R/actions/runs/$id/jobs?per_page=100" --jq '.jobs[].steps[]?.conclusion') \
+    || { echo "RED CI $ci (and its steps could not be read, so it is reported as before: ${steps#BLOCKED:})"; return; }
+  [ -n "$steps" ] || { echo "RED CI $ci (run $id lists no steps at all)"; return; }
+  printf '%s\n' "$steps" | grep -qx failure && { echo "RED CI $ci"; return; }
+  # Nothing failed and it is not a success, so it stopped. The annotation is
+  # usually the only place the host's own error appears.
+  note=$(rd "repos/$R/actions/runs/$id/jobs?per_page=100" --jq '[.jobs[]|select(.conclusion!="success")][0].id' 2>/dev/null)
+  case "$note" in ''|null|BLOCKED*) note="" ;; *) note=$(rd "repos/$R/check-runs/$note/annotations" --jq '.[0].message' 2>/dev/null) ;; esac
+  case "$note" in BLOCKED*|null) note="" ;; esac
+  echo "UNTESTED CI $ci — run $id has $(printf '%s\n' "$steps" | grep -cx null) step(s) that never started and none that failed, so it aborted before testing this commit; re-run it, do not re-push${note:+ — }${note:0:160}"
+}
+
+# verdict <sha> [nogate]: one line — TAG <vX> | NOMAC <vY> <reason> | COVERED <vY> | RED | UNTESTED | WAIT <why> | BLOCKED <unreadable>
 # "nogate" leaves the Swift gate out, for a caller that judges the gate itself (go, through range_gate).
 verdict() {
   local sha=$1 s8=${1:0:8} since ci tag
@@ -63,7 +109,11 @@ verdict() {
       3) echo "WAIT $gout"; return ;;
     esac
   fi
-  ci=$(rd "repos/$R/actions/workflows/ci.yml/runs?head_sha=$sha&per_page=5" --jq '[.workflow_runs[]|select(.event=="push")][0]|"\(.status) \(.conclusion)"') || { echo "BLOCKED reading CI runs for $s8: ${ci#BLOCKED:}"; return; }
+  local cirun
+  ci=$(rd "repos/$R/actions/workflows/ci.yml/runs?head_sha=$sha&per_page=5" --jq '[.workflow_runs[]|select(.event=="push")][0]|"\(.id) \(.status) \(.conclusion)"') || { echo "BLOCKED reading CI runs for $s8: ${ci#BLOCKED:}"; return; }
+  # The id is only needed to look inside a non-success run; strip it back off so
+  # every string below reads exactly as it did before.
+  case "$ci" in ""|null*) cirun="" ;; *) cirun=${ci%% *}; ci=${ci#* } ;; esac
   case "$ci" in
     ""|null*)
       # ci.yml's push trigger has paths-ignore (apps/ios/**): such a commit gets no CI and so no Release
@@ -79,7 +129,7 @@ verdict() {
   esac
   case "$ci" in
     "completed success") ;;
-    completed*) echo "RED CI $ci"; return ;;
+    completed*) ci_abort_state "$cirun" "$ci"; return ;;
     ""|null*) echo "WAIT no CI run yet"; return ;;
     *) echo "WAIT CI $ci"; return ;;
   esac
@@ -232,7 +282,19 @@ go() {
     echo "  main has changes after $tag; each needs a Release plan verdict of 'no Mac change since $tag':"
     while read -r sha subj; do
       v=$(verdict "$sha" nogate); echo "    ${sha:0:9} ${subj:0:70} → $v"
-      case "$v" in "NOMAC $tag"*|NOPATH*) ;; *) nogo+=("${sha:0:9} not judged no-Mac-change since $tag ($v)") ;; esac
+      # One NO-GO either way; the words differ because the next action does.
+      # "not judged" used to head every one of these, so a commit the kit HAD
+      # judged, and judged failed, was reported as missing information with the
+      # real verdict demoted into the parenthetical.
+      case "$v" in "NOMAC $tag"*|NOPATH*) continue ;; esac
+      case "$(verdict_class "$v")" in
+        RED)      nogo+=("${sha:0:9} JUDGED AND FAILED CI since $tag — read the run ($v)") ;;
+        UNTESTED) nogo+=("${sha:0:9} JUDGED, BUT NOTHING RAN since $tag — re-run the job, the commit is not implicated ($v)") ;;
+        REDGATE)  nogo+=("${sha:0:9} has a required check with no successful run since $tag ($v)") ;;
+        WAIT)     nogo+=("${sha:0:9} NOT JUDGED YET since $tag — still running ($v)") ;;
+        BLOCKED)  nogo+=("${sha:0:9} COULD NOT BE READ since $tag, so nothing is inferred ($v)") ;;
+        *)        nogo+=("${sha:0:9} not judged no-Mac-change since $tag ($v)") ;;
+      esac
     done <<< "$ch"
     echo "  required checks since $tag, decided on the newest commit each applies to (older results are findings):"
     range_gate "$tag"
@@ -307,6 +369,11 @@ after() {
       echo "VERDICT $(ts): NO-TAG — ${sha:0:9} changes ${v#NOPATH }. Next GO may run (next 'after ${sha:0:9}')" ;;
     COVERED*) echo "VERDICT $(ts): STOP — plan says an existing tag already covers ${sha:0:9}; look before the next merge" ;;
     RED*) echo "VERDICT $(ts): STOP — main is red at ${sha:0:9} ($v)" ;;
+    # STOP, exactly as RED is, and said separately because the remedy is not
+    # the same one. Without this arm UNTESTED would fall to the default below
+    # and print WAIT, which is this function telling the operator to sit and
+    # wait for a run that has already finished and will never change.
+    UNTESTED*) echo "VERDICT $(ts): STOP — main's CI at ${sha:0:9} aborted before it tested anything; re-run that job ($v)" ;;
     BLOCKED*) echo "VERDICT $(ts): BLOCKED — cannot read what the verdict needs, so no verdict is inferred: ${v#BLOCKED }" ;;
     *) echo "VERDICT $(ts): WAIT — $v" ;;
   esac

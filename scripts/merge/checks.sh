@@ -222,3 +222,54 @@ require_gates() {
   done <<< "$GATES"
   return $rc
 }
+
+# ---------------------------------------------------------------------------
+# What a verdict() line means, in one place.
+#
+# verdict() is in merge-window.sh, but two callers there branch on its output —
+# go() decides whether to add a NO-GO, after() decides LIVE / NO-TAG / STOP —
+# and until 2026-11-04 each kept its own `case`. Two case statements that must
+# agree about which words refuse is a bug waiting to be written, and it was:
+# adding a verdict word without touching after() drops it into that function's
+# default arm, which prints WAIT. WAIT is not a refusal. A new word intended to
+# describe a *failure* would have quietly started permitting one.
+#
+# So the word list lives here, once, and both callers read it. These two are
+# pure — no network, no git — which is also why they are in this file rather
+# than beside verdict(): merge-window.sh runs its dispatcher when sourced, so
+# selftest.sh cannot reach anything defined in it.
+#
+# UNKNOWN is the important row. An unrecognised verdict refuses, so forgetting
+# to register a new word costs a false refusal and never a false pass.
+
+# verdict_class <verdict-line>: one word for the whole line.
+verdict_class() {
+  case "$1" in
+    "TAG "*)      echo TAG ;;
+    "NOMAC "*)    echo NOMAC ;;
+    NOPATH*)      echo NOPATH ;;
+    COVERED*)     echo COVERED ;;
+    "RED GATE"*)  echo REDGATE ;;
+    RED*)         echo RED ;;
+    UNTESTED*)    echo UNTESTED ;;
+    BLOCKED*)     echo BLOCKED ;;
+    WAIT*)        echo WAIT ;;
+    *)            echo UNKNOWN ;;
+  esac
+}
+
+# verdict_clears_go <class>: 0 only for the classes that can let a GO proceed.
+#
+# NOMAC is here, but it is not sufficient on its own: go() must also check that
+# the tag it names is the tag being released. That check stays at the call site
+# because this function is deliberately ignorant of which tag is current.
+#
+# Everything else refuses, UNTESTED included. An aborted run tested nothing,
+# which is the definition of ungated, so it is exactly the state that must not
+# pass. See the comment above `ci_abort_state` in merge-window.sh.
+verdict_clears_go() {
+  case "$1" in
+    NOMAC | NOPATH) return 0 ;;
+    *) return 1 ;;
+  esac
+}
