@@ -1,7 +1,8 @@
 // Grok Bot visual language. The greys are Jacob's 2026-11-03 side-by-side
 // re-measurement against Grok ([feedback grok-colour-parity-2026-11-03]):
-// background #121212, assistant bubble #1C1C1C, user bubble #3C3C3C, composer
-// field #1F1F1F. The metrics are still the dark-mode references in
+// background #121212, assistant bubble #1C1C1C, user bubble #3C3C3C, and the
+// composer #1F1F1F (`pageFieldFill`; the fields inside sheets and cards keep
+// theirs, see `field`). The metrics are still the dark-mode references in
 // internal/refs/grokbot-ios (iPhone Air, 1260×2736 @3x): 17 pt SF Pro body with
 // the default 22 pt line height, 20 pt continuous corners, glass circles for the
 // header controls, system lines in #95959B.
@@ -213,10 +214,11 @@ struct Theme: Equatable {
     /// Three nested `strokeBorder`s (outer 1/3 pt, 2/3 pt, 1 pt) reproduce the three
     /// pixels. Light keeps `fieldBorder` at 1 pt.
     ///
-    /// The alphas are what was measured; they read 58 / 47 / 40 over the #181818 fill
-    /// the field had before the 2026-11-03 parity pass, and 64 / 53 / 46 over its
-    /// #1F1F1F. Keeping the alphas keeps the rim's step over the field; what Grok's
-    /// own rim measures on its lighter field needs a fresh reference.
+    /// The alphas are what was measured, so the rim keeps its step over whatever
+    /// it outlines: 58 / 47 / 40 over a `field` at #181818 — the pills and the
+    /// fields inside sheets and cards — and 64 / 53 / 46 over the composer's
+    /// `pageFieldFill` at #1F1F1F. What Grok's own rim measures on its lighter
+    /// composer needs a fresh reference.
     static let composerRimLayers: [(width: CGFloat, alpha: Double)] = [
         (1, 0.069), (2 / 3, 0.033), (1 / 3, 0.053),
     ]
@@ -305,10 +307,11 @@ struct Theme: Equatable {
         bg: Color(hex: "#121212")!,
         bubbleAssistant: Color(hex: "#1C1C1C")!,
         bubbleUser: Color(hex: "#3C3C3C")!,
-        field: Color(hex: "#1F1F1F")!,
-        // Grok dark draws no rim on the field or the glass circles; keep a whisper
-        // — the same +2 over `field` it has always been (it was #1A1A1A over #181818).
-        fieldBorder: Color(hex: "#212121")!,
+        // A field inside something — a card, a sheet, a picker. The composer is
+        // `pageFieldFill` and carries Grok's number; this is pinned where it was.
+        field: Color(hex: "#181818")!,
+        // Grok dark draws no rim on the field or the glass circles; keep a whisper.
+        fieldBorder: Color(hex: "#1A1A1A")!,
         // The grouped pane card, pinned where it was when it shared
         // `bubbleAssistant` (see `paneCardFill`).
         paneCard: Color(hex: "#202020")!,
@@ -379,6 +382,20 @@ struct Theme: Equatable {
 
     /// A point size scaled like the text, for frames that must grow with it.
     func pt(_ size: CGFloat) -> CGFloat { (size * textScale * 2).rounded() / 2 }
+
+    /// The composer's fill on Matte: Grok's `#1F1F1F`, Jacob's 2026-11-03
+    /// reading of the chat box ([feedback grok-colour-parity-2026-11-03]).
+    ///
+    /// Its own value because that number only improves a field sitting on the
+    /// page, where it lifts the composer from +4 over the background to +13 and
+    /// it stops needing its rim to mark it. Every other field of the family is
+    /// inside something — a card, a sheet, the pickers — and the same move
+    /// takes those from 8/255 under their surface to 1. Those keep `field`.
+    ///
+    /// Light is the literal white, not `field`, though `field` is white too: a
+    /// pin written as an alias holds only until the token it reads moves, which
+    /// is the one moment it exists to survive.
+    var pageFieldFill: Color { isDark ? Color(hex: "#1F1F1F")! : .white }
 
     /// Text colour on a user bubble (white on dark grey, white on black).
     var userText: Color { .white }
@@ -918,9 +935,9 @@ struct PillSurface<S: InsettableShape>: View {
 
     var body: some View {
         if !theme.isGlass {
-            shape.fill(theme.field)
+            shape.fill(theme.pageFieldFill)
         } else if DebugHooks.pillStyle == "translucent" {
-            shape.fill(theme.field.opacity(Self.translucentAlpha))
+            shape.fill(theme.pageFieldFill.opacity(Self.translucentAlpha))
             ComposerRim(shape: shape)
         } else {
             let glass = ChatHeaderGlass.pillGlass(surface: .glass)

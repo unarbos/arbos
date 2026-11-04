@@ -167,7 +167,7 @@ pub fn render(
                 .h(px(AVATAR_HEADER))
                 .px(px(6.0))
                 .rounded(px(6.0))
-                .bg(theme.field)
+                .bg(theme.page_field_fill())
                 .border_1()
                 .border_color(theme.field_border)
                 .text_size(px(TEXT_SMALL))

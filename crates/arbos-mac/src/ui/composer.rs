@@ -4079,7 +4079,7 @@ impl Render for Composer {
             .flex_1()
             .min_w_0()
             .rounded(px(field_radius))
-            .bg(theme.field)
+            .bg(theme.page_field_fill())
             .border_1()
             .border_color(border_color);
         let field = if staged {

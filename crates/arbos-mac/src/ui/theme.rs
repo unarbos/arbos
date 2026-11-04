@@ -624,7 +624,16 @@ pub struct Theme {
     pub bubble: Hsla,
     /// Assistant bubble (left).
     pub bubble_assistant: Hsla,
-    /// Composer field / glass circle fill and its hairline rim.
+    /// A field, a glass circle and the like **inside** something — a pane, a
+    /// card, a sheet, a popover — and its hairline rim.
+    ///
+    /// A field on the page is [`Theme::page_field_fill`] and carries Grok's
+    /// number; this one is pinned where it was. The two were one token until
+    /// the 2026-11-03 parity pass, and the reason they are not is that the
+    /// same grey reads in opposite directions on the two surfaces: on the page
+    /// Grok's `#1F1F1F` lifts a field from +4 over its background to +13, so it
+    /// marks itself; inside a card the same move drops it from 11/255 *under*
+    /// the card to 4, and on a sheet to +1 — the same colour as the sheet.
     pub field: Hsla,
     pub field_border: Hsla,
     /// Primary filled control (send / voice button): white on dark.
@@ -694,7 +703,7 @@ impl Theme {
             accent_soft: hex_a(0x1084fe, 0.18),
             bubble: hex(0x3c3c3c),
             bubble_assistant: hex(0x1c1c1c),
-            field: hex(0x1f1f1f),
+            field: hex(0x181818),
             field_border: hex(0x242424),
             primary: grey(1.0),
             on_primary: grey(0.0),
@@ -1291,6 +1300,36 @@ impl Theme {
         }
     }
 
+    /// A text field that sits **on the page**: the composer, and the header's
+    /// rename box (which stands in the name pill's place, over the chat column).
+    ///
+    /// Matte dark is Grok's `#1F1F1F`, Jacob's 2026-11-03 reading of the chat
+    /// box. It is its own token because that number only improves a field that
+    /// sits on the page: there it goes from +4 over its background to +13 and
+    /// stops needing its rim to mark it. The same move inside a card or a sheet
+    /// takes a field from 11/255 under its surface to 4, or to +1 on a sheet —
+    /// flush with the thing it sits on. Those keep [`Self::field`].
+    ///
+    /// The header's glass circles read `field` through
+    /// [`Self::glass_fill`] and are deliberately *not* here: the `+` and the
+    /// send arrow are their own parity item, still unmeasured, and moving them
+    /// now would prejudge it.
+    ///
+    /// Glass is the same white 6 % wash a field is; the page is a material
+    /// there, not a colour, so the distinction does not arise.
+    /// Light is the literal white, not `field`, though `field` is white too.
+    /// A pin written as an alias is not a pin: it holds only until the token it
+    /// reads moves, which is the one moment it was added to survive.
+    pub fn page_field_fill(&self) -> Hsla {
+        if !self.is_frost() {
+            return match self.appearance {
+                Appearance::Dark => hex(0x1f1f1f),
+                Appearance::Light => grey(1.0),
+            };
+        }
+        self.field_fill()
+    }
+
     /// The track a segmented choice sits in (the pill well behind
     /// [`glass::segment`]), as distinct from a text field.
     ///
@@ -1305,11 +1344,13 @@ impl Theme {
     /// exactly as drawn, on both surfaces and at any opacity.
     ///
     /// Glass has no such split: the track is the same white 6 % wash a field is.
+    /// Light is the literal white for the same reason [`Self::page_field_fill`]
+    /// is: an alias cannot pin anything.
     pub fn segment_track_fill(&self) -> Hsla {
         if !self.is_frost() {
             return match self.appearance {
                 Appearance::Dark => hex(0x181818),
-                Appearance::Light => self.field,
+                Appearance::Light => grey(1.0),
             };
         }
         self.field_fill()
@@ -1929,11 +1970,21 @@ mod glass_contrast_tests {
                 Appearance::Light => hex(0x111111),
             };
             assert_eq!(theme.segment_on_fill(), segment);
+            // The shades themselves, not "these two differ". Both of these were
+            // `field` until the Grok parity pass and both still equal it on
+            // light, so an inequality would pass for the wrong reason — and on
+            // dark it would only start working once `field` had already dragged
+            // them along, which is the one thing they exist to prevent.
             let track = match appearance {
                 Appearance::Dark => hex(0x181818),
-                Appearance::Light => theme.field,
+                Appearance::Light => grey(1.0),
             };
             assert_eq!(theme.segment_track_fill(), track);
+            let page_field = match appearance {
+                Appearance::Dark => hex(0x1f1f1f),
+                Appearance::Light => grey(1.0),
+            };
+            assert_eq!(theme.page_field_fill(), page_field);
             assert_eq!(theme.label_muted(), theme.text_muted);
             assert_eq!(theme.label_faint(), theme.text_faint);
             let tile = match appearance {

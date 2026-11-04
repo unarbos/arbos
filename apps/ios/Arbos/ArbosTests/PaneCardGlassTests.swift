@@ -27,6 +27,16 @@ final class PaneCardGlassTests: XCTestCase {
         for appearance in [Appearance.dark, Appearance.light] {
             let matte = Theme.resolve(appearance: appearance, surface: .matte, systemDark: true)
             XCTAssertEqual(matte.paneCardFill, matte.paneCard, "\(appearance): Matte unchanged")
+            // The number, not just the wiring. `paneCard` was `bubbleAssistant`
+            // until the Grok parity pass and is still close to it, so asserting
+            // that the two differ would pass for the wrong reason — and would
+            // only start working after the bubble had already dragged the card
+            // with it. Pin the shade itself.
+            XCTAssertEqual(
+                matte.paneCard,
+                Color(hex: appearance == .dark ? "#202020" : "#F2F2F2")!,
+                "\(appearance): the pane card keeps its own shade"
+            )
             XCTAssertEqual(matte.paneCardRim, .clear, "\(appearance): no rim on Matte")
             let glass = Theme.resolve(appearance: appearance, surface: .glass, systemDark: true)
             XCTAssertNotEqual(glass.paneCardFill, glass.paneCard, "\(appearance): Glass is the wash")
