@@ -1,0 +1,109 @@
+name: Release gate
+
+# One fix per release. A pull request that publishes something waits while main still owes that
+# same artifact, so release.yml never folds two fixes into one build.
+#
+# The decision is scripts/release/release-gate.py; read its header for what the two sides mean and
+# why they are not symmetric. In short: the Mac side asks the repository's own predicates
+# (scripts/release/mac-change.sh), the phone side reads the literal path filter out of
+# .github/workflows/ios.yml, and both are read at runtime so this workflow cannot drift away from
+# what actually publishes.
+#
+# ── why there is no path filter on this workflow ────────────────────────────────────────────────
+# Writing one would mean copying both path sets into this file, where they would quietly go stale
+# against the lists that really trigger a release. The job runs on every pull request instead and
+# costs under a minute; a pull request on neither path set passes without reading anything.
+#
+# ── why this is a new file, and what it must never touch ────────────────────────────────────────
+# .github/workflows/ios.yml is inside its own trigger paths, so editing it cuts a TestFlight build.
+# This workflow and the scripts it runs are deliberately outside both path sets — nothing here is
+# under apps/ios, crates/arbos-{core,client,ffi,matrix,mac,update}, packages/ArbosFFI,
+# site/assets/logo, Cargo.toml, Cargo.lock or rust-toolchain.toml — so changing the gate never
+# publishes anything. Keep it that way.
+#
+# Linux only. The hosted macos-15 pool is the critical path for a real release and a gate there
+# can wait an hour and a half; this one must never be in that queue.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # The phone side asks which ios.yml run on main last uploaded a build.
+  actions: read
+
+concurrency:
+  group: release-gate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: Release gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The head commit itself, not the merge commit: the gate judges what this pull request
+          # changes, and every history it walks is main's own. fetch-depth 0 brings the tags, which
+          # are how a Mac release is known to have happened.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      # The phone side reads ios.yml's path filter with a real YAML parser rather than a
+      # hand-rolled one, so a filter this gate cannot parse is loud instead of silently empty.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --quiet 'pyyaml==6.0.2'
+      - name: What main already owes
+        id: refs
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref || github.ref_name }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          git fetch -q --tags --force origin "+refs/heads/main:refs/remotes/origin/main"
+          # Only main publishes: release.yml tags from it, and ios.yml uploads to TestFlight only
+          # for a push to it. A pull request into any other branch has no release to wait for.
+          if [[ "$BASE_REF" != main ]]; then
+            echo "gate=skip" >> "$GITHUB_OUTPUT"
+            echo "Base branch is '$BASE_REF', not main: merging it publishes nothing." \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # The merge base, not main's head: a two-dot diff against the head would count whatever
+          # main changed since this branch forked as part of the pull request.
+          base="$(git merge-base origin/main "$HEAD_SHA")"
+          echo "gate=run" >> "$GITHUB_OUTPUT"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+      - name: Does merging this collapse two fixes into one release?
+        if: steps.refs.outputs.gate == 'run'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ steps.refs.outputs.base }}
+        run: |
+          set -euo pipefail
+          # Exit 1 is a refusal, exit 2 is the gate failing to decide. Both fail the job: a check
+          # that cannot tell must never read as a pass. Its output says which of the two it is.
+          python3 scripts/release/release-gate.py \
+            --repo "$GITHUB_REPOSITORY" --main origin/main \
+            --pr-base "$BASE_SHA" --pr-head "$HEAD_SHA"
+
+  self-test:
+    # A gate nobody has watched refuse is not a tested guard. These cases replay states main has
+    # really been in and assert that the gate blocks on the ones it must, for the right artifact.
+    # They are offline and pinned to permanent commits, so they do not change answer as main moves.
+    name: Release gate refuses when it should
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --quiet 'pyyaml==6.0.2'
+      - run: scripts/release/release-gate-selftest.sh
