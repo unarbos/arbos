@@ -168,7 +168,7 @@ pub async fn post(
             .is_some();
         let chart_ok = h.doc.add_part_from_json(&msg_id, &chart_part).is_some();
         if !att_ok || !chart_ok {
-            let _ = h.doc.delete_message(&msg_id);
+            crate::agent::retire_row(&h.doc, &msg_id);
             anyhow::bail!(
                 "message {msg_id} could not take the chart parts in chat {}",
                 target.chat_id
@@ -191,7 +191,7 @@ pub async fn post(
             has_png && has_chart && m.text() == caption
         });
         if !ok {
-            let _ = h.doc.delete_message(&msg_id);
+            crate::agent::retire_row(&h.doc, &msg_id);
             anyhow::bail!("the chart row did not read back from the chat doc");
         }
     }

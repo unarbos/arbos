@@ -449,7 +449,7 @@ pub async fn deliver(
             })
         });
         if !ok {
-            let _ = h.doc.delete_message(&msg_id);
+            crate::agent::retire_row(&h.doc, &msg_id);
             anyhow::bail!("the attachment row did not read back from the chat doc");
         }
     }

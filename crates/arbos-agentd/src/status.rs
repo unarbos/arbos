@@ -2072,6 +2072,16 @@ pub(crate) mod tests {
                 !m.has_visible_content(),
                 "nothing on it for the apps to draw"
             );
+            // Finished, never left streaming. The iPhone's working line scans `status` parts
+            // for `working` / `step`, and that scan is gated on the row still streaming, with
+            // a 15-minute freshness window — so a row kept streaming would drive "Working…"
+            // on the phone for a quarter of an hour after the turn ended. Deleting the row hid
+            // that choice; keeping it makes the status agentd leaves load-bearing.
+            assert_eq!(
+                m.status.as_str(),
+                "done",
+                "a hidden row left streaming drives the phone's working line"
+            );
         }
         let rows = reply_rows(&host, "m-busy");
         assert_eq!(rows.len(), 2, "the bubble and the hidden row");

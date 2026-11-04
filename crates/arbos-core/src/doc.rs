@@ -402,6 +402,9 @@ pub struct ChatDoc {
     /// Set from inside Loro's diff callback when an import (or a local write) stamps a
     /// message `redactedAt`; folded into the two cells above by [`Self::sync_redaction_flag`].
     redaction_seen: Arc<AtomicBool>,
+    /// What [`Self::start_assistant_message`] writes as `sender`. See
+    /// [`Self::set_assistant_sender`] for why this is settable.
+    assistant_sender: RefCell<String>,
     _redaction_sub: loro::Subscription,
 }
 
@@ -663,7 +666,27 @@ impl ChatDoc {
             shallow_mode: Cell::new(false),
             redaction_seen,
             _redaction_sub: sub,
+            assistant_sender: RefCell::new("agent".to_owned()),
         }
+    }
+
+    /// Name the agent that assistant rows opened on this replica belong to, as
+    /// `agent:<project_id>`.
+    ///
+    /// The relay attributes a row the box pushes from its `sender`, and `Pusher::BoxOf::owns`
+    /// (`arbos-relay` `push_guard.rs`) only accepts `agent:<project_id>` resolving to a project
+    /// the box's owner holds. The bare `agent` this defaults to resolves to nothing, so the
+    /// relay recorded **no author at all** for agentd's rows — and then refused every later
+    /// removal of one as `not_yours`, blocking the push queue behind it (Jacob, 2026-11-04:
+    /// 231 refusals, and a reply that never reached the relay).
+    ///
+    /// This is not a new value on the wire: rows in shared chats already carry
+    /// `agent:<project_id>`, and every reader handles it — `reply.rs` counts it as the agent's
+    /// own, and the Mac's avatar lookup treats it as attributed rather than falling back to
+    /// guessing the room's only agent. Holders that cannot name one agent (the relay's own
+    /// writers, fixtures) keep the default.
+    pub fn set_assistant_sender(&self, sender: &str) {
+        *self.assistant_sender.borrow_mut() = sender.to_owned();
     }
 
     /// Fold what the diff callback saw into the flags (called by every reader of them).
@@ -1439,7 +1462,8 @@ impl ChatDoc {
         let m = msgs.push_container(LoroMap::new()).expect("push message");
         m.insert("id", msg_id).ok();
         m.insert("role", "assistant").ok();
-        m.insert("sender", "agent").ok();
+        m.insert("sender", self.assistant_sender.borrow().as_str())
+            .ok();
         m.insert("createdAt", now_ms()).ok();
         m.insert("deviceId", device_id).ok();
         m.insert("inReplyTo", in_reply_to).ok();
@@ -2617,6 +2641,32 @@ mod message_change_tests {
 
 #[cfg(test)]
 mod tests {
+    /// An assistant row must name the agent it belongs to. The relay attributes a box's row
+    /// from `sender` and only accepts `agent:<project_id>` (`push_guard.rs`); the bare `agent`
+    /// this used to always write matched nothing, so no author was recorded and every later
+    /// edit of that row came back `not_yours`.
+    #[test]
+    fn an_assistant_row_is_signed_with_the_agent_that_opened_it() {
+        let doc = ChatDoc::new(Some(1), true);
+        doc.start_assistant_message("unsigned", "ask", "box:1");
+        assert_eq!(
+            doc.message("unsigned").unwrap().rest["sender"],
+            Value::from("agent"),
+            "holders that cannot name one agent keep the old default"
+        );
+
+        doc.set_assistant_sender("agent:01PROJECT");
+        doc.start_assistant_message("signed", "ask", "box:1");
+        let sender = doc.message("signed").unwrap().rest["sender"].clone();
+        assert_eq!(sender, Value::from("agent:01PROJECT"));
+        // The shape `Pusher::BoxOf::owns` strips to reach a project id.
+        assert_eq!(
+            sender.as_str().unwrap().strip_prefix("agent:"),
+            Some("01PROJECT"),
+            "the relay cannot resolve this to a project, so it would record no author"
+        );
+    }
+
     #[test]
     fn remove_parts_of_kind_drops_only_that_kind_and_leaves_the_rest() {
         use super::*;
