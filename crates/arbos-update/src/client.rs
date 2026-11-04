@@ -98,29 +98,59 @@ fn http(retry: &Retry) -> anyhow::Result<reqwest::Client> {
         .context("http client")
 }
 
-/// Fetch and parse the feed from the first of [`fetch::feed_urls`] that answers.
+/// Fetch and parse the feed from every place in [`fetch::feed_urls`] that serves it.
 pub async fn fetch_appcast(feed_url: &str) -> anyhow::Result<Appcast> {
     fetch_appcast_with(feed_url, &Retry::DEFAULT).await
 }
 
 pub async fn fetch_appcast_with(feed_url: &str, retry: &Retry) -> anyhow::Result<Appcast> {
+    fetch_appcast_from(&fetch::feed_urls(feed_url), retry).await
+}
+
+/// Ask every URL for the feed at once and return the union of what they name
+/// ([`Appcast::union`]); fail only when none of them answered with a feed.
+///
+/// Asking all of them rather than stopping at the first is what keeps one place
+/// that is behind from hiding a release: the site mirrors the GitHub release
+/// asset on a timer, so between a publish and that refresh the mirror still
+/// answers 200 with a well-formed but older feed. Taking it as the answer told
+/// every Mac on the stable channel it was up to date while a newer build was
+/// already published (0.6.378 against 0.6.379/0.6.380, 2026-11-03).
+///
+/// A feed is a few KB and the poll is five minutes apart, so the second request
+/// costs little; the 70 MB payload is still fetched from the mirror first
+/// ([`fetch::download_urls`]), which is what the mirror is for.
+pub async fn fetch_appcast_from(urls: &[String], retry: &Retry) -> anyhow::Result<Appcast> {
+    if urls.is_empty() {
+        bail!("no feed URL");
+    }
     let client = http(retry)?;
+    let answers = futures::future::join_all(
+        urls.iter()
+            .map(|url| fetch_feed_once(&client, url, retry))
+            .collect::<Vec<_>>(),
+    )
+    .await;
+    let mut feeds: Vec<Appcast> = Vec::new();
     let mut errors: Vec<anyhow::Error> = Vec::new();
-    for url in fetch::feed_urls(feed_url) {
-        match fetch_feed_once(&client, &url, retry).await {
-            Ok(appcast) => return Ok(appcast),
+    for (url, answer) in urls.iter().zip(answers) {
+        match answer {
+            Ok(appcast) => feeds.push(appcast),
             Err(err) => {
                 tracing::warn!(url, error = format!("{err:#}"), "feed fetch failed");
                 errors.push(err);
             }
         }
     }
-    let joined = errors
-        .iter()
-        .map(|e| format!("{e:#}"))
-        .collect::<Vec<_>>()
-        .join("; then ");
-    bail!("{joined}")
+    if feeds.is_empty() {
+        let joined = errors
+            .iter()
+            .map(|e| format!("{e:#}"))
+            .collect::<Vec<_>>()
+            .join("; then ");
+        bail!("{joined}")
+    }
+    Ok(Appcast::union(feeds))
 }
 
 async fn fetch_feed_once(
