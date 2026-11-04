@@ -33,12 +33,23 @@ impl DeviceRow {
     }
 }
 
+/// A `devices` row that is not a sign-in but a token the owner handed an
+/// agent: the long-lived read-only `adv_…` bearer `export::mint_reader`
+/// mints. Settings → Agent access link owns those now (Jacob, 2026-11-03),
+/// so this page lists sign-ins and nothing else.
+pub fn is_agent_token(kind: &str) -> bool {
+    kind == "reader"
+}
+
 /// The devices that are still signed in. A row with `revoked_at` is a
 /// session that already ended (signed out here, from another device, or by
 /// the relay); it is not a device the user is logged in on, so it never
-/// reaches the list or its count.
+/// reaches the list or its count. Nor does an agent token
+/// ([`is_agent_token`]), which is not a device the user signed in on either.
 pub fn live(devices: &[DeviceView]) -> impl Iterator<Item = &DeviceView> {
-    devices.iter().filter(|d| d.revoked_at.is_none())
+    devices
+        .iter()
+        .filter(|d| d.revoked_at.is_none() && !is_agent_token(&d.kind))
 }
 
 /// The rows, this Mac first, then the other live devices as the relay
@@ -83,8 +94,12 @@ pub fn glyph_for(name: &str, kind: &str) -> &'static str {
     }
 }
 
-/// `kind` as a small tag: readers (Grok Bot's read access) say "read-only",
-/// the old pairing-code devices "pair code"; a GitHub sign-in needs no tag.
+/// `kind` as a small tag: the old pairing-code devices say "pair code"; a
+/// GitHub sign-in needs no tag. A reader keeps its tag for the same reason
+/// [`glyph_for`] keeps its glyph — the kind still exists on the relay — but no
+/// reader reaches this list any more ([`live`]); its row lives under Settings
+/// → Agent access link, where the tag is the scope capsule
+/// (`agent_links::Scope::tag`).
 pub fn kind_tag(kind: &str) -> Option<&'static str> {
     match kind {
         "reader" => Some("read-only"),
@@ -207,8 +222,8 @@ mod tests {
                 dev("a", "Jacob's MacBook Pro", "github", true, Some(10_000)),
                 dev(
                     "c",
-                    "GrokBot-Arbos",
-                    "reader",
+                    "Jacob's old Air",
+                    "paircode",
                     false,
                     Some(3 * 24 * 3_600_000),
                 ),
@@ -222,9 +237,40 @@ mod tests {
         assert!(rows[0].subtitle.starts_with("Active now · added "));
         assert_eq!(rows[1].glyph, "iphone");
         assert!(rows[1].subtitle.starts_with("2 h ago · added "));
-        assert_eq!(rows[2].glyph, "server.rack");
-        assert_eq!(rows[2].tag, Some("read-only"));
+        assert_eq!(rows[2].tag, Some("pair code"));
         assert!(rows[2].subtitle.starts_with("3 d ago · added "));
+    }
+
+    /// Jacob, 2026-11-03: Settings → Agent access link owns every token the
+    /// owner handed an agent, so the reader device that used to wear a
+    /// "read-only" tag here is not in this list or its count any more. The
+    /// relay still returns the row (it is a `devices` row), which is why the
+    /// filter is on the reading side.
+    #[test]
+    fn an_agent_token_is_not_a_signed_in_device() {
+        let list = vec![
+            dev("a", "Jacob's MacBook Pro", "github", true, Some(10_000)),
+            dev("b", "iPhone", "github", false, Some(2 * 3_600_000)),
+            dev(
+                "c",
+                "GrokBot-Arbos",
+                "reader",
+                false,
+                Some(3 * 24 * 3_600_000),
+            ),
+        ];
+        assert_eq!(
+            rows(&list, NOW)
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b"],
+            "the reader token has left this page"
+        );
+        assert_eq!(live(&list).count(), 2, "and the Settings summary's count");
+        assert!(is_agent_token("reader"));
+        assert!(!is_agent_token("github"));
+        assert!(!is_agent_token("paircode"));
     }
 
     #[test]
@@ -232,7 +278,7 @@ mod tests {
         let rows = rows(
             &[
                 dev("a", "Jacob's MacBook Pro", "github", true, Some(0)),
-                dev("c", "GrokBot-Arbos", "reader", false, Some(0)),
+                dev("b", "iPhone", "github", false, Some(0)),
             ],
             NOW,
         );
@@ -240,7 +286,7 @@ mod tests {
         assert!(rows[1].revokable());
         assert_eq!(
             confirm_question(&rows[1].name),
-            "Sign out GrokBot-Arbos? It will need to sign in again."
+            "Sign out iPhone? It will need to sign in again."
         );
     }
 
@@ -249,7 +295,7 @@ mod tests {
         let mut list = vec![
             dev("a", "Jacob's MacBook Pro", "github", true, Some(0)),
             dev("b", "iPhone", "github", false, Some(0)),
-            dev("c", "GrokBot-Arbos", "reader", false, Some(0)),
+            dev("c", "Jacob's old Air", "paircode", false, Some(0)),
         ];
         assert!(remove_other(&mut list, "c"));
         assert_eq!(

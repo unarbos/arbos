@@ -64,6 +64,8 @@ jobs:
           ./scripts/release/auto-stable-selftest.sh
           # One avatar resolver on both platforms (ARB-394): no surface draws an agent picture outside it.
           ./scripts/avatar-lint.sh
+          # Which verdicts refuse a merge. No network, no credentials, ~0.1s.
+          ./scripts/merge/selftest.sh
           curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash | bash -s -- latest /tmp >/dev/null
           /tmp/actionlint -color
 
@@ -72,6 +74,43 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
+      # `ubuntu-24.04` is two fleets, and one of them cannot hold this job. Measured over 40
+      # runners: 39 were Azure (`/dev/root`, 145 GB, 86 GiB free) and 1 was AWS us-west-2
+      # (`/dev/mapper/cow-root`, 72 GB, 13.1 GiB free) on the older 20261018 image. clippy plus
+      # the test build need ~19 GiB and the cache adds a few more, so on the small fleet the
+      # disk runs out during the first heavy write — the cache restore. The ENOSPC lands on the
+      # runner's own `_diag` log and kills its worker, so the job dies with no step output and
+      # no log, which is why this kept being read as a rust-cache flake. Reclaiming the image's
+      # unused SDKs wins back 28 GiB but costs about 90 seconds, so only pay it when the
+      # headroom is actually short.
+      - name: Make room on the short-disk fleet
+        run: |
+          set -euo pipefail
+          # FLOOR is what the job was measured to consume; RECLAIM_BELOW adds margin so the
+          # reclaim fires before the disk is actually tight. Reclaiming unconditionally would
+          # change every job's environment to help the 2.5% that need it.
+          FLOOR=25600
+          RECLAIM_BELOW=30720
+          avail=$(df -B1M --output=avail / | tail -1 | tr -d ' ')
+          if [ "$avail" -ge "$RECLAIM_BELOW" ]; then
+            echo "$avail MiB free on /; this job needs about $FLOOR MiB, so nothing is removed"
+            exit 0
+          fi
+          echo "$avail MiB free on / — short for a ~$FLOOR MiB job, reclaiming unused SDKs"
+          for d in /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /usr/share/swift \
+                   /usr/local/share/powershell /opt/hostedtoolcache/CodeQL /usr/share/miniconda; do
+            if [ -e "$d" ]; then sudo rm -rf "$d"; fi
+          done
+          avail=$(df -B1M --output=avail / | tail -1 | tr -d ' ')
+          echo "$avail MiB free on / now"
+          # The defect this step exists to stop was a failure that destroyed its own evidence.
+          # If the reclaim did not win back enough, say so here, where it is readable, rather
+          # than walking into another ENOSPC that kills the runner and leaves no log.
+          if [ "$avail" -lt "$FLOOR" ]; then
+            echo "::error title=Short disk::Reclaimed what the image allows and only $avail MiB is free on /, under the $FLOOR MiB this job needs. Failing here so the reason is visible; an ENOSPC later kills the runner's worker and leaves no log at all."
+            df -h /
+            exit 1
+          fi
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
