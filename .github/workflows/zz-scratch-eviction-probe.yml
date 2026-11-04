@@ -1,0 +1,24 @@
+name: Scratch eviction probe
+
+# TEMPORARY. Measures whether a pending run in a concurrency group is evicted by a
+# newer run when cancel-in-progress is false. Removed before this branch's PR opens.
+
+on:
+  push:
+    branches: ["cursor/main-ci-run-eviction-6121"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scratch-eviction-probe
+  cancel-in-progress: false
+
+jobs:
+  hold:
+    name: hold the group
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Occupy the concurrency group for a while
+        run: sleep 420
