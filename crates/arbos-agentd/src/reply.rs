@@ -9,16 +9,20 @@ use serde_json::Value;
 pub const EXCERPT_CHARS: usize = 480;
 
 /// Who this agent is: its display name and the `agent:<project_id>` sender its rows carry.
-pub struct Me<'a> {
-    pub name: &'a str,
-    pub project_id: &'a str,
+///
+/// Owned, not borrowed: the name is the agent's live one (#1431), which is read from `identity`
+/// per use rather than held anywhere. Borrowing it is what let the boot-config name in here, so
+/// a renamed agent's note said "you, <old name>".
+pub struct Me {
+    pub name: String,
+    pub project_id: String,
 }
 
 /// `[Replying to <who>: "<text>"]` for the message `msg` answers, or `None` when it answers
 /// nothing or the quoted row is gone. A cross-chat reply ("Reply in DM", `replyRef`) quotes
 /// the snapshot the row carries and names the chat it came from, since that row is not in
 /// this doc.
-pub fn quoted_message_note(doc: &ChatDoc, msg: &MessageView, me: &Me<'_>) -> Option<String> {
+pub fn quoted_message_note(doc: &ChatDoc, msg: &MessageView, me: &Me) -> Option<String> {
     if let Some(r) = ReplyRef::from_row(&msg.rest) {
         return Some(render_cross_chat_note(&r, me));
     }
@@ -27,7 +31,7 @@ pub fn quoted_message_note(doc: &ChatDoc, msg: &MessageView, me: &Me<'_>) -> Opt
     Some(render_note(&quoted, msg, me))
 }
 
-fn render_cross_chat_note(r: &ReplyRef, me: &Me<'_>) -> String {
+fn render_cross_chat_note(r: &ReplyRef, me: &Me) -> String {
     let mine = r.sender == "agent" || r.sender == format!("agent:{}", me.project_id);
     let who = if mine {
         format!("your earlier message (you, {})", me.name)
@@ -62,7 +66,7 @@ fn render_cross_chat_note(r: &ReplyRef, me: &Me<'_>) -> String {
     )
 }
 
-fn render_note(quoted: &MessageView, replying: &MessageView, me: &Me<'_>) -> String {
+fn render_note(quoted: &MessageView, replying: &MessageView, me: &Me) -> String {
     let who = quoted_author(quoted, replying, me);
     // The message being replied to travels whole (Jacob, 2026-10-26): a code post cut to an
     // excerpt is exactly what the agent cannot answer about. Beyond the full cap the marker
@@ -92,7 +96,7 @@ fn render_note(quoted: &MessageView, replying: &MessageView, me: &Me<'_>) -> Str
 
 /// The quoted row is one of this agent's own: `sender: agent` (solo chat) or
 /// `agent:<my project>` (shared chat), on an assistant / project row.
-pub fn quoted_is_mine(quoted: &MessageView, me: &Me<'_>) -> bool {
+pub fn quoted_is_mine(quoted: &MessageView, me: &Me) -> bool {
     let sender = quoted
         .rest
         .get("sender")
@@ -103,7 +107,7 @@ pub fn quoted_is_mine(quoted: &MessageView, me: &Me<'_>) -> bool {
 }
 
 /// "your earlier message", "Jacob's message", "@ops's message" (another agent), …
-fn quoted_author(quoted: &MessageView, replying: &MessageView, me: &Me<'_>) -> String {
+fn quoted_author(quoted: &MessageView, replying: &MessageView, me: &Me) -> String {
     let sender = quoted
         .rest
         .get("sender")
@@ -199,10 +203,12 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    const BOB: Me<'static> = Me {
-        name: "Bob",
-        project_id: "01P1",
-    };
+    fn bob() -> Me {
+        Me {
+            name: "Bob".into(),
+            project_id: "01P1".into(),
+        }
+    }
 
     fn view(id: &str, role: &str, text: &str, rest: Value) -> MessageView {
         MessageView {
@@ -229,7 +235,7 @@ mod tests {
             "What time was it?",
             json!({ "sender": "user", "senderName": "Jacob", "replyTo": "a1" }),
         );
-        let note = render_note(&agent, &reply, &BOB);
+        let note = render_note(&agent, &reply, &bob());
         assert!(note.starts_with(
             "[Replying to your earlier message (you, Bob): \"The latest commit is 7ba9601d8.\""
         ));
@@ -247,7 +253,7 @@ mod tests {
             "Which Friday?",
             json!({ "sender": "user:gh_1", "senderHandle": "jacob", "replyTo": "u1" }),
         );
-        assert!(render_note(&other, &reply, &BOB)
+        assert!(render_note(&other, &reply, &bob())
             .starts_with("[Replying to Sam Okafor's message: \"Launch is Friday\""));
 
         let own = view(
@@ -262,7 +268,7 @@ mod tests {
             "Make that Thursday",
             json!({ "sender": "user", "senderName": "Jacob", "replyTo": "u1" }),
         );
-        assert!(render_note(&own, &reply, &BOB)
+        assert!(render_note(&own, &reply, &bob())
             .starts_with("[Replying to Jacob's own earlier message: \"Remind me tomorrow\""));
     }
 
@@ -305,7 +311,7 @@ mod tests {
             "Do it",
             json!({ "sender": "user:gh_1", "replyTo": "a9", "mentions": ["agent:01P1"] }),
         );
-        assert!(render_note(&theirs, &reply, &BOB)
+        assert!(render_note(&theirs, &reply, &bob())
             .starts_with("[Replying to @ops's message (another agent):"));
         let mine = view(
             "a8",
@@ -313,7 +319,7 @@ mod tests {
             "Done.",
             json!({ "sender": "agent:01P1", "senderHandle": "bob" }),
         );
-        assert!(render_note(&mine, &reply, &BOB)
+        assert!(render_note(&mine, &reply, &bob())
             .starts_with("[Replying to your earlier message (you, Bob):"));
     }
 
@@ -337,7 +343,7 @@ mod tests {
                 }
             }),
         );
-        let note = quoted_message_note(&doc, &reply, &BOB).expect("note");
+        let note = quoted_message_note(&doc, &reply, &bob()).expect("note");
         assert!(
             note.starts_with(
                 "[Replying here, privately, to Jacob's message in the chat \"Arbonites\": \"Testing reply in dm\""
@@ -350,13 +356,15 @@ mod tests {
             text: "Done.".into(),
             ..ReplyRef::default()
         };
-        assert!(render_cross_chat_note(&mine, &BOB)
+        assert!(render_cross_chat_note(&mine, &bob())
             .contains("to your earlier message (you, Bob) in another chat"));
         let theirs = ReplyRef {
             sender: "agent:01P2".into(),
             sender_handle: "ops".into(),
             ..ReplyRef::default()
         };
-        assert!(render_cross_chat_note(&theirs, &BOB).contains("to @ops's message (another agent)"));
+        assert!(
+            render_cross_chat_note(&theirs, &bob()).contains("to @ops's message (another agent)")
+        );
     }
 }
