@@ -1,25 +1,46 @@
 #!/usr/bin/env python3
-"""One fix per release: refuse a release-path merge while main still owes a release.
+"""What does merging this publish, and what does main already owe a release for?
 
     scripts/release/release-gate.py --pr-base <commit> --pr-head <commit> [options]
 
-Exit 0: merging this pull request publishes nothing that is already owed, so merge away.
-Exit 1: blocked — main carries a release-path commit that has not been released yet.
+Exit 0: this check reached a verdict. It reports what the pull request publishes and what main
+        already owes on those same paths, and a merge is never refused for either.
 Exit 2: this check could not decide, so it fails closed. Not a verdict about the pull request.
+
+There is no exit 1. It used to mean "refused: this pull request would share a release with a fix
+already sitting unreleased on main" — see "what this stopped doing" below.
 
 Why this exists
 ---------------
 A merge to main publishes to users. A merge whose diff touches the trigger paths of
 .github/workflows/ios.yml cuts a public TestFlight build and submits it for Beta App Review. A
 merge the Mac release predicates call a Mac change cuts a signed, notarized stable release, marks
-it latest, and pings every installed Mac app. The owner's rule is one fix per release: one fix per
-TestFlight build, one fix per `vX.Y.Z` tag.
+it latest, and pings every installed Mac app.
 
-Nothing enforced that rule. .github/workflows/release.yml releases everything since the last tag
-in one batch, on a 15-minute schedule, so two unreleased fixes sitting on main at the same time
-are silently folded into one release and one of them never gets a build of its own. This check
-makes the rule structural: while an artifact is outstanding, the next pull request on that same
-path waits.
+.github/workflows/release.yml releases everything since the last tag in one batch, on a 15-minute
+schedule, so two unreleased fixes sitting on main at the same time go out as one artifact. The
+useful thing nothing else in the repository can tell you is which fixes are in that state right
+now: this file reads main against the last artifact that actually reached users and names the
+commit the next release is carrying.
+
+What this stopped doing, and why that is not the same as doing less
+-------------------------------------------------------------------
+This check was written to enforce one fix per release — one fix per TestFlight build, one fix per
+`vX.Y.Z` tag — by refusing the second pull request on a path while the first was still unbuilt.
+The owner withdrew that rule on 2026-11-04: several fixes per Mac tag and per TestFlight build
+are now the expected outcome, and the only remaining reasons to sequence two merges are a real
+file conflict and a regression that would be hard to bisect. This file can see neither, so it
+refuses neither, and the collapse refusal is gone.
+
+Holding the pull request was also self-defeating on its own terms. ios.yml uploads on a push to
+main, so the merge that would "share" the build is the same push that finally builds the debt.
+Refusing it left the debt unbuilt and the queue serialised behind a build nobody was triggering.
+
+Measuring the debt is the half that survives, because the measurement was never the rule. An
+unreleased release-path commit on main is work that has reached no user yet, and that is worth
+saying out loud whether or not anyone is allowed to merge on top of it. So every artifact this
+pull request publishes is still read against what main owes, the owing commit is still named, and
+the finding still goes to the log, the job summary and an annotation — as a notice, not an error.
 
 The two sides are not symmetric, and reproducing either one wrongly is the failure mode
 -----------------------------------------------------------------------------------------
@@ -43,9 +64,9 @@ iOS: the newest push run of ios.yml on main that concluded success. That run is 
 build that is still archiving, still processing, or red has not reached a tester and the commit
 that caused it is still owed.
 
-Blocking is per artifact. A Mac-only pull request waits for a Mac release and ignores TestFlight;
-a pull request on both paths (crates/arbos-core is in both sets) waits while either is
-outstanding; a pull request on neither always passes without reading anything.
+Reporting is per artifact. A Mac-only pull request is read against the last Mac release and
+ignores TestFlight; a pull request on both paths (crates/arbos-core is in both sets) is read
+against both; a pull request on neither passes without reading anything.
 """
 
 from __future__ import annotations
@@ -72,7 +93,9 @@ GATE_WORKFLOW = ".github/workflows/release-gate.yml"
 SCREEN = "gate-can-decide.sh"
 PROBE = "__release_gate_coverage_probe__"
 
-ALLOW, BLOCK, UNDETERMINED = 0, 1, 2
+# Exit 1 is deliberately absent: see "what this stopped doing" in the module docstring. Nothing
+# here returns it, and a future refusal should not reuse it without saying what it refuses.
+ALLOW, UNDETERMINED = 0, 2
 
 # How many commits of main to walk when naming the one that made main dirty. The verdict never
 # depends on this: it is already known by then, and a longer history only costs the message its
@@ -519,9 +542,14 @@ def git_contains(ancestor: str, descendant: str) -> bool:
     return done.returncode == 0
 
 
-def report(pr_base: str, pr_head: str, main: str, sides: list[Side]) -> tuple[int, list[str]]:
+def report(pr_base: str, pr_head: str, main: str, sides: list[Side]) -> tuple[list[str], str]:
+    """The whole finding, and the one line of it that becomes the annotation.
+
+    Always a pass. The only question left is whether there is debt to name, and naming it is the
+    half of this check that the withdrawn rule did not take with it.
+    """
     out = [
-        "Release gate — would merging this collapse two fixes into one release?",
+        "Release gate — what does merging this publish, and what does main already owe?",
         "",
         f"  pull request   {pr_base[:8]}..{pr_head[:8]}",
         f"  main           {main[:8]}",
@@ -538,17 +566,17 @@ def report(pr_base: str, pr_head: str, main: str, sides: list[Side]) -> tuple[in
                 out.append(f"      note:           {side.note}")
     out.append("")
 
-    blocking = [side for side in sides if side.on_path and side.outstanding]
-    if not blocking:
+    owed = [side for side in sides if side.on_path and side.outstanding]
+    if not owed:
         out += [
             "PASS. Nothing this pull request publishes is already owed by main.",
             "",
         ]
-        return ALLOW, out
+        return out, "nothing this pull request publishes is already owed by main."
 
-    out.append("BLOCKED. main already owes a release on a path this pull request is also on.")
+    out.append("DEBT. main already owes a release on a path this pull request is also on.")
     out.append("")
-    for side in blocking:
+    for side in owed:
         out += [
             f"  outstanding artifact  {side.artifact}",
             f"  last published        {side.published}",
@@ -557,17 +585,25 @@ def report(pr_base: str, pr_head: str, main: str, sides: list[Side]) -> tuple[in
             "",
         ]
     out += [
-        "The owner's rule is one fix per release: one fix per TestFlight build, one fix per",
-        "vX.Y.Z tag. release.yml batches everything since the last release into one artifact, so",
-        "merging now would ship both fixes as one and neither would get a build of its own.",
+        "That is a finding, not a refusal, and this check does not hold the pull request for it.",
+        "Several fixes per vX.Y.Z tag and per TestFlight build are the expected cadence, so",
+        "merging now folds this fix and the unreleased one into the same artifact on purpose.",
+        "Refusing would also be self-defeating: ios.yml uploads on a push to main, so the merge",
+        "that shares the build is the same push that finally builds the debt above.",
         "",
-        "Nothing about this pull request needs to change. Wait for the outstanding release to",
-        "publish — a Mac release is claimed the moment release.yml pushes its vX.Y.Z tag, and a",
-        "TestFlight build the moment ios.yml's run on main concludes success. Re-run this check",
-        "once that has happened and it passes.",
+        "What the debt is worth knowing for is the work named on it, which has reached no user",
+        "yet. If that has been true for a while, publish it — do not hold this pull request.",
+        "",
+        "PASS. main owes a release on a shared path, which is not a reason to refuse this one.",
         "",
     ]
-    return BLOCK, out
+    return out, (
+        "main owes "
+        + " and ".join(side.artifact.split(" (")[0] for side in owed)
+        + "; "
+        + "; ".join(f"{side.unreleased} is unreleased" for side in owed)
+        + ". Merging folds this fix into that release, which is the cadence now asked for."
+    )
 
 
 def emit(lines: list[str], annotation: str, level: str) -> None:
@@ -623,7 +659,7 @@ def main(argv: list[str]) -> int:
             mac_side(pr_base, pr_head, main_sha, mac_override),
             ios_side(pr_base, pr_head, main_sha, args.repo, token, ios_override),
         ]
-        verdict, lines = report(pr_base, pr_head, main_sha, sides)
+        lines, annotation = report(pr_base, pr_head, main_sha, sides)
     except Undetermined as err:
         emit(
             [
@@ -642,19 +678,7 @@ def main(argv: list[str]) -> int:
         )
         return UNDETERMINED
 
-    if verdict == BLOCK:
-        blocked = [side for side in sides if side.on_path and side.outstanding]
-        emit(
-            lines,
-            "main owes "
-            + " and ".join(side.artifact.split(" (")[0] for side in blocked)
-            + "; "
-            + "; ".join(f"{side.unreleased} is unreleased" for side in blocked)
-            + ". The block clears when that release publishes.",
-            "error",
-        )
-        return BLOCK
-    emit(lines, "nothing this pull request publishes is already owed by main.", "notice")
+    emit(lines, annotation, "notice")
     return ALLOW
 
 

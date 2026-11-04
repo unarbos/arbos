@@ -1,11 +1,22 @@
 #!/usr/bin/env bash
-# Does the release gate block? scripts/release/release-gate.py replayed against states main has
-# really been in, including the ones it must refuse.
+# Does the release gate still decide anything? scripts/release/release-gate.py replayed against
+# states main has really been in, including the ones it must refuse and the ones it must not.
 #
 #   scripts/release/release-gate-selftest.sh        (needs the full history and nothing else)
 #
-# A guard nobody has watched refuse is not a tested guard. A run of the gate on a clean main
-# proves only that it says yes; these cases make it say no, and say it for the right artifact.
+# A guard nobody has watched refuse is not a tested guard, and since 2026-11-04 the reverse is the
+# nearer danger: the one-fix-per-release refusal was withdrawn, and a gate that answers "fine" to
+# everything passes a suite that only ever checks exit codes for 0. So the cases come in two
+# halves that fail in opposite directions.
+#
+#   Debt is not a refusal. The four shapes this gate used to hold — a Mac fix, an iPhone fix and
+#   a dual-artifact fix on a main that owes the matching artifact — now exit 0. Each of them also
+#   asserts that the gate still named the debt and still named what the pull request publishes,
+#   so deleting the measurement to make them pass fails them instead. Exit 0 alone would be
+#   satisfied by a gate that had stopped reading anything at all.
+#
+#   Everything else it refuses, it still refuses. Nine cases exit 2 on inputs the gate cannot
+#   read and on its own shape drifting, and they are untouched by the cadence change.
 #
 # Every case here asserts the gate's own words, not only its exit code — see case_is. An exit code
 # is one of three values shared by twenty-three cases, so on its own it cannot tell a case from the
@@ -24,6 +35,11 @@
 #   f13ab025a #2640, relay only   (base 0c9e04ede)
 #   41847d26b #2533, iPhone only  (base 0c7489b91)
 #   15d11e89a #2604, crates/arbos-core — on BOTH path sets (base 9b62b7fcb)
+#
+# 6f70123be does double duty. It is a release bump, so it is not a Mac change, and it touches
+# Cargo.lock and Cargo.toml, which ios.yml lists outright — which makes it a main that owes a
+# TestFlight build for a commit no pull request on apps/ios/** has anything to do with. That is
+# the exact state #2720 was refused in, replayed below from permanent commits.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -81,9 +97,18 @@ case_is() {
 # ── main owes a Mac release ─────────────────────────────────────────────────────────────────────
 # main is 83c2b5ebf, the last stable release is v0.6.379, and #2645's Mac fix sits between them.
 
-WHY="main owes a stable Mac release; 83c2b5ebf
+# This exited 1 until the cadence rule was withdrawn. Three phrases, and each one fails to a
+# different defect, which is the point of there being three:
+#   exit 0                 — the refusal is gone.
+#   publishes ...: YES     — it is gone because the rule is gone, not because the gate decided
+#                            this pull request publishes nothing. A gate blind to Mac changes
+#                            would exit 0 here too, and this phrase is what separates them.
+#   main owes ...          — the measurement survived the refusal. Delete the outstanding read
+#                            and the gate still exits 0, still says YES, and fails on this line.
+WHY="publishes a stable Mac release: YES — Mac sources changed: crates/arbos-mac
+main owes a stable Mac release; 83c2b5ebf
 publishes a TestFlight build: no" \
-  case_is "a Mac fix is refused while main owes a Mac release" 1 \
+  case_is "a Mac fix merges while main owes a Mac release, and the debt is still named" 0 \
   --main 83c2b5ebf --mac-released-sha 2402ff996 --ios-released-sha 83c2b5ebf \
   --pr-base 49608e2e8 --pr-head 83c2b5ebf
 
@@ -117,10 +142,26 @@ last published: 83c2b5eb" \
 # main is 41847d26b and the last build testers saw was made from 0c7489b91, with #2533's iPhone
 # fix between them. The Mac side is clear across that same span, so only the phone blocks.
 
-WHY="main owes a TestFlight build; 41847d26b
+WHY="publishes a TestFlight build: YES — matches ios.yml's trigger paths: apps/ios/
+main owes a TestFlight build; 41847d26b
 publishes a stable Mac release: no" \
-  case_is "an iPhone fix is refused while main owes a TestFlight build" 1 \
+  case_is "an iPhone fix merges while main owes a TestFlight build, and the debt is still named" 0 \
   --main 41847d26b --mac-released-sha 0c7489b91 --ios-released-sha 0c7489b91 \
+  --pr-base 0c7489b91 --pr-head 41847d26b
+
+# #2720's own state, which is not the case above: there the unbuilt commit IS the pull request's
+# own fix, so a gate that confused "main owes" with "this diff" would still look right. Here main
+# is the v0.6.380 bump, owing a TestFlight build for Cargo.lock and Cargo.toml, and the pull
+# request is an unrelated iPhone fix that shares no file with it. The old gate refused it with
+# "Nothing about this pull request needs to change", which was true and was the whole problem.
+#
+# The reason phrase is the load-bearing one. It names files the pull request does not touch, so
+# it can only come from reading main against the last build — the half that had to survive.
+WHY="publishes a TestFlight build: YES — matches ios.yml's trigger paths: apps/ios/
+why it is unreleased  unreleased on ios.yml's paths: Cargo.lock, Cargo.toml
+main owes a TestFlight build; 6f70123be" \
+  case_is "an iPhone fix merges while main owes a build for a release bump it never touched" 0 \
+  --main 6f70123be --mac-released-sha 6f70123be --ios-released-sha 83c2b5ebf \
   --pr-base 0c7489b91 --pr-head 41847d26b
 
 WHY="publishes a stable Mac release: no
@@ -141,18 +182,22 @@ publishes a TestFlight build: no" \
 # crates/arbos-core is in MAC_PATHS and in ios.yml's filter, so #2604 publishes both artifacts and
 # waits for either one that is outstanding.
 
-# Each of these blocks on the same artifact as one of the single-path cases above, and prints the
-# same `::error` line for it. "Dual" is the part the error line does not carry: it lives in the
-# other publish line, which says YES here and `no` there. Both phrases are needed.
+# Each of these reports the same outstanding artifact as one of the single-path cases above, and
+# prints an identical `::notice` line for it. "Dual" is the part that line does not carry: it
+# lives in the other publish line, which says YES here and `no` there. Both phrases are needed.
+#
+# These two also hold the per-artifact scoping in place. Debt is reported for the artifacts the
+# pull request publishes, so a gate that started reporting every artifact's debt regardless would
+# make the pair indistinguishable, and release-gate-selftest-audit.sh would say so.
 WHY="main owes a TestFlight build; 41847d26b
 publishes a stable Mac release: YES" \
-  case_is "a dual-artifact fix is refused for the phone alone" 1 \
+  case_is "a dual-artifact fix merges while main owes the phone alone" 0 \
   --main 41847d26b --mac-released-sha 0c7489b91 --ios-released-sha 0c7489b91 \
   --pr-base 9b62b7fcb --pr-head 15d11e89a
 
 WHY="main owes a stable Mac release; 83c2b5ebf
 publishes a TestFlight build: YES" \
-  case_is "a dual-artifact fix is refused for the Mac alone" 1 \
+  case_is "a dual-artifact fix merges while main owes the Mac alone" 0 \
   --main 83c2b5ebf --mac-released-sha 2402ff996 --ios-released-sha 83c2b5ebf \
   --pr-base 9b62b7fcb --pr-head 15d11e89a
 
