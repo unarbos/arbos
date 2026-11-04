@@ -2,7 +2,7 @@
   "defaultProvider": "arbos-relay",
   "defaultModel": "anthropic/claude-haiku-5.5",
   "defaultThinkingLevel": "off",
-  "defaultTools": ["read", "bash", "edit", "write", "grep", "find", "ls", "codemode"],
+  "defaultTools": ["read", "bash", "edit", "write", "codemode"],
   "compaction": { "enabled": true, "reserveTokens": 16384, "keepRecentTokens": 20000 },
   "enableSkillCommands": false,
   "shellCommandPrefix": "",
