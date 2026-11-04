@@ -37,6 +37,46 @@ on:
 permissions:
   contents: read
 
+# main COALESCES here, and that is a decision, not an oversight. Read this before porting #2735.
+#
+# The mechanism is the same one #2735 fixed in ci.yml. `cancel-in-progress` governs only a RUNNING
+# run; a run still PENDING in a group is evicted when a newer run joins it, whatever the flag says,
+# because GitHub keeps one pending run per group. So on main `false` does not protect — it makes
+# each push queue, and queueing is what evicts it. merge-window.sh has measured that here all
+# along: "on main a queued gate run is cancelled when the next one is created (260 of 264 cancelled
+# runs, median gap one second)", and `range_gate` is built around it, treating an older commit's
+# gate result as a finding because a per-commit-green rule could essentially never be met.
+#
+# #2735's remedy — a group per commit on main — is REFUSED here, because the resource is not the
+# same one. ci.yml is four ubuntu jobs against an allowance no burst we have can exhaust. This is
+# one 46-85 minute macos-15 job against five concurrent jobs for the whole repository, and main is
+# a sixth of nothing in that pool: of the 290 runs that consumed a macOS job 2026-11-01..04, 17
+# were main. Branch pushes own this pool.
+#
+# Measured 2026-11-04 across every branch and event: 75.2 of a possible 120 runner-hours used
+# (63%), with the pool pegged at five or more concurrent jobs for 594 minutes of the day. Waits are
+# bimodal, which is what makes the average lie — median 1.3 min, but 23 of 106 runs waited over 30
+# min, ten over an hour, and the worst waited 500. Per-commit groups would add exactly the runs
+# that are being evicted today, so the bill is the eviction rate: at the 2026-10-21..28 cadence
+# (48.8 main runs/day, 250 evicted) that is +34 runner-hours/day, taking the pool to 110 of 120
+# (91%) — and at 63% the worst wait is already 8.3 hours. On a REQUIRED gate that trades missing
+# verdicts for multi-hour ones, which is the worse failure.
+#
+# The cost therefore scales with precisely the cadence that makes the fix necessary, which is the
+# inverse of ci.yml and the whole reason the same one-line change does not belong here. At the
+# current cadence (5.9 main runs/day since 2026-11-01) it would also buy nothing: zero evictions.
+#
+# The two cheaper shapes, both measured and neither landed here, both needing #2736 first:
+#   - A per-commit group for `workflow_dispatch` only, keeping `push` coalesced. A group per commit
+#     for the commits actually being judged, paid for one deliberate ask at a time rather than one
+#     merge at a time. Needs #2736's dispatch trigger to exist.
+#   - Moving this group onto the `check` job so an evicted commit leaves something to read. Proven
+#     on a scratch workflow: the job is evicted identically (cancelled, zero steps) but the run
+#     survives, an `always()` verdict job still runs, and the annotation names the sha. Serialising
+#     is unchanged, so it costs no macOS minutes. Note two consequences before adopting it — the
+#     run concludes `cancelled`, which gate_state still reads as RED and so is fail-closed; and the
+#     run then holds a step whose conclusion is `failure`, so any "no failed step means untested"
+#     discriminator (ci_abort_state's) would call an eviction RED rather than UNTESTED.
 concurrency:
   group: swift-core-check-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
