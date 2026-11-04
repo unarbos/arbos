@@ -207,11 +207,22 @@ pub(crate) fn pasted_images_dir() -> PathBuf {
     std::env::temp_dir().join("arbos-pasted")
 }
 // The composer's own type, written out rather than read from `TEXT_BODY` /
-// `LINE_HEIGHT`. Jacob is moving the composer toward Grok's smaller field and
-// said nothing about body text; those two constants have some sixty consumers
+// `LINE_HEIGHT`. Jacob is moving the composer toward Grok's field and said
+// nothing about body text; those two constants have some sixty consumers
 // across thirteen files, so sizing the composer from them would turn one
-// measured control into an app-wide change. Same values as before the split.
-const INPUT_LINE_HEIGHT: f32 = 21.0;
+// measured control into an app-wide change.
+//
+// Line height is Grok's, measured: its composer sets a 42 px line pitch
+// against our 40 px, on a reference crop whose scale is pinned at 1.905 px/pt
+// by our own 21.0 showing as 40.0 px. 42 / 1.905 = 22.05, so 22.0.
+//
+// The font size is deliberately NOT moved. The brief asked for a smaller
+// composer font and every instrument says Grok's is larger, so the only
+// measured quantity here is the pitch; a size would have to be invented. The
+// crop cannot supply one either, because the x-height reading it would come
+// from is corrupted by digit density (lining figures are drawn to cap height,
+// so a digit-heavy line measures tall).
+const INPUT_LINE_HEIGHT: f32 = 22.0;
 const INPUT_FONT_SIZE: f32 = 15.0;
 
 #[derive(Clone, Debug)]
