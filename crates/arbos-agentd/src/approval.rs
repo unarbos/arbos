@@ -42,6 +42,29 @@ use crate::connectors;
 /// A re-run of a gated call is pre-approved for this long after the user approved it late.
 const GRANT_TTL_MS: i64 = 10 * 60 * 1000;
 
+/// `decidedBy` values the box writes for itself (`arbos:timeout`, `arbos:expiry`): no device
+/// issued them, so they are not subject to the owner gate.
+const INTERNAL_DECIDER: &str = "arbos:";
+
+/// Whose device answered a card, as far as the box can work out.
+///
+/// The input is the `issuedBy` of the `approve` / `reject` command — a device id. Resolution is
+/// by the owner's device list from the relay's box listing, then by the people-chat roster's
+/// per-member `devices`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Decider {
+    /// The box itself: the expiry sweep, the abandon hook.
+    Internal,
+    /// A device of this agent's owner.
+    Owner,
+    /// A device the chat's roster puts on another member.
+    Guest(String),
+    /// Not the owner's: the box knows its owner's devices and this is not one of them.
+    NotOwner,
+    /// The box has no owner device list yet and no roster claims this device, so it cannot say.
+    Unknown,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitMode {
     Inline,
@@ -367,6 +390,104 @@ impl Agent {
         }
     }
 
+    /// Whose device answered a card. `decided_by` is the `issuedBy` of the client command.
+    ///
+    /// Two sources, because neither covers every chat. The relay's box listing carries the
+    /// owner's own device ids (`owner.devices`) and so settles a card in a project chat, which
+    /// has no member roster. A people chat's roster carries `devices` per member and so names
+    /// *which* guest answered, which the audit line wants.
+    ///
+    /// `issuedBy` is written by the client, like every other author field in the doc
+    /// (`people::author_of` reads `sender` the same way). This tells the owner's app apart from
+    /// a guest's app; it is not proof against a client that lies about its own device id. See
+    /// the note on `require_owner_decision`.
+    pub(crate) fn decider(&self, chat_id: &str, decided_by: &str) -> Decider {
+        let who = decided_by.trim();
+        if who.is_empty() {
+            return Decider::Unknown;
+        }
+        if who == self.cfg.device_id || who.starts_with(INTERNAL_DECIDER) {
+            return Decider::Internal;
+        }
+        let owner_devices = self.people.owner_devices();
+        let bare = who.strip_prefix("dev:").unwrap_or(who);
+        if owner_devices.iter().any(|d| d == bare || d == who) {
+            return Decider::Owner;
+        }
+        if let Some(info) = self.people.info(chat_id) {
+            match info.user_of_device(who) {
+                Some(u) if u == info.owner_user => return Decider::Owner,
+                Some(u) => return Decider::Guest(u),
+                None => {}
+            }
+        }
+        if owner_devices.is_empty() {
+            Decider::Unknown
+        } else {
+            Decider::NotOwner
+        }
+    }
+
+    /// Only the owner's own devices answer the owner's cards.
+    ///
+    /// A card is the one gate between the model and real authority: a destructive shell command
+    /// on the box, an op on the owner's own computer through `arbos-local`, or — when the answer
+    /// carries `grant` — a standing approval that answers every later card of its class without
+    /// asking anybody. A guest of a shared chat may ask this agent for work. Clearing that gate
+    /// is the owner's, and the refusal belongs here, in the daemon that acts on the decision, so
+    /// a guest-authored command is inert whatever route it arrived by.
+    ///
+    /// The card stays pending: the owner can still answer it.
+    ///
+    /// What this does not cover: `decided_by` comes from the command row, which the client
+    /// writes, so a client that puts the owner's device id in its own `issuedBy` still passes.
+    /// Closing that needs the relay's transport-level attribution of a row (`rooms.rs` already
+    /// stamps the pushing connection's device on every row) to reach the box, which is a change
+    /// to the sync layer rather than to this gate.
+    async fn require_owner_decision(
+        self: &Arc<Self>,
+        approval_id: &str,
+        decided_by: &str,
+    ) -> Result<()> {
+        let Some(row) = self.store.approval(approval_id).ok().flatten() else {
+            return Ok(()); // `decide_approval` reports the unknown id
+        };
+        let decider = self.decider(&row.chat_id, decided_by);
+        let guest = match &decider {
+            Decider::Internal | Decider::Owner => return Ok(()),
+            Decider::Unknown => {
+                tracing::warn!(
+                    approval_id,
+                    decided_by,
+                    chat_id = %row.chat_id,
+                    "approval answered by a device this box cannot place: it has no owner device list yet"
+                );
+                return Ok(());
+            }
+            Decider::Guest(user_id) => Some(user_id.clone()),
+            Decider::NotOwner => None,
+        };
+        tracing::warn!(
+            approval_id,
+            decided_by,
+            guest = guest.as_deref().unwrap_or("-"),
+            chat_id = %row.chat_id,
+            title = %row.title,
+            "approval decision refused: only the owner answers a card"
+        );
+        self.append_audit(
+            "approval_decision_refused",
+            json!({
+                "approval_id": approval_id, "chat_id": row.chat_id, "title": row.title,
+                "risk": row.risk, "decided_by": decided_by, "decided_by_user": guest,
+                "reason": "only the agent's owner may answer an approval card",
+            }),
+        );
+        Err(anyhow!(
+            "approval {approval_id} may only be answered by this agent's owner"
+        ))
+    }
+
     /// An `approve` command from a card: when it carries `grant` (option B/C), the standing grant
     /// is recorded before the call runs, so the record exists even if the run fails.
     pub async fn decide_approval_from_command(
@@ -376,6 +497,9 @@ impl Agent {
         decided_by: &str,
         payload: &Value,
     ) -> Result<()> {
+        // The owner gate comes first: before the hand-off notes the answer, before a `grant`
+        // becomes a standing approval, before anything the decision unblocks.
+        self.require_owner_decision(approval_id, decided_by).await?;
         // Secret hand-off: the request card's answer names the saved secret (ids and names,
         // never a value) for the tool waiting on it; the offer card's Save runs the save.
         crate::handoff::note_card_answer(approval_id, payload);
@@ -1098,6 +1222,9 @@ mod shell_grant_tests {
         let chat = "01TESTCHATSHELLGRANT000001";
         agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
         let _host = agent.sync.open_room(chat).await.unwrap();
+        // The relay's `owner.devices`: "dev-mac" below is the owner's own app, so the card is
+        // answered by the one principal allowed to answer it.
+        agent.people.test_set_owner_devices(&["dev-mac"]);
         let ws = json!({ "command": "cd /work/app && rm -rf node_modules" });
         let v = agent.hook_approval("bash", &ws, chat, "main").await;
         let id = v["approvalId"].as_str().unwrap().to_owned();
@@ -1141,6 +1268,205 @@ mod shell_grant_tests {
             .await
             .unwrap();
         assert_eq!(agent.approvals.shell_grants.lock().await.len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// Only the agent's owner answers its cards. Both tests run the attack as a guest's app runs
+/// it — an `approve` command row with the guest's device in `issuedBy` — and both fail against
+/// the code before [`Agent::require_owner_decision`]: the guest's Approve was taken at face
+/// value, and the guest's "always allow" became a standing grant.
+#[cfg(test)]
+mod owner_only_tests {
+    use super::*;
+    use crate::people::PeopleChatInfo;
+    use crate::status::tests::test_agent;
+    use arbos_core::doc::CommandView;
+
+    /// This box's owner (`test_agent`'s `user_id`) and the device their Mac writes.
+    const OWNER: &str = "u-test";
+    const OWNER_DEVICE: &str = "DEVOWNER";
+    /// A guest of the shared chat: a member, not the owner of this agent.
+    const GUEST: &str = "u-guest";
+    const GUEST_DEVICE: &str = "DEVGUEST";
+
+    /// The roster of a group people chat as the relay's box-facing listing carries it: the
+    /// owner, a guest, and this agent, with each person's device ids.
+    fn shared_chat(agent: &Agent) -> PeopleChatInfo {
+        PeopleChatInfo {
+            members: vec![
+                json!({ "member": format!("user:{OWNER}"), "handle": "jacob", "name": "Jacob",
+                        "devices": [OWNER_DEVICE], "owner": OWNER }),
+                json!({ "member": format!("user:{GUEST}"), "handle": "sam", "name": "Sam",
+                        "devices": [GUEST_DEVICE] }),
+                json!({ "member": format!("agent:{}", agent.cfg.project_id), "handle": "doug",
+                        "owner": OWNER }),
+            ],
+            settings: json!({ "reply_policy": "mention" }),
+            owner_user: OWNER.into(),
+            slug: "doug".into(),
+            kind: "group".into(),
+            owner_address: Some("Jacob".into()),
+        }
+    }
+
+    /// A shared chat with a card already waiting: the agent wants to delete a directory.
+    async fn chat_with_a_card(
+        chat: &str,
+        command: &str,
+    ) -> (Arc<Agent>, std::path::PathBuf, String) {
+        let (agent, root) = test_agent().await;
+        agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
+        let _host = agent.sync.open_room(chat).await.unwrap();
+        agent.people.test_insert(chat, shared_chat(&agent));
+        agent.people.test_set_owner_devices(&[OWNER_DEVICE]);
+        let v = agent
+            .hook_approval("bash", &json!({ "command": command }), chat, "main")
+            .await;
+        assert_eq!(v["state"], "pending", "{v}");
+        let id = v["approvalId"].as_str().unwrap().to_owned();
+        (agent, root, id)
+    }
+
+    /// The `approve` command an app pushes when somebody taps a card
+    /// (`arbos-mac/src/sync/relay.rs` `ClientCommand::Approve`).
+    fn approve_cmd(approval_id: &str, device: &str, grant: Option<&str>) -> CommandView {
+        let mut payload = json!({ "approvalId": approval_id });
+        if let Some(g) = grant {
+            payload[GRANT_FIELD] = json!(g);
+        }
+        CommandView {
+            id: ulid(),
+            kind: "approve".into(),
+            payload,
+            issued_by: device.into(),
+            issued_at: now_ms(),
+            status: "pending".into(),
+        }
+    }
+
+    /// A guest of a shared chat taps Approve on a destructive-shell card the owner's agent
+    /// raised. The decision must not be taken: the card stays pending for the owner, the gated
+    /// call stays gated, and the owner can still answer it afterwards.
+    #[tokio::test]
+    async fn a_guest_cannot_answer_the_owners_card() {
+        let chat = "01TESTCHATGUESTAPPROVE0000";
+        let cmd = json!({ "command": "rm -rf /work/app/dist" });
+        let (agent, root, id) = chat_with_a_card(chat, "rm -rf /work/app/dist").await;
+
+        let refused = agent
+            .handle_command(chat, approve_cmd(&id, GUEST_DEVICE, None))
+            .await;
+        assert!(
+            refused.is_err(),
+            "a guest's Approve must be refused, got {refused:?}"
+        );
+        assert_eq!(
+            agent.approval_status(&id).await["state"],
+            "pending",
+            "the card stays for the owner"
+        );
+        assert_eq!(
+            agent.hook_approval("bash", &cmd, chat, "main").await["state"],
+            "pending",
+            "the gated call is still gated"
+        );
+
+        // Reject is the same decision from the other side, and equally not the guest's.
+        let mut reject = approve_cmd(&id, GUEST_DEVICE, None);
+        reject.kind = "reject".into();
+        assert!(agent.handle_command(chat, reject).await.is_err());
+        assert_eq!(agent.approval_status(&id).await["state"], "pending");
+
+        // The owner's own device answers the same card and it decides.
+        agent
+            .handle_command(chat, approve_cmd(&id, OWNER_DEVICE, None))
+            .await
+            .unwrap();
+        assert_eq!(agent.approval_status(&id).await["state"], "approved");
+        assert_eq!(
+            agent.store.approval(&id).unwrap().unwrap().decided_by,
+            Some(OWNER_DEVICE.to_owned())
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The dangerous half: the same tap with the card's "always allow" option, which mints a
+    /// standing grant and so answers every later card of that class with no card at all.
+    #[tokio::test]
+    async fn a_guest_cannot_mint_a_standing_grant() {
+        let chat = "01TESTCHATGUESTGRANT000000";
+        let (agent, root, id) = chat_with_a_card(chat, "cd /work/app && rm -rf node_modules").await;
+
+        let refused = agent
+            .handle_command(chat, approve_cmd(&id, GUEST_DEVICE, Some("anywhere")))
+            .await;
+        assert!(
+            refused.is_err(),
+            "a guest must not mint a standing grant, got {refused:?}"
+        );
+        assert!(
+            agent.approvals.shell_grants.lock().await.is_empty(),
+            "no grant may be recorded"
+        );
+        assert_eq!(agent.approval_status(&id).await["state"], "pending");
+        assert_eq!(
+            agent
+                .hook_approval("bash", &json!({ "command": "rm -rf /opt/x" }), chat, "main")
+                .await["state"],
+            "pending",
+            "a later destructive command still asks"
+        );
+
+        // The owner's own device makes the same choice and it stands.
+        agent
+            .handle_command(chat, approve_cmd(&id, OWNER_DEVICE, Some("anywhere")))
+            .await
+            .unwrap();
+        let grants = agent.approvals.shell_grants.lock().await.clone();
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].path_class, PathClass::Anywhere);
+        assert_eq!(grants[0].granted_by, OWNER_DEVICE);
+        assert_eq!(
+            agent
+                .hook_approval("bash", &json!({ "command": "rm -rf /opt/x" }), chat, "main")
+                .await["state"],
+            "allowed"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Who the box takes a `decidedBy` for. A box that has not yet been told its owner's
+    /// devices cannot refuse what it cannot place — it says so in the log and carries on —
+    /// but it never mistakes a device the roster puts on a guest for the owner's.
+    #[tokio::test]
+    async fn the_decider_is_resolved_by_owner_devices_then_the_roster() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATDECIDER000000000";
+        agent.people.test_insert(chat, shared_chat(&agent));
+
+        // No owner device list yet: the roster still names the guest.
+        assert_eq!(
+            agent.decider(chat, GUEST_DEVICE),
+            Decider::Guest(GUEST.into())
+        );
+        assert_eq!(agent.decider(chat, OWNER_DEVICE), Decider::Owner);
+        assert_eq!(agent.decider(chat, "DEVSTRANGER"), Decider::Unknown);
+        // A chat with no roster at all (a project chat) and nothing to resolve against.
+        assert_eq!(agent.decider("other", "DEVSTRANGER"), Decider::Unknown);
+
+        // With the list, an unplaceable device is refused rather than waved through.
+        agent.people.test_set_owner_devices(&[OWNER_DEVICE]);
+        assert_eq!(agent.decider("other", "DEVSTRANGER"), Decider::NotOwner);
+        assert_eq!(agent.decider("other", OWNER_DEVICE), Decider::Owner);
+        // The Mac writes `dev:<id>` on some rows; the relay lists bare ids.
+        assert_eq!(
+            agent.decider("other", &format!("dev:{OWNER_DEVICE}")),
+            Decider::Owner
+        );
+        // The box's own decisions (expiry sweep, abandon hook) are not a device's.
+        assert_eq!(agent.decider(chat, "arbos:timeout"), Decider::Internal);
+        assert_eq!(agent.decider(chat, &agent.cfg.device_id), Decider::Internal);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

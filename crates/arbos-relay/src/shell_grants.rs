@@ -175,17 +175,37 @@ fn push_box(state: &AppState, project_id: &str) {
         .enqueue_push(project_id, "shell_grants_changed", &json!({}));
 }
 
+fn project_of(state: &AppState, id: &str) -> Result<crate::db::Project, crate::secrets::ApiErr> {
+    state
+        .db
+        .project(id)
+        .map_err(internal)?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "no such project"))
+}
+
+/// Read access: the owner, their box, a guest the owner invited to the project (D72 step 3).
+fn readable_project(
+    state: &AppState,
+    principal: &Principal,
+    id: &str,
+) -> Result<crate::db::Project, crate::secrets::ApiErr> {
+    let p = project_of(state, id)?;
+    if !state.allows(principal, &p.id) {
+        return Err(err(StatusCode::FORBIDDEN, "not_owner", "not your project"));
+    }
+    Ok(p)
+}
+
+/// Write access: the owner only. A standing grant is the owner's standing answer to every later
+/// card of its class, so a guest of a shared project must not add or revoke one — `allows` would
+/// let them, because it admits invited project members (`state.rs:474`).
 fn owned_project(
     state: &AppState,
     principal: &Principal,
     id: &str,
 ) -> Result<crate::db::Project, crate::secrets::ApiErr> {
-    let p = state
-        .db
-        .project(id)
-        .map_err(internal)?
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "no such project"))?;
-    if !state.allows(principal, &p.id) {
+    let p = project_of(state, id)?;
+    if !state.owns(principal, &p.id) {
         return Err(err(StatusCode::FORBIDDEN, "not_owner", "not your project"));
     }
     Ok(p)
@@ -197,7 +217,7 @@ pub async fn list(
     principal: Principal,
     Path(id): Path<String>,
 ) -> ApiResult {
-    let p = owned_project(&state, &principal, &id)?;
+    let p = readable_project(&state, &principal, &id)?;
     let items: Vec<Value> = state
         .db
         .shell_grants(&p.id)
@@ -264,7 +284,8 @@ pub async fn create(
     Ok((StatusCode::CREATED, Json(grant_json(&g))).into_response())
 }
 
-/// `DELETE /projects/{id}/shell-grants/{grant}` — revoke; the agent asks again next time.
+/// `DELETE /projects/{id}/shell-grants/{grant}` (owner device) — revoke; the agent asks again
+/// next time.
 pub async fn revoke(
     State(state): State<AppState>,
     principal: Principal,
@@ -406,5 +427,155 @@ mod tests {
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].id, c.id);
         assert!(st.db.shell_grants("p2").unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod owner_only_tests {
+    //! A standing grant answers every later card of its class without asking anybody, so adding
+    //! or revoking one is the owner's. `state.allows` admits a guest the owner invited to the
+    //! project (D72 step 3) and these two routes used it, so a guest could grant the agent
+    //! "file deletes anywhere" on the owner's box and then revoke it again.
+
+    use crate::db::Project;
+    use crate::people::tests_support::person;
+    use crate::secrets::ApiErr;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    use super::*;
+
+    const PROJECT: &str = "proj_shell_grants";
+
+    fn status_of(r: ApiResult) -> StatusCode {
+        match r {
+            Ok(res) => res.status(),
+            Err(ApiErr(code, _, _)) => code,
+        }
+    }
+
+    fn project_of(state: &AppState, owner: &str) {
+        state
+            .db
+            .insert_project(&Project {
+                id: PROJECT.into(),
+                name: "Doug".into(),
+                icon: "P".into(),
+                instructions: String::new(),
+                models: json!({}),
+                state: "awake".into(),
+                created_at: 0,
+                last_active_at: 0,
+                spend_cap_daily: 25.0,
+                color: "#000".into(),
+                user_id: owner.into(),
+                workspace_state: "stopped".into(),
+                avatar: None,
+                avatar_color: None,
+                description: String::new(),
+                primary_chat_id: None,
+                avatar_color_index: None,
+                avatar_leaf: None,
+                avatar_leaf_color: None,
+                image_key: None,
+                avatar_version: 0,
+            })
+            .expect("project");
+    }
+
+    fn grant_body() -> GrantBody {
+        GrantBody {
+            rule_class: "file-delete".into(),
+            path_class: "anywhere".into(),
+            chat_id: None,
+            approval_id: None,
+        }
+    }
+
+    /// The one that matters: a guest of a shared project minting the owner's standing shell
+    /// approval. Before the owner check this answered 201 and the grant was live.
+    #[tokio::test]
+    async fn only_the_owner_adds_or_revokes_a_standing_grant() {
+        let state = test_state(AuthMode::Github);
+        let (owner, owner_dev) = person(&state, 41);
+        let (guest, guest_dev) = person(&state, 42);
+        project_of(&state, &owner);
+        assert!(state
+            .db
+            .add_project_member(PROJECT, &guest, &owner)
+            .unwrap());
+
+        let refused = create(
+            State(state.clone()),
+            guest_dev.clone(),
+            Path(PROJECT.to_owned()),
+            Json(grant_body()),
+        )
+        .await;
+        assert_eq!(status_of(refused), StatusCode::FORBIDDEN);
+        assert!(
+            state.db.shell_grants(PROJECT).unwrap().is_empty(),
+            "a guest's grant must not exist"
+        );
+
+        // The owner's own device makes the same call and it stands.
+        let made = create(
+            State(state.clone()),
+            owner_dev.clone(),
+            Path(PROJECT.to_owned()),
+            Json(grant_body()),
+        )
+        .await;
+        assert_eq!(status_of(made), StatusCode::CREATED);
+        let live = state.db.shell_grants(PROJECT).unwrap();
+        assert_eq!(live.len(), 1);
+        let grant_id = live[0].id.clone();
+
+        // Revoking is the owner's too: the guest must not clear the owner's permission state.
+        let refused = revoke(
+            State(state.clone()),
+            guest_dev,
+            Path((PROJECT.to_owned(), grant_id.clone())),
+        )
+        .await;
+        assert_eq!(status_of(refused), StatusCode::FORBIDDEN);
+        assert_eq!(state.db.shell_grants(PROJECT).unwrap().len(), 1);
+
+        let gone = revoke(
+            State(state.clone()),
+            owner_dev,
+            Path((PROJECT.to_owned(), grant_id)),
+        )
+        .await;
+        assert_eq!(status_of(gone), StatusCode::NO_CONTENT);
+        assert!(state.db.shell_grants(PROJECT).unwrap().is_empty());
+    }
+
+    /// Reading the list is unchanged: a guest the owner invited still sees what the agent may
+    /// do on the owner's box.
+    #[tokio::test]
+    async fn a_guest_still_reads_the_list() {
+        let state = test_state(AuthMode::Github);
+        let (owner, _owner_dev) = person(&state, 43);
+        let (guest, guest_dev) = person(&state, 44);
+        project_of(&state, &owner);
+        state
+            .db
+            .add_project_member(PROJECT, &guest, &owner)
+            .unwrap();
+        state
+            .db
+            .add_shell_grant(
+                PROJECT,
+                "file-delete",
+                PathClass::Scratch,
+                None,
+                &owner,
+                None,
+            )
+            .unwrap();
+
+        let r = list(State(state.clone()), guest_dev, Path(PROJECT.to_owned())).await;
+        assert_eq!(status_of(r), StatusCode::OK);
     }
 }
