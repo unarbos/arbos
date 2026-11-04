@@ -49,18 +49,29 @@ permissions:
 #
 # #2735's remedy — a group per commit on main — is REFUSED here, because the resource is not the
 # same one. ci.yml is four ubuntu jobs against an allowance no burst we have can exhaust. This is
-# one 46-85 minute macos-15 job against five concurrent jobs for the whole repository, and main is
-# a sixth of nothing in that pool: of the 290 runs that consumed a macOS job 2026-11-01..04, 17
-# were main. Branch pushes own this pool.
+# one 46-85 minute macos-15 job, and main is a sixth of nothing in the pool it waits in: of the 290
+# runs that consumed a macOS job 2026-11-01..04, 17 were main. Branch pushes own this pool.
 #
-# Measured 2026-11-04 across every branch and event: 75.2 of a possible 120 runner-hours used
-# (63%), with the pool pegged at five or more concurrent jobs for 594 minutes of the day. Waits are
-# bimodal, which is what makes the average lie — median 1.3 min, but 23 of 106 runs waited over 30
-# min, ten over an hour, and the worst waited 500. Per-commit groups would add exactly the runs
-# that are being evicted today, so the bill is the eviction rate: at the 2026-10-21..28 cadence
-# (48.8 main runs/day, 250 evicted) that is +34 runner-hours/day, taking the pool to 110 of 120
-# (91%) — and at 63% the worst wait is already 8.3 hours. On a REQUIRED gate that trades missing
-# verdicts for multi-hour ones, which is the worse failure.
+# The constraint is NOT a job cap. "Five jobs at once" is wrong as a ceiling and is only the modal
+# level: measured 2026-10-29..11-04, this workflow alone reached 16 concurrent macos-15 jobs
+# (2026-10-30 19:29Z) and spent 1716 minutes above five. GitHub's macOS fleet is elastic, so the
+# cost of asking for more is not refusal — it is wait. That is what makes it expensive here, and it
+# is why the arithmetic below is in runner-hours of demand rather than in slots.
+#
+# Waits are bimodal, which is what makes an average lie and a median lie harder. Per UTC day, every
+# branch and event, as median / p90 / worst minutes: 10-29 1.3/51/100, 10-30 2.9/365/596,
+# 10-31 0.1/183/384, 11-01 1.3/157/359, 11-02 8.8/193/343, 11-03 0.9/136/727, 11-04 1.4/60/500.
+# The median is near zero every day because most jobs get a machine at once; the tail is hours. So
+# quote the share over a threshold and a high percentile, never the median: on 11-03, 18 of 58 runs
+# waited over 30 minutes and 14 over an hour, and run 41598907652 — on MAIN — waited 726 minutes
+# for its machine. This workflow consumed 140 runner-hours on 10-30 alone.
+#
+# Per-commit groups would add exactly the runs that are being evicted today, so the bill is the
+# eviction rate: at the 2026-10-21..28 cadence (48.8 main runs/day, 250 evicted) that is +34
+# runner-hours/day, about a quarter more demand on a pool whose tail already reaches 6 to 12 hours,
+# and main's own worst burst (18 arrivals inside one run) would roughly double the peak concurrent
+# demand ever observed. On a REQUIRED gate that trades missing verdicts for multi-hour ones, which
+# is the worse failure.
 #
 # The cost therefore scales with precisely the cadence that makes the fix necessary, which is the
 # inverse of ci.yml and the whole reason the same one-line change does not belong here. At the
@@ -73,10 +84,15 @@ permissions:
 #   - Moving this group onto the `check` job so an evicted commit leaves something to read. Proven
 #     on a scratch workflow: the job is evicted identically (cancelled, zero steps) but the run
 #     survives, an `always()` verdict job still runs, and the annotation names the sha. Serialising
-#     is unchanged, so it costs no macOS minutes. Note two consequences before adopting it — the
-#     run concludes `cancelled`, which gate_state still reads as RED and so is fail-closed; and the
-#     run then holds a step whose conclusion is `failure`, so any "no failed step means untested"
-#     discriminator (ci_abort_state's) would call an eviction RED rather than UNTESTED.
+#     is unchanged, so it costs no macOS minutes. It is NOT a workflow-only change, and that is
+#     inherent rather than fixable: its signal is a verdict job that fails on purpose, so it
+#     manufactures a step concluding `failure`, and at step level that is what a genuine test
+#     failure looks like — being visible to GitHub as a failure is the whole design. So
+#     ci_abort_state's `grep -qx failure` sends an eviction to RED, and the paired fix belongs in
+#     checks.sh, discriminating on the heavy job's own `cancelled` conclusion rather than on a job
+#     name someone can rename. Land it after #2733 and bring the kit change with it. Fail-closed
+#     throughout either ordering: the run still concludes `cancelled`, and gate_state reads that as
+#     RED regardless, so the cost of the wrong order is evictions reading as reds, not a bad merge.
 concurrency:
   group: swift-core-check-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
