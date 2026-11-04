@@ -5,6 +5,7 @@
 
 import ArbosFFI
 import AVFoundation
+import CryptoKit
 import ImageIO
 import QuickLook
 import SwiftUI
@@ -2836,17 +2837,21 @@ private struct LiveSenderBar: ViewModifier {
     }
 }
 
-/// Decoded people pictures for the launch, keyed by URL. A picture that is here
-/// paints on the first frame of any row that shows it (`PersonAvatar` reads it
-/// synchronously); `warm` fetches the New Message directory's pictures ahead of
-/// the sheet, so its rows never flash initials and then the photo.
+/// Decoded people, agent and group pictures, keyed by URL (`key`). A picture that is here
+/// paints on the first frame of any view that shows it (`PersonAvatar` and `AgentPicture`
+/// read it synchronously), so a profile hero opened from a chat row or header draws the
+/// picture that row already holds. `warm` fills it ahead of the chat list and the New
+/// Message directory, so their rows never flash initials and then the photo.
+///
+/// Two tiers: decoded bitmaps in memory, and the downloaded bytes under
+/// Caches/avatar-images, so a relaunch decodes from disk instead of waiting on the network.
 ///
 /// Not an `ObservableObject`: one finished download must not invalidate every
 /// avatar on screen (group-chat scroll lag). Each `PersonAvatar` holds its own
 /// `@State` and awaits `load`.
 ///
 /// Bounded: each picture is a 384 px bitmap (~590 KB), so the limit holds about 110 —
-/// more than twice what `warm` asks for. An evicted picture reloads from the URL cache.
+/// more than twice what `warm` asks for. An evicted picture reloads from disk.
 @MainActor
 final class AvatarImageCache {
     static let shared = AvatarImageCache()
@@ -2858,12 +2863,84 @@ final class AvatarImageCache {
         c.totalCostLimit = AvatarImageCache.costLimitBytes
         return c
     }()
-    /// URLs with a download or decode in flight.
+    /// Keys with a disk read, download or decode in flight.
     private var requested: Set<String> = []
     private var waiters: [String: [CheckedContinuation<UIImage?, Never>]] = [:]
 
+    private init() {
+        Task.detached(priority: .background) { AvatarImageCache.trimDisk() }
+    }
+
     func image(for url: String?) -> UIImage? {
-        url.flatMap { images.object(forKey: $0 as NSString) }
+        url.flatMap { images.object(forKey: AvatarImageCache.key($0) as NSString) }
+    }
+
+    /// The cache key: the URL without its `token=` (the device credential, not the picture),
+    /// so a rotated token still finds the bytes on disk and the token never names a file.
+    nonisolated static func key(_ url: String) -> String {
+        guard let q = url.firstIndex(of: "?") else { return url }
+        let base = String(url[..<q])
+        let kept = url[url.index(after: q)...].split(separator: "&").filter { !$0.hasPrefix("token=") }
+        return kept.isEmpty ? base : base + "?" + kept.joined(separator: "&")
+    }
+
+    nonisolated private static func isRelayPicture(path: String) -> Bool {
+        path.contains("/avatars/") || path.hasSuffix("/avatar.jpg") || path.contains("/blob/")
+    }
+
+    /// A relay picture URL that names its version: a blob key names one upload, and the
+    /// avatar routes carry `?v=<stamp>`. Its bytes never go stale, so the disk copy is kept
+    /// until trimmed; anything else (GitHub's `?v=4` is an API version) is refetched after
+    /// `unversionedMaxAge`.
+    nonisolated static func isVersioned(_ url: String) -> Bool {
+        guard let comps = URLComponents(string: url), isRelayPicture(path: comps.path) else { return false }
+        return comps.path.contains("/blob/") || (comps.queryItems ?? []).contains { $0.name == "v" }
+    }
+
+    nonisolated static let unversionedMaxAge: TimeInterval = 7 * 86_400
+    /// Each file is the 384 px download (~30–60 KB), so this holds a thousand or so.
+    nonisolated static let diskLimitBytes = 48 * 1024 * 1024
+
+    nonisolated static var diskDirectory: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("avatar-images", isDirectory: true)
+    }
+
+    nonisolated static func diskFile(_ key: String) -> URL {
+        let name = SHA256.hash(data: Data(key.utf8)).map { String(format: "%02x", $0) }.joined()
+        return diskDirectory.appendingPathComponent(name, isDirectory: false)
+    }
+
+    nonisolated static func readDisk(_ key: String) -> UIImage? {
+        let file = diskFile(key)
+        if !isVersioned(key) {
+            guard let written = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate,
+                  Date().timeIntervalSince(written) < unversionedMaxAge else { return nil }
+        }
+        guard let data = try? Data(contentsOf: file) else { return nil }
+        return decode(data)
+    }
+
+    nonisolated static func writeDisk(_ data: Data, key: String) {
+        try? FileManager.default.createDirectory(at: diskDirectory, withIntermediateDirectories: true)
+        try? data.write(to: diskFile(key), options: .atomic)
+    }
+
+    /// Over `diskLimitBytes`, the oldest-written files go until three quarters remain.
+    nonisolated static func trimDisk() {
+        let keys: [URLResourceKey] = [.fileSizeKey, .contentModificationDateKey]
+        guard let files = try? FileManager.default.contentsOfDirectory(at: diskDirectory, includingPropertiesForKeys: keys) else { return }
+        var entries = files.compactMap { url -> (url: URL, size: Int, written: Date)? in
+            guard let v = try? url.resourceValues(forKeys: Set(keys)) else { return nil }
+            return (url, v.fileSize ?? 0, v.contentModificationDate ?? .distantPast)
+        }
+        var total = entries.reduce(0) { $0 + $1.size }
+        guard total > diskLimitBytes else { return }
+        entries.sort { $0.written < $1.written }
+        for e in entries where total > diskLimitBytes * 3 / 4 {
+            try? FileManager.default.removeItem(at: e.url)
+            total -= e.size
+        }
     }
 
     /// Pictures are kept at the largest size a row draws (128 pt hero at 3x). The relay's
@@ -2876,9 +2953,7 @@ final class AvatarImageCache {
     /// (`avatar_image` on the relay). Other hosts' pictures (GitHub) are fetched as given.
     nonisolated static func sizedURL(_ url: String, width: Int) -> URL? {
         guard var comps = URLComponents(string: url) else { return URL(string: url) }
-        let path = comps.path
-        let relayPicture = path.contains("/avatars/") || path.hasSuffix("/avatar.jpg") || path.contains("/blob/")
-        guard relayPicture else { return comps.url }
+        guard isRelayPicture(path: comps.path) else { return comps.url }
         var items = comps.queryItems ?? []
         items.removeAll { $0.name == "w" }
         items.append(URLQueryItem(name: "w", value: String(width)))
@@ -2889,7 +2964,7 @@ final class AvatarImageCache {
     /// the rest load as they scroll in).
     nonisolated static let warmLimit = 48
 
-    /// Start fetching the first `warmLimit` URLs not seen this launch (through the shared URLCache).
+    /// Start loading the first `warmLimit` URLs not seen this launch (disk first, then the network).
     func warm(urls: [String?]) {
         for case let url? in urls.prefix(AvatarImageCache.warmLimit) {
             Task { _ = await load(url) }
@@ -2907,30 +2982,34 @@ final class AvatarImageCache {
     /// iPhone alike).
     nonisolated static let retrySeconds: [UInt64] = [2, 5, 10, 20, 40]
 
-    /// Shared download per URL; waiters resume together when the picture lands. Picture URLs
+    /// Shared load per key; waiters resume together when the picture lands. Picture URLs
     /// name their version (`…/avatar.jpg?v=<stamp>`, `/avatars/<user>.jpg?v=…`), so the disk
-    /// cache is asked first: a relaunch paints the picture with no network at all, and a
+    /// copy is asked first: a relaunch paints the picture with no network at all, and a
     /// changed picture is a new URL. Failures retry with backoff before giving up; a 404 ("no
     /// picture") does not retry.
     func load(_ url: String) async -> UIImage? {
-        if let img = image(for: url) { return img }
-        if requested.contains(url) {
+        let key = AvatarImageCache.key(url)
+        if let img = images.object(forKey: key as NSString) { return img }
+        if requested.contains(key) {
             return await withCheckedContinuation { cont in
-                waiters[url, default: []].append(cont)
+                waiters[key, default: []].append(cont)
             }
         }
         guard url.contains("://"), let u = AvatarImageCache.sizedURL(url, width: AvatarImageCache.maxPixelSize) else { return nil }
-        requested.insert(url)
-        var img: UIImage?
+        requested.insert(key)
+        var img = await Task.detached(priority: .userInitiated) { AvatarImageCache.readDisk(key) }.value
+        let versioned = AvatarImageCache.isVersioned(key)
         var attempt = 0
-        while true {
+        while img == nil {
             let (decoded, status) = await Task.detached(priority: .userInitiated) { () -> (UIImage?, Int) in
                 var req = URLRequest(url: u)
-                req.cachePolicy = .returnCacheDataElseLoad
+                req.cachePolicy = versioned ? .returnCacheDataElseLoad : .useProtocolCachePolicy
                 guard let (data, resp) = try? await URLSession.shared.data(for: req) else { return (nil, 0) }
                 let code = (resp as? HTTPURLResponse)?.statusCode ?? 200
                 guard code / 100 == 2 else { return (nil, code) }
-                return (AvatarImageCache.decode(data), code)
+                guard let decoded = AvatarImageCache.decode(data) else { return (nil, code) }
+                AvatarImageCache.writeDisk(data, key: key)
+                return (decoded, code)
             }.value
             if let decoded {
                 img = decoded
@@ -2940,11 +3019,11 @@ final class AvatarImageCache {
             try? await Task.sleep(nanoseconds: AvatarImageCache.retrySeconds[attempt] * 1_000_000_000)
             attempt += 1
         }
-        requested.remove(url)
+        requested.remove(key)
         if let img {
-            images.setObject(img, forKey: url as NSString, cost: AvatarImageCache.cost(of: img))
+            images.setObject(img, forKey: key as NSString, cost: AvatarImageCache.cost(of: img))
         }
-        let pending = waiters.removeValue(forKey: url) ?? []
+        let pending = waiters.removeValue(forKey: key) ?? []
         for cont in pending { cont.resume(returning: img) }
         return img
     }
@@ -3038,28 +3117,17 @@ struct AvatarCluster: View {
         } else if let leaf, imageUrl?.isEmpty ?? true, LeafAvatarsFlag.shared.on {
             LeafAvatar(pick: leaf, size: size * 1.12)
         } else if let imageUrl, !imageUrl.isEmpty {
-            // Keep the group silhouette under the picture until it arrives so we
-            // do not flash initials ("G") then flip to the selected image.
-            ZStack {
-                Circle().fill(theme.card)
-                Image(systemName: "person.2.fill")
-                    .font(theme.font(size * 0.4, weight: .medium))
-                    .foregroundStyle(theme.accent)
-                if let u = URL(string: imageUrl) {
-                    AsyncImage(url: u) { phase in
-                        switch phase {
-                        case .success(let img):
-                            img.resizable().scaledToFill()
-                        case .empty, .failure:
-                            Color.clear
-                        @unknown default:
-                            Color.clear
-                        }
-                    }
+            // Through `AvatarImageCache`, so the picture the chat row and header already hold
+            // paints on the first frame. Until one has ever loaded, the group silhouette — not
+            // initials ("G") that then flip to the selected image.
+            AgentPicture(url: imageUrl, size: size) {
+                ZStack {
+                    Circle().fill(theme.card)
+                    Image(systemName: "person.2.fill")
+                        .font(theme.font(size * 0.4, weight: .medium))
+                        .foregroundStyle(theme.accent)
                 }
             }
-            .frame(width: size, height: size)
-            .clipShape(Circle())
         } else if shown.isEmpty {
             GlassCircle(size: size) { // control-size: exception rowIconTiles (avatar cluster placeholder)
                 Image(systemName: "person.2.fill")
