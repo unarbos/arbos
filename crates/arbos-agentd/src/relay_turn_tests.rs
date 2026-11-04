@@ -278,12 +278,13 @@ fn every_turn_kind_can_deliver_every_delivery_tool() {
     );
 }
 
-/// The id half of the report: the log said the final assistant event reused the table's message
-/// id. It did not. `send_message` logs `t.assistant_msg_id` after it has already opened the next
-/// row, so the table's record names a row the table is not in — and the row it names is the one
-/// the turn ends on, which is what read as reuse. The table's own row is never touched.
+/// The id half of AF-782: the log read as though the final assistant event had reused — and so
+/// overwritten — the table's message id. Nothing was overwritten. `send_message` recorded
+/// `t.assistant_msg_id` after it had already opened the next row, so each progress record named
+/// its successor, and the last one happened to name the row the turn would end on. Each record
+/// now names the bubble its own text is in.
 #[tokio::test]
-async fn a_progress_record_names_the_row_opened_after_it() {
+async fn a_progress_record_names_the_row_its_text_is_in() {
     let (agent, root) = test_agent().await;
     let chat = "01TESTCHATRELAYTURN0000003";
     let host = agent.sync.open_room(chat).await.unwrap();
@@ -291,6 +292,7 @@ async fn a_progress_record_names_the_row_opened_after_it() {
 
     let rows = progress_rows(&host, "m-ask");
     assert_eq!(rows.len(), 2, "summary and table are two bubbles: {rows:?}");
+    let (summary_row_id, _) = rows[0].clone();
     let (table_row_id, table_text) = rows[1].clone();
     assert!(table_text.contains("Casa Azul"), "{table_text}");
 
@@ -306,12 +308,13 @@ async fn a_progress_record_names_the_row_opened_after_it() {
                 .flatten()
         })
         .collect();
-    assert_eq!(logged.len(), 2, "one record per bubble: {logged:?}");
-    assert_ne!(
-        logged[1], table_row_id,
-        "the table's record names a row the table is not in"
-    );
     assert_eq!(
+        logged,
+        vec![summary_row_id, table_row_id.clone()],
+        "each record names the bubble its own text is in"
+    );
+    // And no longer the row the turn ends on, which is what read as a reused id.
+    assert_ne!(
         logged[1],
         agent
             .turn
@@ -320,12 +323,11 @@ async fn a_progress_record_names_the_row_opened_after_it() {
             .as_ref()
             .unwrap()
             .assistant_msg_id
-            .clone(),
-        "it names the row the turn will end on — the 'reuse' in the log"
+            .clone()
     );
-    assert!(
-        progress_rows(&host, "m-ask")[1].1.contains("Casa Azul"),
-        "nothing overwrote the table"
+    println!(
+        "--- after: progress records against the rows they describe ---\n{}",
+        trace(&agent, chat)
     );
     let _ = std::fs::remove_dir_all(root);
 }
