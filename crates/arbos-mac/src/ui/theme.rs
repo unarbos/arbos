@@ -1156,6 +1156,29 @@ impl Theme {
         }
     }
 
+    /// The selected capsule of the pane's segmented tab bar (Details ·
+    /// Library · Computer, Profile · Settings, Links · Groups): grey 27 on
+    /// dark Matte, Grok's (Jacob, 2026-11-03, [feedback
+    /// grok-tab-bold-2026-11-03] — he measured ours at 50 against Grok's 27).
+    /// Seven shades over the page it sits on, so the capsule is a whisper,
+    /// not a slab; with the label brightening to `text` it is the whole
+    /// selected signal now that the tab no longer goes bold.
+    ///
+    /// Its own token, not [`Self::control_fill`]: that one is also every
+    /// round disc, glyph tile, Library thumbnail and the Message pill, and
+    /// Jacob's number is about the tab capsule alone.
+    ///
+    /// Light Matte and Glass keep the round-button fill. One value sampled
+    /// on a dark window does not carry to a white page, nor to a wash whose
+    /// result depends on the desktop behind the glass; Jacob measures those
+    /// when he gets to them.
+    pub fn tab_on_fill(&self) -> Hsla {
+        if self.is_frost() || self.is_light() {
+            return self.control_fill();
+        }
+        hex(0x1b1b1b)
+    }
+
     /// The plate under the transcript's hover rail (☺ ↩ ⋯ beside a bubble)
     /// on Glass ([feedback message-hover-actions-backing-2026-10-29]): the
     /// search popup's frosted plate ([`Self::popup`], thick enough that the
@@ -1168,15 +1191,26 @@ impl Theme {
     }
 
     /// The sidebar filter's selected capsule ("All" · Agents · People ·
-    /// Servers): Grok's `bubble_assistant` on Matte; on Glass the round-button
-    /// family's wash ([`Self::control_fill`]), so the one opaque chip left on
-    /// the frosted sidebar goes glass with the discs beside it (Jacob,
-    /// 2026-10-28 18:17).
+    /// Servers): grey 35 on dark Matte, 237 on light; on Glass the
+    /// round-button family's wash ([`Self::control_fill`]), so the one opaque
+    /// chip left on the frosted sidebar goes glass with the discs beside it
+    /// (Jacob, 2026-10-28 18:17).
+    ///
+    /// The values are pinned here, not read from `bubble_assistant`. The
+    /// capsule only ever borrowed that token because the numbers matched; it
+    /// is not an assistant bubble. Moving the assistant bubble to 28 would
+    /// drag this capsule to one shade off the sidebar's own 26 — a 1.02:1
+    /// step, which is no capsule at all — and with the tab row no longer
+    /// going bold ([feedback grok-tab-bold-2026-11-03]) a filter would have
+    /// had nothing left to show it was selected.
     pub fn filter_on_fill(&self) -> Hsla {
-        if !self.is_frost() {
-            return self.bubble_assistant;
+        if self.is_frost() {
+            return self.control_fill();
         }
-        self.control_fill()
+        match self.appearance {
+            Appearance::Dark => hex(0x232323),
+            Appearance::Light => hex(0xededed),
+        }
     }
 
     /// A text field inside the pane (the description editor, a secret's
@@ -1703,6 +1737,7 @@ mod glass_contrast_tests {
                 ("card", theme.pane_card_fill()),
                 ("control", theme.control_fill()),
                 ("filter capsule", theme.filter_on_fill()),
+                ("tab capsule", theme.tab_on_fill()),
                 ("field", theme.field_fill()),
                 ("icon tile", theme.tile_fill()),
                 ("segment", theme.segment_on_fill()),
@@ -1737,6 +1772,41 @@ mod glass_contrast_tests {
         }
     }
 
+    /// Every selected capsule keeps a visible step over the surface it is
+    /// drawn on ([feedback grok-tab-bold-2026-11-03]). The capsule and the
+    /// label colour are now the *only* signals that a tab or a filter is
+    /// selected — the rows no longer go bold — so a capsule that sinks into
+    /// its own background deletes the selected state outright.
+    ///
+    /// This is the test that catches a bubble token moving under a capsule
+    /// that merely borrowed its value: the pane tab capsule and the sidebar
+    /// filter capsule own their numbers now, and this says so in ratios
+    /// rather than in a comment. The tightest is the pane tab capsule,
+    /// 7/255 over the page on dark.
+    #[test]
+    fn every_selected_capsule_still_steps_over_its_own_surface() {
+        const MIN_STEP: f32 = 6.0;
+        for appearance in [Appearance::Dark, Appearance::Light] {
+            let theme = Theme::with(appearance, Surface::Matte);
+            for (name, fill, under) in [
+                ("pane tab capsule", theme.tab_on_fill(), theme.bg),
+                (
+                    "sidebar filter capsule",
+                    theme.filter_on_fill(),
+                    theme.sidebar,
+                ),
+                ("settings segment", theme.segment_on_fill(), theme.pane_card),
+            ] {
+                let step = (fill.to_rgb().r - under.to_rgb().r).abs() * 255.0;
+                assert!(
+                    step >= MIN_STEP,
+                    "{appearance:?} {name}: {step:.1}/255 over the surface under it \
+                     — the selected state is invisible"
+                );
+            }
+        }
+    }
+
     /// Matte is untouched: every pane token returns exactly what it did.
     #[test]
     fn on_matte_the_pane_components_keep_their_solid_tokens() {
@@ -1745,7 +1815,26 @@ mod glass_contrast_tests {
             assert_eq!(theme.pane_card_fill(), theme.pane_card);
             assert_eq!(theme.pane_card_rim(), gpui::transparent_black());
             assert_eq!(theme.control_fill(), theme.surface_2);
-            assert_eq!(theme.filter_on_fill(), theme.bubble_assistant);
+            // Pinned, not `bubble_assistant`: see `filter_on_fill`. Today the
+            // two still match; the assertion is that moving the bubble does
+            // not move the capsule.
+            assert_eq!(
+                theme.filter_on_fill(),
+                match appearance {
+                    Appearance::Dark => hex(0x232323),
+                    Appearance::Light => hex(0xededed),
+                }
+            );
+            // Jacob's grey 27 ([feedback grok-tab-bold-2026-11-03]) is a dark
+            // reading; light Matte keeps the round-button fill until he
+            // measures a light one.
+            assert_eq!(
+                theme.tab_on_fill(),
+                match appearance {
+                    Appearance::Dark => hex(0x1b1b1b),
+                    Appearance::Light => theme.control_fill(),
+                }
+            );
             assert_eq!(theme.field_fill(), theme.field);
             assert_eq!(theme.segment_on_fill(), theme.bubble);
             assert_eq!(theme.label_muted(), theme.text_muted);

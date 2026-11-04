@@ -959,7 +959,11 @@ struct OthersAskSegment: View {
         let on = value == id || (id == "refuse" && value != "card")
         return Button { if !on { Haptics.pick(); set(id) } } label: {
             Text(label)
-                .font(theme.font(Theme.small, weight: on ? .semibold : .regular))
+                // One weight across the pair, whichever side is on: the filled capsule and
+                // the text colour say which ([feedback grok-tab-bold-2026-11-03]). Bold on
+                // the on-side also moved the other label, bold being the wider face. The
+                // fill stays `primary`: this is an inverted chip, not a subtle tab pill.
+                .font(theme.font(Theme.small, weight: .regular))
                 .lineLimit(1)
                 .foregroundStyle(on ? theme.onPrimary : theme.muted)
                 .padding(.horizontal, 12)

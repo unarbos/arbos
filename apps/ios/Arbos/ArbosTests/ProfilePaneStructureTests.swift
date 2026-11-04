@@ -1,4 +1,6 @@
 import XCTest
+import SwiftUI
+import UIKit
 @testable import Arbos
 
 /// The shared profile pane (D93): every kind lays out hero, then the tab
@@ -245,5 +247,90 @@ final class OneAddRowPerPaneTests: XCTestCase {
         XCTAssertEqual(AddMembersAgents.others(in: nil, meId: "gh_me", query: ""), [], "New group: no chat, no others")
         XCTAssertEqual(AddMembersAgents.note(for: chat.agents[1]), "run by @priya")
         XCTAssertNil(AddMembersAgents.note(for: member("x", "x", agent: true)))
+    }
+}
+
+/// The tab pill's geometry and its selected capsule ([feedback grok-tab-bold-2026-11-03]).
+/// Jacob, 2026-11-03: "on grok these items dont bold when you click on them." `PaneTabs` used
+/// to draw the selected tab semibold, so that tab was wider than the same tab unselected and
+/// every tab after it slid sideways as the selection moved. The Mac twin is
+/// `crates/arbos-mac/src/ui/profiles/mod.rs` `tab_tests`.
+final class PaneTabsLayoutTests: XCTestCase {
+    /// Every tab set the control carries, plus Home's filter row.
+    private var rows: [[String]] { PaneKinds.all.map(\.1) + [HomeListFilter.allCases.map(\.rawValue)] }
+
+    private func textWidth(_ s: String, _ weight: UIFont.Weight) -> CGFloat {
+        (s as NSString).size(withAttributes: [.font: UIFont.systemFont(ofSize: Theme.body, weight: weight)]).width
+    }
+
+    /// Where each tab starts and how wide it is, for one selection, under `weight` for the
+    /// selected tab and `.regular` for the rest — the row `PaneTabs` lays out.
+    private func boxes(_ tabs: [String], selected: Int, selectedWeight: UIFont.Weight) -> [(CGFloat, CGFloat)] {
+        var x: CGFloat = 0
+        return tabs.enumerated().map { i, t in
+            let w = textWidth(t, i == selected ? selectedWeight : .regular) + 2 * PaneTabsMetrics.labelPad + PaneTabsMetrics.gap
+            defer { x += w }
+            return (x, w)
+        }
+    }
+
+    /// The fix: the drawn weight does not take the selection at all.
+    func testTheTabWeightIsOneConstantForSelectedAndUnselected() {
+        XCTAssertEqual(PaneTabsMetrics.labelWeight, .regular)
+    }
+
+    /// Whichever tab is selected, every tab keeps its origin and its width — the row does not
+    /// reflow, so nothing slides out from under the finger when a tab is tapped.
+    func testMovingTheSelectionMovesNoTab() {
+        for tabs in rows {
+            let first = boxes(tabs, selected: 0, selectedWeight: .regular)
+            for selected in 1..<tabs.count {
+                let now = boxes(tabs, selected: selected, selectedWeight: .regular)
+                for (i, (box, was)) in zip(now, first).enumerated() {
+                    XCTAssertEqual(box.0, was.0, accuracy: 0.001, "\(tabs): \(tabs[i]) moved when \(tabs[selected]) was selected")
+                    XCTAssertEqual(box.1, was.1, accuracy: 0.001, "\(tabs): \(tabs[i]) resized when \(tabs[selected]) was selected")
+                }
+            }
+        }
+    }
+
+    /// The test above is not vacuous: under the old selected-is-semibold rule the same rows
+    /// did move. This is the reported bug, measured — the worst shift is reported on failure.
+    func testTheOldSemiboldRuleDidMoveTheRow() {
+        var worst: CGFloat = 0
+        for tabs in rows {
+            for selected in tabs.indices {
+                let now = boxes(tabs, selected: selected, selectedWeight: .regular)
+                let before = boxes(tabs, selected: selected, selectedWeight: .semibold)
+                for (a, b) in zip(now, before) { worst = max(worst, abs(a.0 - b.0)) }
+                worst = max(worst, abs(now[selected].1 - before[selected].1))
+            }
+        }
+        XCTAssertGreaterThan(worst, 0.5, "semibold and regular measure the same, so testMovingTheSelectionMovesNoTab proves nothing")
+    }
+
+    /// Grok's capsule is grey 27 ([feedback grok-tab-bold-2026-11-03]); ours was the
+    /// assistant-bubble grey, 32. It is its own token now, so moving the assistant bubble
+    /// (Jacob's separate 35 → 28 on the Mac) cannot drag the capsule with it.
+    func testTheSelectedCapsuleIsItsOwnGrey27() {
+        XCTAssertEqual(grey(Theme.dark.tabOnFill), 27)
+        XCTAssertNotEqual(Theme.dark.tabOnFill, Theme.dark.bubbleAssistant, "the capsule owns its grey")
+        XCTAssertEqual(Theme.light.tabOnFill, Theme.light.bubbleAssistant, "light is unmeasured, so unchanged")
+    }
+
+    /// The capsule and the label colour are the only selected signals left now that the tab
+    /// does not go bold, so the capsule must still step off the page it sits on.
+    func testTheSelectedCapsuleStillStepsOverThePage() {
+        let step = abs(grey(Theme.dark.tabOnFill) - grey(Theme.dark.bg))
+        XCTAssertGreaterThanOrEqual(step, 6, "capsule \(grey(Theme.dark.tabOnFill)) on page \(grey(Theme.dark.bg)) is invisible")
+    }
+
+    /// A grey token's 0–255 channel value, the way Jacob reads these colours.
+    private func grey(_ c: Color) -> Int {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        UIColor(c).getRed(&r, green: &g, blue: &b, alpha: &a)
+        XCTAssertEqual(r, g, accuracy: 0.002, "not a grey")
+        XCTAssertEqual(g, b, accuracy: 0.002, "not a grey")
+        return Int((r * 255).rounded())
     }
 }

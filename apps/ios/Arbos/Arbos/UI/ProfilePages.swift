@@ -374,6 +374,18 @@ enum PaneTabsMetrics {
     /// Apple's 44 pt tall ([feedback iphone-filter-tab-taps-2026-10-28]).
     static let hitBand: CGFloat = 6
     static var hitHeight: CGFloat { pill + 2 * hitBand }
+    /// One weight for every tab, selected or not. Grok marks the current tab with the capsule
+    /// and a brighter label only, never with bold (Jacob, 2026-11-03: "on grok these items
+    /// dont bold when you click on them" — [feedback grok-tab-bold-2026-11-03]). Weight is
+    /// also what moved the row: bold is wider than regular, so each tab after the selected
+    /// one shifted as selection moved. One weight keeps every tab the same width in both
+    /// states (`PaneTabsLayoutTests`).
+    static let labelWeight: Font.Weight = .regular
+    /// The drawn capsule's width for `label` at [`labelWeight`]: the text plus its padding.
+    /// It takes no selection flag — that is the point.
+    static func tabWidth(_ label: String, measure: (String, CGFloat, Font.Weight) -> CGFloat) -> CGFloat {
+        measure(label, Theme.body, labelWeight) + 2 * labelPad
+    }
 }
 
 /// The one capsule tab pill (Profile | Settings, Links | Groups, Members | Library; Home's
@@ -394,6 +406,7 @@ struct PaneTabs: View {
     /// Hit band under the capsule (Home passes its chrome's 4).
     var hitBelow: CGFloat = PaneTabsMetrics.hitBand
 
+
     // Redesign mocks b/g (same kit as the Mac): bare labels, the current one
     // on a capsule, centred — no track, no border.
     var body: some View {
@@ -401,10 +414,10 @@ struct PaneTabs: View {
             ForEach(tabs, id: \.self) { t in
                 Button { withAnimation(.snappy(duration: 0.2)) { selected = t } } label: {
                     Text(t)
-                        .font(theme.font(Theme.body, weight: selected == t ? .semibold : .regular))
+                        .font(theme.font(Theme.body, weight: PaneTabsMetrics.labelWeight))
                         .foregroundStyle(selected == t ? theme.text : theme.muted)
                         .padding(.horizontal, PaneTabsMetrics.labelPad).frame(height: PaneTabsMetrics.pill)
-                        .background(Capsule().fill(selected == t ? theme.bubbleAssistant : .clear))
+                        .background(Capsule().fill(selected == t ? theme.tabOnFill : .clear))
                         .padding(.horizontal, PaneTabsMetrics.gap / 2)
                         .padding(.top, hitAbove)
                         .padding(.bottom, hitBelow)

@@ -381,11 +381,11 @@ pub fn segment(id: impl Into<ElementId>, label: &str, on: bool, theme: &Theme) -
         .flex()
         .items_center()
         .text_size(px(TEXT_SMALL))
-        .font_weight(if on {
-            FontWeight::SEMIBOLD
-        } else {
-            FontWeight::NORMAL
-        })
+        // One weight across the control, whichever segment is on: the fill and
+        // the text colour say which ([feedback grok-tab-bold-2026-11-03]).
+        // Bold on the on-segment also made the pair reflow, since bold text is
+        // wider than regular.
+        .font_weight(FontWeight::NORMAL)
         .bg(if on {
             theme.segment_on_fill()
         } else {
