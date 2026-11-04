@@ -2139,6 +2139,159 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Jacob on Test5 (2026-11-04 13:13:30 CR, agentd 0.1.192): research job
+    /// 01M6KZET08ANES5MRRXWBSYJXC ended `done` with the worker's return contract at `partial`
+    /// (six sites answered 403) and a CSV in `out/` the worker never posted. The relay turn
+    /// called `bash` beside its `route`, which cut the turn, and the user read "The background
+    /// work I started did not finish" instead of the 45 rows.
+    ///
+    /// The same sequence, replayed: `partial` is a finished job, one tool call beside the first
+    /// `route` leaves the route its retry, and the relay turn may post the file it is told to.
+    #[tokio::test]
+    async fn a_partial_job_delivers_its_unposted_artifact_from_the_relay_turn() {
+        use crate::agent::{relay_fallback_line, TurnKind};
+        use crate::config::SendTool;
+        use crate::media::{deliver_file, out_dir};
+
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000017";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        {
+            let h = host.lock().await;
+            h.doc
+                .append_user_message(
+                    "m-busy",
+                    "compare the shortlisted sites and send me the table",
+                    "dev-mac",
+                    &arbos_core::doc::UserMessageOpts::default(),
+                )
+                .unwrap();
+        }
+        let _busy = agent.test_hold_turn(chat).await;
+
+        // What the worker left behind: the rows on disk, posted nowhere.
+        let csv = "site,price,verdict\nalpha.example,120,shortlist\nbeta.example,98,shortlist\n";
+        let dir = out_dir(&agent.cfg);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("sites.csv"), csv).unwrap();
+
+        let kind = TurnKind::SubagentResult {
+            subagent_id: "01TESTSUBAGENT000000000001".into(),
+            name: "job:sites".into(),
+            status: "partial".into(),
+        };
+        let fallback = relay_fallback_line(&kind);
+        assert!(
+            !fallback.contains("did not finish"),
+            "a job that returns `partial` finished: {fallback}"
+        );
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.ack_text.clear();
+            t.activity = None;
+            t.send_tool = SendTool::On;
+            t.reply_only = true;
+            t.relay_fallback = fallback.clone();
+            agent.test_open_row(&host, t).await;
+        }
+
+        // The model routes `act` and calls `bash` in the same assistant message.
+        let err = agent
+            .hook_route(&json!({
+                "action": "act",
+                "ack": "Pulling the rows together.",
+                "plan": "look at the csv first",
+            }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("relay turn"), "{err}");
+        agent
+            .test_fold(
+                chat,
+                &host,
+                &arbos_core::rpc::Event::ToolExecutionStart {
+                    tool_call_id: "c1".into(),
+                    tool_name: "bash".into(),
+                    args: json!({ "command": "wc -l out/sites.csv" }),
+                    parent_tool_call_id: None,
+                },
+            )
+            .await;
+        {
+            let tl = agent.turn.lock().await;
+            let t = tl.as_ref().unwrap();
+            assert!(
+                !t.stopped,
+                "a tool call beside the first route must not cost the turn its route retry"
+            );
+        }
+
+        // The refusal reaches the model, which retries with `reply` and posts the file.
+        agent
+            .hook_route(&json!({ "action": "reply", "reply": "Here is the comparison." }))
+            .await
+            .unwrap();
+        agent
+            .test_fold(
+                chat,
+                &host,
+                &arbos_core::rpc::Event::ToolExecutionStart {
+                    tool_call_id: "c2".into(),
+                    tool_name: "mcp__arbos__deliver_file".into(),
+                    args: json!({ "path": "out/sites.csv" }),
+                    parent_tool_call_id: None,
+                },
+            )
+            .await;
+        {
+            let tl = agent.turn.lock().await;
+            let t = tl.as_ref().unwrap();
+            assert!(
+                !t.stopped,
+                "a relay turn may deliver the file it was told to"
+            );
+        }
+        let v = deliver_file(&agent, &json!({ "path": "out/sites.csv" })).await;
+        assert!(v.get("isError").is_none(), "{v}");
+        let posted: Value =
+            serde_json::from_str(v["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(posted["posted"], json!(true));
+
+        let table = "| Site | Price |\n| --- | --- |\n| [alpha](https://alpha.example) | 120 |";
+        agent.hook_send_message(table, None, None).await.unwrap();
+
+        // The rows reached the user: the file as its own card, the table as a bubble.
+        let card = host
+            .lock()
+            .await
+            .doc
+            .message(posted["message_id"].as_str().unwrap())
+            .unwrap();
+        let attachment = card
+            .parts
+            .iter()
+            .find_map(|p| p.get("attachment").cloned())
+            .expect("the card carries the file");
+        assert_eq!(attachment["name"], json!("sites.csv"));
+        assert_eq!(
+            attachment["bytes"],
+            json!(csv.len()),
+            "the bytes in the chat are the bytes the worker wrote"
+        );
+        assert_eq!(card.rest["inReplyTo"], json!("m-busy"));
+        let said: String = reply_rows(&host, "m-busy")
+            .iter()
+            .map(|r| r.text())
+            .collect();
+        assert!(said.contains("alpha"), "the table reached the chat: {said}");
+        assert!(
+            !said.contains("did not finish"),
+            "a partial job never reads as a failure: {said}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// #1355: an act turn that closes with a second `route reply {reply: …}` must show that text
     /// in its result row (the streamed path only follows the first route of a turn). #1373: a
     /// plain reply turn whose text already streamed must not get it a second time — the hook may
