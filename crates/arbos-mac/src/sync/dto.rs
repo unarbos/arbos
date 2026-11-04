@@ -40,20 +40,28 @@ fn wire_box_word(state: WireBox) -> &'static str {
     }
 }
 
+/// A project's box as the app shows it. `state` is the project's own column, which the relay
+/// mirrors from the owner's box and which alone can say *how* a sleeping box sleeps;
+/// `box_state` is that box live. A mirror can lag — a project created while its box was already
+/// awake was born asleep and stayed that way (Jacob, 2026-11-04: ~45 s of Offline on a new
+/// agent) — so a live box that says awake or waking outranks a column that says asleep.
 fn box_state_from(state: &str, box_state: &str) -> BoxState {
+    let live = match box_state {
+        "awake" => Some(BoxState::Awake),
+        "waking" => Some(BoxState::Waking),
+        _ => None,
+    };
     match state {
         "awake" => BoxState::Awake,
         "waking" => BoxState::Waking,
-        "hibernated_light" => BoxState::HibernatedLight,
-        "hibernated_deep" => BoxState::HibernatedDeep,
+        "hibernated_light" => live.unwrap_or(BoxState::HibernatedLight),
+        "hibernated_deep" => live.unwrap_or(BoxState::HibernatedDeep),
         "stopped_by_user" => BoxState::StoppedByUser,
         "error" => BoxState::Error,
-        _ => match box_state {
-            "awake" => BoxState::Awake,
-            "waking" => BoxState::Waking,
+        _ => live.unwrap_or(match box_state {
             "error" => BoxState::Error,
             _ => BoxState::HibernatedLight,
-        },
+        }),
     }
 }
 

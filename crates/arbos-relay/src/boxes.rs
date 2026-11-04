@@ -1104,7 +1104,11 @@ pub async fn box_seen_http(state: &AppState, user_id: &str) {
     if st != BoxState::Awake {
         tracing::info!(%user_id, from = ?st, "box reached the relay over HTTP; awake");
         box_connected_inner(state, user_id).await;
+        return;
     }
+    // Already awake, so nothing broadcasts: mirror anyway, because a project created while the
+    // box was awake never saw a state change and so kept the "asleep" word it was born with.
+    state.mirror_box_state_onto_projects(user_id, st);
 }
 
 pub async fn box_connected(state: &AppState, user_id: &str) {

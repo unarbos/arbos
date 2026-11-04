@@ -1883,8 +1883,31 @@ impl Agent {
             s.push_str("\n\n## Project memory\n\n");
             s.push_str(&core);
         }
-        std::fs::create_dir_all(self.system_prompt_path().parent().unwrap())?;
-        std::fs::write(self.system_prompt_path(), s)?;
+        let path = self.system_prompt_path();
+        std::fs::create_dir_all(path.parent().unwrap())?;
+        // Written through a temporary name in the same directory, then renamed over the old file.
+        // A plain write truncates first, and a pi child reads this path while it starts: every
+        // other writer here is a detached task — the memory pass 1.5 s after a reply, the one
+        // after a subagent, a model change from the project doc — so a spawn could meet a
+        // truncated file and boot on half a system prompt. `rename` is atomic, so a reader sees
+        // the whole old file or the whole new one.
+        //
+        // The temporary name is per writer, not a fixed `.tmp`. Those same concurrent writers are
+        // why this function needs the rename at all, so a shared temporary would only move the
+        // truncate one level down: two writers would interleave into it, one would rename a short
+        // file over the prompt, and the other would take an ENOENT on a name the first had
+        // already renamed away.
+        static NEXT_TMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let tmp = path.with_extension(format!(
+            "md.{}.{}.tmp",
+            std::process::id(),
+            NEXT_TMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&tmp, s)?;
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.into());
+        }
         Ok(())
     }
 
@@ -1948,6 +1971,10 @@ impl Agent {
 
     pub async fn start_pi(self: &Arc<Self>, initial_chat: &str) -> Result<()> {
         self.write_system_prompt()?;
+        // pi reads the prompt at spawn, so a refresh scheduled before this line is already in the
+        // file it is about to read. Leaving it pending costs the new session a restart two
+        // seconds in — which is what made every new agent load its extension twice.
+        self.prompt_refresh_pending.store(false, Ordering::SeqCst);
         let session = self.session_file_for(initial_chat)?;
         let (talking_model, _) = self.live_models().await;
         let mut args = PiAdapter::common_args(
@@ -2031,7 +2058,6 @@ impl Agent {
                     }
                     // the respawn writes the current system prompt, so a refresh that came in
                     // while parked needs no second restart
-                    me.prompt_refresh_pending.store(false, Ordering::SeqCst);
                     let chat = me.current_chat.lock().await.clone().unwrap_or_default();
                     match me.respawn_pi(&chat).await {
                         Ok(()) => {
@@ -2148,6 +2174,9 @@ impl Agent {
         }
         // The code-mode flag is read again here (D86): toggling it needs a pi respawn, not a box restart.
         self.write_system_prompt()?;
+        // The new session reads the prompt as it is now, so any refresh asked for up to this
+        // point is served; a second restart for it would buy nothing.
+        self.prompt_refresh_pending.store(false, Ordering::SeqCst);
         let session = self.session_file_for(chat_id)?;
         let (talking_model, _) = self.live_models().await;
         let mut args = PiAdapter::common_args(

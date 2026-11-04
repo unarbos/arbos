@@ -939,6 +939,19 @@ pub(crate) mod tests {
 
     /// Same, with extra mock-relay routes merged in (`/box/secrets/…` for the hand-off tests).
     pub(crate) async fn test_agent_with(extra: axum::Router) -> (Arc<Agent>, std::path::PathBuf) {
+        let (agent, root, _rx) = test_agent_parts(extra).await;
+        (agent, root)
+    }
+
+    /// Same again, handing back the agent's `Incoming` receiver instead of dropping it, for a
+    /// test that drives the command pump itself (`workspace::boot_tests`).
+    pub(crate) async fn test_agent_parts(
+        extra: axum::Router,
+    ) -> (
+        Arc<Agent>,
+        std::path::PathBuf,
+        tokio::sync::mpsc::Receiver<crate::sync::Incoming>,
+    ) {
         let app = axum::Router::new()
             .merge(extra)
             .route(
@@ -986,13 +999,13 @@ pub(crate) mod tests {
         std::fs::create_dir_all(cfg.state_dir.join("agentd")).unwrap();
         let store =
             crate::store::Store::open(&cfg.state_dir.join("agentd").join("agentd.db")).unwrap();
-        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
         let sync = crate::sync::SyncHub::new(cfg.clone(), store.clone(), tx);
         let agent = Agent::new(cfg, store, sync, Arc::new(tokio::sync::Semaphore::new(4)));
-        (agent, root)
+        (agent, root, rx)
     }
 
-    fn send_cmd(host: &SharedHost, text: &str) -> (String, CommandView) {
+    pub(crate) fn send_cmd(host: &SharedHost, text: &str) -> (String, CommandView) {
         let msg_id = ulid();
         let h = host.try_lock().expect("host free");
         h.doc
@@ -1014,7 +1027,10 @@ pub(crate) mod tests {
         (msg_id, cmd)
     }
 
-    fn reply_rows(host: &SharedHost, user_msg_id: &str) -> Vec<arbos_core::doc::MessageView> {
+    pub(crate) fn reply_rows(
+        host: &SharedHost,
+        user_msg_id: &str,
+    ) -> Vec<arbos_core::doc::MessageView> {
         let h = host.try_lock().expect("host free");
         h.doc
             .messages()
@@ -1050,6 +1066,64 @@ pub(crate) mod tests {
         assert!(note.contains("what is going on now?") && note.contains("benchmark"));
         assert!(agent.take_side_notes(chat).is_none());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A pi child reads the system prompt by path while it starts, and the file has four writers,
+    /// three of them detached tasks: `start_pi`, `respawn_pi`, the memory pass 1.5 s after a
+    /// reply, and a model change arriving from the project doc. So the test runs TWO writers
+    /// against one reader, because that is the hazard the rename exists for — a single writer
+    /// would pass against both a correct implementation and a shared temporary name, and prove
+    /// nothing about either.
+    ///
+    /// The reader must only ever see a whole prompt, and no writer may fail: a shared temporary
+    /// gives one writer a short file to rename over the prompt and the other an ENOENT on a name
+    /// already renamed away.
+    #[tokio::test]
+    async fn the_system_prompt_is_never_half_written() {
+        let (agent, root) = test_agent().await;
+        agent.write_system_prompt().unwrap();
+        let path = agent.cfg.state_dir.join("pi").join("system-prompt.md");
+        let whole = std::fs::read_to_string(&path).unwrap();
+        assert!(whole.contains("You are Doug, this user's agent in Arbos"));
+
+        const EACH: usize = 300;
+        let writers: Vec<_> = (0..2)
+            .map(|w| {
+                let agent = agent.clone();
+                tokio::task::spawn_blocking(move || {
+                    for i in 0..EACH {
+                        agent
+                            .write_system_prompt()
+                            .unwrap_or_else(|e| panic!("writer {w} failed on write {i}: {e}"));
+                    }
+                })
+            })
+            .collect();
+        let reads = {
+            let path = path.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut n = 0usize;
+                while n < EACH * 2 {
+                    let got = std::fs::read_to_string(&path).expect("the file is always there");
+                    assert_eq!(got, whole, "read {n} saw a partial prompt");
+                    n += 1;
+                }
+                n
+            })
+        };
+        for w in writers {
+            w.await.unwrap();
+        }
+        assert!(reads.await.unwrap() >= EACH * 2);
+        // Every writer renamed its own temporary away; none are left behind.
+        let strays: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .filter(|n| n.to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(strays.is_empty(), "{strays:?}");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// #1431 (GigChadAgent): after the relay renames the project, the system prompt, the quick
