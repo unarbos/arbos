@@ -282,6 +282,13 @@ verdict_class() {
   case "$1" in
     "TAG "*)      echo TAG ;;
     "NOMAC "*)    echo NOMAC ;;
+    # The two replay words are matched BEFORE nothing in particular — no other
+    # pattern here can catch them — but they are spelled in full rather than as
+    # REPLAY*, because the two differ in the only way that matters: one clears
+    # a GO and one refuses it, so collapsing them is the whole bug this file
+    # guards against.
+    "REPLAY-NOMAC "*) echo REPLAYNOMAC ;;
+    "REPLAY-MAC "*)   echo REPLAYMAC ;;
     NOPATH*)      echo NOPATH ;;
     COVERED*)     echo COVERED ;;
     "RED GATE"*)  echo REDGATE ;;
@@ -299,12 +306,19 @@ verdict_class() {
 # the tag it names is the tag being released. That check stays at the call site
 # because this function is deliberately ignorant of which tag is current.
 #
+# REPLAYNOMAC is here on the same terms as NOMAC, and is tag-checked at the
+# call site for the same reason. It is not a second opinion: it is the Release
+# plan's own Mac predicate, run from git on the commit's own tree, for a green
+# commit whose plan verdict could not be read. REPLAYMAC is its refusing
+# counterpart and is absent from this list deliberately — see mac_from_git in
+# merge-window.sh for why the two are named apart from NOMAC all the way down.
+#
 # Everything else refuses, UNTESTED included. An aborted run tested nothing,
 # which is the definition of ungated, so it is exactly the state that must not
 # pass. See the comment above `ci_abort_state` in merge-window.sh.
 verdict_clears_go() {
   case "$1" in
-    NOMAC | NOPATH) return 0 ;;
+    NOMAC | NOPATH | REPLAYNOMAC) return 0 ;;
     *) return 1 ;;
   esac
 }

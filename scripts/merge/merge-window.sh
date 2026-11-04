@@ -87,7 +87,88 @@ ci_abort_state() {
   echo "UNTESTED CI $ci — run $id has $(printf '%s\n' "$steps" | grep -cx null) step(s) that never started and none that failed, so it aborted before testing this commit; re-run it, do not re-push${note:+ — }${note:0:160}"
 }
 
-# verdict <sha> [nogate]: one line — TAG <vX> | NOMAC <vY> <reason> | COVERED <vY> | RED | UNTESTED | WAIT <why> | BLOCKED <unreadable>
+# mac_from_git <sha> <why>: the Release plan's Mac verdict for <sha> could not be read. Answer the
+# same question from git, by replaying the plan's own predicate.
+#
+# Reached only after this commit's push CI run was READ and found `completed success`. A red,
+# pending or unreadable CI is a different question and mac-change.sh has no opinion about it, so
+# none of those refusals calls this; every call below sits downstream of the CI check.
+#
+# It is a replay, not a second opinion. auto-stable.sh answers "does main owe a Mac release?" by
+# running scripts/release/mac-change.sh over a base from scripts/release/stable-tag-base.sh, and so
+# does this. Neither rule is copied here; both are called.
+#
+# TWO PREDICATES, AND BOTH MUST SAY NO. The commit's own, extracted from its tree with
+# `git archive`, is what the Release plan actually ran, so wherever it says "Mac release needed"
+# the plan would have said so too. This checkout's is the list as the repository understands it
+# now. Both are asked, because the Mac path list changes and it changes for being wrong: it was
+# missing two crates the binary links, so a fix in either shipped with no release cut for it
+# (#2686). A commit merged before that widening carries the narrow list in its own tree, and a
+# purely faithful replay would reproduce the defect inside the merge gate. Taking the stricter of
+# the two is never less conservative than either, because the first IS the plan's own answer and a
+# second predicate can only add refusals.
+#
+# The other three inputs are pinned to the plan's, because a mismatch in any of them is a way the
+# replay could say "no Mac change" where the plan would not have — the one direction in which this
+# would be less conservative than the verdict it stands in for:
+#
+#   base   stable-tag-base.sh, which is where auto-stable.sh gets it: the tag commit's PARENT, not
+#          the tag commit. Diffing from the tag commit hides the release bump's own Cargo.toml and
+#          Cargo.lock lines inside every later diff. Which tag is newest is a fact about now rather
+#          than about the commit on trial, so this checkout's copy is the one asked.
+#   range  tag_base..<sha>, cumulative. The plan's "no Mac change since <tag>" is a claim about
+#          that whole range, not about one commit's own diff.
+#   env    ARBOS_MAC_PATHS unset, because mac-paths.sh honours it as a whole-list override and an
+#          operator's shell carrying a narrow value would narrow the predicate silently.
+#
+# Prints REPLAY-NOMAC, REPLAY-MAC or BLOCKED. go() accepts REPLAY-NOMAC by that name, so a reading
+# the plan never made cannot be mistaken for one it did, in a transcript or in this file. Nothing
+# the replay cannot do is quiet: every way out that is not a verdict is BLOCKED and says what
+# stopped it. A commit from before mac-change.sh existed has nothing of its own to replay, and
+# that is a refusal rather than a guess.
+mac_from_git() {
+  local sha=$1 why=$2 s8=${1:0:8} d ti tag base rc_own rc_now out_own out_now where
+  # The test switches replay an older moment than this checkout's tags describe, so the base here
+  # would be a release the commit never saw.
+  if [ -n "${MW_TEST_HISTORY:-}${MW_TEST_UNTIL:-}" ]; then
+    echo "BLOCKED $why; the git-only replay is off under MW_TEST_HISTORY/MW_TEST_UNTIL, which replay an older moment than this checkout's tags describe"; return
+  fi
+  if [ ! -x "$D/../release/stable-tag-base.sh" ] || [ ! -x "$D/../release/mac-change.sh" ]; then
+    echo "BLOCKED $why; this checkout has no scripts/release/stable-tag-base.sh + mac-change.sh, and the rules in them are called here, never copied"; return
+  fi
+  if ! ti=$(bash "$D/../release/stable-tag-base.sh" 2>&1); then
+    echo "BLOCKED $why; the git-only replay could not read the last stable tag: $(tr '\n' ' ' <<< "$ti")"; return
+  fi
+  tag=$(sed -n 's/^tag=//p' <<< "$ti"); base=$(sed -n 's/^base=//p' <<< "$ti")
+  if [ -z "$tag" ] || [ -z "$base" ]; then
+    echo "BLOCKED $why; the git-only replay has no stable tag to measure from (tag='$tag' base='$base')"; return
+  fi
+  if ! git rev-parse -q --verify "$base^{commit}" >/dev/null; then
+    echo "BLOCKED $why; the git-only replay cannot see ${tag}'s base commit ${base:0:8} in this checkout"; return
+  fi
+  d=$(mktemp -d) || { echo "BLOCKED $why; the git-only replay could not make a workspace"; return; }
+  if ! git archive "$sha" scripts/release 2>/dev/null | tar -x -C "$d" 2>/dev/null \
+     || [ ! -s "$d/scripts/release/mac-change.sh" ]; then
+    rm -rf "$d"
+    echo "BLOCKED $why; and ${s8}'s own tree carries no scripts/release/mac-change.sh, so it has no predicate of its own to replay"; return
+  fi
+  out_own=$(env -u ARBOS_MAC_PATHS bash "$d/scripts/release/mac-change.sh" "$base" "$sha" 2>&1); rc_own=$?
+  rm -rf "$d"
+  out_now=$(env -u ARBOS_MAC_PATHS bash "$D/../release/mac-change.sh" "$base" "$sha" 2>&1); rc_now=$?
+  out_own=$(printf '%s' "$out_own" | tr '\n' ' '); out_now=$(printf '%s' "$out_now" | tr '\n' ' ')
+  where="on ${base:0:8}..$s8, by ${s8}'s own predicate ($out_own) and by this checkout's ($out_now)"
+  case "$rc_own/$rc_now" in
+    0/0)     echo "REPLAY-NOMAC $tag — no Mac change $where. No Release plan verdict to read: $why" ;;
+    1/*|*/1) echo "REPLAY-MAC $tag — the Mac app changed since $tag $where, and no release covers it. No Release plan verdict to read either: $why" ;;
+    *)       echo "BLOCKED $why; the git-only replay exited $rc_own and $rc_now, and mac-change.sh has only two verdicts: $out_own / $out_now" ;;
+  esac
+}
+
+# verdict <sha> [nogate]: one line — TAG <vX> | NOMAC <vY> <reason> | COVERED <vY> | RED | UNTESTED |
+# WAIT <why> | BLOCKED <unreadable> | REPLAY-NOMAC <vY> <reason> | REPLAY-MAC <vY> <reason>. The two
+# REPLAY answers come from mac_from_git, above: the plan's own Mac predicate run from git for a green
+# commit whose plan verdict could not be read. They are named apart from NOMAC so that no caller,
+# and no transcript, can take one for a verdict the Release plan actually made.
 # "nogate" leaves the Swift gate out, for a caller that judges the gate itself (go, through range_gate).
 verdict() {
   local sha=$1 s8=${1:0:8} since ci tag
@@ -139,25 +220,29 @@ verdict() {
     ""|null*) echo "WAIT no CI run yet"; return ;;
     *) echo "WAIT CI $ci"; return ;;
   esac
+  # Past here the commit's push CI is READ and green, so the only fact still missing is the Mac
+  # verdict — and that is the one question mac_from_git can answer. Every refusal below hands it
+  # the reason instead of returning, because this kit once deadlocked on a verdict it could not
+  # read while the predicate that produces it sat in the tree, unused.
   since=$(date -u -d "@$(git show -s --format=%ct "$sha")" +%Y-%m-%dT%H:%M:%SZ)
   local window=">=$since"; [ -n "${MW_TEST_UNTIL:-}" ] && window="$since..$MW_TEST_UNTIL"
   # Every page: the list grows all day (one scheduled run per 15 min), so page 1 alone loses the run that
   # judged an older commit. The total is read first, so a run created mid-read cannot fake a shortfall.
   local total list got runs scanned=0
-  total=$(rd "repos/$R/actions/workflows/release.yml/runs?created=$window&per_page=1" --jq '.total_count') || { echo "BLOCKED counting Release runs: ${total#BLOCKED:}"; return; }
+  total=$(rd "repos/$R/actions/workflows/release.yml/runs?created=$window&per_page=1" --jq '.total_count') || { mac_from_git "$sha" "counting Release runs failed: ${total#BLOCKED:}"; return; }
   list=$(rd --paginate "repos/$R/actions/workflows/release.yml/runs?created=$window&per_page=100" \
-      --jq '.workflow_runs[]|"\(.id) \(.event) \(.status) \(.head_sha)"') || { echo "BLOCKED listing Release runs: ${list#BLOCKED:}"; return; }
+      --jq '.workflow_runs[]|"\(.id) \(.event) \(.status) \(.head_sha)"') || { mac_from_git "$sha" "listing Release runs failed: ${list#BLOCKED:}"; return; }
   got=$(printf '%s\n' "$list" | grep -c .)
-  [ "$got" -ge "${total:-0}" ] || { echo "BLOCKED Release-run lookup incomplete for $s8: read $got of $total runs created since $since"; return; }
+  [ "$got" -ge "${total:-0}" ] || { mac_from_git "$sha" "the Release-run lookup for $s8 was short: read $got of $total runs created since $since"; return; }
   # Runs on this commit first (its own workflow_run plan); the rest, newest first, cover schedule runs.
   runs=$(printf '%s\n' "$list" | awk -v s="$sha" '$2!="push" && $3=="completed" && $4==s {print $1}'
          printf '%s\n' "$list" | awk -v s="$sha" '$2!="push" && $3=="completed" && $4!=s {print $1}')
   for r in $runs; do
     scanned=$((scanned + 1))
-    j=$(rd "repos/$R/actions/runs/$r/jobs" --jq '.jobs[]|select(.name=="What to publish")|.id') || { echo "BLOCKED listing jobs of Release run $r: ${j#BLOCKED:}"; return; }
+    j=$(rd "repos/$R/actions/runs/$r/jobs" --jq '.jobs[]|select(.name=="What to publish")|.id') || { mac_from_git "$sha" "listing the jobs of Release run $r failed: ${j#BLOCKED:}"; return; }
     j=$(echo "$j" | head -1)
     [ -n "$j" ] || continue
-    log=$(rd --allow-escape-sequences "repos/$R/actions/jobs/$j/logs") || { echo "BLOCKED reading the 'What to publish' log of Release run $r: ${log#BLOCKED:}"; return; }
+    log=$(rd --allow-escape-sequences "repos/$R/actions/jobs/$j/logs") || { mac_from_git "$sha" "reading the 'What to publish' log of Release run $r failed: ${log#BLOCKED:}"; return; }
     log=$(printf '%s' "$log" | sed 's/\x1b\[[0-9;]*m//g')
     notes=$(echo "$log" | grep -oE ' notes=.*' | grep -v '"' | head -1 | sed 's/^ notes=//')
     tag=$(echo "$log" | grep -oE ' tag=v[0-9.]+' | head -1 | sed 's/^ tag=//')
@@ -167,11 +252,13 @@ verdict() {
       *"already covers the newest green commit $s8"*) echo "COVERED $(echo "$notes" | awk '{print $2}') (run $r)"; return ;;
     esac
   done
+  # A Release run in flight is the one case that is NOT replayed. The plan's own answer is seconds
+  # away, and waiting for the verdict that is arriving beats standing in for it.
   for st in $ACTIVE; do
-    n=$(gh run list -R $R --workflow release.yml --status $st --limit 5 --json databaseId --jq length 2>&1) || { echo "BLOCKED listing $st Release runs: $(echo "$n" | tr '\n' ' ' | cut -c1-160)"; return; }
+    n=$(gh run list -R $R --workflow release.yml --status $st --limit 5 --json databaseId --jq length 2>&1) || { mac_from_git "$sha" "listing $st Release runs failed: $(echo "$n" | tr '\n' ' ' | cut -c1-160)"; return; }
     [ "${n:-0}" -gt 0 ] && { echo "WAIT Release run $st"; return; }
   done
-  echo "WAIT no Release plan has judged ${s8} yet: read all $got Release runs created since $since (every page), none of the $scanned completed non-push plans names it (the 15-min backstop judges it next)"
+  mac_from_git "$sha" "all $got Release runs created since $since were read (every page) and none of the $scanned completed non-push plans names $s8, with no Release run in flight"
 }
 
 # range_gate <from>: each gate in checks.sh, judged for what main would ship on ONE commit — the newest
@@ -300,9 +387,17 @@ go() {
       # ignorant of which tag is being released, so it answers for the class and
       # not for this release: a NOMAC naming an OLDER tag says nothing about
       # this one and has to fall through to the NO-GO below, as it always did.
+      #
+      # REPLAYNOMAC is tag-checked by the same rule and for the same reason. It
+      # is the Release plan's own predicate, run from git on the commit's own
+      # tree, for a green commit whose plan verdict could not be read — so it
+      # clears a GO, but it stays named apart from NOMAC all the way down, and
+      # a transcript says which commits the plan cleared and which ones this
+      # file cleared for it.
       if verdict_clears_go "$cls"; then
         case "$cls" in
-          NOMAC) case "$v" in "NOMAC $tag"*) continue ;; esac ;;
+          NOMAC)       case "$v" in "NOMAC $tag"*) continue ;; esac ;;
+          REPLAYNOMAC) case "$v" in "REPLAY-NOMAC $tag"*) continue ;; esac ;;
           *) continue ;;
         esac
       fi
@@ -311,12 +406,13 @@ go() {
       # judged, and judged failed, was reported as missing information with the
       # real verdict demoted into the parenthetical.
       case "$cls" in
-        RED)      nogo+=("${sha:0:9} JUDGED AND FAILED CI since $tag — read the run ($v)") ;;
-        UNTESTED) nogo+=("${sha:0:9} JUDGED, BUT NOTHING RAN since $tag — re-run the job, the commit is not implicated ($v)") ;;
-        REDGATE)  nogo+=("${sha:0:9} has a required check with no successful run since $tag ($v)") ;;
-        WAIT)     nogo+=("${sha:0:9} NOT JUDGED YET since $tag — still running ($v)") ;;
-        BLOCKED)  nogo+=("${sha:0:9} COULD NOT BE READ since $tag, so nothing is inferred ($v)") ;;
-        *)        nogo+=("${sha:0:9} not judged no-Mac-change since $tag ($v)") ;;
+        RED)       nogo+=("${sha:0:9} JUDGED AND FAILED CI since $tag — read the run ($v)") ;;
+        UNTESTED)  nogo+=("${sha:0:9} JUDGED, BUT NOTHING RAN since $tag — re-run the job, the commit is not implicated ($v)") ;;
+        REDGATE)   nogo+=("${sha:0:9} has a required check with no successful run since $tag ($v)") ;;
+        WAIT)      nogo+=("${sha:0:9} NOT JUDGED YET since $tag — still running ($v)") ;;
+        BLOCKED)   nogo+=("${sha:0:9} COULD NOT BE READ since $tag, so nothing is inferred ($v)") ;;
+        REPLAYMAC) nogo+=("${sha:0:9} CHANGED THE MAC APP since $tag, by the git-only replay — no release covers it ($v)") ;;
+        *)         nogo+=("${sha:0:9} not judged no-Mac-change since $tag ($v)") ;;
       esac
     done <<< "$ch"
     echo "  required checks since $tag, decided on the newest commit each applies to (older results are findings):"
@@ -392,6 +488,10 @@ after() {
       else echo "VERDICT $(ts): NOT LIVE YET / STOP — ${nogo[*]}"; fi ;;
     NOMAC*)
       echo "VERDICT $(ts): NO-TAG — the Release plan judged ${sha:0:9} 'no Mac change'; nothing to publish. Next GO may run (next 'after ${sha:0:9}')" ;;
+    REPLAY-NOMAC*)
+      echo "VERDICT $(ts): NO-TAG — no Release plan verdict for ${sha:0:9} could be read, and replaying the plan's own predicate from git says no Mac change; nothing to publish. Next GO may run (next 'after ${sha:0:9}'). $v" ;;
+    REPLAY-MAC*)
+      echo "VERDICT $(ts): STOP — no Release plan verdict for ${sha:0:9} could be read, and git says it changes the Mac app with no release covering it: $v" ;;
     NOPATH*)
       echo "VERDICT $(ts): NO-TAG — ${sha:0:9} changes ${v#NOPATH }. Next GO may run (next 'after ${sha:0:9}')" ;;
     COVERED*) echo "VERDICT $(ts): STOP — plan says an existing tag already covers ${sha:0:9}; look before the next merge" ;;
