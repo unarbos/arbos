@@ -15,11 +15,14 @@
 #   so deleting the measurement to make them pass fails them instead. Exit 0 alone would be
 #   satisfied by a gate that had stopped reading anything at all.
 #
-#   Everything else it refuses, it still refuses. Nine cases exit 2 on inputs the gate cannot
-#   read and on its own shape drifting, and they are untouched by the cadence change.
+#   Everything else it refuses, it still refuses. Thirteen cases exit 2 on inputs the gate
+#   cannot read and on its own shape drifting, and they are untouched by the cadence change.
+#   Two of those thirteen are new with the removal of this workflow's `paths:` trigger, and
+#   they assert the ABSENCE of a filter rather than the adequacy of one — see the case built
+#   with `paths: ["**"]`, which covers every file in the repository and is refused anyway.
 #
 # Every case here asserts the gate's own words, not only its exit code — see case_is. An exit code
-# is one of three values shared by twenty-three cases, so on its own it cannot tell a case from the
+# is one of two values shared by twenty-five cases, so on its own it cannot tell a case from the
 # case beside it, and a case that cannot do that would pass for a reason its name does not claim.
 # scripts/release/release-gate-selftest-audit.sh checks that property mechanically: each case's
 # phrases must match that case's output and no other case's.
@@ -268,14 +271,50 @@ throwaway() {
   echo "$d"
 }
 
-# A trigger list that has fallen behind a predicate: the gate would never start for an iOS-only
-# pull request, which is a miss rather than a wrong answer, and silent.
-drift="$(throwaway)"
-grep -v '"apps/ios/\*\*"' "$root/.github/workflows/release-gate.yml" \
-  > "$drift/.github/workflows/release-gate.yml"
-gate="$drift/scripts/release/release-gate.py"
-WHY="touching apps/ios/** (from .github/workflows/ios.yml) would never start this gate" \
-  case_is "a trigger list that misses a predicate's path fails closed" 2 "${QUIET[@]}"
+# A `paths:` filter grown back onto the gate. This case is deliberately built with the *widest
+# possible* filter — `"**"`, which matches every file in the repository — because the property
+# being asserted is the absence of a filter, not the adequacy of one. An implementation that
+# checked coverage instead would pass this case happily, and would then also pass the narrow
+# filter that is the actual risk. The old version of this guard did check coverage, and the case
+# that tested it removed one path from the list; that case cannot be written any more, which is
+# the point of the change.
+refiltered="$(throwaway)"
+python3 - "$root/.github/workflows/release-gate.yml" \
+         "$refiltered/.github/workflows/release-gate.yml" <<'PY'
+import sys
+text = open(sys.argv[1], encoding="utf-8").read()
+old = "on:\n  pull_request:\n"
+if old not in text:
+    raise SystemExit("release-gate.yml no longer has a bare `on: pull_request:` to filter")
+open(sys.argv[2], "w", encoding="utf-8").write(
+    text.replace(old, 'on:\n  pull_request:\n    paths:\n      - "**"\n', 1)
+)
+PY
+gate="$refiltered/scripts/release/release-gate.py"
+WHY="has regrown an event filter (paths)" \
+  case_is "a path filter added back to the gate fails closed, even one covering everything" 2 \
+  "${QUIET[@]}"
+gate="$here/release-gate.py"
+
+# An event other than `pull_request`. workflow_dispatch is the one this gate actually shipped with
+# once: `github.event.pull_request` is null there, the step fell through to `github.ref_name`, and
+# the run reported success having judged nothing. gate-can-decide.sh catches that at runtime; this
+# catches it in the file, which is the earlier and cheaper place.
+extra_event="$(throwaway)"
+python3 - "$root/.github/workflows/release-gate.yml" \
+         "$extra_event/.github/workflows/release-gate.yml" <<'PY'
+import sys
+text = open(sys.argv[1], encoding="utf-8").read()
+old = "on:\n  pull_request:\n"
+if old not in text:
+    raise SystemExit("release-gate.yml no longer has a bare `on: pull_request:` to add to")
+open(sys.argv[2], "w", encoding="utf-8").write(
+    text.replace(old, "on:\n  pull_request:\n  workflow_dispatch:\n", 1)
+)
+PY
+gate="$extra_event/scripts/release/release-gate.py"
+WHY="should trigger on \`pull_request\` and nothing else" \
+  case_is "a second trigger event added to the gate fails closed" 2 "${QUIET[@]}"
 gate="$here/release-gate.py"
 
 # A job that has lost the screen. GitHub concludes a run `success` when every job is

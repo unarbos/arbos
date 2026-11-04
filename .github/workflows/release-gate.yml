@@ -38,13 +38,22 @@ name: Release gate
 # fell through to `github.ref_name`, exited 0 having judged nothing, and handed checks.sh a
 # `success` on a head it had never read. See gate-can-decide.sh for the whole mechanism.
 #
-# ── the trigger list, and why it is not a second copy of the predicates ─────────────────────────
-# GitHub needs a static `paths:` list to start a run at all, and a path the predicates watch that
-# this list misses is a pull request the gate never sees. So the list is a superset of both
-# predicates, and release-gate.py checks that on every run against mac-paths.sh and ios.yml as
-# they stand in the tree — a gap fails the gate instead of passing quietly. The list also names
-# ios.yml, mac-paths.sh and this file, so any pull request that moves either predicate runs this
-# check and cannot widen one without widening the other.
+# ── there is no `paths:` trigger, and that is the point ─────────────────────────────────────────
+# This workflow runs on every pull request. It used to carry a static `paths:` list that had to be
+# a superset of both predicates, because GitHub needs one to start a run and a path the predicates
+# watch that the list missed was a pull request the gate never saw. release-gate.py checked the
+# list against mac-paths.sh and ios.yml on every run to catch that drift.
+#
+# The list is gone because the check it needed was a check against our own copy. Coverage is now a
+# property rather than a maintained invariant: the gate runs, reads both predicates as they stand,
+# and says what the pull request publishes — which for most pull requests is nothing, in about
+# twenty seconds on Linux. release-gate.py now asserts the absence of the filter instead of its
+# adequacy, so re-adding one fails the gate rather than quietly narrowing it.
+#
+# This also removes the only reason the gate's coverage depended on what a diff happened to touch.
+# A path-filtered required check cannot distinguish "ran and passed" from "never started", and the
+# second reads as clean to anything that counts green checks. That is the same defect class as a
+# merge that silently disarms a gate, and it is the one this repository keeps paying for.
 #
 # ── what this must never touch ──────────────────────────────────────────────────────────────────
 # .github/workflows/ios.yml is inside its own trigger paths, so editing it cuts a TestFlight build.
@@ -54,35 +63,11 @@ name: Release gate
 # Linux only. The hosted macos-15 pool is the critical path for a real release and a gate there
 # can wait an hour and a half; this one must never be in that queue.
 
+# No `paths:`, no `paths-ignore:`, no `branches:`. Every pull request, so that "this gate did not
+# run" is never a thing anyone has to interpret. See the section above before adding a filter;
+# release-gate.py fails closed if one appears here.
 on:
   pull_request:
-    paths:
-      # Everything the Mac app is built from (scripts/release/mac-paths.sh).
-      - "crates/arbos-mac/**"
-      - "crates/arbos-core/**"
-      - "crates/arbos-client/**"
-      - "crates/arbos-matrix/**"
-      - "crates/arbos-update/**"
-      - "scripts/bundle-mac.sh"
-      - "site/assets/logo/**"
-      # Everything ios.yml uploads a TestFlight build for, that the Mac list does not already have.
-      - "apps/ios/**"
-      - "crates/arbos-ffi/**"
-      - "packages/ArbosFFI/**"
-      - "scripts/build-xcframework.sh"
-      - "assets/avatars/trees/manifest.json"
-      - "assets/avatars/trees/lottie/**"
-      - "assets/avatars/leaves/**"
-      - "rust-toolchain.toml"
-      # On both lists.
-      - "Cargo.toml"
-      - "Cargo.lock"
-      # The three files that define all of the above. A pull request that moves a predicate runs
-      # this gate, so the coverage check above sees it.
-      - ".github/workflows/ios.yml"
-      - ".github/workflows/release-gate.yml"
-      - "scripts/release/mac-paths.sh"
-      - "scripts/release/gate-can-decide.sh"
 
 permissions:
   contents: read
