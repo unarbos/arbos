@@ -45,17 +45,32 @@ rd() {
 # ci.yml is deliberately absent. Its requiredness turns on `paths-ignore`, which merge-window.sh's
 # verdict() already reads for a different purpose, and asserting it here without that logic would
 # refuse legitimate iOS-only merges. Adding it is a separate change with its own proof.
-GATES='.github/workflows/swift-core-check.yml|Swift core check'
+GATES='.github/workflows/swift-core-check.yml|Swift core check
+.github/workflows/release-gate.yml|Release gate'
 
 # gate_patterns <workflow> <ref>: every quoted path pattern under that workflow's top level `on:`
-# block, read at <ref>.
+# block, read at <ref>. Status 0 with the patterns on stdout when it was read; 2 when <ref>'s tree
+# does not contain the workflow at all; 1 when the read itself failed.
 #
 # The push and pull_request lists are unioned. They are identical today, and a superset errs towards
 # asking for a verdict, which is the safe direction. Unquoted entries yield nothing, and nothing is
 # BLOCKED by the caller rather than "not required".
+#
+# Absent and unreadable are separate answers because they have opposite remedies. This file's header
+# lists three times that "nothing is there" stood in for "the query was wrong"; this is the mirror
+# of it, and it bites once per gate added. A workflow a ref's tree does not have is a fact about
+# that ref, not an unknown: a gate added to main after a branch forked is in no open branch's tree,
+# and the pull request that adds a gate is in no tree on main until it merges. Folding that into
+# BLOCKED refuses every open pull request the moment a gate is added — including the one adding it,
+# which can then never land. Every other failure (network, 403, a bad token) stays a refusal,
+# because then the answer really is unknown. Which of the two it was is decided by the 404 GitHub
+# returns for a path that is not in the tree, never by an empty answer.
 gate_patterns() {
   local body
-  body=$(rd "repos/$R/contents/$1?ref=$2" --jq '.content' 2>/dev/null) || return 1
+  if ! body=$(rd "repos/$R/contents/$1?ref=$2" --jq '.content' 2>/dev/null); then
+    case "$body" in *"HTTP 404"*|*"Not Found"*) return 2 ;; esac
+    return 1
+  fi
   printf '%s' "$body" | base64 -d 2>/dev/null | awk '
     /^on:/          { inon = 1; next }
     /^[^[:space:]]/ { inon = 0 }
@@ -165,10 +180,21 @@ gate_state() {
 # crates/arbos-matrix/src/client.rs, and crates/arbos-matrix/** was added to this filter after that
 # branch forked, so no run could ever have been created for its head while main would gate the merged
 # result. Judging by either filter alone misses that; the union asks for the verdict.
+#
+# A gate in neither tree is not yet policy: nothing can have run for it on this head, and nothing
+# will gate the merged result either, so it is "not required" rather than a refusal. A gate in
+# main's tree but not the head's is the #2376 case above, and still asks for the verdict the head
+# cannot have — the remedy is to rebase, which is the point.
 gate_applies() {
-  local wf=$1 sha=$2 files=$3 phead pbase pats
-  phead=$(gate_patterns "$wf" "$sha"); pbase=$(gate_patterns "$wf" "${GATE_BASE:-main}")
-  if [ -z "$phead" ] || [ -z "$pbase" ]; then
+  local wf=$1 sha=$2 files=$3 phead pbase hrc brc pats
+  phead=$(gate_patterns "$wf" "$sha"); hrc=$?
+  pbase=$(gate_patterns "$wf" "${GATE_BASE:-main}"); brc=$?
+  if [ $hrc -eq 2 ] && [ $brc -eq 2 ]; then
+    echo "not required — neither this head's tree nor ${GATE_BASE:-main}'s contains $wf, so no merge of this head is gated by it"
+    return 1
+  fi
+  if [ $hrc -eq 1 ] || [ $brc -eq 1 ] \
+     || { [ $hrc -eq 0 ] && [ -z "$phead" ]; } || { [ $brc -eq 0 ] && [ -z "$pbase" ]; }; then
     echo "BLOCKED — cannot read the path filter in $wf at this head or at ${GATE_BASE:-main}, so whether it applies is unknown"
     return 2
   fi
