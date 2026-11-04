@@ -9,10 +9,10 @@ import UIKit
 /// The Mac twin is `crates/arbos-mac/src/ui/profiles/pane.rs` `tests`.
 final class ProfilePaneStructureTests: XCTestCase {
     func testEveryKindLaysOutHeroThenPillThenOptions() {
-        for (kind, tabs) in PaneKinds.all {
-            XCTAssertGreaterThanOrEqual(tabs.count, 2, "\(kind): a pane has at least two tabs")
-            XCTAssertEqual(ProfilePane.layout(tabs: tabs.count, footerSections: 1), [.hero, .tabPill, .options, .footer], kind)
-            XCTAssertEqual(ProfilePane.layout(tabs: tabs.count, footerSections: 0), [.hero, .tabPill, .options], kind)
+        for kind in PaneKinds.all {
+            XCTAssertGreaterThanOrEqual(kind.tabs.count, 2, "\(kind.name): a pane has at least two tabs")
+            XCTAssertEqual(ProfilePane.layout(tabs: kind.tabs.count, footerSections: 1), [.hero, .tabPill, .options, .footer], kind.name)
+            XCTAssertEqual(ProfilePane.layout(tabs: kind.tabs.count, footerSections: 0), [.hero, .tabPill, .options], kind.name)
         }
         // One tab: no pill, the options follow the hero directly.
         XCTAssertEqual(ProfilePane.layout(tabs: 1, footerSections: 0), [.hero, .options])
@@ -27,8 +27,8 @@ final class ProfilePaneStructureTests: XCTestCase {
         XCTAssertEqual(PaneKinds.group, ["Members", "Library"])
         XCTAssertEqual(PaneKinds.server, ["Channels", "Members", "Settings"])
         XCTAssertEqual(PaneKinds.channel, ["Profile", "Settings"])
-        for (kind, tabs) in PaneKinds.all {
-            XCTAssertEqual(Set(tabs).count, tabs.count, "\(kind): a tab label appears once")
+        for kind in PaneKinds.all {
+            XCTAssertEqual(Set(kind.tabs).count, kind.tabs.count, "\(kind.name): a tab label appears once")
         }
     }
 
@@ -257,7 +257,7 @@ final class OneAddRowPerPaneTests: XCTestCase {
 /// `crates/arbos-mac/src/ui/profiles/mod.rs` `tab_tests`.
 final class PaneTabsLayoutTests: XCTestCase {
     /// Every tab set the control carries, plus Home's filter row.
-    private var rows: [[String]] { PaneKinds.all.map(\.1) + [HomeListFilter.allCases.map(\.rawValue)] }
+    private var rows: [[String]] { PaneKinds.all.map(\.tabs) + [HomeListFilter.allCases.map(\.rawValue)] }
 
     private func textWidth(_ s: String, _ weight: UIFont.Weight) -> CGFloat {
         (s as NSString).size(withAttributes: [.font: UIFont.systemFont(ofSize: Theme.body, weight: weight)]).width
