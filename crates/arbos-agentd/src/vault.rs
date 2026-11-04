@@ -474,6 +474,61 @@ pub fn promises_secret_request(text: &str) -> bool {
     .any(|w| t.contains(w))
 }
 
+/// Does `host` match one of a grant's allowed hosts? An empty list is every host — the shape the
+/// relay sends for a secret the owner did not scope to one.
+fn host_matches(hosts: &[String], host: &str) -> bool {
+    hosts.is_empty()
+        || hosts.iter().any(|a| {
+            let a = a.to_ascii_lowercase();
+            host.eq_ignore_ascii_case(&a)
+                || a.strip_prefix("*.")
+                    .is_some_and(|suf| host.to_ascii_lowercase().ends_with(suf))
+        })
+}
+
+/// The real value of one secret, for a request **agentd composes itself** toward `host`.
+///
+/// `None` unless the owner has already put that value in this box, which is four conditions and
+/// they are the same four `render_env_file` applies: a grant for `name` on this project, the
+/// owner's "Real value in the agent's environment" switch on (`inject_env`), secrets not paused,
+/// and `host` on the grant's allowed list. It reads only the state `refresh_env` already keeps,
+/// so it never asks the relay, never raises an approval card and never blocks — a caller with no
+/// such secret gets `None` and is otherwise unaffected.
+///
+/// WHY THIS IS NOT A WAY ROUND `egress`. The boundary is that the *model* never holds a secret
+/// and never composes an authenticated request: it works with placeholders and calls `egress`,
+/// where the relay substitutes for the allowed hosts only. A value agentd puts on the wire for a
+/// request of its own is the `browser_fill` shape, which this module already documents and does —
+/// host-scoped against the grant, registered for write-time redaction by `refresh_env`, and never
+/// shown to the model. So this is for agentd's own infrastructure calls. It must not become a way
+/// to hand a model-chosen host a key, which is why `host` is matched against the grant and is not
+/// taken on trust.
+pub fn real_value_for_host(project_id: &str, name: &str, host: &str) -> Option<String> {
+    let st = state().lock().expect("secrets state");
+    if st.paused.iter().any(|p| p == project_id) {
+        return None;
+    }
+    let base = item_base(name);
+    let g = st
+        .grants
+        .iter()
+        .find(|g| g.project_id == project_id && item_base(&g.name) == base)?;
+    if !g.inject_env || !host_matches(&g.hosts, host) {
+        return None;
+    }
+    let r = st
+        .real
+        .get(project_id)?
+        .iter()
+        .find(|r| item_base(&r.name) == base)?;
+    // A single-field key arrives under the grant's own name; a multi-field one under `NAME_FIELD`,
+    // which this has no way to choose between, so it only answers for the unambiguous case.
+    r.vars
+        .get(name)
+        .or_else(|| r.vars.values().next().filter(|_| r.vars.len() == 1))
+        .cloned()
+}
+
 /// Env names of the secrets this project may use right now (enabled grants), for the route
 /// guard's message to the model.
 pub fn enabled_grant_names(project_id: &str) -> Vec<String> {
@@ -1175,18 +1230,7 @@ async fn obtain_grant(
             "{name}: the owner denied this in the last 10 minutes. Do not ask again now; tell the user what you needed it for."
         )));
     }
-    let host_ok = |g: &Grant| {
-        host.is_none()
-            || g.hosts.is_empty()
-            || host.is_some_and(|h| {
-                g.hosts.iter().any(|a| {
-                    let a = a.to_ascii_lowercase();
-                    h.eq_ignore_ascii_case(&a)
-                        || a.strip_prefix("*.")
-                            .is_some_and(|suf| h.to_ascii_lowercase().ends_with(suf))
-                })
-            })
-    };
+    let host_ok = |g: &Grant| host.is_none_or(|h| host_matches(&g.hosts, h));
     let asker = non_owner_asker(agent);
     if let Some(g) = grant_for(&project, &name) {
         if g.request_id.is_none() && host_ok(&g) && use_kind != "browser_fill" {
@@ -1717,8 +1761,95 @@ pub async fn browser_fill(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> Va
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// Put one single-field secret in a project's box, as `GET /box/secrets` and
+    /// `GET /box/secrets/env` together would have: an enabled grant scoped to `hosts` with the
+    /// owner's real-value switch on, and the value itself. For the callers that have to prove
+    /// what they do with a real value; the value is fake.
+    pub(crate) fn grant_a_real_value(project: &str, name: &str, hosts: &[&str], value: &str) {
+        let item = json!({
+            "env": name, "kind": "key", "enabled": true, "inject_env": true,
+            "hosts": hosts, "placeholders": { "value": format!("arbos-secret://{name}/value") },
+        });
+        let g = Grant::from_item(project, &item).expect("grant");
+        let mut st = state().lock().expect("secrets state");
+        st.paused.retain(|p| p != project);
+        st.grants
+            .retain(|x| !(x.project_id == project && x.name == name));
+        st.grants.push(g);
+        st.real.insert(
+            project.to_owned(),
+            vec![RealValues {
+                name: name.to_owned(),
+                vars: [(name.to_owned(), value.to_owned())].into_iter().collect(),
+            }],
+        );
+    }
+
+    /// Everything `real_value_for_host` must refuse. It is the gate on a real value leaving the
+    /// box on a request agentd composes itself, so each condition the owner controls — the grant,
+    /// their real-value switch, Pause all, and the host list — is checked separately.
+    ///
+    /// Each case gets a project id of its own: the secrets state is process-wide and keyed by
+    /// project, so sharing one would let these decide each other's answers.
+    #[test]
+    fn a_real_value_leaves_the_box_only_on_the_owner_s_terms() {
+        let host = "mcp.exa.ai";
+
+        // Nothing in the box: the ordinary case, and the one that must cost nothing.
+        assert_eq!(real_value_for_host(&ulid(), "EXA_API_KEY", host), None);
+
+        // Everything on: the value is there for a request to an allowed host.
+        let p = ulid();
+        grant_a_real_value(&p, "EXA_API_KEY", &[host], "k");
+        assert_eq!(
+            real_value_for_host(&p, "EXA_API_KEY", host).as_deref(),
+            Some("k")
+        );
+        // A different secret's name is not this one's value.
+        assert_eq!(real_value_for_host(&p, "OTHER_KEY", host), None);
+        // A host the grant does not list gets nothing, which is the check that stops a moved or
+        // redirected endpoint taking the key with it.
+        assert_eq!(real_value_for_host(&p, "EXA_API_KEY", "evil.example"), None);
+        // A wildcard grant covers its subdomains and nothing else.
+        let p = ulid();
+        grant_a_real_value(&p, "EXA_API_KEY", &["*.exa.ai"], "k");
+        assert_eq!(
+            real_value_for_host(&p, "EXA_API_KEY", "mcp.exa.ai").as_deref(),
+            Some("k")
+        );
+        assert_eq!(
+            real_value_for_host(&p, "EXA_API_KEY", "exa.ai.evil.example"),
+            None
+        );
+
+        // The owner's "Real value in the agent's environment" switch off: placeholder only.
+        let p = ulid();
+        grant_a_real_value(&p, "EXA_API_KEY", &[host], "k");
+        state()
+            .lock()
+            .expect("secrets state")
+            .grants
+            .iter_mut()
+            .for_each(|g| {
+                if g.project_id == p {
+                    g.inject_env = false;
+                }
+            });
+        assert_eq!(real_value_for_host(&p, "EXA_API_KEY", host), None);
+
+        // Pause all: nothing leaves the box, whatever the grants say.
+        let p = ulid();
+        grant_a_real_value(&p, "EXA_API_KEY", &[host], "k");
+        state()
+            .lock()
+            .expect("secrets state")
+            .paused
+            .push(p.clone());
+        assert_eq!(real_value_for_host(&p, "EXA_API_KEY", host), None);
+    }
 
     /// What the box tells the relay about who is directing a turn: the row it is answering, and
     /// whether it wrote that row itself.
