@@ -44,7 +44,7 @@ pub fn tool_specs() -> Vec<Value> {
         json!({ "name": "web_fetch", "description": "Read a public URL as text: documentation pages, OpenAPI/Swagger JSON or YAML, README files, llms.txt, raw source on GitHub, release notes. HTML is reduced to readable text with links kept; JSON, YAML and plain text come back verbatim. No credentials: a request that needs a key goes through egress instead.",
                 "inputSchema": { "type": "object", "properties": {
                     "url": { "type": "string" },
-                    "max_chars": { "type": "integer", "minimum": 1000, "maximum": 60000, "description": "Cut the text here (default 20000); big pages become a peek handle anyway" } },
+                    "max_chars": { "type": "integer", "minimum": 1000, "maximum": 60000, "description": "Cut the text here (default 20000, max 60000). Text past the cut is discarded and there is no handle to page: when a page is truncated, re-read it once at a higher max_chars rather than walking it in small steps." } },
                   "required": ["url"] } }),
     ]
 }

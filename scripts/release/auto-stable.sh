@@ -38,11 +38,17 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="${GITHUB_REPOSITORY:-unarbos/arbos}"
 TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
 DEBOUNCE="${ARBOS_RELEASE_DEBOUNCE_S:-150}"
-# Everything the Mac binary and bundle are made from. Cargo.lock: a real dependency change ships
-# too — our own crates' version numbers moving does not (mac-change.sh).
-MAC_PATHS="${ARBOS_MAC_PATHS:-crates/arbos-mac crates/arbos-core crates/arbos-update Cargo.lock scripts/bundle-mac.sh site/assets/logo}"
-# mac-change.sh reads the same list, so step 3 and the release notes always agree on it.
-export ARBOS_MAC_PATHS="$MAC_PATHS"
+# Everything the Mac binary and bundle are made from — the cargo closure of arbos-mac, plus what
+# bundles it; scripts/release/mac-paths.sh owns the list and says why each entry is on it.
+# Cargo.lock: a real dependency change ships too — our own crates' version numbers moving does not
+# (mac-change.sh).
+#
+# This copy writes the release notes. mac-change.sh asks mac-paths.sh for itself, so step 3 and
+# the notes agree because they read one file — not because this script hands the list down. An
+# `export ARBOS_MAC_PATHS` used to sit here doing the latter. It was a no-op once both callers
+# read mac-paths.sh (an operator's override reaches mac-change.sh on its own), and it read as
+# this script overriding the list when it was only echoing the list back at itself.
+MAC_PATHS="$("$here/mac-paths.sh")"
 
 say() { echo "::notice::$*" >&2; }
 
@@ -134,15 +140,12 @@ if [[ -z "$target" ]]; then
 fi
 # 3. the last stable tag (highest vX.Y.Z anywhere — a bump commit may live only under its tag,
 #    see below) and the commit it was released from: a release commit touches only
-#    Cargo.toml/Cargo.lock, so its parent is what the Mac app was built from.
-last_tag="$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)"
-tag_base=""
+#    Cargo.toml/Cargo.lock, so its parent is what the Mac app was built from. Both come from
+#    scripts/release/stable-tag-base.sh, which the pre-merge release gate reads too.
+tag_info="$("$here/stable-tag-base.sh")"
+last_tag="$(sed -n 's/^tag=//p' <<< "$tag_info")"
+tag_base="$(sed -n 's/^base=//p' <<< "$tag_info")"
 if [[ -n "$last_tag" ]]; then
-  tag_base="$(git rev-parse "$last_tag^{commit}")"
-  touched="$(git show --format= --name-only "$tag_base" | sort -u | tr '\n' ' ')"
-  if [[ "$touched" == "Cargo.lock Cargo.toml " || "$touched" == "Cargo.toml " ]]; then
-    tag_base="$(git rev-parse "$tag_base^")"
-  fi
   if [[ "$tag_base" == "$target" ]] || git merge-base --is-ancestor "$target" "$tag_base"; then
     emit_none "stable $last_tag already covers the newest green commit ${target:0:8}"
     exit 0
