@@ -75,10 +75,18 @@ fn is_messages_root(cid: &ContainerID) -> bool {
 /// Mechanical on purpose: it reports what an update changed and never whether the change was
 /// allowed. Who may delete, insert or relabel a message is the relay's to decide, because only
 /// the relay knows which principal pushed the bytes.
+/// A message's id and the `sender` written on it, as the list stands at a given version.
+pub type MessageIdentity = (String, Option<String>);
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct MessageChanges {
-    /// Messages the update took out of the list, by id.
-    pub removed: Vec<String>,
+    /// Messages the update took out of the list: the id, and the `sender` the row carried
+    /// before it went.
+    ///
+    /// The sender is here because the relay cannot recover it afterwards — the row is gone
+    /// from the doc by the time the diff is read — and it is what tells a box's own
+    /// unattributed row apart from a person's. See `push_guard`'s removal arm.
+    pub removed: Vec<MessageIdentity>,
     /// Messages the update added, each with the `sender` written on it (`None` when absent).
     pub inserted: Vec<(String, Option<String>)>,
     /// `(message id, field)` for each field written onto a message that was already in the
@@ -91,7 +99,7 @@ pub struct MessageChanges {
     /// and must not guess: a mirror whose *order* drifts from the list would make the next
     /// diff name the wrong message as deleted. Applying the delta is the only exact way, and
     /// the walk that reports the changes is already doing it.
-    pub ids_after: Vec<String>,
+    pub ids_after: Vec<MessageIdentity>,
     /// The diff could not be read, so nothing above is known to be complete. A caller deciding
     /// authorisation must treat this as "anything may have changed".
     pub unreadable: bool,
@@ -2037,6 +2045,22 @@ impl ChatDoc {
     /// [`Self::messages`] goes through `get_deep_value`, which costs about 15 ms at 2 000
     /// messages and 82 ms at 10 000 — too much to spend on a push. This walk reads one key per
     /// row, which is what lets a caller keep a mirror of the list in step with a busy room.
+    /// Every message's id and `sender`, in list order. The sender half is what lets the relay
+    /// say whose a row was *after* an update removed it; see [`MessageChanges::removed`].
+    pub fn message_identities(&self) -> Vec<MessageIdentity> {
+        let msgs = self.messages_list();
+        let mut out = Vec::with_capacity(msgs.len());
+        for i in 0..msgs.len() {
+            let Some(ValueOrContainer::Container(Container::Map(m))) = msgs.get(i) else {
+                continue;
+            };
+            if let Some(id) = map_str(&m, "id") {
+                out.push((id, map_str(&m, "sender")));
+            }
+        }
+        out
+    }
+
     pub fn message_ids(&self) -> Vec<String> {
         let msgs = self.messages_list();
         let mut out = Vec::with_capacity(msgs.len());
@@ -2062,7 +2086,7 @@ impl ChatDoc {
         &self,
         from: &Frontiers,
         to: &Frontiers,
-        before_ids: &[String],
+        before_ids: &[MessageIdentity],
     ) -> MessageChanges {
         let mut out = MessageChanges::default();
         let Ok(batch) = self.doc.diff(from, to) else {
@@ -2104,7 +2128,10 @@ impl ChatDoc {
                                     // Holding an unnameable placeholder keeps the mirror in
                                     // step, so a later delete over it reports an id no message
                                     // can have instead of a neighbour's.
-                                    after.push(id.clone().unwrap_or_default());
+                                    after.push((
+                                        id.clone().unwrap_or_default(),
+                                        m.and_then(|m| map_str(m, "sender")),
+                                    ));
                                     if let (Some(id), Some(m)) = (id, m) {
                                         out.inserted.push((id, map_str(m, "sender")));
                                     }
@@ -2121,7 +2148,7 @@ impl ChatDoc {
                     let Some(id) = self.doc.try_get_map(cid).and_then(|m| map_str(&m, "id")) else {
                         continue;
                     };
-                    if !before_ids.contains(&id) {
+                    if !before_ids.iter().any(|(b, _)| *b == id) {
                         continue;
                     }
                     for key in delta.updated.keys() {
@@ -2493,7 +2520,12 @@ mod message_change_tests {
     }
 
     /// One doc with three messages, as a room stands before a push.
-    fn seeded() -> (ChatDoc, Vec<String>) {
+    /// The ids out of an id+sender list, for assertions that only care about order.
+    fn just_ids(v: &[MessageIdentity]) -> Vec<&str> {
+        v.iter().map(|(id, _)| id.as_str()).collect()
+    }
+
+    fn seeded() -> (ChatDoc, Vec<MessageIdentity>) {
         let doc = ChatDoc::new(Some(1), false);
         for (id, who) in [
             ("m1", "user:alice"),
@@ -2504,8 +2536,8 @@ mod message_change_tests {
                 .unwrap();
         }
         doc.commit_now();
-        let ids = doc.message_ids();
-        assert_eq!(ids, ["m1", "m2", "m3"]);
+        let ids = doc.message_identities();
+        assert_eq!(just_ids(&ids), ["m1", "m2", "m3"]);
         (doc, ids)
     }
 
@@ -2519,7 +2551,10 @@ mod message_change_tests {
         doc.commit_now();
 
         let changes = doc.messages_changed(&before, &doc.frontiers(), &ids);
-        assert_eq!(changes.removed, ["m2"]);
+        assert_eq!(
+            changes.removed,
+            [("m2".to_owned(), Some("user:bob".to_owned()))]
+        );
         assert!(changes.inserted.is_empty());
         assert!(changes.rewritten.is_empty());
         assert!(!changes.unreadable);
@@ -2578,7 +2613,10 @@ mod message_change_tests {
 
         assert_eq!(doc.message_ids().len(), ids.len(), "the count is unchanged");
         let changes = doc.messages_changed(&before, &doc.frontiers(), &ids);
-        assert_eq!(changes.removed, ["m1"]);
+        assert_eq!(
+            changes.removed,
+            [("m1".to_owned(), Some("user:alice".to_owned()))]
+        );
         assert_eq!(
             changes.inserted,
             [("m9".to_owned(), Some("user:bob".to_owned()))]
@@ -2599,8 +2637,8 @@ mod message_change_tests {
         doc.commit_now();
 
         let changes = doc.messages_changed(&before, &doc.frontiers(), &ids);
-        assert_eq!(changes.ids_after, ["m2", "m3", "m9"]);
-        assert_eq!(changes.ids_after, doc.message_ids());
+        assert_eq!(just_ids(&changes.ids_after), ["m2", "m3", "m9"]);
+        assert_eq!(changes.ids_after, doc.message_identities());
     }
 
     /// An update that leaves the list alone still has to hand the mirror back, or the caller

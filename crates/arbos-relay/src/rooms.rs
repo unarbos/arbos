@@ -49,7 +49,7 @@ fn build_room_doc(state: &AppState, room_name: &str) -> anyhow::Result<crate::st
             break;
         }
     }
-    let message_ids = doc.message_ids();
+    let message_ids = doc.message_identities();
     Ok(crate::state::RoomDocCache {
         key: (st.head, st.floor),
         doc,
@@ -100,7 +100,7 @@ fn advance_room_doc(
         // A mirror that may have drifted is worse than a slow one: an id out of place would
         // make a later push's deletion name the wrong message. Pay the sweep instead.
         cached.message_ids = if changes.unreadable {
-            cached.doc.message_ids()
+            cached.doc.message_identities()
         } else {
             changes.ids_after
         };
