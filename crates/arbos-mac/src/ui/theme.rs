@@ -1805,7 +1805,15 @@ mod glass_contrast_tests {
                     theme.filter_on_fill(),
                     theme.sidebar,
                 ),
-                ("settings segment", theme.segment_on_fill(), theme.pane_card),
+                // The Settings segment sits in a track, not straight on the
+                // card: `me.rs` `seg_row` wraps the pills in a `field_fill`
+                // capsule with a `field_border` rim. Measured off a shot of
+                // the Appearance page: card 35, rim 36, track 24, pill 92.
+                (
+                    "settings segment",
+                    theme.segment_on_fill(),
+                    theme.field_fill(),
+                ),
                 (
                     "sidebar raised patch (filter capsule, D89 card)",
                     theme.sidebar_raised(),
