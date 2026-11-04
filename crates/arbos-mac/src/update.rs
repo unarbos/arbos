@@ -148,36 +148,70 @@ pub fn auto_update_enabled() -> bool {
         .unwrap_or(false)
 }
 
-/// `<config>/update-offer.json`: the newest build a check has found.
+/// `<config>/update-offer.json`: the version of the newest build a check has found.
 fn offer_path() -> std::path::PathBuf {
     crate::sync::credentials::config_dir().join("update-offer.json")
 }
 
-/// The offer a previous run found, when it is still newer than what is running.
+/// What an earlier run found, read once at start-up.
 ///
 /// Without this the only record of "0.6.380 is available" is in memory, so a relaunch threw it
 /// away and only a *successful* check could bring it back. On 2026-11-03 Jacob's Mac found
 /// 0.6.379 and then 0.6.380 while running 0.6.378, was restarted, and then met 59 resolver
-/// failures in a row — so the build it had already found was never offered again and the footer
-/// disc had nothing to show.
-pub fn remembered_offer() -> Option<Available> {
-    let text = std::fs::read_to_string(offer_path()).ok()?;
-    let available: Available = serde_json::from_str(&text).ok()?;
-    arbos_update::version::is_newer(&available.item.version, &current_version())
-        .then_some(available)
+/// failures in a row — so the build it had already found was never named again.
+///
+/// This is the only place the file is read, and an [`UpdatePhase`] is the only thing it can
+/// produce. That is deliberate. The file names a version and nothing else: no URL to download
+/// from, no length, no signature. [`UpdatePhase::FoundEarlier`] carries no [`Available`], and an
+/// `Available` is the only thing `AppState::install_update` can act on, so no writer of this
+/// file can choose what installs — or cause anything to install at all. The feed is asked again
+/// for the build itself ([`UpdateCommand::Install`]).
+pub fn remembered_phase() -> Option<UpdatePhase> {
+    phase_from_offer_file(&offer_path(), &current_version())
 }
 
-pub fn remember_offer(available: &Available) {
-    let path = offer_path();
+pub(crate) fn phase_from_offer_file(path: &std::path::Path, current: &str) -> Option<UpdatePhase> {
+    offer_phase(&std::fs::read_to_string(path).ok()?, current)
+}
+
+fn offer_phase(text: &str, current: &str) -> Option<UpdatePhase> {
+    let version = offer_version(text)?;
+    arbos_update::version::is_newer(&version, current)
+        .then_some(UpdatePhase::FoundEarlier { version })
+}
+
+/// The file's `version`, when it is shaped like one of ours. A status line is the one thing this
+/// file can affect, so what reaches it is held to digits and dots at a sane length.
+fn offer_version(text: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let version = value.get("version")?.as_str()?;
+    let shaped = !version.is_empty()
+        && version.len() <= 32
+        && version.chars().all(|c| c.is_ascii_digit() || c == '.');
+    shaped.then(|| version.to_string())
+}
+
+/// Remember that a check found `version`, so a restart can still say so.
+///
+/// Only the version is kept. The URL, the length and the signature are deliberately left out:
+/// keeping them would let whoever can write this file pick the bytes an install fetches, and
+/// they cost nothing to fetch again from the feed at install time.
+pub fn remember_offer(version: &str) {
+    write_offer_file(&offer_path(), version);
+}
+
+fn write_offer_file(path: &std::path::Path, version: &str) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    if let Ok(json) = serde_json::to_string_pretty(available) {
-        let _ = std::fs::write(path, json);
-    }
+    let _ = std::fs::write(path, offer_text(version));
 }
 
-/// Forget the offer: a check said we are up to date, or the build has been installed.
+fn offer_text(version: &str) -> String {
+    serde_json::json!({ "version": version }).to_string()
+}
+
+/// Forget it: a check said we are up to date, or the build has been installed.
 pub fn forget_offer() {
     let _ = std::fs::remove_file(offer_path());
 }
@@ -204,6 +238,12 @@ pub enum UpdatePhase {
     /// date, which is what the app used to show for it.
     CheckFailed {
         message: String,
+    },
+    /// An earlier run found this build and this run has not checked yet. A version and nothing
+    /// else, so it tells the person what is waiting without being something to install: there is
+    /// no [`Available`] here, and `AppState::install_update` needs one.
+    FoundEarlier {
+        version: String,
     },
     /// A newer build is in the feed; the rail button shows.
     Available(Available),
@@ -261,7 +301,9 @@ impl UpdateState {
         Self {
             current_version: current_version(),
             feed_url: feed_url(),
-            phase: UpdatePhase::Idle,
+            // A build an earlier run found is named again before the first check answers, so a
+            // restart does not throw away what the app already knows.
+            phase: remembered_phase().unwrap_or(UpdatePhase::Idle),
             last_checked_at: None,
             needs_relocation: needs_relocation(),
             auto: auto_update_enabled(),
@@ -280,7 +322,8 @@ impl UpdateState {
             UpdatePhase::Idle
             | UpdatePhase::Checking
             | UpdatePhase::UpToDate
-            | UpdatePhase::CheckFailed { .. } => None,
+            | UpdatePhase::CheckFailed { .. }
+            | UpdatePhase::FoundEarlier { .. } => None,
         }
     }
 
@@ -337,6 +380,7 @@ impl UpdateState {
                 | UpdatePhase::Checking
                 | UpdatePhase::UpToDate
                 | UpdatePhase::CheckFailed { .. }
+                | UpdatePhase::FoundEarlier { .. }
                 | UpdatePhase::Available(_)
                 | UpdatePhase::Downloading { .. }
                 | UpdatePhase::Installed { .. }
@@ -355,7 +399,8 @@ impl UpdateState {
             UpdatePhase::Idle
             | UpdatePhase::Checking
             | UpdatePhase::UpToDate
-            | UpdatePhase::CheckFailed { .. } => DiscAction::Hidden,
+            | UpdatePhase::CheckFailed { .. }
+            | UpdatePhase::FoundEarlier { .. } => DiscAction::Hidden,
         }
     }
 
@@ -414,6 +459,7 @@ impl UpdateState {
                     | UpdatePhase::UpToDate
                     | UpdatePhase::Checking
                     | UpdatePhase::CheckFailed { .. }
+                    | UpdatePhase::FoundEarlier { .. }
             )
         {
             return format!(
@@ -427,6 +473,10 @@ impl UpdateState {
             UpdatePhase::UpToDate => format!("Arbos {} · up to date", self.current_version),
             UpdatePhase::CheckFailed { message } => format!(
                 "Arbos {} · could not check for updates ({message})",
+                self.current_version
+            ),
+            UpdatePhase::FoundEarlier { version } => format!(
+                "Arbos {} · {version} was found earlier; check for updates to install it",
                 self.current_version
             ),
             UpdatePhase::Available(a) => format!(
@@ -517,16 +567,9 @@ pub async fn run(
     let os = arbos_update::current_os();
     let current = state.current_version.clone();
     let feed = state.feed_url.clone();
-    // An offer a previous run found is live again before the first check answers, so a build
-    // that was already found stays installable across a restart and through a network outage.
-    let mut known: Option<Available> = remembered_offer();
-    if let Some(available) = known.clone() {
-        log(format!(
-            "offer kept from the last run: {} (running {current})",
-            available.item.version
-        ));
-        let _ = events.send(UpdateEvent::Available(Box::new(available)));
-    }
+    // What this run's own checks have found. The worker never reads the remembered version:
+    // only a feed answer becomes something to install.
+    let mut known: Option<Available> = None;
     let mut next_poll = tokio::time::Instant::now() + Duration::from_secs(5);
 
     loop {
@@ -557,7 +600,7 @@ pub async fn run(
                             ));
                         }
                         known = Some(available.clone());
-                        remember_offer(&available);
+                        remember_offer(&available.item.version);
                         let _ = events.send(UpdateEvent::Available(Box::new(available)));
                     }
                     Ok(None) => {
@@ -591,16 +634,47 @@ pub async fn run(
                 }
             }
             UpdateCommand::Install => {
-                let Some(available) = known.clone() else {
-                    log("install asked for with no build to install (no check has succeeded yet)");
-                    let _ = events.send(UpdateEvent::Failed(
-                        "Could not check for updates, so there is nothing to install yet.".into(),
-                    ));
-                    continue;
+                // The feed says what installs, and nothing else does. When this run has not
+                // checked yet — the app has only a version an earlier run remembered — the feed
+                // is asked now for the build, its URL, its length and its signature, rather
+                // than any of those being read back off disk.
+                let available = match known.clone() {
+                    Some(available) => available,
+                    None => match client::check(&feed, &current, os).await {
+                        Ok(Some(available))
+                            if arbos_update::version::is_newer(
+                                &available.item.version,
+                                &current,
+                            ) =>
+                        {
+                            log(format!(
+                                "install asked for; the feed names {} (running {current})",
+                                available.item.version
+                            ));
+                            remember_offer(&available.item.version);
+                            known = Some(available.clone());
+                            available
+                        }
+                        Ok(_) => {
+                            log("install asked for; the feed says this is the newest build");
+                            forget_offer();
+                            let _ = events.send(UpdateEvent::UpToDate);
+                            continue;
+                        }
+                        Err(err) => {
+                            log(format!("install asked for, but the check failed: {err:#}"));
+                            let _ = events.send(UpdateEvent::Failed(format!(
+                                "Could not check for updates, so there is nothing to install yet ({}).",
+                                arbos_update::fetch::describe(&err)
+                            )));
+                            continue;
+                        }
+                    },
                 };
                 let outcome = install(&available, &events).await;
                 match outcome {
                     Ok(installed) => {
+                        forget_offer();
                         let _ = events.send(UpdateEvent::Installed(installed));
                     }
                     Err(err) => {
@@ -917,6 +991,85 @@ mod disc_tests {
             line.contains("the server name could not be looked up"),
             "{line}"
         );
+    }
+
+    /// Whoever can write `<config>/update-offer.json` must not be able to choose what installs,
+    /// or to cause anything to install at all. The file is held to a version string, and a
+    /// version string cannot become a download: there is no URL, length or signature in it, and
+    /// `FoundEarlier` carries no `Available`, which is the only thing the disc and
+    /// `AppState::install_update` act on.
+    #[test]
+    fn a_hostile_offer_file_can_only_reach_the_status_line() {
+        // A genuine, correctly signed, older-than-newest build, served from this machine.
+        let hostile = r#"{
+            "version": "0.6.379",
+            "url": "http://127.0.0.1:8080/Arbos-0.6.379-macos-universal.tar.gz",
+            "length": 70096176,
+            "ed_signature": "PzcQAwgSljx6fP+h8/sxR/wcU4rYuXGfEA3vij0p1fUK8Bgc",
+            "item": { "version": "0.6.379" }
+        }"#;
+
+        let phase = super::offer_phase(hostile, "0.6.218").expect("a version is named");
+        assert_eq!(
+            phase,
+            UpdatePhase::FoundEarlier {
+                version: "0.6.379".into()
+            },
+            "the version is all that survives: no URL, no length, no signature"
+        );
+
+        for auto in [false, true] {
+            let s = state(phase.clone(), auto);
+            assert!(
+                s.available().is_none(),
+                "nothing for install_update to act on (auto {auto})"
+            );
+            assert!(!s.has_installable_update(), "auto {auto}");
+            assert_eq!(s.disc_action(), DiscAction::Hidden, "auto {auto}");
+            assert_eq!(s.click_action(), DiscAction::Hidden, "auto {auto}");
+        }
+
+        // The named residual: a version that was never offered reaches the status line, and
+        // that is the whole of it. The byte source never does.
+        let line = state(phase, false).status_line();
+        assert!(line.contains("0.6.379"), "{line}");
+        assert!(!line.contains("127.0.0.1"), "{line}");
+        assert!(!line.contains("ed_signature"), "{line}");
+    }
+
+    /// Only a version, and only one shaped like ours. The status line is the one thing this file
+    /// can affect, so it does not get to put arbitrary text there either.
+    #[test]
+    fn an_offer_file_is_read_as_a_version_or_not_at_all() {
+        assert_eq!(
+            super::offer_phase(&super::offer_text("0.6.380"), "0.6.218"),
+            Some(UpdatePhase::FoundEarlier {
+                version: "0.6.380".into()
+            }),
+            "what remember_offer writes is what start-up reads"
+        );
+        assert!(
+            !super::offer_text("0.6.380").contains("url"),
+            "the file we write holds no byte source"
+        );
+
+        for rejected in [
+            r#"{"version": "0.6.218"}"#,             // not newer than what is running
+            r#"{"version": "0.6.1"}"#,               // older
+            r#"{"version": "0.6.380-evil"}"#,        // not a version shape
+            r#"{"version": "../../../etc/passwd"}"#, // not a version shape
+            r#"{"version": "\u001b]0;pwned\u0007"}"#, // no terminal escapes
+            r#"{"version": 380}"#,                   // not a string
+            r#"{"url": "http://127.0.0.1/x.tar.gz"}"#, // no version at all
+            r#"{"item": {"version": "0.6.380"}}"#,   // the old whole-Available shape
+            "not json at all",
+            "",
+        ] {
+            assert_eq!(super::offer_phase(rejected, "0.6.218"), None, "{rejected}");
+        }
+
+        let long = format!(r#"{{"version": "{}"}}"#, "9".repeat(64));
+        assert_eq!(super::offer_phase(&long, "0.6.218"), None, "bounded length");
     }
 
     /// The offer is what the disc acts on, so a build already found stays installable whatever

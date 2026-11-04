@@ -1454,7 +1454,10 @@ impl AppState {
             UpdateEvent::Checking => {
                 if matches!(
                     self.update.phase,
-                    UpdatePhase::Idle | UpdatePhase::UpToDate | UpdatePhase::CheckFailed { .. }
+                    UpdatePhase::Idle
+                        | UpdatePhase::UpToDate
+                        | UpdatePhase::CheckFailed { .. }
+                        | UpdatePhase::FoundEarlier { .. }
                 ) {
                     self.update.phase = UpdatePhase::Checking;
                 }
@@ -1468,9 +1471,13 @@ impl AppState {
             // A check that did not finish is not good news. It must not overwrite a build we
             // are already offering, and it must never read as "up to date".
             UpdateEvent::CheckFailed(message) => {
+                // A failed check never withdraws what the app already knows. A version an
+                // earlier run found names the build, which is the more useful of the two
+                // things we could say; pressing "Check now" is what surfaces the reason.
                 if !self.update.busy()
                     && self.pending_relaunch.is_none()
                     && self.update.available().is_none()
+                    && !matches!(self.update.phase, UpdatePhase::FoundEarlier { .. })
                 {
                     self.update.phase = UpdatePhase::CheckFailed { message };
                 }
@@ -1641,6 +1648,7 @@ impl AppState {
             | UpdatePhase::Checking
             | UpdatePhase::UpToDate
             | UpdatePhase::CheckFailed { .. }
+            | UpdatePhase::FoundEarlier { .. }
             | UpdatePhase::Available(_)
             | UpdatePhase::Downloading { .. }
             | UpdatePhase::Installing(_)
@@ -13822,6 +13830,64 @@ mod update_restart_chain_tests {
             assert!(matches!(s.update.phase, UpdatePhase::CheckFailed { .. }));
             let line = s.update.status_line();
             assert!(!line.contains("up to date"), "{line}");
+        });
+    }
+
+    /// Whoever can write `<config>/update-offer.json` must not be able to start an install or
+    /// choose its bytes. Shown rather than asserted: a hostile file goes through the real
+    /// read-and-parse path, the phase it produces is handed to a running app with automatic
+    /// updates **on**, and the worker is sent nothing — the arm that installs needs an
+    /// `Available`, and the file cannot make one.
+    #[gpui::test]
+    fn an_offer_file_can_neither_start_an_install_nor_choose_its_bytes(cx: &mut TestAppContext) {
+        let path = std::env::temp_dir().join(format!(
+            "arbos-hostile-offer-{}-{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        // A version that was never offered, and bytes from this machine.
+        std::fs::write(
+            &path,
+            r#"{"version":"9.9.9","url":"http://127.0.0.1:8080/Arbos.tar.gz","length":1,"ed_signature":"x"}"#,
+        )
+        .expect("write the hostile file");
+        let phase =
+            update::phase_from_offer_file(&path, "0.6.333").expect("the file names a version");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(
+            phase,
+            UpdatePhase::FoundEarlier {
+                version: "9.9.9".into()
+            },
+            "the version is all that survives the read"
+        );
+
+        let (_rt, state, mut rx) = mount(cx);
+        state.update(cx, |s, cx| {
+            assert!(s.update.auto, "the dangerous case: automatic updates on");
+            s.update.phase = phase;
+            // Everything that could carry the file into an install, in one place.
+            s.install_update(cx);
+            s.apply_update(UpdateEvent::CheckFailed("dns".into()), cx);
+            s.install_update(cx);
+        });
+        assert_eq!(
+            installs(&mut rx),
+            0,
+            "no path from the file reaches the worker"
+        );
+
+        state.update(cx, |s, _| {
+            assert!(s.update.available().is_none(), "nothing to download");
+            assert_eq!(s.update.click_action(), update::DiscAction::Hidden);
+            let line = s.update.status_line();
+            assert!(line.contains("9.9.9"), "the one effect, named: {line}");
+            assert!(!line.contains("127.0.0.1"), "{line}");
+            assert!(
+                matches!(s.update.phase, UpdatePhase::FoundEarlier { .. }),
+                "a failed check does not withdraw what an earlier run found"
+            );
         });
     }
 
