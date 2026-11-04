@@ -1,0 +1,290 @@
+{
+ "image": "0.1.191",
+ "image_sha": "cf3842f42459545d5bc735b37540631209dcecd5",
+ "scores": [
+  {
+   "task": "rs1-affine-read-website",
+   "agent": "Misc (comparison)",
+   "image": "n/a",
+   "items": {
+    "task_success": {
+     "score": 2,
+     "why": "12/12 fact slots filled (100%)",
+     "evidence": null
+    },
+    "investigation": {
+     "score": 2,
+     "why": "reached 3 script/data endpoint(s) after the page",
+     "evidence": [
+      "curl -s https://affine.io/k1.json",
+      "curl -s https://affine.io/k1.json",
+      "curl -s https://affine.io/k1/tables.json"
+     ]
+    },
+    "retry": {
+     "score": 2,
+     "why": "retried curl -s https://affine.io/k1.json after 'curl: (35) SSL connect error' and got through",
+     "evidence": null
+    },
+    "no_confabulation": {
+     "score": 2,
+     "why": "no cause claimed",
+     "evidence": null
+    },
+    "commits": {
+     "score": 2,
+     "why": "committed to an answer",
+     "evidence": null
+    },
+    "counts": {
+     "score": null,
+     "why": "nothing countable produced",
+     "evidence": null
+    },
+    "paging": {
+     "score": 2,
+     "why": "no target fetched twice",
+     "evidence": null
+    },
+    "autonomy": {
+     "score": 2,
+     "why": "0 nudge(s)",
+     "evidence": null
+    }
+   },
+   "score": 14,
+   "out_of": 14,
+   "share": 1.0,
+   "na": [
+    "counts"
+   ],
+   "nudges": 0
+  },
+  {
+   "task": "rs1-affine-read-website",
+   "agent": "Test3",
+   "image": "0.1.191",
+   "items": {
+    "task_success": {
+     "score": 0,
+     "why": "0/12 fact slots filled (0%)",
+     "evidence": null
+    },
+    "investigation": {
+     "score": 0,
+     "why": "the page came back empty and nothing was fetched after it",
+     "evidence": null
+    },
+    "retry": {
+     "score": null,
+     "why": "no transient error in the transcript",
+     "evidence": null
+    },
+    "no_confabulation": {
+     "score": 0,
+     "why": "1 claim(s) contradicted by the agent's own data",
+     "evidence": [
+      "'Submissions are closed (accepting_submissions: false)' against queue.enabled true and the 8 valid queue batches the comparison agent read from the same site"
+     ]
+    },
+    "commits": {
+     "score": 0,
+     "why": "no answer committed to (hand-scored)",
+     "evidence": null
+    },
+    "counts": {
+     "score": null,
+     "why": "nothing countable produced",
+     "evidence": null
+    },
+    "paging": {
+     "score": 2,
+     "why": "no target fetched twice",
+     "evidence": null
+    },
+    "autonomy": {
+     "score": 0,
+     "why": "3 nudge(s)",
+     "evidence": null
+    }
+   },
+   "score": 2,
+   "out_of": 12,
+   "share": 0.167,
+   "na": [
+    "counts",
+    "retry"
+   ],
+   "nudges": 3
+  },
+  {
+   "task": "rs2-santa-teresa-listings",
+   "agent": "Test3",
+   "image": "0.1.191",
+   "items": {
+    "task_success": {
+     "score": null,
+     "why": "no fact checklist scored for this prompt",
+     "evidence": null
+    },
+    "investigation": {
+     "score": 0,
+     "why": "no fetch of any kind",
+     "evidence": null
+    },
+    "retry": {
+     "score": null,
+     "why": "no transient error in the transcript",
+     "evidence": null
+    },
+    "no_confabulation": {
+     "score": null,
+     "why": "agentd log only: an aborted call leaves no record on this image (AF-782)",
+     "evidence": null
+    },
+    "commits": {
+     "score": 2,
+     "why": "no generic non-answer phrase; a pick is stated",
+     "evidence": null
+    },
+    "counts": {
+     "score": 0,
+     "why": "stated 15, produced 16 \u2014 off by 1",
+     "evidence": null
+    },
+    "paging": {
+     "score": null,
+     "why": "no fetch came back, so nothing could be paged",
+     "evidence": null
+    },
+    "autonomy": {
+     "score": 2,
+     "why": "0 nudge(s)",
+     "evidence": null
+    }
+   },
+   "score": 4,
+   "out_of": 8,
+   "share": 0.5,
+   "na": [
+    "no_confabulation",
+    "paging",
+    "retry",
+    "task_success"
+   ],
+   "nudges": 0
+  },
+  {
+   "task": "rs3-llms-txt-read",
+   "agent": "Test4",
+   "image": "0.1.191",
+   "items": {
+    "task_success": {
+     "score": null,
+     "why": "no fact checklist scored for this prompt",
+     "evidence": null
+    },
+    "investigation": {
+     "score": 1,
+     "why": "fetched only what the prompt named; no empty result to escalate from",
+     "evidence": null
+    },
+    "retry": {
+     "score": null,
+     "why": "no transient error in the transcript",
+     "evidence": null
+    },
+    "no_confabulation": {
+     "score": null,
+     "why": "the agent's words are not in evidence",
+     "evidence": null
+    },
+    "commits": {
+     "score": null,
+     "why": "the agent's words are not in evidence",
+     "evidence": null
+    },
+    "counts": {
+     "score": null,
+     "why": "nothing countable produced",
+     "evidence": null
+    },
+    "paging": {
+     "score": 0,
+     "why": "relay.arbos.life/llms.txt fetched 5 times instead of paged",
+     "evidence": [
+      "relay.arbos.life/llms.txt"
+     ]
+    },
+    "autonomy": {
+     "score": 2,
+     "why": "0 nudge(s)",
+     "evidence": null
+    }
+   },
+   "score": 3,
+   "out_of": 6,
+   "share": 0.5,
+   "na": [
+    "commits",
+    "counts",
+    "no_confabulation",
+    "retry",
+    "task_success"
+   ],
+   "nudges": 0
+  }
+ ],
+ "before_summary": {
+  "tasks": 3,
+  "score": 9,
+  "out_of": 26,
+  "share": 0.346,
+  "items": {
+   "task_success": {
+    "mean": 0.0,
+    "scored": 1,
+    "na": 2
+   },
+   "investigation": {
+    "mean": 0.33,
+    "scored": 3,
+    "na": 0
+   },
+   "retry": {
+    "mean": null,
+    "scored": 0,
+    "na": 3
+   },
+   "no_confabulation": {
+    "mean": 0.0,
+    "scored": 1,
+    "na": 2
+   },
+   "commits": {
+    "mean": 1.0,
+    "scored": 2,
+    "na": 1
+   },
+   "counts": {
+    "mean": 0.0,
+    "scored": 1,
+    "na": 2
+   },
+   "paging": {
+    "mean": 1.0,
+    "scored": 2,
+    "na": 1
+   },
+   "autonomy": {
+    "mean": 1.33,
+    "scored": 3,
+    "na": 0
+   }
+  },
+  "weakest": {
+   "item": "task_success",
+   "mean": 0.0
+  }
+ }
+}
