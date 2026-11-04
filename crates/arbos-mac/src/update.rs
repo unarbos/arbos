@@ -148,6 +148,40 @@ pub fn auto_update_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// `<config>/update-offer.json`: the newest build a check has found.
+fn offer_path() -> std::path::PathBuf {
+    crate::sync::credentials::config_dir().join("update-offer.json")
+}
+
+/// The offer a previous run found, when it is still newer than what is running.
+///
+/// Without this the only record of "0.6.380 is available" is in memory, so a relaunch threw it
+/// away and only a *successful* check could bring it back. On 2026-11-03 Jacob's Mac found
+/// 0.6.379 and then 0.6.380 while running 0.6.378, was restarted, and then met 59 resolver
+/// failures in a row — so the build it had already found was never offered again and the footer
+/// disc had nothing to show.
+pub fn remembered_offer() -> Option<Available> {
+    let text = std::fs::read_to_string(offer_path()).ok()?;
+    let available: Available = serde_json::from_str(&text).ok()?;
+    arbos_update::version::is_newer(&available.item.version, &current_version())
+        .then_some(available)
+}
+
+pub fn remember_offer(available: &Available) {
+    let path = offer_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(available) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+/// Forget the offer: a check said we are up to date, or the build has been installed.
+pub fn forget_offer() {
+    let _ = std::fs::remove_file(offer_path());
+}
+
 pub fn save_auto_update(enabled: bool) {
     let mut settings = read_settings();
     settings.insert("auto_update".into(), serde_json::Value::Bool(enabled));
@@ -166,6 +200,11 @@ pub enum UpdatePhase {
     Idle,
     Checking,
     UpToDate,
+    /// The check itself did not finish — no feed answered. Never the same thing as being up to
+    /// date, which is what the app used to show for it.
+    CheckFailed {
+        message: String,
+    },
     /// A newer build is in the feed; the rail button shows.
     Available(Available),
     Downloading {
@@ -238,7 +277,10 @@ impl UpdateState {
             | UpdatePhase::Installed { available: a, .. }
             | UpdatePhase::Restarting(a) => Some(a),
             UpdatePhase::Failed { available, .. } => available.as_ref(),
-            UpdatePhase::Idle | UpdatePhase::Checking | UpdatePhase::UpToDate => None,
+            UpdatePhase::Idle
+            | UpdatePhase::Checking
+            | UpdatePhase::UpToDate
+            | UpdatePhase::CheckFailed { .. } => None,
         }
     }
 
@@ -294,6 +336,7 @@ impl UpdateState {
                 UpdatePhase::Idle
                 | UpdatePhase::Checking
                 | UpdatePhase::UpToDate
+                | UpdatePhase::CheckFailed { .. }
                 | UpdatePhase::Available(_)
                 | UpdatePhase::Downloading { .. }
                 | UpdatePhase::Installed { .. }
@@ -309,7 +352,10 @@ impl UpdateState {
             | UpdatePhase::Installing(_)
             | UpdatePhase::Restarting(_) => DiscAction::Busy,
             UpdatePhase::Installed { .. } => DiscAction::Relaunch,
-            UpdatePhase::Idle | UpdatePhase::Checking | UpdatePhase::UpToDate => DiscAction::Hidden,
+            UpdatePhase::Idle
+            | UpdatePhase::Checking
+            | UpdatePhase::UpToDate
+            | UpdatePhase::CheckFailed { .. } => DiscAction::Hidden,
         }
     }
 
@@ -364,7 +410,10 @@ impl UpdateState {
         if self.button_moves()
             && matches!(
                 self.phase,
-                UpdatePhase::Idle | UpdatePhase::UpToDate | UpdatePhase::Checking
+                UpdatePhase::Idle
+                    | UpdatePhase::UpToDate
+                    | UpdatePhase::Checking
+                    | UpdatePhase::CheckFailed { .. }
             )
         {
             return format!(
@@ -376,6 +425,10 @@ impl UpdateState {
             UpdatePhase::Idle => format!("Arbos {}", self.current_version),
             UpdatePhase::Checking => format!("Arbos {} · checking…", self.current_version),
             UpdatePhase::UpToDate => format!("Arbos {} · up to date", self.current_version),
+            UpdatePhase::CheckFailed { message } => format!(
+                "Arbos {} · could not check for updates ({message})",
+                self.current_version
+            ),
             UpdatePhase::Available(a) => format!(
                 "Arbos {} · {} is available",
                 self.current_version, a.item.version
@@ -435,6 +488,9 @@ pub enum UpdateCommand {
 pub enum UpdateEvent {
     Checking,
     UpToDate,
+    /// No feed answered. Distinct from [`UpdateEvent::UpToDate`]: reporting a failed check as
+    /// "up to date" is what hid a published build from Jacob's Mac on 2026-11-03.
+    CheckFailed(String),
     Available(Box<Available>),
     Progress {
         got: u64,
@@ -461,7 +517,16 @@ pub async fn run(
     let os = arbos_update::current_os();
     let current = state.current_version.clone();
     let feed = state.feed_url.clone();
-    let mut known: Option<Available> = None;
+    // An offer a previous run found is live again before the first check answers, so a build
+    // that was already found stays installable across a restart and through a network outage.
+    let mut known: Option<Available> = remembered_offer();
+    if let Some(available) = known.clone() {
+        log(format!(
+            "offer kept from the last run: {} (running {current})",
+            available.item.version
+        ));
+        let _ = events.send(UpdateEvent::Available(Box::new(available)));
+    }
     let mut next_poll = tokio::time::Instant::now() + Duration::from_secs(5);
 
     loop {
@@ -480,6 +545,7 @@ pub async fn run(
                     Ok(Some(available)) => {
                         if !arbos_update::version::is_newer(&available.item.version, &current) {
                             known = None;
+                            forget_offer();
                             let _ = events.send(UpdateEvent::UpToDate);
                             continue;
                         }
@@ -491,17 +557,23 @@ pub async fn run(
                             ));
                         }
                         known = Some(available.clone());
+                        remember_offer(&available);
                         let _ = events.send(UpdateEvent::Available(Box::new(available)));
                     }
                     Ok(None) => {
                         known = None;
+                        forget_offer();
                         let _ = events.send(UpdateEvent::UpToDate);
                     }
                     Err(err) => {
                         log(format!("check {feed} failed: {err:#}"));
-                        // A failed poll is not news; keep whatever we knew.
+                        // A failed poll is not news; keep whatever we knew. With nothing known
+                        // it is still not good news: saying "up to date" here is what left a
+                        // published build unreachable behind a run of failing checks.
                         if known.is_none() {
-                            let _ = events.send(UpdateEvent::UpToDate);
+                            let _ = events.send(UpdateEvent::CheckFailed(
+                                arbos_update::fetch::describe(&err),
+                            ));
                         }
                     }
                 }
@@ -520,7 +592,10 @@ pub async fn run(
             }
             UpdateCommand::Install => {
                 let Some(available) = known.clone() else {
-                    let _ = events.send(UpdateEvent::Failed("no update to install".into()));
+                    log("install asked for with no build to install (no check has succeeded yet)");
+                    let _ = events.send(UpdateEvent::Failed(
+                        "Could not check for updates, so there is nothing to install yet.".into(),
+                    ));
                     continue;
                 };
                 let outcome = install(&available, &events).await;
@@ -816,6 +891,45 @@ mod disc_tests {
             state(phase("failed"), true).disc_action(),
             DiscAction::Install
         );
+    }
+
+    /// Jacob (2026-11-03): after 0.6.380 was found, every later check failed on the resolver
+    /// (59 of them). A check that did not finish was reported as `UpToDate`, which Settings
+    /// reads as "up to date" — so the app claimed the opposite of the truth and the footer disc
+    /// had nothing to show. The failure now says what happened.
+    #[test]
+    fn a_failed_check_never_claims_to_be_up_to_date() {
+        let s = state(
+            UpdatePhase::CheckFailed {
+                message: "the server name could not be looked up".into(),
+            },
+            false,
+        );
+        assert_eq!(
+            s.disc_action(),
+            DiscAction::Hidden,
+            "nothing to install yet"
+        );
+        let line = s.status_line();
+        assert!(!line.contains("up to date"), "{line}");
+        assert!(line.contains("could not check for updates"), "{line}");
+        assert!(
+            line.contains("the server name could not be looked up"),
+            "{line}"
+        );
+    }
+
+    /// The offer is what the disc acts on, so a build already found stays installable whatever
+    /// the last check did. Both automatic modes show it.
+    #[test]
+    fn an_offer_stays_installable_after_a_check_fails() {
+        for auto in [false, true] {
+            assert_eq!(
+                state(phase("available"), auto).click_action(),
+                DiscAction::Install,
+                "auto {auto}"
+            );
+        }
     }
 
     /// A build that is not newer than the running one never lights the disc,

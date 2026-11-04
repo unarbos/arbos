@@ -100,6 +100,7 @@ impl Shell {
             }
             crate::update::UpdatePhase::Idle
             | crate::update::UpdatePhase::UpToDate
+            | crate::update::UpdatePhase::CheckFailed { .. }
             | crate::update::UpdatePhase::Failed {
                 available: None, ..
             } => Some(("update-check", "Check now", false)),

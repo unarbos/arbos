@@ -22,8 +22,10 @@ use crate::sign::PublicKey;
 /// Download progress: bytes so far, total when the server says.
 pub type ProgressFn = Arc<dyn Fn(u64, Option<u64>) + Send + Sync>;
 
-/// What a successful check found.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// What a successful check found. Serialized so the app can keep the offer across a restart:
+/// the only other record of it is in memory, and losing it leaves a Mac unable to install a
+/// build it has already been told about.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Available {
     pub item: Item,
     pub url: String,
@@ -753,6 +755,29 @@ mod tests {
                 "/private/var/folders/xx/yy/T/AppTranslocation/UUID/d/Arbos.app"
             ))
         );
+    }
+
+    /// The app keeps the offer on disk so a restart does not lose the build it already found,
+    /// which means everything needed to install it has to survive the round trip.
+    #[test]
+    fn an_offer_survives_being_written_and_read_back() {
+        let offer = Available {
+            item: crate::appcast::Item {
+                title: "0.6.380".into(),
+                version: "0.6.380".into(),
+                build: "380".into(),
+                minimum_system_version: Some("14.0".into()),
+                ..Default::default()
+            },
+            url: "https://github.com/unarbos/arbos/releases/download/v0.6.380/Arbos-0.6.380-macos-universal.tar.gz".into(),
+            length: 70_096_176,
+            ed_signature: "PzcQAwgSljx6fP+h8/sxR/wcU4rYuXGfEA3vij0p1fUK8Bgc".into(),
+        };
+        let json = serde_json::to_string(&offer).expect("write");
+        let back: Available = serde_json::from_str(&json).expect("read");
+        assert_eq!(back, offer);
+        assert_eq!(back.length, 70_096_176);
+        assert_eq!(back.ed_signature, offer.ed_signature);
     }
 
     #[test]

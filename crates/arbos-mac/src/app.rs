@@ -1452,7 +1452,10 @@ impl AppState {
     fn apply_update(&mut self, event: UpdateEvent, cx: &mut Context<Self>) {
         match event {
             UpdateEvent::Checking => {
-                if matches!(self.update.phase, UpdatePhase::Idle | UpdatePhase::UpToDate) {
+                if matches!(
+                    self.update.phase,
+                    UpdatePhase::Idle | UpdatePhase::UpToDate | UpdatePhase::CheckFailed { .. }
+                ) {
                     self.update.phase = UpdatePhase::Checking;
                 }
             }
@@ -1460,6 +1463,16 @@ impl AppState {
                 self.update.last_checked_at = Some(now_ms());
                 if !self.update.busy() && self.pending_relaunch.is_none() {
                     self.update.phase = UpdatePhase::UpToDate;
+                }
+            }
+            // A check that did not finish is not good news. It must not overwrite a build we
+            // are already offering, and it must never read as "up to date".
+            UpdateEvent::CheckFailed(message) => {
+                if !self.update.busy()
+                    && self.pending_relaunch.is_none()
+                    && self.update.available().is_none()
+                {
+                    self.update.phase = UpdatePhase::CheckFailed { message };
                 }
             }
             UpdateEvent::Available(available) => {
@@ -1627,6 +1640,7 @@ impl AppState {
             UpdatePhase::Idle
             | UpdatePhase::Checking
             | UpdatePhase::UpToDate
+            | UpdatePhase::CheckFailed { .. }
             | UpdatePhase::Available(_)
             | UpdatePhase::Downloading { .. }
             | UpdatePhase::Installing(_)
@@ -1762,7 +1776,14 @@ impl AppState {
             return;
         }
         match self.update.click_action() {
-            update::DiscAction::Hidden | update::DiscAction::Busy => {}
+            update::DiscAction::Hidden | update::DiscAction::Busy => {
+                // Used to be silent, which is how "I pressed update and nothing happened"
+                // left no trace at all in the update log.
+                update::log(format!(
+                    "install pressed with nothing to do: {}",
+                    self.update.status_line()
+                ));
+            }
             update::DiscAction::Relaunch => {
                 // "Restart now": the automatic install is done; skip the wait.
                 if let Some(installed) = self.pending_relaunch.take() {
@@ -13761,6 +13782,47 @@ mod update_restart_chain_tests {
             Some(version),
             "{version} waits for its relaunch"
         );
+    }
+
+    /// A failed check must not withdraw a build that is already offered, and on its own it must
+    /// not read as "up to date". Jacob's Mac (2026-11-03) found 0.6.380, was restarted, then met
+    /// only failing checks — and the old `UpToDate` report left the disc hidden with no way back.
+    #[gpui::test]
+    fn a_failed_check_neither_withdraws_an_offer_nor_claims_up_to_date(cx: &mut TestAppContext) {
+        let (_rt, state, mut rx) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.update.auto = false;
+            s.apply_update(UpdateEvent::Available(Box::new(build("0.6.380"))), cx);
+        });
+        assert_eq!(installs(&mut rx), 0, "automatic updates off: nothing yet");
+
+        state.update(cx, |s, cx| {
+            s.apply_update(
+                UpdateEvent::CheckFailed("the server name could not be looked up".into()),
+                cx,
+            );
+        });
+        state.update(cx, |s, cx| {
+            assert_eq!(
+                s.update.click_action(),
+                update::DiscAction::Install,
+                "0.6.380 is still the build one click installs"
+            );
+            s.install_update(cx);
+        });
+        assert_eq!(installs(&mut rx), 1, "the click reached the worker");
+
+        // Nothing offered and a check that failed: say so, never "up to date".
+        let (_rt2, fresh, _rx2) = mount(cx);
+        fresh.update(cx, |s, cx| {
+            s.apply_update(
+                UpdateEvent::CheckFailed("the connection timed out".into()),
+                cx,
+            );
+            assert!(matches!(s.update.phase, UpdatePhase::CheckFailed { .. }));
+            let line = s.update.status_line();
+            assert!(!line.contains("up to date"), "{line}");
+        });
     }
 
     #[gpui::test]
