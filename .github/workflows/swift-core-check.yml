@@ -74,6 +74,37 @@ permissions:
 # MAIN, was held in this group for 726 minutes and then got a machine in six seconds. So the long
 # main latencies in the current regime are THIS GROUP serialising, not the pool being full.
 #
+# NOT ALL OF THE WAIT IS OURS, which bounds what any concurrency change here can deliver.
+# Allocation is not FIFO. At 17:55Z on 11-04, run 41862996301 (created 15:58:10Z) had been queued
+# two hours with runner_name empty and zero steps, while three runs created 44 to 106 minutes LATER
+# — 41870076599, 41870349712, 41870386425 — held machines, acquired at 17:41, 17:34 and 17:15. All
+# four jobs request labels [macos-15]; the three running ones hold GitHub-hosted runners. So some
+# of the wait is GitHub's placement order, and no `group:` expression touches that portion.
+#
+# Two further runs looked like they had jumped the same queue and had NOT: 41877623803 and
+# 41877633751, both on cursor/swift-gate-ec2-mac-ac8d, whose heavy job requests [arbos-mac] and ran
+# on the self-hosted runner arbos-ec2-mac — a different pool, never competing for a macos-15
+# machine, and in-progress partly on cheap ubuntu-24.04 route jobs. That branch also keys its own
+# concurrency on `swift-core-check-v2-`. Compare labels before calling anything non-FIFO; two of
+# the five apparent cases here were two pools rather than queue-jumping.
+#
+# THE DEMAND IS BURSTY ON BRANCHES, NOT ON MAIN. 31 runs were created between 16:43:20Z and
+# 16:44:05Z on 11-04 — 18 `push` and 13 `pull_request`, across 18 distinct branches, NONE on main.
+# The pull_request halves all concluded `skipped` (the guard below), so the real demand was 18
+# macOS jobs in 45 seconds. Note what this is NOT: it is not one merge sequence fanning out, and
+# Option A would not prevent any of it, because every one of those runs is a `push` already sitting
+# in its own per-ref group. Branch coalescing is working as designed; the burst is 18 agents
+# pushing at once. It argues for the capacity refusal above and against nothing else.
+#
+# A live eviction, for the reader who wants one instance rather than a rate: on this branch run
+# 41877441892 concluded `cancelled` after a newer push of this very file joined its group — the
+# mechanism eating a real verdict while the file documenting it was being written. Its successor
+# then sat queued over 50 minutes, which is the long tail on that 13.9-minute median.
+#
+# Anything timed on 2026-11-04 after ~16:43Z is contaminated by that backlog (19 queued against 7
+# running at 17:55Z) and should be quoted separately rather than blended into the distribution
+# above.
+#
 # Which is the honest shape of the trade, and it is regime-dependent. When cadence is low, machines
 # are there and a per-commit group would cost nearly nothing while removing multi-hour verdict
 # delays. When cadence is high, the pool is genuinely full and the same change adds the demand
