@@ -133,10 +133,13 @@ class Box:
         return {"binary_mtime": lines[0][:19] if lines else None, "sha": sha}
 
     def refresh_etc_arbos(self):
-        """Re-copy `/etc/arbos` (pi-seed, claude-seed, prime-seed, AGENTS.md) from the box's current
-        image into its persisted `/etc` (fleet.rs `seed_etc` copies the image's /etc only on the
-        box's first boot, so a host-sandbox box keeps the seed of the image that created it). Test
-        box only; the box must be restarted afterwards so agentd re-seeds the project pi dirs."""
+        """Re-copy `/etc/arbos` (pi-seed, claude-seed, prime-seed) from the box's current image
+        into its persisted `/etc`. Normally you do not need this: since #1708 fleet.rs `seed_etc`
+        re-seeds whenever the image changed (`/etc/arbos` is in `ETC_IMAGE_TREES`, and the
+        `.arbos-seed-image` marker records which image the copy reflects), so a box that restarts
+        on a new image picks the new seed up by itself. Use it to force the copy without an image
+        change — a locally rebuilt image under the same tag. Test box only; restart the box
+        afterwards so agentd re-seeds the project pi dirs."""
         if self.provider == "daytona":
             return 1, "refresh is for host sandboxes only"
         etc = f"/var/lib/arbos-relay/boxes/{self.user}/mnt/.etc"
