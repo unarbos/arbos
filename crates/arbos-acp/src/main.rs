@@ -49,6 +49,21 @@
 //!   still offers the mode, and clamps any other non-asking mode to one that asks. Wanting the
 //!   bypass takes `--allow-bypass-permissions`, which is a flag on the owner's own command line
 //!   and reachable from nowhere else.
+//! * **Nothing but the owner's own typed command decides any of it.** The bridge reads two
+//!   environment variables — the key and the relay — and every other switch comes from the
+//!   command line; see [`ENV_READ`] for why that is load-bearing rather than tidy. The agent is
+//!   not handed the bridge's environment ([`env_for_agent`]), so the key is not in the
+//!   environment of the commands it runs. A retired variable that is set anyway is named out
+//!   loud ([`ignored_env`]) rather than dropped in silence, and the relay — which is both what
+//!   raises the owner's card and what answers it — is announced at startup and refused in clear
+//!   text ([`check_relay`]).
+//!
+//! That last point is here because two context-clean Claude Code agents, given the connect
+//! instructions and this source and asked whether they would run it, found the holes in the
+//! first attempt at it: `ARBOS_ACP_PERMISSIONS=allow` turned the asking off through the
+//! environment, `ARBOS_AGENT_KEY` sat in the environment of every command the agent ran, and
+//! `ARBOS_ACP_AGENT` and `ARBOS_RELAY_URL` went around the switches rather than relaxing them.
+//! All of it was true. All of it is closed above.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::process::Stdio;
@@ -86,6 +101,33 @@ const DEFAULT_AGENT_PACKAGE: &str = "@agentclientprotocol/claude-agent-acp@0.100
 /// which is the defect this bridge exists to close, so a session that starts in one of those is
 /// moved to `default` or not used at all.
 const ASKING_MODES: &[&str] = &["default", "plan"];
+/// Every environment variable this bridge reads, and nothing else is one.
+///
+/// The rule is worth stating as a whole rather than per-flag: **two variables, and every other
+/// switch comes from the owner's own command line.** The reason is a concrete escalation path
+/// and not neatness. Once the agent is editing files in the owner's project, one approved edit
+/// to a `.envrc` that `direnv` later evaluates, or to a shell profile, would change every
+/// future start of the bridge. A switch that a file the agent can write is able to flip is not
+/// a switch anybody should rely on, and that applies as much to *which program the bridge
+/// launches* and *what is prepended to every prompt* as to the permission mode itself.
+///
+/// The two that stay, and why each has to:
+///
+/// * `ARBOS_AGENT_KEY` — it is the secret. It belongs in the environment precisely so it is not
+///   in `argv`, which `ps` shows to every process on the machine.
+/// * `ARBOS_RELAY_URL` — a repository-wide convention; `arbos-mac`, `arbos-agentd`, `arbosctl`,
+///   `arbos-local` and the self-hosting documentation all read it, so dropping it here alone
+///   would break a documented setup to no real end. It is not harmless, though — the relay is
+///   both what raises the owner's approval card and what answers it, so a different relay is a
+///   different approver. It is therefore announced at startup and checked for TLS, which is
+///   what [`check_relay`] is for.
+///
+/// Asserted by `only_the_key_and_the_relay_come_from_the_environment`, which reads clap's own
+/// argument table, so adding `env = …` to any other argument fails the build's tests.
+const ENV_READ: &[(&str, &str)] = &[("key", "ARBOS_AGENT_KEY"), ("relay", "ARBOS_RELAY_URL")];
+/// Everything the bridge reads from its own environment starts with this. None of it is the
+/// agent's business, and one of them is the owner's relay key.
+const BRIDGE_ENV_PREFIX: &str = "ARBOS_";
 
 #[derive(Parser, Debug, Clone)]
 #[command(
@@ -105,13 +147,13 @@ struct Args {
     #[arg(long, env = "ARBOS_AGENT_KEY", hide_env_values = true)]
     key: String,
     /// The ACP agent to run (a command on PATH or a path).
-    #[arg(long, env = "ARBOS_ACP_AGENT", default_value = DEFAULT_AGENT)]
+    #[arg(long, default_value = DEFAULT_AGENT)]
     agent: String,
     /// Extra arguments for the agent, comma-separated (`--agent-args=acp,--foo`).
-    #[arg(long, env = "ARBOS_ACP_AGENT_ARGS", value_delimiter = ',')]
+    #[arg(long, value_delimiter = ',')]
     agent_args: Vec<String>,
     /// Working directory the agent's sessions open in (default: the current directory).
-    #[arg(long, env = "ARBOS_ACP_CWD")]
+    #[arg(long)]
     cwd: Option<String>,
     /// Start from the oldest stored event instead of now (replays the backlog).
     #[arg(long)]
@@ -122,29 +164,31 @@ struct Args {
     answer_all: bool,
     /// What to answer when the agent asks permission for a tool: `ask` the owner on an approval
     /// card (default), `reject` everything, or `allow` everything without asking.
-    #[arg(long, env = "ARBOS_ACP_PERMISSIONS", default_value = "ask")]
+    ///
+    /// Command line only. See [`ENV_READ`].
+    #[arg(long, default_value = "ask")]
     permissions: Permissions,
     /// Who may make this agent act, repeatable. `owner` = the person who owns the agent;
     /// `chats` = anyone in a chat it was added to; `@handle` = one person; `chat:<id>` = one
     /// chat. Default: `owner` and `chats`. A message from outside the list is kept as context
     /// and never prompts the agent.
-    #[arg(long = "allow", env = "ARBOS_ACP_ALLOW", value_delimiter = ',')]
+    ///
+    /// Command line only. See [`ENV_READ`].
+    #[arg(long = "allow", value_delimiter = ',')]
     allow: Vec<String>,
     /// How long the owner has to answer an approval card before the tool is refused.
-    #[arg(long, env = "ARBOS_ACP_APPROVAL_TIMEOUT_SECS", default_value_t = 300)]
+    #[arg(long, default_value_t = 300)]
     approval_timeout_secs: u64,
     /// Let the agent keep `bypassPermissions` — every tool runs with nothing asked.
     ///
-    /// Deliberately a flag and nothing else: no environment variable, no config file, nothing
-    /// the relay or a working directory can reach. Turning the asking off has to be something
-    /// the owner typed on their own command line.
+    /// Command line only. See [`ENV_READ`].
     #[arg(long)]
     allow_bypass_permissions: bool,
     /// Extra instructions prepended to every prompt (how this agent should behave in chat).
-    #[arg(long, env = "ARBOS_ACP_INSTRUCTIONS")]
+    #[arg(long)]
     instructions: Option<String>,
     /// ACP auth method id to use when the agent lists several (e.g. `api-key`, `chat-gpt`).
-    #[arg(long, env = "ARBOS_ACP_AUTH_METHOD")]
+    #[arg(long)]
     auth_method: Option<String>,
 }
 
@@ -280,6 +324,7 @@ async fn main() -> Result<()> {
         bail!("ARBOS_AGENT_KEY must be the agent key the Arbos app showed (arbk_…)");
     }
     let relay = args.relay.trim_end_matches('/').to_owned();
+    check_relay(&relay)?;
     let http = reqwest::Client::builder()
         .user_agent(format!("arbos-acp/{}", env!("CARGO_PKG_VERSION")))
         .build()?;
@@ -324,15 +369,33 @@ async fn main() -> Result<()> {
     } else {
         me["inbox_head"].as_i64().unwrap_or(0)
     };
+    // The relay is announced because it is also the approver: a card is raised on it and
+    // answered on it, so a relay the owner did not expect is somebody else holding the vote.
+    // It is the one safety-relevant setting that can still come from the environment, and a
+    // first line naming it is what makes that visible rather than quiet.
     tracing::info!(
         name = %agent_name, handle = %handle, protocol = %me["protocol"], chats = known_chats.len(),
         owner = %owner_handle, permissions = ?args.permissions, allow = %Allow::describe(&rules),
+        relay = %relay, agent = %args.agent,
         "connected to the relay"
     );
     if args.permissions == Permissions::Allow {
         tracing::warn!(
             "--permissions allow: every tool this agent asks for runs with nobody asked. \
              Anyone who can get a message to it can run commands here."
+        );
+    }
+    let ignored = ignored_env(RETIRED_ENV.iter().copied(), &|n| {
+        std::env::var_os(n).is_some()
+    });
+    if !ignored.is_empty() {
+        let read: Vec<&str> = ENV_READ.iter().map(|(_, var)| *var).collect();
+        tracing::warn!(
+            variables = %ignored.join(", "),
+            "these are set and are being ignored: this bridge reads only {}, and every other \
+             switch comes from the command line. Pass them there, or if you did not set these, \
+             find out what did.",
+            read.join(" and ")
         );
     }
 
@@ -1242,6 +1305,92 @@ fn on_path(program: &str) -> bool {
 /// three-command one either. The package is pinned, so this fetches a known version rather than
 /// whatever npm publishes next.
 ///
+/// `ARBOS_ACP_*` variables that are set but which nothing reads any more.
+///
+/// Silence here would be the worst of both worlds. An owner who followed older instructions and
+/// exported `ARBOS_ACP_PERMISSIONS=reject` would get the safe default anyway, but would believe
+/// something stricter was in force; and a `.envrc` quietly trying `=allow` would change nothing
+/// and say nothing, so nobody would learn it had been tried. Both get said out loud.
+///
+/// Takes the names to look for so a test does not have to touch the real environment to prove
+/// the filter works.
+fn ignored_env<'a>(names: impl Iterator<Item = &'a str>, set: &dyn Fn(&str) -> bool) -> Vec<&'a str> {
+    names
+        .filter(|n| n.starts_with("ARBOS_ACP_") && set(n))
+        .collect()
+}
+
+/// The `ARBOS_ACP_*` names this build once honoured and no longer does. Listed rather than
+/// derived, because the point is to recognise what an owner or a script may already have set.
+const RETIRED_ENV: &[&str] = &[
+    "ARBOS_ACP_PERMISSIONS",
+    "ARBOS_ACP_ALLOW",
+    "ARBOS_ACP_ALLOW_BYPASS_PERMISSIONS",
+    "ARBOS_ACP_AGENT",
+    "ARBOS_ACP_AGENT_ARGS",
+    "ARBOS_ACP_CWD",
+    "ARBOS_ACP_INSTRUCTIONS",
+    "ARBOS_ACP_AUTH_METHOD",
+    "ARBOS_ACP_APPROVAL_TIMEOUT_SECS",
+];
+
+/// Is this relay address one the owner's key can safely be sent to?
+///
+/// Plain `http` leaks the bearer token to anything on the path, so it is refused — except on a
+/// loopback address, which is how the self-hosting documentation says to run a relay locally
+/// (`http://127.0.0.1:7700`).
+fn check_relay(relay: &str) -> Result<()> {
+    let loopback = ["127.0.0.1", "localhost", "::1"];
+    if let Some(rest) = relay.strip_prefix("http://") {
+        // An IPv6 literal is bracketed and full of colons, so it has to come off whole before
+        // the port is split away.
+        let host = match rest.strip_prefix('[').and_then(|r| r.split_once(']')) {
+            Some((inside, _)) => inside,
+            None => rest.split(['/', ':']).next().unwrap_or_default(),
+        };
+        if !loopback.contains(&host) {
+            bail!(
+                "--relay {relay} is plain http, which would send the agent key in clear text. \
+                 Use https, or a loopback address for a relay on this machine."
+            );
+        }
+    } else if !relay.starts_with("https://") {
+        bail!("--relay {relay}: expected an http:// or https:// address");
+    }
+    Ok(())
+}
+
+/// Which of this process's environment variables the agent must not be given.
+///
+/// The agent runs commands the owner approved, and anything it can read it can put in a chat
+/// message. `ARBOS_AGENT_KEY` is the owner's relay key, so leaving it in the child's
+/// environment would make the key only as private as every command ever approved — and
+/// approving commands is the whole designed flow now. The rest of `ARBOS_*` is the bridge's own
+/// configuration, which the agent has no use for either.
+fn env_for_agent<'a>(vars: impl Iterator<Item = &'a str>) -> Vec<&'a str> {
+    vars.filter(|k| k.starts_with(BRIDGE_ENV_PREFIX)).collect()
+}
+
+/// The command that starts the ACP agent, built in one place so a test can read back what the
+/// child would actually be given.
+fn agent_command(args: &Args) -> Command {
+    let (program, lead) = resolve_agent(args);
+    let mut cmd = Command::new(&program);
+    cmd.args(lead.iter().chain(args.agent_args.iter().filter(|a| !a.is_empty())))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true);
+    let names: Vec<String> = std::env::vars().map(|(k, _)| k).collect();
+    for k in env_for_agent(names.iter().map(String::as_str)) {
+        cmd.env_remove(k);
+    }
+    if let Some(c) = &args.cwd {
+        cmd.current_dir(c);
+    }
+    cmd
+}
+
 /// Only the default is resolved this way. An explicit `--agent` is taken literally — the owner
 /// naming a program and getting a different one would be its own surprise.
 fn resolve_agent(args: &Args) -> (String, Vec<String>) {
@@ -1260,17 +1409,8 @@ fn resolve_agent(args: &Args) -> (String, Vec<String>) {
 
 impl Acp {
     async fn spawn(args: &Args, asks: mpsc::UnboundedSender<PermissionAsk>) -> Result<Acp> {
-        let (program, lead) = resolve_agent(args);
-        let mut cmd = Command::new(&program);
-        cmd.args(lead.iter().chain(args.agent_args.iter().filter(|a| !a.is_empty())))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true);
-        if let Some(c) = &args.cwd {
-            cmd.current_dir(c);
-        }
-        let mut child = cmd.spawn().with_context(|| {
+        let mut child = agent_command(args).spawn().with_context(|| {
+            let (program, _) = resolve_agent(args);
             if program == "npx" {
                 format!("could not start `{DEFAULT_AGENT}` with npx — is Node installed?")
             } else {
@@ -1492,44 +1632,163 @@ mod tests {
         assert_eq!(args.approval_timeout_secs, 300);
     }
 
-    /// `--allow-bypass-permissions` has to come from the owner's own command line. It is not an
-    /// environment variable and not a config value, so nothing the relay sends and no file in
-    /// the working directory can set it.
+    /// The bridge reads two environment variables — the key and the relay — and every other
+    /// switch comes from the owner's own command line.
+    ///
+    /// Two context-clean Claude Code agents, given the connect instructions and this source and
+    /// asked whether they would run it, found this the hard way. The first found that
+    /// `ARBOS_ACP_PERMISSIONS=allow` turned the asking off through the environment. Told that
+    /// was fixed, the second pointed out that `ARBOS_ACP_AGENT` and `ARBOS_RELAY_URL` went
+    /// *around* the switches rather than relaxing them — the agent variable names the program
+    /// that gets launched, and the relay is both what raises the owner's card and what answers
+    /// it, so a different relay is a different approver. Both were right.
+    ///
+    /// Every `ARBOS_ACP_*` binding is therefore gone. The relay keeps its variable, because
+    /// every Arbos binary and the self-hosting documentation read it, and is announced at
+    /// startup and TLS-checked instead.
+    ///
+    /// This reads clap's own argument table, so adding `env = …` to any other argument fails
+    /// here.
     #[test]
-    fn the_bypass_opt_in_is_reachable_only_from_the_command_line() {
+    fn only_the_key_and_the_relay_come_from_the_environment() {
         use clap::CommandFactory;
-        let arg = Args::command()
+        let cmd = Args::command();
+        let mut with_env: Vec<(String, String)> = cmd
             .get_arguments()
-            .find(|a| a.get_id() == "allow_bypass_permissions")
-            .expect("the flag exists")
-            .clone();
-        assert!(
-            arg.get_env().is_none(),
-            "no environment variable may set the bypass opt-in"
+            .filter_map(|a| {
+                a.get_env()
+                    .and_then(|e| e.to_str())
+                    .map(|e| (a.get_id().to_string(), e.to_owned()))
+            })
+            .collect();
+        with_env.sort();
+        let mut expected: Vec<(String, String)> = ENV_READ
+            .iter()
+            .map(|(id, var)| ((*id).to_owned(), (*var).to_owned()))
+            .collect();
+        expected.sort();
+        assert_eq!(
+            with_env, expected,
+            "exactly these arguments read the environment"
         );
 
-        // Positive control: the flag does exist and does parse, so the assertion above is about
-        // where it can come from and not about a flag that is missing.
+        // Positive control: the reader does find bindings when they exist — it found these two
+        // — so the short list above is a reading and not an empty instrument.
+        assert_eq!(with_env.len(), 2);
+
+        // Every switch still parses from the command line, so nothing was removed rather than
+        // narrowed.
         use clap::Parser;
         let args = Args::parse_from([
             "arbos-acp",
             "--key",
             "arbk_x",
             "--allow-bypass-permissions",
+            "--permissions",
+            "reject",
+            "--allow",
+            "owner",
+            "--agent",
+            "codex-acp",
+            "--cwd",
+            "/tmp",
+            "--approval-timeout-secs",
+            "900",
         ]);
         assert!(args.allow_bypass_permissions);
-        // And the two switches that do read the environment still only read their own names.
-        for (id, var) in [
-            ("permissions", "ARBOS_ACP_PERMISSIONS"),
-            ("allow", "ARBOS_ACP_ALLOW"),
+        assert_eq!(args.permissions, Permissions::Reject);
+        assert_eq!(args.allow, vec!["owner".to_owned()]);
+        assert_eq!(args.agent, "codex-acp");
+        assert_eq!(args.cwd.as_deref(), Some("/tmp"));
+        assert_eq!(args.approval_timeout_secs, 900);
+    }
+
+    /// A retired variable that is set anyway is reported. An attempt to relax the bridge
+    /// through the environment no longer works, and it is not allowed to be silent either.
+    #[test]
+    fn a_retired_variable_is_named_rather_than_quietly_dropped() {
+        let set = |n: &str| n == "ARBOS_ACP_PERMISSIONS" || n == "ARBOS_AGENT_KEY";
+        let said = ignored_env(
+            ["ARBOS_ACP_PERMISSIONS", "ARBOS_AGENT_KEY", "ARBOS_RELAY_URL"].into_iter(),
+            &set,
+        );
+        assert_eq!(said, vec!["ARBOS_ACP_PERMISSIONS"]);
+        // The two the bridge does read are not reported as ignored, which is the control: the
+        // filter distinguishes rather than naming everything it is given.
+        assert!(!said.contains(&"ARBOS_AGENT_KEY"));
+
+        // Nothing set: nothing said.
+        assert!(ignored_env(RETIRED_ENV.iter().copied(), &|_| false).is_empty());
+        // Everything set: everything said, so the list is complete and reachable.
+        assert_eq!(
+            ignored_env(RETIRED_ENV.iter().copied(), &|_| true).len(),
+            RETIRED_ENV.len()
+        );
+        // And the retired list really does name the switches that used to be settable.
+        assert!(RETIRED_ENV.contains(&"ARBOS_ACP_PERMISSIONS"));
+        assert!(RETIRED_ENV.contains(&"ARBOS_ACP_AGENT"));
+    }
+
+    /// The owner's key is not sent in clear text, and a relay on this machine still works.
+    #[test]
+    fn a_cleartext_relay_is_refused_unless_it_is_this_machine() {
+        let e = format!("{:#}", check_relay("http://evil.example").unwrap_err());
+        assert!(e.contains("clear text"), "{e}");
+        assert!(check_relay("http://attacker.test/relay.arbos.life").is_err());
+        assert!(check_relay("ftp://relay.arbos.life").is_err());
+
+        // Positive controls: the addresses people really use are accepted, so the refusals
+        // above are about the scheme and the host and not about a check that refuses all.
+        for ok in [
+            "https://relay.arbos.life",
+            "http://127.0.0.1:7700",
+            "http://localhost:7700",
+            "http://[::1]:7700",
         ] {
-            let a = Args::command()
-                .get_arguments()
-                .find(|a| a.get_id() == id)
-                .expect("the flag exists")
-                .clone();
-            assert_eq!(a.get_env().and_then(|e| e.to_str()), Some(var));
+            assert!(check_relay(ok).is_ok(), "{ok} should be accepted");
         }
+    }
+
+    /// The agent is not handed the owner's relay key.
+    ///
+    /// The same fresh agent noticed that `Acp::spawn` passed its whole environment through, so
+    /// `ARBOS_AGENT_KEY` sat in the environment of every command the agent ran — making the key
+    /// only as private as every approval the owner ever granted.
+    #[test]
+    fn the_agent_is_not_given_the_owners_key() {
+        let names = [
+            "ARBOS_AGENT_KEY",
+            "ARBOS_RELAY_URL",
+            "ARBOS_ACP_CWD",
+            "PATH",
+            "HOME",
+            "ANTHROPIC_API_KEY",
+        ];
+        let stripped = env_for_agent(names.into_iter());
+        assert!(stripped.contains(&"ARBOS_AGENT_KEY"), "{stripped:?}");
+        assert!(stripped.contains(&"ARBOS_RELAY_URL"), "{stripped:?}");
+        assert!(stripped.contains(&"ARBOS_ACP_CWD"), "{stripped:?}");
+        // The agent still needs an environment to run in, and its own credentials are its own.
+        assert!(!stripped.contains(&"PATH"), "{stripped:?}");
+        assert!(!stripped.contains(&"HOME"), "{stripped:?}");
+        assert!(!stripped.contains(&"ANTHROPIC_API_KEY"), "{stripped:?}");
+
+        // And the command really is built that way, read back off the command itself rather
+        // than off the helper. `None` as a value is how `std::process::Command` records a
+        // removal.
+        use clap::Parser;
+        std::env::set_var("ARBOS_AGENT_KEY", "arbk_secret");
+        let args = Args::parse_from(["arbos-acp", "--key", "arbk_x", "--agent", "true"]);
+        let cmd = agent_command(&args);
+        let removed = cmd
+            .as_std()
+            .get_envs()
+            .any(|(k, v)| k == "ARBOS_AGENT_KEY" && v.is_none());
+        std::env::remove_var("ARBOS_AGENT_KEY");
+        assert!(
+            removed,
+            "the key must be removed from the agent's environment"
+        );
     }
 
     #[test]
