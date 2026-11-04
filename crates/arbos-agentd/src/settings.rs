@@ -301,7 +301,12 @@ impl LiveModels {
         self.slots.read().await
     }
 
-    /// Replace the slots. The only writer: it keeps the sync-readable mirrors in step with them.
+    /// Replace the slots.
+    ///
+    /// **This is the only writer, and the sync-readable mirrors below are correct only because
+    /// it is.** `slots` is private and nothing else takes its write lock, so `tree_mode` cannot
+    /// drift from `decision_cfg.memory_tree`. A second writer would silently break that: add one
+    /// here, or have it update every mirror this function updates.
     pub async fn set(&self, m: Models) {
         self.tree_mode.store(
             m.decision_cfg.memory_tree.code(),
