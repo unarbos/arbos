@@ -64,11 +64,19 @@ SLOT_SH=$dir/arbos-heavy-slot.sh
 CONF
 }
 
+# Every invocation starts from a clean environment, because this suite runs in the one environment
+# the guard treats as already authorised: GITHUB_ACTIONS is set on CI, and with it set the guard
+# allows every boot. Left alone, seven refusal cases "passed" into allowing and the suite reported
+# a guard that was not being asked anything. Only c_actions_allowed puts it back, deliberately.
+clean_env=(env -u GITHUB_ACTIONS -u ARBOS_HEAVY_SLOT -u ARBOS_HEAVY_SLOTS_DIR)
+
 rung() {  # rung <install> <as> <args...> → RC, OUT. Reads ENVV, then clears it.
   local inst=$1 as=$2; shift 2
-  OUT=$(env ${ENVV[@]+"${ENVV[@]}"} "$inst/$as" "$@" 2>&1); RC=$?
+  OUT=$("${clean_env[@]}" ${ENVV[@]+"${ENVV[@]}"} "$inst/$as" "$@" 2>&1); RC=$?
   ENVV=()
 }
+
+first_line() { local s=${1:-<no output>}; printf '%s' "${s%%$'\n'*}"; }
 
 # A slot this process owns: the guard allows a boot whose process tree contains the slot's owner
 # pid, and the selftest is the guard's ancestor. The name's second field is the owner (the guard
@@ -147,6 +155,17 @@ c_bootstatus_report_passes() {  # without -b it only reports; no slot needed
   [ "$RC" = 0 ] && [[ "$OUT" == *"FAKE BOOT"* ]]
 }
 
+c_suite_strips_a_ci_environment() {
+  # Guards the harness, not the guard. CI exports GITHUB_ACTIONS, which the guard honours as
+  # pre-authorisation, so without clean_env every refusal case here quietly becomes an allow case —
+  # and the mutants inherit the same free pass, so the mutation pass goes green too. That happened
+  # on this branch's first CI run: seven cases failed at once, which is what a suite that has
+  # stopped asking anything looks like when it is lucky. This case is the tripwire.
+  drop_slot
+  OUT=$(GITHUB_ACTIONS=true "${clean_env[@]}" "$1/simctl" boot "$UDID" 2>&1); RC=$?
+  [ "$RC" = 75 ] && [[ "$OUT" == *"$REFUSAL"* ]]
+}
+
 c_list_passes() {   # everything that is not a boot goes straight through, unslotted
   drop_slot; rung "$1" simctl list devices
   [ "$RC" = 0 ] && [[ "$OUT" == *"FAKE BOOT list devices"* ]]
@@ -174,6 +193,7 @@ report "GitHub Actions boots without a slot of its own"              c_actions_a
 report "bootstatus -b is a boot and is refused"                      c_bootstatus_wait_guarded
 report "bootstatus without -b only reports and passes"               c_bootstatus_report_passes
 report "a non-boot subcommand passes through unslotted"              c_list_passes
+report "the suite strips the CI environment the guard trusts"        c_suite_strips_a_ci_environment
 
 # ── the mutation pass ───────────────────────────────────────────────────────────────────────────
 # Break one piece of the guard, run the case that names it, require that case to fail. A mutant
@@ -200,10 +220,10 @@ mutate() {  # mutate <description> <sed-program> <case-fn> <case-name> [install-
   if "$fn" "$m"; then
     survivors=$((survivors + 1))
     printf 'SURVIVED  %s\n          "%s" still passed, so it is not testing this. Mutant: exit %s, %s\n' \
-      "$desc" "$cname" "$RC" "$(printf '%s' "${OUT:-<no output>}" | head -n 1)"
+      "$desc" "$cname" "$RC" "$(first_line "$OUT")"
   else
     printf 'caught    %s\n          by "%s" (mutant: exit %s, %s)\n' \
-      "$desc" "$cname" "$RC" "$(printf '%s' "${OUT:-<no output>}" | head -n 1)"
+      "$desc" "$cname" "$RC" "$(first_line "$OUT")"
   fi
 }
 
@@ -258,8 +278,8 @@ reset_devdir() {
 reset_devdir
 installer_env=(ARBOS_DEVELOPER_DIR="$dev" ARBOS_LOCALBIN="$work/localbin"
                ARBOS_AXBIN="$work/axbin" ARBOS_HEAVY_SLOTS_DIR="$slots")
-run_installer() { OUT=$(env "${installer_env[@]}" "$INSTALLER" ${1:+"$1"} 2>&1); RC=$?; }
-boot_via_devdir() { OUT=$("$devbin/simctl" boot "$UDID" 2>&1); RC=$?; }
+run_installer() { OUT=$("${clean_env[@]}" "${installer_env[@]}" "$INSTALLER" ${1:+"$1"} 2>&1); RC=$?; }
+boot_via_devdir() { OUT=$("${clean_env[@]}" "$devbin/simctl" boot "$UDID" 2>&1); RC=$?; }
 
 i_route_open_before() {   # the defect, demonstrated against the real artifact
   drop_slot; boot_via_devdir
