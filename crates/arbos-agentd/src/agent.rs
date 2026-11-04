@@ -1129,8 +1129,10 @@ pub enum TurnKind {
     SubagentResult {
         subagent_id: String,
         name: String,
-        /// `done` / `failed` / `cancelled`: the plain line agentd writes itself when the model
-        /// cannot relay the result (cut short for a waiting user, tried to start work).
+        /// The worker's return-contract status (`done` / `partial` / `blocked` / `needs_input`),
+        /// or `failed` / `cancelled` from agentd: it picks the plain line agentd writes itself
+        /// when the model cannot relay the result (cut short for a waiting user, tried to start
+        /// work).
         status: String,
     },
     /// An approval card was decided after its turn ended (feature `approve`): the main agent
@@ -1286,9 +1288,13 @@ pub struct TurnState {
     /// Fresh-session retry after a refusal already happened this turn (at most one).
     pub session_rotated: bool,
     /// Relay turns (a subagent's result, an approval outcome) only speak: `route` must be
-    /// `reply`, a tool call ends the turn, and a waiting user message preempts it. Doug,
-    /// 2026-10-22: a result turn routed `act`, ran tools for 13 minutes and held every chat.
+    /// `reply`, a tool call outside [`relay_turn_tool_allowed`] ends the turn, and a waiting
+    /// user message preempts it. Doug, 2026-10-22: a result turn routed `act`, ran tools for
+    /// 13 minutes and held every chat.
     pub reply_only: bool,
+    /// A relay turn already let one tool call through so the model's first `route` kept its
+    /// retry; a second such call ends the turn.
+    pub relay_tool_tolerated: bool,
     /// A user message was waiting and this relay turn was cut short for it.
     pub preempted: bool,
     /// Limit / error lines already written this turn; the same line is never written twice.
@@ -1496,6 +1502,7 @@ impl TurnState {
             model_error: None,
             session_rotated: false,
             reply_only: false,
+            relay_tool_tolerated: false,
             preempted: false,
             notices: Vec::new(),
             relay_fallback: String::new(),
@@ -4275,6 +4282,7 @@ impl Agent {
             model_error: None,
             session_rotated: false,
             reply_only: !matches!(kind, TurnKind::User | TurnKind::JobFallback { .. }),
+            relay_tool_tolerated: false,
             preempted: false,
             notices: Vec::new(),
             relay_fallback: relay_fallback_line(&kind),
@@ -4867,7 +4875,7 @@ impl Agent {
             ));
         }
         prompt.push_str(
-            "\n\nFiles and pictures: a file is in the chat only where the output above shows a deliver_file result with `posted: true` and a message id — those are already visible to the user as cards or inline pictures, so refer to them, do not post them again. If the output shows a deliver_file error or no deliver_file call, no file is in the chat: post it yourself now with deliver_file(path) if the file exists, or say plainly that it could not be posted. Never say you attached or posted something otherwise.",
+            "\n\nFiles and pictures: a file is in the chat only where the output above shows a deliver_file result with `posted: true` and a message id — those are already visible to the user as cards or inline pictures, so refer to them, do not post them again. If the output shows a deliver_file error or no deliver_file call, no file is in the chat: post it yourself now with deliver_file(path), the one tool this turn may call besides ask_user. Do not check the path with bash or read first — any other tool call ends this turn and the user gets nothing; call deliver_file and let it tell you whether the file was there. Whatever the file holds, put the answer in the messages too (the table, the numbers), so the user has it even when no file can be posted. Only when deliver_file returns an error may you say the file could not be posted, and never say you attached or posted something otherwise.",
         );
         let kind = TurnKind::SubagentResult {
             subagent_id: subagent_id.to_owned(),
@@ -5410,8 +5418,8 @@ impl Agent {
         );
     }
 
-    /// End a relay turn now: the plain fallback line when the model wrote nothing yet, the turn
-    /// marked stopped and preempted (no hand-off follows), the pi turn aborted.
+    /// End a relay turn now: the plain fallback line when nothing has reached the user yet, the
+    /// turn marked stopped and preempted (no hand-off follows), the pi turn aborted.
     async fn cut_relay_turn_short(&self, host: &SharedHost, pi: &Arc<RpcChild>, reason: &str) {
         {
             let mut tl = self.turn.lock().await;
@@ -5443,7 +5451,11 @@ impl Agent {
         t.stopped = true;
         t.preempted = true;
         t.escalate = false;
-        if t.streamed_text.trim().is_empty() && !t.relay_fallback.is_empty() {
+        // Only when nothing at all reached the user. `streamed_text` alone misses the two ways
+        // a relay turn normally answers — `send_message` bubbles and a posted file — so a turn
+        // that had already delivered the answer still announced a failure (Jacob, Test5,
+        // 2026-11-04, chat 01M6M0G9257SCE4RRQDW2GXFS9).
+        if !Self::posted_result(t) && !t.relay_fallback.is_empty() {
             let line = t.relay_fallback.clone();
             self.write_notice(host, t, &line).await;
         }
@@ -5583,20 +5595,36 @@ impl Agent {
                 }
                 // A relay turn that starts real work is ended here (the route hook already
                 // refused `act`; this catches a tool call without one).
-                if t.reply_only && tool_name != "ask_user" && tool_name != "mcp__arbos__ask_user" {
-                    self.cut_relay_turn_short_locked(host, t, "tool call in a relay turn")
-                        .await;
-                    if let Ok(pi) = self.pi().await {
-                        let _ = pi
-                            .call_timeout(
-                                RpcCommand::Abort {
-                                    id: pi.next_id("ab"),
-                                },
-                                Duration::from_secs(5),
-                            )
+                if t.reply_only && !relay_turn_tool_allowed(tool_name) {
+                    // A tool call beside the model's first `route` must not cost the turn the
+                    // one retry the route hook grants it: the refusal is what turns `act` into
+                    // `reply`, and killing the turn here loses the answer the worker already
+                    // produced (Jacob, Test5, 2026-11-04). Tolerate exactly one such call while
+                    // the route is still open; the next one ends the turn as before.
+                    let route_retry_open =
+                        t.route.is_none() && !t.route_failed && t.route_attempts < 2;
+                    if route_retry_open && !t.relay_tool_tolerated {
+                        t.relay_tool_tolerated = true;
+                        tracing::info!(
+                            chat_id = %t.chat_id,
+                            tool = %tool_name,
+                            "tool call beside the first route in a relay turn; the route keeps its retry"
+                        );
+                    } else {
+                        self.cut_relay_turn_short_locked(host, t, "tool call in a relay turn")
                             .await;
+                        if let Ok(pi) = self.pi().await {
+                            let _ = pi
+                                .call_timeout(
+                                    RpcCommand::Abort {
+                                        id: pi.next_id("ab"),
+                                    },
+                                    Duration::from_secs(5),
+                                )
+                                .await;
+                        }
+                        return Ok(false);
                     }
-                    return Ok(false);
                 }
                 // The ack (when the model wrote one) is settled before the first tool runs; no
                 // synthetic "On it." — the working row's activity label below is the status.
@@ -9617,12 +9645,29 @@ pub(crate) fn job_fallback_prompt(
     p
 }
 
+/// The tools a relay turn may call. Everything else is real work and ends the turn.
+///
+/// `ask_user` waits for the user rather than starting anything. `deliver_file` is the only way a
+/// file reaches the chat, and the relay prompt tells the model to post a file the worker left
+/// unposted — before this it was told to do something the turn then killed it for, so the file
+/// never arrived (Jacob, Test5, 2026-11-04).
+pub(crate) fn relay_turn_tool_allowed(tool_name: &str) -> bool {
+    matches!(
+        tool_name.strip_prefix("mcp__arbos__").unwrap_or(tool_name),
+        "ask_user" | "deliver_file"
+    )
+}
+
 /// The plain line agentd writes for a relay turn the model did not finish.
 pub(crate) fn relay_fallback_line(kind: &TurnKind) -> String {
     match kind {
         TurnKind::User => String::new(),
         TurnKind::SubagentResult { status, .. } => match status.as_str() {
-            "done" => "The background work I started has finished. Ask me for the details whenever you like.".to_owned(),
+            // `partial` is a finished return contract, not a failure: the worker got results and
+            // says plainly which parts it could not reach (Jacob, Test5, 2026-11-04: a research
+            // job whose CSV was written and whose 45-row table was ready read as "did not finish"
+            // because six sites answered 403).
+            "done" | "partial" => "The background work I started has finished. Ask me for the details whenever you like.".to_owned(),
             "cancelled" => "The background work I started was stopped before it finished.".to_owned(),
             _ => "The background work I started did not finish: it failed or timed out. Tell me if you want me to try again.".to_owned(),
         },
@@ -9793,6 +9838,16 @@ impl Agent {
         self.flush_staged_text(host, t).await;
         self.write_route_reply_if_missing(host, t).await;
         self.post_fallback_if_silent(host, t).await;
+    }
+
+    /// Test seam: end a relay turn the way a waiting user, the deadline or a tool call does.
+    pub(crate) async fn test_cut_relay_turn_short(
+        &self,
+        host: &SharedHost,
+        t: &mut TurnState,
+        reason: &str,
+    ) {
+        self.cut_relay_turn_short_locked(host, t, reason).await;
     }
 
     /// Test seam: fold one pi event into the held turn.
