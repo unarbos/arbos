@@ -4646,7 +4646,7 @@ impl Agent {
             }
             room_name = h.room.clone();
         }
-        if matches!(trimmed, "deleted" | "hidden") {
+        if matches!(trimmed, "hidden" | "hidden_empty") {
             // Fleet-wide count of the no-answer-line trap (relay `timings`, kind
             // `trailing_wordless_row`): each hit is a turn that would have shown the stock line.
             tracing::info!(
@@ -9379,11 +9379,22 @@ pub(crate) fn trim_wordless_result_row(
     if !wordless {
         return "kept";
     }
+    // Hidden, never deleted — including the row that holds nothing at all, which used to be
+    // deleted. The relay's push guard refuses a removal whose recorded author it cannot match
+    // to the pusher (`arbos-relay` `push_guard.rs`), and on 2026-11-04 it refused 2 of agentd's
+    // 11 trims; each refusal cost a 10 s `PUSH_ACK_TIMEOUT` and a reconnect, delaying whatever
+    // else was in that batch. A field write that is not an identity field passes the guard.
+    //
+    // The transcript does not change. A row whose parts draw nothing contributes no row at all
+    // (`arbos-mac` `transcript.rs`, `shows_nothing`), and the stock "didn't answer" line is
+    // already withheld when another row of the same turn carries words or a card
+    // (`turn_answered_elsewhere`) — which is exactly what the caller checks before trimming.
+    doc.set_message_fields(msg_id, &[("hidden", json!(true))]);
+    // The two shapes stay apart in `trailing_wordless_row` so the fleet count still says which
+    // one happened; `deleted` leaving the metric is how this change shows up there.
     if only_empty {
-        let _ = doc.delete_message(msg_id);
-        "deleted"
+        "hidden_empty"
     } else {
-        doc.set_message_fields(msg_id, &[("hidden", json!(true))]);
         "hidden"
     }
 }

@@ -335,6 +335,18 @@ fn error_frame(code: &str, message: &str) -> Message {
     )
 }
 
+/// Room-push refusal: [`error_frame`] plus the `batchId` being refused, so the pusher can drop
+/// that batch at once instead of waiting out its ack timeout — a refused batch is never acked,
+/// and agentd read that silence as a dead link and reconnected 10 s later (2026-11-04). The
+/// people-push refusal below has always carried `batchId`; this is the same courtesy for rooms.
+fn room_push_refused_frame(code: &str, message: &str, batch_id: &str) -> Message {
+    frame(
+        FrameType::Error,
+        json!({ "code": code, "message": message, "batchId": batch_id }),
+        Bytes::new(),
+    )
+}
+
 /// People-push refusal: always carries `batchId`; `rate_limited` also carries `retryS`;
 /// `not_available` carries `reason` (`blocked_by` / `blocks_member` / `silenced` /
 /// `chat_unavailable`) and, on a block, `byHandle` (+ `byName`). The code set never grows:
@@ -747,7 +759,8 @@ async fn handle_frame(
                         %room_name, %device, code, detail = %detail, batch_id = %p.batch_id,
                         "room push refused"
                     );
-                    sink.send(error_frame(code, &detail)).await?;
+                    sink.send(room_push_refused_frame(code, &detail, &p.batch_id))
+                        .await?;
                     return Ok(());
                 }
             };
@@ -1285,6 +1298,38 @@ pub async fn room_stats(
         }))
         .into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[cfg(test)]
+mod refusal_frame_tests {
+    use super::*;
+
+    /// Jacob, Test5, 2026-11-04: the relay refused a room push at 14:04:46.870 and the pusher
+    /// could not tell which batch it meant, so it waited out its ack timeout and declared the
+    /// link dead at 14:04:56.918. The refusal names its batch so the pusher can drop it at
+    /// once. `batchId` is the contract agentd's `on_refused` reads; the other error codes are
+    /// not about one batch and must stay as they are.
+    #[test]
+    fn a_room_push_refusal_names_the_batch_it_refused() {
+        let decoded = |m: Message| match m {
+            Message::Binary(b) => Frame::decode(b).unwrap().unwrap().header,
+            other => panic!("not a binary frame: {other:?}"),
+        };
+
+        let h = decoded(room_push_refused_frame(
+            "not_yours",
+            "01M6M2KVEGM6QN5K37QYYKTNVF is not yours to delete",
+            "01BATCHTOREFUSE0000000000",
+        ));
+        assert_eq!(h["code"], "not_yours");
+        assert_eq!(h["batchId"], "01BATCHTOREFUSE0000000000");
+        assert!(h["message"].as_str().unwrap().contains("not yours"));
+
+        // A refusal is the only error about one batch: `lagging` asks for a re-sync and the
+        // rest are about the connection, so a pusher must not drop a batch on them.
+        let h = decoded(error_frame("lagging", "re-sync with ROWS_REQ"));
+        assert!(h.get("batchId").is_none(), "{h}");
     }
 }
 

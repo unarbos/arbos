@@ -2146,9 +2146,16 @@ pub(crate) mod tests {
     /// Jacob, "run bubble sort" (Mac, 2026-10-25 18:08 UTC, image 0.1.132): the answer went out as
     /// a `send_message` bubble, the fresh result row it opened ended wordless, and the Mac drew
     /// "The agent didn't answer. Ask again." under the answer. The trailing wordless row is
-    /// deleted when it holds nothing, hidden when it carries tool detail.
+    /// hidden, whether it holds nothing or carries tool detail.
+    ///
+    /// It used to be deleted when it held nothing. The relay refuses a removal it cannot
+    /// attribute to the pusher, and that refusal cost a 10 s link stall (Jacob, Test5,
+    /// 2026-11-04); hiding is a plain field write, which the guard allows. Nothing the user
+    /// sees changes: the row has no visible content either way, and `arbos-mac`'s
+    /// `no_stock_line_when_the_turn_answered_in_another_row` holds the other half — a wordless
+    /// row whose turn answered elsewhere draws no row and no "didn't answer" line.
     #[tokio::test]
-    async fn wordless_row_after_a_bubble_is_removed_or_hidden() {
+    async fn wordless_row_after_a_bubble_is_hidden_never_deleted() {
         use crate::agent::trim_wordless_result_row;
         use crate::config::SendTool;
         let (agent, root) = test_agent().await;
@@ -2183,11 +2190,25 @@ pub(crate) mod tests {
         {
             let h = host.lock().await;
             h.doc.finish_message(&trailing, MessageStatus::Done);
-            assert_eq!(trim_wordless_result_row(&h.doc, &trailing), "deleted");
+            assert_eq!(
+                trim_wordless_result_row(&h.doc, &trailing),
+                "hidden_empty",
+                "an empty trailing row is hidden, not deleted: a deletion the relay cannot \
+                 attribute to us is refused and stalls the link"
+            );
+            // The row is still there — no `removed` op goes into the batch, which is the whole
+            // point — and it is marked hidden and still holds nothing a reader can see.
+            let m = h.doc.message(&trailing).expect("the row survives the trim");
+            assert_eq!(m.rest.get("hidden").and_then(Value::as_bool), Some(true));
+            assert!(
+                !m.has_visible_content(),
+                "nothing on it for the apps to draw"
+            );
         }
         let rows = reply_rows(&host, "m-busy");
-        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.len(), 2, "the bubble and the hidden row");
         assert_eq!(rows[0].text().trim(), "Sorted: 1, 2, 3, 5, 8.");
+        assert!(rows[1].text().trim().is_empty());
         // with hidden tool detail on the trailing row: kept, but hidden
         {
             let mut tl = agent.turn.lock().await;

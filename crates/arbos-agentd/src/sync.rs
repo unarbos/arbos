@@ -48,6 +48,10 @@ pub struct DocHost {
     pub first_pending_seq: Option<i64>,
     acked_vv: VersionVector,
     inflight: Option<(String, VersionVector)>,
+    /// Consecutive refused pushes, and the instant `next_push` may export again. See
+    /// [`DocHost::on_refused`].
+    refusals: u32,
+    push_blocked_until: Option<std::time::Instant>,
     pub caught_up: bool,
     seen_commands: std::collections::HashSet<String>,
     recovered: bool,
@@ -89,6 +93,9 @@ const REDIAL_CONCURRENCY: usize = 16;
 /// A push the relay has not acked within this is a dead link, not a slow relay (the relay acks
 /// from its frame handler right after `append_row`).
 const PUSH_ACK_TIMEOUT: Duration = Duration::from_secs(10);
+/// First wait after a refused push before the same ops are offered again; doubles per
+/// consecutive refusal up to `PUSH_ACK_TIMEOUT`. See [`DocHost::on_refused`].
+const PUSH_REFUSAL_BACKOFF: Duration = Duration::from_secs(1);
 /// Liveness probe cadence; two silent periods end the session (was one probe per 15 min).
 const PROBE_EVERY: Duration = Duration::from_secs(60);
 /// Backoff ceiling for a room whose session failed for any reason but a refusal.
@@ -111,6 +118,10 @@ impl DocHost {
         if self.inflight.is_some() {
             return None;
         }
+        match self.push_blocked_until {
+            Some(t) if std::time::Instant::now() < t => return None,
+            _ => self.push_blocked_until = None,
+        }
         let vv = self.doc.oplog_vv();
         if vv == self.acked_vv {
             return None;
@@ -130,8 +141,38 @@ impl DocHost {
             if b == batch_id {
                 self.acked_vv = vv.clone();
                 self.inflight = None;
+                self.refusals = 0;
+                self.push_blocked_until = None;
             }
         }
+    }
+
+    /// The relay refused this batch (`push_guard`). The link is alive — it answered — but the
+    /// batch will never be acked, so leaving it in flight spends `PUSH_ACK_TIMEOUT` and then
+    /// kills a healthy session (Jacob, Test5, 2026-11-04: `not_yours` at 14:04:46.870, "push
+    /// not acked in 10s" at 14:04:56.918). Clearing it ends that wait.
+    ///
+    /// `acked_vv` deliberately does not move. The relay took none of the batch, and a batch
+    /// carries every op since the last ack rather than only the offending one, so advancing the
+    /// mark would silently drop good ops with the refused one. The same ops therefore export
+    /// again — which is why this also sets a backoff. Without one, a push the relay refuses
+    /// every time would respin on the next tick, which is worse than the stall it replaces. The
+    /// wait doubles per consecutive refusal and is capped at `PUSH_ACK_TIMEOUT`, so a refused
+    /// batch is never retried more slowly than today's timeout already retries it.
+    ///
+    /// `false` when the id names no batch of ours (a late frame for a batch already settled).
+    fn on_refused(&mut self, batch_id: &str) -> bool {
+        match &self.inflight {
+            Some((b, _)) if b == batch_id => {}
+            _ => return false,
+        }
+        self.inflight = None;
+        self.refusals = self.refusals.saturating_add(1);
+        let wait = PUSH_REFUSAL_BACKOFF
+            .saturating_mul(1u32 << (self.refusals - 1).min(4))
+            .min(PUSH_ACK_TIMEOUT);
+        self.push_blocked_until = Some(std::time::Instant::now() + wait);
+        true
     }
 
     fn clear_inflight(&mut self) {
@@ -398,6 +439,8 @@ impl SyncHub {
             first_pending_seq: None,
             acked_vv,
             inflight: None,
+            refusals: 0,
+            push_blocked_until: None,
             caught_up: false,
             seen_commands: Default::default(),
             recovered: false,
@@ -785,10 +828,16 @@ impl SyncHub {
                         }
                         FrameType::Error => {
                             let code = f.header.get("code").and_then(|v| v.as_str()).unwrap_or("");
+                            let refused_batch = f.header.get("batchId").and_then(|v| v.as_str()).unwrap_or("");
                             if code == "lagging" {
                                 let after = host.lock().await.cursor;
                                 let req = Frame::new(FrameType::RowsReq, serde_json::to_value(wire::RowsReq { after, exclude_own: false })?, Bytes::new());
                                 sink.send(Message::Binary(req.encode())).await?;
+                            } else if !refused_batch.is_empty() && host.lock().await.on_refused(refused_batch) {
+                                // The relay named the batch it would not take, so stop waiting
+                                // for an ack that is never coming: the link is fine.
+                                inflight_since = None;
+                                tracing::warn!(room = %room, header = %f.header, "relay refused a push; batch dropped, link kept");
                             } else {
                                 tracing::warn!(room = %room, header = %f.header, "relay error frame");
                             }
@@ -900,6 +949,8 @@ mod tests {
             first_pending_seq: None,
             acked_vv: VersionVector::default(),
             inflight: None,
+            refusals: 0,
+            push_blocked_until: None,
             caught_up: true,
             seen_commands: Default::default(),
             recovered: false,
@@ -1153,6 +1204,60 @@ mod tests {
     /// Jacob's rule (#1573): @mentions set the ORDER, never a filter. A fresh un-mentioned send
     /// still goes through the normal respond gate after a backlog drain, and the stale rows that
     /// were not gated stay in the doc, so the reply can be in context.
+    /// Jacob, Test5, 2026-11-04: the relay refused a push at 14:04:46.870 (`not_yours`) and
+    /// agentd sat on the batch until `PUSH_ACK_TIMEOUT` declared the link dead at 14:04:56.918
+    /// — a 10 s stall and a reconnect over a frame the relay had already answered. A refusal
+    /// that names its batch drops that batch instead.
+    #[test]
+    fn a_refused_batch_is_dropped_and_backs_off_instead_of_stalling() {
+        let doc = ChatDoc::new(Some(7), true);
+        let mut host = host_with(doc);
+        host.doc
+            .append_user_message(
+                "m1",
+                "hi",
+                "mac",
+                &arbos_core::doc::UserMessageOpts::default(),
+            )
+            .unwrap();
+        let (batch, bytes) = host.next_push().expect("first push");
+
+        // A refusal naming some other batch is not ours to act on.
+        assert!(!host.on_refused("01SOMEOTHERBATCH"));
+        assert!(host.inflight.is_some(), "still waiting on our own batch");
+
+        assert!(host.on_refused(&batch));
+        assert!(
+            host.inflight.is_none(),
+            "nothing in flight, so the ack timeout has nothing to kill the link over"
+        );
+        // Backed off: the same ops are not re-offered on the very next tick.
+        assert!(
+            host.next_push().is_none(),
+            "a refused push that respins at tick speed is worse than the stall it replaces"
+        );
+
+        // The ops were not accepted, so the mark did not move and they are still owed. A batch
+        // carries everything since the last ack, not only the op the relay objected to.
+        host.push_blocked_until = None;
+        let (batch2, bytes2) = host.next_push().expect("the ops are still owed");
+        assert_ne!(batch2, batch);
+        assert_eq!(bytes2, bytes, "same ops, exported from the same acked mark");
+
+        // The wait grows while refusals continue, and never past the timeout it replaces.
+        assert!(host.on_refused(&batch2));
+        let second = host.push_blocked_until.expect("backed off again");
+        assert!(second <= std::time::Instant::now() + PUSH_ACK_TIMEOUT);
+
+        // An ack clears the backoff and the count, so one bad batch does not slow the next.
+        host.push_blocked_until = None;
+        let (batch3, _) = host.next_push().expect("retried");
+        host.on_ack(&batch3);
+        assert_eq!(host.refusals, 0);
+        assert!(host.push_blocked_until.is_none());
+        assert!(host.next_push().is_none(), "acked: nothing left to push");
+    }
+
     #[test]
     fn fresh_unmentioned_sends_still_reach_the_gate_with_the_backlog_in_context() {
         let doc = ChatDoc::new(Some(7), true);
