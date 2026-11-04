@@ -189,6 +189,27 @@ WHY="self-test has an \`if:\`" \
   case_is "a job that can be skipped fails closed" 2 "${QUIET[@]}"
 gate="$here/release-gate.py"
 
+ordered="$(throwaway)"
+python3 - "$root/.github/workflows/release-gate.yml" \
+         "$ordered/.github/workflows/release-gate.yml" <<'PY'
+import sys
+text = open(sys.argv[1], encoding="utf-8").read()
+# The screen is still there, but the job does something first. A job that acts before it knows
+# whether the run can decide has already spent the decision it was supposed to wait for.
+head, _, tail = text.partition("\n  self-test:")
+tail = tail.replace(
+    "      - name: Can this run decide anything?",
+    "      - run: echo work the job had no business doing yet\n"
+    "      - name: Can this run decide anything?",
+    1,
+)
+open(sys.argv[2], "w", encoding="utf-8").write(head + "\n  self-test:" + tail)
+PY
+gate="$ordered/scripts/release/release-gate.py"
+WHY="self-test does work before gate-can-decide.sh" \
+  case_is "a job that acts before the screen fails closed" 2 "${QUIET[@]}"
+gate="$here/release-gate.py"
+
 swallowed="$(throwaway)"
 sed 's|^      - run: scripts/release/release-gate-selftest.sh|      - run: scripts/release/release-gate-selftest.sh\n        continue-on-error: true|' \
   "$root/.github/workflows/release-gate.yml" > "$swallowed/.github/workflows/release-gate.yml"
