@@ -97,51 +97,59 @@ final class BackSwipeTests: XCTestCase {
     /// The album bug (DaWizzaa, message 01M670FVEYHXTG2RQBN9PF6G0N): a tall picture or album
     /// row overlaps its neighbours, and the lookup used to take whichever row a dictionary
     /// yielded first and give up if that one could not be replied to. The repliable row under
-    /// the finger must be found whatever order the rows were written in.
+    /// the finger must be found whatever order the rows come back in.
+    ///
+    /// The order loop is kept now that the rows arrive as an array from a view-tree walk
+    /// rather than out of a dictionary. The ordering it guards against is no longer
+    /// unspecified, but "the first match wins" is the mistake this case exists to catch, and
+    /// that mistake is just as writable against an array.
     func testATallRowIsFoundUnderANonRepliableNeighbour() {
-        // A date separator whose frame spans the album's top, written first and last in turn.
+        // A date separator whose frame spans the album's top, listed first and last in turn.
         for separatorFirst in [true, false] {
-            let index = RowFrameIndex()
-            let album = CGRect(x: 0, y: 100, width: 360, height: 300)
-            let separator = CGRect(x: 0, y: 80, width: 360, height: 40)
-            if separatorFirst {
-                index.set("sep", frame: separator, canReply: false)
-                index.set("album", frame: album, canReply: true)
-            } else {
-                index.set("album", frame: album, canReply: true)
-                index.set("sep", frame: separator, canReply: false)
-            }
+            let album = RowHit(id: "album", frame: CGRect(x: 0, y: 100, width: 360, height: 300),
+                               canReply: true)
+            let separator = RowHit(id: "sep", frame: CGRect(x: 0, y: 80, width: 360, height: 40),
+                                   canReply: false)
+            let rows = separatorFirst ? [separator, album] : [album, separator]
             // A point inside both frames: the album is the answer either way.
-            XCTAssertEqual(index.replyableRow(at: CGPoint(x: 180, y: 110)), "album",
+            XCTAssertEqual(RowPick.replyableRow(at: CGPoint(x: 180, y: 110), among: rows), "album",
                            "separatorFirst=\(separatorFirst)")
             // And a point only the album holds.
-            XCTAssertEqual(index.replyableRow(at: CGPoint(x: 180, y: 300)), "album")
+            XCTAssertEqual(RowPick.replyableRow(at: CGPoint(x: 180, y: 300), among: rows), "album")
         }
     }
 
     /// Overlapping repliable rows: the innermost (smallest) one is the one the finger is on.
     func testTheInnermostRepliableRowWins() {
-        let index = RowFrameIndex()
-        index.set("outer", frame: CGRect(x: 0, y: 0, width: 360, height: 400), canReply: true)
-        index.set("inner", frame: CGRect(x: 20, y: 150, width: 200, height: 60), canReply: true)
-        XCTAssertEqual(index.replyableRow(at: CGPoint(x: 100, y: 180)), "inner")
-        XCTAssertEqual(index.replyableRow(at: CGPoint(x: 300, y: 180)), "outer", "outside the inner frame")
+        let rows = [
+            RowHit(id: "outer", frame: CGRect(x: 0, y: 0, width: 360, height: 400), canReply: true),
+            RowHit(id: "inner", frame: CGRect(x: 20, y: 150, width: 200, height: 60), canReply: true),
+        ]
+        XCTAssertEqual(RowPick.replyableRow(at: CGPoint(x: 100, y: 180), among: rows), "inner")
+        XCTAssertEqual(RowPick.replyableRow(at: CGPoint(x: 300, y: 180), among: rows), "outer",
+                       "outside the inner frame")
     }
 
     /// Nothing repliable under the finger: the drag is the time peek's, not a reply's.
+    ///
+    /// A row that has left the view tree needs no case of its own any more. It has no marker,
+    /// so it is simply absent from the list the walk returns — which is the whole point of
+    /// reading live geometry instead of keeping a cache that had to be told.
     func testNoRepliableRowMeansNoReply() {
-        let index = RowFrameIndex()
-        index.set("sep", frame: CGRect(x: 0, y: 0, width: 360, height: 40), canReply: false)
-        XCTAssertNil(index.replyableRow(at: CGPoint(x: 100, y: 20)), "a system row is not repliable")
-        XCTAssertNil(index.replyableRow(at: CGPoint(x: 100, y: 900)), "empty space")
+        let separator = RowHit(id: "sep", frame: CGRect(x: 0, y: 0, width: 360, height: 40),
+                               canReply: false)
+        XCTAssertNil(RowPick.replyableRow(at: CGPoint(x: 100, y: 20), among: [separator]),
+                     "a system row is not repliable")
+        XCTAssertNil(RowPick.replyableRow(at: CGPoint(x: 100, y: 900), among: [separator]),
+                     "empty space")
 
-        // A row that stops being repliable (a message deleted under the finger) is dropped.
-        index.set("m", frame: CGRect(x: 0, y: 50, width: 360, height: 40), canReply: true)
-        XCTAssertEqual(index.replyableRow(at: CGPoint(x: 100, y: 60)), "m")
-        index.set("m", frame: CGRect(x: 0, y: 50, width: 360, height: 40), canReply: false)
-        XCTAssertNil(index.replyableRow(at: CGPoint(x: 100, y: 60)))
-        index.set("m", frame: CGRect(x: 0, y: 50, width: 360, height: 40), canReply: true)
-        index.remove("m")
-        XCTAssertNil(index.replyableRow(at: CGPoint(x: 100, y: 60)), "a row that left the tree")
+        // A message the finger is on, and the same row once it stops being repliable.
+        let frame = CGRect(x: 0, y: 50, width: 360, height: 40)
+        let point = CGPoint(x: 100, y: 60)
+        XCTAssertEqual(RowPick.replyableRow(at: point,
+                                            among: [RowHit(id: "m", frame: frame, canReply: true)]), "m")
+        XCTAssertNil(RowPick.replyableRow(at: point,
+                                          among: [RowHit(id: "m", frame: frame, canReply: false)]))
+        XCTAssertNil(RowPick.replyableRow(at: point, among: []), "a row that left the tree")
     }
 }

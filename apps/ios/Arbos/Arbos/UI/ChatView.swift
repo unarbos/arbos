@@ -350,8 +350,6 @@ struct ChatSession: View {
     @State private var timeReveal: CGFloat = 0
     /// The reply swipe in progress: which row follows the finger and how far (same recognizer).
     @State private var replySwipe = ReplySwipe()
-    /// Row frames in the transcript space, for the recognizer's row-by-location lookup.
-    @State private var rowFrames = RowFrameIndex()
     /// Long-press → Forward: the text to send and who wrote it (Forward sheet).
     @State private var pendingForward: PendingForward?
     /// The tasks sheet (duplex §2.4): open while the user looks at the agent's jobs.
@@ -2348,7 +2346,7 @@ struct ChatSession: View {
             withTransaction(still) { replySwipe = ReplySwipe(rowId: row, reveal: reveal, armed: armed) }
         case .replyEnded(let row, let fire):
             withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) { replySwipe = ReplySwipe() }
-            if fire, let target = windowedRows.first(where: { $0.id == row }) { beginReply(to: target) }
+            if fire { fireReply(on: row) }
         case .timeChanged(let dx):
             if NestedHorizontalScroll.claiming {
                 if timeReveal != 0 { withTransaction(still) { timeReveal = 0 } }
@@ -2455,8 +2453,6 @@ struct ChatSession: View {
                     TranscriptTail(bar: chatBarHeight).id("bottom")
                 }
                 .padding(.horizontal, 16)
-                // The rows report their frames in this space for the recognizer's row lookup.
-                .coordinateSpace(name: TranscriptSpace.name)
                 // The transcript's horizontal swipes live on the scroll view, beside its pan,
                 // routed by direction: left on a bubble replies, left elsewhere peeks the
                 // times, right goes back. The same host watches that pan: a scroll with the
@@ -2465,7 +2461,7 @@ struct ChatSession: View {
                 // move and contend with the system's edge pop.
                 .background {
                     TranscriptSwipeHost(timePeek: ChatGestures.timeReveal, backSwipe: ChatGestures.backSwipe,
-                                        replySwipe: ChatGestures.replySwipe, frames: rowFrames,
+                                        replySwipe: ChatGestures.replySwipe,
                                         onEvent: handleTranscriptSwipe) {
                         if ChatSearchClose.scrollCloses(open: showSearch, query: searchText) { closeSearch() }
                     }
@@ -3239,6 +3235,41 @@ struct ChatSession: View {
 
     /// Reply to this row: composer preview + focus (people chats also address the agent).
     /// Long-press → Reply on the bubble, and the actions menu.
+    /// Turn the row id an armed reply swipe released on into a reply in the composer.
+    ///
+    /// Two lists, as in `revealQuoted`: the recognizer resolved `row` from the markers the
+    /// lazy stack has built, and this resolves a `Row` to reply to. They can disagree —
+    /// `growWindow()` raises `windowSkipEnd` and drops rows off the end of `windowedRows`, so
+    /// a window that slides between touch-down and release leaves an id in one list and not
+    /// the other. Rare, because a horizontal drag does not scroll, but not impossible.
+    ///
+    /// So it is a ladder rather than an `if let`, and every rung says what it did. The old
+    /// code dropped the gesture silently when the lookup missed, which is the worst available
+    /// behaviour here: a reply that does not happen is indistinguishable from the time peek,
+    /// so the user sees "the swipe didn't take" and the log says nothing at all.
+    ///
+    /// `beginReply` needs only `row.messageId`, which it looks up in `messageById`, so a row
+    /// recovered from outside the window is as good as one found inside it.
+    private func fireReply(on rowId: String) {
+        if let target = windowedRows.first(where: { $0.id == rowId }) {
+            revealTrace("reply-end", "row=\(rowId) shown=yes")
+            beginReply(to: target)
+            return
+        }
+        if let target = rows.first(where: { $0.id == rowId }) {
+            revealTrace("reply-end",
+                        "row=\(rowId) shown=no recovered=yes rows=\(rows.count) "
+                        + "window=\(windowCount) skipEnd=\(windowSkipEnd) shown=\(windowedRows.count) "
+                        + "windowTop=\(windowedRows.first?.id ?? "-") "
+                        + "windowBottom=\(windowedRows.last?.id ?? "-")")
+            beginReply(to: target)
+            return
+        }
+        revealTrace("reply-end",
+                    "row=\(rowId) shown=no recovered=no — dropped, no such row in the model; "
+                    + "rows=\(rows.count) visible=\(visibleRows.count) shown=\(windowedRows.count)")
+    }
+
     private func beginReply(to row: Row) {
         guard let m = messageById[row.messageId] else { return }
         editing = nil
@@ -4469,13 +4500,11 @@ extension ChatSession {
                 .modifier(SearchResultTap(active: searchHitsActive && Self.isMessageBubble(row)) {
                     openSearchResult(row.messageId)
                 })
-                // Where this row is, for the swipe recognizer's row-by-location lookup. The
-                // transcript space scrolls with the content, so this fires on layout, not per
-                // scroll frame; the index is a plain class, so no view is invalidated.
-                .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(TranscriptSpace.name)) } action: { frame in
-                    rowFrames.set(row.id, frame: frame, canReply: reply)
-                }
-                .onDisappear { rowFrames.remove(row.id) }
+                // Where this row is, for the swipe recognizer's row-by-location lookup. A leaf
+                // view the recognizer hit-tests at touch time, not a frame written into a
+                // cache: UIKit's own geometry cannot go stale, needs no appear/disappear
+                // bookkeeping, and survives the container being re-keyed. See `RowMarker`.
+                .background(RowMarker(rowId: row.id, canReply: reply))
                 .padding(.top, row.id == firstId ? 0 : row.gapBefore)
                 .id(row.id)
                 .onAppear {

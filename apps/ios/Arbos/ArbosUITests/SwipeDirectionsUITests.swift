@@ -64,9 +64,32 @@ final class SwipeDirectionsUITests: XCTestCase {
     /// attachment-only message quoted by its file name, `g3` is Mira's signup link.
     private static let albumQuote = "Deck, dashboard"
 
+    /// What the recognizer saw on the last leftward drag, for a failure message.
+    ///
+    /// A left swipe that produces no reply has three causes that look identical from outside:
+    /// no row marker held the touch, the recognizer never decided because the scroll view's
+    /// pan took the touch first, or the release could not resolve the row. The first two are
+    /// only separable from here. `chat-swipe-probe` is written by `TranscriptSwipeHost` on
+    /// every leftward decide and is DEBUG-only, which the gate is.
+    ///
+    /// Reported rather than asserted on. A reply that fires is the claim; the probe is how a
+    /// red run explains itself without costing another 75-minute round to instrument.
+    private func swipeProbe(_ app: XCUIApplication) -> String {
+        let probe = app.descendants(matching: .any)["chat-swipe-probe"].firstMatch
+        guard probe.exists else { return "no probe element — a Release build, or the recognizer never attached" }
+        return probe.label
+    }
+
+    /// A reply preview is in the composer, and the probe says why when it is not.
+    private func assertReplied(_ app: XCUIApplication, _ what: String,
+                               file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertTrue(replyPreview(app).waitForExistence(timeout: settle),
+                      "\(what) — last leftward decide: \(swipeProbe(app))", file: file, line: line)
+    }
+
     /// The composer is quoting the message that was swiped, not merely quoting something.
     ///
-    /// "A reply preview exists" is a weaker claim than it looks. `RowFrameIndex.replyableRow`
+    /// "A reply preview exists" is a weaker claim than it looks. `RowPick.replyableRow`
     /// breaks ties toward the *smallest* frame containing the touch, and a tall album overlaps
     /// its neighbours, so a swipe that replies to the wrong row satisfies a bare existence
     /// check. The preview combines its children (`composer-reply-preview`), so its label
@@ -79,8 +102,7 @@ final class SwipeDirectionsUITests: XCTestCase {
     private func assertQuotes(_ app: XCUIApplication, _ expected: String,
                               file: StaticString = #filePath, line: UInt = #line) {
         let preview = replyPreview(app)
-        XCTAssertTrue(preview.waitForExistence(timeout: settle),
-                      "the reply quote is in the composer", file: file, line: line)
+        assertReplied(app, "the reply quote is in the composer", file: file, line: line)
         XCTAssertTrue(preview.label.contains(expected),
                       "the quote is the swiped message — wanted \"\(expected)\", got \"\(preview.label)\"",
                       file: file, line: line)
@@ -233,17 +255,13 @@ final class SwipeDirectionsUITests: XCTestCase {
     ///
     /// 80 pt is still inside the app's rule rather than past it: `fullScreenLock` declines only
     /// below `edgeZoneWidth`, so the app sees a drag from here and decides it on its own terms.
-    private static let appOwnedStartX: CGFloat = 80
-
-    /// Inside the lane an incoming row draws its sender avatar in, x ∈ [12, 48].
     ///
-    /// This used to be where *every* right swipe started, and that was load-bearing by
-    /// accident: the avatar is a SwiftUI `Button`, a `Button` prevents an exclusive pan, and
-    /// before [#2530](https://github.com/unarbos/arbos/pull/2530) a back swipe begun here did
-    /// not go back. Moving the suite's default start to `appOwnedStartX` would have dropped
-    /// that coverage without a single test turning red, so it is kept deliberately below
-    /// instead of as a side effect of a helper's default.
-    private static let avatarLaneStartX: CGFloat = 40
+    /// Moving off 40 pt costs no coverage: 40 lands in the sender-avatar lane (x ∈ [12, 48]),
+    /// and a back swipe begun over an avatar — the [#2530] case, where a `Button`'s press
+    /// recognizer used to prevent the pan — is held deliberately by `AvatarBackSwipeUITests`,
+    /// which aims at each avatar's measured centre instead of at a number that happens to
+    /// land there.
+    private static let appOwnedStartX: CGFloat = 80
 
     /// The row's frame, read immediately before a drag and confirmed by two agreeing reads.
     ///
@@ -309,15 +327,11 @@ final class SwipeDirectionsUITests: XCTestCase {
     /// Swipe right across `bubble`, starting at `appOwnedStartX` or just inside the row's
     /// leading edge, whichever is further in, so a long rightward drag stays on screen and the
     /// app's own back rule — not the system pop — is what answers it.
-    ///
-    /// `from` overrides that start. Only `testSwipeRightStartingOnTheSenderAvatarGoesBack`
-    /// passes it, and the reason it exists is written there.
     private func swipeRight(on bubble: XCUIElement, _ app: XCUIApplication, want: CGFloat = 180,
-                            from: CGFloat? = nil,
                             file: StaticString = #filePath, line: UInt = #line) {
         let window = app.windows.firstMatch.frame
         let frame = stableFrame(of: bubble, file: file, line: line)
-        let startX = from ?? max(frame.minX + 8, Self.appOwnedStartX)
+        let startX = max(frame.minX + 8, Self.appOwnedStartX)
         assertClearOfSystemEdge(startX, "the right swipe", file: file, line: line)
         let distance = min(want, window.maxX - 8 - startX)
         XCTAssertGreaterThan(distance, 80, "the bubble has room for a right swipe", file: file, line: line)
@@ -348,15 +362,15 @@ final class SwipeDirectionsUITests: XCTestCase {
     func testSwipeLeftOnATextBubbleReplies() {
         let app = launchGroup()
         swipeLeft(on: revealBubble(app, "g3"), app)
-        XCTAssertTrue(replyPreview(app).waitForExistence(timeout: settle), "the composer shows the reply quote")
+        assertReplied(app, "the composer shows the reply quote")
         XCTAssertTrue(chatBack(app).exists, "a left swipe never goes back")
     }
 
     /// The album: five attachments and a caption, the shape of DaWizzaa's two-screenshot
     /// message (01M670FVEYHXTG2RQBN9PF6G0N). A tall row overlaps its neighbours, which is what
-    /// the old `RowFrameIndex.replyableRow(at:)` got wrong — it took whichever row a dictionary
-    /// yielded first and gave up when that one was not repliable, so album and picture bubbles
-    /// missed their reply far more often than a line of text did.
+    /// the old row lookup got wrong — it took whichever row a dictionary yielded first and
+    /// gave up when that one was not repliable, so album and picture bubbles missed their
+    /// reply far more often than a line of text did.
     func testSwipeLeftOnAnAlbumBubbleReplies() {
         let app = launchGroup()
         swipeLeft(on: revealBubble(app, "g2b"), app)
@@ -368,7 +382,7 @@ final class SwipeDirectionsUITests: XCTestCase {
     func testSwipeLeftOnAPictureBubbleReplies() {
         let app = launchGroup()
         swipeLeft(on: revealBubble(app, "g6"), app)
-        XCTAssertTrue(replyPreview(app).waitForExistence(timeout: settle), "the picture's reply quote is in the composer")
+        assertReplied(app, "the picture's reply quote is in the composer")
         XCTAssertTrue(chatBack(app).exists, "a left swipe never goes back")
     }
 
@@ -377,7 +391,7 @@ final class SwipeDirectionsUITests: XCTestCase {
     func testSwipeLeftOnAPictureOnlyBubbleReplies() {
         let app = launchGroup()
         swipeLeft(on: revealBubble(app, "g8"), app)
-        XCTAssertTrue(replyPreview(app).waitForExistence(timeout: settle), "the reply quote is in the composer")
+        assertReplied(app, "the reply quote is in the composer")
         // A left drag on a picture must not be read as a tap that opens the viewer.
         XCTAssertFalse(app.descendants(matching: .any)["media-viewer"].exists, "the viewer stayed shut")
     }
@@ -395,7 +409,7 @@ final class SwipeDirectionsUITests: XCTestCase {
         let app = launchComms()
         // `c5` is "Hey": short, mine, and hard against the trailing edge.
         swipeLeft(on: revealBubble(app, "c5"), app)
-        XCTAssertTrue(replyPreview(app).waitForExistence(timeout: settle), "my own message's reply quote is in the composer")
+        assertReplied(app, "my own message's reply quote is in the composer")
         XCTAssertTrue(chatBack(app, Self.comms).exists, "a left swipe never goes back")
     }
 
@@ -439,26 +453,6 @@ final class SwipeDirectionsUITests: XCTestCase {
         swipeRight(on: revealBubble(app, "g8"), app)
         assertWentBack(app)
         XCTAssertFalse(replyPreview(app).exists, "a right swipe never replies")
-    }
-
-    /// A right swipe begun **on the sender's avatar** still goes back — the canary for
-    /// [#2530](https://github.com/unarbos/arbos/pull/2530).
-    ///
-    /// Every avatar beside an incoming bubble is a SwiftUI `Button`, whose press recogniser
-    /// enters `.began` on touch-down, and UIKit lets an already-begun recogniser prevent a
-    /// later one that does not share the touch. So the back swipe was prevented before it had
-    /// decided anything, and a drag that started over a face did nothing. A measured sweep of
-    /// the start x put the boundary at the avatar's right edge rather than at the edge zone:
-    /// in this chat 28 pt and 40 pt did not go back, 52 pt did.
-    ///
-    /// [#2530](https://github.com/unarbos/arbos/pull/2530) fixed it by making the back
-    /// recognisers simultaneous with presses. Nothing in this file holds that any more now
-    /// that the other right swipes start at `appOwnedStartX`, clear of the avatar — so this
-    /// case does, by name, where a reader can see what it is for.
-    func testSwipeRightStartingOnTheSenderAvatarGoesBack() {
-        let app = launchGroup()
-        swipeRight(on: revealBubble(app, "g3"), app, from: Self.avatarLaneStartX)
-        assertWentBack(app)
     }
 
     /// The tall portrait screenshot with a caption, which is the largest row in the fixture and

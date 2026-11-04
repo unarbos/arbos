@@ -165,47 +165,92 @@ enum BubbleSwipe {
     static func triggers(reveal: CGFloat) -> Bool { reveal >= revealWidth * triggerFraction }
 }
 
-enum TranscriptSpace {
-    /// Named coordinate space of the transcript's content (the ScrollView's VStack).
-    static let name = "arbosTranscript"
+/// One transcript row as the recognizer finds it at touch time.
+struct RowHit {
+    let id: String
+    /// In whatever space the caller asked for — the scroll view's, at the only call site.
+    let frame: CGRect
+    let canReply: Bool
 }
 
-/// The transcript rows' frames in `TranscriptSpace.name`, written by the rows on layout
-/// (`onGeometryChange`), read by the swipe recognizer at touch time to find the row under the
-/// finger. A plain class, never `@Published`: a write must not invalidate any view. Frames do
-/// not move with the scroll offset (the space scrolls with the content), so nothing here runs
-/// per frame while scrolling.
-final class RowFrameIndex {
-    private var frames: [String: CGRect] = [:]
-    private var replyable: Set<String> = []
+/// A zero-cost marker a row puts behind itself so the swipe recognizer can find the row under
+/// the finger from live UIKit geometry.
+///
+/// This replaces a cache (`RowFrameIndex`) that the rows wrote on `onGeometryChange` and
+/// cleared on `onDisappear`. The cache was wrong in three ways, and only the first was a race:
+///
+/// 1. `onDisappear` could not tell "this row left the screen" from "this row's view was
+///    replaced". When the lazy stack's container is re-keyed — Search opening or closing does
+///    it today — every surviving row is destroyed and rebuilt under the *same* row id, so the
+///    arriving instance writes the key and the departing one deletes it, in an order SwiftUI
+///    does not define.
+/// 2. A wrong delete never healed. Row frames are measured in a space that scrolls with the
+///    content, so their values do not change while the user scrolls, and `onGeometryChange`
+///    stays silent until the layout itself changes. Reply targeting stayed dead for the rest
+///    of that screen's life and failed *silently*: the drag degraded into the time peek, which
+///    reads as "the gesture didn't take".
+/// 3. Nothing ever noticed, because an index miss, a recognizer that never decided and a
+///    row-lookup miss at release all produce exactly the same nothing.
+///
+/// Live geometry has none of those properties. A marker cannot be stale, it needs no
+/// appear/disappear bookkeeping, and a re-key destroys and recreates it with its row, so the
+/// new one is correct by construction. The cost is one leaf `UIView` per *realized* row.
+final class RowMarkerView: UIView {
+    var rowId = ""
+    var canReply = false
+}
 
-    func set(_ id: String, frame: CGRect, canReply: Bool) {
-        frames[id] = frame
-        if canReply { replyable.insert(id) } else { replyable.remove(id) }
+struct RowMarker: UIViewRepresentable {
+    let rowId: String
+    let canReply: Bool
+
+    func makeUIView(context: Context) -> RowMarkerView {
+        let v = RowMarkerView()
+        v.isUserInteractionEnabled = false
+        v.backgroundColor = .clear
+        v.isAccessibilityElement = false
+        return v
     }
 
-    func remove(_ id: String) {
-        frames[id] = nil
-        replyable.remove(id)
+    func updateUIView(_ uiView: RowMarkerView, context: Context) {
+        uiView.rowId = rowId
+        uiView.canReply = canReply
+    }
+}
+
+/// Choosing the row a leftward drag is on.
+enum RowPick {
+    /// Every `RowMarkerView` under `root`, measured in `space`.
+    static func hits(under root: UIView, in space: UIView) -> [RowHit] {
+        var out: [RowHit] = []
+        var stack = [root]
+        while let view = stack.popLast() {
+            if let marker = view as? RowMarkerView, !marker.rowId.isEmpty {
+                out.append(RowHit(id: marker.rowId,
+                                  frame: marker.convert(marker.bounds, to: space),
+                                  canReply: marker.canReply))
+            }
+            stack.append(contentsOf: view.subviews)
+        }
+        return out
     }
 
-    /// The repliable row under `point` (transcript space).
+    /// The repliable row under `point`.
     ///
-    /// Every row whose frame holds the point is considered, not just the first one a
-    /// dictionary happens to yield. Rows overlap: a frame includes the row's own padding, and
-    /// tall rows (an album, a picture, a file card) overlap more of their neighbours than a
-    /// line of text does. The previous version took `frames.first(where:)` — arbitrary, since
-    /// dictionary order is unspecified — and returned nil when that one row was not repliable,
-    /// without looking at the others. A non-repliable neighbour could therefore shadow the
-    /// bubble under the finger, which is why swipe-to-reply missed album and image bubbles far
-    /// more often than text ones.
+    /// Every row whose frame holds the point is considered, not just the first one found.
+    /// Rows overlap: a frame includes the row's own padding, and tall rows (an album, a
+    /// picture, a file card) overlap more of their neighbours than a line of text does. An
+    /// earlier version took the first match and returned nil when that one row was not
+    /// repliable, without looking at the others, so a non-repliable neighbour could shadow the
+    /// bubble under the finger — which is why swipe-to-reply missed album and image bubbles
+    /// far more often than text ones.
     ///
     /// Ties go to the smallest frame: the innermost row is the one the finger is really on.
-    func replyableRow(at point: CGPoint) -> String? {
+    static func replyableRow(at point: CGPoint, among rows: [RowHit]) -> String? {
         var best: (id: String, area: CGFloat)?
-        for (id, frame) in frames where frame.contains(point) && replyable.contains(id) {
-            let area = frame.width * frame.height
-            if best == nil || area < best!.area { best = (id, area) }
+        for row in rows where row.canReply && row.frame.contains(point) {
+            let area = row.frame.width * row.frame.height
+            if best == nil || area < best!.area { best = (row.id, area) }
         }
         return best?.id
     }
@@ -392,14 +437,12 @@ struct TranscriptSwipeHost: UIViewRepresentable {
     var timePeek = true
     var backSwipe = true
     var replySwipe = true
-    /// Row frames, for finding the repliable row under a leftward drag.
-    let frames: RowFrameIndex
     let onEvent: (TranscriptSwipeEvent) -> Void
     /// The scroll view's own pan began (a finger scroll started).
     let onScrollPanBegan: () -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(timePeek: timePeek, backSwipe: backSwipe, replySwipe: replySwipe, frames: frames,
+        Coordinator(timePeek: timePeek, backSwipe: backSwipe, replySwipe: replySwipe,
                     onEvent: onEvent, onScrollPanBegan: onScrollPanBegan)
     }
 
@@ -437,23 +480,18 @@ struct TranscriptSwipeHost: UIViewRepresentable {
         let timePeek: Bool
         let backSwipe: Bool
         let replySwipe: Bool
-        let frames: RowFrameIndex
         var onEvent: (TranscriptSwipeEvent) -> Void
         var onScrollPanBegan: () -> Void
         private weak var scroll: UIScrollView?
-        /// The `.background` of the ScrollView's content: its coordinate system is
-        /// `TranscriptSpace.name`, which is the space the row frames are written in.
-        private weak var host: UIView?
         private var recognizer: DirectionalSwipeRecognizer?
         private enum Mode { case time, back, reply(row: String) }
         private var mode: Mode?
 
-        init(timePeek: Bool, backSwipe: Bool, replySwipe: Bool, frames: RowFrameIndex,
+        init(timePeek: Bool, backSwipe: Bool, replySwipe: Bool,
              onEvent: @escaping (TranscriptSwipeEvent) -> Void, onScrollPanBegan: @escaping () -> Void) {
             self.timePeek = timePeek
             self.backSwipe = backSwipe
             self.replySwipe = replySwipe
-            self.frames = frames
             self.onEvent = onEvent
             self.onScrollPanBegan = onScrollPanBegan
         }
@@ -463,7 +501,6 @@ struct TranscriptSwipeHost: UIViewRepresentable {
             self.scroll?.panGestureRecognizer.removeTarget(self, action: #selector(scrollPan(_:)))
             if let old = recognizer { old.view?.removeGestureRecognizer(old) }
             self.scroll = scroll
-            self.host = host
             scroll.panGestureRecognizer.addTarget(self, action: #selector(scrollPan(_:)))
             guard timePeek || backSwipe || replySwipe else { return }
             let gr = DirectionalSwipeRecognizer(target: self, action: #selector(handle(_:)))
@@ -483,8 +520,8 @@ struct TranscriptSwipeHost: UIViewRepresentable {
             // Direction decides, once, at `lockDistance`. Right is back; left is reply when a
             // repliable row is under the finger and the time peek otherwise. The two never see
             // each other's drags, which is the whole guarantee.
-            gr.decide = { [weak self, weak scroll, weak host] start, translation in
-                guard let self, let scroll, let host else { return .declined }
+            gr.decide = { [weak self, weak scroll] start, translation in
+                guard let self, let scroll else { return .declined }
                 let dx = translation.width, dy = translation.height
                 guard abs(dx) > abs(dy) * 1.15 else { return .declined }
                 if dx > 0 {
@@ -497,14 +534,17 @@ struct TranscriptSwipeHost: UIViewRepresentable {
                 case .declined: return .declined
                 case .claimed: break
                 }
-                // `start` is in the recognizer's view (the scroll view). Convert through the
-                // host, whose coordinate system is the content's — `TranscriptSpace.name`, the
-                // space the rows wrote their frames in. A view-to-view convert, not
-                // `contentOffset` arithmetic: a touch on scroll-view content already reports
-                // content coordinates, so adding the offset again would double-count it.
-                if self.replySwipe, let row = self.frames.replyableRow(at: host.convert(start, from: scroll)) {
-                    self.mode = .reply(row: row)
-                    return .claimed
+                // `start` is already in the recognizer's view, the scroll view, so the markers
+                // are measured into that same space and no conversion of the touch is needed.
+                // Read live, at touch time: these are the rows UIKit has on screen right now.
+                if self.replySwipe {
+                    let rows = RowPick.hits(under: scroll, in: scroll)
+                    let row = RowPick.replyableRow(at: start, among: rows)
+                    self.note(point: start, rows: rows, chose: row)
+                    if let row {
+                        self.mode = .reply(row: row)
+                        return .claimed
+                    }
                 }
                 guard self.timePeek else { return .declined }
                 self.mode = .time
@@ -512,6 +552,54 @@ struct TranscriptSwipeHost: UIViewRepresentable {
             }
             scroll.addGestureRecognizer(gr)
             recognizer = gr
+            #if DEBUG
+            installProbe(on: host)
+            #endif
+        }
+
+        #if DEBUG
+        /// A 1 pt element carrying the line `note` writes, read by `chat-swipe-probe`.
+        private weak var probe: UIView?
+
+        private func installProbe(on host: UIView) {
+            guard probe == nil else { return }
+            let p = UIView(frame: CGRect(x: 0, y: 0, width: 1, height: 1))
+            p.isUserInteractionEnabled = false
+            p.backgroundColor = .clear
+            p.isAccessibilityElement = true
+            p.accessibilityIdentifier = "chat-swipe-probe"
+            p.accessibilityLabel = "no leftward decide yet"
+            host.addSubview(p)
+            probe = p
+        }
+        #endif
+
+        /// What the last leftward decide saw, in `revealTrace`'s shape.
+        ///
+        /// This stays in after the tests go green, on purpose. A left swipe that produces no
+        /// reply has three causes and they are identical from outside: no marker held the
+        /// point, the recognizer never decided at all because the scroll view's pan took the
+        /// touch first, or the release could not resolve the row. The third says so itself in
+        /// `fireReply`; the first two are only separable from here, and the difference between
+        /// them is the difference between a geometry bug and an arbitration bug.
+        ///
+        /// It is also the cure for the property that makes this area dangerous: a reply that
+        /// does not fire degrades into the time peek, so a regression here is silent unless
+        /// something writes it down.
+        private func note(point: CGPoint, rows: [RowHit], chose: String?) {
+            #if DEBUG
+            let holding = rows.filter { $0.frame.contains(point) }
+            let detail = "point=\(Int(point.x)),\(Int(point.y)) markers=\(rows.count) "
+                + "repliable=\(rows.filter(\.canReply).count) holding=\(holding.count) "
+                + "holdingRepliable=\(holding.filter(\.canReply).count) chose=\(chose ?? "-")"
+            SwipeLog.event("reply-decide \(detail)")
+            // Follow the viewport, so the element a test reads is inside the scrolled content
+            // rather than parked at the top of a transcript hundreds of rows long.
+            if let probe, let scroll {
+                probe.frame = CGRect(origin: scroll.contentOffset, size: CGSize(width: 1, height: 1))
+                probe.accessibilityLabel = detail
+            }
+            #endif
         }
 
         @objc private func scrollPan(_ gr: UIPanGestureRecognizer) {
