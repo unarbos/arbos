@@ -1588,6 +1588,7 @@ pub(crate) mod tests {
             id: "job-a".into(),
             title: "Fixing the tests".into(),
             kind: "code".into(),
+            brief: "Fix the failing tests.".into(),
             touches: vec!["path:/work/p/src".into()],
             attempt: 0,
         };
@@ -1595,6 +1596,7 @@ pub(crate) mod tests {
             id: "job-b".into(),
             title: "Renaming a symbol".into(),
             kind: "code".into(),
+            brief: "Rename the symbol everywhere.".into(),
             touches: vec!["path:/work/p".into()],
             attempt: 0,
         };
@@ -1602,6 +1604,7 @@ pub(crate) mod tests {
             id: "job-c".into(),
             title: "Searching the web".into(),
             kind: "research".into(),
+            brief: "Search the web for the answer.".into(),
             touches: vec![],
             attempt: 0,
         };
@@ -1679,6 +1682,183 @@ pub(crate) mod tests {
             text.contains("fixing the tests") && text.contains("renaming a symbol"),
             "{text}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Jacob's Test5 round 2, bug I: a code job that declares no `touches` used to take
+    /// `path:/` and the project's git, so every code job queued behind every other and one
+    /// stuck job froze the rest. Its default is now the project subfolder its brief names and
+    /// that folder's own git — while a job that declares the project folder still serializes
+    /// against both subfolders.
+    #[tokio::test]
+    async fn a_code_job_locks_its_own_subfolder_not_the_whole_project() {
+        use crate::agent::JobSpec;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATJOBLOCKSCOPE0001";
+        let _host = agent.sync.open_room(chat).await.unwrap();
+        // Two repos, one per folder, as a box that cloned two projects has them.
+        let project = agent.cfg.work_dir.clone();
+        for folder in ["alpha", "beta"] {
+            std::fs::create_dir_all(project.join(folder).join(".git")).unwrap();
+        }
+        let code_job = |id: &str, title: &str, brief: &str| JobSpec {
+            id: id.into(),
+            title: title.into(),
+            kind: "code".into(),
+            brief: brief.into(),
+            touches: vec![],
+            attempt: 0,
+        };
+        let a = code_job(
+            "job-alpha",
+            "Fixing the alpha tests",
+            "Fix the failing tests in alpha/ and run the suite.",
+        );
+        let b = code_job(
+            "job-beta",
+            "Renaming a symbol",
+            "Rename the symbol across beta/ and build it.",
+        );
+        for j in [&a, &b] {
+            agent
+                .store
+                .insert_job(
+                    &j.id, chat, "m-busy", &j.title, "code", &j.brief, &j.touches,
+                )
+                .unwrap();
+        }
+        let held_a = agent.acquire_job_locks(&a).await;
+        // The job in alpha/ never finishes in this test: it is the stuck job.
+        let held_b = tokio::time::timeout(Duration::from_millis(500), agent.acquire_job_locks(&b))
+            .await
+            .expect(
+                "a code job in beta/ must start while a code job in alpha/ runs: a code job's \
+                 default lock is its own subfolder, not the whole project",
+            );
+        assert_eq!(
+            held_a,
+            vec![
+                format!("path:{}/alpha", project.display()),
+                format!("git:{}/alpha", project.display()),
+            ]
+        );
+        assert_eq!(
+            held_b,
+            vec![
+                format!("path:{}/beta", project.display()),
+                format!("git:{}/beta", project.display()),
+            ]
+        );
+        // A brief that names no folder of this project (a fresh clone) still takes the whole
+        // project folder and its git, which is what every code job used to take.
+        assert_eq!(
+            agent.job_lock_keys(&code_job(
+                "job-clone",
+                "Cloning subtensor",
+                "Clone https://github.com/opentensor/subtensor and build it.",
+            )),
+            vec![format!("path:{}", project.display()), "git".to_owned()]
+        );
+        // A job that needs the whole project says so, and then it does wait for both.
+        let wide = JobSpec {
+            touches: vec!["path:/".into(), "git".into()],
+            ..code_job("job-wide", "Reformatting everything", "Run the formatter.")
+        };
+        agent
+            .store
+            .insert_job(
+                "job-wide",
+                chat,
+                "m-busy",
+                &wide.title,
+                "code",
+                &wide.brief,
+                &wide.touches,
+            )
+            .unwrap();
+        let agent2 = agent.clone();
+        let wide2 = wide.clone();
+        let waiter = tokio::spawn(async move { agent2.acquire_job_locks(&wide2).await });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            !waiter.is_finished(),
+            "a job that declares the project folder still waits for every subfolder in it"
+        );
+        agent.release_job_locks("job-alpha").await;
+        agent.release_job_locks("job-beta").await;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), waiter)
+                .await
+                .unwrap()
+                .unwrap(),
+            vec!["path:/".to_owned(), "git".to_owned()]
+        );
+        agent.release_job_locks("job-wide").await;
+        // A project-relative `touches` entry is the same lock as the absolute folder.
+        assert_eq!(
+            agent.job_lock_keys(&JobSpec {
+                touches: vec!["path:alpha".into()],
+                ..code_job("job-rel", "Patching alpha", "Patch it.")
+            }),
+            vec![format!("path:{}/alpha", project.display())]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Bug I, second half: `start_job` used to answer `state: "running"` whenever a worker slot
+    /// was free, so the reply read as if the work had begun while the job was really waiting for
+    /// another job's files. A blocked job comes back queued and names what it is behind.
+    #[tokio::test]
+    async fn start_job_says_it_is_queued_behind_the_job_holding_the_files() {
+        use crate::agent::JobSpec;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUEUEDBEHIND0001";
+        let _host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        let project = agent.cfg.work_dir.clone();
+        std::fs::create_dir_all(project.join("alpha").join(".git")).unwrap();
+        let holder = JobSpec {
+            id: "job-holder".into(),
+            title: "Reformatting everything".into(),
+            kind: "code".into(),
+            brief: "Run the formatter over the project.".into(),
+            touches: vec!["path:/".into(), "git".into()],
+            attempt: 0,
+        };
+        agent
+            .store
+            .insert_job(
+                &holder.id,
+                chat,
+                "m-busy",
+                &holder.title,
+                "code",
+                &holder.brief,
+                &holder.touches,
+            )
+            .unwrap();
+        assert!(!agent.acquire_job_locks(&holder).await.is_empty());
+        let v = agent
+            .hook_start_job(
+                "Fixing the alpha tests",
+                "Fix the failing parser tests in alpha/, run the suite, and return the diff with the test output.",
+                "code",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            v["state"], "queued",
+            "a job behind another job's files has not started: {v}"
+        );
+        assert_eq!(v["queued_behind"]["title"], "Reformatting everything");
+        assert_eq!(v["queued_behind"]["job_id"], "job-holder");
+        let note = v["note"].as_str().unwrap_or_default();
+        assert!(
+            note.contains("queued behind \"Reformatting everything\""),
+            "the reply must name what the job waits for: {note}"
+        );
+        agent.release_job_locks("job-holder").await;
         let _ = std::fs::remove_dir_all(&root);
     }
 
