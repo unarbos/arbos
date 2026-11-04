@@ -145,6 +145,17 @@ c_actions_allowed() {   # release.yml / ios.yml take their slot in a separate st
   [ "$RC" = 0 ] && [[ "$OUT" == *"FAKE BOOT"* ]]
 }
 
+c_actions_with_a_slot_still_binds() {
+  # The CI shape: GITHUB_ACTIONS is set AND a slot is held whose owner is an ancestor (the lanes
+  # acquire with `--pid "$PPID"` in an earlier step, and that pid is still an ancestor here). The
+  # free ride must not short-circuit the slot search, or the udid is never recorded and the
+  # idle-simulator reclaim has nothing to key on — which is what the installed guard does today.
+  take_slot; ENVV=("GITHUB_ACTIONS=true")
+  rung "$1" simctl boot "$UDID"; local rc=$RC
+  local got; got=$(cat "$slot_path/udid" 2>/dev/null || echo ""); drop_slot
+  [ "$rc" = 0 ] && [ "$got" = "$UDID" ]
+}
+
 c_bootstatus_wait_guarded() {   # -b boots the device, so it is a boot
   drop_slot; rung "$1" simctl bootstatus "$UDID" -b
   [ "$RC" = 75 ] && [[ "$OUT" == *"$REFUSAL"* ]]
@@ -190,6 +201,7 @@ report "a boot that fails for its own reasons is not a refusal"      c_failure_i
 report "a slot handed over in ARBOS_HEAVY_SLOT is honoured"          c_handover_inside_slots_dir
 report "a handover pointing outside the slots directory is refused"  c_handover_outside_slots_dir
 report "GitHub Actions boots without a slot of its own"              c_actions_allowed
+report "GitHub Actions does not skip binding a slot it does hold"   c_actions_with_a_slot_still_binds
 report "bootstatus -b is a boot and is refused"                      c_bootstatus_wait_guarded
 report "bootstatus without -b only reports and passes"               c_bootstatus_report_passes
 report "a non-boot subcommand passes through unslotted"              c_list_passes
@@ -256,6 +268,13 @@ mutate "the booted udid is never recorded on the slot" \
 mutate "any directory in ARBOS_HEAVY_SLOT is accepted again" \
   's|^  "\$SLOTS_DIR"/\*.slot) \[ -d "\$ARBOS_HEAVY_SLOT" \]|  *) [ -d "$ARBOS_HEAVY_SLOT" ]|' \
   c_handover_outside_slots_dir "a handover pointing outside the slots directory is refused"
+
+# The installed guard's actual ordering, restored: GITHUB_ACTIONS checked before the slot search.
+# It allows the same boots, so only a case that looks at the binding can see it — which is why the
+# defect sat on the Mac unnoticed and why "GitHub Actions boots" on its own was not enough.
+mutate "the CI free ride is taken before the slot search, as the installed guard does" \
+  's|^\[ "\$is_boot" -eq 1 \] \|\| exec "\$REAL" "\$@"$|[ "$is_boot" -eq 1 ] \|\| exec "$REAL" "$@"\n[ -n "${GITHUB_ACTIONS:-}" ] \&\& exec "$REAL" "$@"|' \
+  c_actions_with_a_slot_still_binds "GitHub Actions does not skip binding a slot it does hold"
 
 # ── the closure itself ──────────────────────────────────────────────────────────────────────────
 # Everything above tests the guard's decision. This tests the thing AF-853 is actually about: that

@@ -24,12 +24,19 @@
 # it. It is left open on purpose: interposing inside an Apple framework bundle is a different risk
 # class from interposing inside Xcode. Treat --check as "closed on the routes it knows".
 #
-# A boot is allowed when one of these holds: a heavy slot whose owner pid is an ancestor of this
-# process (the gate, a rig that did `slot=$(arbos-heavy-slot.sh acquire <rig> --pid $$)`),
-# ARBOS_HEAVY_SLOT names a slot directory inside the slots directory (a rig that acquired one in a
-# subshell), or GITHUB_ACTIONS is set (release.yml / ios.yml take their slot in a separate step).
-# Otherwise it prints the rule and exits 75 (EX_TEMPFAIL) without booting. Two rig simulators booted
-# outside the cap took the box to load 548 on 2026-10-26 22:3x and ssh timed out for every worker.
+# A boot is allowed when one of these holds, CHECKED IN THIS ORDER: ARBOS_HEAVY_SLOT names a slot
+# directory inside the slots directory (a rig that acquired one in a subshell); a heavy slot whose
+# owner pid is an ancestor of this process (the gate, a rig that did
+# `slot=$(arbos-heavy-slot.sh acquire <rig> --pid $$)`); or GITHUB_ACTIONS is set (release.yml /
+# ios.yml take their slot in a separate step). Otherwise it prints the rule and exits 75
+# (EX_TEMPFAIL) without booting. Two rig simulators booted outside the cap took the box to load 548
+# on 2026-10-26 22:3x and ssh timed out for every worker.
+#
+# The order is the point, not an accident. GITHUB_ACTIONS used to be checked first, which allowed
+# exactly the same set of boots and so looked harmless — but it returned before the slot search, so
+# a CI lane that really was holding a slot never had its udid bound to it, and the reclaim that
+# frees a slot whose simulator has been Shutdown for SIM_IDLE_RECLAIM_S could never fire for the
+# lanes that actually boot simulators. Checked last it is a fallback rather than a shortcut.
 #
 # WHERE THE CONFIGURATION COMES FROM, and why not the environment. Everything that decides the
 # verdict — the real binaries, the slots directory — is read from xcrun-slot-guard.conf beside the
@@ -81,7 +88,6 @@ case "$sub" in
 esac
 
 [ "$is_boot" -eq 1 ] || exec "$REAL" "$@"
-[ -n "${GITHUB_ACTIONS:-}" ] && exec "$REAL" "$@"
 
 # Ancestors of this process.
 anc=""; p=$$
@@ -103,6 +109,15 @@ for s in "$SLOTS_DIR"/*.slot; do
   owner=$(basename "$s" | cut -d- -f2)
   case " $anc " in *" $owner "*) bind_and_exec "$s" ;; esac
 done
+
+# CI is allowed without a slot it can prove, because no file can verify GITHUB_ACTIONS. It is
+# checked LAST, after the search above, rather than first. Checked first — as it was — it short-circuits
+# the search, so a CI job that really does hold a slot never binds its udid to it, and the reclaim
+# that frees a slot whose simulator has been Shutdown for 300s has nothing to key on. The CI lanes
+# take their slot in an earlier step with `--pid "$PPID"`, and that pid is still an ancestor in the
+# boot step, so the search finds it: the shortcut was skipping a binding that would have worked.
+# Nothing that was allowed before is refused now; the only difference is the binding.
+[ -n "${GITHUB_ACTIONS:-}" ] && exec "$REAL" "$@"
 
 # The refusal. Its wording is asserted by the selftest, because an exit code on its own cannot tell
 # a refusal apart from the boot simply failing — the confusion that produced the original defect,
