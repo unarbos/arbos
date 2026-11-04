@@ -29,6 +29,8 @@ mod markdown_tables;
 mod mcp;
 mod media;
 mod memory;
+#[cfg(test)]
+mod model_switch_tests;
 mod people;
 mod relay_error;
 mod reply;

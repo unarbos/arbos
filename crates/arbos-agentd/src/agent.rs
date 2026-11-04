@@ -1620,6 +1620,12 @@ pub struct Agent {
     /// the next plain prompt with "Agent is already processing" (#2073, Doug 2026-10-27). The
     /// next turn reclaims pi (abort, wait for idle) before it prompts.
     pub(crate) pi_run_orphaned: AtomicBool,
+    /// The talking model the live pi child is actually on. `None` before the first spawn, and
+    /// while a retry deliberately holds the session on the fallback model
+    /// (`switch_talking_model`) — in both cases the turn boundary leaves the model alone. pi
+    /// owns its model between spawns, so this is what lets a turn tell "pi already has the
+    /// agent's model" from "the one push that would have given it to pi was lost".
+    pub(crate) pi_model: Mutex<Option<String>>,
     /// D91 soft-compaction hysteresis per chat: `None` right after a compaction (the floor is
     /// not known yet), then the window observed on the first turn after it.
     compaction_floor: std::sync::Mutex<HashMap<String, Option<i64>>>,
@@ -1783,6 +1789,7 @@ impl Agent {
             pi_wake: tokio::sync::Notify::new(),
             pi_last_use_ms: std::sync::atomic::AtomicU64::new(now_ms() as u64),
             pi_run_orphaned: AtomicBool::new(false),
+            pi_model: Mutex::new(None),
             compaction_floor: std::sync::Mutex::new(HashMap::new()),
             pending_sends: std::sync::atomic::AtomicUsize::new(0),
             side_notes: std::sync::Mutex::new(HashMap::new()),
@@ -2027,6 +2034,7 @@ impl Agent {
         }
         tracing::info!(ms = t0.elapsed().as_millis() as i64, "pi main agent ready");
         *self.pi.lock().await = Some(child);
+        *self.pi_model.lock().await = Some(talking_model.clone());
         *self.current_chat.lock().await = Some(initial_chat.to_owned());
         self.pi_ready.store(true, Ordering::SeqCst);
         self.store.upsert_session(
@@ -2220,6 +2228,7 @@ impl Agent {
             )
             .await?;
         *self.pi.lock().await = Some(child);
+        *self.pi_model.lock().await = Some(talking_model);
         *self.current_chat.lock().await = Some(chat_id.to_owned());
         self.pi_ready.store(true, Ordering::SeqCst);
         Ok(())
@@ -5220,7 +5229,7 @@ impl Agent {
 
     // ---- the main turn ------------------------------------------------------------------------
 
-    async fn run_main_turn(
+    pub(crate) async fn run_main_turn(
         self: &Arc<Self>,
         chat_id: &str,
         host: &SharedHost,
@@ -7134,9 +7143,13 @@ impl Agent {
     /// Move the live pi session onto the fallback talking model (`on`) or back to the one in
     /// settings. The fallback is the subagent model: it is on this box's `models.json` already
     /// and is a different provider lane from the talking model's. `false` when pi refused.
-    async fn switch_talking_model(&self, on: bool) -> bool {
+    pub(crate) async fn switch_talking_model(&self, on: bool) -> bool {
         let (talking, subagent) = self.live_models().await;
-        let target = if on { subagent } else { talking.clone() };
+        let target = if on {
+            subagent.clone()
+        } else {
+            talking.clone()
+        };
         if on && target == talking {
             return false;
         }
@@ -7155,17 +7168,32 @@ impl Agent {
             .await
         {
             Ok(r) if r.success => {
+                // `None` while the fallback holds the session: the next turn's reconcile leaves
+                // a deliberate choice alone. A restore that fails leaves pi on the fallback and
+                // says so, so the reconcile corrects it rather than trusting a switch that did
+                // not happen.
+                *self.pi_model.lock().await = if on { None } else { Some(target.clone()) };
                 tracing::warn!(model = %target, fallback = on, "talking model switched for a retry");
                 true
             }
             Ok(r) => {
+                self.note_failed_restore(on, &subagent).await;
                 tracing::warn!(model = %target, error = ?r.error, "fallback model refused by pi");
                 false
             }
             Err(e) => {
+                self.note_failed_restore(on, &subagent).await;
                 tracing::warn!(model = %target, error = %e, "fallback model switch failed");
                 false
             }
+        }
+    }
+
+    /// A failed *restore* means pi is still on the fallback model; record that so the next
+    /// turn's reconcile moves it back. A failed switch *to* the fallback moved nothing.
+    async fn note_failed_restore(&self, on: bool, fallback: &str) {
+        if !on {
+            *self.pi_model.lock().await = Some(fallback.to_owned());
         }
     }
 
