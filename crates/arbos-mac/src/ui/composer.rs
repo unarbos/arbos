@@ -39,8 +39,8 @@ use crate::ui::mention::{self, Mention, MentionToken, Mentions};
 use crate::ui::select::{self, word_range};
 use crate::ui::sf_symbols;
 use crate::ui::theme::{
-    Theme, COMPOSER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS, PLUS_BUTTON, SEND_BUTTON, TEXT_BODY,
-    TEXT_SMALL, TEXT_TINY,
+    Theme, COMPOSER_HEIGHT, PANEL_RADIUS, PLUS_BUTTON, SEND_BUTTON, TEXT_BODY, TEXT_SMALL,
+    TEXT_TINY,
 };
 use crate::ui::transcript;
 use crate::ui::voice::{render_recording_row, Voice, VoiceEvent};
@@ -206,8 +206,24 @@ pub(crate) fn stash_pasted_image(image: &gpui::Image, dir: &Path) -> std::io::Re
 pub(crate) fn pasted_images_dir() -> PathBuf {
     std::env::temp_dir().join("arbos-pasted")
 }
-const INPUT_LINE_HEIGHT: f32 = LINE_HEIGHT;
-const INPUT_FONT_SIZE: f32 = TEXT_BODY;
+// The composer's own type, written out rather than read from `TEXT_BODY` /
+// `LINE_HEIGHT`. Jacob is moving the composer toward Grok's field and said
+// nothing about body text; those two constants have some sixty consumers
+// across thirteen files, so sizing the composer from them would turn one
+// measured control into an app-wide change.
+//
+// Line height is Grok's, measured: its composer sets a 40.0 px line pitch
+// against our 42.0 px, on a reference crop pinned at 2.000 px/pt by three
+// 28.0 pt discs and by our own 21.0 showing as 41.997 px. So Grok is 20.0 pt
+// and we were 21.0.
+//
+// The font size is deliberately NOT moved. The pitch is the only composer
+// quantity the crop measures safely; a size would have to be invented,
+// because the x-height reading it would come from is corrupted by digit
+// density (lining figures are drawn to cap height, so a digit-heavy line
+// measures tall).
+const INPUT_LINE_HEIGHT: f32 = 20.0;
+const INPUT_FONT_SIZE: f32 = 15.0;
 
 #[derive(Clone, Debug)]
 pub enum ComposerEvent {
@@ -296,7 +312,7 @@ pub struct ComposerInput {
     masked: bool,
     /// Profile hero rename: paint and hit-test the name centered under the avatar.
     text_center: bool,
-    /// Type size; the composer's `TEXT_BODY` unless a smaller field asks otherwise.
+    /// Type size; the composer's `INPUT_FONT_SIZE` unless a smaller field asks otherwise.
     font_size: f32,
     /// Known `@handle`s (people, agents, `@here`, `@agents`): paint them in the
     /// accent as soon as the full token is typed, same as bubble chips resolve.

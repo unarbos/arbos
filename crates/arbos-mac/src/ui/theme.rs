@@ -847,9 +847,31 @@ impl Theme {
         }
     }
 
-    /// Text on a user bubble: white on the dark grey, white on black.
+    /// White ink on a dark chip: the selected segment ([`glass::segment`]) and
+    /// the link card. **Not the bubbles' ink** — they have their own tokens
+    /// below. Named for the bubble because it used to serve it too; it stays
+    /// at pure white because the Glass dark segment's guard in
+    /// `glass_contrast_tests` has no headroom, and 245 ink puts that worst
+    /// case under the 4.5:1 floor.
     pub fn bubble_text(&self) -> Hsla {
         grey(1.0)
+    }
+
+    /// Ink on my own bubble (Jacob 2026-11-04, measured: 255 -> 245). That
+    /// bubble is dark in both appearances — `#3c3c3c` on dark, `#111111` on
+    /// light — so the ink is one value in both.
+    pub fn bubble_user_text(&self) -> Hsla {
+        hex(0xf5f5f5)
+    }
+
+    /// Ink on an agent bubble (Jacob 2026-11-04, measured: 255 -> 245 on
+    /// dark). Only dark was measured, and only dark has a dark bubble to sit
+    /// on: on light the bubble is `#ededed`, so the ink stays the page's.
+    pub fn bubble_assistant_text(&self) -> Hsla {
+        match self.appearance {
+            Appearance::Dark => hex(0xf5f5f5),
+            Appearance::Light => self.text,
+        }
     }
 
     /// Glass is only possible where the window can be blurred (D10).
@@ -2041,6 +2063,39 @@ mod glass_contrast_tests {
                 "{state}: the track is a well {:.1}/255 under the card",
                 grey(theme.pane_card) - track
             );
+        }
+    }
+
+    /// Jacob's measured bubble ink, 2026-11-04: both bubbles move 255 -> 245.
+    /// The shades themselves, not a comparison — a test that only said the two
+    /// inks differ from white would pass just as well on 254 or on 7.
+    #[test]
+    fn both_bubbles_ink_their_text_at_jacobs_245() {
+        let dark = Theme::with(Appearance::Dark, Surface::Matte);
+        assert_eq!(dark.bubble_user_text(), hex(0xf5f5f5));
+        assert_eq!(dark.bubble_assistant_text(), hex(0xf5f5f5));
+        // My bubble is dark in both appearances, so its ink does not split.
+        let light = Theme::with(Appearance::Light, Surface::Matte);
+        assert_eq!(light.bubble_user_text(), hex(0xf5f5f5));
+        // The agent bubble is near-white on light, so there it keeps page ink.
+        assert_eq!(light.bubble_assistant_text(), light.text);
+    }
+
+    /// `bubble_text` is the selected segment's and the link card's white, and
+    /// it may not follow the bubbles down to 245: the Glass dark segment's
+    /// guard above has no headroom, and 245 puts its worst case under 4.5:1.
+    /// Pinned as the shade, since the thing it must not become is a value.
+    #[test]
+    fn the_chip_white_did_not_follow_the_bubbles() {
+        for appearance in [Appearance::Dark, Appearance::Light] {
+            for surface in [Surface::Matte, Surface::Glass] {
+                let theme = Theme::with(appearance, surface);
+                assert_eq!(
+                    theme.bubble_text(),
+                    grey(1.0),
+                    "{appearance:?}/{surface:?}: the chip white moved"
+                );
+            }
         }
     }
 }
