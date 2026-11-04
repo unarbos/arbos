@@ -603,6 +603,8 @@ impl Agent {
             name: from_name.clone(),
             job_id: None,
             status: status.clone(),
+            title: format!("my message to {from_name}"),
+            result: text.clone(),
         };
         self.run_notice_turn_unless_relayed(
             &chat_id,

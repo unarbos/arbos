@@ -2784,6 +2784,8 @@ pub(crate) mod tests {
             name: "job:sites".into(),
             job_id: None,
             status: "partial".into(),
+            title: "Compare the shortlisted sites".into(),
+            result: "Two of the four sites are on the shortlist.".into(),
         };
         let fallback = relay_fallback_line(&kind);
         assert!(
@@ -2934,6 +2936,8 @@ pub(crate) mod tests {
             name: "job:migration".into(),
             job_id: None,
             status: "failed".into(),
+            title: "Migrate the rows".into(),
+            result: String::new(),
         };
         let fallback = relay_fallback_line(&kind);
         assert!(fallback.contains("did not finish"), "{fallback}");
