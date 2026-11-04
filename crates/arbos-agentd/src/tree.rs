@@ -31,6 +31,7 @@ use arbos_core::ids::{now_ms, ulid};
 
 use crate::config::Config;
 use crate::llm::Llm;
+use crate::settings::{LiveModels, ModelRole};
 use crate::store::{Store, T3Row};
 
 pub const SCHEMA: &str = r#"
@@ -313,8 +314,9 @@ struct Gathered {
 pub struct Tree {
     project_id: String,
     project_name: String,
-    /// Chat model for the cards (the project's `decision_model` slot).
-    card_model: String,
+    /// Chat model for the cards: the project's live `decision_model` slot, read per pass so a
+    /// model change in the app reaches the cards without a box restart (Jacob, 2026-11-04).
+    models: LiveModels,
     store: Store,
     llm: Arc<Llm>,
     build_lock: tokio::sync::Mutex<()>,
@@ -479,20 +481,14 @@ fn cache_ctx(words: &[String], asked_at: i64, asker: &str, restricted: bool) -> 
 }
 
 impl Tree {
-    pub fn new(cfg: &Config, store: Store, llm: Arc<Llm>) -> Self {
-        Self::with_ids(
-            &cfg.project_id,
-            &cfg.project_name,
-            &cfg.decision_model,
-            store,
-            llm,
-        )
+    pub fn new(cfg: &Config, store: Store, llm: Arc<Llm>, models: LiveModels) -> Self {
+        Self::with_ids(&cfg.project_id, &cfg.project_name, models, store, llm)
     }
 
     pub fn with_ids(
         project_id: &str,
         project_name: &str,
-        card_model: &str,
+        models: LiveModels,
         store: Store,
         llm: Arc<Llm>,
     ) -> Self {
@@ -503,7 +499,7 @@ impl Tree {
         let tree = Self {
             project_id: project_id.to_owned(),
             project_name: project_name.to_owned(),
-            card_model: card_model.to_owned(),
+            models,
             store,
             llm,
             build_lock: tokio::sync::Mutex::new(()),
@@ -1188,7 +1184,7 @@ impl Tree {
             stats["ms"] = json!(t0.elapsed().as_millis() as i64);
             return Ok(stats);
         }
-        let model = self.card_model();
+        let model = self.card_model().await;
         let mut calls = 0usize;
         let mut errors = 0usize;
         // 2. page cards for big tool results (deduped by content)
@@ -1476,8 +1472,8 @@ impl Tree {
         Ok(stats)
     }
 
-    fn card_model(&self) -> String {
-        self.card_model.clone()
+    async fn card_model(&self) -> String {
+        self.models.resolve(ModelRole::Decision).await
     }
 
     async fn write_card(
@@ -2797,7 +2793,13 @@ mod tests {
             &format!("http://127.0.0.1:{port}/decisions"),
             "test-token",
         );
-        let tree = Tree::with_ids("p-test", "Bob", "mock-card-model", store, Arc::new(llm));
+        let tree = Tree::with_ids(
+            "p-test",
+            "Bob",
+            crate::settings::LiveModels::fixed("mock-card-model"),
+            store,
+            Arc::new(llm),
+        );
         for _ in 0..10 {
             let st = tree.build_pass().await.unwrap();
             if st["cards"].as_i64().unwrap_or(0) == 0 && st["leaves"].as_i64().unwrap_or(0) == 0 {
@@ -2917,7 +2919,13 @@ mod tests {
             &format!("http://127.0.0.1:{port}/decisions"),
             "test-token",
         );
-        let tree = Tree::with_ids("p-test", "Bob", "mock-card-model", store, Arc::new(llm));
+        let tree = Tree::with_ids(
+            "p-test",
+            "Bob",
+            crate::settings::LiveModels::fixed("mock-card-model"),
+            store,
+            Arc::new(llm),
+        );
         for _ in 0..10 {
             let st = tree.build_pass().await.unwrap();
             if st["cards"].as_i64().unwrap_or(0) == 0 && st["leaves"].as_i64().unwrap_or(0) == 0 {

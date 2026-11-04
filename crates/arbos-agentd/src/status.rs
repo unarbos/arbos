@@ -535,11 +535,18 @@ impl Agent {
         // work and steers are status and live on the working row (Jacob, 2026-10-23: no "On
         // it." / "Still on it…" placeholders in the transcript).
         let address = self.owner_address_note(chat_id, host, &user_msg_id).await;
-        let (talking_model, _) = self.live_models().await;
-        let model = std::env::var("ARBOS_QUICK_REPLY_MODEL")
+        // A cheaper quick-reply lane is allowed, but never over the agent's head: with a model
+        // picked for this agent, the box override is ignored and the quick reply speaks on that
+        // model like the rest of the turn (Jacob, 2026-11-04).
+        let talking_model = self.model_for(crate::settings::ModelRole::Talking).await;
+        let model = match std::env::var("ARBOS_QUICK_REPLY_MODEL")
             .ok()
-            .filter(|m| !m.trim().is_empty())
-            .unwrap_or(talking_model);
+            .map(|m| m.trim().to_owned())
+            .filter(|m| !m.is_empty())
+        {
+            Some(m) if !self.settings.models.talking_is_chosen().await => m,
+            _ => talking_model,
+        };
         let mut used_model = false;
         let (kind, text) = if self.quick_call_allowed(chat_id) {
             used_model = true;

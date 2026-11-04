@@ -117,6 +117,26 @@ impl Models {
         }
     }
 
+    /// The slots a workspace boots with: the project's own settings where it has them, the box
+    /// defaults where it does not.
+    pub fn from_cfg(cfg: &crate::config::Config) -> Models {
+        Models {
+            talking: Slot {
+                id: cfg.talking_model.clone(),
+                effort: "off".into(),
+            },
+            subagent: Slot {
+                id: cfg.subagent_model.clone(),
+                effort: "medium".into(),
+            },
+            decision: Slot {
+                id: cfg.decision_model.clone(),
+                effort: "off".into(),
+            },
+            decision_cfg: cfg.decision_cfg.clone(),
+        }
+    }
+
     pub fn to_json(&self) -> Value {
         json!({
             "talking_model": { "id": self.talking.id, "effort": self.talking.effort },
@@ -200,8 +220,114 @@ pub const DEFAULT_TALKING_MODEL: &str = "anthropic/claude-haiku-5.5";
 pub const DEFAULT_SUBAGENT_MODEL: &str = "anthropic/claude-sonnet-5.5";
 pub const DEFAULT_DECISION_MODEL: &str = "anthropic/claude-haiku-5.5";
 
+/// What a model call is for. Every model choice in agentd resolves through
+/// [`LiveModels::resolve`], so an agent's own pick in its Model setting governs the work that
+/// runs away from the main session as well: jobs, continuation jobs, subagents, quick replies,
+/// compaction, memory passes.
+#[derive(Debug, Clone)]
+pub enum ModelRole<'a> {
+    /// The main session and everything else the user reads as the agent speaking.
+    Talking,
+    /// A job or subagent doing this agent's work. `job_kind` is the job's kind (`research`,
+    /// `code`, `other`) and `None` for a subagent that is not a job; `research` is the
+    /// research-worker override in force (`Config::research_worker_model`).
+    Worker {
+        job_kind: Option<&'a str>,
+        research: Option<&'a str>,
+    },
+    /// Memory write/read decisions and memory-tree cards (the `decision_model` slot).
+    Decision,
+}
+
+/// The agent's live model slots, as one handle. Everything that makes a model call holds a clone
+/// of this instead of reading the boot values out of `Config`, so a model change in the app
+/// reaches each of them on the next call, with no respawn and no restart.
+#[derive(Clone)]
+pub struct LiveModels {
+    slots: Arc<RwLock<Models>>,
+    box_default_talking: String,
+    box_default_subagent: String,
+}
+
+impl LiveModels {
+    pub fn new(cfg: &crate::config::Config) -> Self {
+        Self {
+            slots: Arc::new(RwLock::new(Models::from_cfg(cfg))),
+            box_default_talking: cfg.box_default_talking_model.clone(),
+            box_default_subagent: cfg.box_default_subagent_model.clone(),
+        }
+    }
+
+    /// One id for every role: the `eval-*` subcommands and tests, which have no project settings
+    /// and no box defaults to compare against.
+    pub fn fixed(id: &str) -> Self {
+        let slot = || Slot {
+            id: id.to_owned(),
+            effort: "off".into(),
+        };
+        Self {
+            slots: Arc::new(RwLock::new(Models {
+                talking: slot(),
+                subagent: slot(),
+                decision: slot(),
+                decision_cfg: DecisionConfig {
+                    provider: DecisionProvider::Jev,
+                    scorer: crate::config::DEFAULT_DECISION_SCORER.to_owned(),
+                    threshold: crate::config::DEFAULT_DECISION_THRESHOLD,
+                    memory_tree: crate::tree::TreeMode::On,
+                },
+            })),
+            box_default_talking: id.to_owned(),
+            box_default_subagent: id.to_owned(),
+        }
+    }
+
+    pub async fn read(&self) -> tokio::sync::RwLockReadGuard<'_, Models> {
+        self.slots.read().await
+    }
+
+    pub async fn write(&self) -> tokio::sync::RwLockWriteGuard<'_, Models> {
+        self.slots.write().await
+    }
+
+    pub fn try_read(
+        &self,
+    ) -> Result<tokio::sync::RwLockReadGuard<'_, Models>, tokio::sync::TryLockError> {
+        self.slots.try_read()
+    }
+
+    /// The model one piece of this agent's work runs on.
+    ///
+    /// A slot that differs from its box default was chosen for this agent, and a chosen model
+    /// wins over every cheaper lane: the user who picks Opus gets Opus for the reading and the
+    /// writing, not only for the sentence that answers (Jacob, 2026-11-04: "why did it use Haiku? the model is opus"). An agent left on the box default
+    /// keeps the lanes as they were, so no default moves and nothing costs more than today.
+    pub async fn resolve(&self, role: ModelRole<'_>) -> String {
+        let m = self.read().await;
+        match role {
+            ModelRole::Talking => m.talking.id.clone(),
+            ModelRole::Decision => m.decision.id.clone(),
+            ModelRole::Worker { job_kind, research } => {
+                if m.subagent.id != self.box_default_subagent {
+                    return m.subagent.id.clone();
+                }
+                if m.talking.id != self.box_default_talking {
+                    return m.talking.id.clone();
+                }
+                crate::config::worker_model_for(job_kind.unwrap_or(""), research, &m.subagent.id)
+            }
+        }
+    }
+
+    /// Someone picked this agent's talking model; it is not the box default. A cheap fast path
+    /// (the research-worker lane, `ARBOS_QUICK_REPLY_MODEL`) must yield to it.
+    pub async fn talking_is_chosen(&self) -> bool {
+        self.read().await.talking.id != self.box_default_talking
+    }
+}
+
 pub struct Settings {
-    pub models: RwLock<Models>,
+    pub models: LiveModels,
     pub state: RwLock<SettingsState>,
     pub catalog: RwLock<Option<ModelCatalog>>,
     /// Boot-time slots: the fallback when a client or the registry names an unknown model.
@@ -209,24 +335,11 @@ pub struct Settings {
 }
 
 impl Settings {
-    pub fn new(cfg: &crate::config::Config) -> Self {
-        let models = Models {
-            talking: Slot {
-                id: cfg.talking_model.clone(),
-                effort: "off".into(),
-            },
-            subagent: Slot {
-                id: cfg.subagent_model.clone(),
-                effort: "medium".into(),
-            },
-            decision: Slot {
-                id: cfg.decision_model.clone(),
-                effort: "off".into(),
-            },
-            decision_cfg: cfg.decision_cfg.clone(),
-        };
+    /// `models` is the handle every component shares (`LiveModels`), so a change applied here is
+    /// the change a job, a quick reply or a memory pass sees on its next call.
+    pub fn new(cfg: &crate::config::Config, models: LiveModels) -> Self {
         Self {
-            models: RwLock::new(models.clone()),
+            models,
             state: RwLock::new(SettingsState {
                 name: cfg.project_name.clone(),
                 instructions: cfg.instructions.clone(),
@@ -234,7 +347,7 @@ impl Settings {
                 ..Default::default()
             }),
             catalog: RwLock::new(None),
-            defaults: models,
+            defaults: Models::from_cfg(cfg),
         }
     }
 }

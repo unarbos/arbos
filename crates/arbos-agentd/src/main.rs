@@ -224,7 +224,13 @@ async fn eval_tree(
         }
     };
     let store = store::Store::open(std::path::Path::new(&db))?;
-    let tree = tree::Tree::with_ids("eval", "eval", &card_model, store, std::sync::Arc::new(llm));
+    let tree = tree::Tree::with_ids(
+        "eval",
+        "eval",
+        settings::LiveModels::fixed(&card_model),
+        store,
+        std::sync::Arc::new(llm),
+    );
     let report = tree.eval(&scorer, &chat, &query, opts).await?;
     let text = serde_json::to_string_pretty(&report)?;
     match out {
