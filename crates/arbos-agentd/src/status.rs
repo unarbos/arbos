@@ -2432,6 +2432,7 @@ pub(crate) mod tests {
         let kind = TurnKind::SubagentResult {
             subagent_id: "01TESTSUBAGENT000000000001".into(),
             name: "job:sites".into(),
+            job_id: None,
             status: "partial".into(),
         };
         let fallback = relay_fallback_line(&kind);
@@ -2581,6 +2582,7 @@ pub(crate) mod tests {
         let kind = TurnKind::SubagentResult {
             subagent_id: "01TESTSUBAGENT000000000002".into(),
             name: "job:migration".into(),
+            job_id: None,
             status: "failed".into(),
         };
         let fallback = relay_fallback_line(&kind);
