@@ -372,9 +372,73 @@ struct ChatSession: View {
         showSearch && !searchText.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
-    /// The transcript's lazy stack is keyed by the keyword while one is set, so a filter that
-    /// replaces the whole row set gets a **new** stack rather than the one that was holding
-    /// the other 437 rows.
+    /// What the transcript draws above its rows. At most one of these is in the lazy stack at a
+    /// time, and which one it is changes while a chat is on screen — that is the whole point of
+    /// naming it: a child that comes and goes is what `transcriptStackIdentity` has to cover.
+    enum TranscriptLead: String {
+        /// Rows only.
+        case rowsOnly
+        /// The doc holds rows that are not on screen yet: a spinner.
+        case pending
+        /// The room is still catching up on a thread whose size we do not know: a spinner.
+        case catchUp
+        /// An agent chat or channel with nothing in it: the "Ask @handle anything…" hint.
+        case empty
+        /// Search-in-chat with a keyword no message matches.
+        case noMatches
+    }
+
+    /// The lead child for one transcript state. Pure, so the identity and the view can be read
+    /// off the same answer and cannot disagree about which child is in the stack.
+    static func transcriptLead(pending: Bool, caughtUp: Bool, fixture: Bool, messagesEmpty: Bool,
+                               knownEmpty: Bool, rowsEmpty: Bool, agentCopy: Bool,
+                               searchHits: Bool, visibleRowsEmpty: Bool) -> TranscriptLead {
+        if pending { return .pending }
+        if !caughtUp, messagesEmpty, !fixture {
+            // Known-empty (an optimistic new chat seeds `messages[id] = []`): the hint at once,
+            // no spinner flash on a thread we already know has no rows.
+            return knownEmpty ? (agentCopy ? .empty : .rowsOnly) : .catchUp
+        }
+        // People chats and channels stay blank when empty (iMessage-style); the agent copy
+        // would say "Ask @handle anything…", which is wrong there.
+        if rowsEmpty, agentCopy { return .empty }
+        if searchHits, visibleRowsEmpty { return .noMatches }
+        return .rowsOnly
+    }
+
+    private var transcriptLead: TranscriptLead {
+        Self.transcriptLead(pending: model.transcriptPending(chatId),
+                            caughtUp: model.caughtUp.contains(chatId),
+                            fixture: model.isFixture,
+                            messagesEmpty: messages.isEmpty,
+                            knownEmpty: model.hasKnownEmptyTranscript(chatId),
+                            rowsEmpty: rows.isEmpty,
+                            agentCopy: !isPeople && !isChannel,
+                            searchHits: searchHitsActive,
+                            visibleRowsEmpty: visibleRows.isEmpty)
+    }
+
+    /// Which lead child is in the stack and whether the waking banner is up — the two children
+    /// above the rows that come and go. A change here is a rebuild an **open** caused, as
+    /// against one a keyword caused, and the two want different things afterwards.
+    static func transcriptStackShape(lead: TranscriptLead, banner: Bool) -> String {
+        lead.rawValue + (banner ? "+banner" : "")
+    }
+
+    /// The stack's identity. Pure, so a test can hold every transition that re-keys it.
+    static func transcriptStackIdentity(lead: TranscriptLead, banner: Bool, query: String?) -> String {
+        let shape = transcriptStackShape(lead: lead, banner: banner)
+        guard let query else { return "all:\(shape)" }
+        return "filtered:\(shape):\(query)"
+    }
+
+    private var transcriptStackShape: String {
+        Self.transcriptStackShape(lead: transcriptLead, banner: machineBannerText != nil)
+    }
+
+    /// The transcript's lazy stack is keyed by the keyword while one is set, and by the shape of
+    /// whatever sits above the rows, so a change that replaces the row set gets a **new** stack
+    /// rather than the one that was holding the other 437 rows.
     ///
     /// Why it has to be the identity. A keyword swaps the row set for its hits in one step.
     /// iOS 27 does not re-measure the rows that stay: it keeps the space it had reserved for
@@ -391,11 +455,25 @@ struct ChatSession: View {
     /// 3. So the stale state is the stack's own per-child bookkeeping, not the scroll offset,
     /// and the only thing that clears it is a stack that has none.
     ///
-    /// The cost is bounded: unfiltered the key never changes, so the transcript's hot path
-    /// (streaming, window growth, scrolling) still never rebuilds, and a rebuilt filtered
-    /// stack is lazy, so it builds the few rows at the viewport and not the window.
+    /// Why the lead child has to be in it too. A keyword is not the only thing that replaces the
+    /// row set in one step. An agent chat whose rows have not arrived yet draws the empty hint as
+    /// its one lead child; when the rows land that child leaves and the window's rows arrive
+    /// together, and iOS 27 keeps the space it had reserved just the same — the transcript is a
+    /// header and a composer with nothing between them, no hint and no spinner, until a finger
+    /// scroll forces a build ([feedback iphone-blank-chat-on-open-2026-11-03], Jacob: "still").
+    /// Only the bottom inset was taken out of that path before (`2fe8f86f0`, the floating chat
+    /// bar), which is why the blank outlived it: the inset was one trigger, not the mechanism.
+    /// Rows arriving late is a slow link, which is why no simulator open reproduces it.
+    ///
+    /// The cost is bounded: with the rows up and no keyword the key never changes, so the
+    /// transcript's hot path (streaming, window growth, scrolling) still never rebuilds, and a
+    /// rebuilt stack is lazy, so it builds the few rows at the viewport and not the window. The
+    /// waking banner is in the key for the same reason the hint is, and it carries the one cost
+    /// here: a machine that starts waking while someone reads history rebuilds the stack, which
+    /// lands at the bottom anchor. That is a jump to the end instead of a blank transcript.
     private var transcriptStackIdentity: String {
-        searchHitsActive ? "filtered:\(searchText.trimmingCharacters(in: .whitespaces))" : "all"
+        Self.transcriptStackIdentity(lead: transcriptLead, banner: machineBannerText != nil,
+                                     query: searchHitsActive ? searchText.trimmingCharacters(in: .whitespaces) : nil)
     }
 
     /// `transcriptStackIdentity` with the keyword taken out, for the reveal trace.
@@ -403,10 +481,10 @@ struct ChatSession: View {
     /// The identity has to carry the keyword — that is the whole point of it, a new stack per
     /// filter. A log line must not. What someone types into a chat search is their content:
     /// a name, a diagnosis, a fragment of a secret they are looking for. The trace only ever
-    /// needs to know **which of the two stacks** a reveal is scrolling, so the keyword never
-    /// reaches the line and there is nothing to redact later.
+    /// needs to know **which stack** a reveal is scrolling, so the keyword never reaches the
+    /// line and there is nothing to redact later.
     private var stackIdentityForTrace: String {
-        searchHitsActive ? "filtered" : "all"
+        searchHitsActive ? "filtered:\(transcriptStackShape)" : "all:\(transcriptStackShape)"
     }
 
     static func shownStamp(_ rowsVersion: Int, _ windowCount: Int, _ windowSkipEnd: Int, _ query: String, _ searching: Bool) -> Int {
@@ -2333,25 +2411,20 @@ struct ChatSession: View {
                         .frame(maxWidth: .infinity)
                         .padding(.bottom, 16)
                     }
-                    if model.transcriptPending(chatId) {
+                    // One child at most, and `transcriptStackIdentity` is keyed on which one it
+                    // is: iOS 27 keeps a lazy stack's reserved space when its children change,
+                    // and this is the child that comes and goes while a chat is on screen.
+                    switch transcriptLead {
+                    case .pending:
                         // The doc has rows that are not on screen yet: a spinner, never a
                         // blank people chat ([feedback arbonites-blank-chat-ios-2026-10-28]).
                         HStack { Spacer(); ProgressView().tint(theme.muted); Spacer() }.padding(.top, 60)
                             .accessibilityIdentifier("chat-transcript-loading")
-                    } else if !model.caughtUp.contains(chatId) && messages.isEmpty && !model.isFixture {
-                        // Known-empty (optimistic new chat seeds `messages[id] = []`):
-                        // show the empty hint at once — no spinner flash while the
-                        // room catches up on a thread we already know has no rows.
-                        if model.hasKnownEmptyTranscript(chatId) {
-                            if !isPeople, !isChannel { emptyHint }
-                        } else {
-                            HStack { Spacer(); ProgressView().tint(theme.muted); Spacer() }.padding(.top, 60)
-                        }
-                    } else if rows.isEmpty, !isPeople, !isChannel {
-                        // People chats and channels stay blank (iMessage-style); the agent
-                        // empty copy would say "Ask @handle anything…" which is wrong here.
+                    case .catchUp:
+                        HStack { Spacer(); ProgressView().tint(theme.muted); Spacer() }.padding(.top, 60)
+                    case .empty:
                         emptyHint
-                    } else if searchHitsActive, visibleRows.isEmpty {
+                    case .noMatches:
                         // A keyword with no hit never leaves the transcript blank
                         // ([feedback iphone-search-close-2026-10-28]): say so, and that a
                         // tap or the ✕ brings the messages back.
@@ -2361,6 +2434,8 @@ struct ChatSession: View {
                             .frame(maxWidth: .infinity)
                             .padding(.top, 60)
                             .accessibilityIdentifier("chat-search-no-matches")
+                    case .rowsOnly:
+                        EmptyView()
                     }
                     let shown = windowedRows
                     // One MentionTable for every bubble (Mac builds Mentions once per
@@ -2529,6 +2604,15 @@ struct ChatSession: View {
                 }
             }
             .onChange(of: transcriptStackIdentity) { _, _ in pinFilteredStackToEnd(proxy) }
+            // A rebuilt stack has no measured child heights either way, so the one a lead child
+            // or the banner rebuilds needs the same ladder the filtered one does — otherwise an
+            // open whose rows land late comes to rest on estimates, with the newest row short of
+            // the composer. Only while the reader is following the end: scrolled up, the rebuild
+            // already costs the bottom anchor and dragging them back would cost the place too.
+            .onChange(of: transcriptStackShape) { _, _ in
+                guard pinnedToBottom else { return }
+                settleToBottom(proxy)
+            }
         }
     }
 
