@@ -54,6 +54,15 @@ def spm_flags
   dir.to_s.empty? ? "" : "-clonedSourcePackagesDirPath '#{dir}' "
 end
 
+# The simulator the sim / test lanes name in their destination. GitHub's hosted images do not
+# always carry the iPhone 17 runtime, and a destination naming a device the runner has not got
+# fails xcodebuild in seconds ("Unable to find a device matching the provided destination
+# specifier"), so CI sets ARBOS_SIM_NAME to a device that is there.
+def sim_name
+  name = ENV["ARBOS_SIM_NAME"].to_s.strip
+  name.empty? ? "iPhone 17" : name
+end
+
 # Runs an xcodebuild `command` (which starts in the fastlane directory). The
 # whole output goes to build/xcodebuild-<name>.log; the console gets the
 # `error:` lines and the verdict. `pipefail` keeps xcodebuild's exit status
@@ -135,7 +144,7 @@ platform :ios do
     require_xcframework!
     xcodebuild_logged("sim",
       "cd .. && xcodebuild build -project #{PROJECT} -scheme #{SCHEME} -configuration Debug " \
-      "-destination 'platform=iOS Simulator,name=iPhone 17' -derivedDataPath '#{out_dir}/dd' #{spm_flags}" \
+      "-destination 'platform=iOS Simulator,name=#{sim_name}' -derivedDataPath '#{out_dir}/dd' #{spm_flags}" \
       "CODE_SIGNING_ALLOWED=NO")
   end
 
@@ -148,7 +157,7 @@ platform :ios do
     require_xcframework!
     xcodebuild_logged("test",
       "cd .. && xcodebuild test -project #{PROJECT} -scheme #{SCHEME} -configuration Debug " \
-      "-destination 'platform=iOS Simulator,name=iPhone 17' -derivedDataPath '#{out_dir}/dd' #{spm_flags}" \
+      "-destination 'platform=iOS Simulator,name=#{sim_name}' -derivedDataPath '#{out_dir}/dd' #{spm_flags}" \
       "CODE_SIGNING_ALLOWED=NO")
   end
 
