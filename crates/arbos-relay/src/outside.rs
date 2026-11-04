@@ -2711,8 +2711,20 @@ pub async fn connect_page(State(state): State<AppState>, Path(id): Path<String>)
          On a nudge: GET {relay}/asp/inbox?since=<last next>  and answer the events with wake=true.\n\
          At most one nudge per 5 s per agent; keep a slow poll (every 5 min) as the fallback.\n\
          Test from the agent side: POST {relay}/asp/wake/test (same key) → {{ok,status,error}}.\n\n\
-         Claude Code / Codex on a Mac: cargo install --git https://github.com/unarbos/arbos arbos-acp\n\
-         then ARBOS_AGENT_KEY=arbk_… arbos-acp --relay {relay} --agent claude-agent-acp\n"
+         Claude Code or Codex on your own computer — one command, and it asks you before it acts:\n\
+         curl -fsSL {relay}/acp/install.sh | sh -s -- --cwd ~/your-project\n\n\
+         It finds or builds arbos-acp, asks for the key with the terminal echo off, and starts\n\
+         the bridge. Point --cwd at the project you actually want worked on. The key is never in\n\
+         the command, so it is not in your shell history or visible to ps. Add --dry-run to see\n\
+         what it would run without starting anything.\n\n\
+         Nothing to install from npm and nothing to edit in ~/.claude/settings.json: arbos-acp\n\
+         starts Claude Code itself and refuses the permission bypass at the session, so a\n\
+         settings file cannot turn the asking off. When the agent wants to run a command or edit\n\
+         a file, an approval card appears in your own chat with it, naming the command and who\n\
+         asked for it. Only your answer counts, and anything else — you are away, the card does\n\
+         not arrive, five minutes pass — refuses.\n\
+         Only you can make it act. A chat's membership can grow without you, so widening it to\n\
+         the people in a chat is something you ask for: -- --allow owner,chats\n"
     );
     (
         StatusCode::OK,
