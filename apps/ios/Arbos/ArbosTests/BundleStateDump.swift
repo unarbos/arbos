@@ -5,6 +5,7 @@ import Security
 import UIKit
 import UserNotifications
 import XCTest
+@testable import Arbos
 
 /// The unit bundle runs inside the app (`TEST_HOST`), on the same simulator as the UI bundle (both
 /// are `parallelizable = NO`), so whatever it leaves in the app's defaults domain or data container
@@ -144,5 +145,30 @@ final class BundleStateDump: NSObject, XCTestObservation {
         case .authorized: return "authorized"
         @unknown default: return "unknown"
         }
+    }
+}
+
+/// Whether this gate's app can hold a keychain item at all. The observer's keychain read gets
+/// `errSecMissingEntitlement` here, because the gate builds with `CODE_SIGNING_ALLOWED=NO`; a read
+/// failing does not show that a write fails too. This stores one placeholder item through the
+/// app's own `Keychain`, prints each status on a `bundle-state: keychain-write` line, and deletes
+/// the item again so the case leaves nothing behind. It asserts nothing: either answer is the
+/// measurement.
+final class KeychainWriteProbeTests: XCTestCase {
+    func testStoringThroughTheAppsKeychainPrintsItsStatus() {
+        let account = "bundle-state-probe"
+        var store = "0"
+        do {
+            try Keychain.storeData(Data("probe".utf8), account: account)
+        } catch Keychain.KeychainError.status(let status) {
+            store = "\(status)"
+        } catch {
+            store = "\(error)"
+        }
+        let found = Keychain.loadData(account: account) != nil
+        Keychain.deleteData(account: account)
+        let left = Keychain.loadData(account: account) != nil
+        let line = "bundle-state: keychain-write store=\(store) load=\(found ? "found" : "absent") after-delete=\(left ? "found" : "absent")\n"
+        FileHandle.standardError.write(Data(line.utf8))
     }
 }
