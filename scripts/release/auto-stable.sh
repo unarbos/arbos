@@ -42,9 +42,13 @@ DEBOUNCE="${ARBOS_RELEASE_DEBOUNCE_S:-150}"
 # bundles it; scripts/release/mac-paths.sh owns the list and says why each entry is on it.
 # Cargo.lock: a real dependency change ships too — our own crates' version numbers moving does not
 # (mac-change.sh).
+#
+# This copy writes the release notes. mac-change.sh asks mac-paths.sh for itself, so step 3 and
+# the notes agree because they read one file — not because this script hands the list down. An
+# `export ARBOS_MAC_PATHS` used to sit here doing the latter. It was a no-op once both callers
+# read mac-paths.sh (an operator's override reaches mac-change.sh on its own), and it read as
+# this script overriding the list when it was only echoing the list back at itself.
 MAC_PATHS="$("$here/mac-paths.sh")"
-# mac-change.sh reads the same list, so step 3 and the release notes always agree on it.
-export ARBOS_MAC_PATHS="$MAC_PATHS"
 
 say() { echo "::notice::$*" >&2; }
 
