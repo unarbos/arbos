@@ -6,6 +6,7 @@ name: Swift core check
 
 on:
   push:
+    # Same-repo branches get their verdict only from this push run, so a re-gate must touch a path here.
     paths:
       - "crates/arbos-core/**"
       - "crates/arbos-client/**"
