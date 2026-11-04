@@ -64,6 +64,10 @@ jobs:
           ./scripts/avatar-lint.sh
           # Which verdicts refuse a merge. No network, no credentials, ~0.1s.
           ./scripts/merge/selftest.sh
+          # How auto-stable.sh reads mac-change.sh's exit code: 0 and 1 are its two verdicts and
+          # anything else is the predicate failing, which must not be classified as either. Also
+          # runs the cases against the old two-way read, so a case that could not fail is caught.
+          ./scripts/release/auto-stable-selftest.sh
           curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash | bash -s -- latest /tmp >/dev/null
           /tmp/actionlint -color
 
