@@ -91,7 +91,6 @@ ROOT = HERE.parent.parent
 IOS_WORKFLOW = ".github/workflows/ios.yml"
 GATE_WORKFLOW = ".github/workflows/release-gate.yml"
 SCREEN = "gate-can-decide.sh"
-PROBE = "__release_gate_coverage_probe__"
 
 # Exit 1 is deliberately absent: see "what this stopped doing" in the module docstring. Nothing
 # here returns it, and a future refusal should not reuse it without saying what it refuses.
@@ -242,42 +241,46 @@ def assert_mac_paths_is_the_binary_closure() -> None:
         )
 
 
-def assert_trigger_covers_both_predicates() -> None:
-    """This workflow must run whenever either predicate could say yes.
+def assert_the_gate_runs_on_every_pull_request() -> None:
+    """This workflow must carry no event filter at all.
 
     The gate decides with the repository's own predicates, but it only decides at all when GitHub
-    starts it, and that is a static `paths:` list in a third file. A path the predicates watch and
-    the trigger does not is a pull request the gate never sees — a silent miss, which is the whole
-    failure this gate exists to end. So the trigger list is checked against both predicates on
-    every run, out of the working tree, and a gap fails the gate rather than passing quietly.
+    starts it. That used to be a static `paths:` list here, checked on every run for being a
+    superset of both predicates, because a path the predicates watch and the trigger does not is a
+    pull request the gate never sees.
 
-    The trigger list also names ios.yml, mac-paths.sh and this workflow, so any pull request that
-    moves either predicate runs this check and cannot widen one without widening the other.
+    Maintaining that superset was the wrong fix for the right problem. A filtered required check
+    has two different ways of not being red — it ran and passed, or it never started — and only
+    the first is a verdict. Nothing downstream can tell them apart from a green page, so the
+    second is a silent pass. Removing the filter removes the second state: the gate runs on every
+    pull request and says, in about twenty seconds, that most of them publish nothing.
+
+    So this assertion is now the inverse of the old one. It does not check that a filter is wide
+    enough; it checks that there is no filter, which is the only form of "wide enough" that cannot
+    drift. Re-adding one fails the gate rather than quietly narrowing what it covers.
     """
-    gate = (ROOT / GATE_WORKFLOW).read_text(encoding="utf-8")
-    covered = [matcher(p) for p in trigger_paths(gate, GATE_WORKFLOW, "pull_request", "this tree")]
-    ios = (ROOT / IOS_WORKFLOW).read_text(encoding="utf-8")
-    watched = [(IOS_WORKFLOW, p) for p in trigger_paths(ios, IOS_WORKFLOW, "push", "this tree")]
-    watched += [("mac-paths.sh", p) for p in mac_paths()]
-
-    gaps: list[str] = []
-    for source, entry in watched:
-        if entry.endswith("/**"):
-            probe = f"{entry[:-2]}{PROBE}"
-        elif "*" in entry:
-            gaps.append(f"{entry} (from {source}) is a shape this check cannot probe")
-            continue
-        elif (ROOT / entry).is_dir():
-            probe = f"{entry}/{PROBE}"
-        else:
-            probe = entry
-        if not any(m.match(probe) for m in covered):
-            gaps.append(f"{entry} (from {source})")
-    if gaps:
+    try:
+        doc = yaml.safe_load((ROOT / GATE_WORKFLOW).read_text(encoding="utf-8"))
+    except yaml.YAMLError as err:
+        raise Undetermined(f"{GATE_WORKFLOW} in this tree is not readable YAML: {err}") from err
+    # YAML 1.1 reads a bare `on` key as the boolean true, which is what `on:` becomes here.
+    triggers = doc.get("on", doc.get(True)) if isinstance(doc, dict) else None
+    if not isinstance(triggers, dict) or set(triggers) != {"pull_request"}:
         raise Undetermined(
-            f"{GATE_WORKFLOW}'s own `paths:` trigger does not cover what the release predicates "
-            f"watch, so a pull request touching {'; '.join(gaps)} would never start this gate. "
-            "Add those paths to the trigger."
+            f"{GATE_WORKFLOW} should trigger on `pull_request` and nothing else, and this tree "
+            f"has {sorted(triggers) if isinstance(triggers, dict) else triggers!r}. Every other "
+            "event reaches this gate without a pull request to judge, which is the hole "
+            f"{SCREEN} exists to close."
+        )
+    trigger = triggers["pull_request"]
+    # `pull_request:` with no body parses as None, which is the shape being asserted.
+    filters = sorted(trigger) if isinstance(trigger, dict) else []
+    if filters:
+        raise Undetermined(
+            f"{GATE_WORKFLOW} has regrown an event filter ({', '.join(filters)}), so there are "
+            "now pull requests this gate never starts for. A gate that does not run reads as a "
+            "gate that passed. Take the filter off; deciding that a pull request publishes "
+            "nothing is this gate's job and it is cheap."
         )
 
 
@@ -638,7 +641,7 @@ def main(argv: list[str]) -> int:
 
     try:
         assert_mac_paths_is_the_binary_closure()
-        assert_trigger_covers_both_predicates()
+        assert_the_gate_runs_on_every_pull_request()
         assert_every_job_refuses_an_undecidable_event()
         pr_base, pr_head, main_sha = (
             commit(args.pr_base),

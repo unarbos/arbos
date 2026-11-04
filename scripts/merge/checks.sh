@@ -50,11 +50,20 @@ GATES='.github/workflows/swift-core-check.yml|Swift core check
 
 # gate_patterns <workflow> <ref>: every quoted path pattern under that workflow's top level `on:`
 # block, read at <ref>. Status 0 with the patterns on stdout when it was read; 2 when <ref>'s tree
-# does not contain the workflow at all; 1 when the read itself failed.
+# does not contain the workflow at all; 3 when it is there and declares no path filter, so it runs
+# on everything; 1 when the read itself failed.
 #
 # The push and pull_request lists are unioned. They are identical today, and a superset errs towards
 # asking for a verdict, which is the safe direction. Unquoted entries yield nothing, and nothing is
 # BLOCKED by the caller rather than "not required".
+#
+# 3 is separate from "0 with nothing on stdout" and the difference is the whole reason it exists. A
+# workflow that declares `paths:` and whose entries this reader cannot see is a reader bug, and the
+# caller must block. A workflow that declares no filter at all is making a statement — it runs on
+# every pull request — and the honest reading is "applies", not "unknown". Reading the second as
+# the first refuses every pull request in the repository: release-gate.yml dropped its filter and
+# the kit blocked a diff touching apps/ios/ as unreadable, which is how this status got added.
+# The test is the presence of the `paths:` key, never the emptiness of the output.
 #
 # Absent and unreadable are separate answers because they have opposite remedies. This file's header
 # lists three times that "nothing is there" stood in for "the query was wrong"; this is the mirror
@@ -74,7 +83,12 @@ gate_patterns() {
   printf '%s' "$body" | base64 -d 2>/dev/null | awk '
     /^on:/          { inon = 1; next }
     /^[^[:space:]]/ { inon = 0 }
-    inon && /^ *- *"/ { gsub(/^ *- *"|" *$/, ""); print }'
+    # Matches `paths:` and the inline `paths: ["a"]` alike. An inline list prints nothing and so
+    # reaches the caller as 0-with-no-patterns, which blocks — right, because it is unread, not
+    # unfiltered.
+    inon && /^ *paths(-ignore)?:/ { filtered = 1 }
+    inon && /^ *- *"/ { gsub(/^ *- *"|" *$/, ""); print }
+    END { if (!filtered) exit 3 }'
 }
 
 # files_match_patterns <files> <patterns>: 0 when any file matches any pattern. Handles the two
@@ -185,6 +199,10 @@ gate_state() {
 # will gate the merged result either, so it is "not required" rather than a refusal. A gate in
 # main's tree but not the head's is the #2376 case above, and still asks for the verdict the head
 # cannot have — the remedy is to rebase, which is the point.
+#
+# A gate with no path filter in either tree applies to everything, so there is no diff to consult
+# and the union is skipped. That is release-gate.yml as of this change: it runs on every pull
+# request precisely so that "it did not run" stops being a state anyone has to interpret.
 gate_applies() {
   local wf=$1 sha=$2 files=$3 phead pbase hrc brc pats
   phead=$(gate_patterns "$wf" "$sha"); hrc=$?
@@ -193,8 +211,22 @@ gate_applies() {
     echo "not required — neither this head's tree nor ${GATE_BASE:-main}'s contains $wf, so no merge of this head is gated by it"
     return 1
   fi
-  if [ $hrc -eq 1 ] || [ $brc -eq 1 ] \
-     || { [ $hrc -eq 0 ] && [ -z "$phead" ]; } || { [ $brc -eq 0 ] && [ -z "$pbase" ]; }; then
+  if [ $hrc -eq 1 ] || [ $brc -eq 1 ]; then
+    echo "BLOCKED — cannot read the path filter in $wf at this head or at ${GATE_BASE:-main}, so whether it applies is unknown"
+    return 2
+  fi
+  # Unfiltered in either tree ends the question: it runs for every pull request, so it applies to
+  # this one whatever the diff is.
+  #
+  # This precedes the emptiness test below, and the orders differ on exactly one input: one tree
+  # unfiltered, the other declaring a `paths:` list this reader cannot see. Testing emptiness
+  # first blocks there. Asking first does not, because an unfiltered copy is an unambiguous
+  # statement that a run exists for every pull request, and that answers the question the
+  # unreadable copy only muddies. For every other input the two orders agree, which is why the
+  # case covering this one is called out in selftest.sh — a mutant swapping them survived until
+  # it existed.
+  if [ $hrc -eq 3 ] || [ $brc -eq 3 ]; then return 0; fi
+  if { [ $hrc -eq 0 ] && [ -z "$phead" ]; } || { [ $brc -eq 0 ] && [ -z "$pbase" ]; }; then
     echo "BLOCKED — cannot read the path filter in $wf at this head or at ${GATE_BASE:-main}, so whether it applies is unknown"
     return 2
   fi

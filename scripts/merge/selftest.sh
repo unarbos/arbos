@@ -249,6 +249,108 @@ else
   bad "the NOMAC refusal does not name both tags, so the reader must infer the mismatch from the parenthetical"
 fi
 
+# 10. A gate workflow that declares no path filter at all. This is release-gate.yml
+#     as of this change, and it is a third answer rather than a shade of an
+#     existing one: "runs on everything" is a statement, "I could not read the
+#     filter" is an admission, and both used to arrive as zero patterns.
+#
+#     The case that matters is the FOURTH one. Three of these would pass against
+#     an implementation that simply said "empty output means unfiltered", and
+#     that implementation silently converts every reader bug into a required
+#     gate the kit believes it has evaluated. The discriminating input is a
+#     workflow that declares `paths:` and whose entries this reader cannot see:
+#     it must still block. The test is the presence of the key, not the
+#     emptiness of the output, and only the fourth assertion can tell.
+echo "gate_patterns and gate_applies — unfiltered is not the same as unreadable:"
+WF_UNFILTERED=$'name: g\non:\n  pull_request:\njobs:\n  a:\n    runs-on: ubuntu-24.04\n'
+WF_FILTERED=$'name: g\non:\n  pull_request:\n    paths:\n      - "apps/ios/**"\njobs:\n  a: {}\n'
+# Declares a filter, in a flow sequence this reader does not parse. Zero patterns,
+# but the `paths:` key is right there, so the honest answer is "unread".
+WF_INLINE=$'name: g\non:\n  pull_request:\n    paths: ["apps/ios/**"]\njobs:\n  a: {}\n'
+# Keyed on the ref as well as the name, because gate_applies reads the head's copy
+# and the base's copy and the interesting cases are the ones where they differ —
+# which is every pull request that changes a gate's trigger, including this one.
+# `unfiltered` is a prefix of nothing here, but order the arms longest-first anyway:
+# a `per_page=1` / `per_page=100` collision cost a case an afternoon once already.
+rd() {
+  case "$1" in
+    *unfiltered.yml*)                printf '%s' "$WF_UNFILTERED" | base64 -w0 ;;
+    *inline.yml*)                    printf '%s' "$WF_INLINE" | base64 -w0 ;;
+    *filtered.yml*)                  printf '%s' "$WF_FILTERED" | base64 -w0 ;;
+    # This pull request's own shape: the filter is gone at the head, still there on main.
+    *dropping.yml*ref=main*)         printf '%s' "$WF_FILTERED" | base64 -w0 ;;
+    *dropping.yml*)                  printf '%s' "$WF_UNFILTERED" | base64 -w0 ;;
+    # Unfiltered at the head, and main's copy declares a filter this reader cannot see.
+    *halfread.yml*ref=main*)         printf '%s' "$WF_INLINE" | base64 -w0 ;;
+    *halfread.yml*)                  printf '%s' "$WF_UNFILTERED" | base64 -w0 ;;
+    *) echo "HTTP 404 Not Found" >&2; return 1 ;;
+  esac
+}
+GATE_BASE=main
+# gate_patterns interpolates $R into the URL before it calls rd, and this file runs
+# under `set -u`. Without this the function dies on the unbound variable and returns
+# 1, which the fourth assertion below reads as a BLOCK and calls a pass. It did, once.
+R=unarbos/arbos
+
+out=$(gate_patterns unfiltered.yml main); rc=$?
+if [ $rc -eq 3 ] && [ -z "$out" ]; then
+  ok "a workflow with no paths: key reports status 3, distinct from both 0 and 2"
+else
+  bad "an unfiltered workflow reported status $rc with '$out' — if that is 0 the caller blocks every pull request, if 2 it reads as a gate that does not exist"
+fi
+
+out=$(gate_patterns filtered.yml main); rc=$?
+if [ $rc -eq 0 ] && [ "$out" = "apps/ios/**" ]; then
+  ok "a workflow that does declare paths: still reports them with status 0"
+else
+  bad "a filtered workflow reported status $rc with '$out', so the new status has swallowed the ordinary case"
+fi
+
+msg=$(gate_applies unfiltered.yml deadbeef "docs/README.md"); rc=$?
+if [ $rc -eq 0 ]; then
+  ok "an unfiltered gate applies to a diff touching none of anything"
+else
+  bad "an unfiltered gate returned $rc ($msg) for an unrelated diff — it runs for every pull request, so it applies to every pull request"
+fi
+
+msg=$(gate_applies inline.yml deadbeef "apps/ios/Arbos/x.swift"); rc=$?
+if [ $rc -eq 2 ]; then
+  ok "a paths: key this reader cannot parse still BLOCKS rather than passing as unfiltered"
+else
+  bad "a declared-but-unparsed filter returned $rc ($msg) — 'unfiltered' is now standing in for 'unread', which is the exact substitution this status was added to prevent"
+fi
+
+msg=$(gate_applies filtered.yml deadbeef "docs/README.md"); rc=$?
+if [ $rc -eq 1 ]; then
+  ok "a filtered gate is still not required for a diff off its paths"
+else
+  bad "a filtered gate returned $rc ($msg) off its own paths, so the filter is no longer being consulted at all"
+fi
+
+msg=$(gate_applies dropping.yml deadbeef "docs/README.md"); rc=$?
+if [ $rc -eq 0 ]; then
+  ok "a head that drops the filter while main still has one applies to everything"
+else
+  bad "the head dropping its filter returned $rc ($msg) — this is the shape of the pull request making that change, so it would refuse itself"
+fi
+
+# The two halves disagree and neither is a clean read: unfiltered at the head, a
+# declared-but-unparsed filter on main. The union errs towards asking for a verdict,
+# and the head's answer is the decisive one because the head's copy is what governs
+# the run. This is the ONLY input that separates testing rc 3 before the empty-list
+# check from testing it after: the empty-list check is guarded by rc 0, so for every
+# other input the two orders agree. A mutant that moved the check survived this
+# suite until this case existed.
+msg=$(gate_applies halfread.yml deadbeef "docs/README.md"); rc=$?
+if [ $rc -eq 0 ]; then
+  ok "unfiltered at the head decides it, even when main's own filter cannot be read"
+else
+  bad "returned $rc ($msg) — an unreadable filter on main is overriding an unambiguous 'runs on everything' at the head"
+fi
+
+unset -f rd
+unset GATE_BASE R
+
 echo
 if [ "$fail" -eq 0 ]; then echo "selftest: PASS"; else echo "selftest: FAIL"; fi
 exit "$fail"
