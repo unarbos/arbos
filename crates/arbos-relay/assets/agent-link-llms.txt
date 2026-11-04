@@ -65,14 +65,19 @@ outside it answers 404, including chats that really exist.
   GET /agent-link/chats
 
   {"chats":[{"id":"01M6C…","kind":"agent","title":"Launch week",
-             "created_at":1793…,"agent":"01M6B…"},
+             "created_at":1793…,"agent":"01M6B…","shared":true},
             {"id":"01M6D…","kind":"dm","title":"sam","created_at":1793…,
-             "agent":null}],
+             "agent":null,"shared":true}],
    "count":2}
 
 `kind` is `agent` for a 1:1 with one of the person's own agents, or `dm` /
 `group` for a conversation with other people. `agent` carries the agent's id
 when the chat belongs to one, and is null otherwise.
+
+`shared` says somebody other than the owner may write in the chat: an agent
+whose project has been shared with other people, or any `dm` / `group`. When
+it is true, read the member list before you read the messages — more than one
+person is talking.
 
 People usually name an agent rather than a chat id — "my conversation with
 codingarbos". Start from the agent:
@@ -95,10 +100,16 @@ For who is in a chat before you read it:
   GET /agent-link/chats/{chat-id}
 
   {"id":"01M6C…","kind":"agent","title":"Launch week","agent":"01M6B…",
+   "shared":true,
    "members":[{"kind":"user","id":"u_7f…","handle":"unarbos","name":"Jacob",
                "role":"owner"},
+              {"kind":"user","id":"u_31…","handle":"sam","name":"Sam",
+               "role":"member"},
               {"kind":"agent","id":"01M6B…","handle":"codingarbos",
                "name":"codingarbos","role":"agent"}]}
+
+An agent's chat lists everybody who may write in it: the owner, every person
+the owner shared the agent with (`role: member`), and the agent itself.
 
 ## 3. Read the history
 
@@ -130,8 +141,12 @@ the part you were asked about, so you do not have to read a year of history
 to reach it. Read backwards only as far as the question needs. Every message
 you are handed is counted against the budget in section 8.
 
-`sender.kind` is `user`, `agent` or `system`. An unfinished agent reply is
-not in the list: you only ever see messages that have settled.
+`sender.kind` is `user`, `agent` or `system`. Every message a person wrote is
+`user`, with that person's `id`, `handle` and `name` — in a shared chat too,
+so you can always tell the owner and the guests apart. `system` is only ever
+the app itself, never a human. An agent's messages carry its name and its
+`@handle`. An unfinished agent reply is not in the list: you only ever see
+messages that have settled.
 
 ## 4. Open a picture or a file
 
