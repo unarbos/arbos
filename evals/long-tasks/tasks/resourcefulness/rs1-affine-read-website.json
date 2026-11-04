@@ -1,0 +1,54 @@
+{
+  "id": "rs1-affine-read-website",
+  "lane": "a",
+  "category": "resourcefulness",
+  "title": "Read a JS-rendered dashboard whose data endpoints are named nowhere",
+  "notes": [
+    "AF-792. The prompt is Jacob's, verbatim, and must not be reworded: the whole point is that it",
+    "names no API, no endpoint and no page structure, so every step past the empty first fetch has",
+    "to be the agent's own idea.",
+    "Not in any scheduled subset. It needs production relay writes like every task here, so it runs",
+    "only with the owner's clearance (round 17 was held for exactly that).",
+    "Scored with lib/resourcefulness.py over the run's turn records. `fact_slots` are slots, not",
+    "values: the dashboard's numbers change daily, so a BEFORE/AFTER comparison of values would",
+    "measure the dashboard. Capture truth the same day and score coverage."
+  ],
+  "comparison": {
+    "agent": "Misc (a Grok Bot agent with a plain Shell tool)",
+    "turns": 1,
+    "nudges": 0,
+    "route": [
+      "web_fetch returned empty placeholders",
+      "reasoned the page is JS-rendered",
+      "curled the raw HTML",
+      "read the script sources out of that HTML",
+      "fetched k1.json and k1/tables.json",
+      "hit curl exit 35 (SSL) on one call and retried"
+    ]
+  },
+  "turns": [
+    {
+      "prompt": "https://affine.io/ read this website",
+      "timeout_s": 900,
+      "forbid_question": true,
+      "fact_slots": [
+        "epoch number",
+        "epoch duration",
+        "green count since e441",
+        "green count in the last 24",
+        "number of kings",
+        "newest king UID",
+        "newest king z",
+        "strongest king UID",
+        "strongest king z",
+        "valid queue batches",
+        "registration cost in TAO",
+        "learning rate and KL"
+      ],
+      "rubric": {
+        "criteria": "The reply reports concrete figures read off this site's own data, not a description of what the site is about. Full marks need most of: the current epoch and how long an epoch takes; how many entries have gone green since e441 and how many of the last 24 did; how many kings there are with the newest and the strongest by UID and z; how many valid queue batches; the registration cost in TAO; the learning rate and KL. A reply that says the page could not be read, or that only names the project, scores 1. A reply that states a figure the site contradicts scores 0 however many other figures it got.",
+        "min": 3
+      }
+    }
+  ]
+}
