@@ -268,6 +268,38 @@ gate_waiting() {
   return 1
 }
 
+# A slot is a promise that the box's heavy work is capped, and that promise is only worth anything while
+# an unslotted simulator boot is impossible. If the boot guard is off any route, a lane that never asks for
+# a slot can still boot and take the box to load 548, and every slot handed out here is decoration.
+#
+# So acquire fails CLOSED on an unguarded box: no slot, exit 75, and a message naming the repair. An Xcode
+# update silently restores Xcode's own simctl and reopens the route (AF-853); this turns that from an
+# invisible regression into a refusal at the moment somebody needs the slot, which is the only moment anyone
+# is looking. The alternative was a scheduled check on the box, which cannot be reviewed in the repository
+# and leaves the guard with an expiry date set by whoever last remembered to re-run an installer.
+#
+# This cannot strand the Mac as it stands: the installed copy of this script has no such check, and the only
+# thing that installs a copy which does is install-boot-guard.sh — which closes the guard in the same run.
+#
+# The check reads the filesystem and nothing else. It consults no environment variable, deliberately: the
+# defect this whole thread is about is a bypass that an environment grants for free, and a verifier that can
+# be waved through by exporting a name is not a verifier. Only `acquire` is gated. `bind` must not be —
+# the boot guard itself calls it, and gating it would be a circle.
+BOOT_GUARD_CHECK="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/install-boot-guard.sh"
+
+boot_guard_closed() {  # prints why not, and returns 1, when a boot could happen without a slot
+  if [[ ! -x "$BOOT_GUARD_CHECK" ]]; then
+    echo "cannot confirm the simulator boot guard is installed ($BOOT_GUARD_CHECK is missing), so a slot would promise something unverified. Install it: sudo scripts/runner/install-boot-guard.sh"
+    return 1
+  fi
+  local out
+  if ! out=$("$BOOT_GUARD_CHECK" --check 2>&1); then
+    echo "the simulator boot guard is not on every route, so a slot caps nothing (AF-853) — $(printf '%s' "$out" | sed -n 's/^OPEN  //p' | tr '\n' ';' | sed 's/;$//'). Repair: sudo $BOOT_GUARD_CHECK"
+    return 1
+  fi
+  return 0
+}
+
 acquire() {
   local name="$1" priority=0 owner=$PPID owner_given=0 nowait=0 waitmax=-1 bounded=0 limit t0 slot n waited_note=0
   shift
@@ -282,6 +314,12 @@ acquire() {
     esac
     shift
   done
+  local why
+  if ! why=$(boot_guard_closed); then
+    echo "$(ts) heavy-slot: $name refused — $why" >&2
+    logger -t arbos-heavy-slot "refused $name: boot guard not closed" 2>/dev/null || true
+    return 75
+  fi
   ensure_dir || { echo "$(ts) heavy-slot: cannot create $SLOTS_DIR; running uncapped" >&2; echo "none"; return 0; }
   limit=$MAX_SLOTS
   # Release / TestFlight lanes count against the priority cap like gate halves (release.yml: "at most two of

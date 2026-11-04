@@ -142,6 +142,13 @@ load 66–167). Rule, for every rig script under `/Users/Shared/arbos-*/` and ev
 - An Xcode update puts Xcode's own `simctl` back and silently reopens that route, so
   `scripts/runner/install-boot-guard.sh --check` is the thing to run after one — it needs no privileges, names
   any open route, and exits non-zero. Re-running the installer repairs it and keeps Xcode's newer binary.
+- **`acquire` fails closed on an unguarded box.** It runs that same `--check` first, and when any route is
+  open — or when the checker is not installed beside it, so the answer is unknown — it grants no slot, exits
+  75 and names the repair. A slot only means anything while an unslotted boot is impossible; if a lane can
+  boot without asking, every slot handed out is decoration. So "the guard is open" is not a warning to carry
+  on past: nothing heavy runs until someone runs `sudo /usr/local/bin/install-boot-guard.sh`. The check reads
+  the filesystem and consults no environment variable, and `bind` is deliberately not gated — the boot guard
+  calls it, and gating it would be a circle.
 
 ## ssh to the gate Mac goes through the relay host (2026-10-26 23:40 UTC)
 
