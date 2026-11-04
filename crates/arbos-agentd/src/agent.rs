@@ -1068,6 +1068,9 @@ pub struct JobSpec {
     pub id: String,
     pub title: String,
     pub kind: String,
+    /// The worker's instruction. `job_lock_keys` reads the folder out of it when the job
+    /// declared no `touches`.
+    pub brief: String,
     pub touches: Vec<String>,
     /// 0 on the first worker, 1 on the one retry a failed worker gets (`JOB_WORKER_RETRIES`).
     pub attempt: u8,
@@ -2803,60 +2806,96 @@ impl Agent {
     }
 
     /// Resource keys a job holds while it runs (design D5): the declared `touches`, or the
-    /// defaults for its kind — `code` → the project folder and git; `ops` → the routines;
-    /// `research` / `other` → none.
+    /// defaults for its kind — `ops` → the routines; `research` / `other` → none; `code` → the
+    /// project subfolder the brief names and that folder's git, so two code jobs in two folders
+    /// run side by side and one stuck job no longer freezes the rest (Jacob's Test5 round 2,
+    /// bug I). A code job whose brief names no folder of this project still takes the whole
+    /// project folder, as does a job that declares `path:/` itself.
+    ///
+    /// Every `path:` / `git:` key comes back absolute: a project-relative `touches` entry is
+    /// resolved against the project folder, so `src` and `/work/<project>/src` are one lock.
     pub(crate) fn job_lock_keys(&self, job: &JobSpec) -> Vec<String> {
+        let project = self.cfg.work_dir.as_path();
         if !job.touches.is_empty() {
-            return job.touches.iter().map(|t| normalize_lock_key(t)).collect();
+            return job
+                .touches
+                .iter()
+                .map(|t| absolute_lock_key(&normalize_lock_key(t), project))
+                .collect();
         }
         match job.kind.as_str() {
-            "code" => vec!["path:/".to_owned(), "git".to_owned()],
+            "code" => match job_named_subfolder(&job.brief, project) {
+                Some(dir) => {
+                    // A folder with its own `.git` is its own repo, so its git is its own lock.
+                    // A folder inside the project's repo shares that repo: take the whole of it.
+                    let git = if dir.join(".git").exists() {
+                        format!("git:{}", dir.display())
+                    } else {
+                        "git".to_owned()
+                    };
+                    vec![format!("path:{}", dir.display()), git]
+                }
+                None => vec![format!("path:{}", project.display()), "git".to_owned()],
+            },
             "ops" => vec!["routines".to_owned()],
             _ => Vec::new(),
         }
     }
 
+    /// The job that holds a key conflicting with `job`'s own keys right now, as `(id, title)`.
+    /// `acquire_job_locks` waits for exactly this; `start_job` reports it so its reply names
+    /// what the job is queued behind instead of implying the work has begun.
+    pub(crate) async fn job_lock_blocker(&self, job: &JobSpec) -> Option<(String, String)> {
+        let keys = self.job_lock_keys(job);
+        if keys.is_empty() {
+            return None;
+        }
+        let owner = {
+            let locks = self.job_locks.lock().await;
+            lock_blocker(&locks, &job.id, &keys)?
+        };
+        let title = self.job_title_or_other(&owner);
+        Some((owner, title))
+    }
+
+    fn job_title_or_other(&self, job_id: &str) -> String {
+        self.store
+            .job(job_id)
+            .ok()
+            .flatten()
+            .map(|j| j.title)
+            .unwrap_or_else(|| "another job".into())
+    }
+
     /// Wait until no other job holds a conflicting key, then take the keys. A `path:` key
-    /// conflicts with any `path:` that is its prefix or child.
+    /// conflicts with any `path:` that is its prefix or child, and so does a `git:` key.
     pub(crate) async fn acquire_job_locks(&self, job: &JobSpec) -> Vec<String> {
         let keys = self.job_lock_keys(job);
         if keys.is_empty() {
             return keys;
         }
         loop {
+            // Checking and taking under one guard: two jobs starting together must not both
+            // see a free key and then both take it.
             let blocker = {
-                let locks = self.job_locks.lock().await;
-                locks
-                    .iter()
-                    .find(|(k, owner)| {
-                        **owner != job.id && keys.iter().any(|mine| lock_conflicts(mine, k))
-                    })
-                    .map(|(_, owner)| owner.clone())
+                let mut locks = self.job_locks.lock().await;
+                match lock_blocker(&locks, &job.id, &keys) {
+                    None => {
+                        for k in &keys {
+                            locks.insert(k.clone(), job.id.clone());
+                        }
+                        return keys;
+                    }
+                    Some(owner) => owner,
+                }
             };
-            match blocker {
-                None => {
-                    let mut locks = self.job_locks.lock().await;
-                    for k in &keys {
-                        locks.insert(k.clone(), job.id.clone());
-                    }
-                    return keys;
-                }
-                Some(owner) => {
-                    let title = self
-                        .store
-                        .job(&owner)
-                        .ok()
-                        .flatten()
-                        .map(|j| j.title)
-                        .unwrap_or_else(|| "another job".into());
-                    let _ = self
-                        .store
-                        .set_job_step(&job.id, &format!("Waiting for {title}"));
-                    tokio::select! {
-                        _ = self.job_locks_changed.notified() => {}
-                        _ = tokio::time::sleep(Duration::from_secs(5)) => {}
-                    }
-                }
+            let title = self.job_title_or_other(&blocker);
+            let _ = self
+                .store
+                .set_job_step(&job.id, &format!("Waiting for {title}"));
+            tokio::select! {
+                _ = self.job_locks_changed.notified() => {}
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {}
             }
         }
     }
@@ -6418,9 +6457,13 @@ impl Agent {
             id: job_id.clone(),
             title: title.clone(),
             kind: kind.to_owned(),
+            brief: brief.to_owned(),
             touches,
             attempt: 0,
         };
+        // What the job waits for as of now, named before the worker task is spawned so the
+        // reply cannot report this job's own locks.
+        let blocked_by = self.job_lock_blocker(&spec).await;
         let _ = self.store.t3_append(
             chat_id,
             None,
@@ -6444,12 +6487,25 @@ impl Agent {
             false,
             Some(spec),
         );
-        let queued = self.subagent_slots.available_permits() == 0;
-        Ok(json!({
+        let no_slot = self.subagent_slots.available_permits() == 0;
+        let mut out = json!({
             "job_id": job_id,
             "title": title,
-            "state": if queued { "queued" } else { "running" },
-        }))
+            "state": if no_slot || blocked_by.is_some() { "queued" } else { "running" },
+        });
+        // A queued job has not started: say so, and say what it is behind, so the chat never
+        // reads as if the work had begun (Jacob's Test5 round 2, bug I).
+        if let Some((blocker_id, blocker_title)) = blocked_by {
+            out["queued_behind"] = json!({ "job_id": blocker_id, "title": blocker_title });
+            out["note"] = json!(format!(
+                "queued behind \"{blocker_title}\": this job starts when that one frees what they both need. Tell the user it is queued behind \"{blocker_title}\", not that this work has started."
+            ));
+        } else if no_slot {
+            out["note"] = json!(
+                "queued for a free worker: it starts when one frees up. Tell the user it is queued, not that this work has started."
+            );
+        }
+        Ok(out)
     }
 
     /// `list_jobs()` from the main turn: the jobs of this chat with state, step and elapsed time.
@@ -8802,6 +8858,7 @@ impl Agent {
                     id: j.id.clone(),
                     title: j.title.clone(),
                     kind: j.kind.clone(),
+                    brief: j.brief.clone(),
                     touches: j.touches.clone(),
                     attempt: 0,
                 };
@@ -9303,13 +9360,16 @@ pub(crate) fn subagent_start_failure_line(err: &str) -> String {
     }
 }
 
-/// A resource key as the lock table stores it: `path:<abs or project-relative>` with no
-/// trailing slash, `git`, `routines`, `secret:<name>`; anything else verbatim, lower-cased.
+/// A resource key as the lock table stores it: `path:<abs or project-relative>` and
+/// `git:<folder>` with no trailing slash, `git`, `routines`, `secret:<name>`; anything else
+/// verbatim, lower-cased.
 fn normalize_lock_key(key: &str) -> String {
     let k = key.trim();
-    if let Some(p) = k.strip_prefix("path:") {
-        let p = p.trim().trim_end_matches('/');
-        return format!("path:{}", if p.is_empty() { "/" } else { p });
+    for kind in ["path", "git"] {
+        if let Some(p) = k.strip_prefix(&format!("{kind}:")) {
+            let p = p.trim().trim_end_matches('/');
+            return format!("{kind}:{}", if p.is_empty() { "/" } else { p });
+        }
     }
     if k.starts_with('/') || k.starts_with("./") {
         return format!("path:{}", k.trim_end_matches('/'));
@@ -9320,13 +9380,43 @@ fn normalize_lock_key(key: &str) -> String {
     k.to_ascii_lowercase()
 }
 
-/// Two keys conflict when equal, or when both are paths and one is a prefix of the other.
+/// The folder a key scopes, as `(kind, folder)`: `path:<folder>` is files, `git:<folder>` is one
+/// repo, and bare `git` is every repo of the project (`/`). A key with no folder (`routines`,
+/// `secret:<name>`) scopes nothing and conflicts only with itself.
+fn lock_scope(key: &str) -> Option<(&str, &str)> {
+    if key == "git" {
+        return Some(("git", "/"));
+    }
+    match key.split_once(':') {
+        Some((kind @ ("path" | "git"), folder)) => Some((kind, folder)),
+        _ => None,
+    }
+}
+
+/// A scoped key as an absolute folder: a project-relative one is resolved against the project
+/// folder, so a declared `src` and a derived `/work/<project>/src` are the same lock and cannot
+/// both be held at once.
+fn absolute_lock_key(key: &str, project: &Path) -> String {
+    let Some((kind, folder)) = lock_scope(key) else {
+        return key.to_owned();
+    };
+    if folder.starts_with('/') {
+        return key.to_owned();
+    }
+    format!(
+        "{kind}:{}",
+        project.join(folder.trim_start_matches("./")).display()
+    )
+}
+
+/// Two keys conflict when equal, or when they scope the same kind of resource and one folder
+/// contains the other.
 fn lock_conflicts(a: &str, b: &str) -> bool {
     if a == b {
         return true;
     }
-    match (a.strip_prefix("path:"), b.strip_prefix("path:")) {
-        (Some(pa), Some(pb)) => {
+    match (lock_scope(a), lock_scope(b)) {
+        (Some((ka, pa)), Some((kb, pb))) if ka == kb => {
             pa == "/"
                 || pb == "/"
                 || pa.starts_with(&format!("{pb}/"))
@@ -9334,6 +9424,53 @@ fn lock_conflicts(a: &str, b: &str) -> bool {
         }
         _ => false,
     }
+}
+
+/// The owner of the first held key that conflicts with `keys`, skipping the job's own keys.
+fn lock_blocker(locks: &HashMap<String, String>, job_id: &str, keys: &[String]) -> Option<String> {
+    locks
+        .iter()
+        .find(|(k, owner)| {
+            owner.as_str() != job_id && keys.iter().any(|mine| lock_conflicts(mine, k))
+        })
+        .map(|(_, owner)| owner.clone())
+}
+
+/// The project subfolder a code job's brief names, as the folder its default lock covers.
+///
+/// A token counts when it has a slash (the router tells the main agent to name a folder as
+/// `subtensor/`), is not a URL, and resolves to a folder that exists in the project. The lock is
+/// the *first* level under the project folder: a brief that names one file still edits that
+/// folder's neighbours, so `crates/x/src/a.rs` locks `crates`. `None` when no token qualifies —
+/// a fresh clone, a project-wide refactor, prose only — and the caller then takes the whole
+/// project folder, which is what every code job used to take.
+fn job_named_subfolder(brief: &str, project: &Path) -> Option<PathBuf> {
+    let prefix = format!("{}/", project.display());
+    for raw in brief.split_whitespace() {
+        let token = raw.trim_matches(|c: char| {
+            !(c.is_alphanumeric() || c == '/' || c == '.' || c == '_' || c == '-')
+        });
+        if !token.contains('/') || token.contains("://") {
+            continue;
+        }
+        let rel = match token.strip_prefix(&prefix) {
+            Some(rel) => rel,
+            // An absolute path outside the project is not a folder of this project.
+            None if token.starts_with('/') => continue,
+            None => token.trim_start_matches("./"),
+        };
+        let Some(first) = rel.split('/').find(|s| !s.is_empty()) else {
+            continue;
+        };
+        if first == "." || first == ".." {
+            continue;
+        }
+        let dir = project.join(first);
+        if dir.is_dir() {
+            return Some(dir);
+        }
+    }
+    None
 }
 
 /// Restart after a box restart without asking (Jacob, 2026-10-24, rule 3): research restarts
@@ -9352,7 +9489,8 @@ fn job_restart_allowed(job: &crate::store::JobRow, project_id: &str) -> bool {
         if let Some(name) = k.strip_prefix("secret:") {
             return grants.iter().any(|g| g.eq_ignore_ascii_case(name));
         }
-        if k.starts_with("path:") || k == "git" {
+        // A folder or a repo: an edit, whatever the folder.
+        if lock_scope(&k).is_some() {
             return false;
         }
         !(k.starts_with("external")
@@ -10437,6 +10575,7 @@ mod tests {
             id: "j1".into(),
             title: "Searching San José restaurants".into(),
             kind: "research".into(),
+            brief: "Find 5-6 well-rated restaurants in San José.".into(),
             touches: vec![],
             attempt: JOB_WORKER_RETRIES,
         };
@@ -10477,6 +10616,10 @@ mod tests {
         assert_eq!(normalize_lock_key("/work/p"), "path:/work/p");
         assert_eq!(normalize_lock_key(" GIT "), "git");
         assert_eq!(
+            normalize_lock_key("git:/work/p/alpha/"),
+            "git:/work/p/alpha"
+        );
+        assert_eq!(
             normalize_lock_key("secret: STRIPE_KEY"),
             "secret:STRIPE_KEY"
         );
@@ -10486,6 +10629,56 @@ mod tests {
         assert!(!lock_conflicts("path:/work/p", "path:/work/q"));
         assert!(lock_conflicts("git", "git"));
         assert!(!lock_conflicts("git", "routines"));
+        // One repo per folder: two repos are two locks, and bare `git` is still every repo.
+        assert!(!lock_conflicts("git:/work/p/alpha", "git:/work/p/beta"));
+        assert!(lock_conflicts("git:/work/p/alpha", "git"));
+        assert!(lock_conflicts("git:/work/p/alpha", "git:/work/p"));
+        // A repo and a folder are different resources, whatever the folder.
+        assert!(!lock_conflicts("git:/work/p/alpha", "path:/work/p/alpha"));
+        // A project-relative key is the same lock as the absolute one.
+        let project = Path::new("/work/p");
+        assert_eq!(
+            absolute_lock_key(&normalize_lock_key("path:src"), project),
+            "path:/work/p/src"
+        );
+        assert_eq!(absolute_lock_key("path:/work/q", project), "path:/work/q");
+        assert_eq!(absolute_lock_key("git", project), "git");
+        assert_eq!(absolute_lock_key("routines", project), "routines");
+    }
+
+    /// Bug I, part one: the folder a code job's default lock covers is the first-level project
+    /// folder its brief names — never a URL, a path outside the project, or a folder that is not
+    /// there. Nothing named means the whole project folder, which is what every code job took.
+    #[test]
+    fn code_job_default_folder_comes_from_the_brief() {
+        let project = std::env::temp_dir().join(format!("arbos-lock-{}", ulid()));
+        let p = project.as_path();
+        std::fs::create_dir_all(p.join("alpha/src")).unwrap();
+        std::fs::create_dir_all(p.join("crates/arbos-agentd/src")).unwrap();
+        let folder = |brief: &str| job_named_subfolder(brief, p);
+        assert_eq!(
+            folder("Fix the failing tests in alpha/."),
+            Some(p.join("alpha"))
+        );
+        // A named file still locks its first-level folder: the job edits the neighbours too.
+        assert_eq!(
+            folder("Rename the symbol in crates/arbos-agentd/src/agent.rs."),
+            Some(p.join("crates"))
+        );
+        assert_eq!(
+            folder(&format!("Build {}/alpha/src now.", p.display())),
+            Some(p.join("alpha"))
+        );
+        // A repo to clone is not a folder of this project yet.
+        assert_eq!(
+            folder("Clone https://github.com/opentensor/subtensor."),
+            None
+        );
+        assert_eq!(folder("Read /etc/hosts and report what resolves."), None);
+        assert_eq!(folder("Decide whether it ships and/or waits."), None);
+        assert_eq!(folder("Fix the failing tests in beta/."), None);
+        assert_eq!(folder("Make the suite green."), None);
+        let _ = std::fs::remove_dir_all(p);
     }
 
     /// Jacob's rule 3: reversible work inside the box restarts itself after a box restart; a
