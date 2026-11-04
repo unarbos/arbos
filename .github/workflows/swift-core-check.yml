@@ -6,6 +6,11 @@ name: Swift core check
 
 on:
   push:
+    # Branches only. GitHub does not apply `paths` to a tag push, so every tag push ran the
+    # full gate again on a commit that was already gated. A `tags-ignore` alone would not
+    # do this: with only a tag filter, GitHub runs nothing for branch pushes. Keep the list
+    # inline: checks.sh's gate_patterns reads every `- "..."` line under `on:` as a path.
+    branches: ["**"]
     paths:
       - "crates/arbos-core/**"
       - "crates/arbos-client/**"
@@ -82,6 +87,10 @@ jobs:
         with:
           key: swift-core-check
           cache-on-failure: true
+          # The repo has one 10 GB cache pool, evicted least-recently-used first. A branch's entry
+          # can be read only by that branch, while main's can be read by all, so branch saves
+          # mostly add the bytes that can push main's entry out.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build ArbosFFI xcframework
         run: |
           set -euo pipefail

@@ -139,6 +139,10 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Only main saves: its entry is the one every branch and pull request can read, and
+          # branch saves fill the repo's one 10 GB pool, which can evict main's entry.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Linux libraries for arbos-mac (GPUI)
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb-xkb-dev libasound2-dev libssl-dev libgl1-mesa-dev libfontconfig-dev libstdc++-14-dev libglib2.0-dev
       # Calls v1: the `livekit` crate links a prebuilt libwebrtc whose hermetic libc++
