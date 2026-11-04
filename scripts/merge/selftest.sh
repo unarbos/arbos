@@ -52,14 +52,16 @@ UNTESTED|UNTESTED CI completed failure — run 41761774906 has 20 step(s) that n
 WAIT|WAIT no CI run yet
 WAIT|WAIT CI in_progress null
 BLOCKED|BLOCKED reading CI runs for e445f70a: HTTP 403
+REPLAYNOMAC|REPLAY-NOMAC v0.6.380 — no Mac change on 1a2b3c4d..e445f70a, by e445f70a's own predicate () and by this checkout's (). No Release plan verdict to read: no Release run for e445f70a
+REPLAYMAC|REPLAY-MAC v0.6.380 — the Mac app changed since v0.6.380 on 1a2b3c4d..e445f70a, and no release covers it. No Release plan verdict to read either: no Release run for e445f70a
 UNKNOWN|PURPLE a word nobody has written yet
 CASES
 
 # 2. Which classes may clear a GO. This is the gate, stated once.
-echo "verdict_clears_go — the refusal set is exactly NOMAC and NOPATH:"
-for c in TAG NOMAC NOPATH COVERED REDGATE RED UNTESTED WAIT BLOCKED UNKNOWN; do
+echo "verdict_clears_go — the clearing set is exactly NOMAC, NOPATH and REPLAYNOMAC:"
+for c in TAG NOMAC NOPATH COVERED REDGATE RED UNTESTED WAIT BLOCKED REPLAYNOMAC REPLAYMAC UNKNOWN; do
   if verdict_clears_go "$c"; then got=clears; else got=refuses; fi
-  case "$c" in NOMAC | NOPATH) want=clears ;; *) want=refuses ;; esac
+  case "$c" in NOMAC | NOPATH | REPLAYNOMAC) want=clears ;; *) want=refuses ;; esac
   if [ "$got" = "$want" ]; then ok "$c $got"
   else bad "$c $got, expected $want"; fi
 done
@@ -128,6 +130,23 @@ if printf '%s\n' "$go_src" | grep -q '"NOMAC \$tag"\*'; then
   ok "NOMAC is still gated on the tag being released"
 else
   bad "go() no longer checks that a NOMAC names the current tag, so a NOMAC about an older release would clear this one"
+fi
+# REPLAY-NOMAC clears a GO, so it needs the identical tag check and fails the
+# identical way without it. Asserted separately rather than folded into the
+# case above, because the two are separate strings in the source and a grep
+# that passes for one says nothing about the other.
+if printf '%s\n' "$go_src" | grep -q '"REPLAY-NOMAC \$tag"\*'; then
+  ok "REPLAY-NOMAC is still gated on the tag being released"
+else
+  bad "go() no longer checks that a REPLAY-NOMAC names the current tag, so a git-only replay against an older release would clear this one"
+fi
+# The replay's refusing half. REPLAY-MAC says the Mac app DID change and no
+# release covers it; if it ever joined the clearing set, the one state the
+# replay exists to catch would be the one it waved through.
+if verdict_clears_go REPLAYMAC; then
+  bad "REPLAYMAC clears a GO. That verdict means the git-only replay found a Mac change with no release covering it — the exact state the replay was added to refuse."
+else
+  ok "REPLAYMAC still refuses a GO"
 fi
 
 # 7. verdict() must actually route a non-success run through the classifier;
