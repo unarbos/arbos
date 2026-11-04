@@ -1404,14 +1404,30 @@ impl ModelError {
         if raw == Some("aborted") || is_abort_text(&detail) {
             return None;
         }
-        let lower = detail.to_ascii_lowercase();
         Some(Self {
-            refusal: raw == Some("refusal")
-                || lower.contains("refus")
-                || lower.contains("was blocked")
-                || lower.contains("terms of service"),
+            refusal: raw == Some("refusal") || Self::detail_is_refusal(&detail),
             detail,
         })
+    }
+
+    /// Does this provider text say the request's *content* was declined, rather than that the
+    /// call failed? A refusal does not clear on a retry; a failure may.
+    ///
+    /// One classifier for every lane that has to tell the two apart: the reply path, which reads
+    /// it off a pi `error` message (`from_message`, #2750), and chat compaction, which sees the
+    /// same refusal as a relay-proxy error string (`memory.rs`). The last four wordings are the
+    /// proxy lane's: a moderation block arrives as an HTTP body or an OpenAI-style
+    /// `finish_reason`, and #2750's three patterns matched none of them (Jacob, Test5 round 2,
+    /// the F variant).
+    pub fn detail_is_refusal(detail: &str) -> bool {
+        let lower = detail.to_ascii_lowercase();
+        lower.contains("refus")
+            || lower.contains("was blocked")
+            || lower.contains("terms of service")
+            || lower.contains("content_filter")
+            || lower.contains("content filter")
+            || lower.contains("flagged")
+            || lower.contains("usage polic")
     }
 
     /// One short line for the chat, first person like the limit announcements (#1037).
