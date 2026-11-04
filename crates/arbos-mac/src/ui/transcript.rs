@@ -1530,7 +1530,7 @@ impl Transcript {
         if chat_changed {
             self.drag_scroll = None;
         }
-        let messages: Vec<Message> = chat_id
+        let all: Vec<Message> = chat_id
             .as_deref()
             .map(|id| state.messages_of(id).to_vec())
             .unwrap_or_default();
@@ -1560,6 +1560,15 @@ impl Transcript {
             || state
                 .selected()
                 .is_some_and(|p| matches!(p.kind, SpaceKind::Group | SpaceKind::Dm));
+        // An agent-to-agent exchange — the words another agent sent into this chat and the
+        // answer that went back to it — is not what the chat shows by default (Jacob,
+        // 2026-11-04): it is between the two agents, not addressed to the owner reading
+        // here. The messages themselves are untouched; only what the transcript draws
+        // changes.
+        let messages: Vec<Message> = all
+            .into_iter()
+            .filter(|m| !m.is_agent_cross_message())
+            .collect();
         if chat_changed {
             self.row_cache.clear();
         }
@@ -4258,6 +4267,7 @@ pub fn build_rows_hiding(
 /// Like [`build_rows`], but reuses per-message rows whose render version is
 /// unchanged. A streaming upsert then rebuilds one message, not all of them.
 /// Blocked senders fold into [`RowKind::Hidden`] the same way as [`build_rows_hiding`].
+///
 #[allow(clippy::too_many_arguments)]
 pub fn build_rows_with_cache(
     messages: &[Message],

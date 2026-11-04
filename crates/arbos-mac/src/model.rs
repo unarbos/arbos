@@ -2374,6 +2374,18 @@ impl MembershipNotice {
     }
 }
 
+/// Agent-to-agent messaging (`agentMessage`, `agentd::agent_messages`): what a cross-message
+/// row carries. On the receiving box `from_project_id` names the agent that wrote in; the
+/// sender's own hand-off row carries `toProjectId` instead, which this client does not read.
+/// Another Project's ordinary line in a shared group (`role: project`, F6) carries no
+/// `agentMessage` at all, which is what tells the two apart.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentMessageRef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_project_id: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
@@ -2420,6 +2432,9 @@ pub struct Message {
     /// chat; the name drawn in the "Replied to ◉ X" line under the bubble.
     #[serde(default)]
     pub agent_reply_to: Option<String>,
+    /// Agent-to-agent messaging: the `agentMessage` the box wrote on a cross-message row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_message: Option<AgentMessageRef>,
     /// Emoji reactions, the iPhone's shape: `{ emoji: { "user:<id>": true } }`.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub reactions: std::collections::BTreeMap<String, std::collections::BTreeMap<String, bool>>,
@@ -2888,6 +2903,25 @@ impl Message {
                 _ => 0,
             })
             .sum()
+    }
+
+    /// One row of an agent-to-agent exchange that landed in this chat: either the words
+    /// another agent sent in (`agentMessage.fromProjectId` on a `project` row) or the answer
+    /// that went back to it (`agentReplyTo`, which also carries the quote header and the
+    /// "Replied to ◉ X" line). A shared group's ordinary `project` row has no `agentMessage`,
+    /// so it is not one of these.
+    pub fn is_agent_cross_message(&self) -> bool {
+        let incoming = self.role == Role::Project
+            && self
+                .agent_message
+                .as_ref()
+                .is_some_and(|a| a.from_project_id.as_ref().is_some_and(|id| !id.is_empty()));
+        let answer = self.role == Role::Assistant
+            && self
+                .agent_reply_to
+                .as_deref()
+                .is_some_and(|name| !name.trim().is_empty());
+        incoming || answer
     }
 }
 
@@ -4495,6 +4529,7 @@ impl OptimisticNotice {
             job: None,
             hidden: false,
             agent_reply_to: None,
+            agent_message: None,
             reactions: Default::default(),
             in_reply_to: None,
             routine_name: None,
