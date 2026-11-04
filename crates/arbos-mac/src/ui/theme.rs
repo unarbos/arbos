@@ -1,9 +1,13 @@
 //! Colours are paint, numbers drive layout (zeron-study §2.4). One global.
 //!
-//! The palette is the iPhone app's (`apps/ios/.../UI/Theme.swift`), itself
-//! measured from Grok Bot: background #141414, assistant bubble #202020, user
-//! bubble #5C5C5C, field #181818 with a #242424 rim, system text #95959B.
-//! The Mac is that UI scaled up: a chat-list sidebar, one conversation pane.
+//! The palette is Grok Bot's, re-measured by Jacob on 2026-11-03 against the
+//! Mac app side by side ([feedback grok-colour-parity-2026-11-03]): page
+//! #121212, assistant bubble #1C1C1C, user bubble #3C3C3C, composer field
+//! #1F1F1F with a #242424 rim, system text #95959B. His readings are the
+//! source for the greys — they are not derived from each other. The iPhone
+//! (`apps/ios/.../UI/Theme.swift`) still carries the pre-parity palette; it
+//! follows in its own fix, because two of these tokens alias controls there.
+//! The Mac is the iPhone UI scaled up: a chat-list sidebar, one conversation pane.
 //! Dark + Matte is the default for anyone who never picked (D90); Glass is a
 //! macOS-only toggle (D10, §3.11).
 
@@ -592,8 +596,9 @@ pub struct Theme {
     /// three-pane rule). The pane itself has no tone of its own any more: it
     /// is the chat's surface, as Grok Bot's (dark `#121212` both sides of the
     /// join; [feedback info-pane-chrome-2026-10-24]), so the cards carry the
-    /// contrast — dark: the D80 grey (+15 over `bg`, Grok's `#1F1F1F` is +13
-    /// over its `#121212`); light: a grey card on the white page.
+    /// contrast — dark: the D80 grey (+17 over `bg`); light: a grey card on
+    /// the white page. Jacob's 2026-11-03 reading of Grok's card (31) is held
+    /// back for its own fix: reaching it needs the row-highlight wash too.
     pub pane_card: Hsla,
     /// The hairline on the right pane's left edge — Grok Bot's: one device
     /// pixel of `#1F1F1F` on its `#121212` page (+13, ≈ 5 % toward white),
@@ -674,10 +679,10 @@ impl Theme {
             pref: AppearancePref::Dark,
             glass_opacity: GLASS_ALPHA,
             backdrop: None,
-            bg: hex(0x141414),
+            bg: hex(0x121212),
             sidebar: hex(0x1a1a1a),
             pane_card: hex(0x232323),
-            pane_edge: hex(0x212121),
+            pane_edge: hex(0x1f1f1f),
             surface_1: hex(0x1e1e1e),
             surface_2: hex(0x262626),
             border: hex_a(0xffffff, 0.08),
@@ -687,9 +692,9 @@ impl Theme {
             text_faint: hex(0x6a6a6e),
             accent: hex(0x1084fe),
             accent_soft: hex_a(0x1084fe, 0.18),
-            bubble: hex(0x5c5c5c),
-            bubble_assistant: hex(0x232323),
-            field: hex(0x181818),
+            bubble: hex(0x3c3c3c),
+            bubble_assistant: hex(0x1c1c1c),
+            field: hex(0x1f1f1f),
             field_border: hex(0x242424),
             primary: grey(1.0),
             on_primary: grey(0.0),
@@ -1212,13 +1217,25 @@ impl Theme {
     }
 
     /// The selected segment of an On/Off or Dark/Light choice
-    /// ([`glass::segment`]): `bubble` on Matte; on Glass white 16 % (dark) /
+    /// ([`glass::segment`]): its own grey on Matte; on Glass white 16 % (dark) /
     /// black 72 % (light) — its text stays `bubble_text` (white) in both.
     /// 16 %, not more: over a white desktop the dark card already sits near
     /// `#4d4d4d`, and the white label must keep 4.5:1 on the segment there.
+    ///
+    /// Matte dark is `#5C5C5C`, the grey the user bubble used to be: the chip
+    /// is read against the segment track it sits in (`field_fill`), not
+    /// against the page, and that track is Grok's `#1F1F1F` since the parity
+    /// pass. At the bubble's new `#3C3C3C` the chip would separate from the
+    /// track by only 1.49:1, down from 2.66:1 — the "on" segment stops
+    /// reading as a plate. Grok has no such control to measure, so the number
+    /// stays where it was rather than following a bubble it only ever shared
+    /// a value with.
     pub fn segment_on_fill(&self) -> Hsla {
         if !self.is_frost() {
-            return self.bubble;
+            return match self.appearance {
+                Appearance::Dark => hex(0x5c5c5c),
+                Appearance::Light => hex(0x111111),
+            };
         }
         if self.is_light() {
             hex_a(0x000000, 0.72)
@@ -1747,7 +1764,11 @@ mod glass_contrast_tests {
             assert_eq!(theme.control_fill(), theme.surface_2);
             assert_eq!(theme.filter_on_fill(), theme.bubble_assistant);
             assert_eq!(theme.field_fill(), theme.field);
-            assert_eq!(theme.segment_on_fill(), theme.bubble);
+            let segment = match appearance {
+                Appearance::Dark => hex(0x5c5c5c),
+                Appearance::Light => hex(0x111111),
+            };
+            assert_eq!(theme.segment_on_fill(), segment);
             assert_eq!(theme.label_muted(), theme.text_muted);
             assert_eq!(theme.label_faint(), theme.text_faint);
             let tile = match appearance {

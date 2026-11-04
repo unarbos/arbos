@@ -26,10 +26,10 @@ final class PaneCardGlassTests: XCTestCase {
     func testMatteKeepsTheSolidCardAndNoRim() {
         for appearance in [Appearance.dark, Appearance.light] {
             let matte = Theme.resolve(appearance: appearance, surface: .matte, systemDark: true)
-            XCTAssertEqual(matte.paneCardFill, matte.bubbleAssistant, "\(appearance): Matte unchanged")
+            XCTAssertEqual(matte.paneCardFill, matte.paneCard, "\(appearance): Matte unchanged")
             XCTAssertEqual(matte.paneCardRim, .clear, "\(appearance): no rim on Matte")
             let glass = Theme.resolve(appearance: appearance, surface: .glass, systemDark: true)
-            XCTAssertNotEqual(glass.paneCardFill, glass.bubbleAssistant, "\(appearance): Glass is the wash")
+            XCTAssertNotEqual(glass.paneCardFill, glass.paneCard, "\(appearance): Glass is the wash")
             XCTAssertNotEqual(glass.paneCardRim, .clear, "\(appearance): the rim shows on Glass")
         }
     }

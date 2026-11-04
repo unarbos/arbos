@@ -1,7 +1,9 @@
-// Grok Bot visual language, measured from the dark-mode references in
-// internal/refs/grokbot-ios (iPhone Air, 1260×2736 @3x): background #141414,
-// assistant bubble #202020, user bubble #5C5C5C, 17 pt SF Pro body with the
-// default 22 pt line height, 20 pt continuous corners, glass circles for the
+// Grok Bot visual language. The greys are Jacob's 2026-11-03 side-by-side
+// re-measurement against Grok ([feedback grok-colour-parity-2026-11-03]):
+// background #121212, assistant bubble #1C1C1C, user bubble #3C3C3C, composer
+// field #1F1F1F. The metrics are still the dark-mode references in
+// internal/refs/grokbot-ios (iPhone Air, 1260×2736 @3x): 17 pt SF Pro body with
+// the default 22 pt line height, 20 pt continuous corners, glass circles for the
 // header controls, system lines in #95959B.
 
 import SwiftUI
@@ -57,7 +59,8 @@ struct Theme: Equatable {
     static func == (a: Theme, b: Theme) -> Bool {
         let same = a.isDark == b.isDark && a.surface == b.surface && a.textScale == b.textScale
             && a.bg == b.bg && a.bubbleAssistant == b.bubbleAssistant && a.bubbleUser == b.bubbleUser
-            && a.field == b.field && a.fieldBorder == b.fieldBorder && a.text == b.text && a.muted == b.muted
+            && a.field == b.field && a.fieldBorder == b.fieldBorder && a.paneCard == b.paneCard
+            && a.text == b.text && a.muted == b.muted
             && a.placeholder == b.placeholder && a.icon == b.icon && a.accent == b.accent && a.unread == b.unread
             && a.online == b.online && a.warn == b.warn && a.danger == b.danger && a.dangerSoft == b.dangerSoft
             && a.card == b.card && a.separator == b.separator && a.codeChip == b.codeChip && a.userCodeChip == b.userCodeChip
@@ -80,6 +83,11 @@ struct Theme: Equatable {
     /// Composer field / glass circle fill.
     let field: Color
     let fieldBorder: Color
+    /// The grouped pane card (members, settings, library lists) on Matte.
+    /// Its own colour since the 2026-11-03 Grok parity pass: it used to read
+    /// `bubbleAssistant`, so moving the agent bubble to Grok's #1C1C1C would
+    /// have dragged the Settings card down with it, which nobody asked for.
+    let paneCard: Color
     let text: Color
     /// System lines, timestamps, "is working".
     let muted: Color
@@ -201,9 +209,14 @@ struct Theme: Equatable {
     /// Keyboard down: the composer sits 2 pt above the home indicator's safe area.
     static let composerBottom: CGFloat = 2
     /// The rim on the `+` disc and the field (dark): brightest at the outer pixel and
-    /// fading in over 1 pt — 58 / 47 / 40 luminance over the #181818 fill, measured on the
-    /// top, bottom, left and right edges alike. Three nested `strokeBorder`s (outer
-    /// 1/3 pt, 2/3 pt, 1 pt) reproduce the three pixels. Light keeps `fieldBorder` at 1 pt.
+    /// fading in over 1 pt, measured on the top, bottom, left and right edges alike.
+    /// Three nested `strokeBorder`s (outer 1/3 pt, 2/3 pt, 1 pt) reproduce the three
+    /// pixels. Light keeps `fieldBorder` at 1 pt.
+    ///
+    /// The alphas are what was measured; they read 58 / 47 / 40 over the #181818 fill
+    /// the field had before the 2026-11-03 parity pass, and 64 / 53 / 46 over its
+    /// #1F1F1F. Keeping the alphas keeps the rim's step over the field; what Grok's
+    /// own rim measures on its lighter field needs a fresh reference.
     static let composerRimLayers: [(width: CGFloat, alpha: Double)] = [
         (1, 0.069), (2 / 3, 0.033), (1 / 3, 0.053),
     ]
@@ -289,12 +302,16 @@ struct Theme: Equatable {
 
     static let dark = Theme(
         isDark: true, surface: .matte,
-        bg: Color(hex: "#141414")!,
-        bubbleAssistant: Color(hex: "#202020")!,
-        bubbleUser: Color(hex: "#5C5C5C")!,
-        field: Color(hex: "#181818")!,
-        // Grok dark draws no rim on the field or the glass circles; keep a whisper.
-        fieldBorder: Color(hex: "#1A1A1A")!,
+        bg: Color(hex: "#121212")!,
+        bubbleAssistant: Color(hex: "#1C1C1C")!,
+        bubbleUser: Color(hex: "#3C3C3C")!,
+        field: Color(hex: "#1F1F1F")!,
+        // Grok dark draws no rim on the field or the glass circles; keep a whisper
+        // — the same +2 over `field` it has always been (it was #1A1A1A over #181818).
+        fieldBorder: Color(hex: "#212121")!,
+        // The grouped pane card, pinned where it was when it shared
+        // `bubbleAssistant` (see `paneCardFill`).
+        paneCard: Color(hex: "#202020")!,
         text: .white,
         muted: Color(hex: "#95959B")!,
         placeholder: Color(hex: "#58585B")!,
@@ -323,6 +340,7 @@ struct Theme: Equatable {
         bubbleUser: Color(hex: "#111111")!,
         field: .white,
         fieldBorder: Color(hex: "#DEDEDE")!,
+        paneCard: Color(hex: "#F2F2F2")!,
         text: Color(hex: "#111111")!,
         muted: Color(hex: "#6B6B70")!,
         placeholder: Color(hex: "#757579")!,
@@ -370,14 +388,14 @@ struct Theme: Equatable {
     /// Frosted chrome (header blur, glass circles/pills) when Surface is Glass.
     var isGlass: Bool { surface == .glass }
 
-    /// The grouped pane card (`PaneCard`: members, settings, library lists). Matte: the
-    /// assistant-bubble grey, as before. Glass: a wash of white over the frosted page —
+    /// The grouped pane card (`PaneCard`: members, settings, library lists). Matte:
+    /// `paneCard`, the grey it has always been. Glass: a wash of white over the frosted page —
     /// 8 % dark / 55 % light — so the desktop-through-material shows through the card as it
     /// does through the page, not an opaque slab on a see-through pane (Jacob 2026-10-28,
     /// [feedback right-pane-glass-cards-ios-2026-10-28]; the Mac's `Theme::pane_card_fill`
     /// uses the same numbers, pinned there by `theme::glass_contrast_tests`).
     var paneCardFill: Color {
-        guard isGlass else { return bubbleAssistant }
+        guard isGlass else { return paneCard }
         return Color.white.opacity(PaneCardGlass.fillAlpha(isDark: isDark))
     }
     /// The 1 pt rim the card wears on Glass so its edge reads where the fill is thin
@@ -462,7 +480,7 @@ extension EnvironmentValues {
 
 /// The pane card's fill on Glass, as numbers (the Mac's `PANE_CARD_GLASS_DARK` / `_LIGHT`):
 /// white at `fillAlpha` over the page's material + wash; a hairline rim so the edge
-/// reads. Matte keeps `bubbleAssistant` (`Theme.paneCardFill`).
+/// reads. Matte keeps `paneCard` (`Theme.paneCardFill`).
 enum PaneCardGlass {
     static let fillAlphaDark: Double = 0.08
     static let fillAlphaLight: Double = 0.55
