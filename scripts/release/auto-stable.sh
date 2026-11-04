@@ -38,9 +38,11 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="${GITHUB_REPOSITORY:-unarbos/arbos}"
 TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
 DEBOUNCE="${ARBOS_RELEASE_DEBOUNCE_S:-150}"
-# Everything the Mac binary and bundle are made from. Cargo.lock: a real dependency change ships
-# too — our own crates' version numbers moving does not (mac-change.sh).
-MAC_PATHS="${ARBOS_MAC_PATHS:-crates/arbos-mac crates/arbos-core crates/arbos-update Cargo.lock scripts/bundle-mac.sh site/assets/logo}"
+# Everything the Mac binary and bundle are made from — the cargo closure of arbos-mac, plus what
+# bundles it; scripts/release/mac-paths.sh owns the list and says why each entry is on it.
+# Cargo.lock: a real dependency change ships too — our own crates' version numbers moving does not
+# (mac-change.sh).
+MAC_PATHS="$("$here/mac-paths.sh")"
 # mac-change.sh reads the same list, so step 3 and the release notes always agree on it.
 export ARBOS_MAC_PATHS="$MAC_PATHS"
 

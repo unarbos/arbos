@@ -5,27 +5,69 @@ name: Release gate
 #
 # The decision is scripts/release/release-gate.py; read its header for what the two sides mean and
 # why they are not symmetric. In short: the Mac side asks the repository's own predicates
-# (scripts/release/mac-change.sh), the phone side reads the literal path filter out of
-# .github/workflows/ios.yml, and both are read at runtime so this workflow cannot drift away from
-# what actually publishes.
+# (scripts/release/mac-change.sh over scripts/release/mac-paths.sh), the phone side reads the
+# literal path filter out of .github/workflows/ios.yml, and both are read at runtime so the
+# verdict cannot drift away from what actually publishes.
 #
-# ── why there is no path filter on this workflow ────────────────────────────────────────────────
-# Writing one would mean copying both path sets into this file, where they would quietly go stale
-# against the lists that really trigger a release. The job runs on every pull request instead and
-# costs under a minute; a pull request on neither path set passes without reading anything.
+# ── this is a required check ────────────────────────────────────────────────────────────────────
+# main has no branch protection and no ruleset, so GitHub requires nothing. scripts/merge/checks.sh
+# is the repository's required-check policy, and this workflow is named in its GATES list: a merge
+# through the merge kit is refused while this run is red, absent or still going. The honest limit
+# is that an unprotected main still permits a direct push, which no check can see. This binds
+# every merge, not every possible write.
 #
-# ── why this is a new file, and what it must never touch ────────────────────────────────────────
+# ── CONSTRAINT: no job here may succeed without deciding ────────────────────────────────────────
+# checks.sh reads this workflow's RUN conclusion, and GitHub concludes a run `success` when every
+# job is success-or-skipped. So a job that can be skipped, or that passes without reaching a
+# verdict, turns this gate quietly permissive without a line of checks.sh changing. Both jobs here
+# are unconditional, and the gate job's one decisive step has no `if:` — a base branch that
+# publishes nothing is handled inside the step, which still runs and still says so. Keep it that
+# way, and do not add `continue-on-error` to anything in this file.
+#
+# ── the trigger list, and why it is not a second copy of the predicates ─────────────────────────
+# GitHub needs a static `paths:` list to start a run at all, and a path the predicates watch that
+# this list misses is a pull request the gate never sees. So the list is a superset of both
+# predicates, and release-gate.py checks that on every run against mac-paths.sh and ios.yml as
+# they stand in the tree — a gap fails the gate instead of passing quietly. The list also names
+# ios.yml, mac-paths.sh and this file, so any pull request that moves either predicate runs this
+# check and cannot widen one without widening the other.
+#
+# ── what this must never touch ──────────────────────────────────────────────────────────────────
 # .github/workflows/ios.yml is inside its own trigger paths, so editing it cuts a TestFlight build.
-# This workflow and the scripts it runs are deliberately outside both path sets — nothing here is
-# under apps/ios, crates/arbos-{core,client,ffi,matrix,mac,update}, packages/ArbosFFI,
-# site/assets/logo, Cargo.toml, Cargo.lock or rust-toolchain.toml — so changing the gate never
-# publishes anything. Keep it that way.
+# Nothing the gate is made of is on either path set — not this file, not scripts/release/*.py,
+# not scripts/release/*.sh — so changing the gate never publishes anything. Keep it that way.
 #
 # Linux only. The hosted macos-15 pool is the critical path for a real release and a gate there
 # can wait an hour and a half; this one must never be in that queue.
 
 on:
   pull_request:
+    paths:
+      # Everything the Mac app is built from (scripts/release/mac-paths.sh).
+      - "crates/arbos-mac/**"
+      - "crates/arbos-core/**"
+      - "crates/arbos-client/**"
+      - "crates/arbos-matrix/**"
+      - "crates/arbos-update/**"
+      - "scripts/bundle-mac.sh"
+      - "site/assets/logo/**"
+      # Everything ios.yml uploads a TestFlight build for, that the Mac list does not already have.
+      - "apps/ios/**"
+      - "crates/arbos-ffi/**"
+      - "packages/ArbosFFI/**"
+      - "scripts/build-xcframework.sh"
+      - "assets/avatars/trees/manifest.json"
+      - "assets/avatars/trees/lottie/**"
+      - "assets/avatars/leaves/**"
+      - "rust-toolchain.toml"
+      # On both lists.
+      - "Cargo.toml"
+      - "Cargo.lock"
+      # The three files that define all of the above. A pull request that moves a predicate runs
+      # this gate, so the coverage check above sees it.
+      - ".github/workflows/ios.yml"
+      - ".github/workflows/release-gate.yml"
+      - "scripts/release/mac-paths.sh"
   workflow_dispatch:
 
 permissions:
@@ -56,9 +98,9 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install --quiet 'pyyaml==6.0.2'
-      - name: What main already owes
-        id: refs
+      - name: Does merging this collapse two fixes into one release?
         env:
+          GH_TOKEN: ${{ github.token }}
           BASE_REF: ${{ github.event.pull_request.base.ref || github.ref_name }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
@@ -66,30 +108,20 @@ jobs:
           git fetch -q --tags --force origin "+refs/heads/main:refs/remotes/origin/main"
           # Only main publishes: release.yml tags from it, and ios.yml uploads to TestFlight only
           # for a push to it. A pull request into any other branch has no release to wait for.
+          # This is a step, not an `if:`, so the job never concludes without having said something.
           if [[ "$BASE_REF" != main ]]; then
-            echo "gate=skip" >> "$GITHUB_OUTPUT"
             echo "Base branch is '$BASE_REF', not main: merging it publishes nothing." \
-              >> "$GITHUB_STEP_SUMMARY"
+              | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           # The merge base, not main's head: a two-dot diff against the head would count whatever
           # main changed since this branch forked as part of the pull request.
           base="$(git merge-base origin/main "$HEAD_SHA")"
-          echo "gate=run" >> "$GITHUB_OUTPUT"
-          echo "base=$base" >> "$GITHUB_OUTPUT"
-      - name: Does merging this collapse two fixes into one release?
-        if: steps.refs.outputs.gate == 'run'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          BASE_SHA: ${{ steps.refs.outputs.base }}
-        run: |
-          set -euo pipefail
           # Exit 1 is a refusal, exit 2 is the gate failing to decide. Both fail the job: a check
           # that cannot tell must never read as a pass. Its output says which of the two it is.
           python3 scripts/release/release-gate.py \
             --repo "$GITHUB_REPOSITORY" --main origin/main \
-            --pr-base "$BASE_SHA" --pr-head "$HEAD_SHA"
+            --pr-base "$base" --pr-head "$HEAD_SHA"
 
   self-test:
     # A gate nobody has watched refuse is not a tested guard. These cases replay states main has

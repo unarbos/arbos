@@ -24,6 +24,11 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 gate="$here/release-gate.py"
 failures=0
 
+# A pull request that publishes nothing and a main that owes nothing: the quiet case the two
+# drift guards below are bolted onto, so that only the drifted input can be what fails them.
+QUIET=(--main 41847d26b --mac-released-sha 0c7489b91 --ios-released-sha 41847d26b
+       --pr-base 0c7489b91 --pr-head 41847d26b)
+
 # case <name> <expected exit> <gate arguments...>
 case_is() {
   local name=$1 want=$2 got=0 out
@@ -107,6 +112,30 @@ case_is "an unreadable pull request head fails closed, not open" 2 \
 case_is "a published build that is not on main fails closed, not open" 2 \
   --main 41847d26b --mac-released-sha 0c7489b91 --ios-released-sha e445f70ad \
   --pr-base 0c7489b91 --pr-head 41847d26b
+
+# ── the gate's own inputs drifting is also a refusal ────────────────────────────────────────────
+# Both of these would be silent misses rather than wrong answers: a pull request the gate never
+# judges, or judges against a list that no longer describes what ships. Neither may pass.
+
+# Exactly the state this change fixed: arbos-client and arbos-matrix are linked into Arbos.app and
+# were missing from the Mac path list, so a fix in either shipped with no release cut for it.
+ARBOS_MAC_PATHS="crates/arbos-mac crates/arbos-core crates/arbos-update Cargo.lock scripts/bundle-mac.sh site/assets/logo" \
+  case_is "a Mac path list that is not the binary's closure fails closed" 2 "${QUIET[@]}"
+
+# A trigger list that has fallen behind a predicate, in a throwaway tree so the real one is never
+# edited. crates is linked rather than copied: the closure is read from the manifests.
+drift="$(mktemp -d)"
+trap 'rm -rf "$drift"' EXIT
+root="$(cd "$here/../.." && pwd)"
+mkdir -p "$drift/scripts/release" "$drift/.github/workflows"
+cp "$here"/*.py "$here"/*.sh "$drift/scripts/release/"
+ln -s "$root/crates" "$drift/crates"
+cp "$root/.github/workflows/ios.yml" "$drift/.github/workflows/"
+grep -v '"apps/ios/\*\*"' "$root/.github/workflows/release-gate.yml" \
+  > "$drift/.github/workflows/release-gate.yml"
+gate="$drift/scripts/release/release-gate.py"
+case_is "a trigger list that misses a predicate's path fails closed" 2 "${QUIET[@]}"
+gate="$here/release-gate.py"
 
 if (( failures > 0 )); then
   echo

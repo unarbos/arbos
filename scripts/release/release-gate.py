@@ -56,6 +56,7 @@ import os
 import re
 import subprocess
 import sys
+import tomllib
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -65,7 +66,10 @@ from pathlib import Path
 import yaml
 
 HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent.parent
 IOS_WORKFLOW = ".github/workflows/ios.yml"
+GATE_WORKFLOW = ".github/workflows/release-gate.yml"
+PROBE = "__release_gate_coverage_probe__"
 
 ALLOW, BLOCK, UNDETERMINED = 0, 1, 2
 
@@ -121,27 +125,136 @@ def mac_change(base: str, target: str) -> tuple[bool, str]:
     )
 
 
-def ios_trigger_paths(ref: str) -> list[str]:
-    """The literal `on.push.paths` list of ios.yml, as it stands at `ref`."""
-    text = git("show", f"{ref}:{IOS_WORKFLOW}")
+def trigger_paths(text: str, workflow: str, event: str, where: str) -> list[str]:
+    """A workflow's literal `on.<event>.paths` list, parsed rather than grepped."""
     try:
         doc = yaml.safe_load(text)
     except yaml.YAMLError as err:
-        raise Undetermined(f"{IOS_WORKFLOW} at {ref[:8]} is not readable YAML: {err}") from err
+        raise Undetermined(f"{workflow} at {where} is not readable YAML: {err}") from err
     # YAML 1.1 reads a bare `on` key as the boolean true, which is what `on:` becomes here.
     triggers = doc.get("on", doc.get(True)) if isinstance(doc, dict) else None
-    push = triggers.get("push") if isinstance(triggers, dict) else None
-    paths = push.get("paths") if isinstance(push, dict) else None
+    trigger = triggers.get(event) if isinstance(triggers, dict) else None
+    paths = trigger.get("paths") if isinstance(trigger, dict) else None
     if not isinstance(paths, list) or not paths:
-        raise Undetermined(f"{IOS_WORKFLOW} at {ref[:8]} has no `on.push.paths` list to read")
+        raise Undetermined(f"{workflow} at {where} has no `on.{event}.paths` list to read")
     patterns = [str(p) for p in paths]
     unreadable = [p for p in patterns if p.startswith(("!", "+"))]
     if unreadable:
         raise Undetermined(
-            f"{IOS_WORKFLOW} at {ref[:8]} has pattern(s) this gate cannot evaluate: "
+            f"{workflow} at {where} has pattern(s) this gate cannot evaluate: "
             f"{', '.join(unreadable)}. Teach it the syntax rather than letting it guess."
         )
     return patterns
+
+
+def ios_trigger_paths(ref: str) -> list[str]:
+    """The literal path filter that decides whether a push to main cuts a TestFlight build."""
+    return trigger_paths(git("show", f"{ref}:{IOS_WORKFLOW}"), IOS_WORKFLOW, "push", ref[:8])
+
+
+def mac_paths() -> list[str]:
+    """Everything the Mac app is built from, from the one file that owns the list."""
+    done = subprocess.run(
+        [str(HERE / "mac-paths.sh")], capture_output=True, text=True, check=False
+    )
+    if done.returncode != 0:
+        raise Undetermined(f"mac-paths.sh failed: {done.stderr.strip()[:200]}")
+    return done.stdout.split()
+
+
+def mac_binary_closure() -> set[str]:
+    """Every workspace crate the Mac binary links, read off the manifests.
+
+    `cargo tree -p arbos-mac` is the authority, but it needs a resolved workspace and about
+    fifteen seconds. The manifests give the same closure for the question being asked — which of
+    our own crates end up in Arbos.app — because a path dependency is a path dependency. Dev
+    dependencies are left out: they build tests, not the shipped binary.
+    """
+    manifests: dict[str, set[str]] = {}
+    for path in sorted((ROOT / "crates").glob("*/Cargo.toml")):
+        try:
+            data = tomllib.loads(path.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError) as err:
+            raise Undetermined(f"{path} is not readable: {err}") from err
+        name = data.get("package", {}).get("name")
+        if not name:
+            continue
+        tables = [data, *data.get("target", {}).values()]
+        manifests[name] = {
+            dep
+            for table in tables
+            for section in ("dependencies", "build-dependencies")
+            for dep in table.get(section, {})
+            if dep.startswith("arbos-")
+        }
+    if "arbos-mac" not in manifests:
+        raise Undetermined("crates/arbos-mac/Cargo.toml does not name the package arbos-mac")
+    linked: set[str] = set()
+    pending = ["arbos-mac"]
+    while pending:
+        crate = pending.pop()
+        if crate in linked or crate not in manifests:
+            continue
+        linked.add(crate)
+        pending += sorted(manifests[crate])
+    return linked
+
+
+def assert_mac_paths_is_the_binary_closure() -> None:
+    """What ships in the Mac binary must be what cuts a Mac release.
+
+    MAC_PATHS was a trigger list that had drifted from the binary: arbos-client and arbos-matrix
+    were linked into Arbos.app and absent from it, so a fix in either shipped to Mac users with no
+    release cut for it and no release notes naming it. That is a silent ship, not a late one. This
+    makes the list answerable to the manifests instead of to memory.
+    """
+    watched = {p.split("/", 2)[1] for p in mac_paths() if p.startswith("crates/")}
+    missing = sorted(mac_binary_closure() - watched)
+    if missing:
+        raise Undetermined(
+            f"the Mac binary links {', '.join(missing)}, which scripts/release/mac-paths.sh does "
+            "not watch, so a fix in any of them would ship to Mac users with no release cut for "
+            "it. Add them to mac-paths.sh."
+        )
+
+
+def assert_trigger_covers_both_predicates() -> None:
+    """This workflow must run whenever either predicate could say yes.
+
+    The gate decides with the repository's own predicates, but it only decides at all when GitHub
+    starts it, and that is a static `paths:` list in a third file. A path the predicates watch and
+    the trigger does not is a pull request the gate never sees — a silent miss, which is the whole
+    failure this gate exists to end. So the trigger list is checked against both predicates on
+    every run, out of the working tree, and a gap fails the gate rather than passing quietly.
+
+    The trigger list also names ios.yml, mac-paths.sh and this workflow, so any pull request that
+    moves either predicate runs this check and cannot widen one without widening the other.
+    """
+    gate = (ROOT / GATE_WORKFLOW).read_text(encoding="utf-8")
+    covered = [matcher(p) for p in trigger_paths(gate, GATE_WORKFLOW, "pull_request", "this tree")]
+    ios = (ROOT / IOS_WORKFLOW).read_text(encoding="utf-8")
+    watched = [(IOS_WORKFLOW, p) for p in trigger_paths(ios, IOS_WORKFLOW, "push", "this tree")]
+    watched += [("mac-paths.sh", p) for p in mac_paths()]
+
+    gaps: list[str] = []
+    for source, entry in watched:
+        if entry.endswith("/**"):
+            probe = f"{entry[:-2]}{PROBE}"
+        elif "*" in entry:
+            gaps.append(f"{entry} (from {source}) is a shape this check cannot probe")
+            continue
+        elif (ROOT / entry).is_dir():
+            probe = f"{entry}/{PROBE}"
+        else:
+            probe = entry
+        if not any(m.match(probe) for m in covered):
+            gaps.append(f"{entry} (from {source})")
+    if gaps:
+        raise Undetermined(
+            f"{GATE_WORKFLOW}'s own `paths:` trigger does not cover what the release predicates "
+            f"watch, so a pull request touching {'; '.join(gaps)} would never start this gate. "
+            "Add those paths to the trigger."
+        )
 
 
 def matcher(pattern: str) -> re.Pattern[str]:
@@ -436,6 +549,8 @@ def main(argv: list[str]) -> int:
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
 
     try:
+        assert_mac_paths_is_the_binary_closure()
+        assert_trigger_covers_both_predicates()
         pr_base, pr_head, main_sha = (
             commit(args.pr_base),
             commit(args.pr_head),
